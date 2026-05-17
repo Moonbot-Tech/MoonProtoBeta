@@ -159,7 +159,7 @@ impl Client {
             encode_key: [0; 16],
             decode_key: [0; 16],
             start: Instant::now(),
-            last_sent_hello: -100_000, // ensure first Hello sends immediately (Delphi: CurTm is large, 0 diff > interval)
+            last_sent_hello: 0, // Delphi: 0 initially. now_ms() is huge (system time) → diff > interval → Hello sends immediately
             waiting_hello_start: 0,
             last_socket_recreate: 0,
             last_need_hello_again: 0,
@@ -214,8 +214,13 @@ impl Client {
         );
     }
 
+    /// GetTimeMS equivalent — system time in milliseconds (matches Delphi GetTickCount64).
+    /// MUST use same time base everywhere (reader thread, main thread, slicing).
     fn now_ms(&self) -> i64 {
-        self.start.elapsed().as_millis() as i64
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
     }
 
     fn server_addr(&self) -> String {
@@ -420,6 +425,7 @@ impl Client {
             if let Some((inner_cmd, inner_data, _)) = crypted::decrypt_command(&self.decode_key, &payload, &mut self.slider) {
                 cmd = inner_cmd;
                 payload = inner_data;
+                eprintln!("[DBG decrypt] inner_cmd={} payload_len={}", cmd, payload.len());
             } else { return; }
         }
 
