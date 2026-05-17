@@ -47,6 +47,8 @@ fn main() {
     let mut book_count = 0u32;
 
     client.run(Duration::from_secs(15), Box::new(move |cmd, data| {
+        // LOG EVERYTHING
+        println!("[{}] {:?} {} bytes", trades_count, cmd, data.len());
         match cmd {
             Command::Ping => {}
             Command::TradesStream => {
