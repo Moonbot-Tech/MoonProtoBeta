@@ -601,9 +601,51 @@ impl Client {
         }
     }
 
-    /// Send H-priority item directly (DoSendMPData for small packets)
+    /// Send H-priority item directly via MPC_Crypted (no SliceHeader).
+    /// Matches Delphi DoSendMPData → Client.Crypt → SendCommand(MPC_Crypted, data).
+    /// H-priority does NOT go through slicing — it's sent as direct MPC_Crypted packet.
     fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
-        self.create_sliced_and_send(item);
+        if item.encrypted {
+            let msg_num = if item.msg_num != 0 {
+                item.msg_num
+            } else {
+                self.crypt_msg_counter += 1;
+                self.crypt_msg_counter
+            };
+
+            let mut crypto_hdr = [0u8; 12];
+            let rnd: u16 = rand::random();
+            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
+            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
+            crypto_hdr[10] = item.cmd;
+            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
+
+            let mut plaintext = Vec::with_capacity(12 + item.data.len());
+            plaintext.extend_from_slice(&crypto_hdr);
+            plaintext.extend_from_slice(&item.data);
+
+            let encrypted = crypto::encrypt(&self.encode_key, &plaintext, &[]);
+
+            let wire_cmd = if item.cmd & 0x80 != 0 {
+                Command::Crypted as u8 | 0x80
+            } else {
+                Command::Crypted as u8
+            };
+
+            // Send directly as MPC_Crypted (no SliceHeader!)
+            self.send_raw_packet_cmd(wire_cmd, &encrypted);
+
+            // Add to PendingH for retry (first send only)
+            if item.retry_left > 0 && item.msg_num == 0 {
+                let mut pending_item = item.clone();
+                pending_item.msg_num = msg_num;
+                pending_item.last_sent_at = cur_tm;
+                self.pending_h.push(pending_item);
+            }
+        } else {
+            // Unencrypted H-priority: send directly
+            self.send_raw_packet(Command::from_byte(item.cmd), &item.data);
+        }
         item.last_sent_at = cur_tm;
     }
 
@@ -638,6 +680,17 @@ impl Client {
     /// Send a packet directly (low-level, no queue)
     fn send_direct(&mut self, item: &SendItem) {
         self.create_sliced_and_send(item);
+    }
+
+    fn send_raw_packet_cmd(&mut self, cmd: u8, payload: &[u8]) {
+        let Some(sock) = &self.socket else { return };
+        let (packet, extra) = moonproto_transport::transport_pack(
+            &self.cfg.mac_key, cmd, self.cfg.client_id, payload, self.cfg.mask_ver,
+        );
+        let addr = self.server_addr();
+        if let Some(extra_pkt) = extra { sock.send_to(&extra_pkt, &addr).ok(); }
+        sock.send_to(&packet, &addr).ok();
+        self.total_sent += packet.len() as u64;
     }
 
     fn send_raw_packet(&mut self, cmd: Command, payload: &[u8]) {
