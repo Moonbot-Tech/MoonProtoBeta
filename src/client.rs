@@ -701,7 +701,8 @@ impl Client {
 
     /// Retry pending H-commands (matches CheckSeningData:944-954)
     fn retry_pending_h(&mut self, cur_tm: i64) {
-        let path_delay = self.round_trip_delay.max(200).min(500);
+        // Delphi: Max(200, Min(500, round(Client.RoundTripDelay * 1.1 + 10)))
+        let path_delay = ((self.round_trip_delay as f64 * 1.1 + 10.0).round() as i64).min(500).max(200);
         let mut to_drop = Vec::new();
         let mut to_resend = Vec::new();
 
@@ -721,9 +722,9 @@ impl Client {
             self.pending_h.remove(idx);
         }
 
-        // Resend (outside of borrow)
-        for item in to_resend {
-            self.create_sliced_and_send(&item);
+        // Resend via direct MPC_Crypted (NOT through Sliced — matches Delphi DoSendMPData)
+        for mut item in to_resend {
+            self.send_h_item(&mut item, cur_tm);
         }
     }
 
