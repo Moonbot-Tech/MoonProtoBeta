@@ -527,8 +527,13 @@ impl Client {
 
         // Crypt if needed
         let (wire_cmd, wire_data, msg_num) = if item.encrypted {
-            self.crypt_msg_counter += 1;
-            let msg_num = self.crypt_msg_counter;
+            // FixedMsgNum: retry reuses same MsgNum (Delphi MoonProtoIntStruct.pas:1180)
+            let msg_num = if item.msg_num != 0 {
+                item.msg_num  // retry — reuse existing MsgNum
+            } else {
+                self.crypt_msg_counter += 1;
+                self.crypt_msg_counter
+            };
 
             let mut crypto_hdr = [0u8; 12];
             let rnd: u16 = rand::random();
@@ -581,8 +586,9 @@ impl Client {
             self.send_raw_packet(Command::Sliced, &slice);
         }
 
-        // Add to PendingH for retry if encrypted + has retries
-        if item.encrypted && item.retry_left > 0 {
+        // Add to PendingH for retry if encrypted + has retries + first send only
+        // (retry calls create_sliced_and_send with item.msg_num already set → don't re-add)
+        if item.encrypted && item.retry_left > 0 && item.msg_num == 0 {
             let mut pending_item = item.clone();
             pending_item.msg_num = msg_num;
             pending_item.last_sent_at = self.now_ms();
