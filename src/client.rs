@@ -547,7 +547,12 @@ impl Client {
             plaintext.extend_from_slice(&item.data);
 
             let encrypted_data = crypto::encrypt(&self.encode_key, &plaintext, &[]);
-            let wire_cmd = Command::Crypted as u8;
+            // Delphi: NewCmd := MPC_Crypted; if IsCompressed(d.Fcmd) then NewCmd := SetCompressed(NewCmd)
+            let wire_cmd = if item.cmd & 0x80 != 0 {
+                Command::Crypted as u8 | 0x80
+            } else {
+                Command::Crypted as u8
+            };
             (wire_cmd, encrypted_data, msg_num)
         } else {
             (item.cmd, item.data.clone(), 0u64)
