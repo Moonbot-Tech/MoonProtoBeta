@@ -72,12 +72,12 @@ impl Hello {
 /// NOTE: AAD is NOT actually used due to mORMot's AesGcmReset clearing AAD state
 /// before Encrypt. Both client and server have this behavior, so they're consistent.
 pub fn build_hello_packet(master_key: &MoonKey, client_id: u64, client_token: &mut u64, app_token: u64) -> Vec<u8> {
-    let _ = client_id; // AAD not used (see note above)
     *client_token += 1;
     let mut hello = Hello::new(*client_token, app_token);
     hello.timestamp = delphi_now();
     let packed = hello.to_bytes_packed();
-    crypto::encrypt(master_key, &packed, &[])
+    let aad = client_id.to_le_bytes();
+    crypto::encrypt(master_key, &packed, &aad)
 }
 
 /// Build HelloAgain packet (encrypted with SESSION key, includes PeerMix proof)

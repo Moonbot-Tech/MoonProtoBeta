@@ -82,6 +82,16 @@ pub struct ClientConfig {
 
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
 
+/// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
+struct SentSliced {
+    datagram_num: u16,
+    slices: Vec<Vec<u8>>,  // each slice payload (SliceHeader + data)
+    ack_flags: [u8; 32],   // which blocks ACK'd
+    blocks_count: usize,
+    sent_count: usize,
+    last_checked: i64,
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -472,7 +482,8 @@ impl Client {
 
     fn handle_handshake(&mut self, cmd: Command, payload: &[u8]) {
         if cmd == Command::WhoAreYou {
-            let Some(decrypted) = crypto::decrypt(&self.cfg.master_key, payload, &[]) else { return };
+            let aad = self.cfg.client_id.to_le_bytes();
+            let Some(decrypted) = crypto::decrypt(&self.cfg.master_key, payload, &aad) else { return };
             let Some(hello) = handshake::Hello::from_bytes(&decrypted) else { return };
             self.server_token = hello.server_token;
             let (enc, dec) = crypto::generate_sub_keys(&self.cfg.master_key, self.server_token);
@@ -485,7 +496,8 @@ impl Client {
             im.app_token = self.app_token;
             im.timestamp = delphi_now();
             let packed = im.to_bytes_packed();
-            let encrypted = crypto::encrypt(&self.encode_key, &packed, &[]);
+            let aad = self.cfg.client_id.to_le_bytes();
+            let encrypted = crypto::encrypt(&self.encode_key, &packed, &aad);
             self.send_raw_packet(Command::ImFriend, &encrypted);
             thread::sleep(Duration::from_millis(32));
             self.send_raw_packet(Command::ImFriend, &encrypted);
@@ -717,7 +729,8 @@ impl Client {
         hello.timestamp = delphi_now();
         hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.server_token);
         let packed = hello.to_bytes_packed();
-        let encrypted = crypto::encrypt(&self.encode_key, &packed, &[]);
+        let aad = self.cfg.client_id.to_le_bytes();
+        let encrypted = crypto::encrypt(&self.encode_key, &packed, &aad);
         self.send_raw_packet(Command::HelloAgain, &encrypted);
     }
 
