@@ -202,7 +202,9 @@ impl Client {
     }
 
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, 6 retries).
+    /// Matches: SendAPICmd → SendCmd → DataToSend(MPS_Sliced, FCrypted=true, MaxRetries=6)
     pub fn send_api_request(&self, request_payload: &[u8]) {
+        eprintln!("[DBG send_api] payload hex ({} bytes): {:02x?}", request_payload.len(), &request_payload[..request_payload.len().min(40)]);
         self.send_cmd(
             request_payload.to_vec(),
             Command::API,
@@ -428,28 +430,9 @@ impl Client {
             } else { return; }
         }
 
-        // Ping ACK slider (MAPPING #26)
-        if Command::from_byte(cmd) == Command::Ping && payload.len() > 50 {
-            let ack_start = u64::from_le_bytes(payload[42..50].try_into().unwrap());
-            let max_words = ((payload.len() - 50) / 8).min(64);
-            if max_words > 0 {
-                // ApplyRegularHLAck: remove confirmed pending items
-                for word_idx in 0..max_words {
-                    let off = 50 + word_idx * 8;
-                    let word = u64::from_le_bytes(payload[off..off+8].try_into().unwrap());
-                    self.pending_h.retain(|item| {
-                        if item.msg_num < ack_start { return false; }
-                        let offset = item.msg_num - ack_start;
-                        if offset >= (max_words as u64) * 64 { return true; }
-                        let w_idx = (offset / 64) as usize;
-                        let b_idx = offset % 64;
-                        if w_idx == word_idx {
-                            (word >> b_idx) & 1 == 0
-                        } else { true }
-                    });
-                }
-            }
-        }
+        // NOTE: ApplyRegularHLAck (ACK parsing from Ping) is SERVER-SIDE logic only.
+        // Client does NOT parse incoming Ping for ACK bitmap.
+        // Server confirms our H-commands via SlicedACK, not via Ping.
 
         on_data(Command::from_byte(cmd), &payload);
     }
@@ -463,18 +446,22 @@ impl Client {
         self.rs = payload[41] as f64 / 255.0;
         self.need_connect = false;
 
-        // Send ping response
+        // Send ping response (matches Delphi SendPing exactly):
+        // - Struct written first (AckStart at offset 42 = SERVER's value, untouched)
+        // - BuildAckHalf provides AckWords APPENDED after struct
+        // - AckStart in struct is NOT overwritten (Delphi writes struct then calls BuildAckHalf)
         let mut response = payload[..50].to_vec();
         response[0..8].copy_from_slice(&delphi_now().to_le_bytes());
         response[25..33].copy_from_slice(&self.total_sent.to_le_bytes());
-        let total_recv = self.total_recv;
-        response[33..41].copy_from_slice(&total_recv.to_le_bytes());
-        let (ack_start, ack_words) = self.slider.build_ack_half();
-        response[42..50].copy_from_slice(&ack_start.to_le_bytes());
+        response[33..41].copy_from_slice(&self.total_recv.to_le_bytes());
+        // response[42..50] = AckStart — DO NOT OVERWRITE (keep server's echo value)
+        let (_ack_start, ack_words) = self.slider.build_ack_half();
         for w in &ack_words { response.extend_from_slice(&w.to_le_bytes()); }
         self.send_raw_packet(Command::Ping, &response);
 
-        self.data_read(Command::Ping as u8, payload, on_data);
+        // Client does NOT do ApplyRegularHLAck from incoming Ping
+        // (that's server-side logic only — MoonProtoCommon.pas:513-525)
+        on_data(Command::Ping, payload);
     }
 
     fn handle_handshake(&mut self, cmd: Command, payload: &[u8]) {
@@ -581,6 +568,10 @@ impl Client {
                 data_pos += write_size;
             }
 
+            if block_num == 0 && n_blocks == 1 {
+                eprintln!("[DBG slice] dgram={} wire_cmd={} slice_len={} encrypted_len={}",
+                         datagram_num, wire_cmd as u8, slice.len(), wire_data.len());
+            }
             self.send_raw_packet(Command::Sliced, &slice);
         }
 
