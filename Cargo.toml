@@ -1,0 +1,14 @@
+[package]
+name = "moonproto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+moonproto-transport = { path = "../moonproto-transport" }
+aes-gcm = "0.10"
+sha3 = "0.10"
+rand = "0.8"
+
+[[example]]
+name = "connect"
+path = "examples/connect.rs"
