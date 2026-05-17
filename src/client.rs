@@ -103,6 +103,8 @@ pub struct Client {
 
     // Pending H-commands (main thread only, no sharing)
     pending_h: Vec<SendItem>,
+    // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
+    sending: Vec<SentSliced>,
 
     // Main thread state
     socket: Option<UdpSocket>,
@@ -154,6 +156,7 @@ impl Client {
             send_tx,
             send_rx,
             pending_h: Vec::new(),
+            sending: Vec::new(),
             socket: None,
             authorized: false,
             last_online: 0,
@@ -405,7 +408,30 @@ impl Client {
                     self.data_read_int(inner_cmd, &data, on_data);
                 }
             }
-            Command::SlicedACK => { /* TODO: apply to our Sending list when we send Sliced */ }
+            Command::SlicedACK => {
+                // Parse ACK: Flags(32 bytes) + DatagramNum(2 bytes) = 34 bytes
+                if payload.len() >= 34 {
+                    let mut ack_flags = [0u8; 32];
+                    ack_flags.copy_from_slice(&payload[0..32]);
+                    let ack_dgram = u16::from_le_bytes([payload[32], payload[33]]);
+
+                    // Find matching SentSliced and apply ACK
+                    self.sending.retain(|s| {
+                        if s.datagram_num != ack_dgram { return true; }
+                        // Check if all blocks ACK'd
+                        let mut all_ack = true;
+                        for block in 0..s.blocks_count {
+                            let byte_idx = block / 8;
+                            let bit_idx = block % 8;
+                            if ack_flags[byte_idx] & (1 << bit_idx) == 0 {
+                                all_ack = false;
+                                break;
+                            }
+                        }
+                        !all_ack // retain if NOT all ACK'd
+                    });
+                }
+            }
             Command::Ping => { self.handle_ping(payload, on_data); }
             _ => { self.data_read(raw_cmd, payload, on_data); }
         }
@@ -579,6 +605,7 @@ impl Client {
         self.send_datagram_num = self.send_datagram_num.wrapping_add(1);
 
         let mut data_pos = 0;
+        let mut sent_slices = Vec::with_capacity(n_blocks);
         for block_num in 0..n_blocks {
             let mut slice = Vec::with_capacity(4 + pmtu);
             slice.extend_from_slice(&datagram_num.to_le_bytes());
@@ -600,8 +627,19 @@ impl Client {
                 eprintln!("[DBG slice] dgram={} wire_cmd={} slice_len={} encrypted_len={}",
                          datagram_num, wire_cmd as u8, slice.len(), wire_data.len());
             }
+            sent_slices.push(slice.clone());
             self.send_raw_packet(Command::Sliced, &slice);
         }
+
+        // Store in Sending list for retry on missing SlicedACK
+        self.sending.push(SentSliced {
+            datagram_num,
+            slices: sent_slices,
+            ack_flags: [0u8; 32],
+            blocks_count: n_blocks,
+            sent_count: n_blocks,
+            last_checked: self.now_ms(),
+        });
 
         // Add to PendingH for retry if encrypted + has retries + first send only
         // (retry calls create_sliced_and_send with item.msg_num already set → don't re-add)
