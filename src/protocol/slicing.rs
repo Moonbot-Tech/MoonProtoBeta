@@ -33,12 +33,8 @@ impl SliceHeader {
     }
 }
 
-/// One received slice (block)
-#[derive(Debug)]
-struct Slice {
-    header: SliceHeader,
-    data: Vec<u8>, // full slice payload INCLUDING header bytes
-}
+// `Slice` (тип одного блока с header'ом) объединён в HashMap значения SlicedData.blocks
+// — отдельный тип не используется.
 
 /// Tracks all blocks of one datagram being received
 #[derive(Debug)]
@@ -48,6 +44,7 @@ pub struct SlicedData {
     blocks: Vec<Option<Vec<u8>>>, // indexed by BlockNum, payload after SliceHeader
     received_count: usize,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
+    pub dup_count: u8,       // DupCount (matches IntStruct.pas:539)
 }
 
 impl SlicedData {
@@ -59,6 +56,7 @@ impl SlicedData {
             blocks: vec![None; count],
             received_count: 0,
             ack_flags: [0u8; 32],
+            dup_count: 0,
         }
     }
 
@@ -75,8 +73,9 @@ impl SlicedData {
         if self.blocks[idx].is_none() {
             self.blocks[idx] = Some(payload);
             self.received_count += 1;
+        } else {
+            if self.dup_count < 255 { self.dup_count += 1; }
         }
-        // else: duplicate, ignore (DupCount++ in Delphi)
 
         self.received_count == self.blocks_count
     }
@@ -159,7 +158,8 @@ impl SlicingReceiver {
     /// Process an incoming MPC_Sliced packet payload (after outer header strip).
     /// Returns: (Option<(cmd, assembled_data)>, ack_to_send)
     /// Matches TMoonProtoClient.OnNewSliced byte-for-byte.
-    pub fn on_new_sliced(&mut self, payload: &[u8]) -> (Option<(u8, Vec<u8>)>, [u8; ACK256_WIRE_SIZE]) {
+    /// Returns: (Option<(cmd, data, dup_count, blocks_count)>, ack_bytes)
+    pub fn on_new_sliced(&mut self, payload: &[u8]) -> (Option<(u8, Vec<u8>, u8, usize)>, [u8; ACK256_WIRE_SIZE]) {
         let hdr = match SliceHeader::from_bytes(payload) {
             Some(h) => h,
             None => return (None, [0u8; ACK256_WIRE_SIZE]),
@@ -176,7 +176,7 @@ impl SlicingReceiver {
             self.receiving.insert(datagram_num, SlicedData::new(datagram_num, hdr.max_block_num));
         } else if !self.receiving.contains_key(&datagram_num) {
             // Not new, not in receiving → already completed, send full ACK
-            let mut flags = [0xFFu8; 32]; // SetAllFlags
+            let flags = [0xFFu8; 32]; // SetAllFlags
             let ack = build_ack_bytes(&flags, datagram_num);
             return (None, ack);
         } else {
@@ -194,7 +194,9 @@ impl SlicingReceiver {
         let ack = build_ack_bytes(&sliced.ack_flags, datagram_num);
 
         if complete {
-            let assembled = sliced.assemble();
+            let dup_count = sliced.dup_count;
+            let blocks_count = sliced.blocks_count;
+            let assembled = sliced.assemble().map(|(cmd, data)| (cmd, data, dup_count, blocks_count));
             self.receiving.remove(&datagram_num);
             (assembled, ack)
         } else {
@@ -229,7 +231,7 @@ mod tests {
         recv.set_last_online(10000);
 
         // Single block: SliceHeader(dgram=1, block=0, max=0) + cmd(0x0A) + data
-        let mut payload = vec![
+        let payload = vec![
             0x01, 0x00, // datagram_num = 1
             0x00,       // block_num = 0
             0x00,       // max_block_num = 0 (1 block total)
@@ -237,8 +239,8 @@ mod tests {
             0xDE, 0xAD, // data
         ];
 
-        let (assembled, ack) = recv.on_new_sliced(&payload);
-        let (cmd, data) = assembled.unwrap();
+        let (assembled, _ack) = recv.on_new_sliced(&payload);
+        let (cmd, data, _, _) = assembled.unwrap();
         assert_eq!(cmd, 0x0A);
         assert_eq!(data, vec![0xDE, 0xAD]);
     }
@@ -267,7 +269,7 @@ mod tests {
             0xAA,       // data
         ];
         let (assembled, _) = recv.on_new_sliced(&block0);
-        let (cmd, data) = assembled.unwrap();
+        let (cmd, data, _, _) = assembled.unwrap();
         assert_eq!(cmd, 0x1C);
         assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
     }

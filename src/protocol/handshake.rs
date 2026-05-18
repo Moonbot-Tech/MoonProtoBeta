@@ -2,6 +2,8 @@ use crate::MoonKey;
 use crate::crypto;
 use rand::Rng;
 
+// Hello timestamp is set by caller (client.rs::delphi_now adds NTP offset).
+
 /// TMoonProtoHello — 56 bytes packed record
 /// Layout: Rnd(16) + MixTS(8) + TimeStamp(8) + ServerToken(8) + PeerMix(8) + AppToken(8)
 pub const HELLO_SIZE: usize = 56;
@@ -25,7 +27,7 @@ impl Hello {
         Self {
             rnd,
             mix_ts: client_token,
-            timestamp: delphi_now(),
+            timestamp: 0.0, // caller MUST overwrite with delphi_now() (NTP-corrected)
             server_token: rng.gen(),
             peer_mix: rng.gen(),
             app_token,
@@ -69,43 +71,19 @@ impl Hello {
 }
 
 /// Build the Hello packet ready to send (encrypted with MasterKey).
-/// NOTE: AAD is NOT actually used due to mORMot's AesGcmReset clearing AAD state
-/// before Encrypt. Both client and server have this behavior, so they're consistent.
-pub fn build_hello_packet(master_key: &MoonKey, client_id: u64, client_token: &mut u64, app_token: u64) -> Vec<u8> {
-    *client_token += 1;
-    let mut hello = Hello::new(*client_token, app_token);
-    hello.timestamp = delphi_now();
-    let packed = hello.to_bytes_packed();
-    let aad = client_id.to_le_bytes();
-    crypto::encrypt(master_key, &packed, &aad)
-}
-
-/// Build HelloAgain packet (encrypted with SESSION key, includes PeerMix proof)
-pub fn build_hello_again_packet(
-    encode_key: &MoonKey,
-    master_key_as_rnd: &MoonKey,
+/// AAD = client_id (8 bytes LE). Vars.pas:434 `MakeCorrectAAD = true` ⇒ AAD реально применяется.
+/// `timestamp_dt` — TDateTime от вызывающего (client.rs::delphi_now включает NTP offset).
+pub fn build_hello_packet(
+    master_key: &MoonKey,
     client_id: u64,
     client_token: &mut u64,
-    server_token: u64,
     app_token: u64,
+    timestamp_dt: f64,
 ) -> Vec<u8> {
     *client_token += 1;
     let mut hello = Hello::new(*client_token, app_token);
-    hello.timestamp = delphi_now();
-    // PeerMix = MixValues(Hello.Rnd, MixTS, ServerToken)
-    hello.peer_mix = crypto::mix_values(master_key_as_rnd, hello.mix_ts, server_token);
+    hello.timestamp = timestamp_dt;
     let packed = hello.to_bytes_packed();
-    crypto::encrypt(encode_key, &packed, &client_id.to_le_bytes())
-}
-
-/// Delphi TDateTime: days since 1899-12-30 as f64.
-/// We approximate with UTC now.
-fn delphi_now() -> f64 {
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    // Unix epoch = 1970-01-01 = Delphi day 25569
-    25569.0 + secs / 86400.0
+    let aad = client_id.to_le_bytes();
+    crypto::encrypt(master_key, &packed, &aad)
 }

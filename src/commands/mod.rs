@@ -7,9 +7,28 @@ pub mod order_book;
 pub mod balance;
 pub mod engine_api;
 pub mod engine_request;
+pub mod trade;
+pub mod strat;
+pub mod arb;
+pub mod ui;
+pub mod market;
+pub mod strategy_serializer;
+pub mod candles;
 
 // Re-exports
 pub use trades_stream::{TradesPacket, Trade, TradeSection};
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use balance::{BalanceUpdate, BalanceItem};
 pub use engine_api::{EngineResponse, EngineMethod};
+pub use trade::{
+    TradeCommand,
+    OrderStatus, OrderStatusUpdate, OrderReplaceCommand, OrderReplaceResponse,
+    OrderCancelCommand, AllStatuses, NewOrderCommand, OrderStopsUpdate,
+    OrderTracePoint, CorridorUpdate, VStopUpdate, BulkReplaceNotify,
+    TurnPanicSellCommand, SetImmuneCommand, ImmuneItem,
+    JoinOrdersCommand, SplitOrderCommand, MoveAllSellsCommand, MoveAllBuysCommand,
+    DoClosePositionCommand, DoSellOrderCommand,
+    OrderType, OrderWorkerStatus, FixedPosition, ReplaceMultiKind, PriceZone,
+    OrderCompact, StopSettings, OrderUpdateData,
+    TradeCtx,
+};

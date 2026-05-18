@@ -4,7 +4,9 @@
 /// Request: client → server (CmdId=002)
 /// Response: server → client (CmdId=001)
 
-use super::registry::{CommandHeader, read_string};
+use super::registry::{read_string};
+use flate2::read::DeflateDecoder;
+use std::io::Read;
 
 /// Engine RPC method identifiers
 #[repr(u8)]
@@ -130,16 +132,10 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     let response_data = if sz > 0 && pos + sz <= data.len() {
         let raw = &data[pos..pos + sz];
         if is_compressed {
-            // Raw deflate (windowBits=-15)
-            #[cfg(feature = "deflate")]
-            {
-                // TODO: flate2 decompress
-                raw.to_vec()
-            }
-            #[cfg(not(feature = "deflate"))]
-            {
-                raw.to_vec() // pass through if no deflate support
-            }
+            let mut decoder = DeflateDecoder::new(raw);
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed).unwrap_or(0);
+            decompressed
         } else {
             raw.to_vec()
         }

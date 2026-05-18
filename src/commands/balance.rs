@@ -4,7 +4,7 @@
 /// Uses bitmask optimization: each field has a bit in Flags (u32).
 /// Only fields with bit set are present in wire data.
 
-use super::registry::{CommandHeader, read_string};
+use super::registry::read_string;
 
 /// One market's balance data
 #[derive(Debug, Clone, Default)]

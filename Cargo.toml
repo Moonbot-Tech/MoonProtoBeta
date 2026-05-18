@@ -9,7 +9,8 @@ aes-gcm = "0.10"
 sha3 = "0.10"
 rand = "0.8"
 base64 = "0.22"
+flate2 = "1"
 
 [[example]]
-name = "connect"
-path = "examples/connect.rs"
+name = "client_test"
+path = "examples/client_test.rs"

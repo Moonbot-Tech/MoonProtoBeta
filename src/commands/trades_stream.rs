@@ -49,7 +49,7 @@ pub enum TradeSection {
 }
 
 /// Full parsed trades packet
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TradesPacket {
     pub base_time: f64,      // TDateTime
     pub packet_num: u16,
@@ -74,13 +74,12 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
 
     let has_taker = (flags & TRADES_FLAG_HAS_TAKER) != 0;
     let data = &decompressed;
-    let mut pos = 0usize;
 
     // Header: BaseTime(8) + PacketNum(2)
     if data.len() < 10 { return None; }
     let base_time = f64::from_le_bytes(data[0..8].try_into().unwrap());
     let packet_num = u16::from_le_bytes(data[8..10].try_into().unwrap());
-    pos = 10;
+    let mut pos = 10usize;
 
     let mut sections = Vec::new();
 

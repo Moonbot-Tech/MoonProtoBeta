@@ -49,7 +49,6 @@ pub fn decrypt_command(
     encrypted_data: &[u8],
     slider: &mut Slider,
 ) -> Option<(u8, Vec<u8>, bool)> {
-    // Decrypt AES-GCM (no AAD, same as handshake)
     let plaintext = crypto::decrypt(decode_key, encrypted_data, &[])?;
 
     if plaintext.len() < CRYPTO_HEADER_SIZE {
@@ -61,7 +60,7 @@ pub fn decrypt_command(
     // Replay protection via slider
     let is_new = slider.check_revd(hdr.msg_num);
     if !is_new {
-        return None; // replay or out-of-window
+        return None;
     }
 
     // Strip crypto header, return inner command + payload

@@ -2,23 +2,54 @@ use aes_gcm::{Aes128Gcm, KeyInit, Nonce, Tag};
 use aes_gcm::aead::AeadInPlace;
 use crate::MoonKey;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static IV_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// `GlobalAESIVMask` — random u64 заводится при первом encrypt'е (≡ Delphi
+/// initialization секция MoonProtoFunc.pas:834 `GlobalAESIVMask := random64`).
+/// Используется для XOR с IV counter — обфускация порядка пакетов на проводе.
+static IV_MASK: OnceLock<u64> = OnceLock::new();
+
+#[inline]
+fn iv_mask() -> u64 {
+    *IV_MASK.get_or_init(|| rand::random::<u64>())
+}
+
+/// Pseudo-RDTSC: 64-bit timestamp counter с ~ns-резолюцией.
+/// На x86_64 использует реальный RDTSC (≡ Delphi `GetCPUTimeStamp` MoonProtoFunc.pas:152-156).
+/// На других архитектурах fallback на `SystemTime::nanos_since(UNIX_EPOCH)`.
+#[inline]
+fn cpu_timestamp() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_rdtsc()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        (d.as_secs() as u64) * 1_000_000_000 + d.subsec_nanos() as u64
+    }
+}
+
 /// AES-128-GCM encrypt with PKCS7 padding.
 /// Output layout: IV(12) + Tag(16) + Ciphertext(padded)
+///
+/// IV construction (byte-exact с Delphi MoonProtoFunc.pas:584-587):
+/// - `R1 = atomic_inc(counter) XOR iv_mask` (8 bytes LE)
+/// - `R2 = GetCPUTimeStamp (RDTSC)` (4 младших байта)
 pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let cipher = Aes128Gcm::new(key.into());
 
-    // Build IV: counter(8) + timestamp-like(4)
+    // Build IV: (counter XOR mask)(8) + RDTSC[low 32 bits](4)
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
+    let r1 = counter ^ iv_mask();
+    let r2 = (cpu_timestamp() & 0xFFFF_FFFF) as u32;
     let mut iv_bytes = [0u8; 12];
-    iv_bytes[0..8].copy_from_slice(&counter.to_le_bytes());
-    iv_bytes[8..12].copy_from_slice(&ts.to_le_bytes());
+    iv_bytes[0..8].copy_from_slice(&r1.to_le_bytes());
+    iv_bytes[8..12].copy_from_slice(&r2.to_le_bytes());
     let nonce = Nonce::from_slice(&iv_bytes);
 
     // PKCS7 padding

@@ -1,43 +1,68 @@
 use std::time::Duration;
-use moonproto::MoonKey;
+use std::env;
 use moonproto::client::{Client, ClientConfig};
 use moonproto::protocol::Command;
 use moonproto::commands;
-
-const MASTER_KEY: MoonKey = [
-    0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5,
-    0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25, 0xcb, 0xd6,
-];
-const MAC_KEY: MoonKey = [
-    0x29, 0x05, 0xa9, 0xc4, 0x13, 0x10, 0xe4, 0x3f,
-    0x07, 0x04, 0x93, 0x63, 0x40, 0xfa, 0x45, 0xa5,
-];
+use moonproto::key_import;
 
 fn main() {
-    println!("=== MoonProto Client (library API) ===");
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: client_test <key_base64> [ip:port]");
+        eprintln!("  Default: 127.0.0.1:3000");
+        std::process::exit(1);
+    }
+
+    let key_b64 = &args[1];
+    let (ip, port) = if args.len() >= 3 {
+        let parts: Vec<&str> = args[2].splitn(2, ':').collect();
+        (parts[0].to_string(), parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3000u16))
+    } else {
+        ("127.0.0.1".to_string(), 3000u16)
+    };
+
+    println!("=== MoonProto Client Test ===");
+
+    // NTP sync (matches TMoonProtoTymeSyncer startup)
+    let ntp_result = moonproto::ntp::get_best_ntp("pool.ntp.org", 4);
+    if ntp_result.synced {
+        moonproto::client::set_ntp_offset(ntp_result.time_offset);
+        println!("[ntp] offset={:.1}ms rtt={}ms", ntp_result.time_offset * 1000.0, ntp_result.round_trip_ms);
+    } else {
+        println!("[ntp] sync failed, using system clock");
+    }
+
+    let keys = key_import::import_key(key_b64).expect("Failed to import key");
+    println!("[key] OK, connecting to {}:{}", ip, port);
 
     let cfg = ClientConfig {
-        server_ip: "207.148.91.186".to_string(),
-        server_port: 3000,
-        master_key: MASTER_KEY,
-        mac_key: MAC_KEY,
+        server_ip: ip,
+        server_port: port,
+        master_key: keys.master_key,
+        mac_key: keys.mac_key,
         mask_ver: 0,
         client_id: rand::random(),
     };
 
     let mut client = Client::new(cfg);
 
-    // Phase 1: connect and auth (5 seconds)
+    // Phase 1: connect and auth (10 seconds)
     println!("[run] Phase 1: connecting...");
-    client.run(Duration::from_secs(5), Box::new(|_cmd, _data| {}));
+    client.run(Duration::from_secs(10), Box::new(|cmd, _data| {
+        if cmd != Command::Ping { println!("[p1] {:?}", cmd); }
+    }));
 
     if !client.is_authorized() {
         println!("[FAIL] Not authorized after 5s");
         return;
     }
-    println!("[auth] Connected! Subscribing to trades...");
+    println!("[auth] Connected! Sending BaseCheck first...");
 
-    // Subscribe to trades
+    // Send BaseCheck first (simplest API call — server must respond)
+    let req = commands::engine_request::base_check();
+    client.send_api_request(&req);
+
+    // Then subscribe
     let req = commands::engine_request::subscribe_all_trades();
     client.send_api_request(&req);
 
@@ -106,6 +131,7 @@ fn main() {
         }
     }));
 
+    client.disconnect();
     println!();
     println!("[done] Auth: {:?}", client.auth_status());
     println!("[done] Pings: {}", client.ping_count());

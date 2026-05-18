@@ -200,6 +200,30 @@ cargo test
 cargo bench  # performance benchmarks
 ```
 
+## Test tools (`examples/`)
+
+These are **debug / load-testing** utilities, not production code:
+
+- `client_test` — minimal CLI: handshake + subscribe + receive trades.
+- `loss_logger` — detailed loss/recovery logger with optional client-side packet drop
+  simulation. Useful for verifying gap recovery, reconnect logic, and slicing retry
+  behaviour under degraded network conditions.
+
+```bash
+# Plain run:
+cargo run --example loss_logger --release -- <key_b64> 127.0.0.1:3000 loss.log
+
+# Stress test with 75% client-side packet drop:
+cargo run --example loss_logger --release -- <key_b64> 127.0.0.1:3000 loss.log 75
+```
+
+### `client::set_err_emu(percent)` — **TEST USE ONLY**
+
+Mirror of the server's debug knob: drops incoming UDP packets at the specified
+rate after MAC/version validation. Service commands (Ping / handshake / ACK) are
+dropped at `rate / 2` so the connection doesn't fall apart entirely. Default is `0`
+(disabled). **Never call from production code paths.**
+
 ## Performance
 
 Measured on x86_64, release build:
