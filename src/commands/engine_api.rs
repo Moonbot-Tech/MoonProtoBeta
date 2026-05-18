@@ -47,8 +47,10 @@ pub enum EngineMethod {
 }
 
 impl EngineMethod {
+    /// `EngineMethod` имеет типизированный `None` вариант (=`0`) — сохраняем как есть
+    /// (не `Option<Self>` поскольку None — известный факт). При неизвестном byte > 0
+    /// логируем warn — это означает что server добавил новый метод которого нет в порте (A-02).
     pub fn from_byte(b: u8) -> Self {
-        // Safety: unknown values → None
         match b {
             1 => Self::BaseCheck,
             2 => Self::AuthCheck,
@@ -81,8 +83,32 @@ impl EngineMethod {
             29 => Self::DoTransferAsset,
             30 => Self::UpdateTransferAssets,
             31 => Self::GetCoinCardCandles,
-            _ => Self::None,
+            0 => Self::None,
+            _ => {
+                log::warn!(target: "moonproto::engine_api", "unknown EngineMethod byte: {b} (server-side extension?)");
+                Self::None
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_method_known_bytes() {
+        assert_eq!(EngineMethod::from_byte(1), EngineMethod::BaseCheck);
+        assert_eq!(EngineMethod::from_byte(31), EngineMethod::GetCoinCardCandles);
+        assert_eq!(EngineMethod::from_byte(0), EngineMethod::None);
+    }
+
+    #[test]
+    fn engine_method_unknown_falls_to_none_with_warn() {
+        // Не can directly assert warn вывод без логгер-impl,
+        // но проверяем что значение fallback на None.
+        assert_eq!(EngineMethod::from_byte(99), EngineMethod::None);
+        assert_eq!(EngineMethod::from_byte(255), EngineMethod::None);
     }
 }
 

@@ -11,7 +11,7 @@ static IV_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Используется для XOR с IV counter — обфускация порядка пакетов на проводе.
 static IV_MASK: OnceLock<u64> = OnceLock::new();
 
-#[inline]
+#[inline(always)]
 fn iv_mask() -> u64 {
     *IV_MASK.get_or_init(|| rand::random::<u64>())
 }
@@ -19,7 +19,7 @@ fn iv_mask() -> u64 {
 /// Pseudo-RDTSC: 64-bit timestamp counter с ~ns-резолюцией.
 /// На x86_64 использует реальный RDTSC (≡ Delphi `GetCPUTimeStamp` MoonProtoFunc.pas:152-156).
 /// На других архитектурах fallback на `SystemTime::nanos_since(UNIX_EPOCH)`.
-#[inline]
+#[inline(always)]
 fn cpu_timestamp() -> u64 {
     #[cfg(target_arch = "x86_64")]
     unsafe {

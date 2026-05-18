@@ -124,7 +124,10 @@ pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_
 /// Matches TMoonProtoClient.Receiving: TDictionary<TDatagramNum, TMoonProtoSlicedData>
 pub struct SlicingReceiver {
     pub receiving: HashMap<u16, SlicedData>,
-    last_recvd_ts: Vec<i64>, // for duplicate datagram detection
+    /// B-09 fix: фиксированный размер LAST_RECVD_BUF_SIZE — типизирован как массив,
+    /// `Box<[..; N]>` чтобы не паковать 16KB на stack (создание Client не падает по стеку),
+    /// но размер известен compile-time → bounds checks eliminate'ятся.
+    last_recvd_ts: Box<[i64; LAST_RECVD_BUF_SIZE]>,
     last_online: i64,
 }
 
@@ -135,7 +138,7 @@ impl SlicingReceiver {
     pub fn new() -> Self {
         Self {
             receiving: HashMap::new(),
-            last_recvd_ts: vec![0i64; LAST_RECVD_BUF_SIZE],
+            last_recvd_ts: Box::new([0i64; LAST_RECVD_BUF_SIZE]),
             last_online: 0,
         }
     }
@@ -206,18 +209,14 @@ impl SlicingReceiver {
 
     /// Clean old incomplete datagrams (called periodically).
     /// Matches TMoonProtoClient.ClearOldReceiving.
+    /// A-18 fix: однопроходный `retain` вместо collect→remove (без промежуточного `Vec` alloc).
     pub fn clear_old(&mut self) {
-        let to_remove: Vec<u16> = self.receiving.keys()
-            .filter(|&&k| {
-                let idx = (k as usize) % LAST_RECVD_BUF_SIZE;
-                (self.last_online - self.last_recvd_ts[idx]).abs() > TIME_WHEN_CAN_RECEIVE_RPT
-            })
-            .copied()
-            .collect();
-
-        for k in to_remove {
-            self.receiving.remove(&k);
-        }
+        let last_online = self.last_online;
+        let last_recvd_ts = &self.last_recvd_ts;
+        self.receiving.retain(|&k, _| {
+            let idx = (k as usize) % LAST_RECVD_BUF_SIZE;
+            (last_online - last_recvd_ts[idx]).abs() <= TIME_WHEN_CAN_RECEIVE_RPT
+        });
     }
 }
 

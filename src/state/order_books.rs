@@ -69,19 +69,11 @@ struct OrderBookCache {
 }
 
 impl OrderBookCache {
+    /// A-17 fix: используем стандартный `partition_point` вместо самописного binary search.
+    /// Wrapping-safe сравнение через `compare_seq` — оставляем (стандартный `binary_search`
+    /// не годится из-за u16 wrap-around).
     fn binary_search_insert(&self, seq: u16) -> usize {
-        // Используем wrapping-safe compare_seq. Стандартный binary_search не подходит т.к. u16 wrap.
-        let mut lo = 0usize;
-        let mut hi = self.packets.len();
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if compare_seq(self.packets[mid].seq, seq) < 0 {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo
+        self.packets.partition_point(|p| compare_seq(p.seq, seq) < 0)
     }
 
     fn add(&mut self, seq: u16, pkt: OrderBookUpdate, now_ms: i64) {

@@ -35,13 +35,15 @@ pub enum OrderType {
 }
 
 impl OrderType {
-    pub fn from_byte(b: u8) -> Self {
+    /// Возвращает `None` если байт неизвестен — caller должен drop packet + log.
+    /// Финансовый enum: silent fallback в Default = silent corruption (A-02).
+    pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0 => Self::Sell,
-            1 => Self::Buy,
-            2 => Self::BuyStop,
-            3 => Self::BuyLimit,
-            _ => Self::Sell,
+            0 => Some(Self::Sell),
+            1 => Some(Self::Buy),
+            2 => Some(Self::BuyStop),
+            3 => Some(Self::BuyLimit),
+            _ => None,
         }
     }
 }
@@ -64,19 +66,20 @@ pub enum OrderWorkerStatus {
 }
 
 impl OrderWorkerStatus {
-    pub fn from_byte(b: u8) -> Self {
+    /// Возвращает `None` если байт неизвестен. Финансовый enum — silent fallback opasen (A-02).
+    pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0 => Self::None,
-            1 => Self::BuyFail,
-            2 => Self::BuySet,
-            3 => Self::BuyCancel,
-            4 => Self::BuyDone,
-            5 => Self::SellFail,
-            6 => Self::SellSet,
-            7 => Self::SellCancel,
-            8 => Self::SelLDone,
-            9 => Self::SelLAlmostDone,
-            _ => Self::None,
+            0 => Some(Self::None),
+            1 => Some(Self::BuyFail),
+            2 => Some(Self::BuySet),
+            3 => Some(Self::BuyCancel),
+            4 => Some(Self::BuyDone),
+            5 => Some(Self::SellFail),
+            6 => Some(Self::SellSet),
+            7 => Some(Self::SellCancel),
+            8 => Some(Self::SelLDone),
+            9 => Some(Self::SelLAlmostDone),
+            _ => None,
         }
     }
 
@@ -96,12 +99,13 @@ pub enum FixedPosition {
 }
 
 impl FixedPosition {
-    pub fn from_byte(b: u8) -> Self {
+    /// Возвращает `None` если байт неизвестен (A-02).
+    pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0 => Self::Both,
-            1 => Self::Long,
-            2 => Self::Short,
-            _ => Self::Both,
+            0 => Some(Self::Both),
+            1 => Some(Self::Long),
+            2 => Some(Self::Short),
+            _ => None,
         }
     }
 }
@@ -120,8 +124,9 @@ pub enum MoveAllCmdType {
 }
 
 impl MoveAllCmdType {
-    pub fn from_byte(b: u8) -> Self {
-        match b { 0 => Self::MoveKind, 1 => Self::PriceZone, 2 => Self::Pers, _ => Self::MoveKind }
+    /// Возвращает `None` если байт неизвестен (A-02).
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b { 0 => Some(Self::MoveKind), 1 => Some(Self::PriceZone), 2 => Some(Self::Pers), _ => None }
     }
 }
 
@@ -140,17 +145,18 @@ pub enum ReplaceMultiKind {
 }
 
 impl ReplaceMultiKind {
-    pub fn from_byte(b: u8) -> Self {
+    /// Возвращает `None` если байт неизвестен (A-02).
+    pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            0 => Self::None,
-            1 => Self::Shift,
-            2 => Self::TopVol,
-            3 => Self::LowVol,
-            4 => Self::TopProfit,
-            5 => Self::All,
-            6 => Self::LastSet,
-            7 => Self::LastMoved,
-            _ => Self::None,
+            0 => Some(Self::None),
+            1 => Some(Self::Shift),
+            2 => Some(Self::TopVol),
+            3 => Some(Self::LowVol),
+            4 => Some(Self::TopProfit),
+            5 => Some(Self::All),
+            6 => Some(Self::LastSet),
+            7 => Some(Self::LastMoved),
+            _ => None,
         }
     }
 }
@@ -453,7 +459,7 @@ impl TradeEpochHeader {
         let market = MarketCommandHeader::read(r)?;
         if r.len() < 3 { return None; }
         let epoch = u16::from_le_bytes([r[0], r[1]]);
-        let status = OrderWorkerStatus::from_byte(r[2]);
+        let status = OrderWorkerStatus::from_byte(r[2])?;
         *r = &r[3..];
         Some(Self { market, epoch, status })
     }
@@ -771,7 +777,7 @@ impl OrderReplaceCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
         if r.len() < 1 + 8 { return None; }
-        let order_type = OrderType::from_byte(r[0]); *r = &r[1..];
+        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
         let new_price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         Some(Self { epoch_header, order_type, new_price })
     }
@@ -795,7 +801,7 @@ impl OrderReplaceResponse {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
         if r.len() < 1 + 8 + ORDER_UPDATE_DATA_SIZE + 8 { return None; }
-        let order_type = OrderType::from_byte(r[0]); *r = &r[1..];
+        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         let update_data = OrderUpdateData::from_bytes(&r[..ORDER_UPDATE_DATA_SIZE])?;
         *r = &r[ORDER_UPDATE_DATA_SIZE..];
@@ -919,14 +925,14 @@ impl MoveAllSellsCommand {
         let market = MarketCommandHeader::read(r)?;
         if r.len() < 1 + 1 + 8 + 16 { return None; }
         let cmd_type = r[0]; *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0]); *r = &r[1..];
+        let move_kind = ReplaceMultiKind::from_byte(r[0])?; *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         let min_p = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         let max_p = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         let price_zone = PriceZone { min_p, max_p };
-        // Soft-read: side появилось позже
+        // Soft-read: side появилось позже. На отсутствии — Both (legacy default).
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0]); *r = &r[1..]; v
+            let v = FixedPosition::from_byte(r[0])?; *r = &r[1..]; v
         } else { FixedPosition::Both };
         Some(Self { market, cmd_type, move_kind, price, price_zone, side })
     }
@@ -1071,7 +1077,7 @@ impl OrderTracePoint {
         let trace_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
         let base_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
         let stop_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let ord_type = OrderType::from_byte(r[0]); *r = &r[1..];
+        let ord_type = OrderType::from_byte(r[0])?; *r = &r[1..];
         let flags = r[0]; *r = &r[1..];
         Some(Self { market, trace_time, trace_price, base_price, stop_price, ord_type, flags })
     }
@@ -1127,10 +1133,10 @@ impl MoveAllBuysCommand {
         let market = MarketCommandHeader::read(r)?;
         if r.len() < 1 + 1 + 8 { return None; }
         let cmd_type = r[0]; *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0]); *r = &r[1..];
+        let move_kind = ReplaceMultiKind::from_byte(r[0])?; *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0]); *r = &r[1..]; v
+            let v = FixedPosition::from_byte(r[0])?; *r = &r[1..]; v
         } else { FixedPosition::Both };
         Some(Self { market, cmd_type, move_kind, price, side })
     }
@@ -1153,7 +1159,7 @@ impl BulkReplaceNotify {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
         if r.len() < 1 + 2 { return None; }
-        let order_type = OrderType::from_byte(r[0]); *r = &r[1..];
+        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
         let count = u16::from_le_bytes([r[0], r[1]]) as usize; *r = &r[2..];
         if r.len() < count * 8 { return None; }
         let mut uids = Vec::with_capacity(count);

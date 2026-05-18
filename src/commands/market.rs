@@ -104,6 +104,9 @@ pub enum BaseCurrency {
 }
 
 impl BaseCurrency {
+    /// `BaseCurrency` имеет типизированный `Unknown` вариант — сохраняем как есть
+    /// (не `Option<Self>` поскольку Unknown — это **известный** факт в системе типов).
+    /// При unknown byte логируем warn! для диагностики server-side расширений (A-02).
     pub fn from_byte(b: u8) -> Self {
         match b {
             0 => Self::BTC, 1 => Self::USDT, 2 => Self::ETH, 3 => Self::BNB,
@@ -112,7 +115,11 @@ impl BaseCurrency {
             12 => Self::TRX, 13 => Self::RUB, 14 => Self::EUR, 15 => Self::HTX,
             16 => Self::USDD, 17 => Self::IDR, 18 => Self::DOGE, 19 => Self::TRY,
             20 => Self::USDE, 21 => Self::Next2, 22 => Self::Next3, 23 => Self::Next4,
-            24 => Self::Next5, 25 => Self::EMPTY, _ => Self::Unknown,
+            24 => Self::Next5, 25 => Self::EMPTY,
+            _ => {
+                log::warn!(target: "moonproto::market", "unknown BaseCurrency byte: {b} (server-side extension?)");
+                Self::Unknown
+            }
         }
     }
 }

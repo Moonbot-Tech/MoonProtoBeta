@@ -8,6 +8,7 @@
 /// Offset = ((T2 - T1) + (T3 - T4)) / 2  (in seconds as f64)
 /// RoundTrip = (T4 - T1) - (T3 - T2)
 
+use log::{debug, warn};
 use std::net::UdpSocket;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -90,8 +91,10 @@ pub fn get_best_ntp(host: &str, try_count: usize) -> NtpSyncResult {
     }
 
     if best_delay_ms == i64::MAX {
+        warn!("NTP sync failed: all {try_count} attempts to {host} returned no valid response");
         NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false }
     } else {
+        debug!("NTP sync ok: host={host} offset={:.1}ms rtt={}ms", best_offset * 1000.0, best_delay_ms);
         NtpSyncResult { time_offset: best_offset, round_trip_ms: best_delay_ms, synced: true }
     }
 }

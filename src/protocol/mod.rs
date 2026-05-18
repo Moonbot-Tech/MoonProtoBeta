@@ -48,6 +48,9 @@ pub enum Command {
 }
 
 impl Command {
+    /// Транспортный enum — silent drop через `Command::None` для unknown (стандарт UDP
+    /// "не понял пакет — игнорирую"). При unknown byte > 0 — warn для диагностики
+    /// server-side новых команд (A-02).
     pub fn from_byte(b: u8) -> Self {
         match b & 0x7F {
             0 => Self::None,
@@ -88,7 +91,11 @@ impl Command {
             35 => Self::TradesResendResponse,
             36 => Self::OrderBook,
             37 => Self::Reserved1,
-            _ => Self::None,
+            // 0 уже покрыт в `0 => Self::None` выше; здесь — всё прочее (unknown).
+            _ => {
+                log::warn!(target: "moonproto::cmd", "unknown Command byte: {} (server-side extension?)", b & 0x7F);
+                Self::None
+            }
         }
     }
 }

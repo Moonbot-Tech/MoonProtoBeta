@@ -1,9 +1,29 @@
 use std::time::Duration;
 use std::env;
+use std::fs;
 use moonproto::client::{Client, ClientConfig};
 use moonproto::protocol::Command;
 use moonproto::commands;
 use moonproto::key_import;
+
+/// Прочитать значение `key` из простого `key = value` конфиг файла.
+/// Возвращает `None` если файла нет, ключа нет, или файл не читается.
+/// Формат: одна пара на строку, `#` начинает комментарий, пустые строки игнорируются.
+fn read_config_value(path: &str, key: &str) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -23,8 +43,15 @@ fn main() {
 
     println!("=== MoonProto Client Test ===");
 
+    // NTP host из конфига (если есть) либо default pool.ntp.org.
+    // Скопировать `moonproto.conf.example` → `moonproto.conf` и отредактировать
+    // чтобы изменить.
+    let ntp_host = read_config_value("moonproto.conf", "ntp_host")
+        .unwrap_or_else(|| "pool.ntp.org".to_string());
+    println!("[ntp] host = {}", ntp_host);
+
     // NTP sync (matches TMoonProtoTymeSyncer startup)
-    let ntp_result = moonproto::ntp::get_best_ntp("pool.ntp.org", 4);
+    let ntp_result = moonproto::ntp::get_best_ntp(&ntp_host, 4);
     if ntp_result.synced {
         moonproto::client::set_ntp_offset(ntp_result.time_offset);
         println!("[ntp] offset={:.1}ms rtt={}ms", ntp_result.time_offset * 1000.0, ntp_result.round_trip_ms);

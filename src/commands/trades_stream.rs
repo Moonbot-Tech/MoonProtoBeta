@@ -88,6 +88,13 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
         let market_index_and_flags = u16::from_le_bytes([data[pos], data[pos + 1]]);
         pos += 2;
 
+        // bits 14-15 = section type, bits 0-13 = market index (14 бит, max 16383).
+        // ИНВАРИАНТ: mIndex < 16384 (бот обслуживает сотни рынков, не десятки тысяч).
+        // ПРИМЕЧАНИЕ для исторического контекста: до фикса в MoonProtoTradesStream.pas:531
+        // Delphi сервер не применял `and $3FFF` для MMOrders sub-stream (другие применяли).
+        // Здесь mask `& 0x3FFF` применяется ЕДИНООБРАЗНО для всех section_type — это компенсирует
+        // забагованный Delphi сервер на mIndex < 16384 (где маска не имела видимого эффекта) и
+        // корректно работает с исправленным сервером. См. ARCHITECTURE.md OPEN-QUESTIONS §8 (ЗАКРЫТО).
         let section_type = (market_index_and_flags >> 14) & 0x03;
         let market_idx = market_index_and_flags & 0x3FFF;
 

@@ -7,10 +7,12 @@
 ///
 /// See MAPPING.md for line-by-line correspondence.
 
-use std::net::UdpSocket;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use log::{debug, error, warn};
 use crate::MoonKey;
 use crate::crypto;
 use crate::compression;
@@ -50,6 +52,7 @@ pub fn set_err_emu(percent: u8) {
 
 /// Команды, для которых dropRate делится пополам (служебные).
 /// Точное соответствие Delphi MoonProtoUDPClient.pas:537-538.
+#[inline]
 fn is_service_cmd(cmd: u8) -> bool {
     matches!(
         Command::from_byte(cmd),
@@ -66,6 +69,7 @@ fn is_service_cmd(cmd: u8) -> bool {
 }
 
 /// Возвращает `true` если пакет нужно дропнуть согласно ErrEmu.
+#[inline]
 fn err_emu_should_drop(cmd: u8) -> bool {
     let base_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
     if base_rate == 0 {
@@ -291,8 +295,12 @@ pub struct Client {
     actual_sleep_time: f64,  // ActualSleepTime (EMA of actual loop cycle time)
 
     // BytesPerSec sliding window (10 sec) — observability метрик.
+    // B-13 fix: running sum поддерживается одновременно с window — `bytes_per_sec_*` O(1)
+    // вместо O(N) обхода каждого запроса.
     bps_sent_window: std::collections::VecDeque<(i64, u64)>, // (timestamp_ms, bytes)
     bps_recv_window: std::collections::VecDeque<(i64, u64)>, // (timestamp_ms, bytes)
+    bps_sent_sum: u64,
+    bps_recv_sum: u64,
 
     // Log throttle: ключ → последний raise timestamp (anti-spam).
     log_last: std::collections::HashMap<&'static str, i64>,
@@ -318,6 +326,29 @@ pub struct Client {
     lifecycle_cb: Option<LifecycleFn>,
     /// Предыдущий auth_status (для детектирования переходов).
     prev_auth_status: AuthStatus,
+
+    /// Shutdown signal для reader thread.
+    /// `spawn_reader` создаёт НОВЫЙ `Arc<AtomicBool>` для каждого reader thread и сохраняет
+    /// его сюда. При `do_force_disconnect` / `Drop` мы ставим `true` — reader thread выйдет
+    /// из loop (макс через `read_timeout` = 1s).
+    /// Каждый новый reader получает свой Arc → старый и новый reader НЕ конфликтуют.
+    reader_shutdown: Arc<AtomicBool>,
+
+    /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
+    /// строку + `send_to(&str)` делал `getaddrinfo` resolve на каждый send (потенциально DNS-блокирующий).
+    /// Кэш сбрасывается при ошибке resolve (например, DNS отвалился) — на следующем bind_socket
+    /// повторно резолвится.
+    cached_server_addr: Option<SocketAddr>,
+
+    /// D-02: state-machine для двойной отправки ImFriend (требование Delphi handshake протокола
+    /// — финальный пакет шлётся дважды с короткой паузой для надёжности).
+    /// Раньше использовался `thread::sleep(32ms)` прямо в `handle_handshake`, что блокировало main loop
+    /// на 32мс — за это время накапливались UDP-пакеты в reader channel, heartbeat не отправлялся,
+    /// pending API timeouts не срабатывали.
+    /// Теперь: первый ImFriend уходит сразу, второй планируется в `pending_second_imfriend = Some((due_ms, payload))`,
+    /// main loop каждый тик проверяет и отправляет когда `cur_tm >= due_ms`.
+    /// Сбрасывается при `full_reset` и при отправке.
+    pending_second_imfriend: Option<(i64, Vec<u8>)>,
 }
 
 impl Client {
@@ -371,6 +402,8 @@ impl Client {
             actual_sleep_time: 5.0,
             bps_sent_window: std::collections::VecDeque::new(),
             bps_recv_window: std::collections::VecDeque::new(),
+            bps_sent_sum: 0,
+            bps_recv_sum: 0,
             log_last: std::collections::HashMap::new(),
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
@@ -383,6 +416,9 @@ impl Client {
             api_pending: ApiPending::new(),
             lifecycle_cb: None,
             prev_auth_status: AuthStatus::Base,
+            reader_shutdown: Arc::new(AtomicBool::new(false)),
+            cached_server_addr: None,
+            pending_second_imfriend: None,
         }
     }
 
@@ -805,6 +841,7 @@ impl Client {
 
     /// GetTimeMS equivalent — system time in milliseconds (matches Delphi GetTickCount64).
     /// MUST use same time base everywhere (reader thread, main thread, slicing).
+    #[inline]
     fn now_ms(&self) -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -812,8 +849,30 @@ impl Client {
             .as_millis() as i64
     }
 
-    fn server_addr(&self) -> String {
-        format!("{}:{}", self.cfg.server_ip, self.cfg.server_port)
+    /// Получить кэшированный SocketAddr сервера. Резолвится один раз при `bind_socket` или
+    /// первом вызове, далее используется без re-resolve. Закрывает B-05.
+    /// При неудаче resolve — `None`, отправка пакетов не происходит (логируется).
+    fn server_socket_addr(&mut self) -> Option<SocketAddr> {
+        if let Some(addr) = self.cached_server_addr { return Some(addr); }
+        let key = format!("{}:{}", self.cfg.server_ip, self.cfg.server_port);
+        match key.to_socket_addrs() {
+            Ok(mut iter) => {
+                if let Some(addr) = iter.next() {
+                    self.cached_server_addr = Some(addr);
+                    return Some(addr);
+                }
+                if self.should_log("server_addr_empty", 5000) {
+                    error!("server address resolve returned empty: {}", key);
+                }
+                None
+            }
+            Err(e) => {
+                if self.should_log("server_addr_resolve_fail", 5000) {
+                    error!("server address resolve failed for {}: {}", key, e);
+                }
+                None
+            }
+        }
     }
 
     /// Run the client. Spawns reader thread, runs main loop for `duration`.
@@ -937,6 +996,9 @@ impl Client {
                     self.last_cleanup = cur_tm;
                 }
 
+                // D-02: проверка отложенного второго ImFriend (state machine вместо thread::sleep).
+                self.check_pending_second_imfriend(cur_tm);
+
                 // Reconnect logic
                 self.check_hello_send(cur_tm);
                 self.check_offline_reconnect(cur_tm);
@@ -965,20 +1027,44 @@ impl Client {
 
     /// Spawn reader thread (≡ Indy TIdUDPListenerThread).
     /// Reader шлёт `ClientEvent::Recv(...)` в общий event-канал — main мгновенно просыпается.
+    ///
+    /// **Shutdown:** создаём НОВЫЙ `Arc<AtomicBool>` для этого reader. Сохраняем clone в
+    /// `self.reader_shutdown`. При `do_force_disconnect` / `Drop` ставим в `true` —
+    /// reader thread выйдет из loop (макс через `read_timeout=1s`).
+    /// Новый spawn_reader создаёт **свой** Arc — старый и новый не конфликтуют.
     fn spawn_reader(&mut self) {
         let Some(ref sock) = self.socket else { return; };
-        let sock_clone = sock.try_clone().expect("Failed to clone socket");
+        // D-03: graceful try_clone — на FD exhaustion (long-running клиент с многими reconnect'ами
+        // может упереться в ulimit) не паникуем, а триггерим force_disconnect для restart cycle.
+        let sock_clone = match sock.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("socket try_clone failed: {e} — triggering force_disconnect");
+                self.force_disconnect = true;
+                return;
+            }
+        };
         let mac_key = self.cfg.mac_key;
         let mask_ver = self.cfg.mask_ver;
         let event_tx = self.event_tx.clone();
 
-        thread::spawn(move || {
+        // Новый shutdown flag для этого reader thread.
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        self.reader_shutdown = shutdown_flag.clone();
+
+        // C-03: named thread для удобства debug (ps -L / Instruments / DebugView)
+        let spawn_result = thread::Builder::new()
+            .name("moonproto-reader".into())
+            .spawn(move || {
             let mut buf = [0u8; 65535];
             loop {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    break; // graceful exit on do_force_disconnect / Drop
+                }
                 let n = match sock_clone.recv_from(&mut buf) {
                     Ok((n, _)) => n,
                     Err(_) => {
-                        // Socket closed (force disconnect) or timeout → exit thread
+                        // Socket closed (force disconnect) or timeout → loop через shutdown check
                         thread::sleep(Duration::from_millis(1));
                         continue;
                     }
@@ -1008,6 +1094,10 @@ impl Client {
                 }
             }
         });
+        if let Err(e) = spawn_result {
+            error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
+            self.force_disconnect = true;
+        }
     }
 
     // process_received удалён: обработка recv_msgs теперь inline в run() loop
@@ -1043,6 +1133,11 @@ impl Client {
             Command::Sliced => {
                 self.slicer.set_last_online(self.now_ms());
                 let (assembled, ack) = self.slicer.on_new_sliced(payload);
+                // Per-block ACK (one SlicedACK per received block) — НАМЕРЕННО.
+                // Для торгового канала критична скорость: минимальная задержка обнаружения
+                // потери блока важнее экономии bandwidth на мелких ACK (~34 байта каждый).
+                // Batching/timer-based ACK снижает bandwidth, но увеличивает retry-латентность.
+                // НЕ оптимизировать частоту отправки. См. ARCHITECTURE.md OPEN-QUESTIONS §6 (ЗАКРЫТО).
                 self.send_raw_packet(Command::SlicedACK, &ack);
                 if let Some((inner_cmd, data, dup_count, blocks_count)) = assembled {
                     // AvgDupCount EMA (matches Common.pas:701-703)
@@ -1050,7 +1145,8 @@ impl Client {
                     if self.avg_dup_count == 0.0 {
                         self.avg_dup_count = dup_pct;
                     } else {
-                        self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) / 10.0;
+                        // B-19: * 0.1 вместо / 10.0 — FDIV ~13-25 циклов, FMUL ~4-5.
+                        self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
                     }
                     self.data_read_int(inner_cmd, &data, on_data);
                 }
@@ -1090,7 +1186,8 @@ impl Client {
                         self.avg_over_heat = if self.avg_over_heat == 0.0 {
                             ratio
                         } else {
-                            (self.avg_over_heat * 9.0 + ratio) / 10.0
+                            // B-19: * 0.1 вместо / 10.0
+                            (self.avg_over_heat * 9.0 + ratio) * 0.1
                         };
                     }
                 }
@@ -1166,7 +1263,9 @@ impl Client {
         self.actual_pmtu = u16::from_le_bytes(payload[20..22].try_into().unwrap());
         self.global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
         self.overheat = payload[24];
-        self.rs = payload[41] as f64 / 255.0;
+        // B-19: умножение на const reciprocal вместо деления (FDIV → FMUL).
+        // Компилятор инлайнит `1.0 / 255.0` как const expression.
+        self.rs = payload[41] as f64 * (1.0 / 255.0);
         self.need_connect = false;
 
         // C9: ServerTimeDelta + NetLagPing (matches MoonProtoClient.pas:267-269)
@@ -1259,9 +1358,11 @@ impl Client {
             let packed = im.to_bytes_packed();
             let aad = self.cfg.client_id.to_le_bytes();
             let encrypted = crypto::encrypt(&self.encode_key, &packed, &aad);
+            // D-02: первый ImFriend — сразу. Второй планируется через 32мс state-machine'ой
+            // (раньше: thread::sleep блокировал main loop). Reschedule если в очереди уже
+            // висит старая (соответствует Delphi семантике — последняя попытка вытесняет).
             self.send_raw_packet(Command::ImFriend, &encrypted);
-            thread::sleep(Duration::from_millis(32));
-            self.send_raw_packet(Command::ImFriend, &encrypted);
+            self.pending_second_imfriend = Some((self.now_ms() + 32, encrypted));
         }
         if cmd == Command::Fine {
             self.need_connect = false;
@@ -1297,20 +1398,12 @@ impl Client {
         self.set_dont_fragment(false);
     }
 
-    /// Set IP_DONTFRAGMENT socket option (matches TUDPServerMP.TurnDontFragment)
+    /// Set IP_DONTFRAGMENT socket option (matches TUDPServerMP.TurnDontFragment).
+    /// **Cross-platform**: Windows / Linux / Android / macOS / iOS.
+    /// Реализовано через `setsockopt` напрямую (socket2 имеет `set_mtu_discover` только на Linux).
     fn set_dont_fragment(&self, enable: bool) {
-        #[cfg(target_os = "windows")]
         if let Some(ref sock) = self.socket {
-            use std::os::windows::io::AsRawSocket;
-            let raw = sock.as_raw_socket();
-            let val: i32 = if enable { 1 } else { 0 };
-            unsafe {
-                extern "system" {
-                    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-                }
-                // IPPROTO_IP=0, IP_DONTFRAGMENT=14
-                setsockopt(raw as usize, 0, 14, &val as *const i32 as *const i8, 4);
-            }
+            set_dont_fragment_for_socket(sock, enable);
         }
     }
 
@@ -1565,7 +1658,8 @@ impl Client {
         // Note: Delphi uses per-client LastCheckedSlices, we use the min of all sliced.last_checked
         let path_delay = (self.round_trip_delay as f64 * self.trip_delay_k + 10.0).round() as i64;
         let cycle_time_ms = 5.0f64.max(self.actual_sleep_time).min(15.0);
-        let client_limit = (self.can_send_rate as f64 * cycle_time_ms / 1000.0) as usize;
+        // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
+        let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001) as usize;
         let mut bytes_sent_at_once: usize = 0;
 
         let mut to_send: Vec<Vec<u8>> = Vec::new();
@@ -1674,6 +1768,8 @@ impl Client {
 
     /// Flush the send batch (matches DoSendTmpList, Common.pas:835-867).
     /// If count>1 → MPC_Grouped. If count==1 → single packet.
+    /// A-19 fix: для single случая не re-парсим cmd/sz из buf — мы их знаем при добавлении.
+    /// Single-element путь теперь без bounds-check парсинга.
     fn flush_send_batch(&mut self) {
         if self.tmp_send_count == 0 { return; }
 
@@ -1682,14 +1778,14 @@ impl Client {
             let payload = std::mem::take(&mut self.tmp_send_buf);
             self.send_raw_packet(Command::Grouped, &payload);
         } else {
-            // Single item: extract cmd + data from batch buffer
+            // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
+            // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
             let buf = std::mem::take(&mut self.tmp_send_buf);
             if buf.len() >= 3 {
                 let cmd = buf[0];
-                let sz = u16::from_le_bytes([buf[1], buf[2]]) as usize;
-                if buf.len() >= 3 + sz {
-                    self.send_raw_packet_cmd(cmd, &buf[3..3+sz]);
-                }
+                // sz прочитан только для slicing data (после 3 байт group-header'а).
+                // Используем оставшийся len как `len - 3` — это и есть фактический payload.
+                self.send_raw_packet_cmd(cmd, &buf[3..]);
             }
         }
 
@@ -1698,27 +1794,59 @@ impl Client {
     }
 
     fn send_raw_packet_cmd(&mut self, cmd: u8, payload: &[u8]) {
-        let Some(sock) = &self.socket else { return };
+        let Some(addr) = self.server_socket_addr() else { return };
         let (packet, extra) = moonproto_transport::transport_pack(
             &self.cfg.mac_key, cmd, self.cfg.client_id, payload, self.cfg.mask_ver,
         );
-        let addr = self.server_addr();
-        if let Some(extra_pkt) = extra { sock.send_to(&extra_pkt, &addr).ok(); }
-        sock.send_to(&packet, &addr).ok();
-        self.total_sent += packet.len() as u64;
-        self.track_sent(packet.len() as u64, self.now_ms());
+        self.dispatch_send(cmd, &packet, extra.as_deref(), addr);
     }
 
     fn send_raw_packet(&mut self, cmd: Command, payload: &[u8]) {
-        let Some(sock) = &self.socket else { return };
+        let Some(addr) = self.server_socket_addr() else { return };
         let (packet, extra) = moonproto_transport::transport_pack(
             &self.cfg.mac_key, cmd as u8, self.cfg.client_id, payload, self.cfg.mask_ver,
         );
-        let addr = self.server_addr();
-        if let Some(extra_pkt) = extra { sock.send_to(&extra_pkt, &addr).ok(); }
-        sock.send_to(&packet, &addr).ok();
-        self.total_sent += packet.len() as u64;
-        self.track_sent(packet.len() as u64, self.now_ms());
+        self.dispatch_send(cmd as u8, &packet, extra.as_deref(), addr);
+    }
+
+    /// Реально отправляет пакет (плюс optional extra-пакет от moonext) с обработкой ошибок.
+    /// Закрывает D-06: send errors больше не игнорируются через `.ok()`.
+    /// EWOULDBLOCK логируется как warn (нормальная буферизация ядра). Прочие ошибки → error + force_disconnect
+    /// (чтобы reconnect-цикл подобрал состояние).
+    fn dispatch_send(&mut self, cmd: u8, packet: &[u8], extra: Option<&[u8]>, addr: SocketAddr) {
+        // Сначала выполняем сетевые операции, собирая Result'ы в owned-переменные,
+        // потом обрабатываем через self.should_log без conflicting borrow.
+        let extra_result = match (extra, self.socket.as_ref()) {
+            (Some(extra_pkt), Some(sock)) => Some(sock.send_to(extra_pkt, addr)),
+            _ => None,
+        };
+        let main_result = match self.socket.as_ref() {
+            Some(sock) => sock.send_to(packet, addr),
+            None => return,
+        };
+
+        if let Some(Err(e)) = extra_result {
+            if self.should_log("send_extra_err", 1000) {
+                warn!("send_to(extra, cmd={cmd}) failed: {e}");
+            }
+        }
+        match main_result {
+            Ok(_) => {
+                self.total_sent += packet.len() as u64;
+                self.track_sent(packet.len() as u64, self.now_ms());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if self.should_log("send_wouldblock", 1000) {
+                    warn!("send_to(cmd={cmd}) would block (kernel send buffer full)");
+                }
+            }
+            Err(e) => {
+                if self.should_log("send_err", 1000) {
+                    error!("send_to(cmd={cmd}) failed: {e} — triggering force_disconnect");
+                }
+                self.force_disconnect = true;
+            }
+        }
     }
 
     fn send_hello(&mut self) {
@@ -1784,6 +1912,17 @@ impl Client {
         }
     }
 
+    /// D-02: state-machine для отложенного второго ImFriend.
+    /// Если due ≤ cur_tm — отправляем и очищаем slot. Не блокирует main loop.
+    /// Защита от старого слота при reconnect: full_reset() сбрасывает.
+    fn check_pending_second_imfriend(&mut self, cur_tm: i64) {
+        if second_imfriend_due(&self.pending_second_imfriend, cur_tm) {
+            // take() очищает slot перед отправкой → safe при ошибке send_raw_packet.
+            let payload = self.pending_second_imfriend.take().unwrap().1;
+            self.send_raw_packet(Command::ImFriend, &payload);
+        }
+    }
+
     fn check_dead_zone(&mut self, cur_tm: i64) {
         let authorized = self.authorized;
         let last_online = self.last_online;
@@ -1798,6 +1937,10 @@ impl Client {
         if self.connected && !self.soft_reconnect {
             self.send_raw_packet(Command::LogOff, &[]);
         }
+        // Сигналим текущему reader thread завершиться (макс через 1с — read_timeout).
+        // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
+        // за длинную сессию (часы).
+        self.reader_shutdown.store(true, Ordering::Relaxed);
         self.socket = None;
         if !self.soft_reconnect { self.full_reset(); }
         self.connected = false;
@@ -1818,6 +1961,8 @@ impl Client {
         self.slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = 0;
+        // D-02: при full reset (новый handshake) — старый отложенный second ImFriend больше не нужен.
+        self.pending_second_imfriend = None;
     }
 
     fn bind_socket(&mut self) {
@@ -1826,18 +1971,25 @@ impl Client {
         // Bind family выбирается по серверному адресу. Если сервер — IPv6 literal `[2001:db8::1]:3000`
         // или DNS name резолвящийся в AAAA — bindаемся `[::]:port`. Иначе IPv4 `0.0.0.0:port`.
         let bind_family = if self.cfg.server_ip.contains(':') { "[::]" } else { "0.0.0.0" };
+        let mut last_err: Option<std::io::Error> = None;
         for _ in 0..200 {
             let addr = format!("{}:{}", bind_family, self.next_port);
             match UdpSocket::bind(&addr) {
                 Ok(sock) => {
-                    sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                    if let Err(e) = sock.set_read_timeout(Some(Duration::from_secs(1))) {
+                        warn!("set_read_timeout failed: {e}");
+                    }
                     set_socket_buffers(&sock);
+                    debug!("bound UDP socket on {}:{}", bind_family, self.next_port);
                     self.next_port += 1;
                     self.socket = Some(sock);
                     self.auth_status = AuthStatus::Connected;
+                    // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
+                    self.cached_server_addr = None;
                     return;
                 }
-                Err(_) => {
+                Err(e) => {
+                    last_err = Some(e);
                     self.next_port += 1;
                     if self.next_port > 65000 { self.next_port = 1024; }
                 }
@@ -1846,6 +1998,11 @@ impl Client {
         // Все 200 попыток bind упали → не можем даже создать сокет.
         // Уведомить потребителя через Disconnected lifecycle event.
         // Throttle: только если ещё не в Base (т.е. не повторяем подряд).
+        if let Some(e) = last_err {
+            error!("UdpSocket::bind failed after 200 attempts on {}:*, last error: {}", bind_family, e);
+        } else {
+            error!("UdpSocket::bind failed after 200 attempts on {}:*", bind_family);
+        }
         if self.auth_status != AuthStatus::Base {
             self.auth_status = AuthStatus::Base;
             self.need_connect = false;
@@ -1869,37 +2026,36 @@ impl Client {
 
     const BPS_WINDOW_MS: i64 = 10_000;
 
+    /// A-03 + B-13: убран anti-idiom `bps_window_kind_*` через ifs — заменён прямой mutable
+    /// доступ + running sum обновляется атомарно с window.
     fn track_sent(&mut self, bytes: u64, ts_ms: i64) {
         self.bps_sent_window.push_back((ts_ms, bytes));
-        self.bps_prune(&Self::bps_window_kind_sent(), ts_ms);
+        self.bps_sent_sum = self.bps_sent_sum.saturating_add(bytes);
+        let cutoff = ts_ms - Self::BPS_WINDOW_MS;
+        while let Some(&(ts, b)) = self.bps_sent_window.front() {
+            if ts < cutoff {
+                self.bps_sent_window.pop_front();
+                self.bps_sent_sum = self.bps_sent_sum.saturating_sub(b);
+            } else { break; }
+        }
     }
 
     fn track_recv(&mut self, bytes: u64, ts_ms: i64) {
         self.bps_recv_window.push_back((ts_ms, bytes));
-        self.bps_prune(&Self::bps_window_kind_recv(), ts_ms);
-    }
-
-    fn bps_window_kind_sent() -> &'static str { "sent" }
-    fn bps_window_kind_recv() -> &'static str { "recv" }
-
-    fn bps_prune(&mut self, which: &str, now_ms: i64) {
-        let cutoff = now_ms - Self::BPS_WINDOW_MS;
-        let win = if which == "sent" { &mut self.bps_sent_window } else { &mut self.bps_recv_window };
-        while let Some(&(ts, _)) = win.front() {
-            if ts < cutoff { win.pop_front(); } else { break; }
+        self.bps_recv_sum = self.bps_recv_sum.saturating_add(bytes);
+        let cutoff = ts_ms - Self::BPS_WINDOW_MS;
+        while let Some(&(ts, b)) = self.bps_recv_window.front() {
+            if ts < cutoff {
+                self.bps_recv_window.pop_front();
+                self.bps_recv_sum = self.bps_recv_sum.saturating_sub(b);
+            } else { break; }
         }
     }
 
-    /// Байт отправлено в среднем за последние 10 секунд (B/s).
-    pub fn bytes_per_sec_sent(&self) -> u64 {
-        let total: u64 = self.bps_sent_window.iter().map(|&(_, b)| b).sum();
-        total / 10
-    }
-    /// Байт принято в среднем за последние 10 секунд (B/s).
-    pub fn bytes_per_sec_recv(&self) -> u64 {
-        let total: u64 = self.bps_recv_window.iter().map(|&(_, b)| b).sum();
-        total / 10
-    }
+    /// Байт отправлено в среднем за последние 10 секунд (B/s). B-13: O(1) через running sum.
+    pub fn bytes_per_sec_sent(&self) -> u64 { self.bps_sent_sum / 10 }
+    /// Байт принято в среднем за последние 10 секунд (B/s). B-13: O(1) через running sum.
+    pub fn bytes_per_sec_recv(&self) -> u64 { self.bps_recv_sum / 10 }
 
     // ====================================================================
     //  Log throttle — anti-spam helper для warning'ов.
@@ -1907,6 +2063,8 @@ impl Client {
 
     /// Возвращает `true` если с момента предыдущего лога с этим `key` прошло ≥ `interval_ms`.
     /// Применение: оборачивать `eprintln!("...")` через `if client.should_log("X", 1000) { ... }`.
+    /// `#[inline]`: вызывается на КАЖДОМ warn/error в send/recv pathes.
+    #[inline]
     pub fn should_log(&mut self, key: &'static str, interval_ms: i64) -> bool {
         let now_ms = self.now_ms();
         let last = self.log_last.entry(key).or_insert(0);
@@ -1916,6 +2074,73 @@ impl Client {
         } else {
             false
         }
+    }
+}
+
+/// Drop: гарантированно сигналим reader thread'у завершиться, даже если потребитель
+/// не вызвал `disconnect()`. Reader выйдет из loop макс через 1 сек (read_timeout).
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.reader_shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+/// D-02 helper (testable): pure timing-check для отложенного второго ImFriend.
+/// `true` если слот занят И время пришло.
+#[inline]
+fn second_imfriend_due(pending: &Option<(i64, Vec<u8>)>, cur_tm: i64) -> bool {
+    matches!(pending, Some((due, _)) if cur_tm >= *due)
+}
+
+#[cfg(test)]
+mod d02_tests {
+    use super::*;
+
+    #[test]
+    fn second_imfriend_none_never_due() {
+        let p: Option<(i64, Vec<u8>)> = None;
+        assert!(!second_imfriend_due(&p, 0));
+        assert!(!second_imfriend_due(&p, i64::MAX));
+    }
+
+    #[test]
+    fn second_imfriend_not_due_when_before_deadline() {
+        let p: Option<(i64, Vec<u8>)> = Some((100, vec![1, 2, 3]));
+        assert!(!second_imfriend_due(&p, 0));
+        assert!(!second_imfriend_due(&p, 50));
+        assert!(!second_imfriend_due(&p, 99));
+    }
+
+    #[test]
+    fn second_imfriend_due_at_or_after_deadline() {
+        let p: Option<(i64, Vec<u8>)> = Some((100, vec![1, 2, 3]));
+        assert!(second_imfriend_due(&p, 100));
+        assert!(second_imfriend_due(&p, 101));
+        assert!(second_imfriend_due(&p, 1_000_000));
+    }
+
+    #[test]
+    fn second_imfriend_default_pause_is_32ms() {
+        // Семантический тест: на типичной задержке (32мс — wire-compat константа из Delphi)
+        // после планирования в момент T, due срабатывает в T+32, не раньше.
+        let scheduled_at = 1000;
+        let due = scheduled_at + 32;
+        let p: Option<(i64, Vec<u8>)> = Some((due, vec![0xAA]));
+        assert!(!second_imfriend_due(&p, scheduled_at + 31));
+        assert!(second_imfriend_due(&p, scheduled_at + 32));
+    }
+
+    /// Verify что full_reset очищает pending_second_imfriend slot.
+    /// Это критично — иначе при reconnect старый payload отправлен бы повторно.
+    /// Тестируем take() семантику изолированно — без реального socket.
+    #[test]
+    fn take_clears_pending_slot() {
+        let mut pending: Option<(i64, Vec<u8>)> = Some((100, vec![0xDE, 0xAD]));
+        assert!(second_imfriend_due(&pending, i64::MAX));
+        // take() очищает slot — то же что делает check_pending_second_imfriend и full_reset.
+        let taken = pending.take();
+        assert!(taken.is_some());
+        assert!(!second_imfriend_due(&pending, i64::MAX));
     }
 }
 
@@ -1943,18 +2168,69 @@ fn delphi_now() -> f64 {
     25569.0 + secs / 86400.0 + get_ntp_offset_days()
 }
 
-fn set_socket_buffers(_sock: &UdpSocket) {
+/// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
+/// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").
+/// На пиковой нагрузке (~50K packets/sec) маленький ядерный буфер → silent drop.
+/// D-07 + D-08: ошибки больше не игнорируются — логируем как warn (OS может отказать,
+/// например Linux без `net.core.rmem_max ≥ 8MB` молча обрежет до настройки sysctl).
+fn set_socket_buffers(sock: &UdpSocket) {
+    let sock2 = socket2::SockRef::from(sock);
+    if let Err(e) = sock2.set_recv_buffer_size(8 * 1024 * 1024) {
+        warn!("SO_RCVBUF=8MB rejected by OS (probably net.core.rmem_max too small): {e}");
+    }
+    if let Err(e) = sock2.set_send_buffer_size(8 * 1024 * 1024) {
+        warn!("SO_SNDBUF=8MB rejected by OS: {e}");
+    }
+}
+
+/// Cross-platform IP_DONTFRAGMENT / IP_MTU_DISCOVER / IP_DONTFRAG.
+/// Закрывает ARCH §20 (PMTU discovery должен работать на всех платформах, не только Windows).
+/// Без этого SizeAck/ProbeMTUAck отправляются с разрешённой фрагментацией → измерение PMTU
+/// становится ложным → клиент выбирает неоптимальный PMTU → каскадные retransmit'ы.
+fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::io::AsRawSocket;
-        let raw = _sock.as_raw_socket();
-        let buf_size: i32 = 8 * 1024 * 1024;
+        let raw = sock.as_raw_socket();
+        let val: i32 = if enable { 1 } else { 0 };
         unsafe {
             extern "system" {
                 fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
             }
-            setsockopt(raw as usize, 0xFFFF, 0x1002, &buf_size as *const i32 as *const i8, 4);
-            setsockopt(raw as usize, 0xFFFF, 0x1001, &buf_size as *const i32 as *const i8, 4);
+            // IPPROTO_IP=0, IP_DONTFRAGMENT=14
+            setsockopt(raw as usize, 0, 14, &val as *const i32 as *const i8, 4);
         }
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = sock.as_raw_fd();
+        // IPPROTO_IP=0, IP_MTU_DISCOVER=10, value=IP_PMTUDISC_DO=2 / IP_PMTUDISC_DONT=0
+        let val: i32 = if enable { 2 } else { 0 };
+        unsafe {
+            extern "C" {
+                fn setsockopt(s: i32, level: i32, optname: i32, optval: *const i8, optlen: u32) -> i32;
+            }
+            setsockopt(fd, 0, 10, &val as *const i32 as *const i8, 4);
+        }
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = sock.as_raw_fd();
+        // IPPROTO_IP=0, IP_DONTFRAG=28
+        let val: i32 = if enable { 1 } else { 0 };
+        unsafe {
+            extern "C" {
+                fn setsockopt(s: i32, level: i32, optname: i32, optval: *const i8, optlen: u32) -> i32;
+            }
+            setsockopt(fd, 0, 28, &val as *const i32 as *const i8, 4);
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android",
+                  target_os = "macos", target_os = "ios")))]
+    {
+        // Other platforms (BSD, etc.) — no-op для безопасности, PMTU discovery не работает.
+        let _ = (sock, enable);
     }
 }

@@ -10,6 +10,7 @@
 ///     WantACK: u8 (1 byte, boolean)
 ///   Followed by the actual command payload.
 
+use log::warn;
 use crate::MoonKey;
 use crate::crypto;
 use super::slider::Slider;
@@ -49,9 +50,18 @@ pub fn decrypt_command(
     encrypted_data: &[u8],
     slider: &mut Slider,
 ) -> Option<(u8, Vec<u8>, bool)> {
-    let plaintext = crypto::decrypt(decode_key, encrypted_data, &[])?;
+    let mut plaintext = match crypto::decrypt(decode_key, encrypted_data, &[]) {
+        Some(pt) => pt,
+        None => {
+            // GCM tag mismatch / PKCS7 fail — corrupt packet или wrong key.
+            // Throttle на caller'е, здесь — обычный warn target для фильтрации.
+            warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch or bad padding)");
+            return None;
+        }
+    };
 
     if plaintext.len() < CRYPTO_HEADER_SIZE {
+        warn!(target: "moonproto::crypted", "decrypted plaintext too short: {} < {}", plaintext.len(), CRYPTO_HEADER_SIZE);
         return None;
     }
 
@@ -60,12 +70,14 @@ pub fn decrypt_command(
     // Replay protection via slider
     let is_new = slider.check_revd(hdr.msg_num);
     if !is_new {
+        warn!(target: "moonproto::crypted", "replay/duplicate detected: msg_num={} cmd={}", hdr.msg_num, hdr.cmd);
         return None;
     }
 
-    // Strip crypto header, return inner command + payload
-    let payload = plaintext[CRYPTO_HEADER_SIZE..].to_vec();
-    Some((hdr.cmd, payload, hdr.want_ack))
+    // B-04 fix: drain первые 12 байт вместо `plaintext[12..].to_vec()` —
+    // переиспользуем owned Vec, на одну аллокацию меньше per Crypted packet.
+    plaintext.drain(..CRYPTO_HEADER_SIZE);
+    Some((hdr.cmd, plaintext, hdr.want_ack))
 }
 
 #[cfg(test)]
