@@ -278,6 +278,21 @@ pub enum LifecycleEvent {
     /// `u_key_uid: u64` = `UKey.uid` потерянного pending'а (для cancel/replace =
     /// `Order.uid`). См. robustness audit C3.
     SendBacklogCritical { cmd: u8, u_key_uid: u64 },
+    /// **Критическое событие**: 200 попыток `UdpSocket::bind` упали несколько раз
+    /// подряд — невозможно открыть локальный UDP-сокет. Типичные причины:
+    /// - **iOS/Android background restrictions** (приложение в фоне);
+    /// - **CGNAT / ulimit** (исчерпаны эфемерные порты);
+    /// - **EPERM / SELinux** (нет прав на bind);
+    /// - **VPN config conflict** (порт занят VPN-tunnel'ом).
+    ///
+    /// Либа сама retry'ит forever (Delphi-эквивалент `MoonProtoUDPClient.pas:680+`),
+    /// этот event — сигнал что long-term retry уже идёт. App должен показать
+    /// "Cannot bind UDP socket — check OS network permissions" вместо обычного
+    /// "Connecting..." (иначе пользователь будет вечно ждать без понимания
+    /// проблемы). Поле `consecutive_failures: u32` = сколько раз подряд весь
+    /// 200-port retry упал (1 = первый сигнал, 2 = ещё через ~5с retry, и т.д.).
+    /// См. robustness audit H9.
+    BindFailed { consecutive_failures: u32 },
     /// Детектирован перезапуск сервера: `PeerAppToken` изменился между
     /// сессиями (см. SPEC §3 detection mechanism). Liба сама:
     /// - отметила `MarketsState.indexes_synchronized = false`;
@@ -335,6 +350,31 @@ impl<'a> DispatchSink<'a> {
             Self::Buffer(buf) => buf.push((cmd, payload)),
         }
     }
+}
+
+/// Режим работы main loop — определяет как доставлять входящие data-пакеты
+/// и нужны ли active-library auto-actions (periodic trades tick).
+///
+/// `Callback` — backwards-compat path для `Client::run`. Потребитель получает
+/// сырые `(Command, &[u8])` и сам решает что с ними делать (обычно — свой
+/// `dispatcher.dispatch_into(...)`).
+///
+/// `Dispatcher` — active-library path для `Client::run_with_dispatcher`. Liба
+/// сама пропускает data-пакеты через `EventDispatcher::dispatch_into_active`,
+/// делает auto-actions (RequestOrderBookFull, periodic trades.tick, indexes
+/// sync gate), потребитель получает уже разобранные типизированные `Event`.
+pub(crate) enum RunMode<'a> {
+    Callback {
+        on_data: OnDataFn,
+    },
+    Dispatcher {
+        dispatcher: &'a mut crate::events::EventDispatcher,
+        on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
+        /// Переиспользуемый буфер событий (избегаем alloc per packet).
+        event_buf: Vec<crate::events::Event>,
+        /// Переиспользуемый буфер payload'ов из handle_udp_command.
+        payload_buf: Vec<(Command, Vec<u8>)>,
+    },
 }
 
 // =============================================================================
@@ -591,6 +631,13 @@ pub struct Client {
     /// `run_with_dispatcher`). Throttle ~100ms — соответствует Delphi
     /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets` периодичности.
     last_trades_tick_ms: i64,
+
+    /// Сколько раз подряд весь 200-port retry в `bind_socket` упал. На каждой
+    /// серии неудач (= один main loop tick где все 200 портов отвергнуты)
+    /// инкрементируется; на первом успешном bind сбрасывается в 0. Используется
+    /// для эмиссии `LifecycleEvent::BindFailed` (по нарастающей — сначала через
+    /// 3 серии что ≈15с silent retry, далее каждые 10 серий). См. audit H9.
+    bind_failure_streak: u32,
 }
 
 impl Client {
@@ -680,6 +727,7 @@ impl Client {
             indexes_fetch_in_flight: false,
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
+            bind_failure_streak: 0,
         }
     }
 
@@ -1534,184 +1582,14 @@ impl Client {
 
     /// Run the client. Spawns reader thread, runs main loop for `duration`.
     /// Matches TMoonProtoUDPClient.Execute.
-    pub fn run(&mut self, duration: Duration, mut on_data: OnDataFn) {
-        let run_start = Instant::now();
-
-        loop {
-            if run_start.elapsed() >= duration { break; }
-            let cur_tm = self.now_ms();
-
-            // Emit lifecycle events on auth_status transitions.
-            self.check_lifecycle_transition();
-
-            // ActualSleepTime EMA (matches UDPClient.pas:725-734)
-            if self.prev_cycle_tm != 0 {
-                let raw = (cur_tm - self.prev_cycle_tm).abs();
-                if raw > 0 && raw < 100 {
-                    if self.actual_sleep_time <= 0.0 {
-                        self.actual_sleep_time = raw as f64;
-                    } else {
-                        self.actual_sleep_time = self.actual_sleep_time * 0.7 + raw as f64 * 0.3;
-                    }
-                }
-            }
-            self.prev_cycle_tm = cur_tm;
-
-            // Bind socket if needed
-            if self.socket.is_none() && self.need_connect {
-                self.bind_socket();
-                self.spawn_reader();
-            }
-
-            if self.socket.is_some() {
-                // === Главное изменение для устранения 5мс латентности ===
-                // Ждём событие до 5ms — любой пакет от reader или команда от app будят main мгновенно.
-                // Если ничего не пришло за 5ms — продолжаем (heartbeat работа: retry, Hello, reconnect).
-                // Это замена thread::sleep(5ms) из старой реализации.
-                let first_event = self.event_rx.recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS));
-
-                let mut recv_msgs: Vec<RecvMsg> = Vec::new();
-                let mut sliced = Vec::new();
-                let mut h_items = Vec::new();
-                let mut l_items = Vec::new();
-
-                let handle_event = |ev: ClientEvent,
-                                         recv_msgs: &mut Vec<RecvMsg>,
-                                         sliced: &mut Vec<SendItem>,
-                                         h_items: &mut Vec<SendItem>,
-                                         l_items: &mut Vec<SendItem>| {
-                    match ev {
-                        ClientEvent::Recv(m) => recv_msgs.push(m),
-                        ClientEvent::Send(s) => match s.item.priority {
-                            SendPriority::Sliced => sliced.push(s.item),
-                            SendPriority::High => h_items.push(s.item),
-                            SendPriority::Low => l_items.push(s.item),
-                        },
-                    }
-                };
-
-                match first_event {
-                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-
-                // Дренируем всё что накопилось дополнительно (без блокировки).
-                while let Ok(event) = self.event_rx.try_recv() {
-                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items);
-                }
-
-                // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
-                // Это близко к Delphi UDPRead, который шёл прямо в reader thread.
-                //
-                // Аудит #7 (audit_delphi_deviation E-V2-02): фильтр stale epoch. Старый reader
-                // thread может ещё крутиться до 1с после reconnect'а (пока read_timeout не
-                // сработает) — его пакеты приходят со старым epoch и игнорируются. Делфи
-                // решает это синхронным `UDPClient.Active := false` (Indy ждёт reader thread
-                // exit) — у нас в Rust такого нет, но epoch-tag даёт эквивалентную гарантию.
-                let current_epoch = self.current_reader_epoch;
-                for msg in recv_msgs {
-                    if msg.epoch != current_epoch {
-                        // Stale пакет от старого reader thread'а — игнорируем тихо
-                        // (один лог на reconnect через should_log).
-                        if self.should_log("stale_reader_epoch", 5000) {
-                            warn!(target: "moonproto::client",
-                                "dropping stale packet from old reader epoch (msg.epoch={} current={})",
-                                msg.epoch, current_epoch);
-                        }
-                        continue;
-                    }
-                    self.connected = true;
-                    self.total_recv += msg.recv_bytes;
-                    self.track_recv(msg.recv_bytes, msg.timestamp_ms);
-                    self.last_online = msg.timestamp_ms;
-                    let mut sink = DispatchSink::Callback(&mut on_data);
-                    self.handle_udp_command(Command::from_byte(msg.cmd), msg.cmd, &msg.payload, &mut sink);
-                }
-
-                // UKey dedup: delete old items with same key (matches SendCmdInt:780-785, CheckSeningData:900-901)
-                // For Sliced: remove old Sliced from self.sending AND from pending_h (Delphi: DeleteSendingByKey + DeletePendingByKey)
-                for item in &sliced {
-                    if !item.u_key.is_none() {
-                        self.sending.retain(|s| s.u_key != item.u_key);
-                        self.pending_h.retain(|p| p.u_key != item.u_key);
-                    }
-                }
-                for item in &h_items {
-                    if !item.u_key.is_none() {
-                        self.pending_h.retain(|p| p.u_key != item.u_key);
-                    }
-                }
-
-                // CheckSeningData: process Sliced queue → CreateSlicedObject
-                for item in &sliced {
-                    self.create_sliced_and_send(item);
-                }
-
-                // CheckSeningData: H items + PendingH retry → batched via DoSendMPData
-                for mut item in h_items {
-                    self.send_h_item(&mut item, cur_tm);
-                }
-                self.retry_pending_h(cur_tm);
-
-                // L items: direct send via batching (matches :1017-1031)
-                for item in &l_items {
-                    self.batch_send_direct(item);
-                }
-
-                // Flush batch (sends MPC_Grouped if multiple items buffered)
-                self.flush_send_batch();
-
-                // Sliced retry (matches MoonProtoCommon.pas:970-1007)
-                self.retry_sliced(cur_tm);
-
-                // Cleanup
-                if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-                    self.slicer.clear_old();
-                    // audit_responsibility B2: auto-cleanup устаревших pending API slots
-                    // (default 12s = Delphi `TMoonProtoEngine.FTimeout`). Защита от
-                    // receiver-leak когда caller забыл `remove(uid)`.
-                    let removed = self.api_pending.cleanup_old(cur_tm, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
-                    if removed > 0 {
-                        log::debug!(target: "moonproto::client",
-                            "api_pending: cleaned up {} stale slots (>{}ms old)",
-                            removed, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
-                    }
-                    // Cleanup pending candles aggregators (chunks могут потеряться UDP).
-                    let candles_before = self.pending_candles.len();
-                    self.pending_candles.retain(|_uid, partial| {
-                        (cur_tm - partial.registered_at_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
-                    });
-                    let candles_removed = candles_before - self.pending_candles.len();
-                    if candles_removed > 0 {
-                        log::debug!(target: "moonproto::client",
-                            "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
-                            candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
-                    }
-                    self.last_cleanup = cur_tm;
-                }
-
-                // D-02: проверка отложенного второго ImFriend (state machine вместо thread::sleep).
-                self.check_pending_second_imfriend(cur_tm);
-
-                // Active library: timeout protection для auto-refetch indexes.
-                self.check_indexes_fetch_timeout(cur_tm);
-
-                // Reconnect logic
-                self.check_hello_send(cur_tm);
-                self.check_offline_reconnect(cur_tm);
-                self.check_reconnect_timeout(cur_tm);
-                self.check_dead_zone(cur_tm);
-
-                if self.force_disconnect {
-                    self.do_force_disconnect();
-                }
-            } else {
-                // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
-                thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
-            }
-        }
-
+    pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
+        // Тонкий wrapper над унифицированным `run_inner`. Backwards-compat API —
+        // существует только для потребителей которым НЕ нужны active-library
+        // auto-actions (RequestOrderBookFull, periodic trades.tick, и т.п.).
+        // **Для большинства случаев предпочтительнее `run_with_dispatcher`** —
+        // см. его doc-comment.
+        let mode = RunMode::Callback { on_data };
+        self.run_inner(duration, mode);
     }
 
     /// Send LogOff and close socket. Call when done.
@@ -1755,19 +1633,44 @@ impl Client {
         &mut self,
         duration: Duration,
         dispatcher: &mut crate::events::EventDispatcher,
-        mut on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
+        on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
     ) {
+        // Тонкий wrapper над унифицированным `run_inner`. Все active-library
+        // auto-actions (RequestOrderBookFull, periodic trades.tick, indexes
+        // sync gate, ServerTimeDelta apply, server-token state reset) живут
+        // в `dispatch_into_active` + `run_inner`.
+        let mode = RunMode::Dispatcher {
+            dispatcher,
+            on_event,
+            event_buf: Vec::with_capacity(8),
+            payload_buf: Vec::with_capacity(4),
+        };
+        self.run_inner(duration, mode);
+    }
+
+    /// Унифицированный main loop. Закрывает дубликацию `run`/`run_with_dispatcher`
+    /// которая существовала с момента введения active library (rust_quality #1 +
+    /// delphi_dev #2 audits). Любой fix в loop body (новый cleanup, новый periodic
+    /// check, новое поведение recv/send) делается ОДИН раз.
+    ///
+    /// Различия двух режимов локализованы в:
+    ///   - `process_recv_msg(...)` — куда доставлять data-payload (Callback sink
+    ///     для `run`; Buffer sink + dispatcher.dispatch_into_active для
+    ///     `run_with_dispatcher`).
+    ///   - В конце iter: для Dispatcher mode дополнительно — periodic
+    ///     `trades.tick()` каждые 100мс. Для Callback mode tick не нужен (callback
+    ///     потребитель сам решает что делать с TradesEvent).
+    fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
         let run_start = Instant::now();
-        // Переиспользуемые буферы (избегаем alloc per packet).
-        let mut event_buf: Vec<crate::events::Event> = Vec::with_capacity(8);
-        let mut payload_buf: Vec<(Command, Vec<u8>)> = Vec::with_capacity(4);
 
         loop {
             if run_start.elapsed() >= duration { break; }
             let cur_tm = self.now_ms();
 
+            // Emit lifecycle events on auth_status transitions.
             self.check_lifecycle_transition();
 
+            // ActualSleepTime EMA (matches UDPClient.pas:725-734)
             if self.prev_cycle_tm != 0 {
                 let raw = (cur_tm - self.prev_cycle_tm).abs();
                 if raw > 0 && raw < 100 {
@@ -1780,12 +1683,15 @@ impl Client {
             }
             self.prev_cycle_tm = cur_tm;
 
+            // Bind socket if needed
             if self.socket.is_none() && self.need_connect {
                 self.bind_socket();
                 self.spawn_reader();
             }
 
             if self.socket.is_some() {
+                // === Главное изменение для устранения 5мс латентности ===
+                // Ждём событие до 5ms — любой пакет от reader или команда от app будят main мгновенно.
                 let first_event = self.event_rx.recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS));
 
                 let mut recv_msgs: Vec<RecvMsg> = Vec::new();
@@ -1814,10 +1720,14 @@ impl Client {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
 
+                // Дренируем всё что накопилось дополнительно (без блокировки).
                 while let Ok(event) = self.event_rx.try_recv() {
                     handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items);
                 }
 
+                // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
+                // Фильтр stale epoch — пакеты от старого reader thread'а после reconnect
+                // (epoch-tag дает эквивалент Delphi `UDPClient.Active := false`).
                 let current_epoch = self.current_reader_epoch;
                 for msg in recv_msgs {
                     if msg.epoch != current_epoch {
@@ -1832,30 +1742,10 @@ impl Client {
                     self.total_recv += msg.recv_bytes;
                     self.track_recv(msg.recv_bytes, msg.timestamp_ms);
                     self.last_online = msg.timestamp_ms;
-                    let cmd = Command::from_byte(msg.cmd);
-                    let raw_cmd = msg.cmd;
-
-                    // Накопитель готовых-к-dispatch payload'ов (data-cmd после decrypt/
-                    // decompress/Grouped-split). Buffer-ветка `DispatchSink` пушит сюда
-                    // без `Arc<Mutex>`/`Box`-обходов — это single owner, single thread.
-                    payload_buf.clear();
-                    {
-                        let mut sink = DispatchSink::Buffer(&mut payload_buf);
-                        self.handle_udp_command(cmd, raw_cmd, &msg.payload, &mut sink);
-                    }
-                    // Теперь dispatcher.dispatch_into_active можно вызывать напрямую —
-                    // sink дропнут, &mut self свободен. event_buf переиспользуем между
-                    // итерациями через clear().
-                    for (c, p) in payload_buf.drain(..) {
-                        event_buf.clear();
-                        dispatcher.dispatch_into_active(c, &p, cur_tm, &mut event_buf, self);
-                        for ev in &event_buf {
-                            on_event(ev);
-                        }
-                    }
+                    self.process_recv_msg(msg, cur_tm, &mut mode);
                 }
 
-                // UKey dedup + send queues (как в обычном run).
+                // UKey dedup: delete old items with same key (Delphi: DeleteSendingByKey + DeletePendingByKey)
                 for item in &sliced {
                     if !item.u_key.is_none() {
                         self.sending.retain(|s| s.u_key != item.u_key);
@@ -1868,23 +1758,21 @@ impl Client {
                     }
                 }
 
+                // CheckSeningData: Sliced → CreateSlicedObject; H → batched; PendingH retry; L → batch
                 for item in &sliced {
                     self.create_sliced_and_send(item);
                 }
-
                 for mut item in h_items {
                     self.send_h_item(&mut item, cur_tm);
                 }
                 self.retry_pending_h(cur_tm);
-
                 for item in &l_items {
                     self.batch_send_direct(item);
                 }
-
                 self.flush_send_batch();
                 self.retry_sliced(cur_tm);
 
-                // Cleanup (как в run).
+                // Cleanup periodic (api_pending / pending_candles).
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
                     self.slicer.clear_old();
                     let removed = self.api_pending.cleanup_old(cur_tm, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
@@ -1906,25 +1794,18 @@ impl Client {
                     self.last_cleanup = cur_tm;
                 }
 
+                // D-02: проверка отложенного второго ImFriend (state machine вместо thread::sleep).
                 self.check_pending_second_imfriend(cur_tm);
 
                 // Active library: timeout protection для auto-refetch indexes.
                 self.check_indexes_fetch_timeout(cur_tm);
 
-                // Active library: periodic trades tick — единственный путь для resend.
-                // `trades.tick()` имеет internal throttle 100мс — наш guard здесь только
-                // чтобы не дёргать tick на каждом packet (он всё равно вернёт пустой Vec).
-                // Соответствует Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`.
-                // `cur_tm` — Instant-monotonic, никаких `.abs()` не нужно.
-                if cur_tm - self.last_trades_tick_ms >= 100 {
-                    self.last_trades_tick_ms = cur_tm;
-                    let rtt = self.round_trip_delay;
-                    let payloads = dispatcher.trades.tick(rtt, cur_tm);
-                    for p in payloads {
-                        self.send_api_request(&p);
-                    }
-                }
+                // Active library: periodic trades.tick — только в Dispatcher mode.
+                // В Callback mode TradesEvent попадает к потребителю напрямую,
+                // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
+                self.periodic_trades_tick(cur_tm, &mut mode);
 
+                // Reconnect logic
                 self.check_hello_send(cur_tm);
                 self.check_offline_reconnect(cur_tm);
                 self.check_reconnect_timeout(cur_tm);
@@ -1934,7 +1815,52 @@ impl Client {
                     self.do_force_disconnect();
                 }
             } else {
+                // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
+            }
+        }
+    }
+
+    /// Обработать один входящий UDP-пакет: decrypt/decompress/Grouped-split через
+    /// handle_udp_command, доставить наружу через mode-specific sink.
+    fn process_recv_msg(&mut self, msg: RecvMsg, cur_tm: i64, mode: &mut RunMode<'_>) {
+        let cmd = Command::from_byte(msg.cmd);
+        let raw_cmd = msg.cmd;
+        match mode {
+            RunMode::Callback { on_data } => {
+                let mut sink = DispatchSink::Callback(on_data);
+                self.handle_udp_command(cmd, raw_cmd, &msg.payload, &mut sink);
+            }
+            RunMode::Dispatcher { dispatcher, on_event, event_buf, payload_buf } => {
+                payload_buf.clear();
+                {
+                    let mut sink = DispatchSink::Buffer(payload_buf);
+                    self.handle_udp_command(cmd, raw_cmd, &msg.payload, &mut sink);
+                }
+                for (c, p) in payload_buf.drain(..) {
+                    event_buf.clear();
+                    dispatcher.dispatch_into_active(c, &p, cur_tm, event_buf, self);
+                    for ev in event_buf.iter() {
+                        on_event(ev);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Periodic trades.tick (только в Dispatcher mode). Throttle 100мс — соответствует
+    /// Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`. Сам tick также
+    /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
+    /// на каждом packet (он всё равно вернёт пустой Vec).
+    fn periodic_trades_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if let RunMode::Dispatcher { dispatcher, .. } = mode {
+            if cur_tm - self.last_trades_tick_ms >= 100 {
+                self.last_trades_tick_ms = cur_tm;
+                let rtt = self.round_trip_delay;
+                let payloads = dispatcher.trades.tick(rtt, cur_tm);
+                for p in payloads {
+                    self.send_api_request(&p);
+                }
             }
         }
     }
@@ -2434,12 +2360,21 @@ impl Client {
             // ИЛИ если они ещё не были синхронизированы в этой жизни Client'а.
             // Защита от штормов через indexes_fetch_in_flight + tracked_indexes_peer_app_token.
             // Timeout управляется через check_indexes_fetch_timeout (periodic).
+            //
+            // F12: после смены PeerAppToken также шлём UpdateMarketsList — цены/funding_rate
+            // могут быть устаревшими на новой серверной сессии (Delphi `MoonProtoEngine.pas:809-816
+            // UpdateMarketsList` делает то же). GetMarketsIndexes даёт только маппинг
+            // имя→index, цены/атрибуты приходят через UpdateMarketsList. Шлём оба чтобы UI
+            // не показывал stale prices.
             if self.peer_app_token != self.tracked_indexes_peer_app_token
                 && !self.indexes_fetch_in_flight
             {
                 self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
                 self.indexes_fetch_in_flight = true;
                 self.indexes_fetch_started_ms = self.now_ms();
+                // Refresh prices/funding (fire-and-forget — ответ приходит в MarketsState
+                // через EventDispatcher автоматически).
+                self.send_api_request(&crate::commands::engine_request::update_markets_list());
             }
         }
     }
@@ -3161,6 +3096,11 @@ impl Client {
         // в map бесконечно, receiver потребителя блокируется. Дропаем — receivers получат
         // `Err(channel closed)` и поймут что нужен retry.
         self.api_pending.clear();
+        // audit_responsibility F9: pending candles aggregators — те же UID'ы старой сессии.
+        // Симметрично с api_pending: senders drop'аются → receivers получают
+        // `Err(Disconnected)` → потребитель делает re-request с новым UID. Иначе
+        // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS (30 sec).
+        self.pending_candles.clear();
     }
 
     fn bind_socket(&mut self) {
@@ -3184,6 +3124,7 @@ impl Client {
                     self.auth_status = AuthStatus::Connected;
                     // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
                     self.cached_server_addr = None;
+                    self.bind_failure_streak = 0; // recovered → reset streak counter
                     return;
                 }
                 Err(e) => {
@@ -3212,6 +3153,20 @@ impl Client {
                     bind_family);
             }
         }
+
+        // audit_robustness H9: bind streak → BindFailed lifecycle event.
+        // Эмитим на 3-й подряд серии (≈ 15с silent retry — достаточно показать
+        // пользователю проблему), далее каждые 10 серий (≈ 50с) чтобы UI знал
+        // что состояние не улучшилось. На успешный bind streak обнуляется.
+        self.bind_failure_streak = self.bind_failure_streak.saturating_add(1);
+        let should_emit = self.bind_failure_streak == 3
+            || (self.bind_failure_streak > 3 && (self.bind_failure_streak - 3) % 10 == 0);
+        if should_emit {
+            self.fire_lifecycle(LifecycleEvent::BindFailed {
+                consecutive_failures: self.bind_failure_streak,
+            });
+        }
+
         // auth_status оставляем Base — main loop попробует bind ещё раз через DEFAULT_SLEEP_MS.
         // Если app явно вызвал disconnect() — он сам выставит need_connect=false.
     }
@@ -3823,50 +3778,78 @@ fn set_socket_buffers(sock: &UdpSocket) {
 /// Закрывает ARCH §20 (PMTU discovery должен работать на всех платформах, не только Windows).
 /// Без этого SizeAck/ProbeMTUAck отправляются с разрешённой фрагментацией → измерение PMTU
 /// становится ложным → клиент выбирает неоптимальный PMTU → каскадные retransmit'ы.
+///
+/// IPv4 vs IPv6: option name на IPv6 socket'е другой — `IP_DONTFRAGMENT` (v4) НЕ работает
+/// на AF_INET6, нужен `IPV6_DONTFRAG` (или `IPV6_MTU_DISCOVER` на Linux). Без этого dual-stack
+/// клиент (Android/iOS) silently failед бы PMTU detection. См. rust_quality audit #5.
+///
+/// Return value setsockopt проверяется и при ошибке логируется warn (раньше silently
+/// ignored — fingerprinting'у проблемы было не оставлено следов).
 fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
+    // Определяем IPv6 vs IPv4 по local address. Если local_addr вернул ошибку — fallback на IPv4
+    // semantics (большая часть систем — IPv4 по умолчанию).
+    let is_v6 = sock.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::io::AsRawSocket;
         let raw = sock.as_raw_socket();
         let val: i32 = if enable { 1 } else { 0 };
-        unsafe {
+        // IPPROTO_IP=0, IP_DONTFRAGMENT=14; IPPROTO_IPV6=41, IPV6_DONTFRAG=14 (Win 10+ same value).
+        let (level, optname) = if is_v6 { (41, 14) } else { (0, 14) };
+        let rc = unsafe {
             extern "system" {
                 fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
             }
-            // IPPROTO_IP=0, IP_DONTFRAGMENT=14
-            setsockopt(raw as usize, 0, 14, &val as *const i32 as *const i8, 4);
+            setsockopt(raw as usize, level, optname, &val as *const i32 as *const i8, 4)
+        };
+        if rc != 0 {
+            log::warn!(target: "moonproto::client",
+                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (Windows); PMTU discovery may be inaccurate");
         }
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::fd::AsRawFd;
         let fd = sock.as_raw_fd();
-        // IPPROTO_IP=0, IP_MTU_DISCOVER=10, value=IP_PMTUDISC_DO=2 / IP_PMTUDISC_DONT=0
+        // IPv4: IPPROTO_IP=0, IP_MTU_DISCOVER=10, IP_PMTUDISC_DO=2 / DONT=0
+        // IPv6: IPPROTO_IPV6=41, IPV6_MTU_DISCOVER=23, same PMTUDISC values
         let val: i32 = if enable { 2 } else { 0 };
-        unsafe {
+        let (level, optname) = if is_v6 { (41, 23) } else { (0, 10) };
+        let rc = unsafe {
             extern "C" {
                 fn setsockopt(s: i32, level: i32, optname: i32, optval: *const i8, optlen: u32) -> i32;
             }
-            setsockopt(fd, 0, 10, &val as *const i32 as *const i8, 4);
+            setsockopt(fd, level, optname, &val as *const i32 as *const i8, 4)
+        };
+        if rc != 0 {
+            log::warn!(target: "moonproto::client",
+                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (Linux/Android); PMTU discovery may be inaccurate");
         }
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use std::os::fd::AsRawFd;
         let fd = sock.as_raw_fd();
-        // IPPROTO_IP=0, IP_DONTFRAG=28
+        // IPv4: IPPROTO_IP=0, IP_DONTFRAG=28
+        // IPv6: IPPROTO_IPV6=41, IPV6_DONTFRAG=62
         let val: i32 = if enable { 1 } else { 0 };
-        unsafe {
+        let (level, optname) = if is_v6 { (41, 62) } else { (0, 28) };
+        let rc = unsafe {
             extern "C" {
                 fn setsockopt(s: i32, level: i32, optname: i32, optval: *const i8, optlen: u32) -> i32;
             }
-            setsockopt(fd, 0, 28, &val as *const i32 as *const i8, 4);
+            setsockopt(fd, level, optname, &val as *const i32 as *const i8, 4)
+        };
+        if rc != 0 {
+            log::warn!(target: "moonproto::client",
+                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (macOS/iOS); PMTU discovery may be inaccurate");
         }
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android",
                   target_os = "macos", target_os = "ios")))]
     {
         // Other platforms (BSD, etc.) — no-op для безопасности, PMTU discovery не работает.
-        let _ = (sock, enable);
+        let _ = (sock, enable, is_v6);
     }
 }

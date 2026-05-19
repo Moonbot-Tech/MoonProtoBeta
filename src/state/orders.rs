@@ -121,7 +121,13 @@ fn epoch_is_ok(last: u16, new: u16) -> bool {
     if last == new {
         return false; // duplicate
     }
-    last.wrapping_sub(new) > 100 // wrap-safe: 65535-0=65535 > 100 → accept
+    // RFC 1982 serial number comparison: `new` is "ahead" of `last` iff backward
+    // distance > halfway round the u16 cycle. Stale-duplicate window = u16::MAX/2 =
+    // 32767 эпох (вместо старой константы 100). На high-frequency rebalance
+    // (10 replace/sec) + network reorder + WiFi/cellular switch окно в 100 узко
+    // и легко triggered → legitimate updates тихо дропались. 32767 — реалистичный
+    // потолок (~55 мин при 10 ev/sec до half-cycle). См. robustness audit H6.
+    last.wrapping_sub(new) > u16::MAX / 2
 }
 
 /// Маппинг status → phase number.
@@ -777,22 +783,30 @@ mod tests {
 
     #[test]
     fn epoch_is_ok_unit() {
-        // Реализация: backDist := last - new (wrapping_sub u16); accept = backDist > 100.
-        // Соответствует Delphi MoonProtoFunc.pas:188-203 `EpochIsOK`.
+        // Реализация (audit H6, RFC 1982 serial number comparison):
+        // backDist := last - new (wrapping_sub u16); accept = backDist > u16::MAX/2 (32767).
+        // Окно "stale" = 32767 эпох вместо старой константы 100. На high-freq trading
+        // (10+ replace/sec) + WiFi/cellular reorder узкое окно дропало legitimate updates.
+        const HALF: u16 = u16::MAX / 2; // = 32767
 
         // duplicate
         assert_eq!(epoch_is_ok(10, 10), false);
-        // stale (within 100, no wrap): backDist = 100-50 = 50 ≤ 100 → reject.
+        // stale близко: backDist = 100-50 = 50 ≤ 32767 → reject.
         assert_eq!(epoch_is_ok(100, 50), false);
-        // accept forward big jump: backDist = 100-250 = u16 wrap → 65386 > 100 → accept.
+        // accept forward через wrap: backDist = 100-250 = 65386 > 32767 → accept.
         assert_eq!(epoch_is_ok(100, 250), true);
-        // wrap-around forward: last=65500, new=200. backDist = 65500-200 = 65300 > 100 → accept.
+        // wrap-around forward далеко: last=65500, new=200. backDist = 65500-200 = 65300 > 32767 → accept.
         assert_eq!(epoch_is_ok(65500, 200), true);
-        // last=200, new=65500. backDist = 200-65500 (u16 wrap) = 236 > 100 → accept (forward, не stale).
-        // Это byte-exact поведение Delphi: backDist=236 > 100 ⇒ NewEpoch принимается.
-        assert_eq!(epoch_is_ok(200, 65500), true);
-        // Ближний stale через wrap: last=10, new=65500. backDist = 10-65500 (wrap) = 46 ≤ 100 → reject.
+        // last=200, new=65500. backDist = 200-65500 (wrap) = 236 ≤ 32767 → reject (близкий stale).
+        // **Изменилось vs старого поведения** (raньше backDist=236 > 100 → accept). Сейчас
+        // считается что 65500 — это эпох "236 позади last=200", это duplicate/stale.
+        assert_eq!(epoch_is_ok(200, 65500), false);
+        // Ближний stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 ≤ 32767 → reject.
         assert_eq!(epoch_is_ok(10, 65500), false);
+        // Граница окна: backDist = HALF → НЕ accept (требуется СТРОГО > HALF).
+        assert_eq!(epoch_is_ok(HALF, 0), false);
+        // На один больше границы → accept.
+        assert_eq!(epoch_is_ok(HALF + 1, 0), true);
     }
 
     #[test]

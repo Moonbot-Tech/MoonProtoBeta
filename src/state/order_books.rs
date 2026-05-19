@@ -99,6 +99,13 @@ struct OrderBookCache {
     last_full_request_ms: i64,
     /// Время, когда кэш стал непустым (0 если пуст). Используется в `is_expired`.
     cache_not_empty_since_ms: i64,
+    /// Время последнего успешного `Apply` (Full или Diff) — true LRU метрика.
+    /// Используется для eviction при переполнении `caches`. Healthy books с
+    /// `last_full_request_ms = 0` больше не выкидываются первыми (audit H1):
+    /// раньше LRU работала по `last_full_request_ms`, который у healthy кэшей =
+    /// 0 (никогда не запрашивали Full) — это делало healthy подписки самыми
+    /// "старыми" и эвиктировало их при atomic attack с distinct fake market_idx.
+    last_apply_ms: i64,
 }
 
 impl OrderBookCache {
@@ -237,16 +244,20 @@ impl OrderBooks {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let mut events = Vec::new();
 
-        // DoS guard: если caches заполнен и пришёл пакет на новый ключ — выкидываем самый
-        // старый по last_full_request_ms (LRU-like). Защита от slow-grow attack через distinct
-        // market_index. На реальной бирже размер << MAX_ORDERBOOK_CACHES.
+        // DoS guard: если caches заполнен и пришёл пакет на новый ключ — выкидываем
+        // самый старый по `last_apply_ms` (true LRU). audit H1: раньше eviction шёл
+        // по `last_full_request_ms`, который у healthy кэшей = 0 → они стояли в
+        // начале сортировки и эвиктировались первыми при slow-grow attack с distinct
+        // fake market_idx. `last_apply_ms` обновляется на каждом Apply event'е →
+        // активные подписки получают свежее время → защищены от эвикции.
         if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ORDERBOOK_CACHES {
             if let Some((evict_key, _)) = self.caches.iter()
-                .min_by_key(|(_, c)| c.last_full_request_ms)
-                .map(|(k, c)| (*k, c.last_full_request_ms))
+                .min_by_key(|(_, c)| c.last_apply_ms)
+                .map(|(k, c)| (*k, c.last_apply_ms))
             {
                 log::warn!(target: "moonproto::order_books",
-                    "caches saturated ({}); evicting {:?} (LRU)", self.caches.len(), evict_key);
+                    "caches saturated ({}); evicting {:?} (LRU by last_apply_ms)",
+                    self.caches.len(), evict_key);
                 self.caches.remove(&evict_key);
             }
         }
@@ -261,6 +272,7 @@ impl OrderBooks {
             // Чистим cache от старых seq < expected_seq.
             cache.packets.retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
             cache.check_cache_empty();
+            cache.last_apply_ms = now_ms;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 book_kind: pkt.book_kind,
@@ -308,6 +320,7 @@ impl OrderBooks {
         // === 4. In-order: seq == expected → применить ===
         if cmp == 0 {
             cache.expected_seq = pkt.seq.wrapping_add(1);
+            cache.last_apply_ms = now_ms;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 book_kind: pkt.book_kind,
@@ -344,7 +357,7 @@ impl OrderBooks {
 
     /// Разгрести cache — применить все последовательные пакеты `expected_seq, +1, +2 ...`.
     /// Соответствует `MoonProto_TryApplyCached` (MoonProtoOrderBook.pas:682-720).
-    fn drain_cache(&mut self, key: BookKey, _now_ms: i64, events: &mut Vec<OrderBookEvent>) {
+    fn drain_cache(&mut self, key: BookKey, now_ms: i64, events: &mut Vec<OrderBookEvent>) {
         let cache = match self.caches.get_mut(&key) {
             Some(c) => c,
             None => return,
@@ -362,6 +375,7 @@ impl OrderBooks {
                 // O(1) pop_front вместо O(N) remove(0).
                 let entry = cache.packets.pop_front().unwrap();
                 cache.expected_seq = entry.seq.wrapping_add(1);
+                cache.last_apply_ms = now_ms;
                 events.push(OrderBookEvent::Apply {
                     market_index: entry.pkt.market_index,
                     book_kind: entry.pkt.book_kind,
