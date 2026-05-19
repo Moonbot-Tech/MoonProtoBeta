@@ -202,6 +202,74 @@ pub struct ClientConfig {
 
 IPv6: bind_address выбирается автоматически по наличию `:` в `server_ip` — `[::]:port` для IPv6, `0.0.0.0:port` для IPv4.
 
+## Thread-safe subscribe API (F4)
+
+`subscribe_orderbook` / `subscribe_all_trades` / соответствующие unsubscribe доступны как `&self` методы — можно вызывать из любого thread'а **во время** `client.run_with_dispatcher(...)` (без `&mut Client` lock).
+
+```rust
+use moonproto::client::Client;
+use moonproto::state::OrderBookKind;
+use std::thread;
+
+let mut client = Client::new(cfg);
+let sender = client.sender();  // ClientSender — clone'абельный handle
+
+// UI thread:
+thread::spawn(move || {
+    // Пользователь нажал "открыть BTCUSDT" — подписаться:
+    sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+});
+
+// Main thread:
+client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, ...);
+```
+
+**Что под капотом.** Subscribe методы пушат `ClientEvent::SubscribeOrderBook { ... }` в bounded mpsc channel (capacity 1024). Main loop в `run_with_dispatcher` дренирует channel каждый тик (~5мс), применяет к `subscription_registry`, отправляет wire-запрос. Идемпотентно: повторный subscribe для уже подписанной пары — no-op.
+
+**Channel overflow.** Если main loop забит и channel переполнен (≥1024 событий) — fire-and-forget `subscribe_*` пишет warning в лог и теряет событие (subscribe — non-critical UI action, пользователь может повторить). Для обратной связи используй `try_*` варианты:
+
+```rust
+use moonproto::client::SubscribeError;
+
+match client.sender().try_subscribe_orderbook("BTCUSDT", OrderBookKind::Futures) {
+    Ok(()) => {}
+    Err(SubscribeError::ChannelFull) => { /* retry через несколько ms */ }
+    Err(SubscribeError::Disconnected) => { /* Client уже дропнут */ }
+}
+```
+
+**Auto-replay на reconnect.** При смене `ServerToken` (новый Fine) либа автоматически отправляет все зарегистрированные подписки заново — приложение **не должно** дублировать `subscribe_*` на `LifecycleEvent::ServerRestart`.
+
+### `Client::sender()` vs `Client::event_sender()`
+
+- `Client::sender()` → **`ClientSender`** (высокоуровневый, с typed-методами `subscribe_*`/`try_subscribe_*`) — **главный публичный API**.
+- `Client::event_sender()` → **raw `SyncSender<ClientEvent>`** для custom-протокольных сценариев (отправка `ClientEvent::Send(SendMsg { item })` напрямую). Использовать редко.
+
+## Periodic refresh (F6/F7)
+
+`ClientConfig.refresh: RefreshConfig` управляет автоматическими refresh-командами которые либа сама шлёт в main loop. Дефолт:
+
+```rust
+RefreshConfig {
+    update_markets_every: Some(Duration::from_secs(60)),  // дефолт: каждые 60с
+    check_tags_every: None,                                // дефолт: выключено
+}
+```
+
+**`update_markets_every`** — раз в указанный интервал отправляет `emk_UpdateMarketsList` (fire-and-forget). Сервер обновляет `cfg.Markets` (prices, funding) каждые ~60с — без этого пинга клиент будет показывать stale prices через час сессии. Parity с Delphi.
+
+**`check_tags_every`** — Binance-специфичная проверка futures permissions через `emk_CheckBinanceTags`. По умолчанию выключено (большинству пользователей не нужно). Если используешь Binance API и нужна валидация прав на старте сессии и периодически — выставь `Some(Duration::from_secs(300))`.
+
+Отключить refresh целиком:
+```rust
+let cfg = ClientConfig {
+    refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+    ..
+};
+```
+
+Тики обрабатываются только когда `auth_status = AuthDone` — до handshake запрос потеряется впустую.
+
 ## Multi-server поддержка
 
 Каждый `Client` представляет ОДНО подключение к одному серверу. Для multi-server терминалов держи `Vec<Client>` (или `HashMap<bot_id, Client>`).

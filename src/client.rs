@@ -198,11 +198,146 @@ pub struct SendMsg {
 /// Объединённый канал: reader thread и прикладной слой шлют события в один mpsc.
 /// Main loop делает `recv_timeout(5ms)` → просыпается мгновенно на любое событие.
 /// Это устраняет 5мс латентность ответа на Ping/Sliced/handshake (= Delphi inline в UDPRead).
+///
+/// F4: Subscribe events позволяют UI-thread'у попросить либу обновить подписку
+/// без `&mut Client` lock. Main loop обрабатывает их идентично прямым
+/// `subscribe_*` методам — apply registry change + emit wire request.
 #[doc(hidden)]
 #[derive(Clone)]
 pub enum ClientEvent {
     Recv(RecvMsg),
     Send(SendMsg),
+    /// Подписаться на orderbook рынка. Main loop обновит registry и отправит
+    /// `emk_SubscribeOrderBook` если подписки ещё не было (idempotent).
+    SubscribeOrderBook { market_name: String, kind: crate::state::OrderBookKind },
+    /// Отписаться от orderbook рынка.
+    UnsubscribeOrderBook { market_name: String, kind: crate::state::OrderBookKind },
+    /// Подписаться на all-trades поток с параметром `want_mm` (нужны ли MM-ордера).
+    SubscribeAllTrades { want_mm: bool },
+    /// Отписаться от all-trades потока.
+    UnsubscribeAllTrades,
+}
+
+/// Ошибки при отправке subscribe-запроса через [`ClientSender`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// Channel переполнен (sync_channel capacity 1024). Очень редко — subscribe
+    /// события идут редко (UI клики), 1024 events практически не накапливается.
+    /// Если случилось — main loop забит другой работой, разумно retry через
+    /// несколько ms.
+    ChannelFull,
+    /// `Client` был дропнут или main loop вышел — sender больше нельзя использовать.
+    Disconnected,
+}
+
+impl std::fmt::Display for SubscribeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChannelFull   => write!(f, "Client event channel is full"),
+            Self::Disconnected  => write!(f, "Client event channel disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for SubscribeError {}
+
+/// Thread-safe handle к Client'у для UI / worker thread'ов. Позволяет добавлять
+/// и удалять подписки **во время** `client.run_with_dispatcher()` без `&mut Client`.
+///
+/// Получается через [`Client::sender`]. Клонируется (`#[derive(Clone)]`) — раздавай
+/// в любые thread'ы.
+///
+/// ```ignore
+/// let mut client = Client::new(cfg);
+/// let sender = client.sender();
+/// // Передаём sender в UI-thread:
+/// thread::spawn(move || {
+///     sender.subscribe_orderbook("DOGEUSDT", OrderBookKind::Futures);
+/// });
+/// // Main thread тем временем:
+/// client.run_with_dispatcher(...);
+/// ```
+///
+/// Все методы fire-and-forget: при `ChannelFull` логируется warning, но операция
+/// тихо пропускается (subscribe — non-critical UI action, пользователь может
+/// нажать кнопку ещё раз). Если нужна обратная связь — используй `try_*` варианты
+/// возвращающие `Result<(), SubscribeError>`.
+#[derive(Clone)]
+pub struct ClientSender {
+    tx: mpsc::SyncSender<ClientEvent>,
+}
+
+impl ClientSender {
+    /// Подписаться на orderbook (fire-and-forget; warn-log при channel full).
+    pub fn subscribe_orderbook(&self, market_name: &str, kind: crate::state::OrderBookKind) {
+        if let Err(e) = self.try_subscribe_orderbook(market_name, kind) {
+            log::warn!(target: "moonproto::client",
+                "subscribe_orderbook({market_name}, {kind:?}) dropped: {e}");
+        }
+    }
+
+    /// Отписаться от orderbook (fire-and-forget; warn-log при channel full).
+    pub fn unsubscribe_orderbook(&self, market_name: &str, kind: crate::state::OrderBookKind) {
+        if let Err(e) = self.try_unsubscribe_orderbook(market_name, kind) {
+            log::warn!(target: "moonproto::client",
+                "unsubscribe_orderbook({market_name}, {kind:?}) dropped: {e}");
+        }
+    }
+
+    /// Подписаться на all-trades (fire-and-forget; warn-log при channel full).
+    pub fn subscribe_all_trades(&self, want_mm: bool) {
+        if let Err(e) = self.try_subscribe_all_trades(want_mm) {
+            log::warn!(target: "moonproto::client",
+                "subscribe_all_trades(want_mm={want_mm}) dropped: {e}");
+        }
+    }
+
+    /// Отписаться от all-trades (fire-and-forget; warn-log при channel full).
+    pub fn unsubscribe_all_trades(&self) {
+        if let Err(e) = self.try_unsubscribe_all_trades() {
+            log::warn!(target: "moonproto::client",
+                "unsubscribe_all_trades dropped: {e}");
+        }
+    }
+
+    /// Explicit подписка с возвратом ошибки если channel переполнен / disconnected.
+    pub fn try_subscribe_orderbook(
+        &self,
+        market_name: &str,
+        kind: crate::state::OrderBookKind,
+    ) -> Result<(), SubscribeError> {
+        self.try_send(ClientEvent::SubscribeOrderBook {
+            market_name: market_name.to_string(),
+            kind,
+        })
+    }
+
+    pub fn try_unsubscribe_orderbook(
+        &self,
+        market_name: &str,
+        kind: crate::state::OrderBookKind,
+    ) -> Result<(), SubscribeError> {
+        self.try_send(ClientEvent::UnsubscribeOrderBook {
+            market_name: market_name.to_string(),
+            kind,
+        })
+    }
+
+    pub fn try_subscribe_all_trades(&self, want_mm: bool) -> Result<(), SubscribeError> {
+        self.try_send(ClientEvent::SubscribeAllTrades { want_mm })
+    }
+
+    pub fn try_unsubscribe_all_trades(&self) -> Result<(), SubscribeError> {
+        self.try_send(ClientEvent::UnsubscribeAllTrades)
+    }
+
+    fn try_send(&self, ev: ClientEvent) -> Result<(), SubscribeError> {
+        match self.tx.try_send(ev) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(SubscribeError::ChannelFull),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(SubscribeError::Disconnected),
+        }
+    }
 }
 
 // A-V2-07 fix: бывший ручной impl Clone заменён на #[derive(Clone)] на RecvMsg выше.
@@ -306,6 +441,38 @@ pub enum LifecycleEvent {
 
 pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 
+/// Конфигурация периодических refresh-команд которые либа шлёт сама в main loop.
+///
+/// **Зачем.** При долгой сессии (часы) клиент может видеть stale prices — сервер
+/// обновляет funding/prices в `cfg.Markets` каждые ~60с, но клиент об этом узнаёт
+/// только если **запрашивает** `UpdateMarketsList`. В Delphi-боте это делается
+/// автоматически таймером каждые ~60с (`Vars.pas` cycle). В Rust порте по умолчанию
+/// тоже включено через [`RefreshConfig::default`] — типично пользователю торгового
+/// приложения нужны актуальные prices, не stale.
+///
+/// **Отключить.** Передай `RefreshConfig { update_markets_every: None, check_tags_every: None }`
+/// если приложение само управляет обновлениями (например через `client.api_update_markets_list()`
+/// на свой таймер).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshConfig {
+    /// Периодически шлёт `emk_UpdateMarketsList` для свежих prices/funding. Дефолт
+    /// `Some(60s)` — parity с Delphi bot. `None` отключает.
+    pub update_markets_every: Option<Duration>,
+    /// Периодически шлёт `emk_CheckBinanceTags` (Binance-специфичная проверка
+    /// futures permissions). Дефолт `None` — большинству пользователей не нужно.
+    /// Если используешь Binance API и нужна полная проверка прав — `Some(5min)`.
+    pub check_tags_every: Option<Duration>,
+}
+
+impl Default for RefreshConfig {
+    fn default() -> Self {
+        Self {
+            update_markets_every: Some(Duration::from_secs(60)),
+            check_tags_every: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientConfig {
     pub server_ip: String,
@@ -327,6 +494,10 @@ pub struct ClientConfig {
     /// который в Delphi был singleton-thread'ом созданным `Unit1.InitInt`. См.
     /// responsibility audit F8.
     pub ntp_host: Option<String>,
+    /// Periodic refresh настройки. По умолчанию: `update_markets_every: Some(60s)`,
+    /// `check_tags_every: None`. Передай `RefreshConfig::default()` для дефолта,
+    /// или явный конфиг с `None` чтобы отключить.
+    pub refresh: RefreshConfig,
 }
 
 // Custom Debug — secret keys redacted (audit rust_quality #20).
@@ -340,6 +511,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("mask_ver", &self.mask_ver)
             .field("client_id", &format_args!("{:#x}", self.client_id))
             .field("ntp_host", &self.ntp_host)
+            .field("refresh", &self.refresh)
             .finish()
     }
 }
@@ -674,6 +846,13 @@ pub struct Client {
     /// См. responsibility audit F8.
     ntp_thread_shutdown: Option<Arc<AtomicBool>>,
 
+    /// F6/F7: timestamps последних periodic refresh-команд. `i64::MIN/2` =
+    /// "никогда" → первый tick срабатывает мгновенно после Connected (если в
+    /// `cfg.refresh` задан соответствующий интервал). Дальше — каждый
+    /// `update_markets_every` / `check_tags_every`.
+    last_update_markets_ms: i64,
+    last_check_tags_ms: i64,
+
     /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется в
     /// [`run_init_sequence`] (или может быть выставлена приложением вручную через
     /// [`Client::set_server_info`] если init делается своим pattern'ом). До первого
@@ -798,6 +977,8 @@ impl Client {
             ntp_thread_shutdown,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
+            last_update_markets_ms: i64::MIN / 2,
+            last_check_tags_ms: i64::MIN / 2,
         }
     }
 
@@ -932,13 +1113,15 @@ impl Client {
     }
 
     /// Get a clone of event_tx for use from other threads (e.g. terminal UI).
-    /// Получить клонированный `SyncSender<ClientEvent>` для отправки команд из любого потока.
-    /// Приложение шлёт `ClientEvent::Send(SendMsg { item })` через клонированный sender.
+    /// **Низкоуровневый** raw clone внутреннего `SyncSender<ClientEvent>` для прямой
+    /// отправки `ClientEvent::Send(SendMsg { item })` (для custom-протокольных сценариев).
+    /// Для подписок и обычных операций используй [`Client::sender`] → `ClientSender`
+    /// (высокоуровневый thread-safe API с typed-методами).
     ///
-    /// Аудит #1 (audit_delphi_deviation): тип теперь `SyncSender` (bounded channel).
+    /// Аудит #1 (audit_delphi_deviation): тип `SyncSender` (bounded channel, 1024).
     /// `.send()` BLOCKS если канал переполнен — приложение wait'ит пока main loop разгрузит.
     /// Это правильное поведение для торговых команд (vs UDP пакеты которые можно drop).
-    pub fn sender(&self) -> mpsc::SyncSender<ClientEvent> {
+    pub fn event_sender(&self) -> mpsc::SyncSender<ClientEvent> {
         self.event_tx.clone()
     }
 
@@ -1186,48 +1369,55 @@ impl Client {
     // ====================================================================
     //  Active library: subscription API (по market_name + registry)
     //
-    //  Эти методы — **главный публичный API** для подписок. В отличие от
-    //  `api_subscribe_order_book(&[&str])` они:
+    //  F4: thread-safe API через [`ClientSender`]. Эти методы — **главный
+    //  публичный API** для подписок. В отличие от `api_subscribe_order_book`
+    //  (low-level) они:
     //   1. Запоминают подписку в `subscription_registry`.
     //   2. После любого ServerToken change auto-replay'ят подписку.
     //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
+    //   4. Работают на `&self` — доступны во время `run_with_dispatcher`
+    //      через `client.sender()` clone из любого thread'а.
     //
     //  Аналог Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` с
     //  `BookSubbed: TSet<TMarket>` и `NeedResubscribeOrderBooks`.
     // ====================================================================
 
+    /// Thread-safe sender handle для подписки/отписки из любого потока.
+    ///
+    /// Возвращает clone'абельный `ClientSender` который держит clone внутреннего
+    /// event channel'а. Можно держать в UI-thread, worker-thread, и т.п. —
+    /// `Client::run_with_dispatcher` будет обрабатывать subscribe-events из main loop.
+    ///
+    /// ```ignore
+    /// let mut client = Client::new(cfg);
+    /// let sender = client.sender();
+    /// thread::spawn(move || {
+    ///     sender.subscribe_orderbook("DOGEUSDT", OrderBookKind::Futures);
+    /// });
+    /// client.run_with_dispatcher(...);
+    /// ```
+    pub fn sender(&self) -> ClientSender {
+        ClientSender { tx: self.event_tx.clone() }
+    }
+
     /// Подписаться на orderbook рынка `market_name` типа `kind`.
+    ///
+    /// Convenience-обёртка вокруг `self.sender().subscribe_orderbook(...)`. Можно
+    /// вызывать с `&self` ссылки или прямо на Arc<Client>. Fire-and-forget — при
+    /// переполненном event channel логируется warning. Для обратной связи об
+    /// ошибке используй `client.sender().try_subscribe_orderbook(...)`.
     ///
     /// Подписка запоминается в registry — при reconnect / ServerToken change либа
     /// автоматически переподписывается. Resolve `market_name → market_idx` делает
-    /// сервер, поэтому МожНо подписаться ДО получения `emk_GetMarketsList`.
-    ///
-    /// Идемпотентный: повторный вызов с теми же параметрами не отправляет дубликат.
-    pub fn subscribe_orderbook(&mut self, market_name: &str, kind: OrderBookKind) {
-        // По wire подписка идёт по `market_name` (resolve делает сервер) — поэтому
-        // MarketsState аргументом не нужен и подписку можно вызвать до получения
-        // `emk_GetMarketsList`. Registry хранит и kind — при replay шлём отдельные
-        // batch'и per kind, сервер по-разному маршрутизирует Futures/Spot книги.
-        let key = (market_name.to_string(), kind);
-        let newly_added = self.subscription_registry.orderbook_subs.insert(key);
-        if newly_added {
-            self.send_api_request(
-                &crate::commands::engine_request::subscribe_order_book(&[market_name]),
-            );
-        }
+    /// сервер, поэтому можно подписаться ДО получения `emk_GetMarketsList`.
+    /// Идемпотентный.
+    pub fn subscribe_orderbook(&self, market_name: &str, kind: OrderBookKind) {
+        self.sender().subscribe_orderbook(market_name, kind);
     }
 
-    /// Отписаться от orderbook'а рынка.
-    ///
-    /// Удаляет подписку из registry → при следующем re-handshake она НЕ будет replay'ена.
-    /// Сразу отправляет `emk_UnsubscribeOrderBook` (если была в registry).
-    pub fn unsubscribe_orderbook(&mut self, market_name: &str, kind: OrderBookKind) {
-        let key = (market_name.to_string(), kind);
-        if self.subscription_registry.orderbook_subs.remove(&key) {
-            self.send_api_request(
-                &crate::commands::engine_request::unsubscribe_order_book(&[market_name]),
-            );
-        }
+    /// Отписаться от orderbook'а рынка. См. [`Client::subscribe_orderbook`].
+    pub fn unsubscribe_orderbook(&self, market_name: &str, kind: OrderBookKind) {
+        self.sender().unsubscribe_orderbook(market_name, kind);
     }
 
     /// Подписаться на all-trades поток. `want_mm` — нужны ли MM ордера (Delphi
@@ -1236,19 +1426,86 @@ impl Client {
     /// Подписка запоминается в registry; auto-replay после ServerToken change.
     /// Повторный вызов с другим `want_mm` обновляет registry — сервер получит
     /// fresh subscribe с актуальным параметром.
-    pub fn subscribe_all_trades(&mut self, want_mm: bool) {
-        self.subscription_registry.trades_sub = Some(TradesSubscription { want_mm });
-        self.send_api_request(
-            &crate::commands::engine_request::subscribe_all_trades(want_mm),
-        );
+    pub fn subscribe_all_trades(&self, want_mm: bool) {
+        self.sender().subscribe_all_trades(want_mm);
     }
 
     /// Отписаться от all-trades потока. Удаляет subscription из registry.
-    pub fn unsubscribe_all_trades(&mut self) {
-        if self.subscription_registry.trades_sub.take().is_some() {
-            self.send_api_request(
-                &crate::commands::engine_request::unsubscribe_all_trades(),
-            );
+    pub fn unsubscribe_all_trades(&self) {
+        self.sender().unsubscribe_all_trades();
+    }
+
+    /// F6/F7: проверка пора ли слать periodic refresh-команды.
+    /// Вызывается из main loop каждый тик (~5мс), но реальная отправка происходит
+    /// только когда прошёл `update_markets_every` / `check_tags_every` от последнего раза.
+    ///
+    /// Fire-and-forget: используем `send_api_request` без регистрации в pending registry —
+    /// EventDispatcher автоматически применяет ответ к MarketsState когда он придёт.
+    /// На случай если ответ не дойдёт (UDP loss / server reset) — следующий тик
+    /// просто пошлёт заново, никакого retry/timeout-кода не нужно.
+    fn tick_periodic_refresh(&mut self, cur_tm: i64) {
+        if let Some(interval) = self.cfg.refresh.update_markets_every {
+            let interval_ms = interval.as_millis() as i64;
+            if (cur_tm - self.last_update_markets_ms) >= interval_ms {
+                self.send_api_request(
+                    &crate::commands::engine_request::update_markets_list(),
+                );
+                self.last_update_markets_ms = cur_tm;
+            }
+        }
+        if let Some(interval) = self.cfg.refresh.check_tags_every {
+            let interval_ms = interval.as_millis() as i64;
+            if (cur_tm - self.last_check_tags_ms) >= interval_ms {
+                self.send_api_request(
+                    &crate::commands::engine_request::check_binance_tags(),
+                );
+                self.last_check_tags_ms = cur_tm;
+            }
+        }
+    }
+
+    /// Внутренний метод: применить одну subscribe-команду (registry update + wire send).
+    /// Вызывается main loop при получении `ClientEvent::Subscribe*`/`Unsubscribe*`.
+    fn apply_subscribe_event(&mut self, ev: ClientEvent) {
+        match ev {
+            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+                // Wire подписка идёт по `market_name` (resolve делает сервер) — поэтому
+                // подписку можно вызвать ДО получения `emk_GetMarketsList`. Registry
+                // хранит и kind — при replay шлём отдельные batch'и per kind, сервер
+                // по-разному маршрутизирует Futures/Spot книги.
+                let key = (market_name.clone(), kind);
+                let newly_added = self.subscription_registry.orderbook_subs.insert(key);
+                if newly_added {
+                    self.send_api_request(
+                        &crate::commands::engine_request::subscribe_order_book(&[&market_name]),
+                    );
+                }
+            }
+            ClientEvent::UnsubscribeOrderBook { market_name, kind } => {
+                let key = (market_name.clone(), kind);
+                if self.subscription_registry.orderbook_subs.remove(&key) {
+                    self.send_api_request(
+                        &crate::commands::engine_request::unsubscribe_order_book(&[&market_name]),
+                    );
+                }
+            }
+            ClientEvent::SubscribeAllTrades { want_mm } => {
+                self.subscription_registry.trades_sub = Some(TradesSubscription { want_mm });
+                self.send_api_request(
+                    &crate::commands::engine_request::subscribe_all_trades(want_mm),
+                );
+            }
+            ClientEvent::UnsubscribeAllTrades => {
+                if self.subscription_registry.trades_sub.take().is_some() {
+                    self.send_api_request(
+                        &crate::commands::engine_request::unsubscribe_all_trades(),
+                    );
+                }
+            }
+            // Не-subscribe события не обрабатываются этим методом
+            ClientEvent::Recv(_) | ClientEvent::Send(_) => {
+                debug_assert!(false, "apply_subscribe_event called with non-subscribe event");
+            }
         }
     }
 
@@ -1803,12 +2060,17 @@ impl Client {
                 let mut sliced = Vec::new();
                 let mut h_items = Vec::new();
                 let mut l_items = Vec::new();
+                // F4: subscribe/unsubscribe events применяются ПОСЛЕ closure (нужен
+                // &mut self для registry mutation + send_api_request — borrow checker
+                // не пропустит внутри closure которая уже держит &mut на четыре Vec).
+                let mut subscribe_events: Vec<ClientEvent> = Vec::new();
 
                 let handle_event = |ev: ClientEvent,
                                          recv_msgs: &mut Vec<RecvMsg>,
                                          sliced: &mut Vec<SendItem>,
                                          h_items: &mut Vec<SendItem>,
-                                         l_items: &mut Vec<SendItem>| {
+                                         l_items: &mut Vec<SendItem>,
+                                         subscribe_events: &mut Vec<ClientEvent>| {
                     match ev {
                         ClientEvent::Recv(m) => recv_msgs.push(m),
                         ClientEvent::Send(s) => match s.item.priority {
@@ -1816,18 +2078,30 @@ impl Client {
                             SendPriority::High => h_items.push(s.item),
                             SendPriority::Low => l_items.push(s.item),
                         },
+                        ev @ ClientEvent::SubscribeOrderBook { .. }
+                        | ev @ ClientEvent::UnsubscribeOrderBook { .. }
+                        | ev @ ClientEvent::SubscribeAllTrades { .. }
+                        | ev @ ClientEvent::UnsubscribeAllTrades => subscribe_events.push(ev),
                     }
                 };
 
                 match first_event {
-                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items),
+                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut subscribe_events),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
 
                 // Дренируем всё что накопилось дополнительно (без блокировки).
                 while let Ok(event) = self.event_rx.try_recv() {
-                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items);
+                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut subscribe_events);
+                }
+
+                // F4: применяем subscribe/unsubscribe события до отправки accumulated batch'ей.
+                // Если приложение успело пушнуть subscribe + send в одном тике — порядок
+                // соответствует FIFO в channel'е (subscribe раньше, поэтому wire-команда
+                // подписки уйдёт перед прикладной отправкой).
+                for ev in subscribe_events {
+                    self.apply_subscribe_event(ev);
                 }
 
                 // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
@@ -1904,6 +2178,13 @@ impl Client {
 
                 // Active library: timeout protection для auto-refetch indexes.
                 self.check_indexes_fetch_timeout(cur_tm);
+
+                // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
+                // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
+                // фазе; до неё запрос потеряется впустую).
+                if matches!(self.auth_status, AuthStatus::AuthDone) {
+                    self.tick_periodic_refresh(cur_tm);
+                }
 
                 // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
                 // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
@@ -3776,6 +4057,348 @@ mod d02_tests {
 }
 
 #[cfg(test)]
+mod client_sender_tests {
+    use super::*;
+    use crate::state::OrderBookKind;
+
+    fn make_sender(capacity: usize) -> (ClientSender, mpsc::Receiver<ClientEvent>) {
+        let (tx, rx) = mpsc::sync_channel::<ClientEvent>(capacity);
+        (ClientSender { tx }, rx)
+    }
+
+    #[test]
+    fn subscribe_orderbook_pushes_event_with_correct_fields() {
+        let (sender, rx) = make_sender(8);
+        sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+        match rx.try_recv().expect("event should be queued") {
+            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+                assert_eq!(market_name, "BTCUSDT");
+                assert_eq!(kind, OrderBookKind::Futures);
+            }
+            other => panic!("expected SubscribeOrderBook, got {:?}",
+                std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_orderbook_pushes_event() {
+        let (sender, rx) = make_sender(8);
+        sender.unsubscribe_orderbook("ETHUSDT", OrderBookKind::Spot);
+        match rx.try_recv().unwrap() {
+            ClientEvent::UnsubscribeOrderBook { market_name, kind } => {
+                assert_eq!(market_name, "ETHUSDT");
+                assert_eq!(kind, OrderBookKind::Spot);
+            }
+            _ => panic!("expected UnsubscribeOrderBook"),
+        }
+    }
+
+    #[test]
+    fn subscribe_all_trades_carries_want_mm_flag() {
+        let (sender, rx) = make_sender(8);
+        sender.subscribe_all_trades(true);
+        sender.subscribe_all_trades(false);
+        match rx.try_recv().unwrap() {
+            ClientEvent::SubscribeAllTrades { want_mm } => assert!(want_mm),
+            _ => panic!("expected SubscribeAllTrades(true)"),
+        }
+        match rx.try_recv().unwrap() {
+            ClientEvent::SubscribeAllTrades { want_mm } => assert!(!want_mm),
+            _ => panic!("expected SubscribeAllTrades(false)"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_all_trades_pushes_event() {
+        let (sender, rx) = make_sender(8);
+        sender.unsubscribe_all_trades();
+        assert!(matches!(rx.try_recv().unwrap(), ClientEvent::UnsubscribeAllTrades));
+    }
+
+    #[test]
+    fn try_subscribe_returns_ok_when_channel_has_room() {
+        let (sender, _rx) = make_sender(2);
+        assert!(sender.try_subscribe_orderbook("BTC", OrderBookKind::Futures).is_ok());
+        assert!(sender.try_subscribe_all_trades(true).is_ok());
+    }
+
+    #[test]
+    fn try_subscribe_returns_channel_full_on_overflow() {
+        // capacity=1 → второй try_send блокирующее не работает; должен вернуть Full.
+        let (sender, _rx) = make_sender(1);
+        assert!(sender.try_subscribe_orderbook("BTC", OrderBookKind::Futures).is_ok());
+        // Канал заполнен (rx не читали), следующий должен дать ChannelFull.
+        let err = sender.try_subscribe_orderbook("ETH", OrderBookKind::Futures).unwrap_err();
+        assert_eq!(err, SubscribeError::ChannelFull);
+    }
+
+    #[test]
+    fn try_subscribe_returns_disconnected_when_receiver_dropped() {
+        let (sender, rx) = make_sender(8);
+        drop(rx);
+        let err = sender.try_unsubscribe_all_trades().unwrap_err();
+        assert_eq!(err, SubscribeError::Disconnected);
+    }
+
+    #[test]
+    fn cloned_sender_pushes_into_same_channel() {
+        // Это база для thread-safe API: получили sender, клонировали, оба пушат в
+        // один и тот же channel который слушает main loop.
+        let (sender_a, rx) = make_sender(8);
+        let sender_b = sender_a.clone();
+        sender_a.subscribe_orderbook("A", OrderBookKind::Futures);
+        sender_b.subscribe_orderbook("B", OrderBookKind::Spot);
+        let evs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(evs.len(), 2);
+        // FIFO: первое событие — от sender_a.
+        match &evs[0] {
+            ClientEvent::SubscribeOrderBook { market_name, .. } => assert_eq!(market_name, "A"),
+            _ => panic!("expected first SubscribeOrderBook(A)"),
+        }
+        match &evs[1] {
+            ClientEvent::SubscribeOrderBook { market_name, .. } => assert_eq!(market_name, "B"),
+            _ => panic!("expected second SubscribeOrderBook(B)"),
+        }
+    }
+
+    #[test]
+    fn subscribe_error_displays_with_message() {
+        // Просто проверка что Display impl работает (полезно для логирования).
+        assert_eq!(format!("{}", SubscribeError::ChannelFull),
+            "Client event channel is full");
+        assert_eq!(format!("{}", SubscribeError::Disconnected),
+            "Client event channel disconnected");
+    }
+}
+
+#[cfg(test)]
+mod client_subscribe_integration_tests {
+    use super::*;
+    use crate::state::OrderBookKind;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+        }
+    }
+
+    #[test]
+    fn client_subscribe_orderbook_pushes_event_through_sender() {
+        // Convenience-метод `Client::subscribe_orderbook(&self, ...)` должен пушить
+        // событие в тот же event channel который main loop слушает. До запуска
+        // run_with_dispatcher event лежит в channel и виден через event_rx.
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+        let ev = client.event_rx.try_recv().expect("event should be queued");
+        match ev {
+            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+                assert_eq!(market_name, "BTCUSDT");
+                assert_eq!(kind, OrderBookKind::Futures);
+            }
+            _ => panic!("expected SubscribeOrderBook"),
+        }
+    }
+
+    #[test]
+    fn client_sender_can_be_held_independently_of_client() {
+        // Sender держит clone; даже если client держится по `&` ссылке — sender
+        // независим (Send + Sync через mpsc::SyncSender Clone). Это база для
+        // multi-thread субскрайба.
+        let client = Client::new(dummy_cfg());
+        let sender = client.sender();
+        sender.subscribe_all_trades(true);
+        let ev = client.event_rx.try_recv().expect("event queued via sender");
+        assert!(matches!(ev, ClientEvent::SubscribeAllTrades { want_mm: true }));
+    }
+
+    #[test]
+    fn apply_subscribe_event_inserts_into_registry() {
+        // apply_subscribe_event — точка где main loop принимает решение
+        // обновить registry. Без живого сервера wire-команда уходит в socket=None
+        // ветку (log warn + skip), но регистрация в registry происходит.
+        let mut client = Client::new(dummy_cfg());
+        client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
+            market_name: "BTC".to_string(),
+            kind: OrderBookKind::Futures,
+        });
+        let key = ("BTC".to_string(), OrderBookKind::Futures);
+        assert!(client.subscription_registry.orderbook_subs.contains(&key));
+    }
+
+    #[test]
+    fn apply_subscribe_event_unsubscribe_removes_from_registry() {
+        let mut client = Client::new(dummy_cfg());
+        client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
+            market_name: "BTC".to_string(),
+            kind: OrderBookKind::Futures,
+        });
+        client.apply_subscribe_event(ClientEvent::UnsubscribeOrderBook {
+            market_name: "BTC".to_string(),
+            kind: OrderBookKind::Futures,
+        });
+        let key = ("BTC".to_string(), OrderBookKind::Futures);
+        assert!(!client.subscription_registry.orderbook_subs.contains(&key));
+    }
+
+    #[test]
+    fn apply_subscribe_event_is_idempotent() {
+        // Двойной subscribe для одной пары не должен иметь побочных эффектов
+        // в registry (HashSet dedup) и не должен слать второй wire-запрос (но это
+        // мы не можем проверить здесь — socket=None, проверяем только registry).
+        let mut client = Client::new(dummy_cfg());
+        let ev = || ClientEvent::SubscribeOrderBook {
+            market_name: "ETH".to_string(),
+            kind: OrderBookKind::Spot,
+        };
+        client.apply_subscribe_event(ev());
+        client.apply_subscribe_event(ev());
+        assert_eq!(client.subscription_registry.orderbook_subs.len(), 1);
+    }
+
+    #[test]
+    fn apply_subscribe_all_trades_sets_registry() {
+        let mut client = Client::new(dummy_cfg());
+        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
+        assert_eq!(
+            client.subscription_registry.trades_sub,
+            Some(TradesSubscription { want_mm: true }),
+        );
+        // Повторный с другим want_mm — обновляет registry.
+        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
+        assert_eq!(
+            client.subscription_registry.trades_sub,
+            Some(TradesSubscription { want_mm: false }),
+        );
+    }
+
+    #[test]
+    fn apply_unsubscribe_all_trades_clears_registry() {
+        let mut client = Client::new(dummy_cfg());
+        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
+        client.apply_subscribe_event(ClientEvent::UnsubscribeAllTrades);
+        assert!(client.subscription_registry.trades_sub.is_none());
+    }
+}
+
+#[cfg(test)]
+mod refresh_tick_tests {
+    use super::*;
+
+    fn dummy_cfg(refresh: RefreshConfig) -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh,
+        }
+    }
+
+    #[test]
+    fn refresh_config_defaults() {
+        // Документированные дефолты: update_markets = Some(60s), check_tags = None.
+        let cfg = RefreshConfig::default();
+        assert_eq!(cfg.update_markets_every, Some(Duration::from_secs(60)));
+        assert_eq!(cfg.check_tags_every, None);
+    }
+
+    #[test]
+    fn tick_sends_first_time_immediately() {
+        // last_update_markets_ms = i64::MIN/2 ("никогда") → первый тик должен сразу
+        // зафиксировать timestamp (что эквивалентно отправке запроса; реальная отправка
+        // в socket=None ветке log warn'ит, но логика update состоялась).
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: Some(Duration::from_millis(100)),
+            check_tags_every: None,
+        }));
+        let before = client.last_update_markets_ms;
+        assert_eq!(before, i64::MIN / 2);
+        client.tick_periodic_refresh(0);
+        assert_eq!(client.last_update_markets_ms, 0,
+            "первый тик должен зафиксировать timestamp 0");
+    }
+
+    #[test]
+    fn tick_respects_interval() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: Some(Duration::from_millis(100)),
+            check_tags_every: None,
+        }));
+        client.last_update_markets_ms = 50;
+
+        // 50ms прошло из 100ms required — не должен слать.
+        client.tick_periodic_refresh(100);
+        assert_eq!(client.last_update_markets_ms, 50,
+            "interval не прошёл — last_update_markets_ms не меняется");
+
+        // 100ms прошло — отправка.
+        client.tick_periodic_refresh(150);
+        assert_eq!(client.last_update_markets_ms, 150,
+            "100ms прошло — отправка состоялась");
+    }
+
+    #[test]
+    fn tick_does_nothing_when_both_disabled() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: None,
+        }));
+        let was_markets = client.last_update_markets_ms;
+        let was_tags = client.last_check_tags_ms;
+        client.tick_periodic_refresh(1_000_000);
+        assert_eq!(client.last_update_markets_ms, was_markets,
+            "update_markets выключен — last_update_markets_ms не меняется");
+        assert_eq!(client.last_check_tags_ms, was_tags,
+            "check_tags выключен — last_check_tags_ms не меняется");
+    }
+
+    #[test]
+    fn tick_check_tags_independent_from_update_markets() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: Some(Duration::from_millis(200)),
+        }));
+        let was_markets = client.last_update_markets_ms;
+        client.tick_periodic_refresh(1_000_000);
+        assert_eq!(client.last_update_markets_ms, was_markets,
+            "update_markets выключен — не трогаем");
+        assert_eq!(client.last_check_tags_ms, 1_000_000,
+            "check_tags включен — трогаем");
+    }
+
+    #[test]
+    fn tick_both_intervals_independent() {
+        // Оба включены, но с разными интервалами — каждый тикает по своему.
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: Some(Duration::from_millis(100)),
+            check_tags_every: Some(Duration::from_millis(500)),
+        }));
+        client.last_update_markets_ms = 0;
+        client.last_check_tags_ms = 0;
+
+        // 150ms: update_markets должен сработать (100ms прошло), check_tags нет.
+        client.tick_periodic_refresh(150);
+        assert_eq!(client.last_update_markets_ms, 150);
+        assert_eq!(client.last_check_tags_ms, 0);
+
+        // 600ms: update_markets должен сработать (450ms с прошлого), check_tags тоже (600ms с прошлого).
+        client.tick_periodic_refresh(600);
+        assert_eq!(client.last_update_markets_ms, 600);
+        assert_eq!(client.last_check_tags_ms, 600);
+    }
+}
+
+#[cfg(test)]
 mod server_info_tests {
     use super::*;
     use crate::commands::engine_api::ServerInfo;
@@ -3789,6 +4412,7 @@ mod server_info_tests {
             mask_ver: 0,
             client_id: 0,
             ntp_host: None, // отключаем NTP thread — не нужен для unit-теста
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
         }
     }
 

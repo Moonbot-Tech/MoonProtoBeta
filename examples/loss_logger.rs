@@ -189,10 +189,12 @@ fn main() {
         mask_ver: 0,
         client_id: rand::random(),
         ntp_host: None, // loss_logger — короткий стресс-тест, NTP не нужен
+        // Periodic refresh не нужен в стресс-тесте — отключаем чтобы не зашумлять трафик.
+        refresh: moonproto::client::RefreshConfig { update_markets_every: None, check_tags_every: None },
     };
 
     let mut client = Client::new(cfg);
-    let sender = client.sender();
+    let sender = client.event_sender();
     let counters = Arc::new(Counters::new());
 
     // Lifecycle callback: write to log via a separate channel-less hook.

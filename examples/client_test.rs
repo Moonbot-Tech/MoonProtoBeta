@@ -70,6 +70,7 @@ fn main() {
         mask_ver: 0,
         client_id: rand::random(),
         ntp_host: Some("pool.ntp.org".to_string()),
+        refresh: moonproto::client::RefreshConfig::default(),
     };
 
     let mut client = Client::new(cfg);
