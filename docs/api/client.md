@@ -202,11 +202,55 @@ pub struct ClientConfig {
 
 IPv6: bind_address выбирается автоматически по наличию `:` в `server_ip` — `[::]:port` для IPv6, `0.0.0.0:port` для IPv4.
 
+## Multi-server поддержка
+
+Каждый `Client` представляет ОДНО подключение к одному серверу. Для multi-server терминалов держи `Vec<Client>` (или `HashMap<bot_id, Client>`).
+
+### Server identity
+
+После успешного `emk_BaseCheck` (автоматически в `run_init_sequence`, или вручную через `parse_base_check_response` + `client.set_server_info(...)`) доступно через getter:
+
+```rust
+let info = client.server_info();
+println!("Bot {}: {} ({}, version {})",
+    info.bot_id.unwrap_or(0),
+    info.server_name.as_deref().unwrap_or("?"),
+    info.exchange_name.as_deref().unwrap_or("?"),
+    info.server_version.unwrap_or(0));
+
+// Capabilities check:
+use moonproto::commands::engine_api::exchange_type_flags;
+if info.supports(exchange_type_flags::FUTURES) {
+    // показать UI для futures-only функций
+}
+```
+
+До успешного BaseCheck `server_info()` возвращает дефолт (`bot_id = None`, `has_identity() == false`).
+
+Подробнее — [engine_api.md → ServerInfo](engine_api.md#serverinfo--multi-server-identification).
+
+### ServerTimeDelta linkage (per-Client)
+
+При multi-Client каждый `Client` имеет свой `ServerTimeDelta` (разные серверы — разный clock drift). `EventDispatcher` должен быть привязан к Client'у через handle, иначе все диспетчеры читают один глобальный atomic и timestamps в ордерах будут off by 50-1000ms.
+
+**Auto-link.** Если используешь `client.run_with_dispatcher(...)` или `dispatcher.dispatch_into_active(&mut client)` — линковка делается автоматически на первом вызове, ручная работа не нужна.
+
+**Manual.** При своём pattern'е:
+```rust
+let mut dispatcher = EventDispatcher::new();
+dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
+// Теперь dispatcher для Command::Order применяет delta этого Client'а.
+```
+
+`client.server_time_delta_handle()` возвращает `Arc<AtomicU64>` clone — можно держать в любом контексте, atomic snapshot всегда актуален.
+
+См. [DEVIATION.md #23](../../../DEVIATION.md) — обоснование и тесты multi-Client изоляции.
+
 ## См. также
 
 - [overview.md](overview.md) — общий обзор библиотеки.
 - [events.md](events.md) — EventDispatcher (auto-apply state).
 - [lifecycle.md](lifecycle.md) — детали lifecycle callbacks.
-- [engine_api.md](engine_api.md) — RPC методы.
+- [engine_api.md](engine_api.md) — RPC методы + ServerInfo wire-format.
 - [trade_actions.md](trade_actions.md) — Trade high-level wrappers.
 - DEVIATION.md — список архитектурных отклонений (mpsc channel, IV mask, NTP thread и т.д.).

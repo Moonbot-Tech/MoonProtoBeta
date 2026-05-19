@@ -22,6 +22,9 @@
 //! Состояния (`Orders`, `OrderBooks`, `TradesState`, etc.) живут внутри dispatcher —
 //! доступны как поля `dispatcher.orders`, `dispatcher.order_books`, etc.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::protocol::Command;
 use crate::state::{
     Orders, OrderBooks, TradesState, BalancesState, StratsState, SettingsState, MarketsState,
@@ -95,10 +98,53 @@ pub struct EventDispatcher {
     /// Init=0 (никогда не подключались) → первый non-zero token не триггерит сброс.
     /// См. audit_responsibility_hints #1, #2.
     last_known_server_token: u64,
+    /// Per-Client `ServerTimeDelta` source. Если `Some` — `dispatch_into` для
+    /// `Command::Order` читает delta отсюда (multi-Client safe). Если `None` —
+    /// fallback на global `SERVER_TIME_DELTA_DAYS` (back-compat для single-Client
+    /// потребителей без линковки). См. `DEVIATION.md #23`.
+    ///
+    /// Привязка: либо явный вызов [`Self::set_server_time_delta_source`] с
+    /// `client.server_time_delta_handle()`, либо автоматически — `dispatch_into_active`
+    /// делает lazy-link при первом вызове.
+    server_time_delta_source: Option<Arc<AtomicU64>>,
 }
 
 impl EventDispatcher {
     pub fn new() -> Self { Self::default() }
+
+    /// Привязать dispatcher к per-Client `ServerTimeDelta` handle. После этого
+    /// `dispatch_into` для `Command::Order` применяет **этот** Client's delta вместо
+    /// глобального (multi-Client safe).
+    ///
+    /// **Когда вызывать.** При multi-Client архитектуре — обязательно для каждого
+    /// `EventDispatcher` (по одному на Client). При single-Client можно не вызывать —
+    /// dispatcher падает обратно на global, который Client всё равно обновляет.
+    ///
+    /// **Auto-link.** `dispatch_into_active(&mut Client)` делает линковку
+    /// автоматически на первом вызове — для типичного use case'а
+    /// `Client::run_with_dispatcher` ручная привязка не нужна.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let client = Client::new(cfg);
+    /// let mut dispatcher = EventDispatcher::new();
+    /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
+    /// // Теперь dispatcher.dispatch_into читает delta из client.
+    /// ```
+    ///
+    /// См. `DEVIATION.md #23`.
+    pub fn set_server_time_delta_source(&mut self, handle: Arc<AtomicU64>) {
+        self.server_time_delta_source = Some(handle);
+    }
+
+    /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
+    /// source — берёт оттуда; иначе fallback на global.
+    fn current_server_time_delta(&self) -> f64 {
+        match &self.server_time_delta_source {
+            Some(handle) => f64::from_bits(handle.load(Ordering::Relaxed)),
+            None => crate::client::get_server_time_delta_global(),
+        }
+    }
 
     /// Распарсить входящий payload и применить к соответствующему state.
     /// Возвращает список событий — для большинства каналов 0 или 1 событие,
@@ -141,10 +187,12 @@ impl EventDispatcher {
                 match TradeCommand::parse(payload) {
                     Some(tc) => {
                         // audit_responsibility A5 / active library: автоматически подхватываем
-                        // server_time_delta из глобального atomic (Client пишет туда в
-                        // handle_ping). Без этого Orders::apply применяет AdjustTime со старым
+                        // server_time_delta. При наличии per-Client `server_time_delta_source`
+                        // (multi-Client) — читаем оттуда. Иначе fallback на global (single-Client
+                        // back-compat). Без этого Orders::apply применяет AdjustTime со старым
                         // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
-                        self.orders.set_server_time_delta(crate::client::get_server_time_delta_global());
+                        // См. DEVIATION #23.
+                        self.orders.set_server_time_delta(self.current_server_time_delta());
                         let (_apply_result, ev) = self.orders.apply(tc);
                         out.push(Event::Order(ev));
                     }
@@ -319,6 +367,15 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
         client: &mut crate::client::Client,
     ) {
+        // Multi-Client safety: lazy-link `server_time_delta_source` к этому Client'у.
+        // После первого вызова `dispatch_into_active` все последующие dispatch'и
+        // используют Client-specific delta (а не global). Это критично при multi-Client:
+        // global перезаписывается последним активным Client'ом, что без линковки давало
+        // off-by-50-1000ms timestamps в ордерах других Client'ов. См. DEVIATION #23.
+        if self.server_time_delta_source.is_none() {
+            self.server_time_delta_source = Some(client.server_time_delta_handle());
+        }
+
         // Hard reconnect detection: при смене ServerToken вся per-session state
         // (trades.last_packet_num, order_books.*.expected_seq) устарела — сервер
         // начинает нумерацию заново. Сбрасываем ДО применения нового пакета.
@@ -498,5 +555,105 @@ mod tests {
         let payload = build_all_statuses_request(123);
         let events = d.dispatch(Command::Order, &payload, 1000);
         assert!(!events.is_empty(), "Order должен обрабатываться даже без indexes_synchronized");
+    }
+
+    // =========================================================================
+    //  Multi-Client ServerTimeDelta tests (DEVIATION #23)
+    // =========================================================================
+
+    /// Helper для тестов: дни конвертирует в seconds для удобства сравнения.
+    fn delta_seconds(d: &EventDispatcher) -> f64 {
+        d.current_server_time_delta() * 86400.0
+    }
+
+    #[test]
+    fn current_delta_falls_back_to_global_when_source_is_none() {
+        // Single-Client back-compat: без линковки dispatcher читает global.
+        let d = EventDispatcher::new();
+        assert!(d.server_time_delta_source.is_none());
+        // Записываем в global → dispatcher видит то же значение.
+        crate::client::set_server_time_delta_global(2.5 / 86400.0);
+        assert!((delta_seconds(&d) - 2.5).abs() < 1e-9);
+        // Сбросим global назад чтобы не аффектить другие тесты.
+        crate::client::set_server_time_delta_global(0.0);
+    }
+
+    #[test]
+    fn current_delta_reads_from_source_when_set() {
+        // Multi-Client: с линковкой dispatcher читает per-Client handle,
+        // НЕ global. Изменения global на этот dispatcher не влияют.
+        let handle = Arc::new(AtomicU64::new(0));
+        // Эмулируем что Client записал свою delta = 7.0 секунд.
+        let days: f64 = 7.0 / 86400.0;
+        handle.store(days.to_bits(), Ordering::Relaxed);
+        let mut d = EventDispatcher::new();
+        d.set_server_time_delta_source(Arc::clone(&handle));
+        // Global при этом стоит другое значение — dispatcher должен игнорировать.
+        crate::client::set_server_time_delta_global(99.0 / 86400.0);
+        assert!((delta_seconds(&d) - 7.0).abs() < 1e-9,
+            "dispatcher должен читать handle, а не global");
+        crate::client::set_server_time_delta_global(0.0);
+    }
+
+    #[test]
+    fn delta_handle_update_visible_to_dispatcher() {
+        // Изменение handle отражается в следующем чтении dispatcher'а
+        // (atomic snapshot — нет кэширования).
+        let handle = Arc::new(AtomicU64::new(0));
+        let mut d = EventDispatcher::new();
+        d.set_server_time_delta_source(Arc::clone(&handle));
+        assert!((delta_seconds(&d) - 0.0).abs() < 1e-9);
+        // Обновляем handle (как сделал бы Client::handle_ping).
+        let days: f64 = 3.5 / 86400.0;
+        handle.store(days.to_bits(), Ordering::Relaxed);
+        assert!((delta_seconds(&d) - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_dispatchers_with_distinct_handles_are_isolated() {
+        // **Core multi-Client gurantee**: два EventDispatcher'а с разными handle'ами
+        // (один на Client) видят разные delta. Это и есть фикс DEVIATION #23.
+        let h_a = Arc::new(AtomicU64::new(0));
+        let h_b = Arc::new(AtomicU64::new(0));
+        let mut d_a = EventDispatcher::new();
+        let mut d_b = EventDispatcher::new();
+        d_a.set_server_time_delta_source(Arc::clone(&h_a));
+        d_b.set_server_time_delta_source(Arc::clone(&h_b));
+
+        // Client A: delta = +5s; Client B: delta = -200ms (разные серверы — разный drift).
+        h_a.store((5.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
+        h_b.store((-0.2_f64 / 86400.0).to_bits(), Ordering::Relaxed);
+
+        assert!((delta_seconds(&d_a) - 5.0).abs() < 1e-9);
+        assert!((delta_seconds(&d_b) - (-0.2)).abs() < 1e-9);
+
+        // Изменение одного handle не аффектит другой.
+        h_a.store((10.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
+        assert!((delta_seconds(&d_a) - 10.0).abs() < 1e-9);
+        assert!((delta_seconds(&d_b) - (-0.2)).abs() < 1e-9, "dispatcher B не должен видеть изменения handle A");
+    }
+
+    #[test]
+    fn dispatcher_propagates_delta_to_orders_state() {
+        // End-to-end: при `dispatch(Command::Order, ...)` dispatcher применяет текущий
+        // delta к Orders state. Проверяем что после линковки handle'а delta попадает
+        // в `Orders.server_time_delta`.
+        let handle = Arc::new(AtomicU64::new(0));
+        let days: f64 = 1.25 / 86400.0;
+        handle.store(days.to_bits(), Ordering::Relaxed);
+
+        let mut d = EventDispatcher::new();
+        d.set_server_time_delta_source(Arc::clone(&handle));
+
+        // Любой Order payload триггерит set_server_time_delta.
+        let payload = build_all_statuses_request(99);
+        let _events = d.dispatch(Command::Order, &payload, 1000);
+
+        // Делаем round-trip days → seconds для сравнения с 1.25.
+        let applied_days = d.orders.server_time_delta;
+        let applied_seconds = applied_days * 86400.0;
+        assert!((applied_seconds - 1.25).abs() < 1e-9,
+            "Orders.server_time_delta должен получить значение из handle ({}s, got {}s)",
+            1.25, applied_seconds);
     }
 }

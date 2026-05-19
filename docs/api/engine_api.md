@@ -129,6 +129,94 @@ if let Some(resp) = parse_engine_response(&payload) {
 }
 ```
 
+## ServerInfo — multi-server identification
+
+`emk_BaseCheck` — первый Engine-вызов в init sequence. Кроме обычной проверки success/fail, его response несёт **identity сервера** для приложений подключающихся к нескольким `MoonBot`-серверам одновременно (разные биржи, разные аккаунты).
+
+```rust
+use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_flags};
+
+let rx = client.api_base_check();
+let resp = rx.recv_timeout(Duration::from_secs(10))?;
+if resp.success {
+    let info = parse_base_check_response(&resp.data);
+    if let (Some(id), Some(name)) = (info.bot_id, &info.exchange_name) {
+        println!("Bot #{} = {} ({})", id, name,
+            info.base_currency_name.as_deref().unwrap_or("?"));
+    }
+    if info.supports(exchange_type_flags::FUTURES) {
+        // показать UI для futures-only функций
+    }
+}
+```
+
+**Auto-fill в run_init_sequence.** Если используешь `run_init_sequence` — парсинг и сохранение в `client.server_info` делается автоматически. После init читай через getter:
+
+```rust
+let info = client.server_info();
+println!("Connected to bot {} v{}",
+    info.bot_id.unwrap_or(0),
+    info.server_version.unwrap_or(0));
+```
+
+### ServerInfo поля
+
+| Поле | Тип | Семантика |
+|---|---|---|
+| `bot_id` | `Option<i64>` | `cfg.UniqueBotID` — уникальный 64-bit ID сервера, стабильный через перезапуски. Основной ключ для multi-server идентификации. |
+| `server_name` | `Option<String>` | `cfg.BotName` для UI (`"Binance Main"`); если пусто на сервере — `"Server"`. |
+| `exchange_code` | `Option<u8>` | `Ord(cfg.Header.Current)` — Delphi enum `TBotPlatform`. |
+| `exchange_name` | `Option<String>` | Человеко-читаемое имя биржи (`"Binance Futures"`, `"Hyper"`). |
+| `exchange_type_mask` | `Option<u8>` | Bitmask что доступно — см. [`exchange_type_flags`](#exchange_type_flags) ниже. |
+| `dex_name` | `Option<String>` | HIP-3 dex name для Hyperliquid futures (`GetHIP3DexName`). Пустая строка для остальных бирж. |
+| `base_currency_name` | `Option<String>` | `cfg.Currency` (`"USDT"`, `"BTC"`, `"USDC"`). |
+| `base_currency_code` | `Option<u8>` | `Ord(cfg.BaseCurrency)` — enum `TBaseCurrency` (BC_USDT=1, ...). |
+| `server_version` | `Option<u32>` | `Current_Version_Num_X` (например `763` для v7.63). |
+| `moonproto_version` | `Option<u32>` | `IntMoonProtoTCPCurrentVer`. |
+
+### exchange_type_flags
+
+Bitmask константы для `ServerInfo::exchange_type_mask`. Несколько бит могут быть установлены одновременно.
+
+```rust
+use moonproto::commands::engine_api::exchange_type_flags;
+
+const SPOT: u8    = 0x01;  // exchange_type_flags::SPOT
+const FUTURES: u8 = 0x02;  // exchange_type_flags::FUTURES
+const DEX: u8     = 0x04;  // exchange_type_flags::DEX
+const PREDICT: u8 = 0x08;  // exchange_type_flags::PREDICT (HL outcome markets)
+```
+
+Удобный helper:
+```rust
+if info.supports(exchange_type_flags::DEX) {
+    // ...
+}
+```
+
+### Forward-compatibility
+
+Все поля — `Option`. Старый сервер до multi-server расширения отвечает на BaseCheck пустым payload — все поля будут `None`, `info.has_identity()` вернёт `false`. Парсер толерантен к **truncate в любом месте**: если payload обрывается, заполненные поля сохраняются, остальные = `None`. Это позволяет серверу постепенно расширять wire-format без breaking change клиента.
+
+### Wire-format BaseCheck response (10 полей)
+
+В порядке записи на сервере (`MoonProtoEngineServer.pas:244-273`):
+
+```
+1.  bot_id              i64 LE (8 bytes)        cfg.UniqueBotID
+2.  server_name         u16 length + UTF-8      cfg.BotName (default "Server")
+3.  exchange_code       u8                      Ord(cfg.Header.Current)
+4.  exchange_name       u16 length + UTF-8      "Binance Futures", "Hyper", ...
+5.  exchange_type_mask  u8                      bit0=Spot, bit1=Futures, bit2=DEX, bit3=Predict
+6.  dex_name            u16 length + UTF-8      HIP-3 dex name (или "")
+7.  base_currency_name  u16 length + UTF-8      "USDT", "BTC", ...
+8.  base_currency_code  u8                      Ord(cfg.BaseCurrency) — BC_USDT=1
+9.  server_version      i32 LE (4 bytes)        Current_Version_Num_X
+10. moonproto_version   i32 LE (4 bytes)        IntMoonProtoTCPCurrentVer
+```
+
+`success=false` от сервера → payload пустой (поля не пишутся).
+
 ## EngineResponse структура
 
 ```rust

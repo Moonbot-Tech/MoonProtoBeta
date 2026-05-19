@@ -413,6 +413,419 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     })
 }
 
+// =============================================================================
+//  BaseCheck response parser — multi-server identification
+// =============================================================================
+
+/// Bitmask flags для `ServerInfo::exchange_type_mask`. Несколько бит могут быть
+/// установлены одновременно (например Spot+Futures если сервер обслуживает оба).
+pub mod exchange_type_flags {
+    /// Spot trading доступен.
+    pub const SPOT: u8 = 0x01;
+    /// Futures (perpetual / dated) доступны.
+    pub const FUTURES: u8 = 0x02;
+    /// Сервер работает с DEX (Hyperliquid и подобные).
+    pub const DEX: u8 = 0x04;
+    /// Predict / outcome markets (HL Spot где `HLSpotMarket = 1`; Polymarket в будущем).
+    pub const PREDICT: u8 = 0x08;
+}
+
+/// Распакованная identity сервера, возвращаемая в ответе на `emk_BaseCheck`
+/// (`EngineMethod::BaseCheck`).
+///
+/// **Назначение.** Когда клиент подключается к нескольким `MoonBot`-серверам
+/// одновременно, ему нужно различать их (показать в UI имя биржи, базовую валюту,
+/// версии для compat-проверок). `emk_BaseCheck` — первый Engine-вызов в init
+/// sequence, поэтому именно он несёт **server identity** (`emk_AuthCheck` идёт
+/// после и несёт **per-account** информацию — `binance_account_id`, `is_sub_account`,
+/// `account_id`).
+///
+/// **Forward-compat.** Все поля `Option`. Старые сервера (до multi-server расширения)
+/// шлют пустой response — все поля будут `None`. Новый сервер постепенно дополняется
+/// полями — клиент читает пока есть данные, остальные остаются `None`.
+///
+/// **Wire-format** (порядок в payload, все поля опциональные через `if !EOF`):
+/// 1. `bot_id`                  — i64 LE (`cfg.UniqueBotID`, уникальный идентификатор сервера)
+/// 2. `server_name`             — string LE u16 length + UTF-8 ("Binance Main", default `"Server"`)
+/// 3. `exchange_code`           — u8 (`Ord(cfg.Header.Current)` — `TBotPlatform` enum)
+/// 4. `exchange_name`           — string ("Binance Futures", "Hyper", ...)
+/// 5. `exchange_type_mask`      — u8 bitmask (см. [`exchange_type_flags`])
+/// 6. `dex_name`                — string (HIP-3 dex name для HL futures; `""` иначе)
+/// 7. `base_currency_name`      — string ("USDT", "BTC", ...)
+/// 8. `base_currency_code`      — u8 (`Ord(cfg.BaseCurrency)` — `TBaseCurrency` enum, BC_USDT=1)
+/// 9. `server_version`          — i32 LE (`Current_Version_Num_X`, например 763 = v7.63)
+/// 10. `moonproto_version`      — i32 LE (`IntMoonProtoTCPCurrentVer`)
+///
+/// Source: `MoonProtoEngineServer.pas:244-273`.
+///
+/// Пример использования:
+/// ```ignore
+/// use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_flags};
+/// let rx = client.api_base_check();
+/// let resp = rx.recv_timeout(Duration::from_secs(10))?;
+/// if resp.success {
+///     let info = parse_base_check_response(&resp.data);
+///     if let (Some(name), Some(mask)) = (&info.exchange_name, info.exchange_type_mask) {
+///         let futures = (mask & exchange_type_flags::FUTURES) != 0;
+///         println!("Connected to {} (futures: {}, base: {:?})",
+///             name, futures, info.base_currency_name);
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerInfo {
+    /// `cfg.UniqueBotID` — уникальный 64-битный идентификатор сервера, стабильный
+    /// через перезапуски. `None` если сервер не передал (старая версия). Это
+    /// основной ID для multi-server идентификации в UI.
+    pub bot_id: Option<i64>,
+    /// Human-readable имя сервера для UI ("Binance Main", "My Bybit Test"). Сервер
+    /// присылает `cfg.BotName`; если пустое — `"Server"`.
+    pub server_name: Option<String>,
+    /// Числовой код биржи (`Ord(cfg.Header.Current)` — Delphi enum `TBotPlatform`).
+    /// Финальный список значений ведёт сервер.
+    pub exchange_code: Option<u8>,
+    /// Человеко-читаемое имя биржи для UI ("Binance Futures", "Hyper", ...).
+    pub exchange_name: Option<String>,
+    /// Bitmask что доступно на этом сервере. См. [`exchange_type_flags`].
+    pub exchange_type_mask: Option<u8>,
+    /// HIP-3 dex name для Hyperliquid futures (`GetHIP3DexName`). Пустая строка
+    /// для остальных бирж (`""`, не `None` — сервер всё равно пишет поле).
+    pub dex_name: Option<String>,
+    /// Имя базовой валюты ("USDT" / "USD" / "BTC" / ...). В Delphi —
+    /// `cfg.Currency` (string), может меняться при переключении HL DEX.
+    pub base_currency_name: Option<String>,
+    /// Код базовой валюты (`Ord(cfg.BaseCurrency)` — Delphi enum `TBaseCurrency`,
+    /// BC_USDT=1). Дополняет `base_currency_name` для type-safe сравнений.
+    pub base_currency_code: Option<u8>,
+    /// Версия MoonBot (`Current_Version_Num_X`, например `763` для v7.63). Wire-тип
+    /// Delphi `Int` (i32); храним как `u32` для semantic clarity (версия беззнаковая).
+    pub server_version: Option<u32>,
+    /// Версия протокола MoonProto (`IntMoonProtoTCPCurrentVer`). Резерв на будущие
+    /// breaking changes wire-format'а.
+    pub moonproto_version: Option<u32>,
+}
+
+impl ServerInfo {
+    /// `true` если `bot_id` заполнено — сервер минимум сообщил свою identity.
+    /// Старые серверы вернут `false` (вся структура с `None`).
+    pub fn has_identity(&self) -> bool {
+        self.bot_id.is_some()
+    }
+
+    /// Удобный helper: возвращает `true` если в `exchange_type_mask` установлен
+    /// соответствующий бит. При `None` (старый сервер не передал mask) —
+    /// возвращает `false`.
+    pub fn supports(&self, flag: u8) -> bool {
+        match self.exchange_type_mask {
+            Some(mask) => (mask & flag) != 0,
+            None => false,
+        }
+    }
+}
+
+/// Распарсить `EngineResponse.data` для `emk_BaseCheck` (`EngineMethod::BaseCheck`).
+///
+/// Возвращает `ServerInfo` со всеми заполненными полями которые удалось прочитать.
+/// Никогда не возвращает `None` — пустой payload (старый сервер) валиден,
+/// результат = `ServerInfo::default()` (все поля `None`).
+///
+/// Парсинг **толерантен к truncate'у**: если payload обрывается посередине, поля
+/// до точки обрыва заполнены, остальные = `None`. Это соответствует Delphi-паттерну
+/// `If not resp.EOF then` для опциональных полей.
+///
+/// Byte-exact с серверной частью `MoonProtoEngineServer.pas:244-273`.
+pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
+    let mut info = ServerInfo::default();
+    let mut pos = 0usize;
+
+    // 1. bot_id (i64 LE) — Delphi WriteInt64(cfg.UniqueBotID)
+    if pos + 8 > data.len() { return info; }
+    info.bot_id = Some(i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
+    pos += 8;
+
+    // 2. server_name (string)
+    match read_string(data, &mut pos) {
+        Some(s) => info.server_name = Some(s),
+        None => return info,
+    }
+
+    // 3. exchange_code (u8) — Ord(cfg.Header.Current)
+    if pos + 1 > data.len() { return info; }
+    info.exchange_code = Some(data[pos]);
+    pos += 1;
+
+    // 4. exchange_name (string)
+    match read_string(data, &mut pos) {
+        Some(s) => info.exchange_name = Some(s),
+        None => return info,
+    }
+
+    // 5. exchange_type_mask (u8)
+    if pos + 1 > data.len() { return info; }
+    info.exchange_type_mask = Some(data[pos]);
+    pos += 1;
+
+    // 6. dex_name (string)
+    match read_string(data, &mut pos) {
+        Some(s) => info.dex_name = Some(s),
+        None => return info,
+    }
+
+    // 7. base_currency_name (string)
+    match read_string(data, &mut pos) {
+        Some(s) => info.base_currency_name = Some(s),
+        None => return info,
+    }
+
+    // 8. base_currency_code (u8) — Ord(cfg.BaseCurrency)
+    if pos + 1 > data.len() { return info; }
+    info.base_currency_code = Some(data[pos]);
+    pos += 1;
+
+    // 9. server_version (i32 LE → u32) — Delphi WriteInt(Current_Version_Num_X).
+    // Trust серверу: значения версий монотонно растут с малых положительных
+    // чисел (например 763 для v7.63), поэтому signed/unsigned различие не влияет.
+    if pos + 4 > data.len() { return info; }
+    info.server_version = Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
+    pos += 4;
+
+    // 10. moonproto_version (i32 LE → u32)
+    if pos + 4 > data.len() { return info; }
+    info.moonproto_version = Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
+    // pos += 4;  // больше не используется
+
+    info
+}
+
+#[cfg(test)]
+mod base_check_tests {
+    use super::*;
+
+    /// Helper: build wire-payload for BaseCheck response from a fully-populated `ServerInfo`.
+    /// Reverse of `parse_base_check_response` for round-trip testing.
+    ///
+    /// Поля пишутся в том же порядке что и сервер (`MoonProtoEngineServer.pas:262-271`).
+    /// Каждое поле пишется только если `Some(...)`; первый `None` обрывает запись
+    /// (это соответствует семантике truncate'а — следующие поля становятся
+    /// "недоступными" для парсера).
+    fn encode_full(info: &ServerInfo) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let Some(id) = info.bot_id else { return buf };
+        buf.extend_from_slice(&id.to_le_bytes());
+        let Some(name) = &info.server_name else { return buf };
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        let Some(ex_code) = info.exchange_code else { return buf };
+        buf.push(ex_code);
+        let Some(ex_name) = &info.exchange_name else { return buf };
+        buf.extend_from_slice(&(ex_name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(ex_name.as_bytes());
+        let Some(mask) = info.exchange_type_mask else { return buf };
+        buf.push(mask);
+        let Some(dex) = &info.dex_name else { return buf };
+        buf.extend_from_slice(&(dex.len() as u16).to_le_bytes());
+        buf.extend_from_slice(dex.as_bytes());
+        let Some(bc_name) = &info.base_currency_name else { return buf };
+        buf.extend_from_slice(&(bc_name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(bc_name.as_bytes());
+        let Some(bc_code) = info.base_currency_code else { return buf };
+        buf.push(bc_code);
+        let Some(sv) = info.server_version else { return buf };
+        buf.extend_from_slice(&(sv as i32).to_le_bytes());
+        let Some(mp) = info.moonproto_version else { return buf };
+        buf.extend_from_slice(&(mp as i32).to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn parse_empty_payload_returns_all_none() {
+        // Старый сервер до multi-server расширения шлёт пустой response.
+        // Парсер не должен падать — возвращает дефолт со всеми None.
+        let info = parse_base_check_response(&[]);
+        assert_eq!(info, ServerInfo::default());
+        assert!(!info.has_identity());
+        assert!(info.bot_id.is_none());
+        assert!(info.moonproto_version.is_none());
+    }
+
+    #[test]
+    fn parse_full_payload_returns_all_fields() {
+        let original = ServerInfo {
+            bot_id: Some(0x12_34_56_78_9A_BC_DE_F0_i64),
+            server_name: Some("Binance Main".to_string()),
+            exchange_code: Some(1),
+            exchange_name: Some("Binance Futures".to_string()),
+            exchange_type_mask: Some(exchange_type_flags::FUTURES),
+            dex_name: Some(String::new()), // не HL futures → пусто
+            base_currency_name: Some("USDT".to_string()),
+            base_currency_code: Some(1), // BC_USDT
+            server_version: Some(763),    // v7.63
+            moonproto_version: Some(3),
+        };
+        let payload = encode_full(&original);
+        let parsed = parse_base_check_response(&payload);
+        assert_eq!(parsed, original);
+        assert!(parsed.has_identity());
+        assert!(parsed.supports(exchange_type_flags::FUTURES));
+        assert!(!parsed.supports(exchange_type_flags::SPOT));
+    }
+
+    #[test]
+    fn parse_hl_futures_with_hip3_dex_name() {
+        // Hyperliquid futures с HIP-3 dex — все 4 типа в mask + непустой dex_name.
+        let original = ServerInfo {
+            bot_id: Some(42),
+            server_name: Some("Hyper Test".to_string()),
+            exchange_code: Some(7),
+            exchange_name: Some("Hyper".to_string()),
+            exchange_type_mask: Some(
+                exchange_type_flags::FUTURES | exchange_type_flags::DEX,
+            ),
+            dex_name: Some("HIP3-PERPS".to_string()),
+            base_currency_name: Some("USDC".to_string()),
+            base_currency_code: Some(5),
+            server_version: Some(763),
+            moonproto_version: Some(3),
+        };
+        let payload = encode_full(&original);
+        let parsed = parse_base_check_response(&payload);
+        assert_eq!(parsed, original);
+        assert!(parsed.supports(exchange_type_flags::FUTURES));
+        assert!(parsed.supports(exchange_type_flags::DEX));
+        assert!(!parsed.supports(exchange_type_flags::SPOT));
+        assert!(!parsed.supports(exchange_type_flags::PREDICT));
+    }
+
+    #[test]
+    fn parse_truncated_at_server_name_returns_only_bot_id() {
+        // bot_id есть, server_name обрезан в середине строкового заголовка.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(42_i64).to_le_bytes());
+        buf.push(0x05); // частичный u16 length для server_name (только 1 байт)
+        let info = parse_base_check_response(&buf);
+        assert_eq!(info.bot_id, Some(42));
+        assert!(info.server_name.is_none());
+        assert!(info.exchange_code.is_none());
+    }
+
+    #[test]
+    fn parse_truncated_at_exchange_code_returns_three_fields() {
+        // bot_id + server_name есть, exchange_code (1 байт) обрезан.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(7_i64).to_le_bytes());
+        buf.extend_from_slice(&(4u16.to_le_bytes()));
+        buf.extend_from_slice(b"name");
+        // exchange_code (1 byte) отсутствует.
+        let info = parse_base_check_response(&buf);
+        assert_eq!(info.bot_id, Some(7));
+        assert_eq!(info.server_name.as_deref(), Some("name"));
+        assert!(info.exchange_code.is_none());
+        assert!(info.exchange_name.is_none());
+    }
+
+    #[test]
+    fn parse_truncated_at_server_version_keeps_eight_fields() {
+        // Восемь полей заполнены, на server_version (i32) данных не хватает.
+        let info_partial = ServerInfo {
+            bot_id: Some(1),
+            server_name: Some("y".to_string()),
+            exchange_code: Some(2),
+            exchange_name: Some("Bybit".to_string()),
+            exchange_type_mask: Some(exchange_type_flags::FUTURES),
+            dex_name: Some(String::new()),
+            base_currency_name: Some("USD".to_string()),
+            base_currency_code: Some(3),
+            server_version: None,
+            moonproto_version: None,
+        };
+        let mut payload = encode_full(&info_partial);
+        // Добавим обрезанные 2 байта вместо полных 4 для server_version.
+        payload.extend_from_slice(&[0xAA, 0xBB]);
+        let parsed = parse_base_check_response(&payload);
+        assert_eq!(parsed.bot_id, Some(1));
+        assert_eq!(parsed.base_currency_code, Some(3));
+        assert!(parsed.server_version.is_none());
+        assert!(parsed.moonproto_version.is_none());
+    }
+
+    #[test]
+    fn parse_only_moonproto_version_missing() {
+        // Все 9 полей кроме последнего.
+        let info_partial = ServerInfo {
+            bot_id: Some(0xABC_i64),
+            server_name: Some("Test".to_string()),
+            exchange_code: Some(4),
+            exchange_name: Some("Hyper".to_string()),
+            exchange_type_mask: Some(
+                exchange_type_flags::DEX | exchange_type_flags::FUTURES,
+            ),
+            dex_name: Some("DEX-NAME".to_string()),
+            base_currency_name: Some("USDC".to_string()),
+            base_currency_code: Some(5),
+            server_version: Some(763),
+            moonproto_version: None,
+        };
+        let payload = encode_full(&info_partial);
+        let parsed = parse_base_check_response(&payload);
+        assert_eq!(parsed, info_partial);
+        assert!(parsed.has_identity());
+        assert!(parsed.moonproto_version.is_none());
+    }
+
+    #[test]
+    fn parse_predict_market_bit() {
+        let info = ServerInfo {
+            bot_id: Some(99),
+            server_name: Some("HL Predict".to_string()),
+            exchange_code: Some(7),
+            exchange_name: Some("Hyper".to_string()),
+            exchange_type_mask: Some(
+                exchange_type_flags::DEX | exchange_type_flags::PREDICT,
+            ),
+            dex_name: Some(String::new()),
+            base_currency_name: Some("USDC".to_string()),
+            base_currency_code: Some(5),
+            server_version: Some(763),
+            moonproto_version: Some(3),
+        };
+        let parsed = parse_base_check_response(&encode_full(&info));
+        assert!(parsed.supports(exchange_type_flags::PREDICT));
+        assert!(parsed.supports(exchange_type_flags::DEX));
+        assert!(!parsed.supports(exchange_type_flags::FUTURES));
+        assert!(!parsed.supports(exchange_type_flags::SPOT));
+    }
+
+    #[test]
+    fn server_info_default_has_no_identity_and_no_flags() {
+        let info = ServerInfo::default();
+        assert!(!info.has_identity());
+        assert!(!info.supports(exchange_type_flags::SPOT));
+        assert!(!info.supports(exchange_type_flags::FUTURES));
+    }
+
+    #[test]
+    fn parse_zero_length_strings_are_some_empty() {
+        // Сервер может явно прислать пустую строку (например `dex_name` для не-HL
+        // биржи). `Some("")` отличается от `None`.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(1_i64).to_le_bytes());
+        buf.extend_from_slice(&(0u16.to_le_bytes())); // server_name = ""
+        let info = parse_base_check_response(&buf);
+        assert_eq!(info.bot_id, Some(1));
+        assert_eq!(info.server_name.as_deref(), Some(""));
+        assert!(info.exchange_code.is_none());
+    }
+
+    #[test]
+    fn parse_does_not_panic_on_random_garbage() {
+        // Стресс: рандом-байты не должны вызвать panic.
+        // (utf8_lossy подменит невалидные байты на U+FFFD — это OK для UI.)
+        let garbage: Vec<u8> = (0..200).map(|i| (i * 7 ^ 0xA5) as u8).collect();
+        let _info = parse_base_check_response(&garbage);
+        // Парсер выживает; конкретные значения зависят от random pattern.
+    }
+}
+
 #[cfg(test)]
 mod auth_check_tests {
     use super::*;

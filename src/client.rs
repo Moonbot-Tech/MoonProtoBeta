@@ -673,6 +673,31 @@ pub struct Client {
     /// ~100мс (см. `ntp::spawn_sync_thread`). `None` если NTP отключен в cfg.
     /// См. responsibility audit F8.
     ntp_thread_shutdown: Option<Arc<AtomicBool>>,
+
+    /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется в
+    /// [`run_init_sequence`] (или может быть выставлена приложением вручную через
+    /// [`Client::set_server_info`] если init делается своим pattern'ом). До первого
+    /// успешного BaseCheck — `ServerInfo::default()` (все поля `None`,
+    /// `has_identity()=false`).
+    ///
+    /// **Multi-server**: при подключении к нескольким серверам приложение хранит
+    /// `Vec<Client>` и различает их по `client.server_info().bot_id`.
+    server_info: crate::commands::engine_api::ServerInfo,
+
+    /// **Per-Client ServerTimeDelta handle** — shareable через `Arc::clone`.
+    ///
+    /// Хранит текущий `ServerTimeDelta` (в днях, TDateTime-формат, упакован в u64
+    /// через `f64::to_bits`). Обновляется в `handle_ping` синхронно с
+    /// `self.server_time_delta` и (для back-compat) с глобальным
+    /// `SERVER_TIME_DELTA_DAYS`.
+    ///
+    /// **Multi-Client** (DEVIATION #23): `EventDispatcher` должен быть привязан к
+    /// этому handle через `EventDispatcher::set_server_time_delta_source(handle)`
+    /// или автоматически через `run_with_dispatcher` / `dispatch_into_active`. Без
+    /// привязки EventDispatcher падает обратно на global, что при multi-Client даёт
+    /// off-by-50-1000ms timestamps в ордерах (последний Client перезаписывает
+    /// delta всех остальных).
+    server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Client {
@@ -771,7 +796,44 @@ impl Client {
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
             ntp_thread_shutdown,
+            server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            server_info: crate::commands::engine_api::ServerInfo::default(),
         }
+    }
+
+    /// Identity сервера (`bot_id`, `exchange_name`, `base_currency_name`, версии и т.д.).
+    /// Заполняется автоматически в [`run_init_sequence`] после успешного `emk_BaseCheck`.
+    ///
+    /// До первого успешного BaseCheck возвращает дефолт со всеми `None`. Используется
+    /// для UI ("подключён к Binance Futures, USDT") и для multi-server идентификации.
+    ///
+    /// См. [`crate::commands::engine_api::ServerInfo`].
+    pub fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
+        &self.server_info
+    }
+
+    /// Установить `ServerInfo` вручную. Обычно не нужно — `run_init_sequence` делает
+    /// это автоматически. Полезно если приложение использует свой init pattern
+    /// (минуя `run_init_sequence`) и хочет вручную распарсить ответ `api_base_check`.
+    pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
+        self.server_info = info;
+    }
+
+    /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
+    ///
+    /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:
+    /// ```ignore
+    /// let mut dispatcher = EventDispatcher::new();
+    /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
+    /// ```
+    ///
+    /// Если использовать `Client::run_with_dispatcher` или
+    /// `EventDispatcher::dispatch_into_active(&mut Client)` — линковка делается
+    /// автоматически на первом вызове (lazy).
+    ///
+    /// См. `DEVIATION.md #23` (single-Client → multi-Client refactor).
+    pub fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.server_time_delta_handle)
     }
 
     /// Установить lifecycle callback. Вызывается из main-thread при изменении auth_status.
@@ -2286,7 +2348,12 @@ impl Client {
         let now_dt = delphi_now();
         self.server_time_delta = initial_time - now_dt; // InitialTime - Now (for order time correction)
         // audit_responsibility A5 / active library: автоматически пробрасываем delta в
-        // глобальный atomic чтобы EventDispatcher применил к Orders state без manual bridge.
+        // per-Client `Arc<AtomicU64>` handle (multi-Client) И в глобальный atomic
+        // (back-compat для одиночных EventDispatcher::new() без линковки). См. DEVIATION #23.
+        self.server_time_delta_handle.store(
+            self.server_time_delta.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         set_server_time_delta_global(self.server_time_delta);
         let server_time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
         self.net_lag_ping = ((now_dt - server_time) * 86400000.0).abs() as i64;
@@ -3449,11 +3516,17 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
         .unwrap_or(Duration::from_millis(crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64));
     let mut result = InitResult::default();
 
-    // === 1. BaseCheck === критический шаг
+    // === 1. BaseCheck === критический шаг.
+    // При успехе — парсим server identity и сохраняем в Client.server_info
+    // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
     if cfg.base_check {
         let rx = client.api_base_check();
         match rx.recv_timeout(timeout) {
-            Ok(resp) if resp.success => { result.base_check_ok = true; }
+            Ok(resp) if resp.success => {
+                result.base_check_ok = true;
+                let info = crate::commands::engine_api::parse_base_check_response(&resp.data);
+                client.set_server_info(info);
+            }
             Ok(resp) => {
                 result.errors.push(format!("BaseCheck error: code={} msg={}",
                                            resp.error_code, resp.error_msg));
@@ -3699,6 +3772,74 @@ mod d02_tests {
         let taken = pending.take();
         assert!(taken.is_some());
         assert!(!second_imfriend_due(&pending, i64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod server_info_tests {
+    use super::*;
+    use crate::commands::engine_api::ServerInfo;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None, // отключаем NTP thread — не нужен для unit-теста
+        }
+    }
+
+    #[test]
+    fn server_info_default_on_new_client() {
+        let client = Client::new(dummy_cfg());
+        assert_eq!(client.server_info(), &ServerInfo::default());
+        assert!(!client.server_info().has_identity());
+    }
+
+    #[test]
+    fn set_server_info_updates_storage_and_is_retrievable_via_getter() {
+        let mut client = Client::new(dummy_cfg());
+        let info = ServerInfo {
+            bot_id: Some(0x1234_5678),
+            server_name: Some("Test Server".to_string()),
+            exchange_code: Some(1),
+            exchange_name: Some("Binance Futures".to_string()),
+            base_currency_name: Some("USDT".to_string()),
+            base_currency_code: Some(1),
+            ..Default::default()
+        };
+        client.set_server_info(info.clone());
+        assert_eq!(client.server_info(), &info);
+        assert_eq!(client.server_info().bot_id, Some(0x1234_5678));
+        assert_eq!(client.server_info().exchange_name.as_deref(), Some("Binance Futures"));
+        assert!(client.server_info().has_identity());
+    }
+
+    #[test]
+    fn server_info_independent_across_clients() {
+        // Multi-server: два Client'а с разными server_info никак не должны
+        // влиять друг на друга. Это база для multi-server терминала.
+        let mut client_a = Client::new(dummy_cfg());
+        let mut client_b = Client::new(dummy_cfg());
+
+        client_a.set_server_info(ServerInfo {
+            bot_id: Some(100),
+            exchange_name: Some("Binance".to_string()),
+            ..Default::default()
+        });
+        client_b.set_server_info(ServerInfo {
+            bot_id: Some(200),
+            exchange_name: Some("Bybit".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(client_a.server_info().bot_id, Some(100));
+        assert_eq!(client_b.server_info().bot_id, Some(200));
+        assert_eq!(client_a.server_info().exchange_name.as_deref(), Some("Binance"));
+        assert_eq!(client_b.server_info().exchange_name.as_deref(), Some("Bybit"));
     }
 }
 
