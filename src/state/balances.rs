@@ -59,9 +59,36 @@ pub enum BalanceEvent {
     EpochStale { incoming: u16, last: u16 },
 }
 
+/// DoS guard: верхний лимит количества market_name записей в `by_market`. Реальный
+/// бот видит сотни-тысячи маркетов; 20_000 — щедрый потолок. Враждебный сервер
+/// мог бы accumulate'ить unique market_names через incremental updates (cmd_id=4)
+/// → unbounded HashMap. См. `audit_robustness` C-3.
+///
+/// Cap применяется в `apply_legacy_snapshot` (cmd_id=2) и `apply_incremental`
+/// (cmd_id=4). `apply_full_snapshot` (cmd_id=3) не нуждается в cap — full snapshot
+/// заменяет map целиком (любой DoS-flood сервера ограничен размером **одного**
+/// snapshot'а).
+pub const MAX_BALANCE_MARKETS: usize = 20_000;
+
 impl BalancesState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// DoS guard insert: вставляет `BalanceItem` если cap не достигнут.
+    /// Возвращает true если вставлено, false если cap reached (skip + warn).
+    /// Existing key — всегда update (cap не нужен).
+    fn try_insert_balance(&mut self, item: BalanceItem) -> bool {
+        if !self.by_market.contains_key(&item.market_name)
+            && self.by_market.len() >= MAX_BALANCE_MARKETS
+        {
+            log::warn!(target: "moonproto::balances",
+                "BalancesState.by_market at MAX ({MAX_BALANCE_MARKETS}) — rejecting market='{}'",
+                item.market_name);
+            return false;
+        }
+        self.by_market.insert(item.market_name.clone(), item);
+        true
     }
 
     /// Применить распарсенный `BalanceUpdate`.
@@ -87,9 +114,9 @@ impl BalancesState {
             btc_balance_full: upd.btc_balance_full,
             special_coin_balance: upd.special_coin_balance,
         };
-        let count = upd.items.len();
+        let mut count = 0;
         for it in upd.items {
-            self.by_market.insert(it.market_name.clone(), it);
+            if self.try_insert_balance(it) { count += 1; }
         }
         self.last_epoch = upd.epoch;
         self.epoch_set = true;
@@ -128,9 +155,9 @@ impl BalancesState {
                 special_coin_balance: upd.special_coin_balance,
             };
         }
-        let count = upd.items.len();
+        let mut count = 0;
         for it in upd.items {
-            self.by_market.insert(it.market_name.clone(), it);
+            if self.try_insert_balance(it) { count += 1; }
         }
         self.last_epoch = upd.epoch;
         self.epoch_set = true;
@@ -161,14 +188,10 @@ impl BalancesState {
     }
 }
 
-/// Wrap-safe epoch comparison: `MoonProtoFunc.pas:188-203 EpochIsOK`.
-/// Returns true если new — действительно новое значение (не дубликат и не stale).
-fn epoch_is_ok(last: u16, new: u16) -> bool {
-    if last == new {
-        return false; // duplicate
-    }
-    last.wrapping_sub(new) > 100
-}
+// `epoch_is_ok` теперь общий через `state::epoch::epoch_is_ok` (audit_rust_quality #1).
+// Раньше здесь была локальная копия со старым окном 100 — на high-freq updates
+// legitimate пакеты тихо отбрасывались. Текущее окно RFC 1982 half-cycle = 32767.
+use super::epoch::epoch_is_ok;
 
 #[cfg(test)]
 mod tests {

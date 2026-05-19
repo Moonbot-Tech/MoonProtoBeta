@@ -11,6 +11,7 @@
 //!
 //! Каждый модуль документирован в `moonproto/docs/api/<channel>.md`.
 
+pub mod epoch;
 pub mod orders;
 pub mod order_books;
 pub mod trades;

@@ -117,18 +117,10 @@ impl SellReason {
 ///
 /// Возвращает `true` если new — действительно новое значение (не дубликат, не stale).
 /// Используется AcceptServerCommand в BOrderWorker (TaskWorkers.pas:1440).
-fn epoch_is_ok(last: u16, new: u16) -> bool {
-    if last == new {
-        return false; // duplicate
-    }
-    // RFC 1982 serial number comparison: `new` is "ahead" of `last` iff backward
-    // distance > halfway round the u16 cycle. Stale-duplicate window = u16::MAX/2 =
-    // 32767 эпох (вместо старой константы 100). На high-frequency rebalance
-    // (10 replace/sec) + network reorder + WiFi/cellular switch окно в 100 узко
-    // и легко triggered → legitimate updates тихо дропались. 32767 — реалистичный
-    // потолок (~55 мин при 10 ev/sec до half-cycle). См. robustness audit H6.
-    last.wrapping_sub(new) > u16::MAX / 2
-}
+// `epoch_is_ok` теперь общий через `state::epoch::epoch_is_ok` (audit_rust_quality #1).
+// Раньше тут была локальная копия с правильным окном 32767, и параллельная копия
+// в `balances.rs` со старым окном 100 — single source of truth устраняет drift.
+use super::epoch::epoch_is_ok;
 
 /// Маппинг status → phase number.
 /// Соответствует TaskWorkers.pas:546-555 `StatusPhase`:
@@ -266,6 +258,9 @@ pub enum ApplyResult {
     OrderNotFound,
     /// Команда не относится к Orders state (например, AllStatusesRequest от клиента).
     NotApplicable,
+    /// Создание нового entry отвергнуто — `map.len() >= MAX_ORDERS` (DoS защита).
+    /// Существующие entries обновляются без cap-check.
+    Rejected,
 }
 
 /// Событие, которое сгенерировалось в результате apply.
@@ -295,6 +290,17 @@ pub enum OrderEvent {
     /// Команда проигнорирована (out-of-order / phase rollback / unknown).
     Ignored { uid: u64, reason: ApplyResult },
 }
+
+/// Верхний лимит количества активных ордеров в state. При попытке вставить
+/// новый uid когда `map.len() >= MAX_ORDERS` — insert отвергается с warn-логом.
+/// Защита от DoS / OOM в случае:
+///   - враждебный/скомпрометированный сервер шлёт поток `TOrderStatus` с
+///     уникальными uid'ами (35 MB/sec при 50K msg/sec);
+///   - сервер забыл прислать терминальный статус и ордера накапливаются;
+///   - очень долгая сессия с десятками тысяч ордеров.
+/// Реальный бот держит сотни-единицы тысяч активных ордеров; 50_000 — щедрый
+/// запас. См. `audit_robustness` C-1.
+pub const MAX_ORDERS: usize = 50_000;
 
 /// Главная коллекция ордеров.
 ///
@@ -367,6 +373,13 @@ impl Orders {
                 let new_flag = self.current_snapshot_flag;
                 for st in &snap.orders {
                     let order_uid = st.epoch_header.market.base.uid;
+                    // DoS guard (audit_robustness C-1): cap при создании новых
+                    // entries. Существующие uid'ы — update пропускаем без cap-check.
+                    if !self.map.contains_key(&order_uid) && self.map.len() >= MAX_ORDERS {
+                        log::warn!(target: "moonproto::orders",
+                            "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting snapshot uid={order_uid}");
+                        continue;
+                    }
                     let entry = self.map.entry(order_uid).or_insert_with(|| Order::from_status(st));
                     Self::apply_status_inner(entry, st, self.server_time_delta);
                     entry.snapshot_flag = new_flag;
@@ -380,6 +393,13 @@ impl Orders {
                     // Inc snapshot flag — это новый ордер из live update'а.
                 }
                 let new_order = !self.map.contains_key(&uid);
+                // DoS guard (audit_robustness C-1): cap новых ордеров. Update
+                // existing — пропускаем без cap-check.
+                if new_order && self.map.len() >= MAX_ORDERS {
+                    log::warn!(target: "moonproto::orders",
+                        "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting new uid={uid}");
+                    return (ApplyResult::Rejected, OrderEvent::Ignored { uid, reason: ApplyResult::Rejected });
+                }
                 let entry = self.map.entry(uid).or_insert_with(|| Order::from_status(&st));
 
                 // Epoch check (wrap-safe, byte-exact с Delphi EpochIsOK + AcceptServerCommand)
