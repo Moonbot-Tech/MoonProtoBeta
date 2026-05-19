@@ -782,6 +782,82 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_requested_with_cached_raw_triggers_auto_echo() {
+        // Active library auto-action 2: при SnapshotRequested → если есть
+        // last_full_snapshot_raw — либа сама шлёт его обратно (без участия app).
+        let mut d = EventDispatcher::new();
+        let cached_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        d.strats.last_full_snapshot_raw = Some(cached_snapshot.clone());
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let mut out = Vec::new();
+
+        // Server prods клиента: "пришли свой snapshot стратегий" — это
+        // StratCommand::SnapshotRequest. Payload = `build_snapshot_request(uid)`.
+        let payload = crate::commands::strat::build_snapshot_request(42);
+
+        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+
+        // Drain event channel — должна быть отправка Command::Strat с CMD_STRAT_SNAPSHOT
+        // (=2) + ver + uid + cached_snapshot content.
+        let mut found_snapshot_send = false;
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let crate::client::ClientEvent::Send(msg) = ev {
+                if msg.item.cmd == Command::Strat as u8 {
+                    let data = &msg.item.data;
+                    // Header: cmd_subcode(1) + ver(2) + uid(8) = 11; затем payload.
+                    if data.len() >= 11 + cached_snapshot.len() {
+                        let cmd_subcode = data[0];
+                        let tail = &data[11..];
+                        if cmd_subcode == 2 && tail == cached_snapshot.as_slice() {
+                            found_snapshot_send = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found_snapshot_send,
+            "после SnapshotRequest с cached snapshot — должна быть auto-echo отправка");
+
+        // out содержит event SnapshotRequested (app тоже видит, для UI awareness).
+        let has_snapshot_event = out.iter().any(|ev| matches!(
+            ev, Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 42 })
+        ));
+        assert!(has_snapshot_event,
+            "event SnapshotRequested должен быть в out (для app awareness)");
+    }
+
+    #[test]
+    fn snapshot_requested_without_cached_raw_does_not_send() {
+        // Если у нас НЕТ last_full_snapshot_raw — auto-echo не происходит.
+        // App получает event и может сам решить что делать.
+        let mut d = EventDispatcher::new();
+        assert!(d.strats.last_full_snapshot_raw.is_none());
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let mut out = Vec::new();
+        let payload = crate::commands::strat::build_snapshot_request(99);
+        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+
+        // Drain event channel — НЕ должно быть Command::Strat send'ов (нет cached snapshot).
+        let mut strat_sends = 0;
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let crate::client::ClientEvent::Send(msg) = ev {
+                if msg.item.cmd == Command::Strat as u8 {
+                    strat_sends += 1;
+                }
+            }
+        }
+        assert_eq!(strat_sends, 0, "без cached snapshot — auto-echo не должен сработать");
+
+        // Но event SnapshotRequested всё равно прилетает app'у.
+        let has_event = out.iter().any(|ev| matches!(
+            ev, Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
+        ));
+        assert!(has_event);
+    }
+
+    #[test]
     fn dispatcher_propagates_delta_to_orders_state() {
         // End-to-end: при `dispatch(Command::Order, ...)` dispatcher применяет текущий
         // delta к Orders state. Проверяем что после линковки handle'а delta попадает
