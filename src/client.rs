@@ -555,6 +555,21 @@ impl Client {
     /// и т.д.). Если потребителю нужен гарантированный feedback — он может
     /// проверить статус через `LifecycleEvent::Disconnected` callback и не
     /// шарашить новые команды после.
+    ///
+    /// **BACKPRESSURE BEHAVIOR (audit_responsibility B4 / hints #6)**: внутренний
+    /// event channel — `mpsc::sync_channel` с capacity 1024. Если main loop отстаёт
+    /// (тяжёлый on_data callback / OS scheduling), очередь может заполниться.
+    /// `send_cmd` **БЛОКИРУЕТ** caller-поток до освобождения слота — никогда не
+    /// дропает торговую команду молча.
+    ///
+    /// Это РАЗУМНО для торгового приложения (drop ордеров catastrofично), но имеет
+    /// следствие: вызов из UI-потока может зависнуть на десятки/сотни ms при burst'е.
+    /// Рекомендация: для UI вызывайте через `tokio::spawn_blocking` или отдельный
+    /// worker-thread; не вызывайте `send_cmd` прямо из main UI-loop.
+    ///
+    /// (В Delphi `MoonProtoCommon.pas:749 SendCmd` под FastLock без верхнего лимита
+    /// очереди — не блокирует caller, но рискует OOM на патологии. Rust bounded =
+    /// безопаснее по памяти, цена — потенциальная блокировка caller-потока.)
     pub fn send_cmd(&self, data: Vec<u8>, cmd: Command, priority: SendPriority, encrypted: bool, max_retries: i32) {
         self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, UniqueKey::none());
     }
@@ -1674,6 +1689,9 @@ impl Client {
         // delphi_now() already includes NTP offset (= Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset).
         let now_dt = delphi_now();
         self.server_time_delta = initial_time - now_dt; // InitialTime - Now (for order time correction)
+        // audit_responsibility A5 / active library: автоматически пробрасываем delta в
+        // глобальный atomic чтобы EventDispatcher применил к Orders state без manual bridge.
+        set_server_time_delta_global(self.server_time_delta);
         let server_time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
         self.net_lag_ping = ((now_dt - server_time) * 86400000.0).abs() as i64;
 
@@ -2804,6 +2822,27 @@ pub fn set_ntp_offset(offset_seconds: f64) {
 
 fn get_ntp_offset_days() -> f64 {
     f64::from_bits(NTP_OFFSET_DAYS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Global server-time-delta (days), обновляется Client при каждом Ping update.
+/// `EventDispatcher` читает в `dispatch_into` и **автоматически** применяет к
+/// `Orders::apply` через `Orders::set_server_time_delta()` — потребитель либы НЕ
+/// должен делать manual bridge (audit_responsibility A5 / active library principle).
+///
+/// **Ограничение**: глобальная переменная = один Client per process. Multi-Client
+/// (например multi-server терминал) пока не поддерживается, при необходимости
+/// замените на `Arc<AtomicU64>` per Client + bind в Dispatcher.
+static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Установить server_time_delta (в днях, как TDateTime). Вызывается из Client::handle_ping
+/// автоматически — публично выставлен только для тестов.
+pub fn set_server_time_delta_global(delta_days: f64) {
+    SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Получить server_time_delta (дни). Используется EventDispatcher.
+pub fn get_server_time_delta_global() -> f64 {
+    f64::from_bits(SERVER_TIME_DELTA_DAYS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Delphi TDateTime (days since 1899-12-30) corrected by NTP offset.

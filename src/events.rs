@@ -119,6 +119,11 @@ impl EventDispatcher {
             Command::Order => {
                 match TradeCommand::parse(payload) {
                     Some(tc) => {
+                        // audit_responsibility A5 / active library: автоматически подхватываем
+                        // server_time_delta из глобального atomic (Client пишет туда в
+                        // handle_ping). Без этого Orders::apply применяет AdjustTime со старым
+                        // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
+                        self.orders.set_server_time_delta(crate::client::get_server_time_delta_global());
                         let (_apply_result, ev) = self.orders.apply(tc);
                         out.push(Event::Order(ev));
                     }

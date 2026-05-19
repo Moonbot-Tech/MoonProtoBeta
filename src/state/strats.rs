@@ -56,7 +56,13 @@ pub enum StratEvent {
     CheckedSynced { changed: usize, is_delta: bool },
     /// Эхо checked-state от сервера (после нашего sync).
     CheckedEcho { count: usize },
-    /// Команда не применима (Unknown/SnapshotRequest от нас же).
+    /// **Сервер просит у нас snapshot стратегий** (audit_responsibility B3).
+    /// Это `TStratSnapshotRequest` от сервера — клиент должен ответить
+    /// `client.strat_send_snapshot(serialized_snapshot)`. Сериализация требует
+    /// `StrategySerializer writer` который пока не портирован (Stage 3) — поэтому
+    /// auto-respond невозможен. Liба эмитит явное событие чтобы app мог обработать.
+    SnapshotRequested { uid: u64 },
+    /// Команда не применима (Unknown).
     Ignored,
 }
 
@@ -121,7 +127,8 @@ impl StratsState {
                 StratEvent::CheckedSynced { changed, is_delta: s.is_delta }
             }
             StratCommand::CheckedEcho(e) => StratEvent::CheckedEcho { count: e.items.len() },
-            StratCommand::SnapshotRequest { .. } | StratCommand::Unknown { .. } => StratEvent::Ignored,
+            StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
+            StratCommand::Unknown { .. } => StratEvent::Ignored,
         }
     }
 
