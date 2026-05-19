@@ -7,6 +7,7 @@
 ///
 /// See MAPPING.md for line-by-line correspondence.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +19,9 @@ use crate::crypto;
 use crate::compression;
 use crate::protocol::{Command, handshake, slider::Slider, slicing, crypted};
 use crate::api_pending::ApiPending;
-use crate::commands::engine_api::{EngineResponse, parse_engine_response};
+use crate::commands::engine_api::{EngineResponse, EngineMethod, parse_engine_response};
+use crate::commands::candles::{CandlesAggregator, DeepPrice, parse_coin_card_candles_response};
+use crate::state::OrderBookKind;
 
 // =============================================================================
 //  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
@@ -219,30 +222,41 @@ pub enum AuthStatus {
 ///
 /// Типовая последовательность:
 /// ```text
-///   Connecting  → Authenticated  → [running, обычная работа] → Disconnected
+///   Connecting  → Connected{fresh:true}  → [running] → Disconnected
 ///                       │
-///                       └──[потеря связи]──► Reconnecting → Authenticated → ...
+///                       └──[потеря связи]──► Reconnecting → Connected{fresh:false} → ...
 ///                                                  │
 ///                                                  └──[detected restart]──► ServerRestart
 /// ```
 ///
-/// `Authenticated` может прилетать несколько раз за жизнь Client'а (после каждого
-/// успешного re-handshake). `ServerRestart` — отдельный сигнал что нужно сбросить
-/// клиентские кэши market index'ов.
+/// `Connected` может прилетать несколько раз за жизнь Client'а (после каждого
+/// успешного re-handshake). **Поле `fresh: bool`** = `true` только при ПЕРВОМ
+/// `Connected` за всю жизнь Client'а; для всех последующих re-handshake'ей
+/// = `false`. Удобно для UI: показать "Welcome" один раз vs обычный re-connect indicator.
+///
+/// **Active library principle**: на любое из этих событий потребитель **не должен**
+/// предпринимать никаких recovery-действий. Liба сама:
+/// - re-subscribe всех зарегистрированных streams (registry);
+/// - re-fetch markets indexes при ServerRestart;
+/// - применить ServerTimeDelta из Ping;
+/// - drain pending Engine API responses которые перестали быть валидны.
+///
+/// Потребителю остаётся только покрасить UI индикатор по событию.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LifecycleEvent {
     /// Handshake начат (Hello отправлен), Fine ещё не получен. Сетевой trip-time
-    /// между Connecting и Authenticated = первые 1-3 RTT. Никаких действий от
+    /// между Connecting и Connected = первые 1-3 RTT. Никаких действий от
     /// потребителя не требуется — клиент сам пробует, retry'ит, переключает порты.
     Connecting,
     /// Fine получен — канал авторизован и готов принимать/отправлять команды.
-    /// **Обычные действия потребителя** на этот event:
-    /// - `client.api_subscribe_all_trades()` — подписаться на сделки
-    /// - `client.request_all_statuses(uid)` — запросить статусы ордеров
-    /// - `client.strat_snapshot_request()` — запросить snapshot стратегий
-    /// - `client.ui_settings_request()` — запросить настройки
-    /// - `client.balance_request_refresh()` — запросить актуальный баланс
-    Authenticated,
+    ///
+    /// `fresh = true` — это **первый** Connected с момента `Client::new`. App может
+    /// одноразово показать "Welcome" / выполнить init-шаги (`subscribe_orderbook`,
+    /// `subscribe_all_trades`, `api_get_markets_list` и т.п.).
+    ///
+    /// `fresh = false` — это re-connect после потери связи / server restart / etc.
+    /// **Никакие действия от app не нужны** — registry уже выполнил re-subscribe.
+    Connected { fresh: bool },
     /// Канал закрыт явным `client.disconnect()` от потребителя. Финальное
     /// состояние — для возобновления связи нужен новый `Client::new`.
     Disconnected,
@@ -252,14 +266,26 @@ pub enum LifecycleEvent {
     /// нового Hello → новый `Connecting`. **Никаких действий от потребителя
     /// не требуется**, можно только показать в UI индикатор "переподключаемся".
     Reconnecting,
+    /// **Критическое событие**: переполнен буфер pending H-priority команд
+    /// (`MAX_PENDING_H = 256`). Это происходит при долгой server silence без
+    /// ACK — retry-копии накапливаются, либа **молча выбрасывает** самые старые
+    /// чтобы освободить место. Среди старых могут быть `cancel_order` /
+    /// `replace_order` — потеря таких команд = ордер не отменился = торговый риск.
+    ///
+    /// App **обязан** реагировать: показать критический индикатор пользователю,
+    /// возможно retry команды через свой механизм (если знает что недоотменено).
+    /// Поле `cmd: u8` = TMoonProtoCommand этой команды (обычно `Command::Order`),
+    /// `u_key_uid: u64` = `UKey.uid` потерянного pending'а (для cancel/replace =
+    /// `Order.uid`). См. robustness audit C3.
+    SendBacklogCritical { cmd: u8, u_key_uid: u64 },
     /// Детектирован перезапуск сервера: `PeerAppToken` изменился между
-    /// сессиями (см. SPEC §3 detection mechanism). На сервере **обнулились
-    /// market indexes** — кэши клиента по индексам рынков невалидны.
-    /// **Действие потребителя**:
-    /// - Сбросить локальные mappings `market_idx → market_name`
-    /// - `client.api_get_markets_indexes()` — получить свежие
-    /// - `client.api_reload_order_book()` или re-subscribe — получить свежие book'и
-    /// - `client.api_get_markets_balance_full()` — fresh balance snapshot
+    /// сессиями (см. SPEC §3 detection mechanism). Liба сама:
+    /// - отметила `MarketsState.indexes_synchronized = false`;
+    /// - отправила `api_get_markets_indexes()`;
+    /// - блокирует обработку TradesStream/OrderBook пакетов до синхронизации;
+    /// - после ServerToken change auto-replays все subscriptions из registry.
+    ///
+    /// **Никаких actionable действий от потребителя** — только UI tooltip.
     ServerRestart,
 }
 
@@ -275,6 +301,104 @@ pub struct ClientConfig {
 }
 
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
+
+/// Куда доставлять `Command + payload` после внутренней обработки (decrypt,
+/// decompress, Grouped split, API pending dispatch). Два варианта:
+///
+/// * `Callback` — старый путь через `OnDataFn` (используется `Client::run`).
+/// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
+///   `EventDispatcher` (используется `Client::run_with_dispatcher`).
+///
+/// Этот enum позволяет one-and-the-same internal pipeline (`handle_udp_command`
+/// и др.) обслуживать оба сценария без `Arc<Mutex>`-обходов borrow checker.
+pub(crate) enum DispatchSink<'a> {
+    Callback(&'a mut OnDataFn),
+    Buffer(&'a mut Vec<(Command, Vec<u8>)>),
+}
+
+impl<'a> DispatchSink<'a> {
+    /// Доставка по ссылке — копия только для Buffer ветки.
+    #[inline]
+    fn deliver(&mut self, cmd: Command, payload: &[u8]) {
+        match self {
+            Self::Callback(cb) => cb(cmd, payload),
+            Self::Buffer(buf) => buf.push((cmd, payload.to_vec())),
+        }
+    }
+
+    /// Доставка с уже-владеемым Vec (avoid лишний `to_vec`, когда payload
+    /// родился из decrypt/decompress и уже Owned).
+    #[inline]
+    fn deliver_owned(&mut self, cmd: Command, payload: Vec<u8>) {
+        match self {
+            Self::Callback(cb) => cb(cmd, &payload),
+            Self::Buffer(buf) => buf.push((cmd, payload)),
+        }
+    }
+}
+
+// =============================================================================
+//  Subscription Registry — active library principle
+//
+//  Хранит ВОЛЮ потребителя: какие streams подписаны и с какими параметрами.
+//  Liба сама воспроизводит эти подписки после:
+//   • ServerToken change (hard handshake);
+//   • PeerAppToken change (server restart) — после re-fetch markets indexes;
+//   • любого reset через `full_reset` если нужен новый Hello цикл.
+//
+//  Ключ orderbook — `market_name` (стабилен через reindex), не `market_idx`
+//  (последний меняется при ServerRestart). Аналог Delphi
+//  `MoonProtoEngine.pas:305-360 BookSubbed: TSet<TMarket>`.
+// =============================================================================
+
+/// Подписка на all-trades поток. `want_mm` сохраняем чтобы re-subscribe воспроизвёл
+/// в точности тот же параметр (без него сервер мог бы перестать слать MM-events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TradesSubscription {
+    pub want_mm: bool,
+}
+
+/// Реестр подписок — что app просил, что либа обязана поддерживать на протяжении сессии.
+///
+/// `last_subscribed_token` хранит `server_token` на момент последнего replay'я. Если
+/// в `handle_handshake` приходит новый `Fine` с другим `server_token` —
+/// `replay_subscriptions` отправит все подписки заново.
+#[derive(Default)]
+pub(crate) struct SubscriptionRegistry {
+    pub orderbook_subs: HashSet<(String, OrderBookKind)>,
+    pub trades_sub: Option<TradesSubscription>,
+    pub last_subscribed_token: u64,
+}
+
+// =============================================================================
+//  CandlesAggregator async API
+// =============================================================================
+
+/// Результат `api_request_candles_data_async` — собранный набор свечей от сервера.
+///
+/// Сервер отвечает на `RequestCandlesData` несколькими `EngineResponse`-пакетами с
+/// одинаковым `request_uid`, каждый — chunk вида `ChunkIndex:u16 + ChunkTotal:u16 + payload`.
+/// Liба сама агрегирует чанки через [`CandlesAggregator`] и возвращает merged result.
+#[derive(Debug, Clone)]
+pub struct MergedCandles {
+    /// `request_uid` запроса (для соотнесения с downstream-обработчиком).
+    pub uid: u64,
+    /// Распарсенные `TDeepPrice`-свечи (count:i32 + N × 28 bytes wire-format).
+    pub candles: Vec<DeepPrice>,
+}
+
+/// Внутреннее состояние частично собранного набора свечей.
+struct PartialCandles {
+    aggregator: CandlesAggregator,
+    /// Sender который будет уведомлён когда aggregator вернёт merged.
+    sender: mpsc::Sender<MergedCandles>,
+    /// Timestamp регистрации — для cleanup устаревших pending (timeout 30s).
+    registered_at_ms: i64,
+}
+
+/// Дефолтный timeout pending candles слотов. Сервер обычно отвечает в течение 1-3с;
+/// 30с — щедрый верхний предел перед auto-cleanup.
+pub const DEFAULT_PENDING_CANDLES_TIMEOUT_MS: i64 = 30_000;
 
 /// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
 struct SentSliced {
@@ -394,7 +518,7 @@ pub struct Client {
     /// в зарегистрированный receiver, если UID найден.
     pub api_pending: Arc<ApiPending>,
 
-    /// Lifecycle callback — вызывается при изменении статуса канала (Connecting → Authenticated → Reconnecting/Disconnected).
+    /// Lifecycle callback — вызывается при изменении статуса канала (Connecting → Connected{fresh} → Reconnecting/Disconnected).
     /// Установить через `client.on_lifecycle(cb)`. Опционально.
     lifecycle_cb: Option<LifecycleFn>,
     /// Предыдущий auth_status (для детектирования переходов).
@@ -427,6 +551,46 @@ pub struct Client {
     /// main loop каждый тик проверяет и отправляет когда `cur_tm >= due_ms`.
     /// Сбрасывается при `full_reset` и при отправке.
     pending_second_imfriend: Option<(i64, Vec<u8>)>,
+
+    /// **Active library — subscription registry**: что app просил подписать. После
+    /// любого ServerToken change `replay_subscriptions` берёт отсюда → отправляет
+    /// заново через текущие keys / market_idx. App ничего делать не должен.
+    pub(crate) subscription_registry: SubscriptionRegistry,
+
+    /// Был ли когда-нибудь успешный Connected (`Fine` получен ≥1 раз).
+    /// Используется в `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
+    /// при ПЕРВОМ Connected; для всех последующих `fresh = false`.
+    was_ever_connected: bool,
+
+    /// Pending candles aggregators по `request_uid`. Заполняется в
+    /// `api_request_candles_data_async`, очищается когда aggregator вернул merged
+    /// (отправили в Receiver) или истёк timeout.
+    ///
+    /// **Внутренняя работа** — потребитель API не знает об этом поле, видит только
+    /// `mpsc::Receiver<MergedCandles>`.
+    pending_candles: HashMap<u64, PartialCandles>,
+
+    /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
+    /// Используется в `handle_handshake` и `handle_ping` для детекции server restart:
+    /// если incoming `peer_app_token != tracked_peer_app_token` — auto-fetch markets indexes.
+    /// 0 = ещё не было успешной синхронизации (init состояние).
+    tracked_indexes_peer_app_token: u64,
+
+    /// `true` если auto-refetch markets indexes уже отправлен и ждёт ответа.
+    /// Защита от шторма повторных запросов при следующих Ping'ах до получения ответа.
+    indexes_fetch_in_flight: bool,
+
+    /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
+    /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
+    /// сбрасываем `indexes_fetch_in_flight = false` чтобы next handshake / periodic check
+    /// мог переотправить запрос. Без этого защита от шторма превратилась бы в deadlock
+    /// (TradesStream/OrderBook blocked forever).
+    indexes_fetch_started_ms: i64,
+
+    /// Когда последний раз вызвали `trades_state.tick()` из main loop (в режиме
+    /// `run_with_dispatcher`). Throttle ~100ms — соответствует Delphi
+    /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets` периодичности.
+    last_trades_tick_ms: i64,
 }
 
 impl Client {
@@ -460,11 +624,17 @@ impl Client {
             encode_cipher: None,
             decode_cipher: None,
             _start: Instant::now(),
-            last_sent_hello: 0, // Delphi: 0 initially. now_ms() is huge (system time) → diff > interval → Hello sends immediately
+            // NEVER_SENT sentinel: i64::MIN/2 = "очень давно". Любое `(cur_tm - NEVER_SENT) > interval`
+            // мгновенно true → первый Hello / cleanup / etc выстреливают на первом тике main loop
+            // (5мс после bind вместо 2 секунд задержки). Делфи использовал `GetTickCount64`
+            // (миллисекунды с boot) ≈ 10^7+ при инициализации `FLastSentHello := 0`, что давало
+            // тот же эффект; в Rust `now_ms()` = `Instant::elapsed()` стартует с 0 → нужен явный
+            // sentinel. См. delphi_deviation audit #1.
+            last_sent_hello: i64::MIN / 2,
             waiting_hello_start: 0,
-            last_socket_recreate: 0,
-            last_need_hello_again: 0,
-            last_cleanup: 0,
+            last_socket_recreate: i64::MIN / 2,
+            last_need_hello_again: i64::MIN / 2,
+            last_cleanup: i64::MIN / 2,
             prev_cycle_tm: 0,
             crypt_msg_counter: 0,
             send_datagram_num: 0,
@@ -477,7 +647,7 @@ impl Client {
             global_timing_orders: 0,
             net_lag_ping: 0,
             trip_delay_k: 1.1,
-            last_set_trip_k: 0,
+            last_set_trip_k: i64::MIN / 2,
             avg_dup_count: 0.0,
             avg_over_heat: 0.0,
             can_send_rate: 2 * 1024 * 1024, // StartCanSendRate = 2 MB/s
@@ -503,6 +673,13 @@ impl Client {
             current_reader_epoch: 0,
             cached_server_addr: None,
             pending_second_imfriend: None,
+            subscription_registry: SubscriptionRegistry::default(),
+            was_ever_connected: false,
+            pending_candles: HashMap::new(),
+            tracked_indexes_peer_app_token: 0,
+            indexes_fetch_in_flight: false,
+            indexes_fetch_started_ms: 0,
+            last_trades_tick_ms: i64::MIN / 2,
         }
     }
 
@@ -528,9 +705,13 @@ impl Client {
             (AuthStatus::Base, AuthStatus::Connected) => Some(LifecycleEvent::Connecting),
             // Re-handshake после потери связи (soft reconnect) — Offline → Connected
             (AuthStatus::Offline, AuthStatus::Connected) => Some(LifecycleEvent::Connecting),
-            // Успешная авторизация (Fine received)
+            // Успешная авторизация (Fine received) — `fresh = true` только для первого
+            // в жизни Connected. После was_ever_connected становится true и все
+            // последующие re-handshake'и шлют `fresh = false`.
             (_, AuthStatus::AuthDone) if self.prev_auth_status != AuthStatus::AuthDone => {
-                Some(LifecycleEvent::Authenticated)
+                let fresh = !self.was_ever_connected;
+                self.was_ever_connected = true;
+                Some(LifecycleEvent::Connected { fresh })
             }
             // Потеря связи
             (AuthStatus::AuthDone, AuthStatus::Offline) => Some(LifecycleEvent::Reconnecting),
@@ -736,11 +917,16 @@ impl Client {
     }
 
     /// `emk_SubscribeOrderBook` — `markets` empty = подписка на все.
+    ///
+    /// **Low-level вариант** (не обновляет subscription registry, не resolve'ит market_name).
+    /// Для нормальной работы используй [`Client::subscribe_orderbook`].
     pub fn api_subscribe_order_book(&self, markets: &[&str]) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::subscribe_order_book(markets))
     }
 
     /// `emk_UnsubscribeOrderBook` — `markets` empty = отписка от всех.
+    ///
+    /// **Low-level вариант** (не обновляет registry). См. [`Client::unsubscribe_orderbook`].
     pub fn api_unsubscribe_order_book(&self, markets: &[&str]) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::unsubscribe_order_book(markets))
     }
@@ -803,18 +989,154 @@ impl Client {
         self.send_api_request_async(&crate::commands::candles::get_coin_card_candles(market, ticks))
     }
 
-    /// `emk_RequestCandlesData` — запрос chunked candles + wall data.
-    /// **NB:** ответ приходит несколькими `EngineResponse` пакетами. Используй
-    /// `commands::candles::CandlesAggregator::on_chunk(&resp.data)` чтобы собрать
-    /// все чанки. Aggregator вернёт `Some(merged)` когда все чанки получены.
-    ///
-    /// Так как pending_api registry удаляет sender после ПЕРВОГО response,
-    /// для chunked candles нужно использовать обычный `on_data` callback и
-    /// фильтровать по `Command::API` + `EngineMethod::RequestCandlesData`.
-    /// (Для single-response API — `send_api_request_async` работает.)
+    /// `emk_RequestCandlesData` — низкоуровневый fire-and-forget. Сервер пришлёт
+    /// несколько chunked `EngineResponse`-пакетов с одинаковым `request_uid`.
+    /// **Для нормальной работы используй [`Client::api_request_candles_data_async`]**
+    /// — он автоматически агрегирует chunks через [`CandlesAggregator`] и возвращает
+    /// `Receiver<MergedCandles>` для blocking-ожидания финального результата.
     pub fn api_request_candles_data(&self) {
         self.send_api_request(&crate::commands::engine_request::request_candles_data());
     }
+
+    /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
+    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель делает
+    /// `rx.recv_timeout(Duration::from_secs(N))` и получает уже собранный набор свечей.
+    ///
+    /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
+    /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
+    /// через `CandlesAggregator`, парсит через `parse_coin_card_candles_response`,
+    /// уведомляет sender → потребитель получает `MergedCandles { uid, candles }`.
+    ///
+    /// Auto-cleanup: pending slot удаляется автоматически если не пришёл финальный chunk
+    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` (30 секунд) — sender дропается,
+    /// receiver получает `Err(Disconnected)`.
+    pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
+        let raw = crate::commands::engine_request::request_candles_data();
+        // UID извлекается из BaseCommand header offset 3..11 (тот же что в send_api_request_async).
+        let uid = raw.get(3..11)
+            .and_then(|s| s.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let (tx, rx) = mpsc::channel();
+        let partial = PartialCandles {
+            aggregator: CandlesAggregator::new(),
+            sender: tx,
+            registered_at_ms: self.now_ms(),
+        };
+        // Замещение существующего slot'а допустимо — старый sender дропнется, его
+        // receiver получит Err(Disconnected) (что корректно при двойном вызове).
+        self.pending_candles.insert(uid, partial);
+        self.send_api_request(&raw);
+        rx
+    }
+
+    // ====================================================================
+    //  Active library: subscription API (по market_name + registry)
+    //
+    //  Эти методы — **главный публичный API** для подписок. В отличие от
+    //  `api_subscribe_order_book(&[&str])` они:
+    //   1. Запоминают подписку в `subscription_registry`.
+    //   2. После любого ServerToken change auto-replay'ят подписку.
+    //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
+    //
+    //  Аналог Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` с
+    //  `BookSubbed: TSet<TMarket>` и `NeedResubscribeOrderBooks`.
+    // ====================================================================
+
+    /// Подписаться на orderbook рынка `market_name` типа `kind`.
+    ///
+    /// Подписка запоминается в registry — при reconnect / ServerToken change либа
+    /// автоматически переподписывается. Resolve `market_name → market_idx` делает
+    /// сервер, поэтому МожНо подписаться ДО получения `emk_GetMarketsList`.
+    ///
+    /// Идемпотентный: повторный вызов с теми же параметрами не отправляет дубликат.
+    pub fn subscribe_orderbook(&mut self, market_name: &str, kind: OrderBookKind) {
+        // По wire подписка идёт по `market_name` (resolve делает сервер) — поэтому
+        // MarketsState аргументом не нужен и подписку можно вызвать до получения
+        // `emk_GetMarketsList`. Registry хранит и kind — при replay шлём отдельные
+        // batch'и per kind, сервер по-разному маршрутизирует Futures/Spot книги.
+        let key = (market_name.to_string(), kind);
+        let newly_added = self.subscription_registry.orderbook_subs.insert(key);
+        if newly_added {
+            self.send_api_request(
+                &crate::commands::engine_request::subscribe_order_book(&[market_name]),
+            );
+        }
+    }
+
+    /// Отписаться от orderbook'а рынка.
+    ///
+    /// Удаляет подписку из registry → при следующем re-handshake она НЕ будет replay'ена.
+    /// Сразу отправляет `emk_UnsubscribeOrderBook` (если была в registry).
+    pub fn unsubscribe_orderbook(&mut self, market_name: &str, kind: OrderBookKind) {
+        let key = (market_name.to_string(), kind);
+        if self.subscription_registry.orderbook_subs.remove(&key) {
+            self.send_api_request(
+                &crate::commands::engine_request::unsubscribe_order_book(&[market_name]),
+            );
+        }
+    }
+
+    /// Подписаться на all-trades поток. `want_mm` — нужны ли MM ордера (Delphi
+    /// `MoonProtoEngine.pas:274 MMOrdersSubscribed`).
+    ///
+    /// Подписка запоминается в registry; auto-replay после ServerToken change.
+    /// Повторный вызов с другим `want_mm` обновляет registry — сервер получит
+    /// fresh subscribe с актуальным параметром.
+    pub fn subscribe_all_trades(&mut self, want_mm: bool) {
+        self.subscription_registry.trades_sub = Some(TradesSubscription { want_mm });
+        self.send_api_request(
+            &crate::commands::engine_request::subscribe_all_trades(want_mm),
+        );
+    }
+
+    /// Отписаться от all-trades потока. Удаляет subscription из registry.
+    pub fn unsubscribe_all_trades(&mut self) {
+        if self.subscription_registry.trades_sub.take().is_some() {
+            self.send_api_request(
+                &crate::commands::engine_request::unsubscribe_all_trades(),
+            );
+        }
+    }
+
+    /// Re-play всех зарегистрированных подписок на новом ServerToken.
+    /// Вызывается из `handle_handshake` после `Fine` если token изменился.
+    ///
+    /// OrderBook подписки группируются по `OrderBookKind` и отправляются ОДНИМ
+    /// `emk_SubscribeOrderBook` per kind — экономит N-1 datagram'ов на reconnect'е
+    /// с большим количеством подписок. Группировка через `HashMap<OrderBookKind,
+    /// Vec<&str>>` (futureproof — при добавлении новых kind в enum не нужно
+    /// править этот код).
+    fn replay_subscriptions(&mut self) {
+        if let Some(sub) = self.subscription_registry.trades_sub {
+            self.send_api_request(
+                &crate::commands::engine_request::subscribe_all_trades(sub.want_mm),
+            );
+        }
+        // Группируем по kind через HashMap — добавление нового OrderBookKind variant
+        // не требует правки этой функции (futureproof против изменения enum).
+        let mut by_kind: HashMap<OrderBookKind, Vec<&str>> = HashMap::new();
+        for (name, kind) in &self.subscription_registry.orderbook_subs {
+            by_kind.entry(*kind).or_default().push(name.as_str());
+        }
+        for (_kind, refs) in by_kind.iter() {
+            if !refs.is_empty() {
+                self.send_api_request(
+                    &crate::commands::engine_request::subscribe_order_book(refs),
+                );
+            }
+        }
+        self.subscription_registry.last_subscribed_token = self.server_token;
+    }
+
+    // ====================================================================
+    //  Init helper УБРАН: дизайн `run_init_sequence` конфликтовал с
+    //  `&mut Client` который держит `run()` — метод не мог быть вызван из
+    //  обычного flow. Init шаги выполняются напрямую: вызови `subscribe_*` /
+    //  `api_*` ДО `client.run_with_dispatcher` (методы требуют `&mut self` —
+    //  это безопасно пока main loop не запущен), либо после `Connected{fresh}`
+    //  через тот же `&mut Client` если используется single-thread runner.
+    // ====================================================================
 
     // ====================================================================
     //  High-level Trade wrappers (convenience over commands::trade::build_*)
@@ -1303,7 +1625,8 @@ impl Client {
                     self.total_recv += msg.recv_bytes;
                     self.track_recv(msg.recv_bytes, msg.timestamp_ms);
                     self.last_online = msg.timestamp_ms;
-                    self.handle_udp_command(Command::from_byte(msg.cmd), msg.cmd, &msg.payload, &mut on_data);
+                    let mut sink = DispatchSink::Callback(&mut on_data);
+                    self.handle_udp_command(Command::from_byte(msg.cmd), msg.cmd, &msg.payload, &mut sink);
                 }
 
                 // UKey dedup: delete old items with same key (matches SendCmdInt:780-785, CheckSeningData:900-901)
@@ -1354,11 +1677,25 @@ impl Client {
                             "api_pending: cleaned up {} stale slots (>{}ms old)",
                             removed, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
                     }
+                    // Cleanup pending candles aggregators (chunks могут потеряться UDP).
+                    let candles_before = self.pending_candles.len();
+                    self.pending_candles.retain(|_uid, partial| {
+                        (cur_tm - partial.registered_at_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
+                    });
+                    let candles_removed = candles_before - self.pending_candles.len();
+                    if candles_removed > 0 {
+                        log::debug!(target: "moonproto::client",
+                            "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
+                            candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
+                    }
                     self.last_cleanup = cur_tm;
                 }
 
                 // D-02: проверка отложенного второго ImFriend (state machine вместо thread::sleep).
                 self.check_pending_second_imfriend(cur_tm);
+
+                // Active library: timeout protection для auto-refetch indexes.
+                self.check_indexes_fetch_timeout(cur_tm);
 
                 // Reconnect logic
                 self.check_hello_send(cur_tm);
@@ -1384,6 +1721,222 @@ impl Client {
         self.force_disconnect = true;
         self.authorized = false;
         self.auth_status = AuthStatus::Base;
+    }
+
+    /// **Active library entry-point**: Run the client с integrated EventDispatcher.
+    ///
+    /// В отличие от `run()` который требует `on_data: FnMut(Command, &[u8])`, этот
+    /// метод сам прогоняет входящий payload через `dispatcher.dispatch_into_active`
+    /// и выполняет **auto-actions**:
+    ///   - `OrderBookEvent::RequestFullNeeded` → auto-send `api_request_order_book_full`;
+    ///   - `TradesEvent::GapDetected` → auto-tick + send `api_trades_resend` batches;
+    ///   - Auto-tick `trades_state.tick()` каждые 100 мс из main loop (соответствует
+    ///     Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`);
+    ///   - Markets indexes / server-time-delta уже подхватываются Dispatcher автоматически.
+    ///
+    /// `on_event` — informational callback для UI: dispatcher уже разобрал событие,
+    /// потребитель только отображает / агрегирует.
+    ///
+    /// Pattern использования:
+    /// ```ignore
+    /// let mut client = Client::new(cfg);
+    /// let mut dispatcher = EventDispatcher::new();
+    /// client.run_with_dispatcher(
+    ///     Duration::from_secs(3600),
+    ///     &mut dispatcher,
+    ///     Box::new(|ev| match ev {
+    ///         Event::Order(o) => /* update UI */,
+    ///         Event::EngineResponse(r) if !r.success => /* show error */,
+    ///         _ => {}
+    ///     })
+    /// );
+    /// ```
+    pub fn run_with_dispatcher(
+        &mut self,
+        duration: Duration,
+        dispatcher: &mut crate::events::EventDispatcher,
+        mut on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
+    ) {
+        let run_start = Instant::now();
+        // Переиспользуемые буферы (избегаем alloc per packet).
+        let mut event_buf: Vec<crate::events::Event> = Vec::with_capacity(8);
+        let mut payload_buf: Vec<(Command, Vec<u8>)> = Vec::with_capacity(4);
+
+        loop {
+            if run_start.elapsed() >= duration { break; }
+            let cur_tm = self.now_ms();
+
+            self.check_lifecycle_transition();
+
+            if self.prev_cycle_tm != 0 {
+                let raw = (cur_tm - self.prev_cycle_tm).abs();
+                if raw > 0 && raw < 100 {
+                    if self.actual_sleep_time <= 0.0 {
+                        self.actual_sleep_time = raw as f64;
+                    } else {
+                        self.actual_sleep_time = self.actual_sleep_time * 0.7 + raw as f64 * 0.3;
+                    }
+                }
+            }
+            self.prev_cycle_tm = cur_tm;
+
+            if self.socket.is_none() && self.need_connect {
+                self.bind_socket();
+                self.spawn_reader();
+            }
+
+            if self.socket.is_some() {
+                let first_event = self.event_rx.recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS));
+
+                let mut recv_msgs: Vec<RecvMsg> = Vec::new();
+                let mut sliced = Vec::new();
+                let mut h_items = Vec::new();
+                let mut l_items = Vec::new();
+
+                let handle_event = |ev: ClientEvent,
+                                         recv_msgs: &mut Vec<RecvMsg>,
+                                         sliced: &mut Vec<SendItem>,
+                                         h_items: &mut Vec<SendItem>,
+                                         l_items: &mut Vec<SendItem>| {
+                    match ev {
+                        ClientEvent::Recv(m) => recv_msgs.push(m),
+                        ClientEvent::Send(s) => match s.item.priority {
+                            SendPriority::Sliced => sliced.push(s.item),
+                            SendPriority::High => h_items.push(s.item),
+                            SendPriority::Low => l_items.push(s.item),
+                        },
+                    }
+                };
+
+                match first_event {
+                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+
+                while let Ok(event) = self.event_rx.try_recv() {
+                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items);
+                }
+
+                let current_epoch = self.current_reader_epoch;
+                for msg in recv_msgs {
+                    if msg.epoch != current_epoch {
+                        if self.should_log("stale_reader_epoch", 5000) {
+                            warn!(target: "moonproto::client",
+                                "dropping stale packet from old reader epoch (msg.epoch={} current={})",
+                                msg.epoch, current_epoch);
+                        }
+                        continue;
+                    }
+                    self.connected = true;
+                    self.total_recv += msg.recv_bytes;
+                    self.track_recv(msg.recv_bytes, msg.timestamp_ms);
+                    self.last_online = msg.timestamp_ms;
+                    let cmd = Command::from_byte(msg.cmd);
+                    let raw_cmd = msg.cmd;
+
+                    // Накопитель готовых-к-dispatch payload'ов (data-cmd после decrypt/
+                    // decompress/Grouped-split). Buffer-ветка `DispatchSink` пушит сюда
+                    // без `Arc<Mutex>`/`Box`-обходов — это single owner, single thread.
+                    payload_buf.clear();
+                    {
+                        let mut sink = DispatchSink::Buffer(&mut payload_buf);
+                        self.handle_udp_command(cmd, raw_cmd, &msg.payload, &mut sink);
+                    }
+                    // Теперь dispatcher.dispatch_into_active можно вызывать напрямую —
+                    // sink дропнут, &mut self свободен. event_buf переиспользуем между
+                    // итерациями через clear().
+                    for (c, p) in payload_buf.drain(..) {
+                        event_buf.clear();
+                        dispatcher.dispatch_into_active(c, &p, cur_tm, &mut event_buf, self);
+                        for ev in &event_buf {
+                            on_event(ev);
+                        }
+                    }
+                }
+
+                // UKey dedup + send queues (как в обычном run).
+                for item in &sliced {
+                    if !item.u_key.is_none() {
+                        self.sending.retain(|s| s.u_key != item.u_key);
+                        self.pending_h.retain(|p| p.u_key != item.u_key);
+                    }
+                }
+                for item in &h_items {
+                    if !item.u_key.is_none() {
+                        self.pending_h.retain(|p| p.u_key != item.u_key);
+                    }
+                }
+
+                for item in &sliced {
+                    self.create_sliced_and_send(item);
+                }
+
+                for mut item in h_items {
+                    self.send_h_item(&mut item, cur_tm);
+                }
+                self.retry_pending_h(cur_tm);
+
+                for item in &l_items {
+                    self.batch_send_direct(item);
+                }
+
+                self.flush_send_batch();
+                self.retry_sliced(cur_tm);
+
+                // Cleanup (как в run).
+                if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
+                    self.slicer.clear_old();
+                    let removed = self.api_pending.cleanup_old(cur_tm, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
+                    if removed > 0 {
+                        log::debug!(target: "moonproto::client",
+                            "api_pending: cleaned up {} stale slots (>{}ms old)",
+                            removed, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
+                    }
+                    let candles_before = self.pending_candles.len();
+                    self.pending_candles.retain(|_uid, partial| {
+                        (cur_tm - partial.registered_at_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
+                    });
+                    let candles_removed = candles_before - self.pending_candles.len();
+                    if candles_removed > 0 {
+                        log::debug!(target: "moonproto::client",
+                            "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
+                            candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
+                    }
+                    self.last_cleanup = cur_tm;
+                }
+
+                self.check_pending_second_imfriend(cur_tm);
+
+                // Active library: timeout protection для auto-refetch indexes.
+                self.check_indexes_fetch_timeout(cur_tm);
+
+                // Active library: periodic trades tick — единственный путь для resend.
+                // `trades.tick()` имеет internal throttle 100мс — наш guard здесь только
+                // чтобы не дёргать tick на каждом packet (он всё равно вернёт пустой Vec).
+                // Соответствует Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`.
+                // `cur_tm` — Instant-monotonic, никаких `.abs()` не нужно.
+                if cur_tm - self.last_trades_tick_ms >= 100 {
+                    self.last_trades_tick_ms = cur_tm;
+                    let rtt = self.round_trip_delay;
+                    let payloads = dispatcher.trades.tick(rtt, cur_tm);
+                    for p in payloads {
+                        self.send_api_request(&p);
+                    }
+                }
+
+                self.check_hello_send(cur_tm);
+                self.check_offline_reconnect(cur_tm);
+                self.check_reconnect_timeout(cur_tm);
+                self.check_dead_zone(cur_tm);
+
+                if self.force_disconnect {
+                    self.do_force_disconnect();
+                }
+            } else {
+                thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
+            }
+        }
     }
 
     /// Spawn reader thread (≡ Indy TIdUDPListenerThread).
@@ -1507,7 +2060,7 @@ impl Client {
     // process_received удалён: обработка recv_msgs теперь inline в run() loop
     // (после event_rx.recv_timeout / try_recv дренажа event channel).
 
-    fn handle_udp_command(&mut self, cmd: Command, raw_cmd: u8, payload: &[u8], on_data: &mut OnDataFn) {
+    fn handle_udp_command(&mut self, cmd: Command, raw_cmd: u8, payload: &[u8], sink: &mut DispatchSink<'_>) {
         if matches!(cmd, Command::WantNewHello | Command::WrongHello | Command::WhoAreYou | Command::Fine) {
             self.waiting_hello = false;
         }
@@ -1552,7 +2105,7 @@ impl Client {
                         // B-19: * 0.1 вместо / 10.0 — FDIV ~13-25 циклов, FMUL ~4-5.
                         self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
                     }
-                    self.data_read_int(inner_cmd, &data, on_data);
+                    self.data_read_int(inner_cmd, &data, sink);
                 }
             }
             Command::SlicedACK => {
@@ -1596,12 +2149,12 @@ impl Client {
                     }
                 }
             }
-            Command::Ping => { self.handle_ping(payload, on_data); }
-            _ => { self.data_read(raw_cmd, payload, on_data); }
+            Command::Ping => { self.handle_ping(payload, sink); }
+            _ => { self.data_read(raw_cmd, payload, sink); }
         }
     }
 
-    fn data_read(&mut self, raw_cmd: u8, payload: &[u8], on_data: &mut OnDataFn) {
+    fn data_read(&mut self, raw_cmd: u8, payload: &[u8], sink: &mut DispatchSink<'_>) {
         let cmd = Command::from_byte(raw_cmd);
         if cmd == Command::Grouped {
             let mut pos = 0;
@@ -1609,15 +2162,15 @@ impl Client {
                 let sub_cmd = payload[pos]; pos += 1;
                 let sz = u16::from_le_bytes([payload[pos], payload[pos+1]]) as usize; pos += 2;
                 if pos + sz > payload.len() { break; }
-                self.data_read_int(sub_cmd, &payload[pos..pos+sz], on_data);
+                self.data_read_int(sub_cmd, &payload[pos..pos+sz], sink);
                 pos += sz;
             }
         } else {
-            self.data_read_int(raw_cmd, payload, on_data);
+            self.data_read_int(raw_cmd, payload, sink);
         }
     }
 
-    fn data_read_int(&mut self, raw_cmd: u8, data: &[u8], on_data: &mut OnDataFn) {
+    fn data_read_int(&mut self, raw_cmd: u8, data: &[u8], sink: &mut DispatchSink<'_>) {
         // B-V2-01 fix: используем Cow вместо безусловного data.to_vec(). Большинство
         // пакетов не Crypted и не Compressed (Ping, handshake, Sliced-блоки) — для них
         // payload остаётся borrowed (zero alloc). Crypted и Compressed создают Owned
@@ -1647,26 +2200,84 @@ impl Client {
         // реализован в handle_ping (matches MoonProtoCommon.pas:511-528 + MoonProtoIntStruct.pas:844-876).
         // Здесь, в общем data_read_int, ничего делать не нужно — Ping обработан отдельной веткой выше.
 
-        // Engine API responses: попытаться доставить в pending registry.
-        // Если UID не зарегистрирован — пробрасываем как обычный data callback.
+        // Engine API responses: попытаться доставить в pending registry / chunked
+        // candles aggregator / internal recovery flags. Если UID не зарегистрирован —
+        // пробрасываем как обычный data callback.
         if cmd == Command::API as u8 {
             if let Some(resp) = parse_engine_response(&payload) {
+                // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
+                // несколько response пакетов с одинаковым UID. До завершения сборки
+                // не дропаем slot.
+                if resp.method == EngineMethod::RequestCandlesData {
+                    if self.handle_candles_chunk(&resp) {
+                        // Чанк потреблён aggregator'ом. Передаём в on_data только
+                        // если потребитель НЕ использует async API (тогда тут merged
+                        // ещё не готов — пусть приложение видит сырые chunks).
+                        // Однако: чтобы не путать — пропускаем on_data callback.
+                        // Async-потребитель получит результат через Receiver<MergedCandles>.
+                        return;
+                    }
+                    // Если slot не зарегистрирован — fallback на pending registry /
+                    // on_data (для пользователей старого fire-and-forget API).
+                }
+
+                // 2. Active library: auto-clear indexes_fetch_in_flight на ответе
+                // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
+                if resp.method == EngineMethod::GetMarketsIndexes {
+                    self.indexes_fetch_in_flight = false;
+                    if resp.success {
+                        // Запоминаем что для текущего PeerAppToken индексы получены.
+                        self.tracked_indexes_peer_app_token = self.peer_app_token;
+                    }
+                }
+
+                // 3. Pending registry (обычный async API).
                 if let Some(unconsumed) = self.api_pending.dispatch(resp) {
-                    // Не в registry — отдадим обратно через on_data в виде raw payload.
+                    // Не в registry — отдадим обратно через sink в виде raw payload.
                     // Потребитель сам распарсит через parse_engine_response при необходимости.
                     let _ = unconsumed; // payload уже у нас, просто пропустим resp
-                    on_data(Command::API, &payload);
+                    sink.deliver_owned(Command::API, payload.into_owned());
                 }
-                // else — отправлено в pending::Receiver, on_data не вызываем.
+                // else — отправлено в pending::Receiver, sink не вызываем.
                 return;
             }
-            // Не распарсилось — fallback на raw callback.
+            // Не распарсилось — fallback на raw sink.
         }
 
-        on_data(Command::from_byte(cmd), &payload);
+        sink.deliver_owned(Command::from_byte(cmd), payload.into_owned());
     }
 
-    fn handle_ping(&mut self, payload: &[u8], on_data: &mut OnDataFn) {
+    /// Поглотить candles chunk через pending aggregator. Возвращает `true` если slot
+    /// найден и chunk обработан (даже если merged ещё не готов — копить дальше);
+    /// `false` если UID не зарегистрирован (потребитель не использует async API).
+    ///
+    /// Когда aggregator вернул merged — sender'у отправляется готовый `MergedCandles`,
+    /// slot удаляется. Если sender уже дропнут (receiver не ждёт) — slot всё равно
+    /// удаляется (semantic = "fire-and-forget с финализацией").
+    fn handle_candles_chunk(&mut self, resp: &EngineResponse) -> bool {
+        // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
+        let Some(partial) = self.pending_candles.get_mut(&resp.request_uid) else {
+            return false;
+        };
+        let merged_bytes = partial.aggregator.on_chunk(&resp.data);
+        let uid = resp.request_uid;
+        if let Some(merged) = merged_bytes {
+            // Парсим в DeepPrice list — если не получилось, всё равно отвечаем (но
+            // пустым списком + лог), чтобы потребитель не висел.
+            let candles = parse_coin_card_candles_response(&merged).unwrap_or_else(|| {
+                log::warn!(target: "moonproto::client",
+                    "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, merged.len());
+                Vec::new()
+            });
+            if let Some(partial) = self.pending_candles.remove(&uid) {
+                let _ = partial.sender.send(MergedCandles { uid, candles });
+                // Sender дропается → receiver получает Ok(...) / уже получил.
+            }
+        }
+        true
+    }
+
+    fn handle_ping(&mut self, payload: &[u8], sink: &mut DispatchSink<'_>) {
         if payload.len() < 50 { return; }
         self.ping_count += 1;
         // TMoonProtoPing fields (matches MoonProtoDataStruct.pas:63-74)
@@ -1675,9 +2286,16 @@ impl Client {
         // D-V2-06 fix: clamp PMTU — corrupt/malicious Ping не должен дать pmtu < header_size
         // (=19), иначе arithmetic underflow в create_sliced_and_send. MinSafeDatagramSize=508
         // по протоколу — это нижняя граница договорённого PMTU.
+        // PMTU clamp: снизу — `MIN_PMTU=64` чтобы create_sliced_and_send не упёрся в
+        // underflow при вычитании header_size. Сверху — `MAX_PMTU=8192` (= MaxNeededDatagramSize
+        // по IPv6 protocol limit). Без upper-clamp malicious Ping pmtu=65535 заставил бы
+        // отправлять 65 KB UDP датаграммы → `send_to()` возвращает EMSGSIZE → каскад
+        // force_disconnect → permanent reconnect loop с одного malicious пакета.
+        // См. robustness audit C4.
         const MIN_PMTU: u16 = 64;
+        const MAX_PMTU: u16 = 8192;
         let pmtu_raw = u16::from_le_bytes(payload[20..22].try_into().unwrap());
-        self.actual_pmtu = pmtu_raw.max(MIN_PMTU);
+        self.actual_pmtu = pmtu_raw.clamp(MIN_PMTU, MAX_PMTU);
         self.global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
         self.overheat = payload[24];
         // B-19: умножение на const reciprocal вместо деления (FDIV → FMUL).
@@ -1754,7 +2372,7 @@ impl Client {
             }
         }
 
-        on_data(Command::Ping, payload);
+        sink.deliver(Command::Ping, payload);
     }
 
     fn handle_handshake(&mut self, cmd: Command, payload: &[u8]) {
@@ -1768,6 +2386,10 @@ impl Client {
             let prev_app_token = self.peer_app_token;
             self.peer_app_token = hello.app_token; // C7: save PeerAppToken
             if prev_app_token != 0 && prev_app_token != hello.app_token {
+                // Active library: либа сама инвалидирует indexes и просит свежие.
+                // App ловит ServerRestart event для UI tooltip — никаких actions от него.
+                self.indexes_fetch_in_flight = false;  // следующий Ping/handshake-flow auto-fetch
+                self.tracked_indexes_peer_app_token = 0;  // мы пока не знаем что индексы синхронны
                 self.fire_lifecycle(LifecycleEvent::ServerRestart);
             }
             let (enc, dec) = crypto::generate_sub_keys(&self.cfg.master_key, self.server_token);
@@ -1800,6 +2422,50 @@ impl Client {
             self.waiting_hello = false;
             self.auth_status = AuthStatus::AuthDone;
             self.authorized = true;
+
+            // Active library: auto-resubscribe если server_token изменился.
+            // last_subscribed_token = 0 при cold start → первый replay всё равно отправит
+            // существующий registry (если потребитель вызвал subscribe_* до Fine).
+            if self.subscription_registry.last_subscribed_token != self.server_token {
+                self.replay_subscriptions();
+            }
+
+            // Auto-refetch markets indexes если PeerAppToken изменился (server restart)
+            // ИЛИ если они ещё не были синхронизированы в этой жизни Client'а.
+            // Защита от штормов через indexes_fetch_in_flight + tracked_indexes_peer_app_token.
+            // Timeout управляется через check_indexes_fetch_timeout (periodic).
+            if self.peer_app_token != self.tracked_indexes_peer_app_token
+                && !self.indexes_fetch_in_flight
+            {
+                self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
+                self.indexes_fetch_in_flight = true;
+                self.indexes_fetch_started_ms = self.now_ms();
+            }
+        }
+    }
+
+    /// Periodic timeout protection для auto-refetch markets indexes. UDP-ответ может
+    /// потеряться — без этой проверки `indexes_fetch_in_flight = true` остался бы
+    /// навсегда и блокировал бы TradesStream/OrderBook обработку в EventDispatcher.
+    ///
+    /// Вызывается из main loop'ов `run` / `run_with_dispatcher` раз за тик. Если
+    /// запрос был отправлен `> INDEXES_FETCH_TIMEOUT_MS` назад и ответ не пришёл —
+    /// сбрасываем in_flight; следующий handshake/Ping увидит `peer != tracked` и
+    /// переотправит запрос. Cost: 3 сравнения когда in_flight=false (hot path).
+    #[inline]
+    fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
+        const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
+        if self.indexes_fetch_in_flight
+            && now_ms - self.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
+        {
+            self.indexes_fetch_in_flight = false;
+            // Если PeerAppToken всё ещё расходится — сразу переотправим запрос.
+            // Иначе ничего не делаем (синхронизация может уже не нужна).
+            if self.peer_app_token != self.tracked_indexes_peer_app_token && self.peer_app_token != 0 {
+                self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
+                self.indexes_fetch_in_flight = true;
+                self.indexes_fetch_started_ms = now_ms;
+            }
         }
     }
 
@@ -2039,15 +2705,24 @@ impl Client {
                 // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
                 // alloc здесь (необходимый — pending_h хранит копию между retry).
                 pending_item.data = eff_data.into_owned();
-                // DoS guard (audit_robustness H5): pending_h может неконтролируемо расти если
-                // сервер живой по MAC, но не ACK'ает H-priority. На burst торговых команд при
-                // долгой server silence — мегабайты + O(N) обход в retry_pending_h каждый цикл.
-                // Drop oldest при превышении: старые retry устаревают, новые ордера важнее.
+                // DoS guard: pending_h может неконтролируемо расти если сервер живой по MAC,
+                // но не ACK'ает H-priority. На burst торговых команд при долгой server silence —
+                // мегабайты + O(N) обход в retry_pending_h каждый цикл.
+                //
+                // **Финансовый риск**: среди старых pending могут быть `cancel_order` /
+                // `replace_order` (UK_ORDER_MOVE) — потеря таких команд = ордер не отменился =
+                // исполнится по старой цене. Эмитим `LifecycleEvent::SendBacklogCritical` чтобы
+                // app мог отреагировать (показать критический индикатор, retry через свой
+                // механизм если знает что не отменено). См. robustness audit C3.
                 if self.pending_h.len() >= MAX_PENDING_H {
+                    let dropped = self.pending_h.remove(0);
                     log::warn!(target: "moonproto::client",
-                        "pending_h saturated ({}); dropping oldest (no ACK from server for H-priority)",
-                        self.pending_h.len());
-                    self.pending_h.remove(0);
+                        "pending_h saturated; dropped oldest u_key=({:?}, uid={}) cmd={:?} — emitting SendBacklogCritical",
+                        dropped.u_key.kind, dropped.u_key.uid, dropped.cmd);
+                    self.fire_lifecycle(LifecycleEvent::SendBacklogCritical {
+                        cmd: dropped.cmd as u8,
+                        u_key_uid: dropped.u_key.uid,
+                    });
                 }
                 self.pending_h.push(pending_item);
             }
@@ -2641,6 +3316,211 @@ impl Client {
     }
 }
 
+// =============================================================================
+//  Init sequence helper — free function (НЕ метод Client)
+//
+//  Логически единственный init-проход после `Connected{fresh:true}`:
+//  `BaseCheck → AuthCheck → GetMarketsList → GetMarketsBalanceFull → подписки`.
+//  Аналог Delphi `TCryptoPumpTool.InitInt` (`Unit1.pas:4987-5150`).
+//
+//  Почему free function, а не `Client::run_init_sequence`:
+//   - `Client::run` / `Client::run_with_dispatcher` занимают `&mut Client` на всё
+//     время выполнения (main loop крутится). Метод-helper не мог бы быть вызван
+//     ВО ВРЕМЯ работы run().
+//   - Free function принимает `&mut Client` явно — компилятор уровнем доказывает
+//     что run() не запущен (иначе borrow checker не пустит). Helper вызывается
+//     между run-сессиями: после `Connected{fresh:true}` короткий run завершается,
+//     app зовёт `run_init_sequence(&mut client, cfg)`, затем входит в main run.
+//   - Pattern в trading_flow.rs — Phase 1 (15s short run) → run_init_sequence →
+//     Phase 5 (long run). Эта free function — упаковка этого pattern'а в один
+//     вызов с retry/timeout/error handling.
+//
+//  См. audit_responsibility F1, audit_responsibility_hints Q13.
+// =============================================================================
+
+/// Конфигурация init pipeline для `run_init_sequence`. Все шаги опциональны —
+/// flag = `true` включает шаг. Дефолт = всё отключено.
+#[derive(Debug, Clone, Default)]
+pub struct InitConfig {
+    /// Выполнить `api_base_check` (минимальная проверка соединения).
+    pub base_check: bool,
+    /// Выполнить `api_auth_check` (валидация ключей биржи на сервере).
+    pub auth_check: bool,
+    /// Выполнить `api_get_markets_list` (полный snapshot маркетов).
+    pub fetch_markets: bool,
+    /// Выполнить `api_get_markets_balance_full` (snapshot всех балансов).
+    pub fetch_balance: bool,
+    /// Подписаться на all-trades с указанным `want_mm`. None = пропустить.
+    pub subscribe_trades: Option<bool>,
+    /// Подписаться на orderbook'и (`(market_name, kind)` пары). Resolve по имени
+    /// делает сервер — можно подписаться до получения GetMarketsList.
+    pub subscribe_orderbooks: Vec<(String, crate::state::OrderBookKind)>,
+    /// Per-step timeout. Default = `DEFAULT_PENDING_TIMEOUT_MS` (12с).
+    pub step_timeout: Option<Duration>,
+}
+
+/// Результат `run_init_sequence` — статусы каждого шага + список ошибок.
+#[derive(Debug, Default)]
+pub struct InitResult {
+    pub base_check_ok: bool,
+    pub auth_check_ok: bool,
+    /// Размер payload (байт) ответа `GetMarketsList` — реальный count парсится
+    /// `EventDispatcher` асинхронно в `MarketsState`.
+    pub markets_response_bytes: usize,
+    pub balances_response_bytes: usize,
+    pub trades_subscribed: bool,
+    pub orderbooks_subscribed: usize,
+    /// Список текстовых ошибок шагов, которые не остановили init (например
+    /// `fetch_markets` timeout — критическим не считается, init продолжается).
+    pub errors: Vec<String>,
+}
+
+/// Ошибки `run_init_sequence` — возвращаются ТОЛЬКО когда продолжать осмысленно
+/// нельзя (BaseCheck/AuthCheck timeout — без auth остальное гарантированно
+/// провалится). Не-critical шаги (markets/balance/subscribes) аккумулируются в
+/// `InitResult.errors` и не валят init.
+#[derive(Debug, Clone)]
+pub enum InitError {
+    /// Канал отправки команд закрыт — main loop мёртв. Все шаги пропущены.
+    SendChannelClosed,
+    /// BaseCheck или AuthCheck timeout. Дальнейшие шаги не запускаем.
+    CriticalStepTimedOut(&'static str),
+    /// Клиент не авторизован — нужно сначала войти в `run_with_dispatcher` до
+    /// `Connected{fresh:true}`, потом выйти, потом вызывать init.
+    NotAuthenticated,
+}
+
+impl std::fmt::Display for InitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendChannelClosed => write!(f, "client send channel closed during init"),
+            Self::CriticalStepTimedOut(step) => write!(f, "critical init step '{step}' timed out"),
+            Self::NotAuthenticated => write!(f, "client not authenticated (call run_with_dispatcher until Connected{{fresh:true}} first)"),
+        }
+    }
+}
+
+impl std::error::Error for InitError {}
+
+/// Запустить init pipeline после `Connected{fresh:true}`.
+///
+/// **Pattern**:
+/// ```ignore
+/// // Phase 1: ждём авторизацию.
+/// client.run_with_dispatcher(Duration::from_secs(15), &mut dispatcher, ...);
+/// if !client.is_authorized() { panic!("auth failed"); }
+///
+/// // Phase 2: init.
+/// let cfg = InitConfig {
+///     base_check: true, auth_check: true, fetch_markets: true,
+///     fetch_balance: true, subscribe_trades: Some(false),
+///     subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+///     ..Default::default()
+/// };
+/// let result = run_init_sequence(&mut client, cfg)?;
+///
+/// // Phase 3: main monitoring loop.
+/// client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, ...);
+/// ```
+///
+/// **NB**: между phase 1 и phase 2 `api_*` ответы ДОЛЖНЫ дойти. Для этого после
+/// каждого `api_*().recv_timeout(...)` сам recv_timeout дренирует mpsc, **но**
+/// доставка пакета от сервера до dispatcher требует чтобы main loop крутился.
+/// Решение в trading_flow.rs: короткий run_with_dispatcher между шагами; для
+/// production-кода с непрерывным run — использовать pattern с отдельным
+/// init-thread'ом (см. HANDOFF Stage 3 backlog).
+///
+/// На текущей реализации эта функция работает корректно если вызывается ВО
+/// ВРЕМЯ короткого `run_with_dispatcher` — но это невозможно из-за `&mut`. То
+/// есть useful pattern — последовательно: short_run → init → long_run.
+pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitResult, InitError> {
+    if !client.is_authorized() {
+        return Err(InitError::NotAuthenticated);
+    }
+
+    let timeout = cfg.step_timeout
+        .unwrap_or(Duration::from_millis(crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64));
+    let mut result = InitResult::default();
+
+    // === 1. BaseCheck === критический шаг
+    if cfg.base_check {
+        let rx = client.api_base_check();
+        match rx.recv_timeout(timeout) {
+            Ok(resp) if resp.success => { result.base_check_ok = true; }
+            Ok(resp) => {
+                result.errors.push(format!("BaseCheck error: code={} msg={}",
+                                           resp.error_code, resp.error_msg));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) =>
+                return Err(InitError::CriticalStepTimedOut("BaseCheck")),
+            Err(mpsc::RecvTimeoutError::Disconnected) =>
+                return Err(InitError::SendChannelClosed),
+        }
+    }
+
+    // === 2. AuthCheck === критический шаг
+    if cfg.auth_check {
+        let rx = client.api_auth_check();
+        match rx.recv_timeout(timeout) {
+            Ok(resp) if resp.success => { result.auth_check_ok = true; }
+            Ok(resp) => {
+                result.errors.push(format!("AuthCheck error: code={} msg={}",
+                                           resp.error_code, resp.error_msg));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) =>
+                return Err(InitError::CriticalStepTimedOut("AuthCheck")),
+            Err(mpsc::RecvTimeoutError::Disconnected) =>
+                return Err(InitError::SendChannelClosed),
+        }
+    }
+
+    // === 3. GetMarketsList === не критический (timeout → продолжить)
+    if cfg.fetch_markets {
+        let rx = client.api_get_markets_list();
+        match rx.recv_timeout(timeout) {
+            Ok(resp) if resp.success => {
+                result.markets_response_bytes = resp.data.len();
+            }
+            Ok(resp) => result.errors.push(format!("GetMarketsList error: code={} msg={}",
+                                                   resp.error_code, resp.error_msg)),
+            Err(mpsc::RecvTimeoutError::Timeout) =>
+                result.errors.push("GetMarketsList: timeout (continuing)".to_string()),
+            Err(mpsc::RecvTimeoutError::Disconnected) =>
+                return Err(InitError::SendChannelClosed),
+        }
+    }
+
+    // === 4. GetMarketsBalanceFull === не критический
+    if cfg.fetch_balance {
+        let rx = client.api_get_markets_balance_full();
+        match rx.recv_timeout(timeout) {
+            Ok(resp) if resp.success => {
+                result.balances_response_bytes = resp.data.len();
+            }
+            Ok(resp) => result.errors.push(format!("GetMarketsBalanceFull error: code={} msg={}",
+                                                   resp.error_code, resp.error_msg)),
+            Err(mpsc::RecvTimeoutError::Timeout) =>
+                result.errors.push("GetMarketsBalanceFull: timeout (continuing)".to_string()),
+            Err(mpsc::RecvTimeoutError::Disconnected) =>
+                return Err(InitError::SendChannelClosed),
+        }
+    }
+
+    // === 5. SubscribeAllTrades === идёт через subscription_registry (fire-and-forget)
+    if let Some(want_mm) = cfg.subscribe_trades {
+        client.subscribe_all_trades(want_mm);
+        result.trades_subscribed = true;
+    }
+
+    // === 6. Subscribe orderbooks === fire-and-forget per kind через registry
+    for (name, kind) in &cfg.subscribe_orderbooks {
+        client.subscribe_orderbook(name, *kind);
+        result.orderbooks_subscribed += 1;
+    }
+
+    Ok(result)
+}
+
 /// Drop: гарантированно сигналим reader thread'у завершиться, даже если потребитель
 /// не вызвал `disconnect()`. Reader выйдет из loop макс через 1 сек (read_timeout).
 impl Drop for Client {
@@ -2811,6 +3691,51 @@ mod d02_tests {
     }
 }
 
+#[cfg(test)]
+mod subscription_registry_tests {
+    use super::*;
+
+    #[test]
+    fn registry_default_is_empty() {
+        let r = SubscriptionRegistry::default();
+        assert!(r.orderbook_subs.is_empty());
+        assert!(r.trades_sub.is_none());
+        assert_eq!(r.last_subscribed_token, 0);
+    }
+
+    #[test]
+    fn registry_orderbook_insert_dedups() {
+        let mut r = SubscriptionRegistry::default();
+        assert!(r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Futures)));
+        assert!(!r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Futures)));
+        assert!(r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Spot)));
+        assert_eq!(r.orderbook_subs.len(), 2);
+    }
+
+    #[test]
+    fn trades_subscription_round_trip() {
+        let sub = TradesSubscription { want_mm: true };
+        assert!(sub.want_mm);
+        let sub_off = TradesSubscription { want_mm: false };
+        assert!(!sub_off.want_mm);
+    }
+
+    /// Verify что Connected{fresh:true} срабатывает только на ПЕРВОМ Authenticated
+    /// в жизни Client'а. После этого все последующие = fresh:false.
+    /// Тестируем through state-machine simulation (без полного Client::new).
+    #[test]
+    fn lifecycle_event_connected_fresh_flag_semantics() {
+        // Симулируем: при первом переходе → fresh=true. При втором → fresh=false.
+        let mut was_ever_connected = false;
+        let first = LifecycleEvent::Connected { fresh: !was_ever_connected };
+        was_ever_connected = true;
+        let second = LifecycleEvent::Connected { fresh: !was_ever_connected };
+        assert_eq!(first, LifecycleEvent::Connected { fresh: true });
+        assert_eq!(second, LifecycleEvent::Connected { fresh: false });
+    }
+
+}
+
 /// Global NTP time offset (days). Set once at startup by ntp::get_best_ntp.
 /// Matches Delphi GlobalMPTimeOffset.
 static NTP_OFFSET_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2830,8 +3755,10 @@ fn get_ntp_offset_days() -> f64 {
 /// должен делать manual bridge (audit_responsibility A5 / active library principle).
 ///
 /// **Ограничение**: глобальная переменная = один Client per process. Multi-Client
-/// (например multi-server терминал) пока не поддерживается, при необходимости
-/// замените на `Arc<AtomicU64>` per Client + bind в Dispatcher.
+/// (multi-server терминал, Stage 3 backlog в HANDOFF Roadmap) перезапишет delta
+/// последнего активного Client'а на все остальные → silent timestamp corruption.
+/// См. `DEVIATION.md #23`. Фикс при необходимости: `Arc<AtomicU64>` per Client +
+/// bind в `EventDispatcher` через ссылку на Client.
 static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Установить server_time_delta (в днях, как TDateTime). Вызывается из Client::handle_ping

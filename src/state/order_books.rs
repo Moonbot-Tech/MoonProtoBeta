@@ -30,6 +30,36 @@
 use std::collections::{HashMap, VecDeque};
 use crate::commands::order_book::{OrderBookUpdate, compare_seq};
 
+/// Тип orderbook'а: фьючерсы или spot. Wire-формат — 1 байт.
+///
+/// Соответствует Delphi `TBookKind` (MoonProtoOrderBook.pas:5) с ord-кодами
+/// 0=`bk_Futures`, 1=`bk_Spot`. Используется в публичном API подписок
+/// и в внутренних структурах state.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OrderBookKind {
+    /// Фьючерсный orderbook (`bk_Futures = 0`).
+    Futures = 0,
+    /// Spot orderbook (`bk_Spot = 1`).
+    Spot    = 1,
+}
+
+impl OrderBookKind {
+    /// Конвертация в wire-байт (для engine_request / state cache key).
+    #[inline]
+    pub fn as_u8(self) -> u8 { self as u8 }
+
+    /// Распарсить из wire-байт. Неизвестное значение → None (вызывающая логика
+    /// должна решить — дропать пакет или fallback'нуть).
+    pub fn from_u8(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Futures),
+            1 => Some(Self::Spot),
+            _ => None,
+        }
+    }
+}
+
 /// Кэш считается corrupted, если непустой дольше этого порога (мс).
 /// Соответствует `MoonProtoOrderBook.pas:9` `BOOK_EXPIRED_TIMEOUT = 800`.
 const BOOK_EXPIRED_TIMEOUT: i64 = 800;
@@ -457,5 +487,15 @@ mod tests {
         // Diff для futures at seq 11 — должен примениться независимо.
         let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
         assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 11, book_kind: 0, .. })));
+    }
+
+    #[test]
+    fn order_book_kind_roundtrip() {
+        assert_eq!(OrderBookKind::Futures.as_u8(), 0);
+        assert_eq!(OrderBookKind::Spot.as_u8(), 1);
+        assert_eq!(OrderBookKind::from_u8(0), Some(OrderBookKind::Futures));
+        assert_eq!(OrderBookKind::from_u8(1), Some(OrderBookKind::Spot));
+        assert_eq!(OrderBookKind::from_u8(2), None);
+        assert_eq!(OrderBookKind::from_u8(255), None);
     }
 }

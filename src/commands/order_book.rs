@@ -46,8 +46,14 @@ pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
 
     // BuyCount + Buy levels
     if pos + 2 > data.len() { return None; }
-    let buy_count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+    let buy_count_raw = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
+
+    // Cap по реально доступным байтам — защита от malicious `buy_count = 65535` который
+    // на пустом payload запросил бы `Vec::with_capacity(65535)` = 512 KB на пакет ×
+    // burst rate = аллокатор thrash. См. robustness audit H7.
+    let max_buys_by_payload = (data.len() - pos) / 8;
+    let buy_count = buy_count_raw.min(max_buys_by_payload);
 
     let mut buys = Vec::with_capacity(buy_count);
     for _ in 0..buy_count {

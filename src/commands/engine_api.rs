@@ -6,7 +6,6 @@
 
 use super::registry::{read_string};
 use flate2::read::DeflateDecoder;
-use std::io::Read;
 
 /// Engine RPC method identifiers — 31 метод торгового API.
 ///

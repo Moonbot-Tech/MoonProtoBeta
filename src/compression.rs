@@ -18,10 +18,12 @@ type Offsets = [usize; 4096];
 /// Maximum allowed output size for SynLZ decompression (DoS protection).
 ///
 /// MoonProto-сообщения внутри Sliced ограничены ~384 KB (256 блоков × PMTU ≤ ~1.5 KB).
-/// Сжатые прикладные пакеты — единицы MB максимум. Лимит 16 MB закрывает decompression-bomb
-/// vector: scoмpromised сервер мог бы отправить заголовок `out_size = 2 GB`, что приводит
-/// к мгновенному OOM-крашу (особенно на mobile). Любой превышающий лимит payload — adversarial.
-pub const MAX_SYNLZ_OUTPUT: usize = 16 * 1024 * 1024;
+/// Сжатые прикладные пакеты — единицы сотен KB максимум для реальной нагрузки.
+/// Лимит 1 MB закрывает burst-DoS vector: скомпрометированный сервер мог бы шлёт
+/// 100 pkt/sec с `out_size = 16 MB - 1` (под старым лимитом) → 1.6 GB/sec allocator
+/// thrash + zero-fill ~5 мс per 16 MB. Реалистичный потолок для MoonProto — ~512 KB,
+/// 1 MB даёт ×2 запас на будущие изменения. См. robustness audit C1.
+pub const MAX_SYNLZ_OUTPUT: usize = 1024 * 1024;
 
 /// Decompress SynLZ data. Returns decompressed bytes or None on error.
 ///

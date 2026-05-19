@@ -1,17 +1,19 @@
 //! Полный пример торгового flow: подключение → подписка → ордер → cancel.
 //!
-//! Покрывает:
-//! - Импорт ключа из base64 (MoonBot Settings → Export Key)
-//! - NTP sync (рекомендуется до старта)
-//! - Создание Client + ClientConfig
-//! - Lifecycle callback (Connecting / Authenticated / ServerRestart / ...)
-//! - EventDispatcher для авто-парсинга входящих в типизированные события
-//! - Stack команд после Authenticated (api_subscribe_all_trades, balance refresh,
-//!   strat snapshot, settings request)
-//! - Engine API async response через mpsc::Receiver
-//! - Trade команды (new_order, cancel_order)
-//! - UI команды (mm_subscribe, switch_dex)
-//! - Strat команды (strat_snapshot_request, strat_sell_price_update)
+//! Показывает **active library API** через `Client::run_with_dispatcher` —
+//! рекомендуемый главный entry-point. Liба сама делает:
+//! - auto-replay подписок при reconnect / ServerToken change (через `SubscriptionRegistry`)
+//! - auto-fetch markets indexes при `PeerAppToken change` + блокировка
+//!   `TradesStream`/`OrderBook` пакетов до завершения синхронизации
+//! - auto-send `emk_RequestOrderBookFull` при `RequestFullNeeded` (corruption /
+//!   missing Full snapshot) — потребитель НЕ должен это вызывать сам
+//! - periodic `trades.tick()` каждые ~100мс для resend missing TradesStream пакетов
+//! - timeout protection для auto-fetch indexes (UDP-loss recovery, см.
+//!   `check_indexes_fetch_timeout`)
+//! - ServerTimeDelta application через глобальный atomic
+//!
+//! App ловит lifecycle events только для UI индикатора + дёргает trade-команды
+//! по user actions. Никаких ручных recovery шагов от app не требуется.
 //!
 //! Запуск:
 //!   cargo run --example trading_flow --release -- "<key_base64>" "host:port"
@@ -21,21 +23,15 @@
 //! (комментарий `/* uncomment to send */`).
 
 use std::env;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::time::Duration;
 
 use moonproto::client::{Client, ClientConfig, LifecycleEvent, set_ntp_offset};
 use moonproto::events::{EventDispatcher, Event};
 use moonproto::key_import;
 use moonproto::ntp;
-use moonproto::protocol::Command;
 use moonproto::state::OrderEvent;
 use moonproto::commands::trade::TradeCtx;
-
-fn now_ms_for_dispatch() -> i64 {
-    use std::time::SystemTime;
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis() as i64
-}
 
 fn main() {
     // env_logger опционально — раскомментируй если нужны log message'и:
@@ -59,7 +55,8 @@ fn main() {
     let ntp_result = ntp::get_best_ntp("pool.ntp.org", 4);
     if ntp_result.synced {
         set_ntp_offset(ntp_result.time_offset);
-        println!("[setup] NTP offset={:.1}ms rtt={}ms", ntp_result.time_offset * 1000.0, ntp_result.round_trip_ms);
+        println!("[setup] NTP offset={:.1}ms rtt={}ms",
+                 ntp_result.time_offset * 1000.0, ntp_result.round_trip_ms);
     } else {
         println!("[setup] NTP failed, continuing with system clock");
     }
@@ -81,14 +78,17 @@ fn main() {
     client.on_lifecycle(Box::new(move |ev: LifecycleEvent| {
         println!("[lifecycle] {:?}", ev);
         match ev {
-            LifecycleEvent::Authenticated => {
+            LifecycleEvent::Connected { fresh } => {
                 auth_flag.store(true, Ordering::Relaxed);
-                println!("[lifecycle] >>> AUTHENTICATED — sending initial subscriptions");
+                if fresh {
+                    println!("[lifecycle] >>> FIRST CONNECTED — app may now send init commands");
+                } else {
+                    println!("[lifecycle] >>> RE-CONNECTED — registry auto-replayed subscriptions, ничего делать не надо");
+                }
             }
             LifecycleEvent::ServerRestart => {
-                println!("[lifecycle] >>> SERVER RESTART — market indexes invalidated, would re-subscribe");
-                // В реальном клиенте: сбросить кэшированный market_idx → name mapping,
-                // вызвать client.api_get_markets_indexes(), client.api_reload_order_book().
+                println!("[lifecycle] >>> SERVER RESTART — либа сама re-fetch'нет indexes и replay'нет subscriptions");
+                // App ничего не должен делать — это info-event для UI индикатора.
             }
             LifecycleEvent::Disconnected => {
                 println!("[lifecycle] >>> FINAL DISCONNECT");
@@ -97,41 +97,53 @@ fn main() {
         }
     }));
 
-    // ---- 5. EventDispatcher ----
+    // ---- 5. EventDispatcher — переиспользуется между всеми phase'ами ----
+    // Один и тот же dispatcher держит state (markets, orders, ...) и подхватывает
+    // auto-action'ы либы через `run_with_dispatcher`.
     let mut dispatcher = EventDispatcher::new();
 
     // ---- 6. Phase 1: подключение и авторизация (до 15 сек) ----
     println!("[phase 1] connecting...");
-    let phase_start = Instant::now();
-    let auth_flag2 = authenticated.clone();
-    client.run(Duration::from_secs(15), Box::new(move |cmd, payload| {
-        for ev in dispatcher.dispatch(cmd, payload, now_ms_for_dispatch()) {
-            // На phase 1 печатаем только Order events (не спамим Ping/etc).
-            if let Event::Order(oe) = &ev {
+    let phase1_orders = Arc::new(AtomicU64::new(0));
+    let p1_orders = phase1_orders.clone();
+    client.run_with_dispatcher(
+        Duration::from_secs(15),
+        &mut dispatcher,
+        Box::new(move |ev: &Event| {
+            // На phase 1 печатаем только Order events (Ping/etc спам не нужен).
+            if let Event::Order(oe) = ev {
+                p1_orders.fetch_add(1, Ordering::Relaxed);
                 println!("[phase 1] order event: {:?}", oe.variant_name());
             }
-        }
-        if auth_flag2.load(Ordering::Relaxed) && phase_start.elapsed() > Duration::from_secs(2) {
-            // Авторизовались + дали 2 сек на serv-init — можно завершать phase.
-            // (run() сам выйдет через duration, это просто marker)
-        }
-    }));
+        }),
+    );
 
     if !authenticated.load(Ordering::Relaxed) {
         eprintln!("[phase 1] FAILED: not authenticated after 15s. Check key/host.");
         std::process::exit(1);
     }
+    println!("[phase 1] OK, order events seen: {}", phase1_orders.load(Ordering::Relaxed));
 
-    // ---- 7. Phase 2: initial subscriptions (after Authenticated) ----
+    // ---- 7. Phase 2: initial subscriptions ----
+    //
+    // Все методы ниже требуют `&mut Client`. После выхода из run_with_dispatcher
+    // (phase 1 завершилась через 15с) borrow checker разрешает их вызвать.
+    // Если бы потребитель хотел отправлять команды ВО ВРЕМЯ run_with_dispatcher
+    // (например по user action из UI thread'а) — это уже Stage 3 (см. HANDOFF
+    // Roadmap, "subscribe_* thread-safe API"). На текущий момент паттерн:
+    // run-pause-issue-resume.
     println!("\n[phase 2] sending initial subscriptions...");
 
-    // Engine API: получить список рынков (async response).
+    // Active library API: `subscribe_all_trades` запоминается в registry — при
+    // следующем reconnect / ServerToken change либа auto-replay'ит. App ничего
+    // не делает.
+    client.subscribe_all_trades(false);
+
+    // Engine API: получить список рынков (async response). Receiver можно
+    // дождаться в этом же потоке между phase 2 и phase 4.
     let markets_rx = client.api_get_markets_list();
 
-    // Trade подписки.
-    let _ = client.api_subscribe_all_trades(false);
-
-    // Settings + balance + strats — initial sync.
+    // Settings + balance + strats — initial sync (после Connected{fresh:true}).
     client.ui_settings_request();
     client.balance_request_refresh();
     client.strat_snapshot_request();
@@ -141,21 +153,39 @@ fn main() {
     /* client.ui_switch_dex("Binance"); */    // uncomment если нужно сменить DEX
     /* client.ui_strat_start_stop(true); */   // uncomment если нужно запустить все стратегии
 
-    // Engine API: ждать ответ на api_get_markets_list (timeout 5с).
-    match markets_rx.recv_timeout(Duration::from_secs(5)) {
+    // Подписка на orderbook через registry-aware API. Resolve `market_name →
+    // market_idx` делает сервер — поэтому можно вызвать ДО получения
+    // `emk_GetMarketsList`.
+    {
+        use moonproto::state::OrderBookKind;
+        client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+    }
+
+    // ---- 8. Phase 3: ждать ответ на api_get_markets_list ----
+    //
+    // Receiver `markets_rx` остался валидным; ответы поступают через
+    // EventDispatcher → ApiPending → sender. На этой фазе чтобы их доставить
+    // нужен короткий run_with_dispatcher (5с timeout).
+    println!("\n[phase 3] waiting for markets list response...");
+    client.run_with_dispatcher(
+        Duration::from_secs(5),
+        &mut dispatcher,
+        Box::new(|_ev: &Event| { /* silent — ждём только api response */ }),
+    );
+    match markets_rx.try_recv() {
         Ok(resp) if resp.success => {
-            println!("[phase 2] got markets list ({} bytes payload)", resp.data.len());
+            println!("[phase 3] got markets list ({} bytes payload)", resp.data.len());
         }
         Ok(resp) => {
-            println!("[phase 2] markets list error: {}", resp.error_msg);
+            println!("[phase 3] markets list error: {}", resp.error_msg);
         }
         Err(e) => {
-            println!("[phase 2] markets list timeout/error: {:?}", e);
+            println!("[phase 3] markets list timeout/disconnected: {:?}", e);
         }
     }
 
-    // ---- 8. Phase 3: пример торговой операции (закомментировано — не отправляем по умолчанию) ----
-    println!("\n[phase 3] example trade operations (commented out, uncomment to send) ...");
+    // ---- 9. Phase 4: пример торговой операции (закомментировано) ----
+    println!("\n[phase 4] example trade operations (commented out, uncomment to send) ...");
     let _example_ctx = TradeCtx { uid: rand::random(), currency: 0u8, platform: 0u8 };
 
     // Новый ордер (запрещено на чужом сервере — uncomment только для теста).
@@ -168,24 +198,31 @@ fn main() {
         0,               // strategy_id (0 = manual)
         0.001,           // order_size
     );
-    println!("[phase 3] sent new_order BTCUSDT @ 50000 size 0.001");
+    println!("[phase 4] sent new_order BTCUSDT @ 50000 size 0.001");
     */
 
-    // Penalty (новая команда iter-2):
     /* client.penalty(_example_ctx, "BTCUSDT"); */
-
-    // Strat sell price update:
     /* client.strat_sell_price_update(strategy_id, 51_000.0); */
 
-    // ---- 9. Phase 4: passive monitoring (60 сек): печатать события ----
-    println!("\n[phase 4] passive monitoring for 60s — listening for events...");
-    let mut dispatcher2 = EventDispatcher::new();
-    let total_events = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let te2 = total_events.clone();
-    client.run(Duration::from_secs(60), Box::new(move |cmd, payload| {
-        for ev in dispatcher2.dispatch(cmd, payload, now_ms_for_dispatch()) {
-            te2.fetch_add(1, Ordering::Relaxed);
-            // Печатаем только важные события.
+    // ---- 10. Phase 5: passive monitoring (60 сек): печатать события ----
+    //
+    // В этом цикле:
+    //   - dispatch_into_active авто-отправит emk_RequestOrderBookFull при
+    //     RequestFullNeeded (corruption detection)
+    //   - periodic trades.tick() каждые 100мс автоматически восстановит
+    //     потерянные TradesStream пакеты через emk_TradesResend
+    //   - check_indexes_fetch_timeout раз за тик защитит от UDP-потери ответа
+    //     emk_GetMarketsIndexes
+    println!("\n[phase 5] passive monitoring for 60s — active library в действии...");
+    let total_events = Arc::new(AtomicU64::new(0));
+    let te = total_events.clone();
+    client.run_with_dispatcher(
+        Duration::from_secs(60),
+        &mut dispatcher,
+        Box::new(move |ev: &Event| {
+            te.fetch_add(1, Ordering::Relaxed);
+            // Печатаем только семантически важные события — Trades/OrderBook
+            // слишком частые для console output.
             match ev {
                 Event::Order(oe) => println!("[event] Order::{}", oe.variant_name()),
                 Event::Balance(_) => println!("[event] Balance update"),
@@ -194,17 +231,14 @@ fn main() {
                     println!("[event] EngineResponse method={:?} success={}", r.method, r.success);
                 }
                 Event::ServerLog { time: _, msg } => println!("[server log] {}", msg),
-                _ => {} // Trades / OrderBook / etc — слишком частые
+                _ => {} // Trades / OrderBook / Ping — слишком частые
             }
-        }
-        if cmd != Command::Ping {
-            // Сырой счётчик не-Ping команд.
-        }
-    }));
+        }),
+    );
 
     println!("\n[done] total dispatched events: {}", total_events.load(Ordering::Relaxed));
 
-    // ---- 10. Disconnect ----
+    // ---- 11. Disconnect ----
     println!("[done] disconnecting...");
     client.disconnect();
 }

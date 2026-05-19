@@ -48,6 +48,14 @@ pub struct MarketsState {
     pub token_tags: HashMap<String, TokenTags>,
     /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
     pub market_indexes: Vec<String>,
+    /// `true` если последняя пачка `emk_GetMarketsIndexes` была получена для текущего
+    /// `PeerAppToken`. При server-restart (`PeerAppToken` сменился) Client сбрасывает в
+    /// `false` и отправляет fresh `api_get_markets_indexes()`. До получения ответа
+    /// `EventDispatcher` дропает входящие `TradesStream` / `OrderBook` пакеты — они
+    /// несут market_idx по новой нумерации, локальные state ещё знают старую.
+    ///
+    /// Аналог Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <> PeerAppToken then exit`.
+    pub indexes_synchronized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +143,12 @@ impl MarketsState {
     }
 
     /// Применить ответ `emk_GetMarketsIndexes`.
+    /// Помечает `indexes_synchronized = true` — после этого EventDispatcher разблокирует
+    /// обработку TradesStream / OrderBook пакетов.
     pub fn apply_markets_indexes(&mut self, names: Vec<String>) -> MarketsEvent {
         let count = names.len();
         self.market_indexes = names;
+        self.indexes_synchronized = true;
         MarketsEvent::IndexesUpdated { count }
     }
 
@@ -393,5 +404,15 @@ mod tests {
         let ev = st.apply_markets_indexes(names.clone());
         assert!(matches!(ev, MarketsEvent::IndexesUpdated { count: 2 }));
         assert_eq!(st.market_indexes, names);
+    }
+
+    #[test]
+    fn apply_markets_indexes_sets_synchronized_flag() {
+        // Active library: indexes_synchronized = false по умолчанию (init состояние).
+        // EventDispatcher блокирует TradesStream/OrderBook до этого момента.
+        let mut st = MarketsState::new();
+        assert!(!st.indexes_synchronized, "default: not synchronized");
+        st.apply_markets_indexes(vec!["A".to_string()]);
+        assert!(st.indexes_synchronized, "after apply: synchronized");
     }
 }

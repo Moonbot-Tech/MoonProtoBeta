@@ -34,7 +34,7 @@
 //! };
 //! let mut client = Client::new(cfg);
 //!
-//! // 4. Lifecycle callback (опционально) — Connecting / Authenticated / Reconnecting / etc.
+//! // 4. Lifecycle callback (опционально) — Connecting / Connected{fresh} / Reconnecting / etc.
 //! client.on_lifecycle(Box::new(|ev: LifecycleEvent| {
 //!     println!("[lifecycle] {:?}", ev);
 //! }));

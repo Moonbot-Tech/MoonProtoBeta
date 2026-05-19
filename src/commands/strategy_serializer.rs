@@ -166,11 +166,24 @@ pub struct StrategyBatch {
 //  Парсер
 // =============================================================================
 
+/// Максимальный размер распакованного strategy batch'а — защита от deflate-bomb.
+///
+/// Реалистичная стратегия — ~1-5 KB сериализованных полей. 1000 стратегий × 5 KB =
+/// 5 MB верхний бытовой потолок. 64 MB даёт ×12 запас от практики. Без cap'а
+/// скомпрометированный сервер мог бы послать 1 KB сжатого payload'а который
+/// разворачивается в гигабайты — мгновенный OOM на mobile.
+/// Зеркало `MAX_ENGINE_RESPONSE_BYTES` в engine_api.rs. См. robustness audit C2.
+const MAX_STRATEGY_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Парсинг с DEFLATE-сжатого payload'а (как приходит в `TStratSnapshot.data`).
 pub fn parse_strategy_batch(deflate_bytes: &[u8]) -> Option<StrategyBatch> {
-    let mut decoder = DeflateDecoder::new(deflate_bytes);
+    let decoder = DeflateDecoder::new(deflate_bytes);
+    // `.take(MAX_STRATEGY_BATCH_BYTES)` — anti-bomb cap. При превышении
+    // `read_to_end` вернёт Ok(N) где N = MAX, и `parse_strategy_batch_plain`
+    // обнаружит truncated stream → None. Лучше silent reject чем OOM panic.
+    let mut limited = decoder.take(MAX_STRATEGY_BATCH_BYTES);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed).ok()?;
+    limited.read_to_end(&mut decompressed).ok()?;
     parse_strategy_batch_plain(&decompressed)
 }
 

@@ -483,8 +483,14 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
     let use_coins_black_list = data[*pos] != 0; *pos += 1;
 
     if *pos + 4 > data.len() { return None; }
-    let temp_bl_count = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+    let temp_bl_count_raw = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
     *pos += 4;
+    // Sanity check: каждый item занимает минимум 2 (string length prefix) + 8 (TDateTime)
+    // = 10 байт. Cap по реально доступным байтам. Без этой защиты malicious
+    // `temp_bl_count = i32::MAX` запросил бы `Vec::with_capacity(2_147_483_647)` →
+    // ~50 GB heap → OOM panic от одного UI пакета. См. robustness audit C5.
+    let max_items_by_payload = (data.len() - *pos) / 10;
+    let temp_bl_count = (temp_bl_count_raw.max(0) as usize).min(max_items_by_payload);
     let mut temp_bl_symbols = Vec::with_capacity(temp_bl_count);
     let mut temp_bl_times   = Vec::with_capacity(temp_bl_count);
     for _ in 0..temp_bl_count {

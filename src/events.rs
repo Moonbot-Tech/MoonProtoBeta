@@ -84,6 +84,17 @@ pub struct EventDispatcher {
     pub strats:      StratsState,
     pub settings:    SettingsState,
     pub markets:     MarketsState,
+    /// Последний известный `ServerToken` — для детектирования hard reconnect.
+    /// При смене токена `dispatch_into_active` сбрасывает per-token state
+    /// (`trades.full_reset()`, `order_books.clear()`) до применения нового пакета.
+    /// Иначе stale `last_packet_num` / `expected_seq` в старой нумерации новой
+    /// сессии порождает spurious `GapDetected` события и corrupted orderbook display
+    /// в первые секунды. Аналог Delphi `MoonProtoEngine.pas:1586-1591`
+    /// (`If FTradesServerToken <> MClient.Client.ServerToken then ResetGapBuckets`) +
+    /// `MoonProtoEngine.pas:316-318` (`If NeedResubscribeOrderBooks then ResetOrderBookCaches`).
+    /// Init=0 (никогда не подключались) → первый non-zero token не триггерит сброс.
+    /// См. audit_responsibility_hints #1, #2.
+    last_known_server_token: u64,
 }
 
 impl EventDispatcher {
@@ -104,6 +115,15 @@ impl EventDispatcher {
     /// Раньше `dispatch` делал `vec![event]` per call → 50K alloc/sec на пике
     /// TradesStream. Теперь events pushed в переданный `out` buffer который потребитель
     /// переиспользует через `clear()` между вызовами.
+    ///
+    /// **Active library**: если есть `&mut Client` — используй
+    /// [`Self::dispatch_into_active`]. Этот вариант:
+    ///   1. блокирует обработку TradesStream/OrderBook пакетов когда
+    ///      `MarketsState.indexes_synchronized = false` (event drop'ается тихо);
+    ///   2. автоматически шлёт `api_request_order_book_full` на
+    ///      `OrderBookEvent::RequestFullNeeded` — потребитель не должен делать это сам.
+    /// `dispatch_into` (без Client) — backwards compat, потребитель должен сам
+    /// обрабатывать RequestFullNeeded events.
     ///
     /// Pattern для performance-sensitive потребителей:
     /// ```ignore
@@ -132,6 +152,14 @@ impl EventDispatcher {
             }
 
             Command::OrderBook => {
+                // Active library: блокируем обработку OrderBook если markets indexes не sync.
+                // Соответствует Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
+                // PeerAppToken then exit`. Без этого: потеряем пакеты от первых апдейтов
+                // после server restart до получения свежих индексов (market_idx по новой
+                // нумерации применился бы к старому by_index → silent data corruption).
+                if !self.markets.indexes_synchronized {
+                    return;
+                }
                 match parse_order_book_packet(payload) {
                     Some(pkt) => {
                         for ev in self.order_books.on_packet(pkt, now_ms) {
@@ -143,6 +171,10 @@ impl EventDispatcher {
             }
 
             Command::TradesStream => {
+                // Active library: блокируем обработку TradesStream пока markets indexes не sync.
+                if !self.markets.indexes_synchronized {
+                    return;
+                }
                 match parse_trades_packet(payload) {
                     Some(pkt) => {
                         let evs = self.trades.on_packet(pkt, now_ms);
@@ -261,7 +293,78 @@ impl EventDispatcher {
             _ => out.push(Event::Raw { cmd, payload: payload.to_vec() }),
         }
     }
+
+    /// **Active library dispatch** — расширение `dispatch_into` с `&mut Client` для
+    /// auto-actions либы.
+    ///
+    /// Auto-action: `OrderBookEvent::RequestFullNeeded` → автоматически отправляется
+    /// `emk_RequestOrderBookFull` через `send_api_request` (fire-and-forget — без
+    /// регистрации в pending API registry, т.к. response придёт обычным OrderBook-пакетом
+    /// который сам разберёт диспетчер). Event всё равно эмиттится в `out` — для UI
+    /// индикатора «загружаем стакан» — но **потребитель не должен слать запрос сам**.
+    ///
+    /// Дедупликация: за один `dispatch_into_active` вызов на одну `(market_idx, kind)`
+    /// пару отправляется максимум один запрос, даже если Grouped-payload содержит
+    /// несколько `RequestFullNeeded` для того же книги.
+    ///
+    /// **Trades gap resend** в этой функции НЕ запускается — он управляется единым
+    /// периодическим тиком в `Client::run_with_dispatcher` (раз в ~100мс). Так
+    /// избегаем double-resend на одном пакете.
+    pub fn dispatch_into_active(
+        &mut self,
+        cmd: Command,
+        payload: &[u8],
+        now_ms: i64,
+        out: &mut Vec<Event>,
+        client: &mut crate::client::Client,
+    ) {
+        // Hard reconnect detection: при смене ServerToken вся per-session state
+        // (trades.last_packet_num, order_books.*.expected_seq) устарела — сервер
+        // начинает нумерацию заново. Сбрасываем ДО применения нового пакета.
+        // Init last_known=0; первый non-zero token (после первого Fine) — не triggers
+        // (последующие пакеты будут с тем же token, full_reset не нужен). Сброс
+        // срабатывает только на ИЗМЕНЕНИИ token'а между установившейся сессией и
+        // новой (hard reconnect через `WantNewHello` или server restart с новым ST).
+        let current_token = client.server_token();
+        if current_token != 0
+            && self.last_known_server_token != 0
+            && self.last_known_server_token != current_token
+        {
+            self.trades.full_reset();
+            self.order_books.clear();
+            log::info!(target: "moonproto::events",
+                "ServerToken changed ({:#x} -> {:#x}) — trades+order_books state reset",
+                self.last_known_server_token, current_token);
+        }
+        self.last_known_server_token = current_token;
+
+        let start_len = out.len();
+        self.dispatch_into(cmd, payload, now_ms, out);
+        // now_ms прокинут в dispatch_into для state.on_packet(now_ms); auto-actions
+        // ниже не зависят от времени (события OrderBookEvent::RequestFullNeeded и
+        // TradesEvent::GapDetected уже содержат всё нужное).
+
+        // Auto-action: RequestFullNeeded → send_api_request (sync, no pending).
+        // Dedup через HashSet — Grouped-payload может содержать несколько
+        // RequestFullNeeded для одной и той же книги (corruption detection +
+        // последующий update в одном datagram'е). Шлём один запрос на пару.
+        use std::collections::HashSet;
+        let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
+        for ev in &out[start_len..] {
+            if let Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) = ev {
+                to_request_full.insert((*market_index, *book_kind));
+            }
+        }
+        for (mi, bk) in to_request_full {
+            // Fire-and-forget — response придёт обычным OrderBook-пакетом (is_full=true)
+            // через тот же dispatcher. Регистрировать pending API receiver не нужно.
+            client.send_api_request(
+                &crate::commands::engine_request::request_order_book_full(mi, bk),
+            );
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -338,5 +441,39 @@ mod tests {
     fn dispatcher_ctx_unused_warning_silenced() {
         // Suppress dead_code warning for TradeCtx if not used elsewhere
         let _ = TradeCtx::new(1);
+    }
+
+    #[test]
+    fn dispatcher_blocks_orderbook_until_indexes_sync() {
+        let mut d = EventDispatcher::new();
+        // indexes_synchronized = false по умолчанию — OrderBook event должен быть дропнут.
+        // Делаем минимальный wire-payload для OrderBook (parse может не пройти, и это ок —
+        // главное что мы ВООБЩЕ не доходим до parse, потому что блокировка раньше).
+        let dummy_payload = vec![0u8; 32];
+        let events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
+        assert!(events.is_empty(), "OrderBook event должен быть дропнут до indexes_synchronized");
+
+        // После apply_markets_indexes — должен начать парсить.
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+        let _events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
+        // Теперь либо успешный parse, либо ParseFailed (но не пусто).
+        // Точное значение зависит от содержимого dummy_payload — главное что блок снят.
+    }
+
+    #[test]
+    fn dispatcher_blocks_trades_until_indexes_sync() {
+        let mut d = EventDispatcher::new();
+        let dummy_payload = vec![0u8; 16];
+        let events = d.dispatch(Command::TradesStream, &dummy_payload, 1000);
+        assert!(events.is_empty(), "TradesStream должен быть дропнут до indexes_synchronized");
+    }
+
+    #[test]
+    fn dispatcher_order_not_blocked_by_indexes_sync() {
+        // Order channel не зависит от market_idx → не должен блокироваться indexes_sync.
+        let mut d = EventDispatcher::new();
+        let payload = build_all_statuses_request(123);
+        let events = d.dispatch(Command::Order, &payload, 1000);
+        assert!(!events.is_empty(), "Order должен обрабатываться даже без indexes_synchronized");
     }
 }

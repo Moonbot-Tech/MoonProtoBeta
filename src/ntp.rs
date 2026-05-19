@@ -92,11 +92,25 @@ pub fn get_best_ntp(host: &str, try_count: usize) -> NtpSyncResult {
 
     if best_delay_ms == i64::MAX {
         warn!("NTP sync failed: all {try_count} attempts to {host} returned no valid response");
-        NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false }
-    } else {
-        debug!("NTP sync ok: host={host} offset={:.1}ms rtt={}ms", best_offset * 1000.0, best_delay_ms);
-        NtpSyncResult { time_offset: best_offset, round_trip_ms: best_delay_ms, synced: true }
+        return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
     }
+
+    // Sanity check: реалистичный clock drift на современной системе — секунды, не часы.
+    // Если NTP вернул offset > 1 дня — это либо системные часы радикально сломаны
+    // (RTC reset на embedded device), либо MITM/DNS-spoof NTP сервер пытается сдвинуть
+    // нас в прошлое/будущее на годы (классическая атака: hostile WiFi, ISP MITM).
+    // В обоих случаях лучше отвергнуть offset чем применить — иначе handshake'и
+    // отвергаются сервером по любому timestamp check → permanent reconnect loop.
+    // См. robustness audit H4.
+    const MAX_REASONABLE_OFFSET_SEC: f64 = 86_400.0;
+    if best_offset.abs() > MAX_REASONABLE_OFFSET_SEC {
+        warn!("NTP sync rejected: host={host} returned implausible offset {:.1}s (> 1 day) — possible MITM/spoof, ignoring",
+              best_offset);
+        return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
+    }
+
+    debug!("NTP sync ok: host={host} offset={:.1}ms rtt={}ms", best_offset * 1000.0, best_delay_ms);
+    NtpSyncResult { time_offset: best_offset, round_trip_ms: best_delay_ms, synced: true }
 }
 
 /// Convert NTP timestamp (seconds + fraction since 1900) to seconds as f64.
