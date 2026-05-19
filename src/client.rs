@@ -1000,6 +1000,14 @@ impl Client {
         self.server_info = info;
     }
 
+    /// Test-only setter для `server_token` — позволяет имитировать состояние после
+    /// успешного handshake без реального сетевого подключения. Используется в
+    /// `events.rs` тестах для проверки `dispatch_into_active` token tracking.
+    #[cfg(test)]
+    pub(crate) fn testing_set_server_token(&mut self, token: u64) {
+        self.server_token = token;
+    }
+
     /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
     ///
     /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:
@@ -2189,11 +2197,7 @@ impl Client {
                 // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
                 // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
                 // чтобы full_reset + новый Hello с актуальным временем.
-                if CLOCK_JUMP_DETECTED.swap(false, Ordering::Relaxed) {
-                    log::warn!(target: "moonproto::client",
-                        "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
-                    self.force_disconnect = true;
-                }
+                self.check_clock_jump();
 
                 // Active library: periodic trades.tick — только в Dispatcher mode.
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
@@ -2788,6 +2792,18 @@ impl Client {
     /// сбрасываем in_flight; следующий handshake/Ping увидит `peer != tracked` и
     /// переотправит запрос. Cost: 3 сравнения когда in_flight=false (hot path).
     #[inline]
+    /// audit_robustness H5: атомарный CLOCK_JUMP_DETECTED → force_disconnect.
+    /// Извлечён в метод для testability + чтобы main loop был чище.
+    /// `swap(false)` атомарно читает и сбрасывает флаг.
+    fn check_clock_jump(&mut self) {
+        use std::sync::atomic::Ordering;
+        if CLOCK_JUMP_DETECTED.swap(false, Ordering::Relaxed) {
+            log::warn!(target: "moonproto::client",
+                "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
+            self.force_disconnect = true;
+        }
+    }
+
     fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
         const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
         if self.indexes_fetch_in_flight
@@ -4284,6 +4300,275 @@ mod client_subscribe_integration_tests {
         client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
         client.apply_subscribe_event(ClientEvent::UnsubscribeAllTrades);
         assert!(client.subscription_registry.trades_sub.is_none());
+    }
+}
+
+#[cfg(test)]
+mod active_library_helpers_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+        }
+    }
+
+    /// Сериализует тесты которые трогают `CLOCK_JUMP_DETECTED` (process-global atomic).
+    /// Cargo test запускает тесты в параллельных thread'ах — без этой блокировки
+    /// race на флаге даёт flaky failures.
+    static CLOCK_JUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    // =====================================================================
+    //  check_clock_jump
+    // =====================================================================
+
+    #[test]
+    fn clock_jump_check_triggers_force_disconnect() {
+        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
+        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed); // reset
+        let mut client = Client::new(dummy_cfg());
+        assert!(!client.force_disconnect);
+        CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
+        client.check_clock_jump();
+        assert!(client.force_disconnect, "clock jump flag → force_disconnect = true");
+        assert!(!CLOCK_JUMP_DETECTED.load(Ordering::Relaxed),
+            "CLOCK_JUMP_DETECTED должен быть сброшен после обработки");
+    }
+
+    #[test]
+    fn clock_jump_check_noop_when_flag_clear() {
+        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
+        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed);
+        let mut client = Client::new(dummy_cfg());
+        client.check_clock_jump();
+        assert!(!client.force_disconnect, "без флага — никаких изменений");
+    }
+
+    #[test]
+    fn clock_jump_check_idempotent_after_swap() {
+        // Двойной вызов — второй раз должен быть no-op (swap уже сбросил).
+        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
+        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed); // reset
+        let mut client = Client::new(dummy_cfg());
+        CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
+        client.check_clock_jump();
+        assert!(client.force_disconnect, "первый вызов с flag=true → force_disconnect");
+        client.force_disconnect = false; // reset для второй проверки
+        client.check_clock_jump();
+        assert!(!client.force_disconnect, "swap сбросил флаг — второй вызов no-op");
+    }
+
+    // =====================================================================
+    //  check_indexes_fetch_timeout
+    // =====================================================================
+
+    #[test]
+    fn indexes_fetch_timeout_does_nothing_when_not_in_flight() {
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = false;
+        client.indexes_fetch_started_ms = 0;
+        client.check_indexes_fetch_timeout(100_000_000);
+        assert!(!client.indexes_fetch_in_flight);
+    }
+
+    #[test]
+    fn indexes_fetch_timeout_preserves_in_flight_within_window() {
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = true;
+        client.indexes_fetch_started_ms = 0;
+        // 5 секунд прошло — меньше 12с timeout.
+        client.check_indexes_fetch_timeout(5_000);
+        assert!(client.indexes_fetch_in_flight,
+            "в пределах timeout — флаг сохраняется");
+    }
+
+    #[test]
+    fn indexes_fetch_timeout_clears_in_flight_after_window() {
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = true;
+        client.indexes_fetch_started_ms = 0;
+        client.peer_app_token = 0; // не triggers re-send (нет mismatch)
+        client.tracked_indexes_peer_app_token = 0;
+        // 13 секунд — больше 12с timeout.
+        client.check_indexes_fetch_timeout(13_000);
+        assert!(!client.indexes_fetch_in_flight,
+            "после timeout без peer_app_token mismatch — флаг сбрасывается");
+    }
+
+    #[test]
+    fn indexes_fetch_timeout_re_sends_when_peer_token_mismatch() {
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = true;
+        client.indexes_fetch_started_ms = 0;
+        // PeerAppToken расходится → должен переотправить запрос.
+        client.peer_app_token = 0xABC;
+        client.tracked_indexes_peer_app_token = 0xDEF;
+        client.check_indexes_fetch_timeout(13_000);
+        assert!(client.indexes_fetch_in_flight,
+            "после re-send флаг снова true");
+        assert_eq!(client.indexes_fetch_started_ms, 13_000,
+            "indexes_fetch_started_ms обновлён на текущее время");
+        // Drain event channel — должен быть один GetMarketsIndexes request.
+        let mut found_get_markets_indexes = false;
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let ClientEvent::Send(msg) = ev {
+                if msg.item.cmd == Command::API as u8 && msg.item.data.len() > 11 {
+                    if msg.item.data[11] == crate::commands::engine_api::EngineMethod::GetMarketsIndexes as u8 {
+                        found_get_markets_indexes = true;
+                    }
+                }
+            }
+        }
+        assert!(found_get_markets_indexes,
+            "после timeout c mismatch — отправлен GetMarketsIndexes");
+    }
+
+    #[test]
+    fn indexes_fetch_timeout_zero_peer_token_does_not_re_send() {
+        // Если peer_app_token = 0 (никогда не подключались) → не re-send даже если mismatch.
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = true;
+        client.indexes_fetch_started_ms = 0;
+        client.peer_app_token = 0;
+        client.tracked_indexes_peer_app_token = 0xABC;
+        client.check_indexes_fetch_timeout(13_000);
+        assert!(!client.indexes_fetch_in_flight,
+            "peer_app_token=0 (не подключены) → не re-send, флаг сброшен");
+    }
+}
+
+#[cfg(test)]
+mod replay_subscriptions_tests {
+    use super::*;
+    use crate::commands::engine_api::EngineMethod;
+    use crate::state::OrderBookKind;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+        }
+    }
+
+    /// Извлекает `EngineMethod` ID из wire-payload Engine request'а.
+    /// Header: CmdId(1) + ver(2) + UID(8) = 11 байт → Method на offset 11.
+    fn method_id(payload: &[u8]) -> Option<u8> {
+        if payload.len() < 12 { return None; }
+        Some(payload[11])
+    }
+
+    /// Дренирует event channel клиента, собирая wire-payload'ы отправленных API-запросов.
+    fn drain_api_requests(client: &Client) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let ClientEvent::Send(msg) = ev {
+                if msg.item.cmd == Command::API as u8 {
+                    out.push(msg.item.data);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn replay_with_empty_registry_sends_nothing_but_updates_token() {
+        let mut client = Client::new(dummy_cfg());
+        client.server_token = 0xCAFE;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        assert!(sent.is_empty(), "пустой registry → 0 wire-запросов");
+        assert_eq!(client.subscription_registry.last_subscribed_token, 0xCAFE);
+    }
+
+    #[test]
+    fn replay_trades_only_sends_single_subscribe_all_trades() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1, "только trades → 1 wire-запрос");
+        assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeAllTrades as u8));
+    }
+
+    #[test]
+    fn replay_orderbooks_of_one_kind_batched_into_single_request() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.orderbook_subs
+            .insert(("BTC".to_string(), OrderBookKind::Futures));
+        client.subscription_registry.orderbook_subs
+            .insert(("ETH".to_string(), OrderBookKind::Futures));
+        client.subscription_registry.orderbook_subs
+            .insert(("XRP".to_string(), OrderBookKind::Futures));
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        // Все три futures-подписки должны уйти ОДНИМ batch'ем, не тремя.
+        assert_eq!(sent.len(), 1, "3 подписки одного kind → 1 batch wire-запрос");
+        assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeOrderBook as u8));
+    }
+
+    #[test]
+    fn replay_orderbooks_of_different_kinds_get_separate_batches() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.orderbook_subs
+            .insert(("BTC".to_string(), OrderBookKind::Futures));
+        client.subscription_registry.orderbook_subs
+            .insert(("ETH".to_string(), OrderBookKind::Spot));
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        // Два разных kind → два batch'а (HashMap order undefined, но количество детерминировано).
+        assert_eq!(sent.len(), 2, "2 разных kind → 2 batch wire-запроса");
+        for payload in &sent {
+            assert_eq!(method_id(payload), Some(EngineMethod::SubscribeOrderBook as u8));
+        }
+    }
+
+    #[test]
+    fn replay_combined_sends_trades_plus_orderbook_batches() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
+        client.subscription_registry.orderbook_subs
+            .insert(("BTC".to_string(), OrderBookKind::Futures));
+        client.subscription_registry.orderbook_subs
+            .insert(("XRP".to_string(), OrderBookKind::Spot));
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 3, "1 trades + 2 orderbook (per kind) = 3 запроса");
+        let methods: Vec<Option<u8>> = sent.iter().map(|p| method_id(p)).collect();
+        // Один из запросов — SubscribeAllTrades.
+        assert!(methods.contains(&Some(EngineMethod::SubscribeAllTrades as u8)));
+        // Два запроса — SubscribeOrderBook.
+        let book_count = methods.iter()
+            .filter(|m| **m == Some(EngineMethod::SubscribeOrderBook as u8))
+            .count();
+        assert_eq!(book_count, 2);
+    }
+
+    #[test]
+    fn replay_updates_last_subscribed_token() {
+        let mut client = Client::new(dummy_cfg());
+        client.server_token = 0xDEAD_BEEF;
+        assert_eq!(client.subscription_registry.last_subscribed_token, 0);
+        client.replay_subscriptions();
+        assert_eq!(client.subscription_registry.last_subscribed_token, 0xDEAD_BEEF);
     }
 }
 

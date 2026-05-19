@@ -96,15 +96,9 @@ pub fn get_best_ntp(host: &str, try_count: usize) -> NtpSyncResult {
         return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
     }
 
-    // Sanity check: реалистичный clock drift на современной системе — секунды, не часы.
-    // Если NTP вернул offset > 1 дня — это либо системные часы радикально сломаны
-    // (RTC reset на embedded device), либо MITM/DNS-spoof NTP сервер пытается сдвинуть
-    // нас в прошлое/будущее на годы (классическая атака: hostile WiFi, ISP MITM).
-    // В обоих случаях лучше отвергнуть offset чем применить — иначе handshake'и
-    // отвергаются сервером по любому timestamp check → permanent reconnect loop.
-    // См. robustness audit H4.
-    const MAX_REASONABLE_OFFSET_SEC: f64 = 86_400.0;
-    if best_offset.abs() > MAX_REASONABLE_OFFSET_SEC {
+    // Sanity check через [`is_reasonable_offset`] — отвергаем явно нереалистичный
+    // offset (MITM / broken RTC). См. robustness audit H4.
+    if !is_reasonable_offset(best_offset) {
         warn!("NTP sync rejected: host={host} returned implausible offset {:.1}s (> 1 day) — possible MITM/spoof, ignoring",
               best_offset);
         return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
@@ -134,6 +128,20 @@ fn system_time_to_ntp() -> (u32, u32) {
 /// Since TDateTime is in days: offset_days = offset_seconds / 86400.
 pub fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
     offset_seconds / 86400.0
+}
+
+/// Максимально допустимый offset от NTP — 1 день. Реалистичный clock drift на
+/// современной системе — секунды, не часы. Превышение этого лимита = либо
+/// сломанный RTC (embedded device), либо MITM/DNS-spoof NTP сервер пытается
+/// сдвинуть нас на годы. В обоих случаях лучше отвергнуть offset чем применить —
+/// иначе handshake'и сервер reject'нёт по любому timestamp check.
+/// См. `audit_robustness` H4.
+pub const MAX_REASONABLE_OFFSET_SEC: f64 = 86_400.0;
+
+/// True если offset (в секундах) проходит sanity check (`|offset| ≤ 1 day`).
+/// Используется для anti-poisoning защиты в [`get_best_ntp`].
+pub fn is_reasonable_offset(offset_seconds: f64) -> bool {
+    offset_seconds.abs() <= MAX_REASONABLE_OFFSET_SEC
 }
 
 /// Background NTP sync thread — byte-exact port of `TMoonProtoTymeSyncer.Execute`
@@ -240,5 +248,36 @@ mod tests {
         assert_eq!(offset_to_delphi_days(86400.0), 1.0);
         assert_eq!(offset_to_delphi_days(0.0), 0.0);
         assert!((offset_to_delphi_days(3600.0) - (1.0 / 24.0)).abs() < 1e-9);
+    }
+
+    // ===== NTP poisoning reject (H4) =====
+
+    #[test]
+    fn reasonable_offset_accepts_normal_drift() {
+        // Типичные значения NTP drift на здоровой системе — миллисекунды.
+        assert!(is_reasonable_offset(0.0));
+        assert!(is_reasonable_offset(0.001));      // 1ms
+        assert!(is_reasonable_offset(-0.5));       // -500ms
+        assert!(is_reasonable_offset(60.0));       // 1 min (после сильного drift)
+        assert!(is_reasonable_offset(3600.0));     // 1 hour
+        assert!(is_reasonable_offset(-43_200.0));  // -12 hours
+    }
+
+    #[test]
+    fn reasonable_offset_rejects_implausible_values() {
+        // Если NTP отдал > 1 дня — это либо MITM, либо broken RTC.
+        assert!(!is_reasonable_offset(86_400.001));   // 1 day + 1ms
+        assert!(!is_reasonable_offset(-86_400.001));
+        assert!(!is_reasonable_offset(31_536_000.0)); // 1 year
+        assert!(!is_reasonable_offset(-31_536_000.0));
+        assert!(!is_reasonable_offset(f64::INFINITY));
+    }
+
+    #[test]
+    fn reasonable_offset_boundary_exactly_one_day_accepted() {
+        // ≤ 1 day включительно — accept. NaN — reject (NaN.abs()=NaN, NaN<=86400=false).
+        assert!(is_reasonable_offset(86_400.0));
+        assert!(is_reasonable_offset(-86_400.0));
+        assert!(!is_reasonable_offset(f64::NAN));
     }
 }

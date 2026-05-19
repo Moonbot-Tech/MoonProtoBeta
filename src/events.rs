@@ -633,6 +633,97 @@ mod tests {
         assert!((delta_seconds(&d_b) - (-0.2)).abs() < 1e-9, "dispatcher B не должен видеть изменения handle A");
     }
 
+    // =========================================================================
+    //  dispatch_into_active — server_token tracking + auto-link delta handle
+    // =========================================================================
+
+    fn dummy_client_cfg() -> crate::client::ClientConfig {
+        crate::client::ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: crate::client::RefreshConfig {
+                update_markets_every: None,
+                check_tags_every: None,
+            },
+        }
+    }
+
+    #[test]
+    fn dispatch_into_active_records_initial_server_token() {
+        // Первый вызов запоминает текущий server_token в last_known_server_token.
+        // Sentinel значение 0 (init) → не triggers reset на первом non-zero token.
+        let mut d = EventDispatcher::new();
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        // Установим server_token=42 (имитация после первого Fine).
+        client.testing_set_server_token(42);
+        assert_eq!(d.last_known_server_token, 0);
+        let mut out = Vec::new();
+        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        assert_eq!(d.last_known_server_token, 42,
+            "первый dispatch_into_active должен запомнить server_token");
+    }
+
+    #[test]
+    fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
+        // Init last_known=0 → первый non-zero token НЕ triggers full_reset.
+        // Чтобы это проверить — устанавливаем "сигнатурные" значения в trades/order_books
+        // и проверяем что они НЕ сбросились.
+        let mut d = EventDispatcher::new();
+        // Сделаем order_books непустым через apply_markets_indexes (создаёт market_idx mapping).
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+        let snapshot_count_before = d.markets.by_name.len();
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_server_token(0x100);
+        let mut out = Vec::new();
+        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        // markets state НЕ должны быть сброшен (full_reset не вызывался).
+        assert_eq!(d.markets.by_name.len(), snapshot_count_before,
+            "первый non-zero token — не triggers reset");
+    }
+
+    #[test]
+    fn dispatch_into_active_triggers_reset_on_token_change() {
+        let mut d = EventDispatcher::new();
+        // Симулируем что мы уже видели server_token = 0xAAA.
+        d.last_known_server_token = 0xAAA;
+        // Установим trades state в non-default (last_packet_num != 0 наблюдаемо через
+        // повторный dispatch — но private. Достаточно проверить что `last_known`
+        // обновляется на новый, а full_reset работает на уровне самой TradesState).
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_server_token(0xBBB);
+        let mut out = Vec::new();
+        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        assert_eq!(d.last_known_server_token, 0xBBB,
+            "после смены токена — last_known обновлён");
+        // Поведение TradesState.full_reset() и OrderBooks.clear() покрыто
+        // unit-тестами в соответствующих модулях (state::trades, state::order_books).
+    }
+
+    #[test]
+    fn dispatch_into_active_auto_links_server_time_delta_source() {
+        // Первый вызов — линкует handle от Client'а. До этого source = None,
+        // dispatcher падает обратно на global.
+        let mut d = EventDispatcher::new();
+        assert!(d.server_time_delta_source.is_none());
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let mut out = Vec::new();
+        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        assert!(d.server_time_delta_source.is_some(),
+            "после первого dispatch_into_active — source привязан к Client'у");
+
+        // Повторный вызов — source не меняется (already linked).
+        let handle_after_first = Arc::clone(d.server_time_delta_source.as_ref().unwrap());
+        d.dispatch_into_active(Command::Reserved1, b"y", 0, &mut out, &mut client);
+        let handle_after_second = d.server_time_delta_source.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&handle_after_first, handle_after_second),
+            "повторный вызов — source остаётся тем же handle");
+    }
+
     #[test]
     fn dispatcher_propagates_delta_to_orders_state() {
         // End-to-end: при `dispatch(Command::Order, ...)` dispatcher применяет текущий
