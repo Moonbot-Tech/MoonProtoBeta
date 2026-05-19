@@ -15,19 +15,33 @@
 use std::collections::HashMap;
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
 
+/// Глобальные суммарные балансы аккаунта (в BTC equivalent).
 #[derive(Debug, Clone, Default)]
 pub struct GlobalBalance {
+    /// Доступный баланс в BTC (свободный + locked, минус долги).
     pub btc_balance_total: f64,
+    /// Заблокированная часть баланса в BTC (в открытых ордерах / залогах).
     pub btc_balance_locked: f64,
+    /// Полный баланс включая нереализованную прибыль/убыток в BTC equivalent.
     pub btc_balance_full: f64,
+    /// Баланс specialCoin (USDT для futures, BUSD/USDC при MA mode и т.д.).
     pub special_coin_balance: f64,
 }
 
+/// Sync state балансов клиента. Обновляется через `apply(BalanceUpdate)` при
+/// получении `MPC_Balance` пакетов от сервера. Используется в [`crate::events::EventDispatcher`].
+///
+/// **Семантика snapshot vs incremental**:
+/// - `cmd_id=2` (legacy snapshot): обновляются полученные маркеты, остальные не трогаются.
+/// - `cmd_id=3` (full snapshot): обновляются полученные, **остальные сбрасываются**.
+/// - `cmd_id=4` (incremental): обновление дельты + опциональный обнов globals.
 #[derive(Debug, Default)]
 pub struct BalancesState {
+    /// Глобальные суммы (BTC, special coin, locked).
     pub global: GlobalBalance,
-    /// market_name → BalanceItem
+    /// Per-маркет балансы: ключ = `market_name` (e.g. "BTCUSDT"), значение = строка `BalanceItem`.
     pub by_market: HashMap<String, BalanceItem>,
+    /// Последний применённый epoch (wrap-safe сравнение через `EpochIsOK`).
     pub last_epoch: u16,
     /// Epoch уже выставлялся (после первого apply). До этого epoch=0 принимается как валидный.
     epoch_set: bool,

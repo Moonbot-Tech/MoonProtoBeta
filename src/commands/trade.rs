@@ -48,20 +48,53 @@ impl OrderType {
     }
 }
 
-/// TOrderWorkerStatus (MarketsU.pas:39).
-/// State machine: None → BuySet → BuyDone → SellSet → SelLAlmostDone → SelLDone (terminal).
+/// TOrderWorkerStatus (MarketsU.pas:39) — состояние торгового ордера в state machine.
+///
+/// Standard flow для long-позиции:
+/// ```text
+///   None ──► BuySet ──► BuyDone ──► SellSet ──► SelLAlmostDone ──► SelLDone
+///             │           │           │            │
+///             ▼           ▼           ▼            ▼
+///          BuyFail    BuyCancel   SellFail    SellCancel
+/// ```
+///
+/// **Terminal states** (ордер закрыт, дальнейших переходов не будет):
+/// `SelLDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
+///
+/// **Phase semantics** (для UI группировки):
+/// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) — ожидание/исполнение
+///   входа в позицию.
+/// - **Sell phase** (`SellSet`/`SelLAlmostDone`/`SelLDone`/`SellFail`/`SellCancel`) —
+///   выход из позиции (take-profit / stop-loss / manual close).
+/// - `SelLAlmostDone` — частичное исполнение sell-ордера, ждём остаток.
+///
+/// **Server constraints** (см. ARCHITECTURE.md §17 sync state):
+/// - Откат фазы запрещён сервером (нельзя из SellSet вернуться в BuySet).
+/// - Внутри фазы переходы по статусам валидны (BuySet → BuyDone).
+/// - Terminal состояние не меняется.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderWorkerStatus {
+    /// Initial state — ордер ещё не отправлен на биржу.
     None = 0,
+    /// Buy-ордер не удался (отказ биржи, недостаточно баланса, т.п.). Terminal.
     BuyFail = 1,
+    /// Buy-ордер размещён на бирже, ждём fill.
     BuySet = 2,
+    /// Buy-ордер отменён (пользователем или системой). Terminal.
     BuyCancel = 3,
+    /// Buy-ордер исполнен — позиция открыта.
     BuyDone = 4,
+    /// Sell-ордер не удался. Terminal.
     SellFail = 5,
+    /// Sell-ордер (закрытие/take-profit) размещён, ждём fill.
     SellSet = 6,
+    /// Sell-ордер отменён. Terminal.
     SellCancel = 7,
+    /// Sell-ордер полностью исполнен — позиция закрыта. Final terminal state для
+    /// успешной торговой сделки.
     SelLDone = 8,
+    /// Sell-ордер частично исполнен — ждём fill остатка.
     SelLAlmostDone = 9,
 }
 
@@ -826,8 +859,15 @@ impl AllStatuses {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let header = BaseCommandHeader::read(r)?;
         if r.len() < 4 { return None; }
-        let count = i32::from_le_bytes(r[0..4].try_into().unwrap()) as usize;
+        let count_raw = i32::from_le_bytes(r[0..4].try_into().unwrap());
         *r = &r[4..];
+        // DoS guard: отрицательный count или явно нереалистичный → reject.
+        // OrderStatus минимум 11 байт (CommandHeader). Если count * 11 > remaining → malformed.
+        if count_raw < 0 || (count_raw as usize).saturating_mul(11) > r.len() {
+            log::warn!(target: "moonproto::trade", "AllStatuses: invalid count={} (remaining={})", count_raw, r.len());
+            return None;
+        }
+        let count = count_raw as usize;
         let mut orders = Vec::with_capacity(count);
         for _ in 0..count {
             // Каждый order пишется через `o.StoreToStream(Stream)` — то есть **сам** включает
@@ -1405,6 +1445,14 @@ pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short
     let mut out = Vec::with_capacity(32);
     write_market_header(&mut out, 30, ctx.uid, market_name, ctx.currency, ctx.platform);
     out.push(is_short as u8);
+    out
+}
+
+/// CmdId=23: TPenaltyCommand — пометить маркет penalty (cooldown).
+/// Аудит docs_api B-04: команда вызывается в TaskWorkers.pas:8361, Unit1.pas:11859/23750.
+pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    write_market_header(&mut out, 23, ctx.uid, market_name, ctx.currency, ctx.platform);
     out
 }
 

@@ -98,8 +98,16 @@ pub fn build_engine_request(method: EngineMethod, market_name: &str, market_name
 // ============================================================================
 
 /// `emk_SubscribeAllTrades` — подписка на TradesStream.
-pub fn subscribe_all_trades() -> Vec<u8> {
-    build_engine_request(EngineMethod::SubscribeAllTrades, "", &[])
+///
+/// `want_mm_orders` — нужны ли market-maker ордера (TradesStream section 01). Зависит от
+/// прикладной логики app (есть ли активные MM-стратегии / включена ли heatmap). Liба
+/// не решает за app — это публичный параметр.
+///
+/// Wire-format: params = 1 byte bool (Delphi `MoonProtoEngine.pas:274
+/// req.WriteBool(MMOrdersSubscribed)`).
+pub fn subscribe_all_trades(want_mm_orders: bool) -> Vec<u8> {
+    let params = [if want_mm_orders { 1u8 } else { 0u8 }];
+    build_engine_request_full(EngineMethod::SubscribeAllTrades, "", &[], &params)
 }
 
 /// `emk_UnsubscribeAllTrades` — отписка от TradesStream.

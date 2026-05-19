@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use crate::commands::order_book::{OrderBookUpdate, compare_seq};
 
 /// Кэш считается corrupted, если непустой дольше этого порога (мс).
@@ -59,7 +59,10 @@ struct OrderBookCache {
     /// Был ли получен Full snapshot. До первого Full — все Diff игнорируются.
     has_full: bool,
     /// Сортированный по seq список накопленных out-of-order пакетов.
-    packets: Vec<CachedPacket>,
+    /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` чтобы `pop_front()` в `drain_cache`
+    /// был O(1) вместо O(N) на `Vec::remove(0)`. На burst recovery 64 пакета это снимает
+    /// ~2080 memmove ops (64+63+62+…+1).
+    packets: VecDeque<CachedPacket>,
     /// Помечен ли кэш как corrupted (нужен Full).
     corrupted: bool,
     /// Время последнего отправленного `RequestOrderBookFull` (throttle).
@@ -72,8 +75,12 @@ impl OrderBookCache {
     /// A-17 fix: используем стандартный `partition_point` вместо самописного binary search.
     /// Wrapping-safe сравнение через `compare_seq` — оставляем (стандартный `binary_search`
     /// не годится из-за u16 wrap-around).
-    fn binary_search_insert(&self, seq: u16) -> usize {
-        self.packets.partition_point(|p| compare_seq(p.seq, seq) < 0)
+    fn binary_search_insert(&mut self, seq: u16) -> usize {
+        // VecDeque не имеет `partition_point` на ring-форме; make_contiguous() выравнивает
+        // в один slice (O(1) если ring не wrapped, O(N) только при reset wrapped state).
+        // Для нашего N≤64 — пренебрежимо.
+        self.packets.make_contiguous();
+        self.packets.as_slices().0.partition_point(|p| compare_seq(p.seq, seq) < 0)
     }
 
     fn add(&mut self, seq: u16, pkt: OrderBookUpdate, now_ms: i64) {
@@ -87,9 +94,17 @@ impl OrderBookCache {
         }
         self.packets.insert(pos, CachedPacket { seq, pkt });
 
-        // Drop oldest если переполнили
-        while self.packets.len() > BOOK_CACHE_MAX_PACKETS {
-            self.packets.remove(0);
+        // D-V2-11 fix: при переполнении кэша **не дропаем середину** sequence (раньше
+        // `remove(0)` снимало самый старый = самый нужный для recovery → скрытые gap'ы
+        // в orderbook → corrupted UI state). Вместо этого — помечаем corrupted + сбрасываем
+        // кэш. На следующем packet'е orderbook_cache_handler запросит fresh Full snapshot.
+        if self.packets.len() > BOOK_CACHE_MAX_PACKETS {
+            log::warn!(target: "moonproto::order_books",
+                "OrderBook cache overflow ({} packets) — clearing + will request Full",
+                self.packets.len());
+            self.corrupted = true;
+            self.packets.clear();
+            self.cache_not_empty_since_ms = 0;
         }
     }
 
@@ -168,6 +183,12 @@ pub enum OrderBookEvent {
     },
 }
 
+/// DoS guard: верхний лимит уникальных (market_index, book_kind) ключей.
+/// На реальной бирже сотни маркетов × 2 book_kind = единицы тысяч. 4096 — щедрый запас,
+/// закрывает медленный grow-attack когда злой/багнутый сервер отправляет Diff пакеты
+/// с разными market_index чтобы наполнить HashMap до OOM.
+pub const MAX_ORDERBOOK_CACHES: usize = 4096;
+
 /// Главный sync state — кэш на каждый (market_index, book_kind).
 #[derive(Debug, Default)]
 pub struct OrderBooks {
@@ -184,8 +205,23 @@ impl OrderBooks {
     /// Возвращает список событий: Apply (может быть несколько при разгребании cache), RequestFullNeeded, Ignored.
     pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
-        let cache = self.caches.entry(key).or_default();
         let mut events = Vec::new();
+
+        // DoS guard: если caches заполнен и пришёл пакет на новый ключ — выкидываем самый
+        // старый по last_full_request_ms (LRU-like). Защита от slow-grow attack через distinct
+        // market_index. На реальной бирже размер << MAX_ORDERBOOK_CACHES.
+        if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ORDERBOOK_CACHES {
+            if let Some((evict_key, _)) = self.caches.iter()
+                .min_by_key(|(_, c)| c.last_full_request_ms)
+                .map(|(k, c)| (*k, c.last_full_request_ms))
+            {
+                log::warn!(target: "moonproto::order_books",
+                    "caches saturated ({}); evicting {:?} (LRU)", self.caches.len(), evict_key);
+                self.caches.remove(&evict_key);
+            }
+        }
+
+        let cache = self.caches.entry(key).or_default();
 
         // === 1. Full snapshot — всегда применяется (это reset кэша) ===
         if pkt.is_full {
@@ -288,12 +324,13 @@ impl OrderBooks {
         cache.packets.retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
 
         loop {
-            if cache.packets.is_empty() {
-                break;
-            }
-            let head_seq = cache.packets[0].seq;
+            let head_seq = match cache.packets.front() {
+                Some(p) => p.seq,
+                None => break,
+            };
             if head_seq == cache.expected_seq {
-                let entry = cache.packets.remove(0);
+                // O(1) pop_front вместо O(N) remove(0).
+                let entry = cache.packets.pop_front().unwrap();
                 cache.expected_seq = entry.seq.wrapping_add(1);
                 events.push(OrderBookEvent::Apply {
                     market_index: entry.pkt.market_index,

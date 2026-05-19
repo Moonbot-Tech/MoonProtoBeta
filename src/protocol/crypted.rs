@@ -11,8 +11,8 @@
 ///   Followed by the actual command payload.
 
 use log::warn;
-use crate::MoonKey;
 use crate::crypto;
+use crate::crypto::Aes128Gcm;
 use super::slider::Slider;
 
 pub const CRYPTO_HEADER_SIZE: usize = 12;
@@ -44,13 +44,15 @@ impl CryptoHeader {
 /// Returns (cmd, payload, want_ack) or None if decryption/replay fails.
 /// Matches TMoonProtoClient.DeCrypt exactly.
 ///
-/// decode_key = MPKeys[not ServerSide] — for client (ServerSide=false), this is MPKeys[true].
+/// `decode_cipher` — кэшированный `Aes128Gcm` (B-V2-03), построенный из
+/// `MPKeys[not ServerSide]`. Для клиента (ServerSide=false) это `MPKeys[true]`.
+/// Хранится в `Client::decode_cipher` и обновляется при handshake.
 pub fn decrypt_command(
-    decode_key: &MoonKey,
+    decode_cipher: &Aes128Gcm,
     encrypted_data: &[u8],
     slider: &mut Slider,
 ) -> Option<(u8, Vec<u8>, bool)> {
-    let mut plaintext = match crypto::decrypt(decode_key, encrypted_data, &[]) {
+    let mut plaintext = match crypto::decrypt_with_cipher(decode_cipher, encrypted_data, &[]) {
         Some(pt) => pt,
         None => {
             // GCM tag mismatch / PKCS7 fail — corrupt packet или wrong key.

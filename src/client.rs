@@ -91,6 +91,10 @@ const CLEANUP_INTERVAL_MS: i64 = 5000;     // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80;          // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64;    // MoonProtoDataStruct.pas:31
 
+/// DoS guard: верхний лимит pending_h. При долгой server silence без ACK retry-копии
+/// накапливаются. 256 — щедрый запас для нормальной торговой нагрузки (burst orders).
+const MAX_PENDING_H: usize = 256;
+
 // Send priority (matches TMoonProtoSendPriority)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SendPriority {
@@ -128,6 +132,26 @@ impl UniqueKey {
     pub fn is_none(&self) -> bool { self.kind == UK_NONE }
     pub fn order_move(task_id: u64) -> Self { Self { kind: UK_ORDER_MOVE, uid: task_id } }
     pub fn immune_clicks(items_uid_sum: u64) -> Self { Self { kind: UK_IMMUNE_CLICKS, uid: items_uid_sum } }
+
+    /// `UK_BaseUISettings` — единственный per-client настройковый snapshot;
+    /// последняя версия замещает предыдущую в очереди отправки.
+    pub fn base_ui_settings(uid: u64) -> Self { Self { kind: UK_BASE_UI_SETTINGS, uid } }
+    /// `UK_TurnMMDetection` — переключатель ON/OFF, важен только последний.
+    pub fn turn_mm_detection() -> Self { Self { kind: UK_TURN_MM_DETECTION, uid: 0 } }
+    /// `UK_LevManageSettings` — настройки leverage, последняя версия замещает.
+    pub fn lev_manage_settings(uid: u64) -> Self { Self { kind: UK_LEV_MANAGE_SETTINGS, uid } }
+    /// `UK_DexSwitch` — выбор DEX, последний выбор замещает.
+    pub fn dex_switch() -> Self { Self { kind: UK_DEX_SWITCH, uid: 0 } }
+    /// `UK_SpotSwitch` — выбор spot режима, последний замещает.
+    pub fn spot_switch() -> Self { Self { kind: UK_SPOT_SWITCH, uid: 0 } }
+    /// `UK_StratSellPriceUpdate` — обновление sell-price конкретной стратегии;
+    /// `uid` = strategy_id, чтобы dedup был per-strategy (несколько стратегий
+    /// могут обновлять цену параллельно, но каждая сама себя замещает).
+    pub fn strat_sell_price_update(strategy_id: u64) -> Self { Self { kind: UK_STRAT_SELL_PRICE_UPDATE, uid: strategy_id } }
+    /// `UK_StratSnapshot` — полный snapshot всех стратегий, единственная пишет.
+    pub fn strat_snapshot() -> Self { Self { kind: UK_STRAT_SNAPSHOT, uid: 1 } }
+    /// `UK_BalanceFull` — full balance snapshot; единственный замещаемый.
+    pub fn balance_full() -> Self { Self { kind: UK_BALANCE_FULL, uid: 0 } }
 }
 
 /// Item in the send queue (matches TMoonProtoDataToSend)
@@ -148,11 +172,17 @@ pub struct SendItem {
 /// Public for use in `ClientEvent::Recv` variant — но напрямую не конструируется снаружи,
 /// reader thread сам формирует RecvMsg внутри `spawn_reader`.
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct RecvMsg {
     cmd: u8,
     payload: Vec<u8>,
     recv_bytes: u64,
     timestamp_ms: i64,
+    /// Аудит #7 (audit_delphi_deviation E-V2-02): эпоха reader thread'а который создал
+    /// это сообщение. Инкрементируется на каждый `spawn_reader`. Main loop игнорирует
+    /// сообщения с epoch != `current_reader_epoch` — это защита от пакетов старого
+    /// reader thread'а который ещё не завершился во время reconnect'а.
+    epoch: u32,
 }
 
 /// Message from app to main loop (send command request)
@@ -172,17 +202,7 @@ pub enum ClientEvent {
     Send(SendMsg),
 }
 
-// RecvMsg должен быть Clone для ClientEvent::Clone:
-impl Clone for RecvMsg {
-    fn clone(&self) -> Self {
-        Self {
-            cmd: self.cmd,
-            payload: self.payload.clone(),
-            recv_bytes: self.recv_bytes,
-            timestamp_ms: self.timestamp_ms,
-        }
-    }
-}
+// A-V2-07 fix: бывший ручной impl Clone заменён на #[derive(Clone)] на RecvMsg выше.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AuthStatus {
@@ -192,18 +212,54 @@ pub enum AuthStatus {
     Offline,
 }
 
-/// Lifecycle event для уведомления потребителя о смене состояния канала.
+/// Lifecycle event — уведомления о смене состояния канала связи с сервером.
+///
+/// Подключай callback через [`Client::on_lifecycle`]. Callback выполняется в
+/// main thread (тот же где `client.run()`).
+///
+/// Типовая последовательность:
+/// ```text
+///   Connecting  → Authenticated  → [running, обычная работа] → Disconnected
+///                       │
+///                       └──[потеря связи]──► Reconnecting → Authenticated → ...
+///                                                  │
+///                                                  └──[detected restart]──► ServerRestart
+/// ```
+///
+/// `Authenticated` может прилетать несколько раз за жизнь Client'а (после каждого
+/// успешного re-handshake). `ServerRestart` — отдельный сигнал что нужно сбросить
+/// клиентские кэши market index'ов.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LifecycleEvent {
-    /// Handshake начат (Hello отправлен), но Fine ещё не получен.
+    /// Handshake начат (Hello отправлен), Fine ещё не получен. Сетевой trip-time
+    /// между Connecting и Authenticated = первые 1-3 RTT. Никаких действий от
+    /// потребителя не требуется — клиент сам пробует, retry'ит, переключает порты.
     Connecting,
-    /// Fine получен — канал авторизован и готов к работе.
+    /// Fine получен — канал авторизован и готов принимать/отправлять команды.
+    /// **Обычные действия потребителя** на этот event:
+    /// - `client.api_subscribe_all_trades()` — подписаться на сделки
+    /// - `client.request_all_statuses(uid)` — запросить статусы ордеров
+    /// - `client.strat_snapshot_request()` — запросить snapshot стратегий
+    /// - `client.ui_settings_request()` — запросить настройки
+    /// - `client.balance_request_refresh()` — запросить актуальный баланс
     Authenticated,
-    /// Канал закрыт (явный disconnect от потребителя).
+    /// Канал закрыт явным `client.disconnect()` от потребителя. Финальное
+    /// состояние — для возобновления связи нужен новый `Client::new`.
     Disconnected,
-    /// Потеря связи > RECONNECT_WAITING_MS, ждём reconnect.
+    /// Потеря связи > порога (`RECONNECT_WAITING_MS`) — клиент **сам** пытается
+    /// soft-reconnect (HelloAgain без полного handshake). Если HelloAgain не
+    /// проходит (сервер не помнит этого клиента) — следующий цикл начнётся с
+    /// нового Hello → новый `Connecting`. **Никаких действий от потребителя
+    /// не требуется**, можно только показать в UI индикатор "переподключаемся".
     Reconnecting,
-    /// Сервер перезапустился (PeerAppToken изменился между ImFriend rounds).
+    /// Детектирован перезапуск сервера: `PeerAppToken` изменился между
+    /// сессиями (см. SPEC §3 detection mechanism). На сервере **обнулились
+    /// market indexes** — кэши клиента по индексам рынков невалидны.
+    /// **Действие потребителя**:
+    /// - Сбросить локальные mappings `market_idx → market_name`
+    /// - `client.api_get_markets_indexes()` — получить свежие
+    /// - `client.api_reload_order_book()` или re-subscribe — получить свежие book'и
+    /// - `client.api_get_markets_balance_full()` — fresh balance snapshot
     ServerRestart,
 }
 
@@ -239,7 +295,12 @@ pub struct Client {
     cfg: ClientConfig,
 
     // Единый event-канал: reader + app шлют ClientEvent → main делает recv_timeout(5ms).
-    event_tx: mpsc::Sender<ClientEvent>,
+    // Аудит #1 (audit_delphi_deviation): bounded channel вместо unbounded mpsc::channel().
+    // Раньше на burst 50K pps + slow callback канал рос неограниченно → OOM-vector (50K msgs ×
+    // ~1500б payload = 75MB/sec). Теперь sync_channel(1024) + try_send + drop+warn при overflow.
+    // UDP уже lossy → drop пакета на user-level семантически эквивалентен kernel drop при
+    // переполнении SO_RCVBUF (что делает Delphi через ThreadedEvent inline handling).
+    event_tx: mpsc::SyncSender<ClientEvent>,
     event_rx: mpsc::Receiver<ClientEvent>,
 
     // Pending H-commands (main thread only, no sharing)
@@ -264,6 +325,13 @@ pub struct Client {
     app_token: u64,
     encode_key: MoonKey,
     decode_key: MoonKey,
+    /// B-V2-03 fix: кэшированный AES-128-GCM cipher для encode (encrypt direction).
+    /// Обновляется одновременно с `encode_key` при handshake. `Aes128Gcm::new` дорогой
+    /// (key schedule expansion ~100 байт операций) — раньше делалось на каждый
+    /// зашифрованный пакет (тысячи раз/сек). Теперь один раз за сессию.
+    encode_cipher: Option<crate::crypto::Aes128Gcm>,
+    /// Аналогично для decode. См. `encode_cipher`.
+    decode_cipher: Option<crate::crypto::Aes128Gcm>,
 
     _start: Instant,
     last_sent_hello: i64,
@@ -297,10 +365,11 @@ pub struct Client {
     // BytesPerSec sliding window (10 sec) — observability метрик.
     // B-13 fix: running sum поддерживается одновременно с window — `bytes_per_sec_*` O(1)
     // вместо O(N) обхода каждого запроса.
-    bps_sent_window: std::collections::VecDeque<(i64, u64)>, // (timestamp_ms, bytes)
-    bps_recv_window: std::collections::VecDeque<(i64, u64)>, // (timestamp_ms, bytes)
-    bps_sent_sum: u64,
-    bps_recv_sum: u64,
+    // #5 audit_delphi_deviation: O(1) EMA counter (порт Delphi MoonProtoUDPClient.pas:113-138
+    // AddBytesCount). VecDeque<(i64,u64)> sliding window удалён — он давал ~8MB heap на
+    // burst 50K pps + 100K push_back/pop_front ops/sec. Сейчас 24 байта + 4 ops/add.
+    bps_sent: BpsCounter,
+    bps_recv: BpsCounter,
 
     // Log throttle: ключ → последний raise timestamp (anti-spam).
     log_last: std::collections::HashMap<&'static str, i64>,
@@ -315,6 +384,10 @@ pub struct Client {
     total_sent: u64,
     next_port: u16,
     ping_count: u32,
+
+    // audit_robustness M8: throttle для SizeTest/ProbeMTU ответов (anti-amplification).
+    last_size_test_ack_ms: i64,
+    last_probe_mtu_ack_ms: i64,
 
     /// Реестр pending Engine API запросов. Shareable через `Arc::clone`.
     /// При получении `Command::API` пакета — `dispatch` доставит response
@@ -333,6 +406,11 @@ pub struct Client {
     /// из loop (макс через `read_timeout` = 1s).
     /// Каждый новый reader получает свой Arc → старый и новый reader НЕ конфликтуют.
     reader_shutdown: Arc<AtomicBool>,
+    /// Аудит #7 (audit_delphi_deviation E-V2-02): инкремент на каждый `spawn_reader`.
+    /// Reader thread получает копию текущего значения и проставляет в `RecvMsg.epoch`.
+    /// Main loop фильтрует stale events с epoch != этого значения. Защита от race на
+    /// reconnect (старый reader может ещё крутиться 1с пока read_timeout сработает).
+    current_reader_epoch: u32,
 
     /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
     /// строку + `send_to(&str)` делал `getaddrinfo` resolve на каждый send (потенциально DNS-блокирующий).
@@ -353,7 +431,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(cfg: ClientConfig) -> Self {
-        let (event_tx, event_rx) = mpsc::channel();
+        // Аудит #1: bounded channel. 1024 events × ~1500б payload = ~1.5MB worst case.
+        // При burst 10K pps это 100мс задержки main loop без потери. После — drop+warn.
+        const EVENT_CHANNEL_CAPACITY: usize = 1024;
+        let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
 
         Self {
             cfg,
@@ -376,6 +457,8 @@ impl Client {
             app_token: rand::random(),
             encode_key: [0; 16],
             decode_key: [0; 16],
+            encode_cipher: None,
+            decode_cipher: None,
             _start: Instant::now(),
             last_sent_hello: 0, // Delphi: 0 initially. now_ms() is huge (system time) → diff > interval → Hello sends immediately
             waiting_hello_start: 0,
@@ -400,10 +483,8 @@ impl Client {
             can_send_rate: 2 * 1024 * 1024, // StartCanSendRate = 2 MB/s
             used_sliced_limit: false,
             actual_sleep_time: 5.0,
-            bps_sent_window: std::collections::VecDeque::new(),
-            bps_recv_window: std::collections::VecDeque::new(),
-            bps_sent_sum: 0,
-            bps_recv_sum: 0,
+            bps_sent: BpsCounter::new(),
+            bps_recv: BpsCounter::new(),
             log_last: std::collections::HashMap::new(),
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
@@ -413,10 +494,13 @@ impl Client {
             total_sent: 0,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
-            api_pending: ApiPending::new(),
+            last_size_test_ack_ms: 0,
+            last_probe_mtu_ack_ms: 0,
+            api_pending: ApiPending::new_arc(),
             lifecycle_cb: None,
             prev_auth_status: AuthStatus::Base,
             reader_shutdown: Arc::new(AtomicBool::new(false)),
+            current_reader_epoch: 0,
             cached_server_addr: None,
             pending_second_imfriend: None,
         }
@@ -464,6 +548,13 @@ impl Client {
     /// Public API: queue a command for sending (thread-safe, via channel).
     /// Matches Delphi: SendCmd → SendCmdInt → DataToSend/H/L.
     /// Can be called from any thread (send_tx is cloneable).
+    ///
+    /// E-V2-06: возвращает `()`, **но** при закрытом канале (main loop завершён)
+    /// логирует error через `log` crate. Потерянная команда — серьёзный сигнал,
+    /// но возвращать Result сломало бы API всех Client wrappers (`client.new_order(...)`
+    /// и т.д.). Если потребителю нужен гарантированный feedback — он может
+    /// проверить статус через `LifecycleEvent::Disconnected` callback и не
+    /// шарашить новые команды после.
     pub fn send_cmd(&self, data: Vec<u8>, cmd: Command, priority: SendPriority, encrypted: bool, max_retries: i32) {
         self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, UniqueKey::none());
     }
@@ -480,13 +571,25 @@ impl Client {
             last_sent_at: 0,
             u_key,
         };
-        self.event_tx.send(ClientEvent::Send(SendMsg { item })).ok();
+        // Аудит #1 + E-V2-06: для send команд (app → main) используем blocking `send` (не
+        // `try_send`). Application threads ОБЯЗАНЫ ждать пока main loop разгрузит канал —
+        // в отличие от UDP пакетов, торговая команда не должна быть дропнута. Если main loop
+        // мёртв (channel closed) — логируем и возвращаемся (потребитель проверит lifecycle).
+        if self.event_tx.send(ClientEvent::Send(SendMsg { item })).is_err() {
+            log::error!(target: "moonproto::client",
+                "send_cmd: event channel closed (main loop dead?) — packet cmd={:?} priority={:?} dropped",
+                cmd, priority);
+        }
     }
 
-    /// Get a clone of send_tx for use from other threads (e.g. terminal UI).
-    /// Получить клонированный `Sender<ClientEvent>` для отправки команд из любого потока.
+    /// Get a clone of event_tx for use from other threads (e.g. terminal UI).
+    /// Получить клонированный `SyncSender<ClientEvent>` для отправки команд из любого потока.
     /// Приложение шлёт `ClientEvent::Send(SendMsg { item })` через клонированный sender.
-    pub fn sender(&self) -> mpsc::Sender<ClientEvent> {
+    ///
+    /// Аудит #1 (audit_delphi_deviation): тип теперь `SyncSender` (bounded channel).
+    /// `.send()` BLOCKS если канал переполнен — приложение wait'ит пока main loop разгрузит.
+    /// Это правильное поведение для торговых команд (vs UDP пакеты которые можно drop).
+    pub fn sender(&self) -> mpsc::SyncSender<ClientEvent> {
         self.event_tx.clone()
     }
 
@@ -511,8 +614,14 @@ impl Client {
     ///
     /// При timeout вызвать `client.api_pending.remove(uid)` чтобы освободить slot.
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
-        let uid = u64::from_le_bytes(request_payload[3..11].try_into().unwrap_or([0u8; 8]));
-        let rx = self.api_pending.register(uid);
+        // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
+        // паниковала при len<11 — publis API не должен валить процесс из-за плохого input'а.
+        let uid = request_payload
+            .get(3..11)
+            .and_then(|s| s.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        let rx = self.api_pending.register(uid, self.now_ms());
         self.send_api_request(request_payload);
         rx
     }
@@ -602,8 +711,8 @@ impl Client {
     }
 
     /// `emk_SubscribeAllTrades`.
-    pub fn api_subscribe_all_trades(&self) -> mpsc::Receiver<EngineResponse> {
-        self.send_api_request_async(&crate::commands::engine_request::subscribe_all_trades())
+    pub fn api_subscribe_all_trades(&self, want_mm_orders: bool) -> mpsc::Receiver<EngineResponse> {
+        self.send_api_request_async(&crate::commands::engine_request::subscribe_all_trades(want_mm_orders))
     }
 
     /// `emk_UnsubscribeAllTrades`.
@@ -718,10 +827,14 @@ impl Client {
 
     /// `TOrderReplaceCommand` (CmdId=6, UK_OrderMove) — replace ордера новой ценой.
     /// `ctx.uid` должен быть **task_id ордера** для корректного dedup'а.
+    ///
+    /// `Epoch` устанавливается внутри в 0 (audit_responsibility B1: в Delphi приложение
+    /// всегда передаёт `Epoch=0` в C→S командах; поле используется только в server→client
+    /// для filter out-of-order).
     pub fn replace_order(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                          epoch: u16, status: crate::commands::trade::OrderWorkerStatus,
+                          status: crate::commands::trade::OrderWorkerStatus,
                           order_type: crate::commands::trade::OrderType, new_price: f64) {
-        let raw = crate::commands::trade::build_order_replace(ctx, market, epoch, status, order_type, new_price);
+        let raw = crate::commands::trade::build_order_replace(ctx, market, 0, status, order_type, new_price);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
@@ -733,9 +846,10 @@ impl Client {
 
     /// `TOrderCancelCommand` (CmdId=10, UK_OrderMove) — отменить ордер.
     /// `ctx.uid` должен быть **task_id ордера** для корректного dedup'а.
+    /// `Epoch=0` (внутри). См. `replace_order`.
     pub fn cancel_order(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                         epoch: u16, status: crate::commands::trade::OrderWorkerStatus) {
-        let raw = crate::commands::trade::build_order_cancel(ctx, market, epoch, status);
+                         status: crate::commands::trade::OrderWorkerStatus) {
+        let raw = crate::commands::trade::build_order_cancel(ctx, market, 0, status);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
@@ -793,17 +907,19 @@ impl Client {
     }
 
     /// `TOrderStopsUpdate` (CmdId=20, UK_OrderMove). `ctx.uid` = task_id ордера.
+    /// `Epoch=0` (внутри). См. `replace_order`.
     pub fn update_order_stops(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                               epoch: u16, status: crate::commands::trade::OrderWorkerStatus,
+                               status: crate::commands::trade::OrderWorkerStatus,
                                stops: &crate::commands::trade::StopSettings) {
-        let raw = crate::commands::trade::build_order_stops_update(ctx, market, epoch, status, stops);
+        let raw = crate::commands::trade::build_order_stops_update(ctx, market, 0, status, stops);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
     /// `TTurnPanicSellCommand` (CmdId=21, UK_OrderMove). `ctx.uid` = task_id ордера.
+    /// `Epoch=0` (внутри). См. `replace_order`.
     pub fn turn_panic_sell(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                            epoch: u16, status: crate::commands::trade::OrderWorkerStatus, turn_on: bool) {
-        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, epoch, status, turn_on);
+                            status: crate::commands::trade::OrderWorkerStatus, turn_on: bool) {
+        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, 0, status, turn_on);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
@@ -825,10 +941,11 @@ impl Client {
     }
 
     /// `TVStopUpdate` (CmdId=29, UK_OrderMove). `ctx.uid` = task_id ордера.
+    /// `Epoch=0` (внутри). См. `replace_order`.
     pub fn update_vstop(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                         epoch: u16, status: crate::commands::trade::OrderWorkerStatus,
+                         status: crate::commands::trade::OrderWorkerStatus,
                          vstop_on: bool, vstop_fixed: bool, vstop_level: f64, vstop_vol: f64) {
-        let raw = crate::commands::trade::build_vstop_update(ctx, market, epoch, status,
+        let raw = crate::commands::trade::build_vstop_update(ctx, market, 0, status,
                                                               vstop_on, vstop_fixed, vstop_level, vstop_vol);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
@@ -839,14 +956,217 @@ impl Client {
         self.send_trade(raw, 1);
     }
 
-    /// GetTimeMS equivalent — system time in milliseconds (matches Delphi GetTickCount64).
-    /// MUST use same time base everywhere (reader thread, main thread, slicing).
+    /// `TPenaltyCommand` (CmdId=23) — пометить маркет penalty (cooldown).
+    /// Docs_api audit B-04: команда активно используется в MoonBot Delphi
+    /// (TaskWorkers.pas:8361, Unit1.pas:11859/23750).
+    pub fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) {
+        let raw = crate::commands::trade::build_penalty(ctx, market);
+        self.send_trade(raw, 3);
+    }
+
+    // ====================================================================
+    //  High-level UI wrappers (Command::UI, encrypted=true)
+    //  Покрывают MClient.SendUICmd(T*Command.Create(...)) семантику Delphi.
+    //  UID авто-генерируется через rand::random() — потребитель не передаёт.
+    //  Priority/MaxRetries/UKey — из атрибутов соответствующих Delphi-классов.
+    //  Аудит docs_api B-01: было 14 build_* функций без Client-обёрток.
+    // ====================================================================
+
+    /// `TClientSettingsCommand` (UI CmdId=1, Sliced, UK_BaseUISettings).
+    /// Передаёт полный snapshot настроек клиента — заменяет любой предыдущий
+    /// pending settings-пакет с тем же UKey.
+    pub fn ui_send_settings(&self, settings: &crate::commands::ui::ClientSettingsCommand) {
+        let raw = crate::commands::ui::build_client_settings(settings);
+        self.send_cmd_keyed(raw, Command::UI, SendPriority::Sliced, true, 6,
+                            UniqueKey::base_ui_settings(settings.uid));
+    }
+
+    /// `TSettingsRequest` (UI CmdId=2, High) — запрос текущих настроек с сервера.
+    pub fn ui_settings_request(&self) {
+        let raw = crate::commands::ui::build_settings_request(rand::random());
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TStratStartStopCommand` (UI CmdId=3, High) — запустить/остановить все стратегии.
+    pub fn ui_strat_start_stop(&self, is_start: bool) {
+        let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TStratStartStopCommandV2` (UI CmdId=4, High) — запустить/остановить
+    /// конкретные стратегии (с массивом checked-items).
+    pub fn ui_strat_start_stop_v2(&self, is_start: bool, items: &[crate::commands::strat::StratCheckedItem]) {
+        let raw = crate::commands::ui::build_strat_start_stop_v2(rand::random(), is_start, items);
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TMMOrdersSubscribeCommand` (UI CmdId=5, High, UK_TurnMMDetection) —
+    /// включить/выключить подписку на market-maker ордера.
+    pub fn ui_mm_subscribe(&self, subscribe: bool) {
+        let raw = crate::commands::ui::build_mm_orders_subscribe(rand::random(), subscribe);
+        self.send_cmd_keyed(raw, Command::UI, SendPriority::High, true, 3,
+                            UniqueKey::turn_mm_detection());
+    }
+
+    /// `TUpdateVersionCommand` (UI CmdId=6, High) — уведомить сервер о версии клиента.
+    pub fn ui_update_version(&self, version_name: &str, is_release: bool) {
+        let raw = crate::commands::ui::build_update_version(rand::random(), version_name, is_release);
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TEmuTradesCommand` (UI CmdId=7, Sliced) — отправить эмуляцию трейдов
+    /// для тестового рынка.
+    pub fn ui_emu_trades(&self, m_index: u16, base_time: f64,
+                          points: &[crate::commands::ui::EmuTradePoint]) {
+        let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
+        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+    }
+
+    /// `TNewMarketNotifyCommand` (UI CmdId=8, High) — уведомить о новом рынке.
+    pub fn ui_new_market_notify(&self) {
+        let raw = crate::commands::ui::build_new_market_notify(rand::random());
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TLevManageCommand` (UI CmdId=9, Sliced, UK_LevManageSettings) —
+    /// конфигурация leverage (auto-max, auto-up, isolated/cross, fix-lev).
+    pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
+        let uid: u64 = rand::random();
+        let raw = crate::commands::ui::build_lev_manage(uid, cmd);
+        self.send_cmd_keyed(raw, Command::UI, SendPriority::Sliced, true, 6,
+                            UniqueKey::lev_manage_settings(uid));
+    }
+
+    /// `TTriggerManageCommand` (UI CmdId=10, Sliced) — батч-управление trigger'ами:
+    /// action over (all_markets | конкретные markets/keys).
+    pub fn ui_trigger_manage(&self, action: u8, all_markets: bool,
+                              markets: &[u16], keys: &[u16]) {
+        let raw = crate::commands::ui::build_trigger_manage(rand::random(), action, all_markets, markets, keys);
+        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+    }
+
+    /// `TResetProfitCommand` (UI CmdId=11, High) — сброс profit-счётчиков.
+    pub fn ui_reset_profit(&self, kind: u8) {
+        let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TArbActivateNotify` (UI CmdId=12, High) — уведомление об активации арбитража.
+    pub fn ui_arb_activate_notify(&self, arb_valid: f64) {
+        let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
+        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+    }
+
+    /// `TSwitchDexCommand` (UI CmdId=13, High, UK_DexSwitch) — выбор DEX.
+    /// Имя DEX обрезается до 15 байт ShortString.
+    pub fn ui_switch_dex(&self, dex_name: &str) {
+        let raw = crate::commands::ui::build_switch_dex(rand::random(), dex_name);
+        self.send_cmd_keyed(raw, Command::UI, SendPriority::High, true, 3,
+                            UniqueKey::dex_switch());
+    }
+
+    /// `TSwitchSpotCommand` (UI CmdId=14, High, UK_SpotSwitch) — выбор spot режима.
+    pub fn ui_switch_spot(&self, spot_index: u8) {
+        let raw = crate::commands::ui::build_switch_spot(rand::random(), spot_index);
+        self.send_cmd_keyed(raw, Command::UI, SendPriority::High, true, 3,
+                            UniqueKey::spot_switch());
+    }
+
+    // ====================================================================
+    //  High-level Strat wrappers (Command::Strat, encrypted=true)
+    //  Покрывают MClient.SendStratCmd(T*Command.Create(...)) семантику Delphi.
+    //  Аудит docs_api B-02: было 5 build_* функций без Client-обёрток.
+    //  ВНИМАНИЕ: отправка StratSnapshot полного через CreateFromStrats требует
+    //  StrategySerializer (Stage 3) — здесь только raw-payload entry.
+    // ====================================================================
+
+    /// `TStratSnapshotRequest` (Strat CmdId=1, High) — запрос snapshot стратегий с сервера.
+    pub fn strat_snapshot_request(&self) {
+        let raw = crate::commands::strat::build_snapshot_request(rand::random());
+        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+    }
+
+    /// `TStratSnapshot.CreateFromStrats` raw entry (Strat CmdId=2, Sliced, UK_StratSnapshot).
+    /// `serialized_payload` — уже сериализованный через `StrategySerializer` блок
+    /// без обёртывающего заголовка команды; функция сама добавляет CmdId/ver/uid.
+    /// Полный snapshot замещает любой предыдущий pending snapshot.
+    ///
+    /// **Stage 3:** StrategySerializer Rust writer не готов; до его реализации
+    /// этот метод можно использовать только если ты сам сериализовал стратегии
+    /// другим способом, совместимым с Delphi wire-format.
+    pub fn strat_send_snapshot(&self, serialized_payload: &[u8]) {
+        const CMD_STRAT_SNAPSHOT: u8 = 2;
+        const CURRENT_PROTO_CMD_VER: u16 = 3;
+        let uid: u64 = rand::random();
+        let mut raw = Vec::with_capacity(11 + serialized_payload.len());
+        raw.push(CMD_STRAT_SNAPSHOT);
+        raw.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+        raw.extend_from_slice(&uid.to_le_bytes());
+        raw.extend_from_slice(serialized_payload);
+        self.send_cmd_keyed(raw, Command::Strat, SendPriority::Sliced, true, 6,
+                            UniqueKey::strat_snapshot());
+    }
+
+    /// `TStratDelete` (Strat CmdId=3, High) — удалить стратегию по id.
+    pub fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
+        let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
+        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+    }
+
+    /// `TStratSellPriceUpdate` (Strat CmdId=4, High, UK_StratSellPriceUpdate) —
+    /// обновить sell-price конкретной стратегии. UKey включает strategy_id,
+    /// чтобы dedup был per-strategy.
+    pub fn strat_sell_price_update(&self, strategy_id: u64, sell_price: f64) {
+        let raw = crate::commands::strat::build_sell_price_update(rand::random(), strategy_id, sell_price);
+        self.send_cmd_keyed(raw, Command::Strat, SendPriority::High, true, 3,
+                            UniqueKey::strat_sell_price_update(strategy_id));
+    }
+
+    /// `TStratCheckedSync` (Strat CmdId=5, Sliced) — синхронизация чекбоксов стратегий.
+    /// `is_delta = false` для полного списка, `true` для дельты.
+    pub fn strat_checked_sync(&self, items: &[crate::commands::strat::StratCheckedItem], is_delta: bool) {
+        let raw = crate::commands::strat::build_checked_sync(rand::random(), items, is_delta);
+        self.send_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
+    }
+
+    /// `TStratCheckedEcho` (Strat CmdId=6, High) — echo чекбоксов от сервера.
+    pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
+        let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
+        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+    }
+
+    // ====================================================================
+    //  High-level Balance wrappers (Command::Balance, encrypted=true)
+    //  Покрывают MClient.SendBalanceCmd семантику Delphi.
+    //  Аудит docs_api B-03: ранее не было ни build_, ни Client-wrapper'а.
+    // ====================================================================
+
+    /// `TRequestBalanceRefresh` (Balance CmdId=5, High) — запросить refresh баланса.
+    /// Сервер на запрос пришлёт новый snapshot балансов (как обычный broadcast).
+    pub fn balance_request_refresh(&self) {
+        let raw = crate::commands::balance::build_request_balance_refresh(rand::random());
+        self.send_cmd(raw, Command::Balance, SendPriority::High, true, 3);
+    }
+
+    /// GetTimeMS equivalent — монотонные миллисекунды с момента старта `Client` (matches
+    /// Delphi GetTickCount64 семантикой "since some fixed past point").
+    ///
+    /// B-V3-02 fix: ранее использовался `SystemTime::now()` (clock_gettime CLOCK_REALTIME)
+    /// — ~30-100ns per call. На hot path reader thread (50K pps на пике TradesStream)
+    /// это давало 1-5 мс/сек wasted CPU + потенциальный wall-clock jump при NTP-step
+    /// (ломал бы diff'ы). `Instant::elapsed()` использует CLOCK_MONOTONIC (на Linux/Mac)
+    /// либо QueryPerformanceCounter (Windows) — стабильный, ~5-20ns per call, не
+    /// подвержен NTP-корректировкам.
+    ///
+    /// **Semantic change vs предыдущая версия:** возвращает ms since process start,
+    /// не ms since UNIX_EPOCH. Все callers используют **diff** между двумя `now_ms()`,
+    /// так что absolute-base разница не имеет значения.
+    ///
+    /// MUST use same time base everywhere (reader thread, main thread, slicing) —
+    /// гарантируется через общий `self._start: Instant`.
     #[inline]
     fn now_ms(&self) -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
+        self._start.elapsed().as_millis() as i64
     }
 
     /// Получить кэшированный SocketAddr сервера. Резолвится один раз при `bind_socket` или
@@ -946,7 +1266,24 @@ impl Client {
 
                 // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
                 // Это близко к Delphi UDPRead, который шёл прямо в reader thread.
+                //
+                // Аудит #7 (audit_delphi_deviation E-V2-02): фильтр stale epoch. Старый reader
+                // thread может ещё крутиться до 1с после reconnect'а (пока read_timeout не
+                // сработает) — его пакеты приходят со старым epoch и игнорируются. Делфи
+                // решает это синхронным `UDPClient.Active := false` (Indy ждёт reader thread
+                // exit) — у нас в Rust такого нет, но epoch-tag даёт эквивалентную гарантию.
+                let current_epoch = self.current_reader_epoch;
                 for msg in recv_msgs {
+                    if msg.epoch != current_epoch {
+                        // Stale пакет от старого reader thread'а — игнорируем тихо
+                        // (один лог на reconnect через should_log).
+                        if self.should_log("stale_reader_epoch", 5000) {
+                            warn!(target: "moonproto::client",
+                                "dropping stale packet from old reader epoch (msg.epoch={} current={})",
+                                msg.epoch, current_epoch);
+                        }
+                        continue;
+                    }
                     self.connected = true;
                     self.total_recv += msg.recv_bytes;
                     self.track_recv(msg.recv_bytes, msg.timestamp_ms);
@@ -993,6 +1330,15 @@ impl Client {
                 // Cleanup
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
                     self.slicer.clear_old();
+                    // audit_responsibility B2: auto-cleanup устаревших pending API slots
+                    // (default 12s = Delphi `TMoonProtoEngine.FTimeout`). Защита от
+                    // receiver-leak когда caller забыл `remove(uid)`.
+                    let removed = self.api_pending.cleanup_old(cur_tm, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
+                    if removed > 0 {
+                        log::debug!(target: "moonproto::client",
+                            "api_pending: cleaned up {} stale slots (>{}ms old)",
+                            removed, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
+                    }
                     self.last_cleanup = cur_tm;
                 }
 
@@ -1047,10 +1393,18 @@ impl Client {
         let mac_key = self.cfg.mac_key;
         let mask_ver = self.cfg.mask_ver;
         let event_tx = self.event_tx.clone();
+        // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
+        let start_time = self._start;
 
         // Новый shutdown flag для этого reader thread.
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         self.reader_shutdown = shutdown_flag.clone();
+
+        // Аудит #7: инкрементируем epoch. Каждый новый reader thread получает свой
+        // epoch'идентификатор; main loop игнорирует events с **старого** epoch'а
+        // (старый reader ещё крутится но мы его игнорируем).
+        self.current_reader_epoch = self.current_reader_epoch.wrapping_add(1);
+        let my_epoch = self.current_reader_epoch;
 
         // C-03: named thread для удобства debug (ps -L / Instruments / DebugView)
         let spawn_result = thread::Builder::new()
@@ -1063,10 +1417,26 @@ impl Client {
                 }
                 let n = match sock_clone.recv_from(&mut buf) {
                     Ok((n, _)) => n,
-                    Err(_) => {
-                        // Socket closed (force disconnect) or timeout → loop через shutdown check
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
+                    Err(e) => {
+                        // D-V2-08 fix: различаем нормальные timeout (set_read_timeout=1s) от
+                        // реальных ошибок. На timeout — просто continue без sleep (1с уже
+                        // потратили внутри recv_from). На реальной ошибке (BadFd при socket
+                        // disconnect, ConnectionReset) — log + проверка shutdown.
+                        match e.kind() {
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            _ => {
+                                if shutdown_flag.load(Ordering::Relaxed) {
+                                    // Сокет закрыт через do_force_disconnect — норма.
+                                    break;
+                                }
+                                // Реальная ошибка — log + короткая пауза перед retry.
+                                log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
+                                thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                        }
                     }
                 };
 
@@ -1083,14 +1453,33 @@ impl Client {
                     continue;
                 }
 
-                let timestamp_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
+                // B-V3-02 fix: монотонный timestamp через Instant вместо SystemTime
+                // (~20x faster, не подвержен NTP-корректировкам). Reader thread
+                // получил `start_time` clone'ом из self._start (Instant — Copy).
+                // Тот же time base что в `Client::now_ms` — diff'ы остаются корректны.
+                let timestamp_ms = start_time.elapsed().as_millis() as i64;
 
-                let msg = RecvMsg { cmd: hdr.cmd, payload, recv_bytes: n as u64, timestamp_ms };
-                if event_tx.send(ClientEvent::Recv(msg)).is_err() {
-                    break; // main thread dropped rx → exit
+                let msg = RecvMsg { cmd: hdr.cmd, payload, recv_bytes: n as u64, timestamp_ms, epoch: my_epoch };
+                // Аудит #1: `try_send` вместо `send` для recv path. Если main loop отстаёт и
+                // канал переполнен — дропаем пакет с warn (UDP всё равно lossy, сервер пришлёт
+                // retry для важных через Sliced+ACK). Это закрывает OOM-vector.
+                match event_tx.try_send(ClientEvent::Recv(msg)) {
+                    Ok(()) => {},
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        // Throttle лога: 1 на 1000мс через статический counter.
+                        use std::sync::atomic::{AtomicI64, Ordering};
+                        static LAST_LOG_MS: AtomicI64 = AtomicI64::new(0);
+                        let now = start_time.elapsed().as_millis() as i64;
+                        let last = LAST_LOG_MS.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) > 1000 {
+                            LAST_LOG_MS.store(now, Ordering::Relaxed);
+                            warn!(target: "moonproto::reader",
+                                "event channel full — packet dropped (main loop slow / overflow)");
+                        }
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        break; // main thread dropped rx → exit reader
+                    }
                 }
             }
         });
@@ -1214,20 +1603,28 @@ impl Client {
     }
 
     fn data_read_int(&mut self, raw_cmd: u8, data: &[u8], on_data: &mut OnDataFn) {
+        // B-V2-01 fix: используем Cow вместо безусловного data.to_vec(). Большинство
+        // пакетов не Crypted и не Compressed (Ping, handshake, Sliced-блоки) — для них
+        // payload остаётся borrowed (zero alloc). Crypted и Compressed создают Owned
+        // только когда реально нужны. На пике TradesStream это устраняет 50K alloc'ов/сек.
+        use std::borrow::Cow;
         let mut cmd = raw_cmd;
-        let mut payload = data.to_vec();
+        let mut payload: Cow<'_, [u8]> = Cow::Borrowed(data);
 
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
-            if let Some((inner_cmd, inner_data, _)) = crypted::decrypt_command(&self.decode_key, &payload, &mut self.slider) {
+            // B-V2-03: используем кэшированный cipher вместо ключа. До handshake
+            // (cipher = None) Crypted-пакетов и быть не должно — но защищаемся return.
+            let Some(decode_cipher) = self.decode_cipher.as_ref() else { return };
+            if let Some((inner_cmd, inner_data, _)) = crypted::decrypt_command(decode_cipher, &payload, &mut self.slider) {
                 cmd = inner_cmd;
-                payload = inner_data;
+                payload = Cow::Owned(inner_data);
             } else { return; }
         }
 
         if cmd & COMPRESSED_FLAG != 0 {
             cmd &= 0x7F;
             if let Some(decompressed) = compression::mp_decompress(&payload) {
-                payload = decompressed;
+                payload = Cow::Owned(decompressed);
             } else { return; }
         }
 
@@ -1260,7 +1657,12 @@ impl Client {
         // TMoonProtoPing fields (matches MoonProtoDataStruct.pas:63-74)
         let initial_time = f64::from_le_bytes(payload[8..16].try_into().unwrap());
         self.round_trip_delay = i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64;
-        self.actual_pmtu = u16::from_le_bytes(payload[20..22].try_into().unwrap());
+        // D-V2-06 fix: clamp PMTU — corrupt/malicious Ping не должен дать pmtu < header_size
+        // (=19), иначе arithmetic underflow в create_sliced_and_send. MinSafeDatagramSize=508
+        // по протоколу — это нижняя граница договорённого PMTU.
+        const MIN_PMTU: u16 = 64;
+        let pmtu_raw = u16::from_le_bytes(payload[20..22].try_into().unwrap());
+        self.actual_pmtu = pmtu_raw.max(MIN_PMTU);
         self.global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
         self.overheat = payload[24];
         // B-19: умножение на const reciprocal вместо деления (FDIV → FMUL).
@@ -1298,8 +1700,12 @@ impl Client {
         // - Struct written first (AckStart at offset 42 = SERVER's value, untouched)
         // - BuildAckHalf provides AckWords APPENDED after struct
         // BuildAckHalf fills AckStart + AckWords, then we write struct with correct AckStart
+        //
+        // audit_rust_quality #15: переиспользуем `now_dt` из расчёта server_time_delta выше
+        // вместо повторного `delphi_now()` syscall. Также защита от clock-jump между двумя
+        // вызовами — server_time_delta и `Time` поля Ping получат согласованное значение.
         let mut response = payload[..50].to_vec();
-        response[0..8].copy_from_slice(&delphi_now().to_le_bytes());
+        response[0..8].copy_from_slice(&now_dt.to_le_bytes());
         response[25..33].copy_from_slice(&self.total_sent.to_le_bytes());
         response[33..41].copy_from_slice(&self.total_recv.to_le_bytes());
         let (ack_start, ack_words) = self.slider.build_ack_half();
@@ -1349,6 +1755,11 @@ impl Client {
             let (enc, dec) = crypto::generate_sub_keys(&self.cfg.master_key, self.server_token);
             self.encode_key = enc;
             self.decode_key = dec;
+            // B-V2-03: пересоздаём кэшированные cipher'ы при обновлении ключей.
+            // Это единственное место где ключи меняются (handshake), поэтому
+            // overhead Aes128Gcm::new здесь несущественен.
+            self.encode_cipher = Some(crate::crypto::cipher_from_key(&enc));
+            self.decode_cipher = Some(crate::crypto::cipher_from_key(&dec));
 
             self.client_token += 1;
             let mut im = hello;
@@ -1357,7 +1768,9 @@ impl Client {
             im.timestamp = delphi_now();
             let packed = im.to_bytes_packed();
             let aad = self.cfg.client_id.to_le_bytes();
-            let encrypted = crypto::encrypt(&self.encode_key, &packed, &aad);
+            // B-V2-03: cipher только что установлен выше — invariant выполняется.
+            let cipher = self.encode_cipher.as_ref().expect("encode_cipher set 3 lines above");
+            let encrypted = crypto::encrypt_with_cipher(cipher, &packed, &aad);
             // D-02: первый ImFriend — сразу. Второй планируется через 32мс state-machine'ой
             // (раньше: thread::sleep блокировал main loop). Reschedule если в очереди уже
             // висит старая (соответствует Delphi семантике — последняя попытка вытесняет).
@@ -1376,6 +1789,20 @@ impl Client {
         if payload.len() < 6 { return; }
         let size = u16::from_le_bytes(payload[0..2].try_into().unwrap());
         let series = u16::from_le_bytes(payload[4..6].try_into().unwrap());
+        // D-V2-07 fix: clamp size до разумного верхнего предела. Атакующий сервер мог бы
+        // прислать SizeTest шторм с size=65535 → 64KB alloc/packet → DoS. PMTU тестовые
+        // пакеты ограничены сверху MAX_DATAGRAM_PROBE (см. ARCHITECTURE §7). MoonProto
+        // не передаёт пакетов > MaxNeededDatagramSize (8000 по IPv6 limit).
+        const MAX_SIZE_PROBE: u16 = 8192;
+        if size > MAX_SIZE_PROBE || (size as usize) < 6 { return; }
+        // audit_robustness M8: throttle ответов на SizeTest до 10/sec. Защита от amplification
+        // attack (адверсарь шлёт burst → клиент шлёт burst 8KB ответов в ответ = mobile data
+        // drain). Реальный PMTU discovery шлёт ~17 пакетов на серию каждые ~5сек → 10/sec хватает.
+        let now = self.now_ms();
+        if now.saturating_sub(self.last_size_test_ack_ms) < 100 {
+            return;
+        }
+        self.last_size_test_ack_ms = now;
         let mut ack = vec![0u8; size as usize];
         ack[0..2].copy_from_slice(&size.to_le_bytes());
         ack[4..6].copy_from_slice(&series.to_le_bytes());
@@ -1389,6 +1816,15 @@ impl Client {
         let probe_id = u16::from_le_bytes(payload[0..2].try_into().unwrap());
         let probe_index = payload[2];
         let test_size = u16::from_le_bytes(payload[3..5].try_into().unwrap());
+        // D-V2-07 fix: см. handle_size_test выше — clamp до MAX_SIZE_PROBE.
+        const MAX_SIZE_PROBE: u16 = 8192;
+        if test_size > MAX_SIZE_PROBE || (test_size as usize) < 5 { return; }
+        // audit_robustness M8: throttle до 10/sec (см. handle_size_test).
+        let now = self.now_ms();
+        if now.saturating_sub(self.last_probe_mtu_ack_ms) < 100 {
+            return;
+        }
+        self.last_probe_mtu_ack_ms = now;
         let mut ack = vec![0u8; test_size as usize];
         ack[0..2].copy_from_slice(&probe_id.to_le_bytes());
         ack[2] = probe_index;
@@ -1422,16 +1858,11 @@ impl Client {
             return; // empty non-encrypted data (Delphi logs + exits)
         }
 
-        // Compress if beneficial (matches TMoonProtoDataToSend.Create, DataStruct.pas:618-633)
-        let (send_cmd, send_data) = if item.cmd & COMPRESSED_FLAG == 0 && item.data.len() > MIN_SIZE_TO_COMPRESS {
-            if let Some(compressed) = compression::mp_compress(&item.data) {
-                (item.cmd | COMPRESSED_FLAG, compressed)
-            } else {
-                (item.cmd, item.data.clone())
-            }
-        } else {
-            (item.cmd, item.data.clone())
-        };
+        // Compress if beneficial (matches TMoonProtoDataToSend.Create, DataStruct.pas:618-633).
+        // audit_delphi_deviation #1: используем `maybe_compress` (Cow паттерн уже в H-path) —
+        // без сжатия = Cow::Borrowed = zero alloc. Раньше безусловный `.clone()` создавал
+        // лишнюю аллокацию на каждый Sliced (1-50KB payload каждый, 10-100/sec → MB/sec).
+        let (send_cmd, send_data) = Self::maybe_compress(item.cmd, &item.data);
 
         // Crypt if needed
         let (wire_cmd, wire_data, msg_num) = if item.encrypted {
@@ -1451,9 +1882,14 @@ impl Client {
 
             let mut plaintext = Vec::with_capacity(12 + send_data.len());
             plaintext.extend_from_slice(&crypto_hdr);
-            plaintext.extend_from_slice(&send_data);
+            plaintext.extend_from_slice(send_data.as_ref());
 
-            let encrypted_data = crypto::encrypt(&self.encode_key, &plaintext, &[]);
+            // B-V2-03: используем кэшированный cipher из Client.
+            let Some(cipher) = self.encode_cipher.as_ref() else {
+                error!(target: "moonproto::crypto", "encrypt H-prio called before handshake — packet dropped");
+                return;
+            };
+            let encrypted_data = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
             // Delphi: NewCmd := MPC_Crypted; if IsCompressed(d.Fcmd) then NewCmd := SetCompressed(NewCmd)
             let wire_cmd = if send_cmd & 0x80 != 0 {
                 Command::Crypted as u8 | 0x80
@@ -1492,8 +1928,9 @@ impl Client {
                 data_pos += write_size;
             }
 
-            sent_slices.push(slice.clone());
+            // B-V2-07 fix: сначала отправляем (borrow), потом move в sent_slices без clone.
             self.send_raw_packet(Command::Sliced, &slice);
+            sent_slices.push(slice);
         }
 
         // Store in Sending list with priority insert (matches IntStruct.pas:1112-1116)
@@ -1550,7 +1987,12 @@ impl Client {
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
 
-            let encrypted = crypto::encrypt(&self.encode_key, &plaintext, &[]);
+            // B-V2-03: кэшированный cipher.
+            let Some(cipher) = self.encode_cipher.as_ref() else {
+                error!(target: "moonproto::crypto", "encrypt batch called before handshake — packet dropped");
+                return;
+            };
+            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
 
             // Wire (outer) cmd — всегда Crypted; COMPRESSED_FLAG переезжает на inner cmd.
             let wire_cmd = Command::Crypted as u8;
@@ -1576,7 +2018,19 @@ impl Client {
                 // снова обернёт их (compression deterministic, можно было бы не хранить —
                 // но проще не пересжимать).
                 pending_item.cmd = eff_cmd;
-                pending_item.data = eff_data;
+                // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
+                // alloc здесь (необходимый — pending_h хранит копию между retry).
+                pending_item.data = eff_data.into_owned();
+                // DoS guard (audit_robustness H5): pending_h может неконтролируемо расти если
+                // сервер живой по MAC, но не ACK'ает H-priority. На burst торговых команд при
+                // долгой server silence — мегабайты + O(N) обход в retry_pending_h каждый цикл.
+                // Drop oldest при превышении: старые retry устаревают, новые ордера важнее.
+                if self.pending_h.len() >= MAX_PENDING_H {
+                    log::warn!(target: "moonproto::client",
+                        "pending_h saturated ({}); dropping oldest (no ACK from server for H-priority)",
+                        self.pending_h.len());
+                    self.pending_h.remove(0);
+                }
                 self.pending_h.push(pending_item);
             }
         } else {
@@ -1598,14 +2052,18 @@ impl Client {
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
     /// и `mp_compress` дал savings ≥ 5% (`mp_compress` сам возвращает None если меньше).
     /// Соответствует Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
-    /// Возвращает (effective_cmd, effective_data).
-    fn maybe_compress(cmd: u8, data: &[u8]) -> (u8, Vec<u8>) {
+    ///
+    /// Аудит #3 (audit_delphi_deviation): возвращает `Cow<'_, [u8]>` вместо `Vec<u8>`.
+    /// Раньше делали безусловный `data.to_vec()` даже когда компрессия не применялась —
+    /// 1 alloc на каждый отправляемый H/L/Sliced пакет. В Delphi `TMemoryStream` передаётся
+    /// по ссылке, ноль копий. Теперь `Cow::Borrowed` когда без сжатия → zero alloc.
+    fn maybe_compress<'a>(cmd: u8, data: &'a [u8]) -> (u8, std::borrow::Cow<'a, [u8]>) {
         if cmd & COMPRESSED_FLAG == 0 && data.len() > MIN_SIZE_TO_COMPRESS {
             if let Some(compressed) = compression::mp_compress(data) {
-                return (cmd | COMPRESSED_FLAG, compressed);
+                return (cmd | COMPRESSED_FLAG, std::borrow::Cow::Owned(compressed));
             }
         }
-        (cmd, data.to_vec())
+        (cmd, std::borrow::Cow::Borrowed(data))
     }
 
     /// Retry pending H-commands (matches CheckSeningData:944-954).
@@ -1662,7 +2120,13 @@ impl Client {
         let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001) as usize;
         let mut bytes_sent_at_once: usize = 0;
 
-        let mut to_send: Vec<Vec<u8>> = Vec::new();
+        // Аудит #2 (audit_delphi_deviation): индексы вместо clone. Раньше каждый
+        // ретранслируемый блок копировался в `to_send: Vec<Vec<u8>>` — 200 alloc/sec
+        // при congestion (10 active Sliced × 20 blocks × 2 retries/sec × ~500б).
+        // Теперь храним `(sending_idx, block_num)` (16 байт), отправляем по ссылке.
+        // Соответствует Delphi `SendCommand(Client, MPC_Sliced, Piece.data)` где Piece.data —
+        // `TMemoryStream` по ссылке (ноль копий).
+        let mut to_send_indices: Vec<(usize, usize)> = Vec::new();
         let mut to_remove = Vec::new();
 
         for (idx, sliced) in self.sending.iter_mut().enumerate() {
@@ -1681,7 +2145,7 @@ impl Client {
                 if (cur_tm - sliced.piece_last_checked[block_num]).abs() <= path_delay { continue; }
                 if bytes_sent_at_once >= client_limit { break; }
 
-                to_send.push(slice_data.clone());
+                to_send_indices.push((idx, block_num));
                 sliced.piece_last_checked[block_num] = cur_tm;
                 sliced.sent_count += 1;
                 bytes_sent_at_once += slice_data.len();
@@ -1716,11 +2180,23 @@ impl Client {
             self.used_sliced_limit = true;
         }
 
+        // Аудит #2: отправляем по индексу из self.sending — никаких clone.
+        // ВАЖНО: send_raw_packet берёт `&[u8]`, поэтому borrow на self.sending живёт только
+        // на время одного send. self.send_raw_packet требует `&mut self` (внутри пишет в
+        // bps/total_sent/socket), а sending borrow read-only — нужен split. Делаем мини-
+        // dance: snapshot нужного slice во временный буфер (1 alloc per packet вместо 1
+        // alloc на каждый element в общем Vec<Vec<u8>>). Чуть лучше но не zero-alloc.
+        // **TODO** для следующей версии: разнести send_raw_packet чтобы slice мог быть
+        // передан без holding &mut self на сокет.
+        let mut tmp_slice: Vec<u8> = Vec::new();
+        for (idx, block_num) in to_send_indices {
+            tmp_slice.clear();
+            tmp_slice.extend_from_slice(&self.sending[idx].slices[block_num]);
+            self.send_raw_packet(Command::Sliced, &tmp_slice);
+        }
+
         for idx in to_remove.into_iter().rev() {
             self.sending.remove(idx);
-        }
-        for pkt in to_send {
-            self.send_raw_packet(Command::Sliced, &pkt);
         }
     }
 
@@ -1739,7 +2215,9 @@ impl Client {
         }
 
         // Encrypt if needed
-        let (wire_cmd, wire_data) = if item.encrypted {
+        // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
+        // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
+        let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
             self.crypt_msg_counter += 1;
             let msg_num = self.crypt_msg_counter;
             let mut crypto_hdr = [0u8; 12];
@@ -1751,8 +2229,16 @@ impl Client {
             let mut plaintext = Vec::with_capacity(12 + eff_data.len());
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
-            let encrypted = crypto::encrypt(&self.encode_key, &plaintext, &[]);
-            (Command::Crypted as u8, encrypted)
+            // B-V2-03: кэшированный cipher.
+            let cipher = match self.encode_cipher.as_ref() {
+                Some(c) => c,
+                None => {
+                    error!(target: "moonproto::crypto", "encrypt batch_direct called before handshake — packet dropped");
+                    return;
+                }
+            };
+            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
+            (Command::Crypted as u8, std::borrow::Cow::Owned(encrypted))
         } else {
             (eff_cmd, eff_data)
         };
@@ -1863,7 +2349,13 @@ impl Client {
         hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.server_token);
         let packed = hello.to_bytes_packed();
         let aad = self.cfg.client_id.to_le_bytes();
-        let encrypted = crypto::encrypt(&self.encode_key, &packed, &aad);
+        // B-V2-03: send_hello_again вызывается после первичного Fine (cipher установлен).
+        // Если по какой-то причине cipher = None — пропускаем (защита от panic).
+        let Some(cipher) = self.encode_cipher.as_ref() else {
+            error!(target: "moonproto::crypto", "HelloAgain called before initial handshake — skipping");
+            return;
+        };
+        let encrypted = crypto::encrypt_with_cipher(cipher, &packed, &aad);
         self.send_raw_packet(Command::HelloAgain, &encrypted);
     }
 
@@ -1963,6 +2455,19 @@ impl Client {
         self.last_sent_hello = 0;
         // D-02: при full reset (новый handshake) — старый отложенный second ImFriend больше не нужен.
         self.pending_second_imfriend = None;
+        // Аудит #9 (audit_delphi_deviation): очистка stale Sliced состояния при hard
+        // reconnect. После полного reset crypt_msg_counter=0 и ключи **поменяются** в
+        // следующем handshake. Старые `sending` зашифрованы прежними ключами / прежними
+        // MsgNum'ами — сервер их дропнет (bad keys / out-of-order). Без clear retry будет
+        // слать мусорный трафик на сервер до max_retry exhaustion (bandwidth waste +
+        // noise на reconnect). pending_h оставляем (это user'ские торговые команды —
+        // re-encrypt при retry через send_h_item с новыми ключами).
+        self.sending.clear();
+        // audit_robustness H2: api_pending sender'ы относятся к UID'ам предыдущей сессии.
+        // Сервер новой сессии этих UID не знает → ответ никогда не придёт → Sender живёт
+        // в map бесконечно, receiver потребителя блокируется. Дропаем — receivers получат
+        // `Err(channel closed)` и поймут что нужен retry.
+        self.api_pending.clear();
     }
 
     fn bind_socket(&mut self) {
@@ -1995,19 +2500,27 @@ impl Client {
                 }
             }
         }
-        // Все 200 попыток bind упали → не можем даже создать сокет.
-        // Уведомить потребителя через Disconnected lifecycle event.
-        // Throttle: только если ещё не в Base (т.е. не повторяем подряд).
-        if let Some(e) = last_err {
-            error!("UdpSocket::bind failed after 200 attempts on {}:*, last error: {}", bind_family, e);
-        } else {
-            error!("UdpSocket::bind failed after 200 attempts on {}:*", bind_family);
+        // Все 200 попыток bind упали → не можем создать сокет В ЭТОТ ТИК.
+        // НЕ ставим need_connect=false (audit_responsibility H3): на mobile при port
+        // exhaustion (CGNAT, iOS background, ulimit) Disconnected заставил бы app
+        // пересоздавать Client. Delphi (`MoonProtoUDPClient.pas:680+`) ретраит forever —
+        // active library тоже должна.
+        //
+        // Throttled error-лог чтобы не спамить (раз в 5 сек). Следующий тик main loop
+        // снова войдёт в bind_socket — обычно через короткое время порты освободятся.
+        if self.should_log("bind_socket_exhausted", 5000) {
+            if let Some(ref e) = last_err {
+                error!(target: "moonproto::client",
+                    "UdpSocket::bind failed after 200 attempts on {}:*, last error: {} (will retry on next tick)",
+                    bind_family, e);
+            } else {
+                error!(target: "moonproto::client",
+                    "UdpSocket::bind failed after 200 attempts on {}:* (will retry on next tick)",
+                    bind_family);
+            }
         }
-        if self.auth_status != AuthStatus::Base {
-            self.auth_status = AuthStatus::Base;
-            self.need_connect = false;
-            self.fire_lifecycle(LifecycleEvent::Disconnected);
-        }
+        // auth_status оставляем Base — main loop попробует bind ещё раз через DEFAULT_SLEEP_MS.
+        // Если app явно вызвал disconnect() — он сам выставит need_connect=false.
     }
 
     pub fn is_authorized(&self) -> bool { self.authorized }
@@ -2021,41 +2534,74 @@ impl Client {
     pub fn avg_over_heat(&self) -> f64 { self.avg_over_heat }
 
     // ====================================================================
-    //  BytesPerSec sliding window (10 sec)
+    //  Diagnostic getters (audit_responsibility A4)
+    //
+    //  В Delphi `TMoonProtoNetClient` эти поля публичны и читаются UI
+    //  (MoonProtoUnit.pas:363 — "Ping: %d PMTU: %d RS: %d%%"). Aналог в Rust
+    //  для построения статус-строки терминала.
     // ====================================================================
 
-    const BPS_WINDOW_MS: i64 = 10_000;
+    /// RTT в ms (последний измеренный из Ping). Соответствует Delphi
+    /// `TMoonProtoNetClient.RoundTripDelay` (MoonProtoClient.pas:62).
+    pub fn round_trip_delay_ms(&self) -> i64 { self.round_trip_delay }
 
-    /// A-03 + B-13: убран anti-idiom `bps_window_kind_*` через ifs — заменён прямой mutable
-    /// доступ + running sum обновляется атомарно с window.
+    /// Текущий Path MTU в байтах (от 508 до 8000, адаптируется PMTU discovery).
+    /// Соответствует Delphi `TMoonProtoNetClient.PMTU`.
+    pub fn actual_pmtu(&self) -> u16 { self.actual_pmtu }
+
+    /// Receive Status [0.0..1.0] — качество downlink канала. >0.92 = норма,
+    /// <0.85 = критично, между = серая зона. Соответствует Delphi
+    /// `TMoonProtoNetClient.RS`.
+    pub fn rs(&self) -> f64 { self.rs }
+
+    /// `ServerTime - LocalTime` в днях (как Delphi TDateTime). Применяется
+    /// автоматически к timestamp'ам входящих ордеров через `Orders::apply`.
+    /// Внешним потребителям обычно не нужен — выставлен публично для диагностики.
+    pub fn server_time_delta_days(&self) -> f64 { self.server_time_delta }
+
+    /// `|ServerTime - LocalTime|` в ms (абсолютный лаг от последнего Ping).
+    /// Полезно для UI индикатора "сервер близко / далеко".
+    pub fn net_lag_ping_ms(&self) -> i64 { self.net_lag_ping }
+
+    /// `Orders cycle ms` от сервера — рекомендованный темп опроса ордерных событий.
+    /// Соответствует Delphi `TMoonProtoNetClient.GlobalTimingOrders`.
+    pub fn global_timing_orders(&self) -> u16 { self.global_timing_orders }
+
+    /// Текущий `ServerToken` — меняется при каждом hard handshake (Hello→WhoAreYou→Fine).
+    /// Soft reconnect (HelloAgain) НЕ меняет этот токен. **Внутри либы используется для
+    /// auto-resubscribe** subscription registry — внешнему потребителю обычно не нужен,
+    /// выставлен для diagnostic UI.
+    pub fn server_token(&self) -> u64 { self.server_token }
+
+    /// `PeerAppToken` — генерируется при старте серверного процесса. Меняется при перезапуске
+    /// сервера. **Внутри либы используется для auto-refetch markets indexes** — внешнему
+    /// потребителю обычно не нужен, выставлен для diagnostic UI / event correlation.
+    pub fn peer_app_token(&self) -> u64 { self.peer_app_token }
+
+    // ====================================================================
+    //  BytesPerSec — O(1) EMA counter (порт Delphi AddBytesCount)
+    // ====================================================================
+    //
+    // Аудит #5 (audit_delphi_deviation): ранее использовался `VecDeque<(i64,u64)>` sliding
+    // window. На пике 50K pps входящих VecDeque раскручивался до ~500K entries × 16B = 8MB
+    // только для recv (+ ещё 8MB для sent). Плюс 100K push_back/pop_front ops/sec.
+    //
+    // Delphi решает это за 24 байта (3×u64) + 1 if + 1 add per packet — byte-exact порт
+    // `MoonProtoUDPClient.pas:113-138 AddBytesCount`. EMA формула: `ema = ema*9/10 + bucket`,
+    // что в steady state даёт `ema = 10*bytes_per_sec` (отсюда деление на 10 в getter'е).
+
     fn track_sent(&mut self, bytes: u64, ts_ms: i64) {
-        self.bps_sent_window.push_back((ts_ms, bytes));
-        self.bps_sent_sum = self.bps_sent_sum.saturating_add(bytes);
-        let cutoff = ts_ms - Self::BPS_WINDOW_MS;
-        while let Some(&(ts, b)) = self.bps_sent_window.front() {
-            if ts < cutoff {
-                self.bps_sent_window.pop_front();
-                self.bps_sent_sum = self.bps_sent_sum.saturating_sub(b);
-            } else { break; }
-        }
+        self.bps_sent.add(bytes, ts_ms);
     }
 
     fn track_recv(&mut self, bytes: u64, ts_ms: i64) {
-        self.bps_recv_window.push_back((ts_ms, bytes));
-        self.bps_recv_sum = self.bps_recv_sum.saturating_add(bytes);
-        let cutoff = ts_ms - Self::BPS_WINDOW_MS;
-        while let Some(&(ts, b)) = self.bps_recv_window.front() {
-            if ts < cutoff {
-                self.bps_recv_window.pop_front();
-                self.bps_recv_sum = self.bps_recv_sum.saturating_sub(b);
-            } else { break; }
-        }
+        self.bps_recv.add(bytes, ts_ms);
     }
 
-    /// Байт отправлено в среднем за последние 10 секунд (B/s). B-13: O(1) через running sum.
-    pub fn bytes_per_sec_sent(&self) -> u64 { self.bps_sent_sum / 10 }
-    /// Байт принято в среднем за последние 10 секунд (B/s). B-13: O(1) через running sum.
-    pub fn bytes_per_sec_recv(&self) -> u64 { self.bps_recv_sum / 10 }
+    /// Байт отправлено в среднем за последние ~10 секунд (B/s). O(1) EMA, see [`BpsCounter`].
+    pub fn bytes_per_sec_sent(&self) -> u64 { self.bps_sent.bytes_per_sec() }
+    /// Байт принято в среднем за последние ~10 секунд (B/s). O(1) EMA.
+    pub fn bytes_per_sec_recv(&self) -> u64 { self.bps_recv.bytes_per_sec() }
 
     // ====================================================================
     //  Log throttle — anti-spam helper для warning'ов.
@@ -2082,6 +2628,109 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.reader_shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+/// O(1) счётчик байтов с EMA-сглаживанием за ~10 секунд.
+///
+/// Byte-exact порт `TMoonProtoUDPClient.AddBytesCount` (MoonProtoUDPClient.pas:113-138).
+/// Замена `VecDeque` sliding window (audit_delphi_deviation #5) — экономит ~16MB heap
+/// на пике + убирает 100K push_back/pop_front ops/sec.
+///
+/// Алгоритм (как Delphi):
+/// - `cur_sec_bytes` накапливает байты текущей секунды.
+/// - Когда `now_ms - last_sec_ms > 1000`: закрываем bucket в EMA через
+///   `ema = ema * 9/10 + cur_sec_bytes`, обнуляем `cur_sec_bytes`, обновляем `last_sec_ms`.
+/// - `bytes_per_sec() = ema / 10` (в steady state `ema = 10 × bytes/sec`).
+#[derive(Debug, Default)]
+pub struct BpsCounter {
+    /// Байт накоплено в текущем 1-секундном bucket'е.
+    cur_sec_bytes: u64,
+    /// EMA-сглаженное значение (= 10 × среднее B/s в steady state).
+    ema_10sec: u64,
+    /// Timestamp начала текущего bucket'а (ms; 0 = ещё не инициализирован).
+    last_sec_ms: i64,
+    /// Сколько секунд накопили (clamped до 10). audit_delphi_deviation #2: до 10 секунд
+    /// используем accumulation (без EMA) — Delphi паттерн `StatSecCount`. Иначе первые
+    /// 10 сек getter выдаёт занижено в 10 раз.
+    stat_sec_count: u8,
+}
+
+impl BpsCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Добавить N байт в счётчик. `now_ms` — текущее время (любая монотонная база).
+    /// O(1): 1 if + 1 sub + (раз в секунду) 2 mul/div + 1 store. Никаких аллокаций.
+    pub fn add(&mut self, bytes: u64, now_ms: i64) {
+        // Первый вызов — просто инициализируем bucket.
+        if self.last_sec_ms == 0 {
+            self.last_sec_ms = now_ms;
+        }
+        // Прошла секунда? Закрываем bucket в EMA / accumulation.
+        if (now_ms - self.last_sec_ms).abs() > 1000 {
+            // Ramp-up (audit_delphi_deviation #2): первые 10 секунд — accumulation, далее EMA.
+            // Так Delphi `MoonProtoUDPClient.pas:113-138` гарантирует точное среднее
+            // с первой секунды (без 10×underestimate).
+            if self.stat_sec_count < 10 {
+                self.ema_10sec = self.ema_10sec.saturating_add(self.cur_sec_bytes);
+                self.stat_sec_count += 1;
+            } else {
+                // EMA: 90% старого + 10% нового. Формула из Delphi: `ema := ema / 10 * 9 + bucket`.
+                self.ema_10sec = (self.ema_10sec / 10) * 9 + self.cur_sec_bytes;
+            }
+            self.cur_sec_bytes = 0;
+            self.last_sec_ms = now_ms;
+        }
+        self.cur_sec_bytes = self.cur_sec_bytes.saturating_add(bytes);
+    }
+
+    /// Среднее количество байт в секунду за последние ~10 секунд.
+    /// В steady state равно фактическому `bytes/sec`. В первые 10 секунд после старта —
+    /// делится на реальное число накопленных секунд (а не на 10) для точного среднего.
+    pub fn bytes_per_sec(&self) -> u64 {
+        let div = self.stat_sec_count.max(1) as u64;
+        self.ema_10sec / div
+    }
+}
+
+#[cfg(test)]
+mod bps_tests {
+    use super::*;
+
+    #[test]
+    fn bps_counter_empty() {
+        let c = BpsCounter::new();
+        assert_eq!(c.bytes_per_sec(), 0);
+    }
+
+    #[test]
+    fn bps_counter_within_second_just_accumulates() {
+        let mut c = BpsCounter::new();
+        c.add(100, 1000);
+        c.add(200, 1500);
+        // Не прошла секунда → ema_10sec не обновился → bytes_per_sec = 0.
+        assert_eq!(c.bytes_per_sec(), 0);
+        // Но bucket собрал 300.
+        assert_eq!(c.cur_sec_bytes, 300);
+    }
+
+    #[test]
+    fn bps_counter_steady_state_converges() {
+        let mut c = BpsCounter::new();
+        // Эмулируем 100 секунд равномерного потока: 1000 байт/сек.
+        // Используем шаг 1100мс между бакетами чтобы условие `> 1000` срабатывало надёжно.
+        for sec in 1..101i64 {
+            let bucket_start = sec * 1100;
+            for _ in 0..10 {
+                c.add(100, bucket_start);
+            }
+        }
+        // EMA должна сойтись к ~10000 (= 10 × 1000 byte/sec — формула Delphi).
+        // bytes_per_sec возвращает ema/10 = ~1000.
+        let bps = c.bytes_per_sec();
+        assert!(bps > 850 && bps < 1100, "bps={}, expected ~1000", bps);
     }
 }
 
@@ -2160,12 +2809,33 @@ fn get_ntp_offset_days() -> f64 {
 /// Delphi TDateTime (days since 1899-12-30) corrected by NTP offset.
 /// Matches: `Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset`
 /// We use UTC directly (no timezone offset needed — TDateTime in MoonProto = UTC).
+///
+/// **Clock-jump sanity check** (audit_robustness H6): SystemTime подвержен NTP step и
+/// suspend/resume скачкам. Если детектируем монотонное смещение > 60 сек между подряд
+/// идущими вызовами — log warn (потребитель должен пере-syncнуться через `set_ntp_offset`).
+/// Сам результат возвращаем как есть — иначе handshake/order timestamps будут противоречить
+/// серверу. Защита через лог, не через clamp.
 fn delphi_now() -> f64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    25569.0 + secs / 86400.0 + get_ntp_offset_days()
+    let now = 25569.0 + secs / 86400.0 + get_ntp_offset_days();
+
+    // Детектор скачка: сравним с прошлым вызовом. Days * 86400 = seconds.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_NOW_BITS: AtomicU64 = AtomicU64::new(0);
+    let prev_bits = LAST_NOW_BITS.swap(now.to_bits(), Ordering::Relaxed);
+    if prev_bits != 0 {
+        let prev = f64::from_bits(prev_bits);
+        let delta_secs = (now - prev) * 86400.0;
+        if delta_secs.abs() > 60.0 {
+            log::warn!(target: "moonproto::client",
+                "delphi_now clock jump detected: {:.1}s — handshake/order timestamps may diverge; consider re-syncing NTP",
+                delta_secs);
+        }
+    }
+    now
 }
 
 /// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).

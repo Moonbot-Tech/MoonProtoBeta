@@ -18,11 +18,17 @@ use crate::commands::market::{
 /// Per-market price snapshot (обновляется через `emk_UpdateMarketsList`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketPrice {
+    /// Лучшая цена покупки (top of bid side).
     pub bid:               f64,
+    /// Лучшая цена продажи (top of ask side).
     pub ask:               f64,
+    /// Funding rate (для perpetual futures), дробь — например `0.0001` = 0.01%.
     pub funding_rate:      f64,
+    /// UTC unix time момента следующего funding взимания (в днях, как Delphi TDateTime).
     pub funding_time_utc:  f64,
+    /// Mark price (используется биржей для PnL/liquidation расчётов, может отличаться от last/bid/ask).
     pub mark_price:        f64,
+    /// Был ли получен mark_price в последнем апдейте (биржи могут не присылать на каждом тике).
     pub mark_price_found:  bool,
 }
 

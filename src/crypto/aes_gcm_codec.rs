@@ -34,15 +34,19 @@ fn cpu_timestamp() -> u64 {
     }
 }
 
-/// AES-128-GCM encrypt with PKCS7 padding.
-/// Output layout: IV(12) + Tag(16) + Ciphertext(padded)
-///
-/// IV construction (byte-exact с Delphi MoonProtoFunc.pas:584-587):
-/// - `R1 = atomic_inc(counter) XOR iv_mask` (8 bytes LE)
-/// - `R2 = GetCPUTimeStamp (RDTSC)` (4 младших байта)
-pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-    let cipher = Aes128Gcm::new(key.into());
+/// Сконструировать переиспользуемый `Aes128Gcm` cipher из 16-байтного ключа.
+/// B-V2-03 fix: ключ фиксирован на всю сессию (меняется только при handshake),
+/// key schedule расширяется один раз, дальше cipher используется на каждый пакет.
+/// `Aes128Gcm` — Send+Sync, можно держать в `Client`.
+#[inline]
+pub fn cipher_from_key(key: &MoonKey) -> Aes128Gcm {
+    Aes128Gcm::new(key.into())
+}
 
+/// AES-128-GCM encrypt with PKCS7 padding — hot path версия с переиспользуемым cipher.
+/// B-V2-03: на hot path callers держат cipher в Client и передают сюда — экономим
+/// `Aes128Gcm::new` (key schedule expansion) на каждый encrypt'е (50K pps на пике).
+pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     // Build IV: (counter XOR mask)(8) + RDTSC[low 32 bits](4)
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);
     let r1 = counter ^ iv_mask();
@@ -59,10 +63,11 @@ pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     padded.extend_from_slice(plaintext);
     padded.resize(plaintext.len() + padding, padding as u8);
 
-    // Encrypt in-place
+    // Encrypt in-place — `expect` invariant: AES-GCM fails только при ≥ 16 EiB payload,
+    // что невозможно в MoonProto (PMTU < 8KB → одно сообщение).
     let tag = cipher
         .encrypt_in_place_detached(nonce, aad, &mut padded)
-        .expect("AES-GCM encrypt failed");
+        .expect("AES-GCM payload < 16 EiB — invariant satisfied by MTU");
 
     // Output: IV(12) + Tag(16) + Ciphertext
     let mut output = Vec::with_capacity(12 + 16 + padded.len());
@@ -72,11 +77,11 @@ pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     output
 }
 
-/// AES-128-GCM decrypt, verifies tag, strips PKCS7 padding.
-/// Input layout: IV(12) + Tag(16) + Ciphertext
-pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+/// AES-128-GCM decrypt с переиспользуемым cipher — hot path версия.
+/// См. `encrypt_with_cipher` для контекста B-V2-03.
+pub fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 28 {
-        return None; // minimum: 12 IV + 16 tag + 0 ciphertext (but that's empty)
+        return None;
     }
 
     let iv_bytes = &data[0..12];
@@ -87,7 +92,6 @@ pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let cipher = Aes128Gcm::new(key.into());
     let nonce = Nonce::from_slice(iv_bytes);
     let tag = Tag::from_slice(tag_bytes);
 
@@ -101,7 +105,6 @@ pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if padding == 0 || padding > 16 || padding > buf.len() {
         return None;
     }
-    // Verify all padding bytes
     for &b in &buf[buf.len() - padding..] {
         if b as usize != padding {
             return None;
@@ -109,6 +112,25 @@ pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     }
     buf.truncate(buf.len() - padding);
     Some(buf)
+}
+
+/// AES-128-GCM encrypt with PKCS7 padding — convenience-обёртка для редких
+/// случаев (handshake) где cipher не закэширован. Каждый вызов создаёт cipher
+/// заново — допустимо только когда вызывается несколько раз за сессию.
+///
+/// Output layout: IV(12) + Tag(16) + Ciphertext(padded)
+///
+/// IV construction (byte-exact с Delphi MoonProtoFunc.pas:584-587):
+/// - `R1 = atomic_inc(counter) XOR iv_mask` (8 bytes LE)
+/// - `R2 = GetCPUTimeStamp (RDTSC)` (4 младших байта)
+pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
+    encrypt_with_cipher(&cipher_from_key(key), plaintext, aad)
+}
+
+/// AES-128-GCM decrypt, verifies tag, strips PKCS7 padding — convenience-обёртка
+/// для handshake. На hot path используй `decrypt_with_cipher`.
+pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+    decrypt_with_cipher(&cipher_from_key(key), data, aad)
 }
 
 #[cfg(test)]

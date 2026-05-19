@@ -96,7 +96,7 @@ fn flush_log(buf: &mut BufWriter<File>) {
 }
 
 fn send_resend_payload(
-    sender: &std::sync::mpsc::Sender<ClientEvent>,
+    sender: &std::sync::mpsc::SyncSender<ClientEvent>,
     payload: Vec<u8>,
 ) -> bool {
     let item = SendItem {
@@ -245,7 +245,7 @@ fn main() {
 
     // Subscribe to all trades + order books (empty list = all markets)
     log_line(&mut log, t0, "[SUB] subscribe_all_trades + subscribe_all_orderbooks");
-    let req_trades = engine_request::subscribe_all_trades();
+    let req_trades = engine_request::subscribe_all_trades(false);
     client.send_api_request(&req_trades);
     let req_book = engine_request::subscribe_order_book(&[]);
     client.send_api_request(&req_book);

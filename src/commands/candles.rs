@@ -101,9 +101,20 @@ pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u
 pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     let mut pos = 0usize;
     if pos + 4 > data.len() { return None; }
-    let count = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
-    if pos + count * DEEP_PRICE_SIZE > data.len() { return None; }
+    // DoS guard: отрицательный count или count*DEEP_PRICE_SIZE overflow.
+    if count_raw < 0 {
+        log::warn!(target: "moonproto::candles", "negative count {} rejected", count_raw);
+        return None;
+    }
+    let count = count_raw as usize;
+    let required = count.saturating_mul(DEEP_PRICE_SIZE);
+    if required > data.len().saturating_sub(pos) {
+        log::warn!(target: "moonproto::candles",
+            "count={} requires {} bytes but only {} remaining", count, required, data.len() - pos);
+        return None;
+    }
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         out.push(DeepPrice::read_from(data, &mut pos)?);
@@ -155,6 +166,15 @@ impl CandlesAggregator {
         let chunk_index = u16::from_le_bytes([response_data[0], response_data[1]]) as usize;
         let chunk_total = u16::from_le_bytes([response_data[2], response_data[3]]) as usize;
         let payload = &response_data[4..];
+
+        // DoS guard: разумный максимум чанков. Реальные responses умещаются в десятки чанков
+        // (~8KB payload каждый). 1024 — 8MB полного ответа, более чем достаточно.
+        const MAX_CHUNKS: usize = 1024;
+        if chunk_total > MAX_CHUNKS {
+            log::warn!(target: "moonproto::candles",
+                "chunk_total={} exceeds MAX_CHUNKS={}", chunk_total, MAX_CHUNKS);
+            return None;
+        }
 
         // Resize если первый раз или total изменился
         if self.total != chunk_total {

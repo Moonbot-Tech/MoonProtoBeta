@@ -108,8 +108,25 @@ pub struct EmuTradePoint {
 ///
 /// Многие поля append-only soft-read: в зависимости от версии сервера часть полей
 /// может отсутствовать (читается до конца payload, недостающие = дефолты).
-#[derive(Debug, Clone)]
+///
+/// B-01 (docs_api iter-2): `#[derive(Default)]` для удобства потребителя.
+/// Из Delphi `TClientSettingsCommand.Create` пользователь получал готовую структуру
+/// с дефолтами; в Rust раньше нужно было руками заполнять ~30 полей. Теперь:
+/// ```ignore
+/// let mut settings = ClientSettingsCommand::default();
+/// settings.x_sell = 3;
+/// settings.use_g_take_profit = true;
+/// settings.g_take_profit = 1.5;
+/// client.ui_send_settings(&settings);
+/// ```
+/// `uid` будет 0 — Client wrapper всё равно генерирует свой uid для отправки,
+/// поле `uid` в struct — это field используемый только в edge cases (явное
+/// проставление UID для dedup). Если не уверен — оставь 0 или `rand::random()`.
+#[derive(Debug, Clone, Default)]
 pub struct ClientSettingsCommand {
+    /// Уникальный идентификатор настройки. Обычно `0` (Client wrapper сам ставит
+    /// валидный uid при отправке); явно проставлять только когда нужен dedup
+    /// с конкретным UKey.
     pub uid: u64,
     // --- always present (v1+) ---
     pub x_sell:             i32,

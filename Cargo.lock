@@ -243,6 +243,7 @@ dependencies = [
  "crc32c",
  "libloading",
  "log",
+ "rand",
 ]
 
 [[package]]

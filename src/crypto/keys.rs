@@ -36,9 +36,22 @@ fn generate_sub_key(master_key: &MoonKey, token: u64) -> MoonKey {
     result
 }
 
-/// Generate session key pair from master key + server token.
-/// Returns (encode_key, decode_key) for CLIENT side.
-/// Client encodes with keys[false] and decodes with keys[true] (Delphi convention).
+/// Деривация пары session keys из master key + server token.
+///
+/// Возвращает `(encode_key, decode_key)` для **client-side** (клиент шифрует своими
+/// исходящими encode_key и расшифровывает входящие decode_key).
+///
+/// **Algorithm:** SHAKE-128(master_key) → начальное состояние; затем `server_token`
+/// XOR'ится с константой (encode/decode-specific) → 5 раундов XOR-fold через SHAKE-128
+/// для каждой стороны. Сборка финальная — `(keys[false], keys[true])` для клиента
+/// (Delphi convention: server encodes with `keys[true]`, decodes с `keys[false]`).
+///
+/// **Когда вызывать:** после получения WhoAreYou от сервера (получили `server_token`).
+/// Эти ключи стабильны до следующего полного handshake (нового Hello/WhoAreYou cycle).
+/// Кэшированный `Aes128Gcm` cipher в Client построен из этих ключей и пересоздаётся
+/// при изменении.
+///
+/// A-14 (docs_api iter-2): doc comment расширен.
 pub fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (MoonKey, MoonKey) {
     let key_true = generate_sub_key(master_key, server_token ^ XOR_CONST_ENCODE);
     let key_false = generate_sub_key(master_key, server_token ^ XOR_CONST_DECODE);
@@ -46,8 +59,19 @@ pub fn generate_sub_keys(master_key: &MoonKey, server_token: u64) -> (MoonKey, M
     (key_false, key_true)
 }
 
-/// MixValues: SHAKE-128 hash of (key, token1, token2) with 5-round XOR-fold,
-/// then combine two u64 halves by addition.
+/// `MixValues` — SHAKE-128 хэш от `(key, token1, token2)` с 5-раундовым XOR-fold,
+/// затем сборка двух u64 половин через сложение.
+///
+/// **Используется в:**
+/// - handshake `PeerMix` вычисление (см. SPEC.md §3.1 / §3.3) — server и client
+///   сверяют что обе стороны знают session token + ClientID.
+/// - Дополнительная защита от MITM (атакующий без знания SubKey не сможет
+///   подделать `MixValues(rnd, mix_ts, server_token)` совпадение).
+///
+/// **Не криптографически стойкий MAC** — это лёгкий аутентификатор сессии,
+/// настоящая защита целостности пакета — `calculate_mac32` (HMAC-CRC32C).
+///
+/// A-14 (docs_api iter-2): doc comment расширен.
 pub fn mix_values(key: &MoonKey, token1: u64, token2: u64) -> u64 {
     let token1_bytes = token1.to_le_bytes();
     let token2_bytes = token2.to_le_bytes();

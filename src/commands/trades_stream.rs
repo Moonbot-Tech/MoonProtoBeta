@@ -65,15 +65,19 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
     let flags = raw[raw.len() - 1];
     let data_size = raw.len() - 1;
 
-    // Decompress if needed
-    let decompressed = if flags & TRADES_FLAG_COMPRESSED != 0 {
-        compression::mp_decompress(&raw[..data_size])?
+    // B-V2-10 fix: Cow вместо безусловного to_vec для не-compressed случая.
+    // TradesStream — самый частый hot-input на пике; trades_packet может приходить
+    // 50K+ раз/сек. Большинство пакетов uncompressed (мелкие batches). Раньше каждый
+    // делал alloc 200-1500б "просто чтобы owned" — теперь zero alloc для borrow case.
+    use std::borrow::Cow;
+    let decompressed: Cow<'_, [u8]> = if flags & TRADES_FLAG_COMPRESSED != 0 {
+        Cow::Owned(compression::mp_decompress(&raw[..data_size])?)
     } else {
-        raw[..data_size].to_vec()
+        Cow::Borrowed(&raw[..data_size])
     };
 
     let has_taker = (flags & TRADES_FLAG_HAS_TAKER) != 0;
-    let data = &decompressed;
+    let data: &[u8] = &decompressed;
 
     // Header: BaseTime(8) + PacketNum(2)
     if data.len() < 10 { return None; }

@@ -22,12 +22,21 @@ use crate::commands::ui::{
     EmuTrades, TriggerManage, ResetProfit, ArbActivateNotify, SwitchDex, SwitchSpot,
 };
 
+/// Sync state клиентских настроек — обновляется через `apply(UICommand)`.
+///
+/// Settings — это snapshot-state, не аккумулирующая история. Каждый принятый
+/// `TClientSettingsCommand` от сервера полностью заменяет `client_settings`.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
+    /// Последний полученный snapshot настроек клиента (None до первого `SettingsRequest` ответа).
     pub client_settings: Option<ClientSettingsCommand>,
+    /// Текущие настройки leverage management (None если ни одного `TLevManageCommand` не получено).
     pub lev_manage:      Option<LevManage>,
+    /// Активна ли подписка на market-maker ордера (изменяется через `ui_mm_subscribe`).
     pub mm_orders_subscribed: bool,
+    /// Имя текущего выбранного DEX (None если не выбран / не futures-режим).
     pub current_dex:     Option<String>,
+    /// Индекс текущего spot (None если не выбран). Конкретные значения биржа-specific.
     pub current_spot:    Option<u8>,
     /// `TDateTime` (Delphi double): момент когда истекает Arb лицензия.
     pub arb_valid_until: Option<f64>,

@@ -18,6 +18,7 @@ use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, 
 /// Информация по одной стратегии — то что хранится клиентом.
 #[derive(Debug, Clone)]
 pub struct StrategyInfo {
+    /// Уникальный идентификатор стратегии (от сервера). 0 = не валидный.
     pub strategy_id: u64,
     /// Время последнего апдейта (TDateTime f64 packed как UInt64).
     pub last_date: u64,
@@ -59,9 +60,18 @@ pub enum StratEvent {
     Ignored,
 }
 
+/// Sync state стратегий клиента — обновляется через `apply(StratCommand)` при получении
+/// `MPC_Strat` от сервера.
+///
+/// **Snapshot применяется через `apply_snapshot_decoded(deflate_data)`** — для полного
+/// snapshot'а потребитель должен распаковать raw payload через
+/// [`crate::commands::strategy_serializer`] и применить декодированный batch.
 #[derive(Debug, Default)]
 pub struct StratsState {
+    /// `strategy_id → StrategyInfo`. Удаляется при `TStratDelete`.
     pub by_id: HashMap<u64, StrategyInfo>,
+    /// Серверный epoch последнего применённого snapshot'а — для детекции
+    /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
 }
 

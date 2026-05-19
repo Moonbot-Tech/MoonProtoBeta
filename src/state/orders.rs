@@ -20,8 +20,93 @@
 //! - Auto-removal на терминальном статусе.
 //! - ServerTimeDelta correction для всех TDateTime полей.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use crate::commands::trade::*;
+
+/// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
+///
+/// Сервер выставляет код в поле `sell_reason_code` каждого `OrderStatusUpdate`. Терминал
+/// должен показывать пользователю причину закрытия (напр. "Stop Loss", "Take Profit",
+/// "Panic Sell"). Используйте `SellReason::from_u8(order.sell_reason_code)` или
+/// `Order::sell_reason()`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SellReason {
+    /// Неизвестная / не выставлена.
+    Unknown        = 0,
+    /// Продажа по установленной цене (дефолт).
+    SellPrice      = 1,
+    /// Auto Price Down — автоматический спуск цены.
+    AutoPriceDown  = 2,
+    /// Sell Level — продажа по уровню.
+    SellLevel      = 3,
+    /// SellSpread — продажа по спреду.
+    SellSpread     = 4,
+    /// SellShot — снайперская продажа.
+    SellShot       = 5,
+    /// Global / Manual PanicSell.
+    PanicSell      = 6,
+    /// StopLoss активирован.
+    StopLoss       = 7,
+    /// Trailing Stop сработал.
+    Trailing       = 8,
+    /// Market Stop.
+    MarketStop     = 9,
+    /// Manual Sell (price < 95% от ожидания).
+    ManualSell     = 10,
+    /// JoinedSell — объединённая продажа.
+    JoinedSell     = 11,
+    /// SellFromAssets — продажа из активов.
+    SellFromAssets = 12,
+    /// BV/SV Stop.
+    BvSvStop       = 13,
+    /// TakeProfit достигнут.
+    TakeProfit     = 14,
+}
+
+impl SellReason {
+    /// Преобразовать byte в enum. Неизвестные коды (>14) → `Unknown`.
+    pub fn from_u8(b: u8) -> Self {
+        match b {
+            1  => Self::SellPrice,
+            2  => Self::AutoPriceDown,
+            3  => Self::SellLevel,
+            4  => Self::SellSpread,
+            5  => Self::SellShot,
+            6  => Self::PanicSell,
+            7  => Self::StopLoss,
+            8  => Self::Trailing,
+            9  => Self::MarketStop,
+            10 => Self::ManualSell,
+            11 => Self::JoinedSell,
+            12 => Self::SellFromAssets,
+            13 => Self::BvSvStop,
+            14 => Self::TakeProfit,
+            _  => Self::Unknown,
+        }
+    }
+
+    /// Человекочитаемое название (для UI отображения).
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Unknown        => "Unknown",
+            Self::SellPrice      => "Sell Price",
+            Self::AutoPriceDown  => "Auto Price Down",
+            Self::SellLevel      => "Sell Level",
+            Self::SellSpread     => "Sell Spread",
+            Self::SellShot       => "Sell Shot",
+            Self::PanicSell      => "Panic Sell",
+            Self::StopLoss       => "Stop Loss",
+            Self::Trailing       => "Trailing Stop",
+            Self::MarketStop     => "Market Stop",
+            Self::ManualSell     => "Manual Sell",
+            Self::JoinedSell     => "Joined Sell",
+            Self::SellFromAssets => "Sell From Assets",
+            Self::BvSvStop       => "BV/SV Stop",
+            Self::TakeProfit     => "Take Profit",
+        }
+    }
+}
 
 /// Wrapping-safe epoch comparison.
 /// Соответствует MoonProtoFunc.pas:188-203 `EpochIsOK`:
@@ -103,7 +188,10 @@ pub struct Order {
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     /// Trace points (визуализация решения сервера).
-    pub trace_points: Vec<OrderTracePoint>,
+    /// Ring-buffer trace points (audit_rust_quality #5 + audit_robustness M5):
+    /// `VecDeque` вместо `Vec` чтобы `pop_front()` был O(1) вместо O(N) при превышении лимита.
+    /// При 100 ордерах × 10 trace_points/sec этот O(N) был 250K memmove ops/sec.
+    pub trace_points: VecDeque<OrderTracePoint>,
     /// True если ордер терминален (закроется при очередном tick).
     pub job_is_done: bool,
     /// Server-forced removal (TOrderNotFound пришёл).
@@ -119,6 +207,12 @@ pub struct Order {
 }
 
 impl Order {
+    /// Причина закрытия как enum. Удобный getter для UI.
+    /// См. [`SellReason`] для описания всех значений.
+    pub fn sell_reason(&self) -> SellReason {
+        SellReason::from_u8(self.sell_reason_code)
+    }
+
     /// Создать новый Order из TOrderStatus.
     fn from_status(status_cmd: &OrderStatus) -> Self {
         Self {
@@ -143,7 +237,7 @@ impl Order {
             panic_sell: false,
             bulk_replace_buy: false,
             bulk_replace_sell: false,
-            trace_points: Vec::new(),
+            trace_points: VecDeque::new(),
             job_is_done: status_cmd.epoch_header.status.is_terminal(),
             server_forced_remove: false,
             sell_reason_code: 0,
@@ -445,9 +539,9 @@ impl Orders {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
                 tp.adjust_time(self.server_time_delta);
-                entry.trace_points.push(tp);
+                entry.trace_points.push_back(tp);
                 if entry.trace_points.len() > self.max_trace_points {
-                    entry.trace_points.remove(0);
+                    entry.trace_points.pop_front();
                 }
                 (ApplyResult::Applied, OrderEvent::TracePoint { uid })
             }

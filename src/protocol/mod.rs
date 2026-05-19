@@ -93,7 +93,21 @@ impl Command {
             37 => Self::Reserved1,
             // 0 уже покрыт в `0 => Self::None` выше; здесь — всё прочее (unknown).
             _ => {
-                log::warn!(target: "moonproto::cmd", "unknown Command byte: {} (server-side extension?)", b & 0x7F);
+                // A-V2-06 fix: throttle warn — атакующий мог бы залить лог штормом
+                // пакетов с unknown cmd. Логируем максимум 1 раз в секунду.
+                use std::sync::atomic::{AtomicI64, Ordering};
+                static LAST_LOGGED_MS: AtomicI64 = AtomicI64::new(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let last = LAST_LOGGED_MS.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(last) > 1000 {
+                    LAST_LOGGED_MS.store(now_ms, Ordering::Relaxed);
+                    log::warn!(target: "moonproto::cmd",
+                        "unknown Command byte: {} (server-side extension? / corrupted pkt? / DoS attempt?)",
+                        b & 0x7F);
+                }
                 Self::None
             }
         }

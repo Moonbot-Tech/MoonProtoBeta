@@ -91,8 +91,15 @@ impl SlicedData {
         if !self.is_complete() {
             return None;
         }
+        // B-V2-09 fix: prealloc capacity по сумме block sizes — избегаем re-alloc'ов
+        // в extend_from_slice. На больших Sliced сообщениях (~50KB) это экономит ~10
+        // re-alloc'ов с растущей capacity до финального размера.
+        let total: usize = self.blocks.iter()
+            .filter_map(|b| b.as_ref())
+            .map(|b| b.len())
+            .sum();
         let mut cmd = 0u8;
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(total.saturating_sub(1));
 
         for (i, block) in self.blocks.iter().enumerate() {
             let data = block.as_ref()?;
@@ -133,6 +140,12 @@ pub struct SlicingReceiver {
 
 const LAST_RECVD_BUF_SIZE: usize = 2048;
 const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
+
+/// DoS guard: верхний лимит на число одновременно собираемых датаграмм.
+/// Реалистично клиент имеет 2-10 параллельных Sliced датаграмм одновременно.
+/// 256 — щедрый запас, закрывает burst-bomb vector когда злой/багнутый сервер
+/// отправляет пакеты с distinct datagram_num чтобы наполнить HashMap.
+const MAX_RECEIVING_DATAGRAMS: usize = 256;
 
 impl SlicingReceiver {
     pub fn new() -> Self {
@@ -175,6 +188,15 @@ impl SlicingReceiver {
         if self.is_new_datagram(datagram_num) {
             // Remove any old entry with same number
             self.receiving.remove(&datagram_num);
+            // DoS guard: при штатной работе клиента в receiving одновременно <20 датаграмм.
+            // Если злой/багнутый сервер пытается раздуть HashMap через distinct datagram_num —
+            // отбрасываем новые, обработка реальных продолжится.
+            if self.receiving.len() >= MAX_RECEIVING_DATAGRAMS {
+                log::warn!(target: "moonproto::slicing",
+                    "receiving HashMap saturated ({}); dropping new datagram_num={} (DoS guard)",
+                    self.receiving.len(), datagram_num);
+                return (None, [0u8; ACK256_WIRE_SIZE]);
+            }
             // Create new SlicedData
             self.receiving.insert(datagram_num, SlicedData::new(datagram_num, hdr.max_block_num));
         } else if !self.receiving.contains_key(&datagram_num) {
@@ -185,7 +207,10 @@ impl SlicingReceiver {
         } else {
             // Existing entry — check if MaxBlockNum matches (recreate if mismatch)
             let existing = self.receiving.get(&datagram_num).unwrap();
-            if existing.blocks_count - 1 != hdr.max_block_num as usize {
+            // D-V2-13 fix: saturating_sub защита от theoretical underflow если blocks_count=0.
+            // Логически blocks_count = max_block_num+1, минимум 1 — но защита defensive
+            // на случай code change ниже по стеку.
+            if existing.blocks_count.saturating_sub(1) != hdr.max_block_num as usize {
                 self.receiving.remove(&datagram_num);
                 self.receiving.insert(datagram_num, SlicedData::new(datagram_num, hdr.max_block_num));
             }

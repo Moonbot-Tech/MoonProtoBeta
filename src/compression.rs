@@ -15,6 +15,14 @@
 
 type Offsets = [usize; 4096];
 
+/// Maximum allowed output size for SynLZ decompression (DoS protection).
+///
+/// MoonProto-сообщения внутри Sliced ограничены ~384 KB (256 блоков × PMTU ≤ ~1.5 KB).
+/// Сжатые прикладные пакеты — единицы MB максимум. Лимит 16 MB закрывает decompression-bomb
+/// vector: scoмpromised сервер мог бы отправить заголовок `out_size = 2 GB`, что приводит
+/// к мгновенному OOM-крашу (особенно на mobile). Любой превышающий лимит payload — adversarial.
+pub const MAX_SYNLZ_OUTPUT: usize = 16 * 1024 * 1024;
+
 /// Decompress SynLZ data. Returns decompressed bytes or None on error.
 ///
 /// **Byte-exact port** `mormot.core.base.pas:10636-10717 SynLZdecompress1passub`.
@@ -47,9 +55,21 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         first_word as usize
     };
 
+    // DoS protection: cap decompressed size. Закрывает decompression-bomb vector
+    // когда скомпрометированный сервер отправляет header с гигантским out_size.
+    if out_size > MAX_SYNLZ_OUTPUT {
+        log::warn!(target: "moonproto::compression",
+            "synlz_decompress: out_size {} exceeds MAX_SYNLZ_OUTPUT {}, rejecting (DoS protection)",
+            out_size, MAX_SYNLZ_OUTPUT);
+        return None;
+    }
+
     let mut dst = vec![0u8; out_size];
     let mut dst_pos = 0usize;
-    let mut offset: Offsets = [0; 4096];
+    // audit_rust_quality #2: 32 KB на стеке (`[usize; 4096]` × 8 байт) — близко к лимиту
+    // вторичных потоков на iOS (~512 KB) при глубоком callstack. Heap-аллокация ~30 нс
+    // на каждый вызов, незначительно на фоне самого decompress.
+    let mut offset: Box<Offsets> = Box::new([0; 4096]);
 
     // last_hashed = dst - 1 в Delphi pointer-math (на 1 позицию ДО буфера).
     // В Rust используем i64, где -1 представляет это начальное состояние.
@@ -110,6 +130,13 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
                 // Копируем t байт (учитываем overlap — Delphi MoveByOne для overlap'а).
                 if dst_pos + t > out_size {
                     // Защита от записи за границу буфера — Delphi полагается на корректность.
+                    return None;
+                }
+                // D-V2-05 fix: malicious/corrupt SynLZ stream может выставить copy_from
+                // указывающий за пределы уже декомпрессированных данных. Delphi (без bounds
+                // check) делает out-of-bounds read; в Rust это panic. Отказываемся вместо
+                // panic — corrupt input не должен валить long-running клиент.
+                if copy_from.saturating_add(t) > dst.len() || copy_from > dst_pos {
                     return None;
                 }
                 if dst_pos.saturating_sub(copy_from) < t {
@@ -184,8 +211,9 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
         if size == 0 { return; }
     }
 
-    let mut offset: [usize; 4096] = [usize::MAX; 4096];
-    let mut cache: [u32; 4096] = [0u32; 4096];
+    // audit_rust_quality #2: 32+16=48 KB на стеке — слишком много для mobile вторичных потоков.
+    let mut offset: Box<[usize; 4096]> = Box::new([usize::MAX; 4096]);
+    let mut cache: Box<[u32; 4096]> = Box::new([0u32; 4096]);
 
     let srcend = size;
     let srcendmatch = if size > 11 { size - 11 } else { 0 };

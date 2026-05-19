@@ -90,7 +90,7 @@ fn main() {
     client.send_api_request(&req);
 
     // Then subscribe
-    let req = commands::engine_request::subscribe_all_trades();
+    let req = commands::engine_request::subscribe_all_trades(false);
     client.send_api_request(&req);
 
     // Phase 2: receive data (15 seconds)

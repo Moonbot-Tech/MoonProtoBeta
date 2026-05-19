@@ -56,6 +56,31 @@ pub struct BalanceUpdate {
     pub items: Vec<BalanceItem>,
 }
 
+// =============================================================================
+//  Builders (C → S)
+// =============================================================================
+
+/// CmdId=5 `TRequestBalanceRefresh` (MoonProtoBalanceStruct.pas:191).
+/// Запрашивает у сервера повторную отправку текущего snapshot балансов.
+/// Empty body — только wrapping заголовок команды (CmdId + ver + uid).
+///
+/// Priority = MPS_High, encrypted = true, max_retries = 3 (default для High).
+/// Docs_api audit B-03 — отсутствие этого builder'а блокировало возможность
+/// запросить refresh из Rust клиента.
+pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
+    const CMD_REQUEST_BALANCE_REFRESH: u8 = 5;
+    const CURRENT_PROTO_CMD_VER: u16 = 3;
+    let mut out = Vec::with_capacity(11);
+    out.push(CMD_REQUEST_BALANCE_REFRESH);
+    out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+    out.extend_from_slice(&uid.to_le_bytes());
+    out
+}
+
+// =============================================================================
+//  Parsers (S → C)
+// =============================================================================
+
 /// Parse balance command payload (after command header CmdId+ver+UID stripped).
 /// cmd_id determines the format (002/003 vs 004).
 pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
@@ -101,8 +126,16 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
 
     // Count
     if pos + 4 > data.len() { return Some(result); }
-    let count = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
+    // DoS guard: BalanceItem минимум ~14 байт (string-prefix u16 + hash 8 + flags 4).
+    // count * 14 > remaining → malformed/adversarial.
+    if count_raw < 0 || (count_raw as usize).saturating_mul(14) > data.len().saturating_sub(pos) {
+        log::warn!(target: "moonproto::balance",
+            "BalanceUpdate: invalid count={} (remaining={})", count_raw, data.len() - pos);
+        return Some(result);
+    }
+    let count = count_raw as usize;
 
     // Items
     for _ in 0..count {
