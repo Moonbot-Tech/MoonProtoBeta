@@ -154,6 +154,18 @@ const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
 /// отправляет пакеты с distinct datagram_num чтобы наполнить HashMap.
 const MAX_RECEIVING_DATAGRAMS: usize = 256;
 
+/// DoS guard: верхний потолок `max_block_num` принимаемого Sliced пакета.
+///
+/// Реалистичный MoonProto-payload: даже большой StratSnapshot укладывается в
+/// несколько десятков блоков (PMTU ~1400 байт × 64 блока = 90KB). Adversary
+/// мог бы заслать `max_block_num=255` (256 блоков) и шлёт по 1 блоку в каждый
+/// uniqued datagram_num — heap-spike `256 × (6KB metadata + N × 8KB filled
+/// payload)` × `MAX_RECEIVING_DATAGRAMS=256` атак-вектор амплификации.
+///
+/// 128 — щедрый потолок (~180KB при PMTU=1400) превышающий любой legitimate
+/// MoonProto-payload. См. `audit_robustness` C-4.
+const MAX_BLOCK_NUM_INCOMING: u8 = 128;
+
 impl SlicingReceiver {
     pub fn new() -> Self {
         Self {
@@ -187,6 +199,24 @@ impl SlicingReceiver {
             Some(h) => h,
             None => return (None, [0u8; ACK256_WIRE_SIZE]),
         };
+
+        // DoS guard (audit_robustness C-4): отвергаем Sliced пакеты с явно
+        // неreasonable `max_block_num`. Legitimate MoonProto-payload не достигает
+        // 128 блоков (см. const MAX_BLOCK_NUM_INCOMING). Adversary с 255 →
+        // heap amplification ×256 datagrams = >500MB. Reject + warn.
+        if hdr.max_block_num > MAX_BLOCK_NUM_INCOMING {
+            log::warn!(target: "moonproto::slicing",
+                "Sliced dgram={} max_block_num={} exceeds MAX_BLOCK_NUM_INCOMING={} — rejecting",
+                hdr.datagram_num, hdr.max_block_num, MAX_BLOCK_NUM_INCOMING);
+            return (None, [0u8; ACK256_WIRE_SIZE]);
+        }
+        // Также reject block_num за пределами max_block_num (явная corruption / atack).
+        if hdr.block_num > hdr.max_block_num {
+            log::warn!(target: "moonproto::slicing",
+                "Sliced dgram={} block_num={} > max_block_num={} — rejecting",
+                hdr.datagram_num, hdr.block_num, hdr.max_block_num);
+            return (None, [0u8; ACK256_WIRE_SIZE]);
+        }
 
         let block_data = payload[SLICE_HEADER_SIZE..].to_vec();
         let datagram_num = hdr.datagram_num;
