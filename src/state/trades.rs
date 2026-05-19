@@ -216,6 +216,7 @@ impl TradesState {
 
     /// Обработать MPC_TradesStream пакет (track packets = true).
     /// Делает то же что Delphi `ProcessTradesStream(TrackPackets=True)` MoonProtoEngine.pas:1553+.
+    #[must_use = "TradesEvent's must be processed — пропуск Apply ведёт к потере trades для UI/strategy"]
     pub fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
         let mut events = Vec::new();
         let packet_num = pkt.packet_num;
@@ -309,12 +310,20 @@ impl TradesState {
         }
 
         if !extended {
-            // Проверяем размер. Слишком большой gap или buckets переполнены → reset.
+            // Проверяем размер. Слишком большой gap или buckets переполнены.
             if gap_size > MAX_RECVD_SIZE || self.used_buckets >= MAX_GAP_BUCKETS {
-                self.reset_buckets();
-                self.last_packet_num = packet_num;
-                self.last_packet_time_ms = now_ms;
-                events.push(TradesEvent::Apply(pkt));
+                // audit_robustness H8: раньше reset_buckets + accept. Это даёт adversarial
+                // server возможность держать state в постоянном reset через пакеты
+                // `last + 3001` каждые 100мс → silent trade loss (gap recovery не работает).
+                //
+                // Legitimate reset (смена ServerToken) обрабатывается на dispatcher-уровне
+                // через `EventDispatcher.last_known_server_token` + `trades.full_reset()`
+                // ДО applying пакета. Поэтому здесь, при тех же server keys/token, такой
+                // jump = adversarial поведение → **drop packet** + warn (не reset).
+                log::warn!(target: "moonproto::trades",
+                    "suspicious packet_num jump {} -> {} (gap_size={} > MAX_RECVD_SIZE={} or buckets full); dropping packet, state preserved",
+                    last, packet_num, gap_size, MAX_RECVD_SIZE);
+                events.push(TradesEvent::Duplicate);
                 return events;
             }
 
@@ -486,7 +495,7 @@ mod tests {
     #[test]
     fn sequential_packets_applied() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(101), 1010);
         assert!(matches!(evs[0], TradesEvent::Apply(_)));
         assert_eq!(s.last_packet_num(), 101);
@@ -496,7 +505,7 @@ mod tests {
     #[test]
     fn duplicate_detected() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(100), 1010);
         assert!(matches!(evs[0], TradesEvent::Duplicate));
     }
@@ -504,7 +513,7 @@ mod tests {
     #[test]
     fn gap_creates_bucket() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(103), 1010); // gap: 101, 102
         let has_gap = evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { start: 101, end: 102 }));
         let has_apply = evs.iter().any(|e| matches!(e, TradesEvent::Apply(_)));
@@ -515,8 +524,8 @@ mod tests {
     #[test]
     fn out_of_order_fills_gap() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(103), 1010); // creates bucket [101, 102]
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(103), 1010); // creates bucket [101, 102]
         let evs = s.on_packet(make_pkt(101), 1020); // fills bucket
         let has_filled = evs.iter().any(|e| matches!(e, TradesEvent::GapFilled { packet_num: 101, .. }));
         assert!(has_filled);
@@ -525,8 +534,8 @@ mod tests {
     #[test]
     fn tick_emits_resend_after_path_delay() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(105), 1010); // gap [101..104]
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104]
         // Через 500мс с RTT 250 — PathDelay = 250 * 1.2 = 300мс → 500 > 300 → resend.
         let payloads = s.tick(250, 1500);
         assert_eq!(payloads.len(), 1, "должен быть один батч resend");
@@ -536,8 +545,8 @@ mod tests {
     #[test]
     fn tick_throttles_within_100ms() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(105), 1010);
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010);
         let _ = s.tick(250, 1500);
         // Сразу же — throttle 100мс ещё активен.
         let payloads = s.tick(250, 1550);
@@ -547,8 +556,8 @@ mod tests {
     #[test]
     fn bucket_closes_after_max_retries() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(105), 1010);
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010);
         // 3 retry — после 4-го tick'а bucket должен быть закрыт.
         for i in 0..MAX_RETRY_COUNT as i64 + 1 {
             let _ = s.tick(250, 1500 + i * 5000);
@@ -586,10 +595,10 @@ mod tests {
         // Сценарий: пакеты 100, [gap 101..104], 105 (sequential!), [gap 106..109], 110.
         // Должны получить ОДИН расширенный bucket [101..109], а не два.
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(105), 1010); // gap [101..104] → bucket1
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104] → bucket1
         assert_eq!(s.used_buckets(), 1);
-        s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 до [101..109]
+        let _ = s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 до [101..109]
         // Bucket должен расшириться, а не создать второй.
         assert_eq!(s.used_buckets(), 1, "extend должен переиспользовать существующий bucket");
         // Найдём bucket и проверим что end_num = 109, и Recvd[4] (= packet 105) = true.
@@ -604,8 +613,8 @@ mod tests {
     fn extend_respects_max_recvd_size() {
         // Если расширение превысит MAX_RECVD_SIZE — должен создаться новый bucket.
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(0), 1000);
-        s.on_packet(make_pkt(2900), 1010); // bucket [1..2899]
+        let _ = s.on_packet(make_pkt(0), 1000);
+        let _ = s.on_packet(make_pkt(2900), 1010); // bucket [1..2899]
         // Теперь новый gap [2901..N], N - 0 > MAX_RECVD_SIZE → не extend → reset.
         let evs = s.on_packet(make_pkt(7000), 1020);
         // reset_buckets → 0 buckets потом нет дополнительного create если gap > MAX.
@@ -616,8 +625,8 @@ mod tests {
     #[test]
     fn pause_resets_buckets() {
         let mut s = TradesState::new();
-        s.on_packet(make_pkt(100), 1000);
-        s.on_packet(make_pkt(105), 1010); // creates bucket
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010); // creates bucket
         assert_eq!(s.used_buckets(), 1);
         // Через 31 сек — пауза.
         let evs = s.on_packet(make_pkt(200), 1000 + 31_000);

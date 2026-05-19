@@ -16,6 +16,7 @@ const NTP_PORT: u16 = 123;
 const NTP_PACKET_SIZE: usize = 48;
 const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds between 1900-01-01 and 1970-01-01
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NtpSyncResult {
     pub time_offset: f64,    // seconds (add to SystemTime to get corrected time)
     pub round_trip_ms: i64,  // milliseconds

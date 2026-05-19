@@ -69,6 +69,7 @@ fn main() {
         mac_key: keys.mac_key,
         mask_ver: 0,
         client_id: rand::random(),
+        ntp_host: Some("pool.ntp.org".to_string()),
     };
 
     let mut client = Client::new(cfg);

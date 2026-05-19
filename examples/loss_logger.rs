@@ -188,6 +188,7 @@ fn main() {
         mac_key: keys.mac_key,
         mask_ver: 0,
         client_id: rand::random(),
+        ntp_host: None, // loss_logger — короткий стресс-тест, NTP не нужен
     };
 
     let mut client = Client::new(cfg);

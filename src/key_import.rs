@@ -17,8 +17,11 @@
 
 use crate::MoonKey;
 
-/// Decoded key pair from MoonBot export
-#[derive(Debug, Clone)]
+/// Decoded key pair from MoonBot export.
+///
+/// `Copy` — все поля Copy (`MoonKey = [u8; 16]`, bool, u8). Упрощает API:
+/// потребитель не пишет `keys.clone()` для передачи в несколько мест.
+#[derive(Debug, Clone, Copy)]
 pub struct ImportedKeys {
     pub master_key: MoonKey,
     pub mac_key: MoonKey,

@@ -240,6 +240,7 @@ impl OrderBooks {
     /// Обработать один распарсенный `MPC_OrderBook` пакет.
     /// `now_ms` — текущее время в миллисекундах (из `client.now_ms()`).
     /// Возвращает список событий: Apply (может быть несколько при разгребании cache), RequestFullNeeded, Ignored.
+    #[must_use = "OrderBookEvent's must be processed — пропуск RequestFullNeeded ведёт к persistent corrupted orderbook"]
     pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let mut events = Vec::new();
@@ -455,7 +456,7 @@ mod tests {
     #[test]
     fn gap_caches_then_drains() {
         let mut ob = OrderBooks::new();
-        ob.on_packet(make_pkt(3, 0, 10, true), 1000);
+        let _ = ob.on_packet(make_pkt(3, 0, 10, true), 1000);
         // Получен seq 12 — gap. Положить в cache.
         let events = ob.on_packet(make_pkt(3, 0, 12, false), 1010);
         assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Ignored { reason: ApplyResult::Cached, seq: 12, .. })));
@@ -471,7 +472,7 @@ mod tests {
     #[test]
     fn stale_diff_rejected() {
         let mut ob = OrderBooks::new();
-        ob.on_packet(make_pkt(4, 0, 20, true), 1000); // Full, expected_seq = 21
+        let _ = ob.on_packet(make_pkt(4, 0, 20, true), 1000); // Full, expected_seq = 21
         let events = ob.on_packet(make_pkt(4, 0, 19, false), 1010); // seq 19 < 21
         assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Ignored { reason: ApplyResult::Stale, .. })));
     }
@@ -493,8 +494,8 @@ mod tests {
     #[test]
     fn separate_pairs_independent() {
         let mut ob = OrderBooks::new();
-        ob.on_packet(make_pkt(1, 0, 10, true), 1000); // Futures
-        ob.on_packet(make_pkt(1, 1, 20, true), 1000); // Spot
+        let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000); // Futures
+        let _ = ob.on_packet(make_pkt(1, 1, 20, true), 1000); // Spot
         // Diff for spot at seq 21 — должен примениться.
         let events = ob.on_packet(make_pkt(1, 1, 21, false), 1010);
         assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 21, book_kind: 1, .. })));

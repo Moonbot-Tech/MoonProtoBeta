@@ -79,6 +79,21 @@ pub struct StratsState {
     /// Серверный epoch последнего применённого snapshot'а — для детекции
     /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
+    /// Последний `TStratSnapshot.data` от сервера с `full=true`. Хранится для
+    /// **auto-echo** на серверный `TStratSnapshotRequest`: либа сама шлёт обратно
+    /// через `client.strat_send_snapshot(...)` в `EventDispatcher::dispatch_into_active`.
+    /// Это аналог Delphi `MoonProtoClient.pas:695-699` где клиент auto-respond'ит
+    /// `TStratSnapshot.CreateFromStrats(Strats)`.
+    ///
+    /// **Внимание**: echo'ится **последний полученный** snapshot. Если приложение
+    /// модифицировало стратегии локально и эти изменения ещё не дошли до сервера
+    /// — они потеряются. Для нормального flow клиент шлёт мутации через
+    /// `client.strat_*` API → сервер их применяет → следующий SnapshotRequest
+    /// получит уже изменённое. См. responsibility audit F5.
+    ///
+    /// `None` пока не пришёл ни один Full snapshot — в этом случае auto-echo
+    /// пропускается, app получит `StratEvent::SnapshotRequested` как раньше.
+    pub last_full_snapshot_raw: Option<Vec<u8>>,
 }
 
 impl StratsState {
@@ -92,9 +107,9 @@ impl StratsState {
             StratCommand::Snapshot(snap) => {
                 self.last_server_epoch = snap.server_epoch;
                 if snap.full {
-                    // Full snapshot — стратегии будут раскрыты потребителем из raw_data.
-                    // Сами entry в by_id мы НЕ создаём здесь т.к. без decoder'а не знаем StrategyID'ы.
-                    // Потребитель распакует data через strategy_serializer и явно вызовет update_from_decoded().
+                    // Сохраняем для auto-echo на следующий SnapshotRequest (audit F5).
+                    // Clone — single Vec per Full snapshot, частота низкая (~раз в сессию).
+                    self.last_full_snapshot_raw = Some(snap.data.clone());
                     StratEvent::SnapshotFull { server_epoch: snap.server_epoch, raw_data: snap.data }
                 } else {
                     StratEvent::SnapshotPartial { server_epoch: snap.server_epoch, raw_data: snap.data }
@@ -188,6 +203,7 @@ impl StratsState {
     pub fn clear(&mut self) {
         self.by_id.clear();
         self.last_server_epoch = 0;
+        self.last_full_snapshot_raw = None;
     }
 }
 

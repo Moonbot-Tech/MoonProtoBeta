@@ -69,6 +69,9 @@ fn main() {
         mac_key:     keys.mac_key,
         mask_ver:    0,
         client_id:   rand::random(),
+        // Active library F8: либа сама spawn'ит NTP-sync thread в Client::new
+        // и завершает в Drop. Без отдельного ntp::spawn_sync_thread снаружи.
+        ntp_host:    Some("pool.ntp.org".to_string()),
     };
     let mut client = Client::new(cfg);
 

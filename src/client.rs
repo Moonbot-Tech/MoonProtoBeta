@@ -306,6 +306,7 @@ pub enum LifecycleEvent {
 
 pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 
+#[derive(Clone)]
 pub struct ClientConfig {
     pub server_ip: String,
     pub server_port: u16,
@@ -313,6 +314,34 @@ pub struct ClientConfig {
     pub mac_key: MoonKey,
     pub mask_ver: u8,
     pub client_id: u64,
+    /// Если `Some(host)` — `Client::new` сам spawn'ит NTP-thread который синхронизирует
+    /// `GlobalMPTimeOffset` каждые ~500ms в фоне. Thread автоматически завершается в
+    /// `Drop for Client`. **Это рекомендуемый вариант** — без NTP-sync timestamps в
+    /// торговых командах будут с системным временем (потенциально сдвинуты на десятки
+    /// мс при clock drift), что вызовет AdjustTime неточность на стороне сервера.
+    ///
+    /// `None` — отключить NTP. Подходит для тестов и для случаев когда потребитель
+    /// сам управляет NTP (через `ntp::spawn_sync_thread` напрямую).
+    ///
+    /// Соответствует Delphi `TMoonProtoTymeSyncer` (`MoonProtoIntStruct.pas:1224-1302`)
+    /// который в Delphi был singleton-thread'ом созданным `Unit1.InitInt`. См.
+    /// responsibility audit F8.
+    pub ntp_host: Option<String>,
+}
+
+// Custom Debug — secret keys redacted (audit rust_quality #20).
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server_ip", &self.server_ip)
+            .field("server_port", &self.server_port)
+            .field("master_key", &"<REDACTED>")
+            .field("mac_key", &"<REDACTED>")
+            .field("mask_ver", &self.mask_ver)
+            .field("client_id", &format_args!("{:#x}", self.client_id))
+            .field("ntp_host", &self.ntp_host)
+            .finish()
+    }
 }
 
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
@@ -638,6 +667,12 @@ pub struct Client {
     /// для эмиссии `LifecycleEvent::BindFailed` (по нарастающей — сначала через
     /// 3 серии что ≈15с silent retry, далее каждые 10 серий). См. audit H9.
     bind_failure_streak: u32,
+
+    /// Shutdown handle для self-managed NTP-thread'а (если `cfg.ntp_host = Some`).
+    /// При `Drop for Client` → `store(true)` — NTP-thread завершится в течение
+    /// ~100мс (см. `ntp::spawn_sync_thread`). `None` если NTP отключен в cfg.
+    /// См. responsibility audit F8.
+    ntp_thread_shutdown: Option<Arc<AtomicBool>>,
 }
 
 impl Client {
@@ -646,6 +681,13 @@ impl Client {
         // При burst 10K pps это 100мс задержки main loop без потери. После — drop+warn.
         const EVENT_CHANNEL_CAPACITY: usize = 1024;
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+
+        // Active library F8: spawn self-managed NTP thread если cfg.ntp_host задан.
+        // Thread будет периодически обновлять GlobalMPTimeOffset через set_ntp_offset.
+        // Shutdown handle сохраняется в Client.ntp_thread_shutdown → Drop останавливает.
+        let ntp_thread_shutdown = cfg.ntp_host.as_ref().map(|host| {
+            crate::ntp::spawn_sync_thread(host.clone(), set_ntp_offset)
+        });
 
         Self {
             cfg,
@@ -728,6 +770,7 @@ impl Client {
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
+            ntp_thread_shutdown,
         }
     }
 
@@ -1799,6 +1842,15 @@ impl Client {
 
                 // Active library: timeout protection для auto-refetch indexes.
                 self.check_indexes_fetch_timeout(cur_tm);
+
+                // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
+                // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
+                // чтобы full_reset + новый Hello с актуальным временем.
+                if CLOCK_JUMP_DETECTED.swap(false, Ordering::Relaxed) {
+                    log::warn!(target: "moonproto::client",
+                        "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
+                    self.force_disconnect = true;
+                }
 
                 // Active library: periodic trades.tick — только в Dispatcher mode.
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
@@ -3476,11 +3528,15 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
     Ok(result)
 }
 
-/// Drop: гарантированно сигналим reader thread'у завершиться, даже если потребитель
-/// не вызвал `disconnect()`. Reader выйдет из loop макс через 1 сек (read_timeout).
+/// Drop: гарантированно сигналим reader thread'у И self-managed NTP-thread'у
+/// завершиться, даже если потребитель не вызвал `disconnect()`. Reader выйдет
+/// из loop макс через 1 сек (read_timeout), NTP-thread — через ~100мс.
 impl Drop for Client {
     fn drop(&mut self) {
         self.reader_shutdown.store(true, Ordering::Relaxed);
+        if let Some(ntp_shutdown) = self.ntp_thread_shutdown.as_ref() {
+            ntp_shutdown.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -3752,12 +3808,22 @@ fn delphi_now() -> f64 {
         let delta_secs = (now - prev) * 86400.0;
         if delta_secs.abs() > 60.0 {
             log::warn!(target: "moonproto::client",
-                "delphi_now clock jump detected: {:.1}s — handshake/order timestamps may diverge; consider re-syncing NTP",
+                "delphi_now clock jump detected: {:.1}s — forcing reconnect to re-sync handshake timestamps",
                 delta_secs);
+            // audit_robustness H5: при clock-jump (NTP step / suspend-resume на mobile)
+            // прежний handshake timestamp устарел; сервер reject'нёт hello по
+            // anti-replay window. Без сброса клиент впадает в permanent retry loop с тем
+            // же stale timestamp. Atomic flag читается Client в main loop и триггерит
+            // force_disconnect → full_reset → fresh handshake с актуальным временем.
+            CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
         }
     }
     now
 }
+
+/// Сигнал от `delphi_now` к Client'у что системные часы скакнули >60с (NTP step,
+/// suspend/resume на mobile). Main loop читает + сбрасывает в `check_clock_jump`.
+static CLOCK_JUMP_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
 /// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").

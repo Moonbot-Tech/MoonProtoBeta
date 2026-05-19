@@ -103,6 +103,7 @@ impl EventDispatcher {
     /// Распарсить входящий payload и применить к соответствующему state.
     /// Возвращает список событий — для большинства каналов 0 или 1 событие,
     /// для OrderBook (с buffered cache) и Balance (multi-market batch) может быть несколько.
+    #[must_use = "Events must be processed — пропуск приведёт к потере OrderEvent/TradesEvent/etc."]
     pub fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
         // Convenience-обёртка над `dispatch_into`. Backwards compat.
         let mut out = Vec::new();
@@ -344,15 +345,26 @@ impl EventDispatcher {
         // ниже не зависят от времени (события OrderBookEvent::RequestFullNeeded и
         // TradesEvent::GapDetected уже содержат всё нужное).
 
-        // Auto-action: RequestFullNeeded → send_api_request (sync, no pending).
+        // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
         // RequestFullNeeded для одной и той же книги (corruption detection +
         // последующий update в одном datagram'е). Шлём один запрос на пару.
         use std::collections::HashSet;
         let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
+        // Auto-action 2: StratEvent::SnapshotRequested → если есть last_full_snapshot_raw
+        // — auto-echo через client.strat_send_snapshot. Аналог Delphi
+        // `MoonProtoClient.pas:695-699` где либа сама echo'ит. App получает event для
+        // UI awareness, но НЕ обязан слать reply.
+        let mut snapshot_requested_uid: Option<u64> = None;
         for ev in &out[start_len..] {
-            if let Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) = ev {
-                to_request_full.insert((*market_index, *book_kind));
+            match ev {
+                Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) => {
+                    to_request_full.insert((*market_index, *book_kind));
+                }
+                Event::Strat(crate::state::StratEvent::SnapshotRequested { uid }) => {
+                    snapshot_requested_uid = Some(*uid);
+                }
+                _ => {}
             }
         }
         for (mi, bk) in to_request_full {
@@ -361,6 +373,17 @@ impl EventDispatcher {
             client.send_api_request(
                 &crate::commands::engine_request::request_order_book_full(mi, bk),
             );
+        }
+        if snapshot_requested_uid.is_some() {
+            if let Some(raw) = self.strats.last_full_snapshot_raw.as_ref() {
+                // Echo последний полученный full snapshot. Сервер примет как актуальный
+                // снимок стратегий клиента. Если клиент локально не модифицировал —
+                // это корректно. Иначе локальные изменения теряются (см. F5 docstring).
+                let raw_clone = raw.clone();
+                client.strat_send_snapshot(&raw_clone);
+            }
+            // Если last_full_snapshot_raw=None — событие всё равно эмиттится в `out`,
+            // потребитель сам обработает SnapshotRequested (как раньше).
         }
     }
 }

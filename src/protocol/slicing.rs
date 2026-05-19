@@ -45,10 +45,16 @@ pub struct SlicedData {
     received_count: usize,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
     pub dup_count: u8,       // DupCount (matches IntStruct.pas:539)
+    /// Время прибытия ПЕРВОГО блока этой датаграммы. Используется для LRU eviction
+    /// при `MAX_RECEIVING_DATAGRAMS` overflow — выкидываем oldest incomplete.
+    /// Без этого raньше silent drop НОВЫХ датаграмм → adversarial server мог
+    /// заглушить legitimate trade snapshots после atomic'а из 256 fake datagram_num.
+    /// См. robustness audit H2/H3.
+    pub first_seen_ms: i64,
 }
 
 impl SlicedData {
-    pub fn new(datagram_num: u16, max_block_num: u8) -> Self {
+    pub fn new(datagram_num: u16, max_block_num: u8, now_ms: i64) -> Self {
         let count = (max_block_num as usize) + 1;
         Self {
             datagram_num,
@@ -57,6 +63,7 @@ impl SlicedData {
             received_count: 0,
             ack_flags: [0u8; 32],
             dup_count: 0,
+            first_seen_ms: now_ms,
         }
     }
 
@@ -189,16 +196,26 @@ impl SlicingReceiver {
             // Remove any old entry with same number
             self.receiving.remove(&datagram_num);
             // DoS guard: при штатной работе клиента в receiving одновременно <20 датаграмм.
-            // Если злой/багнутый сервер пытается раздуть HashMap через distinct datagram_num —
-            // отбрасываем новые, обработка реальных продолжится.
+            // При saturation — эвиктим OLDEST incomplete (по first_seen_ms) вместо drop_new.
+            // audit_robustness H2/H3: stale incomplete всё равно не достроится (sender бы
+            // уже ретранслировал), а свежая datagram может достроиться → новый contains
+            // legitimate trade snapshot который надо принять. Старая семантика drop_new
+            // позволяла adversarial server'у заглушить legitimate sliced через 256 fake
+            // datagram_num.
             if self.receiving.len() >= MAX_RECEIVING_DATAGRAMS {
-                log::warn!(target: "moonproto::slicing",
-                    "receiving HashMap saturated ({}); dropping new datagram_num={} (DoS guard)",
-                    self.receiving.len(), datagram_num);
-                return (None, [0u8; ACK256_WIRE_SIZE]);
+                let oldest = self.receiving.iter()
+                    .min_by_key(|(_, s)| s.first_seen_ms)
+                    .map(|(k, _)| *k);
+                if let Some(evict_key) = oldest {
+                    log::warn!(target: "moonproto::slicing",
+                        "receiving saturated ({}); evicting oldest dgram={} to make room for dgram={}",
+                        self.receiving.len(), evict_key, datagram_num);
+                    self.receiving.remove(&evict_key);
+                }
             }
             // Create new SlicedData
-            self.receiving.insert(datagram_num, SlicedData::new(datagram_num, hdr.max_block_num));
+            self.receiving.insert(datagram_num,
+                SlicedData::new(datagram_num, hdr.max_block_num, self.last_online));
         } else if !self.receiving.contains_key(&datagram_num) {
             // Not new, not in receiving → already completed, send full ACK
             let flags = [0xFFu8; 32]; // SetAllFlags
@@ -212,7 +229,8 @@ impl SlicingReceiver {
             // на случай code change ниже по стеку.
             if existing.blocks_count.saturating_sub(1) != hdr.max_block_num as usize {
                 self.receiving.remove(&datagram_num);
-                self.receiving.insert(datagram_num, SlicedData::new(datagram_num, hdr.max_block_num));
+                self.receiving.insert(datagram_num,
+                    SlicedData::new(datagram_num, hdr.max_block_num, self.last_online));
             }
         }
 
