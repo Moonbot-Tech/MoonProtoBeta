@@ -3815,7 +3815,78 @@ impl std::error::Error for InitError {}
 /// На текущей реализации эта функция работает корректно если вызывается ВО
 /// ВРЕМЯ короткого `run_with_dispatcher` — но это невозможно из-за `&mut`. То
 /// есть useful pattern — последовательно: short_run → init → long_run.
-pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitResult, InitError> {
+/// Ожидание ответа на `api_*` request с **chunked main loop pump**.
+///
+/// `Client::api_*()` возвращает `Receiver<EngineResponse>` — но response приходит
+/// только когда main loop **крутится** и обрабатывает UDP пакеты. Если вызвать
+/// `rx.recv_timeout(...)` в том же thread'е что владеет Client'ом — main loop
+/// не работает в это время и response никогда не доставится → timeout.
+///
+/// Этот helper решает проблему: периодически (~50ms тиков) запускает короткий
+/// `run_with_dispatcher` пока не пришёл response или не истёк общий timeout.
+/// Тики достаточно короткие чтобы reagировать без задержки.
+///
+/// **EventDispatcher обязателен** потому что без него `Markets` / `OrderBooks` /
+/// `Trades` state НЕ обновляются автоматически при доставке Engine API responses
+/// (см. `EventDispatcher::dispatch_into` для `Command::API`).
+fn wait_for_api_response(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    rx: &mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+    timeout: Duration,
+) -> Result<crate::commands::engine_api::EngineResponse, mpsc::RecvTimeoutError> {
+    const TICK: Duration = Duration::from_millis(50);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(resp) => return Ok(resp),
+            Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(mpsc::RecvTimeoutError::Timeout);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let tick = remaining.min(TICK);
+        client.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+    }
+}
+
+/// Полноценный init sequence: BaseCheck → AuthCheck → GetMarketsList →
+/// GetMarketsBalanceFull → подписки.
+///
+/// **Принимает `&mut EventDispatcher`** — это обязательно для работы chunked
+/// main loop pump (см. [`wait_for_api_response`]). Через dispatcher также
+/// автоматически применяются Engine API response payloads к Markets state
+/// (`indexes_synchronized`, market list, prices) — без этого Trades/OrderBook
+/// streams будут заблокированы gating-логикой `dispatch_into_active`.
+///
+/// Должен быть вызван **после** того как Client уже handshake'нулся (фаза
+/// `Connected{fresh:true}` поступила в lifecycle callback). Если не authorized —
+/// возвращает `InitError::NotAuthenticated`.
+///
+/// При успешном BaseCheck — парсит [`ServerInfo`] и сохраняет в `client.server_info()`
+/// (для multi-server идентификации). См. `commands::engine_api::ServerInfo`.
+///
+/// Pattern:
+/// ```ignore
+/// let mut client = Client::new(cfg);
+/// let mut dispatcher = EventDispatcher::new();
+/// // Phase 1 — handshake.
+/// client.run_with_dispatcher(Duration::from_secs(3), &mut dispatcher, Box::new(|_| {}));
+/// // Phase 2 — init (внутри chunked main loop pump).
+/// let r = run_init_sequence(&mut client, &mut dispatcher, InitConfig::default())?;
+/// // Phase 3 — long-running stream.
+/// client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|ev| {...}));
+/// ```
+///
+/// [`ServerInfo`]: crate::commands::engine_api::ServerInfo
+pub fn run_init_sequence(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cfg: InitConfig,
+) -> Result<InitResult, InitError> {
     if !client.is_authorized() {
         return Err(InitError::NotAuthenticated);
     }
@@ -3829,7 +3900,7 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
     // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
     if cfg.base_check {
         let rx = client.api_base_check();
-        match rx.recv_timeout(timeout) {
+        match wait_for_api_response(client, dispatcher, &rx, timeout) {
             Ok(resp) if resp.success => {
                 result.base_check_ok = true;
                 let info = crate::commands::engine_api::parse_base_check_response(&resp.data);
@@ -3849,7 +3920,7 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
     // === 2. AuthCheck === критический шаг
     if cfg.auth_check {
         let rx = client.api_auth_check();
-        match rx.recv_timeout(timeout) {
+        match wait_for_api_response(client, dispatcher, &rx, timeout) {
             Ok(resp) if resp.success => { result.auth_check_ok = true; }
             Ok(resp) => {
                 result.errors.push(format!("AuthCheck error: code={} msg={}",
@@ -3862,10 +3933,12 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
         }
     }
 
-    // === 3. GetMarketsList === не критический (timeout → продолжить)
+    // === 3. GetMarketsList === не критический (timeout → продолжить).
+    // Markets state в dispatcher обновляется автоматически через
+    // `EventDispatcher::dispatch_into` ветка Command::API → GetMarketsList.
     if cfg.fetch_markets {
         let rx = client.api_get_markets_list();
-        match rx.recv_timeout(timeout) {
+        match wait_for_api_response(client, dispatcher, &rx, timeout) {
             Ok(resp) if resp.success => {
                 result.markets_response_bytes = resp.data.len();
             }
@@ -3881,7 +3954,7 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
     // === 4. GetMarketsBalanceFull === не критический
     if cfg.fetch_balance {
         let rx = client.api_get_markets_balance_full();
-        match rx.recv_timeout(timeout) {
+        match wait_for_api_response(client, dispatcher, &rx, timeout) {
             Ok(resp) if resp.success => {
                 result.balances_response_bytes = resp.data.len();
             }
@@ -3894,7 +3967,9 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
         }
     }
 
-    // === 5. SubscribeAllTrades === идёт через subscription_registry (fire-and-forget)
+    // === 5. SubscribeAllTrades === идёт через subscription_registry (fire-and-forget).
+    // Subscribe events идут в event channel; main loop их применит на следующем тике
+    // (либо здесь же если ниже идёт wait, либо в основном run_with_dispatcher после init).
     if let Some(want_mm) = cfg.subscribe_trades {
         client.subscribe_all_trades(want_mm);
         result.trades_subscribed = true;
@@ -3904,6 +3979,18 @@ pub fn run_init_sequence(client: &mut Client, cfg: InitConfig) -> Result<InitRes
     for (name, kind) in &cfg.subscribe_orderbooks {
         client.subscribe_orderbook(name, *kind);
         result.orderbooks_subscribed += 1;
+    }
+
+    // === 7. Drain fire-and-forget subscribe events ===
+    // subscribe_* пушит ClientEvent::Subscribe* в channel. Без тика main loop
+    // events лежат в channel и wire-команды не уходят. Прогоняем короткий тик
+    // чтобы обработка подписки реально стартовала к моменту выхода из init.
+    if cfg.subscribe_trades.is_some() || !cfg.subscribe_orderbooks.is_empty() {
+        client.run_with_dispatcher(
+            Duration::from_millis(100),
+            dispatcher,
+            Box::new(|_| {}),
+        );
     }
 
     Ok(result)

@@ -199,10 +199,28 @@ pub struct EngineResponse {
     pub data: Vec<u8>,  // decompressed response payload
 }
 
-/// Parse TEngineResponse from command payload (after CmdId+ver+UID header).
-/// Matches MoonProtoEngineStruct.pas:364-403.
+/// Parse TEngineResponse from command payload.
+///
+/// **Wire-format** (после Crypted decrypt + CryptoHeader strip, payload **с** Engine
+/// TBaseCommand header):
+/// ```text
+/// [CmdId(1)=1][ver(2)][own_UID(8)][RequestUID(8)][Method(1)][Success(1)][ErrorCode(4)][ErrorMsg(string)][IsCompressed(1)][DataSize(4)][Data]
+/// ```
+///
+/// Engine TBaseCommand header (11 байт: `CmdId + ver + own_UID`) **пропускается**
+/// до чтения `RequestUID` — соответствует Delphi `TEngineResponse.CreateFromStream`
+/// который через `inherited CreateFromStream` (TBaseCommand) сначала читает ver+UID,
+/// потом own fields.
+///
+/// **Историческая ошибка** (исправлено): раньше парсер начинал с `pos=0`, читая
+/// `[ver][own_UID first 5 bytes]` как `request_uid` — никогда не совпадало с
+/// зарегистрированным uid → все Engine API responses терялись (BaseCheck/AuthCheck/
+/// GetMarketsList timeouts).
+///
+/// Matches `MoonProtoEngineStruct.pas:364-403`.
 pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
-    let mut pos = 0usize;
+    // Skip Engine TBaseCommand header: CmdId(1) + ver(2) + own_UID(8) = 11 bytes.
+    let mut pos = 11usize;
 
     if pos + 8 > data.len() { return None; }
     let request_uid = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
@@ -595,6 +613,121 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     // pos += 4;  // больше не используется
 
     info
+}
+
+#[cfg(test)]
+mod parse_engine_response_tests {
+    use super::*;
+
+    /// Helper: builds a fake response wire-payload as the server would emit
+    /// (after Crypted decrypt + CryptoHeader strip). Layout:
+    /// [CmdId(1)=1][ver(2)=3][own_UID(8)][RequestUID(8)][Method(1)][Success(1)]
+    /// [ErrorCode(4)][ErrorMsg_len(2)][ErrorMsg][IsCompressed(1)][DataSize(4)][Data]
+    fn build_wire_response(
+        own_uid: u64,
+        request_uid: u64,
+        method: EngineMethod,
+        success: bool,
+        error_code: i32,
+        error_msg: &str,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(1u8);                                              // CmdId = 1
+        buf.extend_from_slice(&3u16.to_le_bytes());                 // ver = 3
+        buf.extend_from_slice(&own_uid.to_le_bytes());              // own_UID
+        buf.extend_from_slice(&request_uid.to_le_bytes());          // RequestUID (echo)
+        buf.push(method as u8);                                     // Method
+        buf.push(success as u8);                                    // Success
+        buf.extend_from_slice(&error_code.to_le_bytes());           // ErrorCode
+        buf.extend_from_slice(&(error_msg.len() as u16).to_le_bytes()); // ErrorMsg len
+        buf.extend_from_slice(error_msg.as_bytes());
+        buf.push(0u8);                                              // IsCompressed = false
+        buf.extend_from_slice(&(data.len() as i32).to_le_bytes());  // DataSize
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn parse_skips_basecmd_header_and_reads_request_uid_correctly() {
+        // Регрессия от critical bug: парсер ДО fix начинал с offset 0
+        // и читал request_uid из `[CmdId][ver][own_UID 5 bytes]` — garbage.
+        let request_uid = 0x12_34_56_78_9A_BC_DE_F0u64;
+        let payload = build_wire_response(
+            0xAAAA_BBBB_CCCC_DDDD,         // own_UID (random)
+            request_uid,                    // RequestUID (echo)
+            EngineMethod::BaseCheck,
+            true,
+            0,
+            "",
+            &[],
+        );
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.request_uid, request_uid);
+        assert_eq!(resp.method, EngineMethod::BaseCheck);
+        assert!(resp.success);
+        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_msg.is_empty());
+        assert!(resp.data.is_empty());
+    }
+
+    #[test]
+    fn parse_carries_method_byte_after_request_uid() {
+        // Каждый method byte корректно читается с offset 19 (после header + request_uid).
+        for method in [
+            EngineMethod::AuthCheck,
+            EngineMethod::GetMarketsList,
+            EngineMethod::GetMarketsIndexes,
+            EngineMethod::SubscribeAllTrades,
+            EngineMethod::GetOpenOrders,
+        ] {
+            let payload = build_wire_response(0xDEAD, 0xBEEF, method, true, 0, "", &[]);
+            let resp = parse_engine_response(&payload).expect("parse ok");
+            assert_eq!(resp.method, method, "method mismatch for {:?}", method);
+            assert_eq!(resp.request_uid, 0xBEEF);
+        }
+    }
+
+    #[test]
+    fn parse_carries_error_payload() {
+        let payload = build_wire_response(
+            1, 42,
+            EngineMethod::AuthCheck,
+            false, // success = false
+            -123,  // error_code
+            "Invalid API key",
+            &[],
+        );
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert!(!resp.success);
+        assert_eq!(resp.error_code, -123);
+        assert_eq!(resp.error_msg, "Invalid API key");
+        assert_eq!(resp.request_uid, 42);
+    }
+
+    #[test]
+    fn parse_carries_uncompressed_data() {
+        let blob = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78];
+        let payload = build_wire_response(0, 100, EngineMethod::GetMarketsList, true, 0, "", &blob);
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.data, blob);
+        assert_eq!(resp.method, EngineMethod::GetMarketsList);
+    }
+
+    #[test]
+    fn parse_returns_none_on_short_payload() {
+        // < 11 bytes header не парсится.
+        let too_short = vec![0u8; 10];
+        assert!(parse_engine_response(&too_short).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_when_truncated_at_request_uid() {
+        // header (11) + 4 bytes (вместо 8 для request_uid) → None.
+        let mut buf = vec![0u8; 11];
+        buf.extend_from_slice(&[1, 2, 3, 4]);
+        assert!(parse_engine_response(&buf).is_none());
+    }
 }
 
 #[cfg(test)]
