@@ -78,15 +78,22 @@ pub enum Event {
 /// A-V2-09: `#[derive(Default)]` — каждое поле имеет свой `Default::default`
 /// (через `pub fn new()` который равен `default()`), что эквивалентно ручному
 /// `impl Default`. Ручной impl убран как избыточный.
+///
+/// **API encapsulation (audit_rust_quality #9):** state-поля имеют видимость
+/// `pub(crate)` (read-only снаружи). Пользователь получает доступ через
+/// getters [`Self::orders`], [`Self::order_books`], [`Self::trades`],
+/// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
+/// Прямая мутация state'ов снаружи — запрещена: state поддерживается через
+/// [`Self::dispatch`] / [`Self::dispatch_into`] / [`Self::dispatch_into_active`].
 #[derive(Default)]
 pub struct EventDispatcher {
-    pub orders:      Orders,
-    pub order_books: OrderBooks,
-    pub trades:      TradesState,
-    pub balances:    BalancesState,
-    pub strats:      StratsState,
-    pub settings:    SettingsState,
-    pub markets:     MarketsState,
+    pub(crate) orders:      Orders,
+    pub(crate) order_books: OrderBooks,
+    pub(crate) trades:      TradesState,
+    pub(crate) balances:    BalancesState,
+    pub(crate) strats:      StratsState,
+    pub(crate) settings:    SettingsState,
+    pub(crate) markets:     MarketsState,
     /// Последний известный `ServerToken` — для детектирования hard reconnect.
     /// При смене токена `dispatch_into_active` сбрасывает per-token state
     /// (`trades.full_reset()`, `order_books.clear()`) до применения нового пакета.
@@ -111,6 +118,56 @@ pub struct EventDispatcher {
 
 impl EventDispatcher {
     pub fn new() -> Self { Self::default() }
+
+    /// Read-only доступ к `Orders` state (sync-state ордеров — uid → Order map).
+    /// Состояние обновляется автоматически при dispatch'е `Command::Order` пакетов.
+    pub fn orders(&self) -> &Orders { &self.orders }
+
+    /// Read-only доступ к `OrderBooks` state (per-market kind sliding каше).
+    /// Состояние обновляется при dispatch'е `Command::OrderBook` пакетов.
+    pub fn order_books(&self) -> &OrderBooks { &self.order_books }
+
+    /// Read-only доступ к `TradesState` (gap detection + bucket tracking).
+    pub fn trades(&self) -> &TradesState { &self.trades }
+
+    /// Read-only доступ к `BalancesState` (балансы валют + locked).
+    pub fn balances(&self) -> &BalancesState { &self.balances }
+
+    /// Read-only доступ к `StratsState` (стратегии: uid → StratSnapshot).
+    pub fn strats(&self) -> &StratsState { &self.strats }
+
+    /// Read-only доступ к `SettingsState` (`TClientSettingsCommand` snapshot).
+    pub fn settings(&self) -> &SettingsState { &self.settings }
+
+    /// Read-only доступ к `MarketsState` (markets list + indexes + token tags).
+    /// `markets().indexes_synchronized` — ключевой инвариант active library
+    /// (gating флаг для TradesStream/OrderBook парсинга).
+    pub fn markets(&self) -> &MarketsState { &self.markets }
+
+    /// Periodic tick для `TradesState` gap recovery — генерирует `TradesResend`
+    /// payload'ы для пропущенных packet num'ов, закрывает старые buckets.
+    ///
+    /// Пользователю **не нужно** вызывать вручную если используется
+    /// [`crate::client::Client::run_with_dispatcher`] (он делает это автоматически
+    /// каждые ~100мс).
+    ///
+    /// Только при custom main loop'е (вызов `client.run(...)` с собственным
+    /// callback'ом): вызывай раз в ~100мс с актуальным `rtt_ms` и `now_ms` чтобы
+    /// trades-channel самовосстанавливался от UDP loss.
+    pub fn tick_trades(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
+        self.trades.tick(rtt_ms, now_ms)
+    }
+
+    /// Variant of [`Self::tick_trades`] возвращающий также emitted `TradesEvent`'ы.
+    /// Полезно для observability — `BucketClosed` / `GapFilled` events не доходят до
+    /// потребителя через `dispatch`, только через tick.
+    pub fn tick_trades_with_events(
+        &mut self,
+        rtt_ms: i64,
+        now_ms: i64,
+    ) -> (Vec<Vec<u8>>, Vec<TradesEvent>) {
+        self.trades.tick_with_events(rtt_ms, now_ms)
+    }
 
     /// Привязать dispatcher к per-Client `ServerTimeDelta` handle. После этого
     /// `dispatch_into` для `Command::Order` применяет **этот** Client's delta вместо

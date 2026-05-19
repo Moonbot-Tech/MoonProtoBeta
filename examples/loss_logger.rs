@@ -374,7 +374,7 @@ fn main() {
 
                             // Tick trades — emit resend payloads + BucketClosed events.
                             let rtt = last_rtt_cb.load(Ordering::Relaxed);
-                            let (payloads, closed) = disp.trades.tick_with_events(rtt, now);
+                            let (payloads, closed) = disp.tick_trades_with_events(rtt, now);
                             for p in payloads {
                                 resend_payloads.push(p);
                             }
