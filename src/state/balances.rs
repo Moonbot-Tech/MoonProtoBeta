@@ -229,8 +229,7 @@ impl BalancesState {
 }
 
 // `epoch_is_ok` теперь общий через `state::epoch::epoch_is_ok` (audit_rust_quality #1).
-// Раньше здесь была локальная копия со старым окном 100 — на high-freq updates
-// legitimate пакеты тихо отбрасывались. Текущее окно RFC 1982 half-cycle = 32767.
+// Окно stale = 100 взято из Delphi `MoonProtoFunc.pas:188-203`.
 use super::epoch::epoch_is_ok;
 
 #[cfg(test)]

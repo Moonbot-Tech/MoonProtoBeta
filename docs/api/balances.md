@@ -54,8 +54,9 @@ per-market epoch protection, matching Delphi `m.LastBalanceEpoch`: stale items
 are skipped, while newer items from the same packet can still be applied. Full
 snapshots are not rejected by a global epoch gate.
 
-`BalancesState::apply` uses `epoch_is_ok(last, new)` (wrap-safe, matching Delphi
-`MoonProtoFunc.pas:188-203`) with the RFC 1982 half-cycle window (32767 steps).
+`BalancesState::apply` uses `epoch_is_ok(last, new)` matching Delphi
+`MoonProtoFunc.pas:188-203`: duplicate epochs are rejected, and a wrapped
+backward distance of `100` or less is treated as stale.
 `IncrementalApplied.count` is the number of market rows actually applied after
 that per-market stale filtering.
 

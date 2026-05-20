@@ -169,7 +169,7 @@
 | # | Delphi src | Что | Rust orders.rs | ✅ |
 |---|---|---|---|---|
 | O-A1 | TaskWorkers.pas:1450-1666 ProcessCommandOrder | OrderStatus → create/update worker by UID | state/orders.rs:apply OrderStatus | ✅ |
-| O-A2 | MoonProtoFunc.pas:188 EpochIsOK | Wrapping-safe epoch compare | state/orders.rs:epoch_is_ok | ✅ |
+| O-A2 | MoonProtoFunc.pas:188 EpochIsOK | `LastEpoch = NewEpoch` reject; `Word(LastEpoch - NewEpoch) <= 100` reject; otherwise accept | state/epoch.rs:epoch_is_ok | ✅ |
 | O-A3 | TaskWorkers.pas:546 StatusPhase | Status → phase для rollback protection | state/orders.rs:status_phase | ✅ |
 | O-A4 | MoonProtoClient.pas:553-555 | Filter not.FromCache AND m≠nil | DEVIATION #6 — Rust сохраняет все | DEVIATION |
 | O-A5 | TaskWorkers.pas:1475-1666 setters | ApplyTo/Stops/VStop с побочными эффектами | DEVIATION #5 — Rust observer | DEVIATION |

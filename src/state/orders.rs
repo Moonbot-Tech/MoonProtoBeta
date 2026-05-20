@@ -118,8 +118,7 @@ impl SellReason {
 /// Возвращает `true` если new — действительно новое значение (не дубликат, не stale).
 /// Используется AcceptServerCommand в BOrderWorker (TaskWorkers.pas:1440).
 // `epoch_is_ok` теперь общий через `state::epoch::epoch_is_ok` (audit_rust_quality #1).
-// Раньше тут была локальная копия с правильным окном 32767, и параллельная копия
-// в `balances.rs` со старым окном 100 — single source of truth устраняет drift.
+// Окно stale = 100 взято из Delphi `MoonProtoFunc.pas:188-203`.
 use super::epoch::epoch_is_ok;
 
 /// Маппинг status → phase number.
@@ -803,30 +802,24 @@ mod tests {
 
     #[test]
     fn epoch_is_ok_unit() {
-        // Реализация (audit H6, RFC 1982 serial number comparison):
-        // backDist := last - new (wrapping_sub u16); accept = backDist > u16::MAX/2 (32767).
-        // Окно "stale" = 32767 эпох вместо старой константы 100. На high-freq trading
-        // (10+ replace/sec) + WiFi/cellular reorder узкое окно дропало legitimate updates.
-        const HALF: u16 = u16::MAX / 2; // = 32767
+        // Delphi: backDist := last - new (Word wrapping); accept = backDist > 100.
 
         // duplicate
         assert_eq!(epoch_is_ok(10, 10), false);
-        // stale близко: backDist = 100-50 = 50 ≤ 32767 → reject.
+        // stale близко: backDist = 100-50 = 50 <= 100 → reject.
         assert_eq!(epoch_is_ok(100, 50), false);
-        // accept forward через wrap: backDist = 100-250 = 65386 > 32767 → accept.
+        // accept forward через wrap: backDist = 100-250 = 65386 > 100 → accept.
         assert_eq!(epoch_is_ok(100, 250), true);
-        // wrap-around forward далеко: last=65500, new=200. backDist = 65500-200 = 65300 > 32767 → accept.
+        // wrap-around forward далеко: last=65500, new=200. backDist = 65300 > 100 → accept.
         assert_eq!(epoch_is_ok(65500, 200), true);
-        // last=200, new=65500. backDist = 200-65500 (wrap) = 236 ≤ 32767 → reject (близкий stale).
-        // **Изменилось vs старого поведения** (raньше backDist=236 > 100 → accept). Сейчас
-        // считается что 65500 — это эпох "236 позади last=200", это duplicate/stale.
-        assert_eq!(epoch_is_ok(200, 65500), false);
-        // Ближний stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 ≤ 32767 → reject.
+        // last=200, new=65500. backDist = 200-65500 (wrap) = 236 > 100 → accept.
+        assert_eq!(epoch_is_ok(200, 65500), true);
+        // Ближний stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 <= 100 → reject.
         assert_eq!(epoch_is_ok(10, 65500), false);
-        // Граница окна: backDist = HALF → НЕ accept (требуется СТРОГО > HALF).
-        assert_eq!(epoch_is_ok(HALF, 0), false);
+        // Граница окна: backDist = 100 → НЕ accept (требуется СТРОГО > 100).
+        assert_eq!(epoch_is_ok(500, 400), false);
         // На один больше границы → accept.
-        assert_eq!(epoch_is_ok(HALF + 1, 0), true);
+        assert_eq!(epoch_is_ok(500, 399), true);
     }
 
     #[test]
