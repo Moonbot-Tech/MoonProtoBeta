@@ -258,30 +258,37 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     pos += 1;
 
     if pos + 4 > data.len() { return Some(EngineResponse { request_uid, method, success, error_code, error_msg, data: Vec::new() }); }
-    let sz = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    let sz = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
 
-    let response_data = if sz > 0 && pos + sz <= data.len() {
-        let raw = &data[pos..pos + sz];
-        if is_compressed {
-            // DoS protection: cap decompressed size (anti-bomb).
-            // Engine API responses (markets list, balances, candles) реально 1-5 MB.
-            // 64 MB — щедрый запас, закрывает adversarial expansion.
-            use std::io::Read;
-            const MAX_ENGINE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
-            let mut decoder = DeflateDecoder::new(raw).take(MAX_ENGINE_RESPONSE_BYTES);
-            let mut decompressed = Vec::new();
-            match decoder.read_to_end(&mut decompressed) {
-                Ok(_) => decompressed,
-                Err(e) => {
-                    log::warn!(target: "moonproto::engine_api",
-                        "DEFLATE decompress failed for EngineResponse uid={}: {}",
-                        request_uid, e);
-                    return None;
-                }
-            }
+    let response_data = if sz > 0 {
+        let sz = sz as usize;
+        let Some(end) = pos.checked_add(sz) else {
+            log::warn!(target: "moonproto::engine_api",
+                "EngineResponse uid={} declares overflowing data size {}",
+                request_uid, sz);
+            return None;
+        };
+        if end > data.len() {
+            Vec::new()
         } else {
-            raw.to_vec()
+            let raw = &data[pos..end];
+            if is_compressed {
+                use std::io::Read;
+                let mut decoder = DeflateDecoder::new(raw);
+                let mut decompressed = Vec::new();
+                match decoder.read_to_end(&mut decompressed) {
+                    Ok(_) => decompressed,
+                    Err(e) => {
+                        log::warn!(target: "moonproto::engine_api",
+                            "DEFLATE decompress failed for EngineResponse uid={}: {}",
+                            request_uid, e);
+                        return None;
+                    }
+                }
+            } else {
+                raw.to_vec()
+            }
         }
     } else {
         Vec::new()
@@ -747,6 +754,44 @@ mod parse_engine_response_tests {
         let resp = parse_engine_response(&payload).expect("parse ok");
         assert_eq!(resp.data, blob);
         assert_eq!(resp.method, EngineMethod::GetMarketsList);
+    }
+
+    #[test]
+    fn parse_handles_negative_data_size_without_panic() {
+        let blob = [0xAA, 0xBB, 0xCC];
+        let mut payload = build_wire_response(0, 100, EngineMethod::GetMarketsList, true, 0, "", &blob);
+        let size_pos = payload.len() - blob.len() - 4;
+        payload[size_pos..size_pos + 4].copy_from_slice(&(-1i32).to_le_bytes());
+        payload.truncate(size_pos + 4);
+
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert!(resp.data.is_empty());
+    }
+
+    #[test]
+    fn parse_inflates_compressed_response_data() {
+        use flate2::{write::DeflateEncoder, Compression};
+        use std::io::Write;
+
+        let plain = b"compressed engine response payload".repeat(4);
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut payload = build_wire_response(
+            0,
+            101,
+            EngineMethod::UpdateMarketsList,
+            true,
+            0,
+            "",
+            &compressed,
+        );
+        let size_pos = payload.len() - compressed.len() - 4;
+        payload[size_pos - 1] = 1; // IsCompressed = true
+
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.data, plain);
     }
 
     #[test]
