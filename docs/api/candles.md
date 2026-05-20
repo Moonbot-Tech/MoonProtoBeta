@@ -181,7 +181,7 @@ fn delphi_to_unix_secs(td: f64) -> f64 {
 
 ## See also
 
-- [engine_api.md](engine_api.md) — RPC channel, ApiPending registry.
+- [engine_api.md](engine_api.md) — RPC channel and `EngineResponse` format.
 - [events.md](events.md) — `Event::EngineResponse` for raw response tracking.
 - [client.md](client.md) — `client.request_coin_card_candles()` /
   `api_get_coin_card_candles()` / `api_request_candles_data()` /

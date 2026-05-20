@@ -50,9 +50,10 @@ response to the registered receiver.
 ```
 
 `parse_engine_response` strips the common header, extracts `RequestUID`, and
-DEFLATE-decompresses `Data` when `IsCompressed` is set. `ApiPending` then uses
-`RequestUID` to match the response to the registered receiver. The public
-`EngineResponse::data` field contains the decompressed payload.
+DEFLATE-decompresses `Data` when `IsCompressed` is set. The client uses
+`RequestUID` internally to match the response to the receiver returned by
+`Client::api_*` wrappers. The public `EngineResponse::data` field contains the
+decompressed payload.
 
 The `Data` format is method-specific. See the doc comments on each
 `EngineMethod` variant (`cargo doc --open` -> `EngineMethod`). Parsers for

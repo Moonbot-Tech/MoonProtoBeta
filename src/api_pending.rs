@@ -41,13 +41,6 @@ pub struct ApiPending {
 }
 
 impl ApiPending {
-    /// A-V2-03 fix: ранее `new() -> Arc<Self>` противоречил `Default::default() -> Self`.
-    /// Теперь `new()` следует Rust API guideline (`new = default`); для типичного
-    /// shared-use есть [`new_arc`].
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Convenience: построить уже обёрнутый `Arc<ApiPending>`. Большинство callers
     /// хотят shared доступ (Client держит, reader thread получает clone'd Arc).
     pub fn new_arc() -> Arc<Self> {
@@ -110,6 +103,7 @@ impl ApiPending {
     }
 
     /// Количество активных ожиданий.
+    #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         self.lock_map().len()
     }

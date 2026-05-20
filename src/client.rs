@@ -183,7 +183,7 @@ impl UniqueKey {
 
 /// Item in the send queue (matches TMoonProtoDataToSend)
 #[derive(Clone)]
-pub struct SendItem {
+pub(crate) struct SendItem {
     pub data: Vec<u8>,         // serialized command stream
     pub cmd: u8,               // TMoonProtoCommand ordinal
     pub encrypted: bool,       // FCrypted
@@ -196,11 +196,9 @@ pub struct SendItem {
 }
 
 /// Message from reader thread to main loop.
-/// Public for use in `ClientEvent::Recv` variant — но напрямую не конструируется снаружи,
-/// reader thread сам формирует RecvMsg внутри `spawn_reader`.
-#[doc(hidden)]
+/// Внутренний тип: reader thread сам формирует `RecvMsg` внутри `spawn_reader`.
 #[derive(Clone)]
-pub struct RecvMsg {
+pub(crate) struct RecvMsg {
     cmd: u8,
     payload: Vec<u8>,
     recv_bytes: u64,
@@ -215,7 +213,7 @@ pub struct RecvMsg {
 /// Message from app to main loop (send command request)
 /// Matches Delphi: SendCmd → DataToSend queue
 #[derive(Clone)]
-pub struct SendMsg {
+pub(crate) struct SendMsg {
     pub item: SendItem,
 }
 
@@ -226,9 +224,8 @@ pub struct SendMsg {
 /// F4: Subscribe events позволяют UI-thread'у попросить либу обновить подписку
 /// без `&mut Client` lock. Main loop обрабатывает их идентично прямым
 /// `subscribe_*` методам — apply registry change + emit wire request.
-#[doc(hidden)]
 #[derive(Clone)]
-pub enum ClientEvent {
+pub(crate) enum ClientEvent {
     Recv(RecvMsg),
     Send(SendMsg),
     /// Подписаться на orderbook рынка. Main loop обновит registry и отправит
@@ -920,10 +917,10 @@ pub struct Client {
     next_port: u16,
     ping_count: u32,
 
-    /// Реестр pending Engine API запросов. Shareable через `Arc::clone`.
+    /// Реестр pending Engine API запросов.
     /// При получении `Command::API` пакета — `dispatch` доставит response
     /// в зарегистрированный receiver, если UID найден.
-    pub api_pending: Arc<ApiPending>,
+    api_pending: Arc<ApiPending>,
 
     /// Lifecycle callback — вызывается при изменении статуса канала (Connecting → Connected{fresh} → Reconnecting/Disconnected).
     /// Установить через `client.on_lifecycle(cb)`. Опционально.
@@ -1317,19 +1314,6 @@ impl Client {
                 "send_cmd: event channel closed (main loop dead?) — packet cmd={:?} priority={:?} dropped",
                 cmd, priority);
         }
-    }
-
-    /// Get a clone of event_tx for use from other threads (e.g. terminal UI).
-    /// **Низкоуровневый** raw clone внутреннего `SyncSender<ClientEvent>` для прямой
-    /// отправки `ClientEvent::Send(SendMsg { item })` (для custom-протокольных сценариев).
-    /// Для подписок и обычных операций используй [`Client::sender`] → `ClientSender`
-    /// (высокоуровневый thread-safe API с typed-методами).
-    ///
-    /// Аудит #1 (audit_delphi_deviation): тип `SyncSender` (bounded channel, 1024).
-    /// `.send()` BLOCKS если канал переполнен — приложение wait'ит пока main loop разгрузит.
-    /// Это правильное поведение для торговых команд (vs UDP пакеты которые можно drop).
-    pub fn event_sender(&self) -> mpsc::SyncSender<ClientEvent> {
-        self.event_tx.clone()
     }
 
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
@@ -2865,13 +2849,18 @@ impl Client {
     /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
     /// на каждом packet (он всё равно вернёт пустой Vec).
     fn periodic_trades_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher { dispatcher, .. } = mode {
+        if let RunMode::Dispatcher { dispatcher, on_event, event_buf, .. } = mode {
             if cur_tm - self.last_trades_tick_ms >= 100 {
                 self.last_trades_tick_ms = cur_tm;
                 let rtt = self.round_trip_delay;
-                let payloads = dispatcher.trades.tick(rtt, cur_tm);
+                let (payloads, tick_events) = dispatcher.trades.tick_with_events(rtt, cur_tm);
                 for p in payloads {
                     self.send_api_request(&p);
+                }
+                event_buf.clear();
+                event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
+                for ev in event_buf.iter() {
+                    on_event.call(ev, dispatcher);
                 }
             }
         }

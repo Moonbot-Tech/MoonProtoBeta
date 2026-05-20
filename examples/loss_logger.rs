@@ -6,7 +6,6 @@
 ///
 /// Лог: каждое событие с timestamp в `logfile.txt` (по умолчанию `loss_logger.log`).
 
-use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -14,15 +13,14 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use moonproto::client::{Client, ClientConfig, ClientEvent, LifecycleEvent, SendItem, SendMsg, SendPriority, UniqueKey};
-use moonproto::commands::engine_request;
-use moonproto::events::{Event, EventDispatcher};
+use moonproto::client::{Client, ClientConfig, LifecycleEvent};
+use moonproto::events::Event;
 use moonproto::key_import;
-use moonproto::protocol::Command;
 use moonproto::state::{
     BalanceEvent, MarketsEvent, OrderBookEvent, SettingsEvent, TradesEvent,
 };
 use moonproto::state::order_books::ApplyResult as OBApplyResult;
+use moonproto::{run_init_sequence, EventDispatcher, InitConfig};
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -57,7 +55,6 @@ struct Counters {
     ob_stale: AtomicU64,
     ob_cached: AtomicU64,
     ob_no_full_yet: AtomicU64,
-    resend_sent: AtomicU64,
     parse_failed: AtomicU64,
     server_logs: AtomicU64,
 }
@@ -80,7 +77,6 @@ impl Counters {
             ob_stale: AtomicU64::new(0),
             ob_cached: AtomicU64::new(0),
             ob_no_full_yet: AtomicU64::new(0),
-            resend_sent: AtomicU64::new(0),
             parse_failed: AtomicU64::new(0),
             server_logs: AtomicU64::new(0),
         }
@@ -93,24 +89,6 @@ fn log_line(buf: &mut BufWriter<File>, t0: i64, msg: &str) {
 
 fn flush_log(buf: &mut BufWriter<File>) {
     let _ = buf.flush();
-}
-
-fn send_resend_payload(
-    sender: &std::sync::mpsc::SyncSender<ClientEvent>,
-    payload: Vec<u8>,
-) -> bool {
-    let item = SendItem {
-        data: payload,
-        cmd: Command::API as u8,
-        encrypted: true,
-        priority: SendPriority::Sliced,
-        retry_left: 5,
-        max_retries: 6,
-        msg_num: 0,
-        last_sent_at: 0,
-        u_key: UniqueKey::none(),
-    };
-    sender.send(ClientEvent::Send(SendMsg { item })).is_ok()
 }
 
 fn main() {
@@ -190,7 +168,7 @@ fn main() {
         });
 
     let mut client = Client::new(cfg);
-    let sender = client.event_sender();
+    let mut dispatcher = EventDispatcher::new();
     let counters = Arc::new(Counters::new());
 
     // Lifecycle callback: write to log via a separate channel-less hook.
@@ -210,18 +188,10 @@ fn main() {
     log_line(&mut log, t0, "[PHASE-1] connecting + handshake (10s)...");
     flush_log(&mut log);
 
-    let ph1_counters = counters.clone();
-    let ph1_lq = lifecycle_queue.clone();
-    let log_file_path = logfile.clone();
-    client.run(
+    client.run_with_dispatcher(
         Duration::from_secs(10),
-        Box::new(move |cmd, _payload| {
-            if cmd == Command::Ping {
-                ph1_counters.trades_pkts.fetch_add(0, Ordering::Relaxed); // touch
-            }
-            let _ = &ph1_lq; // unused in this closure
-            let _ = &log_file_path;
-        }),
+        &mut dispatcher,
+        Box::new(|_| {}),
     );
 
     if !client.is_authorized() {
@@ -242,15 +212,37 @@ fn main() {
         }
     }
 
-    // Subscribe to all trades + order books (empty list = all markets)
-    log_line(&mut log, t0, "[SUB] subscribe_all_trades + subscribe_all_orderbooks");
-    let req_trades = engine_request::subscribe_all_trades(false);
-    client.send_api_request(&req_trades);
-    let req_book = engine_request::subscribe_order_book(&[]);
-    client.send_api_request(&req_book);
-    // Also fire-and-forget GetMarketsList to populate markets state
-    let req_markets = engine_request::get_markets_list();
-    client.send_api_request(&req_markets);
+    log_line(&mut log, t0, "[INIT] BaseCheck/AuthCheck/GetMarketsList + trades subscription");
+    let init = InitConfig {
+        base_check: true,
+        auth_check: true,
+        fetch_markets: true,
+        subscribe_trades: Some(false),
+        ..Default::default()
+    };
+    match run_init_sequence(&mut client, &mut dispatcher, init) {
+        Ok(result) => {
+            log_line(
+                &mut log,
+                t0,
+                &format!(
+                    "[INIT] ok base={} auth={} markets_bytes={} trades_subscribed={} errors={:?}",
+                    result.base_check_ok,
+                    result.auth_check_ok,
+                    result.markets_response_bytes,
+                    result.trades_subscribed,
+                    result.errors
+                ),
+            );
+        }
+        Err(err) => {
+            log_line(&mut log, t0, &format!("[INIT-ERR] {err}"));
+        }
+    }
+    // Empty market list is the protocol-level "all orderbooks" request. The normal
+    // typed subscription API is per-market and registry-aware; this logger is a
+    // stress tool, so it intentionally uses the raw Engine API wrapper here.
+    let _ = client.api_subscribe_order_book(&[]);
     flush_log(&mut log);
 
     // Phase 2: long-running logger
@@ -259,20 +251,10 @@ fn main() {
 
     let last_stats_ms = Arc::new(AtomicI64::new(0));
     let last_tick_ms = Arc::new(AtomicI64::new(0));
-    let last_rtt_ms = Arc::new(AtomicI64::new(250));
-    let last_rs = Arc::new(AtomicU64::new(255)); // RS * 255
-
-    let dispatcher: Arc<std::sync::Mutex<EventDispatcher>> =
-        Arc::new(std::sync::Mutex::new(EventDispatcher::new()));
-
-    let sender_cb = sender.clone();
-    let dispatcher_cb = dispatcher.clone();
     let lq_cb = lifecycle_queue.clone();
     let counters_cb = counters.clone();
     let last_stats_cb = last_stats_ms.clone();
     let last_tick_cb = last_tick_ms.clone();
-    let last_rtt_cb = last_rtt_ms.clone();
-    let last_rs_cb = last_rs.clone();
     let logfile_for_cb = logfile.clone();
     let log_path_cb = logfile.clone();
 
@@ -287,9 +269,10 @@ fn main() {
     let _ = (logfile_for_cb, log_path_cb);
 
     // Run for 24 hours max safety; user kills with SIGINT/ctrl-C
-    client.run(
+    client.run_with_dispatcher(
         Duration::from_secs(24 * 3600),
-        Box::new(move |cmd, payload| {
+        &mut dispatcher,
+        Box::new(move |event| {
             let now = now_ms();
 
             // Drain lifecycle events from callback queue
@@ -299,24 +282,8 @@ fn main() {
                 }
             }
 
-            // Capture RTT + RS from Ping payload
-            if cmd == Command::Ping && payload.len() >= 50 {
-                let rtt = i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64;
-                let rsq = payload[41] as u64;
-                last_rtt_cb.store(rtt, Ordering::Relaxed);
-                last_rs_cb.store(rsq, Ordering::Relaxed);
-            }
-
-            // Dispatch through EventDispatcher
             let mut events_to_log: Vec<String> = Vec::new();
-            let mut resend_payloads: Vec<Vec<u8>> = Vec::new();
-
-            {
-                let mut disp = dispatcher_cb.lock().unwrap();
-                let events = disp.dispatch(cmd, payload, now);
-
-                for ev in events {
-                    match ev {
+            match event {
                         // audit_rust_quality #11: Event::Trades(Vec) → Event::Trade(single).
                         // Каждое TradesEvent теперь приходит отдельным events. trades_pkts
                         // counter переименован семантически — теперь это сумма всех TradesEvent
@@ -331,7 +298,7 @@ fn main() {
                                     }
                                     TradesEvent::GapDetected { start, end } => {
                                         counters_cb.gap_detected.fetch_add(1, Ordering::Relaxed);
-                                        let n = end.wrapping_sub(start).wrapping_add(1);
+                                        let n = end.wrapping_sub(*start).wrapping_add(1);
                                         events_to_log.push(format!(
                                             "[GAP-DETECTED] [{}..{}] missing {} packets",
                                             start, end, n
@@ -345,7 +312,7 @@ fn main() {
                                         ));
                                     }
                                     TradesEvent::BucketClosed { start, end, all_received, retry_count } => {
-                                        if all_received {
+                                        if *all_received {
                                             counters_cb.bucket_recovered.fetch_add(1, Ordering::Relaxed);
                                             events_to_log.push(format!(
                                                 "[BUCKET-RECOVERED] [{}..{}] retry={} ALL recovered",
@@ -372,35 +339,12 @@ fn main() {
                                 }
                             }
 
-                            // Tick trades — emit resend payloads + BucketClosed events.
-                            let rtt = last_rtt_cb.load(Ordering::Relaxed);
-                            let (payloads, closed) = disp.tick_trades_with_events(rtt, now);
-                            for p in payloads {
-                                resend_payloads.push(p);
-                            }
-                            for ev in closed {
-                                if let TradesEvent::BucketClosed { start, end, all_received, retry_count } = ev {
-                                    if all_received {
-                                        counters_cb.bucket_recovered.fetch_add(1, Ordering::Relaxed);
-                                        events_to_log.push(format!(
-                                            "[BUCKET-RECOVERED] [{}..{}] retry={} ALL recovered",
-                                            start, end, retry_count
-                                        ));
-                                    } else {
-                                        counters_cb.bucket_lost.fetch_add(1, Ordering::Relaxed);
-                                        events_to_log.push(format!(
-                                            "[BUCKET-LOST] [{}..{}] retry={}/3 PACKETS LOST",
-                                            start, end, retry_count
-                                        ));
-                                    }
-                                }
-                            }
                         }
                         Event::OrderBook(obev) => {
                             counters_cb.ob_pkts.fetch_add(1, Ordering::Relaxed);
                             match obev {
                                 OrderBookEvent::Apply { market_index, book_kind, is_full, seq, .. } => {
-                                    if is_full {
+                                    if *is_full {
                                         counters_cb.ob_full.fetch_add(1, Ordering::Relaxed);
                                         events_to_log.push(format!(
                                             "[OB-FULL] mkt={} bk={} seq={}",
@@ -416,20 +360,6 @@ fn main() {
                                         "[OB-REQ-FULL] mkt={} bk={} (corrupted/gap)",
                                         market_index, book_kind
                                     ));
-                                    // Auto-send the request through sender
-                                    let req = engine_request::request_order_book_full(market_index, book_kind);
-                                    let item = SendItem {
-                                        data: req,
-                                        cmd: Command::API as u8,
-                                        encrypted: true,
-                                        priority: SendPriority::Sliced,
-                                        retry_left: 5,
-                                        max_retries: 6,
-                                        msg_num: 0,
-                                        last_sent_at: 0,
-                                        u_key: UniqueKey::none(),
-                                    };
-                                    let _ = sender_cb.send(ClientEvent::Send(SendMsg { item }));
                                 }
                                 OrderBookEvent::Ignored { market_index, book_kind, seq, reason } => {
                                     match reason {
@@ -464,7 +394,7 @@ fn main() {
                                 ));
                             }
                             BalanceEvent::IncrementalApplied { count, epoch, global_changed } => {
-                                if count > 0 || global_changed {
+                                if *count > 0 || *global_changed {
                                     events_to_log.push(format!(
                                         "[BAL-INC] {} items, epoch={}, global_changed={}",
                                         count, epoch, global_changed
@@ -528,36 +458,23 @@ fn main() {
                         }
                         _ => {}
                     }
-                }
-            }
 
             // Write all collected log lines
             for line in &events_to_log {
                 log_line(&mut log2, t0, line);
             }
 
-            // Send resend payloads
-            for p in resend_payloads {
-                let p_len = p.len();
-                if send_resend_payload(&sender_cb, p) {
-                    counters_cb.resend_sent.fetch_add(1, Ordering::Relaxed);
-                    log_line(&mut log2, t0, &format!("[RESEND-SENT] {} bytes", p_len));
-                }
-            }
-
             // Periodic stats every 10 seconds
             let last_stats = last_stats_cb.load(Ordering::Relaxed);
             if (now - last_stats).abs() > 10_000 {
                 last_stats_cb.store(now, Ordering::Relaxed);
-                let rtt = last_rtt_cb.load(Ordering::Relaxed);
-                let rs = last_rs_cb.load(Ordering::Relaxed) as f64 / 255.0;
                 log_line(
                     &mut log2,
                     t0,
                     &format!(
                         "[STATS] trades_apply={} gap_det={} gap_fill={} bkt_rec={} bkt_lost={} | \
                          ob_full={} ob_diff={} ob_req_full={} ob_cached={} | \
-                         resend_sent={} parse_fail={} | rtt={}ms rs={:.2}",
+                         parse_fail={}",
                         counters_cb.trades_apply.load(Ordering::Relaxed),
                         counters_cb.gap_detected.load(Ordering::Relaxed),
                         counters_cb.gap_filled.load(Ordering::Relaxed),
@@ -567,10 +484,7 @@ fn main() {
                         counters_cb.ob_diff.load(Ordering::Relaxed),
                         counters_cb.ob_req_full.load(Ordering::Relaxed),
                         counters_cb.ob_cached.load(Ordering::Relaxed),
-                        counters_cb.resend_sent.load(Ordering::Relaxed),
                         counters_cb.parse_failed.load(Ordering::Relaxed),
-                        rtt,
-                        rs,
                     ),
                 );
                 flush_log(&mut log2);
@@ -607,7 +521,7 @@ fn main() {
         &format!(
             "[FINAL] trades_apply={} gap_det={} gap_fill={} bkt_rec={} bkt_lost={} | \
              ob_full={} ob_diff={} ob_req_full={} ob_cached={} ob_no_full_yet={} | \
-             resend_sent={} parse_fail={} srv_logs={}",
+             parse_fail={} srv_logs={}",
             counters.trades_apply.load(Ordering::Relaxed),
             counters.gap_detected.load(Ordering::Relaxed),
             counters.gap_filled.load(Ordering::Relaxed),
@@ -618,12 +532,9 @@ fn main() {
             counters.ob_req_full.load(Ordering::Relaxed),
             counters.ob_cached.load(Ordering::Relaxed),
             counters.ob_no_full_yet.load(Ordering::Relaxed),
-            counters.resend_sent.load(Ordering::Relaxed),
             counters.parse_failed.load(Ordering::Relaxed),
             counters.server_logs.load(Ordering::Relaxed),
         ),
     );
     flush_log(&mut log);
-
-    let _ = HashMap::<&str, u64>::new(); // silence unused import if any
 }

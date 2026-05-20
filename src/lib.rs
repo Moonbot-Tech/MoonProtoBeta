@@ -103,7 +103,6 @@
 //!   Strats / Settings / Markets.
 //! - [`key_import`] — парсер base64 MoonBot exported key.
 //! - [`ntp`] — SNTP клиент для self-managed NTP thread.
-//! - [`api_pending`] — registry для pending Engine API responses.
 //! - [`compression`] — SynLZ/DEFLATE helpers для wire-format.
 //!
 //! Зависит от [`moonproto_transport`] — низкоуровневый wire-layer (MAC,
@@ -118,7 +117,7 @@ pub mod commands;
 pub mod state;
 pub mod key_import;
 pub mod ntp;
-pub mod api_pending;
+mod api_pending;
 pub mod events;
 
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};

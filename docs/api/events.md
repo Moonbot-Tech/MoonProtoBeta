@@ -123,4 +123,6 @@ normal applications, prefer `Client::run_with_dispatcher`.
 ## Trades Tick
 
 `tick_trades` and `tick_trades_with_events` are low-level hooks for custom loops.
-`Client::run_with_dispatcher` calls the tick automatically about every 100 ms.
+`Client::run_with_dispatcher` calls the tick automatically about every 100 ms and
+emits tick-generated `BucketClosed` diagnostics through the normal
+`Event::Trade(...)` callback.

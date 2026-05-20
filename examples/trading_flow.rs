@@ -156,7 +156,7 @@ fn main() {
     // ---- 8. Phase 3: ждать ответ на api_get_markets_list ----
     //
     // Receiver `markets_rx` остался валидным; ответы поступают через
-    // EventDispatcher → ApiPending → sender. На этой фазе чтобы их доставить
+    // EventDispatcher → pending-response registry → sender. На этой фазе чтобы их доставить
     // нужен короткий run_with_dispatcher (5с timeout).
     println!("\n[phase 3] waiting for markets list response...");
     client.run_with_dispatcher(
