@@ -1288,10 +1288,26 @@ impl TradeCtx {
 }
 
 /// CmdId=6: построить пакет TOrderReplaceCommand.
-pub fn build_order_replace(ctx: TradeCtx, market_name: &str, epoch: u16, status: OrderWorkerStatus,
-                            order_type: OrderType, new_price: f64) -> Vec<u8> {
+///
+/// Delphi `TOrderReplaceCommand.Create` always sends `Epoch=0` and
+/// `Status=OS_None` for client-originated replace commands.
+pub fn build_order_replace(
+    ctx: TradeCtx,
+    market_name: &str,
+    order_type: OrderType,
+    new_price: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    write_trade_epoch_header(&mut out, 6, ctx.uid, market_name, ctx.currency, ctx.platform, epoch, status);
+    write_trade_epoch_header(
+        &mut out,
+        6,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+        0,
+        OrderWorkerStatus::None,
+    );
     out.push(order_type as u8);
     out.extend_from_slice(&new_price.to_le_bytes());
     out
@@ -1396,10 +1412,26 @@ pub fn build_order_stops_update(ctx: TradeCtx, market_name: &str, epoch: u16,
 }
 
 /// CmdId=21: TTurnPanicSellCommand.
-pub fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, epoch: u16,
-                              status: OrderWorkerStatus, turn_on: bool) -> Vec<u8> {
+///
+/// Delphi `TTurnPanicSellCommand.Create` does not set inherited
+/// `TTradeEpochCommand` fields on the client path, so object zero-init gives
+/// `Epoch=0` and `Status=OS_None`.
+pub fn build_turn_panic_sell(
+    ctx: TradeCtx,
+    market_name: &str,
+    turn_on: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_trade_epoch_header(&mut out, 21, ctx.uid, market_name, ctx.currency, ctx.platform, epoch, status);
+    write_trade_epoch_header(
+        &mut out,
+        21,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+        0,
+        OrderWorkerStatus::None,
+    );
     out.push(turn_on as u8);
     out
 }
@@ -1559,6 +1591,39 @@ mod tests {
                 assert!(cmd.items[0].value);
                 assert_eq!(cmd.items[3].uid, 3);
                 assert!(!cmd.items[3].value);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_replace_builder_uses_delphi_client_epoch_header() {
+        let ctx = TradeCtx::new(0x0102_0304_0506_0708);
+        let payload = build_order_replace(ctx, "BTCUSDT", OrderType::Sell, 50100.25);
+
+        match TradeCommand::parse(&payload).expect("valid OrderReplace") {
+            TradeCommand::OrderReplace(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, ctx.uid);
+                assert_eq!(cmd.epoch_header.epoch, 0);
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::None);
+                assert_eq!(cmd.order_type, OrderType::Sell);
+                assert_eq!(cmd.new_price, 50100.25);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_panic_sell_builder_uses_delphi_client_epoch_header() {
+        let ctx = TradeCtx::new(0x1112_1314_1516_1718);
+        let payload = build_turn_panic_sell(ctx, "ETHUSDT", true);
+
+        match TradeCommand::parse(&payload).expect("valid TurnPanicSell") {
+            TradeCommand::TurnPanicSell(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, ctx.uid);
+                assert_eq!(cmd.epoch_header.epoch, 0);
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::None);
+                assert!(cmd.turn_on);
             }
             other => panic!("unexpected command: {other:?}"),
         }

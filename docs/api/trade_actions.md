@@ -20,7 +20,7 @@ That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
 | Method | What it sends |
 |---|---|
 | `new_order(ctx, market, is_short, price, strat_id, order_size)` | Open a new order. |
-| `replace_order(ctx, market, status, order_type, new_price)` | Move an order price. |
+| `replace_order(ctx, market, order_type, new_price)` | Move an order price. |
 | `request_all_statuses(uid)` | Request full order snapshot. |
 | `cancel_order(ctx, market, status)` | Cancel an order. |
 | `join_orders(ctx, market, is_short)` | Join open orders. |
@@ -32,15 +32,16 @@ That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
 | `do_sell_order(ctx, market, price, size)` | Send immediate sell command. |
 | `request_order_status(ctx, market)` | Request one order status. |
 | `update_order_stops(ctx, market, status, &stops)` | Update stop settings. |
-| `turn_panic_sell(ctx, market, status, turn_on)` | Toggle panic sell. |
+| `turn_panic_sell(ctx, market, turn_on)` | Toggle panic sell. |
 | `set_immune(uid, items)` | Mark orders immune to clicks. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk. |
 | `update_vstop(ctx, market, status, on, fixed, level, vol)` | Update volume stop. |
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
 
-Epoch is intentionally not part of the public outgoing wrappers. The client sends
-`epoch = 0` for C→S order-control commands, matching current server behavior.
+Epoch is intentionally not part of the public outgoing wrappers. For replace and
+panic-sell commands, status is not public either: the Delphi client writes
+`epoch = 0` and `status = OS_None` for those commands.
 
 ## Example
 
@@ -56,7 +57,6 @@ let ctx = TradeCtx::new(order.uid);
 client.replace_order(
     ctx,
     &order.market_name,
-    order.status,
     OrderType::Sell,
     50100.0,
 );

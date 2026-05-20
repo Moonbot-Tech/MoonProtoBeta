@@ -94,8 +94,9 @@ UI: drag-replace генерирует поток, на сервер уходит
 |---------|------|
 | `OrderReplace` (CmdId 6) | `UK_OrderMove(task_id)` |
 | `OrderCancel` (CmdId 10) | `UK_OrderMove(task_id)` |
-| `OrderStopsUpdate` (CmdId 20) | `UK_StopMove(task_id)` |
-| `VStopUpdate` (CmdId 29) | `UK_StopMove(task_id)` (UK_OrderMove на VStopUpdate если task_id same) |
+| `OrderStopsUpdate` (CmdId 20) | `UK_OrderMove(task_id)` |
+| `TurnPanicSell` (CmdId 21) | `UK_OrderMove(task_id)` |
+| `VStopUpdate` (CmdId 29) | `UK_OrderMove(task_id)` |
 | `SetImmune` (CmdId 22) | `UK_ImmuneClicks(items_uid_sum)` |
 
 Остальные команды отправляются без dedup.

@@ -145,7 +145,7 @@
 | O3 | :128 | TNewOrderCommand (CmdId=3) — +is_short:bool + price:double + strat_id:u64 + order_size:double | TradeCommand::NewOrder | ✅ |
 | O4 | :151 | TOrderStatus (CmdId=4) — epoch_header + Buy/Sell:OrderCompact + Stops + strat_id + is_short + db_id + from_cache + (v2) emu + (v3) immune | TradeCommand::OrderStatus + OrderCompact(117б)/StopSettings(46б) | ✅ |
 | O5 | :235 | TOrderStatusUpdate (CmdId=5) — epoch_header + UpdateData(66б) + (soft) sell_reason_code | TradeCommand::OrderStatusUpdate | ✅ |
-| O6 | :291 | TOrderReplaceCommand (CmdId=6) — epoch_header + order_type + new_price | TradeCommand::OrderReplace | ✅ |
+| O6 | :291; :532-540 | TOrderReplaceCommand (CmdId=6) — epoch_header + order_type + new_price; C→S constructor forces `Epoch=0`, `Status=OS_None` | TradeCommand::OrderReplace + `build_order_replace` | ✅ |
 | O7 | :308 | TOrderReplaceResponse (CmdId=7) — epoch_header + order_type + price + UpdateData + qty_base | TradeCommand::OrderReplaceResponse | ✅ |
 | O8 | :350 | TAllStatuses (CmdId=8) — base_header + count:i32 + orders[]:OrderStatus | TradeCommand::AllStatuses | ✅ |
 | O9 | :385 | TAllStatusesReq (CmdId=9) — base_header only | TradeCommand::AllStatusesReq | ✅ |
@@ -160,7 +160,7 @@
 | O18 | :578 | TOrderStatusRequest (CmdId=18) — epoch_header | TradeCommand::OrderStatusRequest | ✅ |
 | O19 | :594 | TOrderNotFound (CmdId=19) — epoch_header | TradeCommand::OrderNotFound | ✅ |
 | O20 | :614 | TOrderStopsUpdate (CmdId=20) — epoch_header + StopSettings | TradeCommand::OrderStopsUpdate | ✅ |
-| O21 | :634 | TTurnPanicSellCommand (CmdId=21) — epoch_header + turn_on | TradeCommand::TurnPanicSell | ✅ |
+| O21 | :634; :756-760 | TTurnPanicSellCommand (CmdId=21) — epoch_header + turn_on; C→S constructor leaves inherited epoch/status zero-initialized | TradeCommand::TurnPanicSell + `build_turn_panic_sell` | ✅ |
 | O22 | :210-223,778-812 | TSetImmuneCommand (CmdId=22) — base_header + count:byte + items[uid:u64+value:bool]*count; UKey.UID=sum(items.uid) | TradeCommand::SetImmune + ImmuneItem; builder writes byte count without clamp | ✅ |
 | O23 | :689 | TPenaltyCommand (CmdId=23) — market_header | TradeCommand::Penalty | ✅ |
 | O24 | :702 | TTradeVisualCommand (CmdId=24) — market_header | TradeCommand::TradeVisual | ✅ |

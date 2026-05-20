@@ -1730,13 +1730,11 @@ impl Client {
     /// `TOrderReplaceCommand` (CmdId=6, UK_OrderMove) — replace ордера новой ценой.
     /// `ctx.uid` должен быть **task_id ордера** для корректного dedup'а.
     ///
-    /// `Epoch` устанавливается внутри в 0 (audit_responsibility B1: в Delphi приложение
-    /// всегда передаёт `Epoch=0` в C→S командах; поле используется только в server→client
-    /// для filter out-of-order).
+    /// `Epoch=0` и `Status=OS_None` устанавливаются внутри: Delphi
+    /// `TOrderReplaceCommand.Create` не принимает статус для client-side replace.
     pub fn replace_order(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                          status: crate::commands::trade::OrderWorkerStatus,
                           order_type: crate::commands::trade::OrderType, new_price: f64) {
-        let raw = crate::commands::trade::build_order_replace(ctx, market, 0, status, order_type, new_price);
+        let raw = crate::commands::trade::build_order_replace(ctx, market, order_type, new_price);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
@@ -1818,10 +1816,10 @@ impl Client {
     }
 
     /// `TTurnPanicSellCommand` (CmdId=21, UK_OrderMove). `ctx.uid` = task_id ордера.
-    /// `Epoch=0` (внутри). См. `replace_order`.
+    /// `Epoch=0` и `Status=OS_None` устанавливаются внутри, как в Delphi client path.
     pub fn turn_panic_sell(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
-                            status: crate::commands::trade::OrderWorkerStatus, turn_on: bool) {
-        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, 0, status, turn_on);
+                            turn_on: bool) {
+        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, turn_on);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
