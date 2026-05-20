@@ -130,6 +130,19 @@ Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`;
 the response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the client.
 
+## UI Settings Request
+
+The UI settings channel is not an Engine API request, so it has no pending
+`Receiver`. Use `request_client_settings` for the common one-shot flow:
+
+```rust
+let settings = client.request_client_settings(
+    &mut dispatcher,
+    Duration::from_secs(10),
+)?;
+println!("xSell={}", settings.x_sell);
+```
+
 ## Subscriptions
 
 Use registry-aware methods:

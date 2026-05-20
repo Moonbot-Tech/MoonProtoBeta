@@ -35,6 +35,23 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 current DEX, current spot selector, MM subscription status, leverage management,
 and arb validity time.
 
+## Requesting Current Settings
+
+For a one-shot fetch, use `request_client_settings`. It sends
+`TSettingsRequest`, keeps the UDP loop running, and returns the next
+`ClientSettingsCommand` snapshot applied by `EventDispatcher`:
+
+```rust
+let settings = client.request_client_settings(
+    &mut dispatcher,
+    std::time::Duration::from_secs(10),
+)?;
+println!("xSell={}", settings.x_sell);
+```
+
+The lower-level event path remains useful for long-running UI screens that want
+to react to every later settings update.
+
 ## Sending UI Commands
 
 Prefer `Client` methods:

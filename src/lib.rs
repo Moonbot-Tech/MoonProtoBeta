@@ -82,6 +82,7 @@
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
+//! `examples/request_client_settings.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
 //! `examples/multi_client_test.rs`.

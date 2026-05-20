@@ -140,6 +140,13 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 let hedge_mode = parse_query_hedge_mode_response(&resp.data).expect("bad hedge payload");
 ```
 
+UI settings use the UI channel rather than Engine API pending responses:
+
+```rust
+let settings = client.request_client_settings(&mut dispatcher, Duration::from_secs(10))?;
+println!("xSell={}", settings.x_sell);
+```
+
 ## Subscriptions
 
 Use the registry-aware subscription API:
@@ -183,6 +190,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/history_bars.rs` — request and parse historical candles.
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
+- `examples/request_client_settings.rs` — request the current UI settings snapshot.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.
 - `examples/market_refresh.rs` — observe automatic market refresh events.
 - `examples/multi_client_test.rs` — two independent clients in one process.

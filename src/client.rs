@@ -82,6 +82,22 @@ fn err_emu_should_drop(cmd: u8) -> bool {
     roll < drop_rate
 }
 
+#[inline]
+fn is_datagram_too_large_error(e: &std::io::Error) -> bool {
+    match e.raw_os_error() {
+        Some(90) => true,    // Linux EMSGSIZE
+        Some(10040) => true, // Windows WSAEMSGSIZE
+        Some(40) if cfg!(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+        )) => true,
+        _ => false,
+    }
+}
+
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5;           // MoonProtoFunc.pas:19
 const RECONNECT_WAITING_MS: i64 = 7000;    // MoonProtoUDPClient.pas:88
@@ -1935,6 +1951,46 @@ impl Client {
         self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    /// Request the current UI settings snapshot and wait for the next
+    /// `TClientSettingsCommand` while pumping the UDP loop.
+    ///
+    /// This is the UI-channel counterpart to [`Self::run_until_response`] for
+    /// Engine API calls. `TSettingsRequest` does not carry a request/response
+    /// UID pair on the wire: Delphi answers by sending a fresh
+    /// `TClientSettingsCommand`. The helper therefore waits until
+    /// `EventDispatcher` observes a settings snapshot with a new command UID.
+    pub fn request_client_settings(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError> {
+        const TICK: Duration = Duration::from_millis(50);
+
+        let previous_uid = dispatcher.settings()
+            .client_settings
+            .as_ref()
+            .map(|settings| settings.uid);
+        let deadline = Instant::now() + timeout;
+        self.ui_settings_request();
+
+        loop {
+            if let Some(settings) = dispatcher.settings().client_settings.as_ref() {
+                if previous_uid.map_or(true, |uid| settings.uid != uid) {
+                    return Ok(settings.clone());
+                }
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let tick = remaining.min(TICK);
+            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+        }
+    }
+
     /// `TStratStartStopCommand` (UI CmdId=3, High) — запустить/остановить все стратегии.
     pub fn ui_strat_start_stop(&self, is_start: bool) {
         let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
@@ -2514,9 +2570,18 @@ impl Client {
             }
             RunMode::Dispatcher { dispatcher, on_event, event_buf, payload_buf } => {
                 payload_buf.clear();
+                let authorized_before = self.authorized;
                 {
                     let mut sink = DispatchSink::Buffer(payload_buf);
                     self.handle_udp_command(cmd, raw_cmd, &msg.payload, &mut sink);
+                }
+                // During startup the server may send large app-state snapshots before
+                // `Fine`. Do not let active state parsing delay the handshake path:
+                // handle transport/handshake commands first, then dispatch app payloads
+                // only once the client is authorized.
+                if !authorized_before && !self.authorized {
+                    payload_buf.clear();
+                    return;
                 }
                 for (c, p) in payload_buf.drain(..) {
                     event_buf.clear();
@@ -2636,25 +2701,32 @@ impl Client {
                 let timestamp_ms = start_time.elapsed().as_millis() as i64;
 
                 let msg = RecvMsg { cmd: hdr.cmd, payload, recv_bytes: n as u64, timestamp_ms, epoch: my_epoch };
-                // Аудит #1: `try_send` вместо `send` для recv path. Если main loop отстаёт и
-                // канал переполнен — дропаем пакет с warn (UDP всё равно lossy, сервер пришлёт
-                // retry для важных через Sliced+ACK). Это закрывает OOM-vector.
-                match event_tx.try_send(ClientEvent::Recv(msg)) {
-                    Ok(()) => {},
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        // Throttle лога: 1 на 1000мс через статический counter.
-                        use std::sync::atomic::{AtomicI64, Ordering};
-                        static LAST_LOG_MS: AtomicI64 = AtomicI64::new(0);
-                        let now = start_time.elapsed().as_millis() as i64;
-                        let last = LAST_LOG_MS.load(Ordering::Relaxed);
-                        if now.saturating_sub(last) > 1000 {
-                            LAST_LOG_MS.store(now, Ordering::Relaxed);
-                            warn!(target: "moonproto::reader",
-                                "event channel full — packet dropped (main loop slow / overflow)");
-                        }
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                // Data packets remain best-effort on internal backpressure, but service
+                // packets must not be artificially dropped: losing `Fine` under a startup
+                // state burst can leave the active dispatcher path unauthenticated even
+                // though the UDP exchange succeeded.
+                if is_service_cmd(hdr.cmd) {
+                    if event_tx.send(ClientEvent::Recv(msg)).is_err() {
                         break; // main thread dropped rx → exit reader
+                    }
+                } else {
+                    match event_tx.try_send(ClientEvent::Recv(msg)) {
+                        Ok(()) => {},
+                        Err(mpsc::TrySendError::Full(_)) => {
+                            // Throttle лога: 1 на 1000мс через статический counter.
+                            use std::sync::atomic::{AtomicI64, Ordering};
+                            static LAST_LOG_MS: AtomicI64 = AtomicI64::new(0);
+                            let now = start_time.elapsed().as_millis() as i64;
+                            let last = LAST_LOG_MS.load(Ordering::Relaxed);
+                            if now.saturating_sub(last) > 1000 {
+                                LAST_LOG_MS.store(now, Ordering::Relaxed);
+                                warn!(target: "moonproto::reader",
+                                    "event channel full — data packet dropped (main loop slow / overflow)");
+                            }
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            break; // main thread dropped rx → exit reader
+                        }
                     }
                 }
             }
@@ -3683,6 +3755,11 @@ impl Client {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if self.should_log("send_wouldblock", 1000) {
                     warn!("send_to(cmd={cmd}) would block (kernel send buffer full)");
+                }
+            }
+            Err(e) if is_datagram_too_large_error(&e) => {
+                if self.should_log("send_too_large", 1000) {
+                    warn!("send_to(cmd={cmd}) packet too large for current path MTU: {e}");
                 }
             }
             Err(e) => {
@@ -5710,6 +5787,65 @@ mod subscription_registry_tests {
         assert_eq!(second, LifecycleEvent::Connected { fresh: false });
     }
 
+}
+
+#[cfg(test)]
+mod service_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn service_cmds_include_handshake_and_keepalive() {
+        for cmd in [
+            Command::Ping,
+            Command::WantNewHello,
+            Command::WrongHello,
+            Command::WhoAreYou,
+            Command::Fine,
+            Command::NeedHelloAgain,
+            Command::SizeTest,
+            Command::ProbeMTU,
+            Command::SlicedACK,
+        ] {
+            assert!(is_service_cmd(cmd as u8), "{cmd:?} must be service");
+        }
+    }
+
+    #[test]
+    fn data_channels_are_not_service_cmds() {
+        for cmd in [
+            Command::Order,
+            Command::UI,
+            Command::Strat,
+            Command::API,
+            Command::Balance,
+            Command::TradesStream,
+            Command::OrderBook,
+        ] {
+            assert!(!is_service_cmd(cmd as u8), "{cmd:?} must stay data");
+        }
+    }
+
+    #[test]
+    fn datagram_too_large_errors_are_non_fatal_pmtu_feedback() {
+        for code in [90, 10040] {
+            let err = std::io::Error::from_raw_os_error(code);
+            assert!(is_datagram_too_large_error(&err), "os error {code}");
+        }
+        let bsd_emsgsize = std::io::Error::from_raw_os_error(40);
+        assert_eq!(
+            is_datagram_too_large_error(&bsd_emsgsize),
+            cfg!(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+            )),
+        );
+
+        let permission = std::io::Error::from_raw_os_error(13);
+        assert!(!is_datagram_too_large_error(&permission));
+    }
 }
 
 /// Global NTP time offset (days). Set once at startup by ntp::get_best_ntp.

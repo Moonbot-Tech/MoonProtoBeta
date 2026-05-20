@@ -21,6 +21,7 @@
 | 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) | client.rs: last_need_hello_again + 700ms check | ✅ |
 | 14 | 578-581 | WhoAreYou/Fine → HandleHandShake | client.rs handle_handshake | ✅ |
 | 15 | 583-591 | MPC_SizeTest → SendSizeAck | client.rs handle_size_test | ✅ |
+| 15a | 347-351 | DoSendPacket: `Package Size Too Big` не рвёт соединение | client.rs send_raw_packet ignores datagram-too-large errors | ✅ |
 | 16 | 594-617 | MPC_ProbeMTU → ProbeMTUAck (DontFragment!), `ReceivedSize := TestSize` без upper clamp | client.rs: handle_probe_mtu echoes `test_size` verbatim for valid record size | ✅ |
 | 17 | 620-625 | MPC_Sliced → OnNewSliced | client.rs handle Sliced | ✅ |
 | 18 | 627-629 | MPC_SlicedACK → OnNewSlicedACK | client.rs: match arm (no-op, client doesn't send Sliced yet) | ✅ |
@@ -307,7 +308,7 @@
 | # | Delphi pas:line | CmdId | Sub-command | Rust | ✅ |
 |---|---|---|---|---|---|
 | U1 | :20 | 1 | TClientSettingsCommand (Sliced, UK_BaseUISettings) — big snapshot | UICommand::ClientSettings | ✅ |
-| U2 | :78 | 2 | TSettingsRequest — empty | UICommand::SettingsRequest | ✅ |
+| U2 | :78 | 2 | TSettingsRequest — empty; штатный Delphi-клиент отправляет его при init и получает `TClientSettingsCommand` snapshot | UICommand::SettingsRequest + `Client::ui_settings_request` / `Client::request_client_settings` | ✅ |
 | U3 | :82 | 3 | TStratStartStopCommand — IsStart:bool | UICommand::StratStartStop | ✅ |
 | U4 | :93 | 4 | TStratStartStopCommandV2 — IsStart + Items[StratCheckedItem] | UICommand::StratStartStopV2 | ✅ |
 | U5 | :105 | 5 | TMMOrdersSubscribeCommand (UK_TurnMMDetection) — Subscribe:bool | UICommand::MMOrdersSubscribe | ✅ |
