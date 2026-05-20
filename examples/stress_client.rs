@@ -760,6 +760,7 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
         let api_disconnected = stats.api_disconnected.load(Ordering::Relaxed);
         let candles_timeout = stats.candles_chunked_timeout.load(Ordering::Relaxed);
         let candles_disconnected = stats.candles_chunked_disconnected.load(Ordering::Relaxed);
+        let candles_empty = stats.candles_chunked_empty.load(Ordering::Relaxed);
         let parse_failed = stats.parse_failed.load(Ordering::Relaxed);
         let invalid_numbers = stats.invalid_numbers.load(Ordering::Relaxed);
 
@@ -810,7 +811,7 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             stats.candles_chunked_ok.load(Ordering::Relaxed),
             candles_timeout,
             candles_disconnected,
-            stats.candles_chunked_empty.load(Ordering::Relaxed),
+            candles_empty,
             stats.max_pending_candles.load(Ordering::Relaxed),
         );
         println!(
@@ -837,6 +838,7 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             || api_disconnected > 0
             || candles_timeout > 0
             || candles_disconnected > 0
+            || candles_empty > 0
             || parse_failed > 0
             || invalid_numbers > 0
         {
