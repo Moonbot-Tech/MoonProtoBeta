@@ -602,6 +602,11 @@ pub(crate) enum DispatchSink<'a> {
 }
 
 impl<'a> DispatchSink<'a> {
+    #[inline]
+    fn is_buffer(&self) -> bool {
+        matches!(self, Self::Buffer(_))
+    }
+
     /// Доставка по ссылке — копия только для Buffer ветки.
     #[inline]
     fn deliver(&mut self, cmd: Command, payload: &[u8]) {
@@ -2735,13 +2740,16 @@ impl Client {
                 }
 
                 // 3. Pending registry (обычный async API).
-                if let Some(unconsumed) = self.api_pending.dispatch(resp) {
-                    // Не в registry — отдадим обратно через sink в виде raw payload.
-                    // Потребитель сам распарсит через parse_engine_response при необходимости.
-                    let _ = unconsumed; // payload уже у нас, просто пропустим resp
+                let pending_consumed = self.api_pending.dispatch(resp).is_none();
+                if !pending_consumed || sink.is_buffer() {
+                    // Если response не ждал конкретный receiver — это обычный API event.
+                    // Если ждал, но мы в Dispatcher mode, всё равно отдаём raw payload
+                    // dispatcher'у: active state (markets/indexes/tags) должен обновиться
+                    // независимо от того, ждёт ли user code этот же ответ через Receiver.
+                    // Callback mode сохраняет старую семантику: pending response не
+                    // дублируется в on_data callback.
                     sink.deliver_owned(Command::API, payload.into_owned());
                 }
-                // else — отправлено в pending::Receiver, sink не вызываем.
                 return;
             }
             // Не распарсилось — fallback на raw sink.
@@ -4350,6 +4358,117 @@ mod d02_tests {
         let taken = pending.take();
         assert!(taken.is_some());
         assert!(!second_imfriend_due(&pending, i64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod api_pending_dispatch_tests {
+    use super::*;
+    use crate::commands::engine_api::EngineMethod;
+    use crate::commands::market::build_markets_indexes_response;
+    use crate::events::EventDispatcher;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig {
+                update_markets_every: None,
+                check_tags_every: None,
+            },
+        }
+    }
+
+    fn build_engine_response_payload(
+        request_uid: u64,
+        method: EngineMethod,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(1u8); // TEngineResponse CmdId
+        buf.extend_from_slice(&3u16.to_le_bytes()); // version
+        buf.extend_from_slice(&0xAABB_CCDD_u64.to_le_bytes());
+        buf.extend_from_slice(&request_uid.to_le_bytes());
+        buf.push(method as u8);
+        buf.push(1u8); // success
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // empty error_msg
+        buf.push(0u8); // not compressed
+        buf.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn pending_api_response_still_reaches_dispatcher_state() {
+        let mut client = Client::new(dummy_cfg());
+        let request_uid = 0x1122_3344_5566_7788;
+        let rx = client.api_pending.register(request_uid, client.now_ms());
+
+        let names = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let response_data = build_markets_indexes_response(&names);
+        let payload = build_engine_response_payload(
+            request_uid,
+            EngineMethod::GetMarketsIndexes,
+            &response_data,
+        );
+
+        let mut payloads = Vec::new();
+        {
+            let mut sink = DispatchSink::Buffer(&mut payloads);
+            client.data_read_int(Command::API as u8, &payload, &mut sink);
+        }
+
+        let resp = rx.try_recv().expect("pending receiver must get response");
+        assert_eq!(resp.request_uid, request_uid);
+        assert_eq!(resp.method, EngineMethod::GetMarketsIndexes);
+
+        assert_eq!(
+            payloads.len(),
+            1,
+            "dispatcher buffer must also receive API payload",
+        );
+        let (cmd, dispatcher_payload) = payloads.pop().unwrap();
+        assert_eq!(cmd, Command::API);
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut out = Vec::new();
+        dispatcher.dispatch_into_active(
+            cmd,
+            &dispatcher_payload,
+            client.now_ms(),
+            &mut out,
+            &mut client,
+        );
+
+        assert!(dispatcher.markets().indexes_synchronized);
+        assert_eq!(dispatcher.markets().market_indexes, names);
+    }
+
+    #[test]
+    fn pending_api_response_is_not_duplicated_to_callback_sink() {
+        let mut client = Client::new(dummy_cfg());
+        let request_uid = 7;
+        let rx = client.api_pending.register(request_uid, client.now_ms());
+        let payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_cb = calls.clone();
+        let mut cb: OnDataFn = Box::new(move |_cmd, _payload| {
+            calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        {
+            let mut sink = DispatchSink::Callback(&mut cb);
+            client.data_read_int(Command::API as u8, &payload, &mut sink);
+        }
+
+        assert!(rx.try_recv().is_ok(), "pending receiver must get response");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
 

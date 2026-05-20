@@ -416,6 +416,7 @@
 | AP2 | MoonProtoClient.pas:880-885 search by RequestUID | dispatch(resp) → map.remove(resp.request_uid) | ✅ |
 | AP3 | Delphi: SendAndWait blocks until response | Rust: register(uid) → Receiver; same-thread wait через `Client::run_until_response` | ✅ |
 | AP4 | timeout cleanup | `cleanup_old` из main loop + explicit `remove(uid)` для caller timeout | ✅ |
+| AP5 | active library extension over Delphi pending list | pending response still reaches `EventDispatcher` in dispatcher mode so markets/indexes/tags state updates while `Receiver` gets the same response | ✅ |
 
 ## key_import.rs → MoonProtoFunc.pas DecodeBuffer + base64 import
 
