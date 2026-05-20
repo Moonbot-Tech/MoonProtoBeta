@@ -349,6 +349,8 @@
 | M-A2 | apply UpdateMarketsList → per-index update, bounds check, send_funding gate | apply_markets_prices | ✅ |
 | M-A3 | apply GetMarketsIndexes → полная замена market_indexes | apply_markets_indexes | ✅ |
 | M-A4 | apply CheckBinanceTags → полная замена (replace semantics) | apply_token_tags | ✅ |
+| M-A5 | BMarketsDetailsWorker.Execute вызывает `Engine.UpdateMarketsList` в цикле примерно каждые 2с при `FullProxy` (`CreateEngine` → `TMoonProtoEngine`) | `RefreshConfig::default().update_markets_every = Some(2s)` + `tick_periodic_refresh` | ✅ |
+| M-A6 | BHeavyApiWorker.Execute вызывает `Engine.CheckBinanceTags` при старте и далее примерно каждые 60с | `RefreshConfig::default().check_tags_every = Some(60s)` + `tick_periodic_refresh` | ✅ |
 
 ---
 

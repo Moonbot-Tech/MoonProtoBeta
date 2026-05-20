@@ -444,11 +444,12 @@ pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 /// Конфигурация периодических refresh-команд которые либа шлёт сама в main loop.
 ///
 /// **Зачем.** При долгой сессии (часы) клиент может видеть stale prices — сервер
-/// обновляет funding/prices в `cfg.Markets` каждые ~60с, но клиент об этом узнаёт
+/// обновляет funding/prices в `cfg.Markets`, но клиент об этом узнаёт
 /// только если **запрашивает** `UpdateMarketsList`. В Delphi-боте это делается
-/// автоматически таймером каждые ~60с (`Vars.pas` cycle). В Rust порте по умолчанию
-/// тоже включено через [`RefreshConfig::default`] — типично пользователю торгового
-/// приложения нужны актуальные prices, не stale.
+/// автоматически из `BMarketsDetailsWorker` примерно каждые 2с; `CheckBinanceTags`
+/// запрашивается из `BHeavyApiWorker` примерно каждые 60с. В Rust порте по умолчанию
+/// оба refresh'а включены через [`RefreshConfig::default`] — типично пользователю
+/// торгового приложения нужны актуальные prices/tags, не stale.
 ///
 /// **Отключить.** Передай `RefreshConfig { update_markets_every: None, check_tags_every: None }`
 /// если приложение само управляет обновлениями (например через `client.api_update_markets_list()`
@@ -456,19 +457,19 @@ pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefreshConfig {
     /// Периодически шлёт `emk_UpdateMarketsList` для свежих prices/funding. Дефолт
-    /// `Some(60s)` — parity с Delphi bot. `None` отключает.
+    /// `Some(2s)` — parity с Delphi bot. `None` отключает.
     pub update_markets_every: Option<Duration>,
     /// Периодически шлёт `emk_CheckBinanceTags` (Binance-специфичная проверка
-    /// futures permissions). Дефолт `None` — большинству пользователей не нужно.
-    /// Если используешь Binance API и нужна полная проверка прав — `Some(5min)`.
+    /// futures permissions). Дефолт `Some(60s)` — parity с Delphi bot. `None`
+    /// отключает.
     pub check_tags_every: Option<Duration>,
 }
 
 impl Default for RefreshConfig {
     fn default() -> Self {
         Self {
-            update_markets_every: Some(Duration::from_secs(60)),
-            check_tags_every: None,
+            update_markets_every: Some(Duration::from_secs(2)),
+            check_tags_every: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -494,8 +495,8 @@ pub struct ClientConfig {
     /// который в Delphi был singleton-thread'ом созданным `Unit1.InitInt`. См.
     /// responsibility audit F8.
     pub ntp_host: Option<String>,
-    /// Periodic refresh настройки. По умолчанию: `update_markets_every: Some(60s)`,
-    /// `check_tags_every: None`. Передай `RefreshConfig::default()` для дефолта,
+    /// Periodic refresh настройки. По умолчанию: `update_markets_every: Some(2s)`,
+    /// `check_tags_every: Some(60s)`. Передай `RefreshConfig::default()` для дефолта,
     /// или явный конфиг с `None` чтобы отключить.
     pub refresh: RefreshConfig,
 }
@@ -505,7 +506,8 @@ impl ClientConfig {
     /// - `mask_ver = 0`;
     /// - `client_id = rand::random()`;
     /// - `ntp_host = Some("pool.ntp.org")`;
-    /// - `refresh = RefreshConfig::default()` (UpdateMarketsList каждые 60с).
+    /// - `refresh = RefreshConfig::default()` (UpdateMarketsList каждые 2с,
+    ///   CheckBinanceTags каждые 60с).
     ///
     /// Тесты и оффлайн-инструменты могут вызвать [`Self::without_ntp`].
     /// Приложения с extended transport — [`Self::with_transport_mode`].
@@ -5236,10 +5238,10 @@ mod refresh_tick_tests {
 
     #[test]
     fn refresh_config_defaults() {
-        // Документированные дефолты: update_markets = Some(60s), check_tags = None.
+        // Документированные дефолты: update_markets = Some(2s), check_tags = Some(60s).
         let cfg = RefreshConfig::default();
-        assert_eq!(cfg.update_markets_every, Some(Duration::from_secs(60)));
-        assert_eq!(cfg.check_tags_every, None);
+        assert_eq!(cfg.update_markets_every, Some(Duration::from_secs(2)));
+        assert_eq!(cfg.check_tags_every, Some(Duration::from_secs(60)));
     }
 
     #[test]

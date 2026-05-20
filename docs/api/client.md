@@ -39,8 +39,8 @@ let cfg = ClientConfig::new(host, port, master_key, mac_key)
     .with_client_id(12345)
     .without_ntp()
     .with_refresh(RefreshConfig {
-        update_markets_every: Some(Duration::from_secs(60)),
-        check_tags_every: None,
+        update_markets_every: Some(Duration::from_secs(2)),
+        check_tags_every: Some(Duration::from_secs(60)),
     });
 ```
 
@@ -170,13 +170,15 @@ match client.sender().try_subscribe_orderbook("BTCUSDT", OrderBookKind::Futures)
 
 ```rust
 RefreshConfig {
-    update_markets_every: Some(Duration::from_secs(60)),
-    check_tags_every: None,
+    update_markets_every: Some(Duration::from_secs(2)),
+    check_tags_every: Some(Duration::from_secs(60)),
 }
 ```
 
 `update_markets_every` is enabled by default to keep prices and funding fresh in
-long sessions. `check_tags_every` is opt-in.
+long sessions. The default 2 second cadence follows the Delphi full-proxy client
+market-details worker. `check_tags_every` is also enabled by default at 60 seconds
+to mirror the Delphi heavy API worker; set it to `None` to disable token-tag refresh.
 
 ## Observability
 
