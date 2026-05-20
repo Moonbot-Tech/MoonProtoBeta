@@ -3106,7 +3106,7 @@ impl Client {
         }
         let pmtu_for_check = pmtu_for_check_i32 as usize;
         let max_sliced_data_size = pmtu_for_check * 256 - 12 - 1; // 12=CryptoHeader, 1=cmd byte
-        if item.data.len() > max_sliced_data_size {
+        if item.data.len() >= max_sliced_data_size {
             return; // too large, drop (Delphi logs + exits)
         }
         if item.data.is_empty() && !item.encrypted {

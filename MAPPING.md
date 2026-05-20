@@ -21,10 +21,10 @@
 | 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) | client.rs: last_need_hello_again + 700ms check | ✅ |
 | 14 | 578-581 | WhoAreYou/Fine → HandleHandShake | client.rs handle_handshake | ✅ |
 | 15 | 583-591 | MPC_SizeTest → SendSizeAck | client.rs handle_size_test | ✅ |
-| 16 | 594-617 | MPC_ProbeMTU → ProbeMTUAck (DontFragment!) | client.rs: handle_probe_mtu (TODO: DF flag) | ✅* |
+| 16 | 594-617 | MPC_ProbeMTU → ProbeMTUAck (DontFragment!), `ReceivedSize := TestSize` без upper clamp | client.rs: handle_probe_mtu echoes `test_size` verbatim for valid record size | ✅ |
 | 17 | 620-625 | MPC_Sliced → OnNewSliced | client.rs handle Sliced | ✅ |
 | 18 | 627-629 | MPC_SlicedACK → OnNewSlicedACK | client.rs: match arm (no-op, client doesn't send Sliced yet) | ✅ |
-| 19 | 632-661 | MPC_Ping → update RTT/PMTU/OverHeat/RS + rate control | client.rs: handle_ping reads fields; PMTU clamp documented in DEVIATION #25 | DEVIATION |
+| 19 | 632-661 | MPC_Ping → update RTT/PMTU/OverHeat/RS + rate control | client.rs: handle_ping reads fields; `actual_pmtu = pmtu_raw` без clamp | ✅ |
 | 20 | 663 | DataRead(cmd, data, client) | client.rs → on_data callback | ✅ |
 
 ## DataRead (MoonProtoCommon.pas:541-577) → client.rs handle_command
@@ -119,9 +119,15 @@
 |---|---|---|---|---|
 | 57 | 795-833 | Для H/L item сначала делает `Client.Crypt(data)` если нужно, затем считает `sz := d.ms.Size + GetHeaderSize + 3`; при overflow PMTU flush'ит batch или отправляет одиночный пакет | client.rs: `send_h_item` / `batch_send_direct` считают batch-size по encrypted/plain wire payload после `encrypt_with_cipher` | ✅ |
 
+## CreateSlicedObject (MoonProtoIntStruct.pas:1058-1125) → client.rs create_sliced_and_send
+
+| # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
+|---|---|---|---|---|
+| 58 | 1070-1075 | `PTMU := ActualPMTU - HeaderSize - SliceHeader`; если `data.ms.Size >= MaxSlicedDataSize(ActualPMTU)` → drop | client.rs: create_sliced_and_send computes payload PMTU with low-PMTU guard and uses `>= max_sliced_data_size` | ✅ |
+
 ---
 
-## Итого Stage 1: 57 пунктов
+## Итого Stage 1: 58 пунктов
 
 - Все пункты закрыты или имеют подтверждённое описание поведения.
 - AAD в handshake актуализирован: текущий Delphi `MakeCorrectAAD = true`, Rust
@@ -460,3 +466,4 @@
 - #22: active session manager boundary — ПОДТВЕРЖДЕНО
 - #23: per-Client ServerTimeDelta — ИСПРАВЛЕНО
 - #24: first OrderBook Diff with local seq 0 + corrupted-mode diffs — ИСПРАВЛЕНО
+- #25: PMTU clamp in `handle_ping` / `handle_probe_mtu` — ИСПРАВЛЕНО
