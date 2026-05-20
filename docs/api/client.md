@@ -178,7 +178,9 @@ RefreshConfig {
 `update_markets_every` is enabled by default to keep prices and funding fresh in
 long sessions. The default 2 second cadence follows the Delphi full-proxy client
 market-details worker. `check_tags_every` is also enabled by default at 60 seconds
-to mirror the Delphi heavy API worker; set it to `None` to disable token-tag refresh.
+to mirror the Delphi heavy API worker. After an hourly boundary the client also
+sends the Delphi-compatible four-request `CheckBinanceTags` burst with 200 ms
+spacing. Set `check_tags_every` to `None` to disable token-tag refresh entirely.
 
 ## Observability
 

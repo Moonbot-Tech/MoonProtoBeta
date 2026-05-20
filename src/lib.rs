@@ -80,7 +80,8 @@
 //! не работает во время блокирующего wait).
 //!
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
-//! `examples/history_bars.rs`, `examples/multi_client_test.rs`.
+//! `examples/history_bars.rs`, `examples/market_refresh.rs`,
+//! `examples/multi_client_test.rs`.
 //!
 //! ## Главные публичные модули
 //!

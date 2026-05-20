@@ -447,9 +447,10 @@ pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 /// обновляет funding/prices в `cfg.Markets`, но клиент об этом узнаёт
 /// только если **запрашивает** `UpdateMarketsList`. В Delphi-боте это делается
 /// автоматически из `BMarketsDetailsWorker` примерно каждые 2с; `CheckBinanceTags`
-/// запрашивается из `BHeavyApiWorker` примерно каждые 60с. В Rust порте по умолчанию
-/// оба refresh'а включены через [`RefreshConfig::default`] — типично пользователю
-/// торгового приложения нужны актуальные prices/tags, не stale.
+/// запрашивается из `BHeavyApiWorker` примерно каждые 60с и до 4 раз с шагом
+/// 200мс после смены часа. В Rust порте по умолчанию оба refresh'а включены
+/// через [`RefreshConfig::default`] — типично пользователю торгового приложения
+/// нужны актуальные prices/tags, не stale.
 ///
 /// **Отключить.** Передай `RefreshConfig { update_markets_every: None, check_tags_every: None }`
 /// если приложение само управляет обновлениями (например через `client.api_update_markets_list()`
@@ -460,10 +461,13 @@ pub struct RefreshConfig {
     /// `Some(2s)` — parity с Delphi bot. `None` отключает.
     pub update_markets_every: Option<Duration>,
     /// Периодически шлёт `emk_CheckBinanceTags` (Binance-специфичная проверка
-    /// futures permissions). Дефолт `Some(60s)` — parity с Delphi bot. `None`
-    /// отключает.
+    /// futures permissions). Дефолт `Some(60s)` — parity с Delphi bot; hourly
+    /// burst из 4 запросов с шагом 200мс включён автоматически. `None` отключает.
     pub check_tags_every: Option<Duration>,
 }
+
+const CHECK_TAGS_BURST_COUNT: u8 = 4;
+const CHECK_TAGS_BURST_SPACING_MS: i64 = 200;
 
 impl Default for RefreshConfig {
     fn default() -> Self {
@@ -945,6 +949,11 @@ pub struct Client {
     /// `update_markets_every` / `check_tags_every`.
     last_update_markets_ms: i64,
     last_check_tags_ms: i64,
+    /// Delphi `BHeavyApiWorker` делает до 4 быстрых `CheckBinanceTags` после
+    /// смены часа. Эти поля хранят текущий wall-clock hour slot и прогресс burst.
+    check_tags_hour_slot: i64,
+    check_tags_burst_sent: u8,
+    last_check_tags_burst_ms: i64,
 
     /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется в
     /// [`run_init_sequence`] (или может быть выставлена приложением вручную через
@@ -1089,6 +1098,9 @@ impl Client {
             server_info: crate::commands::engine_api::ServerInfo::default(),
             last_update_markets_ms: i64::MIN / 2,
             last_check_tags_ms: i64::MIN / 2,
+            check_tags_hour_slot: i64::MIN,
+            check_tags_burst_sent: CHECK_TAGS_BURST_COUNT,
+            last_check_tags_burst_ms: i64::MIN / 2,
             mac_ctx,
             send_buf: Vec::with_capacity(2048),    // типичный send packet ~500-1500 байт
         }
@@ -1572,6 +1584,15 @@ impl Client {
     /// На случай если ответ не дойдёт (UDP loss / server reset) — следующий тик
     /// просто пошлёт заново, никакого retry/timeout-кода не нужно.
     fn tick_periodic_refresh(&mut self, cur_tm: i64) {
+        let hour_slot = if self.cfg.refresh.check_tags_every.is_some() {
+            current_utc_hour_slot()
+        } else {
+            self.check_tags_hour_slot
+        };
+        self.tick_periodic_refresh_at(cur_tm, hour_slot);
+    }
+
+    fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
         if let Some(interval) = self.cfg.refresh.update_markets_every {
             let interval_ms = interval.as_millis() as i64;
             if (cur_tm - self.last_update_markets_ms) >= interval_ms {
@@ -1582,12 +1603,28 @@ impl Client {
             }
         }
         if let Some(interval) = self.cfg.refresh.check_tags_every {
+            if self.check_tags_hour_slot == i64::MIN {
+                self.check_tags_hour_slot = hour_slot;
+            } else if hour_slot != self.check_tags_hour_slot {
+                self.check_tags_hour_slot = hour_slot;
+                self.check_tags_burst_sent = 0;
+                self.last_check_tags_burst_ms = i64::MIN / 2;
+            }
+
             let interval_ms = interval.as_millis() as i64;
-            if (cur_tm - self.last_check_tags_ms) >= interval_ms {
+            let burst_due = self.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT
+                && (cur_tm - self.last_check_tags_burst_ms) >= CHECK_TAGS_BURST_SPACING_MS;
+            let interval_due = (cur_tm - self.last_check_tags_ms) >= interval_ms;
+
+            if burst_due || interval_due {
                 self.send_api_request(
                     &crate::commands::engine_request::check_binance_tags(),
                 );
                 self.last_check_tags_ms = cur_tm;
+                if self.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT {
+                    self.check_tags_burst_sent += 1;
+                    self.last_check_tags_burst_ms = cur_tm;
+                }
             }
         }
     }
@@ -5236,6 +5273,18 @@ mod refresh_tick_tests {
         }
     }
 
+    fn drain_api_methods(client: &Client) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let ClientEvent::Send(msg) = ev {
+                if msg.item.cmd == Command::API as u8 && msg.item.data.len() >= 12 {
+                    out.push(msg.item.data[11]);
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn refresh_config_defaults() {
         // Документированные дефолты: update_markets = Some(2s), check_tags = Some(60s).
@@ -5309,6 +5358,26 @@ mod refresh_tick_tests {
     }
 
     #[test]
+    fn first_check_tags_tick_initializes_hour_without_burst() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: Some(Duration::from_secs(60)),
+        }));
+        assert_eq!(client.check_tags_hour_slot, i64::MIN);
+
+        client.tick_periodic_refresh_at(0, 42);
+        assert_eq!(client.check_tags_hour_slot, 42);
+        assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
+        assert_eq!(
+            drain_api_methods(&client),
+            vec![EngineMethod::CheckBinanceTags as u8],
+        );
+
+        client.tick_periodic_refresh_at(200, 42);
+        assert!(drain_api_methods(&client).is_empty(), "initial tick is not a burst");
+    }
+
+    #[test]
     fn tick_both_intervals_independent() {
         // Оба включены, но с разными интервалами — каждый тикает по своему.
         let mut client = Client::new(dummy_cfg(RefreshConfig {
@@ -5327,6 +5396,44 @@ mod refresh_tick_tests {
         client.tick_periodic_refresh(600);
         assert_eq!(client.last_update_markets_ms, 600);
         assert_eq!(client.last_check_tags_ms, 600);
+    }
+
+    #[test]
+    fn check_tags_hourly_burst_sends_four_requests_with_spacing() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: Some(Duration::from_secs(60)),
+        }));
+        client.check_tags_hour_slot = 10;
+        client.last_check_tags_ms = 1_000;
+        client.check_tags_burst_sent = CHECK_TAGS_BURST_COUNT;
+        drain_api_methods(&client);
+
+        client.tick_periodic_refresh_at(10_000, 11);
+        assert_eq!(
+            drain_api_methods(&client),
+            vec![EngineMethod::CheckBinanceTags as u8],
+        );
+        assert_eq!(client.check_tags_burst_sent, 1);
+
+        client.tick_periodic_refresh_at(10_100, 11);
+        assert!(drain_api_methods(&client).is_empty(), "200ms spacing not reached");
+
+        client.tick_periodic_refresh_at(10_200, 11);
+        client.tick_periodic_refresh_at(10_400, 11);
+        client.tick_periodic_refresh_at(10_600, 11);
+        assert_eq!(
+            drain_api_methods(&client),
+            vec![
+                EngineMethod::CheckBinanceTags as u8,
+                EngineMethod::CheckBinanceTags as u8,
+                EngineMethod::CheckBinanceTags as u8,
+            ],
+        );
+        assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
+
+        client.tick_periodic_refresh_at(10_800, 11);
+        assert!(drain_api_methods(&client).is_empty(), "no fifth burst request");
     }
 }
 
@@ -5451,6 +5558,15 @@ static NTP_OFFSET_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub fn set_ntp_offset(offset_seconds: f64) {
     let bits = (offset_seconds / 86400.0).to_bits();
     NTP_OFFSET_DAYS.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn current_utc_hour_slot() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .checked_div(3600)
+        .unwrap_or(0) as i64
 }
 
 fn get_ntp_offset_days() -> f64 {

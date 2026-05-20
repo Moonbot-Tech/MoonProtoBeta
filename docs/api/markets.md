@@ -40,7 +40,12 @@ run_init_sequence(&mut client, &mut dispatcher, init)?;
 ```
 
 Long-running price refresh is controlled by `ClientConfig.refresh` and is enabled
-by default through `RefreshConfig::default()`.
+by default through `RefreshConfig::default()`. The default also refreshes token
+tags every 60 seconds and performs the Delphi-compatible hourly four-request
+`CheckBinanceTags` burst; applications do not need their own timer for this.
+
+See `examples/market_refresh.rs` for a compact consumer-side loop that reads
+prices and tags from `EventDispatcher`.
 
 ## Events
 
