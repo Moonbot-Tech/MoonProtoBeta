@@ -3441,13 +3441,6 @@ impl Client {
         // Auto-compression (DEVIATION #11 — закрыто).
         let (eff_cmd, eff_data) = Self::maybe_compress(item.cmd, &item.data);
 
-        let item_size = eff_data.len() + 3; // cmd(1) + sz(2) + data — ClientHdr (15) учтён в initial tmp_send_size
-
-        // If adding this item would exceed PMTU → flush first
-        if self.tmp_send_count > 0 && self.tmp_send_size + item_size > self.actual_pmtu as usize {
-            self.flush_send_batch();
-        }
-
         // Encrypt if needed
         // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
         // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
@@ -3476,6 +3469,13 @@ impl Client {
         } else {
             (eff_cmd, eff_data)
         };
+
+        let item_size = wire_data.len() + 3; // cmd(1) + sz(2) + encrypted/plain data
+        // If adding this item would exceed PMTU → flush first. Delphi computes
+        // this size after `Client.Crypt(data)` using actual `d.ms.Size`.
+        if self.tmp_send_count > 0 && self.tmp_send_size + item_size > self.actual_pmtu as usize {
+            self.flush_send_batch();
+        }
 
         // Append to batch: cmd(1) + sz(2) + data
         self.tmp_send_buf.push(wire_cmd);
@@ -4762,6 +4762,31 @@ mod pmtu_tests {
 
         client.create_sliced_and_send(&item);
         assert!(client.sending.is_empty());
+    }
+
+    #[test]
+    fn encrypted_low_batch_size_uses_wire_size_after_crypt() {
+        let mut client = Client::new(dummy_cfg());
+        client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+
+        let item = SendItem {
+            data: vec![0xA5; 10],
+            cmd: Command::UI as u8,
+            encrypted: true,
+            priority: SendPriority::Low,
+            retry_left: 0,
+            max_retries: 0,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+
+        client.batch_send_direct(&item);
+
+        let wire_len = u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
+        assert_eq!(wire_len, 60);
+        assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
+        assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
     }
 }
 

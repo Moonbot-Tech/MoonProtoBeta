@@ -113,9 +113,15 @@
 |---|---|---|---|---|
 | 56 | MoonProtoCommon.pas:780-787,900-906,931-939 + MoonProtoIntStruct.pas:1152-1168 | `UKey != UK_None`: новая Sliced/High команда вытесняет старую с тем же ключом в очереди; при отправке чистит `Sending`/`PendingH` по ключу | client.rs: `dedup_send_items_by_u_key`, затем `sending.retain` / `pending_h.retain` перед `create_sliced_and_send` / `send_h_item` | ✅ |
 
+## DoSendMPData / DoSendTmpList (MoonProtoCommon.pas:795-867, 933-939) → client.rs send_h_item / batch_send_direct
+
+| # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
+|---|---|---|---|---|
+| 57 | 795-833 | Для H/L item сначала делает `Client.Crypt(data)` если нужно, затем считает `sz := d.ms.Size + GetHeaderSize + 3`; при overflow PMTU flush'ит batch или отправляет одиночный пакет | client.rs: `send_h_item` / `batch_send_direct` считают batch-size по encrypted/plain wire payload после `encrypt_with_cipher` | ✅ |
+
 ---
 
-## Итого Stage 1: 56 пунктов
+## Итого Stage 1: 57 пунктов
 
 - Все пункты закрыты или имеют подтверждённое описание поведения.
 - AAD в handshake актуализирован: текущий Delphi `MakeCorrectAAD = true`, Rust
