@@ -1,9 +1,10 @@
-# Candles channel
+# Candles
 
-Запрос исторических свечей через Engine API. Два метода: `emk_GetCoinCardCandles`
-(single response) и `emk_RequestCandlesData` (chunked).
+Historical candles are requested through Engine API. Two methods are exposed:
+`emk_GetCoinCardCandles` (single response) and `emk_RequestCandlesData` (chunked,
+wrapped by an async helper).
 
-## TDeepPrice
+## DeepPrice
 
 Packed record, **28 bytes**:
 
@@ -14,29 +15,29 @@ pub struct DeepPrice {
     pub max_p:   f32,    // 4 bytes
     pub min_p:   f32,    // 4 bytes
     pub vol:     f32,    // 4 bytes
-    pub time:    f64,    // 8 bytes — TDateTime (Delphi double, дни с 1899-12-30)
+    pub time:    f64,    // 8 bytes — TDateTime (Delphi double, days since 1899-12-30 UTC)
 }
 ```
 
-Соответствует Delphi `MarketsU.pas:701-705 TDeepPrice = packed record`.
+Mirrors Delphi `MarketsU.pas:701-705 TDeepPrice = packed record`.
 
 ## DeepHistoryKind
 
 ```rust
 pub enum DeepHistoryKind {
-    Min1  = 0,    // 1-минутные свечи
+    Min1  = 0,
     Min5  = 1,
     Min30 = 2,
     Hour1 = 3,
     Hour4 = 4,
-    Day1  = 5,    // дневные
+    Day1  = 5,
 }
 ```
 
-Соответствует `EngineBase.pas:60 TMarketDeepHistoryKind`.
+Mirrors `EngineBase.pas:60 TMarketDeepHistoryKind`.
 
-**ВНИМАНИЕ**: Hour4 был добавлен в Delphi — порядок enum'а **критичен** для
-wire-формата. Передаётся как 1 byte ordinal.
+**Note:** `Hour4` was added to Delphi later — the enum order is **wire-critical**,
+ordinal is sent as a single byte.
 
 ## emk_GetCoinCardCandles — single response
 
@@ -45,9 +46,10 @@ use std::time::Duration;
 use moonproto::commands::candles::{DeepHistoryKind, parse_coin_card_candles_response};
 
 let rx = client.api_get_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour1);
-// `run_until_response` крутит main loop тиками пока ждёт ответ — нужно
-// потому что в single-threaded коде `rx.recv_timeout(...)` обычно timeout'ит
-// (main loop стоит во время блокирующего wait).
+// `run_until_response` keeps pumping the UDP main loop in short ticks while
+// it waits. Calling `rx.recv_timeout(...)` directly on the same thread that
+// owns `Client` would time out because no UDP packets are processed during
+// that blocking wait.
 match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10)) {
     Ok(resp) if resp.success => {
         let candles = parse_coin_card_candles_response(&resp.data).unwrap();
@@ -67,13 +69,14 @@ count: i32 LE
 candles: N × TDeepPrice (28 bytes each)
 ```
 
-## emk_RequestCandlesData — chunked response (рекомендуется async helper)
+## emk_RequestCandlesData — chunked response (async helper recommended)
 
-Сервер отвечает несколькими `EngineResponse`-пакетами с одинаковым `request_uid`,
-каждый — chunk вида `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба
-автоматически агрегирует через `CandlesAggregator` и возвращает merged result.
+The server replies with multiple `EngineResponse` packets carrying the same
+`request_uid`. Each packet is a chunk of the form `ChunkIndex:u16 +
+ChunkTotal:u16 + payload`. The library aggregates them through
+`CandlesAggregator` and returns the merged result.
 
-### Async API (рекомендуется)
+### Async API (recommended)
 
 ```rust
 use std::time::Duration;
@@ -82,7 +85,7 @@ let rx = client.api_request_candles_data_async();
 match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
     Ok(merged) => {
         // merged.uid     — request_uid
-        // merged.candles — Vec<DeepPrice> уже распарсенный
+        // merged.candles — already-parsed Vec<DeepPrice>
         for c in &merged.candles {
             println!("{}: o={} c={}", c.time, c.open_p, c.close_p);
         }
@@ -99,24 +102,24 @@ pub struct MergedCandles {
 }
 ```
 
-Auto-cleanup устаревших pending candles слотов — default `DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 30_000`
-(30 секунд). Слот освобождается автоматически либо при получении всех chunks,
-либо по timeout.
+Stale pending candles slots are auto-cleaned —
+`DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 30_000` (30 seconds). A slot is freed
+either when all chunks have arrived or on timeout.
 
-### Низкоуровневый CandlesAggregator
+### Low-level CandlesAggregator
 
-Если нужен fine-grained контроль (например routing по request_uid в multi-request
-сценарии):
+Use this only for custom flows that need fine-grained `request_uid` routing in
+a multi-request scenario:
 
 ```rust
 use moonproto::commands::candles::{CandlesAggregator, parse_coin_card_candles_response};
 
 let mut agg = CandlesAggregator::new();
 
-// Отправка request — fire-and-forget:
+// Fire-and-forget request:
 client.api_request_candles_data();
 
-// В on_data callback'е (или через EventDispatcher::Event::EngineResponse):
+// Inside an `on_data` callback (or through EventDispatcher::Event::EngineResponse):
 //   if resp.method == EngineMethod::RequestCandlesData {
 //       if let Some(merged) = agg.on_chunk(&resp.data) {
 //           let candles = parse_coin_card_candles_response(&merged).unwrap();
@@ -125,18 +128,18 @@ client.api_request_candles_data();
 //   }
 ```
 
-### Wire-формат chunk
+### Chunk wire format
 
-Каждый `EngineResponse.data` (для метода RequestCandlesData):
+Each `EngineResponse.data` for `RequestCandlesData`:
 ```
 ChunkIndex: u16 LE
 ChunkTotal: u16 LE
 chunk_payload: bytes (rest)
 ```
 
-После сборки всех `ChunkTotal` чанков (по `ChunkIndex` 0..ChunkTotal-1),
-`chunk_payload`'ы конкатенируются в final stream, который имеет формат как у
-`GetCoinCardCandles` (count + candles).
+After all `ChunkTotal` chunks have arrived (in any order, by `ChunkIndex`
+`0..ChunkTotal-1`), the `chunk_payload`s are concatenated into a final stream
+with the same `count + candles` layout as `GetCoinCardCandles`.
 
 ### CandlesAggregator API
 
@@ -149,37 +152,38 @@ impl CandlesAggregator {
 }
 ```
 
-**Поведение:**
-- **Out-of-order delivery**: chunks принимаются в любом порядке, складываются в `chunks[idx]`.
-- **Duplicate**: повторный chunk с тем же `idx` игнорируется.
-- **Resize**: при первом chunk инициализируется `chunks: Vec<Option<Vec<u8>>>` размером `ChunkTotal`.
-- **Auto-reset**: после `on_chunk` возвращает `Some(merged)` — внутреннее
-  состояние сбрасывается, готов к новому запросу.
+**Behavior:**
+- **Out-of-order delivery**: chunks are accepted in any order, stored at `chunks[idx]`.
+- **Duplicates**: a repeated chunk for the same `idx` is ignored.
+- **Resize**: on the first chunk the internal `chunks: Vec<Option<Vec<u8>>>` is
+  sized to `ChunkTotal`.
+- **Auto-reset**: when `on_chunk` returns `Some(merged)` the internal state is
+  cleared and ready for the next request.
 
-### Требования к caller'у (только при ручном CandlesAggregator)
+### Requirements for manual `CandlesAggregator` callers
 
-1. **DEFLATE decompression уже выполнен**. `response_data` — это
-   `EngineResponse.data` _после_ распаковки.
-2. **Фильтрация по `request_uid`**: если запущено несколько параллельных
-   `RequestCandlesData` через ручной aggregator, нужно либо вести отдельный
-   `CandlesAggregator` для каждого `request_uid`, либо вызывать `reset()` при
-   смене запроса. **Async API (`api_request_candles_data_async`) делает это
-   автоматически** через `pending_candles` registry.
+1. **DEFLATE decompression already done.** `response_data` is the
+   `EngineResponse.data` _after_ decompression.
+2. **`request_uid` filtering.** If you run multiple parallel `RequestCandlesData`
+   through the manual aggregator, keep a separate `CandlesAggregator` per
+   `request_uid` or call `reset()` between requests. The async API
+   (`api_request_candles_data_async`) handles this for you through the internal
+   `pending_candles` registry.
 
-## Время свечей
+## Candle time
 
-`DeepPrice.time` — это `TDateTime` (Delphi double, дни с 1899-12-30 UTC).
-Конвертация в unix timestamp:
+`DeepPrice.time` is a `TDateTime` (Delphi double, days since 1899-12-30 UTC).
+Convert to unix timestamp:
 
 ```rust
 fn delphi_to_unix_secs(td: f64) -> f64 {
-    (td - 25569.0) * 86400.0    // 25569 = days между 1899-12-30 и 1970-01-01
+    (td - 25569.0) * 86400.0    // 25569 = days between 1899-12-30 and 1970-01-01
 }
 ```
 
-## См. также
+## See also
 
-- [engine_api.md](engine_api.md) — RPC канал, ApiPending registry.
-- [events.md](events.md) — `Event::EngineResponse` для отслеживания response'ов.
+- [engine_api.md](engine_api.md) — RPC channel, ApiPending registry.
+- [events.md](events.md) — `Event::EngineResponse` for raw response tracking.
 - [client.md](client.md) — `client.api_get_coin_card_candles()` /
   `api_request_candles_data()` / `api_request_candles_data_async()`.

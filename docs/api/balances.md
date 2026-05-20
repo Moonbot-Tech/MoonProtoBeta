@@ -1,50 +1,17 @@
 # Balances channel (MPC_Balance)
 
-Балансы аккаунта и маркетов: full snapshot + incremental updates.
+Account and market balances: full snapshots plus incremental updates.
 
-## Что это
+## Overview
 
-`TBalanceCommand` шлёт обновления балансов в трёх режимах:
-- **cmd_id=2 (legacy snapshot)**: обновляются полученные маркеты, остальные **не сбрасываются** (merge update).
-- **cmd_id=3 (full snapshot)**: маркеты не в snapshot **сбрасываются** в default; глобальные суммы обновляются.
-- **cmd_id=4 (incremental)**: merge маркетов + опциональное обновление глобалов (gated `global_changed: bool`).
+`TBalanceCommand` sends balance updates in three modes:
+- **cmd_id=2 (legacy snapshot)**: updates the markets present in the packet; all other markets are **not reset** (merge update).
+- **cmd_id=3 (full snapshot)**: markets missing from the snapshot are **reset** to default values; global totals are updated.
+- **cmd_id=4 (incremental)**: merges market rows and optionally updates global totals (gated by `global_changed: bool`).
 
-Sync state — `BalancesState`. Ключ — `market_name: String` (например `"BTCUSDT"`).
+The sync state is `BalancesState`. The key is `market_name: String`, for example `"BTCUSDT"`.
 
-## Использование через EventDispatcher
-
-```rust
-use moonproto::events::{EventDispatcher, Event};
-use moonproto::state::BalanceEvent;
-
-let mut dispatcher = EventDispatcher::new();
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|ev| match ev {
-    Event::Balance(BalanceEvent::SnapshotApplied { count, epoch }) => {
-        println!("Full snapshot: {count} markets, epoch={epoch}");
-    }
-    Event::Balance(BalanceEvent::LegacySnapshotApplied { count, .. }) => {
-        println!("Legacy merge snapshot: {count} markets");
-    }
-    Event::Balance(BalanceEvent::IncrementalApplied { count, global_changed, .. }) => {
-        println!("Incremental: {count} markets, global={global_changed}");
-    }
-    Event::Balance(BalanceEvent::EpochStale { incoming, last }) => {
-        log::warn!("stale balance epoch {incoming}, last {last}");
-    }
-    _ => {}
-}));
-
-// State доступен через getter:
-let bs = dispatcher.balances();
-if let Some(item) = bs.get("BTCUSDT") {
-    println!("Pos size: {}, pos price: {}", item.pos_size, item.pos_price);
-}
-let g = &bs.global;
-println!("BTC: total={} locked={} full={}",
-         g.btc_balance_total, g.btc_balance_locked, g.btc_balance_full);
-```
-
-## Низкоуровневый pattern
+## Usage
 
 ```rust
 use moonproto::commands::balance::parse_balance;
@@ -52,28 +19,47 @@ use moonproto::state::{BalancesState, BalanceEvent};
 
 let mut balances = BalancesState::new();
 
-// cmd_id берётся из payload[0], body — payload[11..] (после TBaseCommand header).
-if let Some(update) = parse_balance(cmd_id, body) {
+if let Some(update) = parse_balance(cmd_id, &payload) {
     let event = balances.apply(update);
     match event {
-        BalanceEvent::SnapshotApplied { count, .. } => {}
-        // ...
+        BalanceEvent::SnapshotApplied { count, epoch } => {
+            println!("Full snapshot: {} markets, epoch={}", count, epoch);
+        }
+        BalanceEvent::LegacySnapshotApplied { count, epoch } => {
+            println!("Legacy merge snapshot: {} markets", count);
+        }
+        BalanceEvent::IncrementalApplied { count, epoch, global_changed } => {
+            println!("Incremental: {} markets changed, global={}", count, global_changed);
+        }
+        BalanceEvent::EpochStale { incoming, last } => {
+            // Old packet after reconnect/reordering; skipped.
+        }
     }
 }
+
+// Read one market balance:
+if let Some(item) = balances.get("BTCUSDT") {
+    println!("Pos size: {}, pos price: {}", item.pos_size, item.pos_price);
+}
+
+// Global totals in BTC:
+let g = &balances.global;
+println!("BTC total: {}, locked: {}, full: {}", g.btc_balance_total, g.btc_balance_locked, g.btc_balance_full);
 ```
 
 ## Epoch protection
 
-Каждый update имеет `epoch: u16` — wrapping counter для защиты от out-of-order
-пакетов. `BalancesState::apply` использует общий `state::epoch::epoch_is_ok`
-(wrap-safe, RFC 1982 окно 32767, аналог Delphi `MoonProtoFunc.pas:188-203`):
-если `new` это duplicate или stale — `EpochStale` событие, state не меняется.
+Each update carries `epoch: u16`, a wrapping counter used to reject out-of-order packets.
+`BalancesState::apply` uses `epoch_is_ok(last, new)` (wrap-safe, matching Delphi
+`MoonProtoFunc.pas:188-203`): if `new` is a duplicate or stale value within the
+RFC 1982 half-cycle window (up to 32767 steps behind with u16 wrapping), it emits
+`EpochStale` and leaves the state unchanged.
 
-## BalanceItem (поля)
+## BalanceItem Fields
 
 ```rust
 pub struct BalanceItem {
-    pub market_name:           String,    // ключ в HashMap by_market
+    pub market_name:           String,  // Key in the by_market HashMap.
     pub balance_hash:          u64,
     pub initial_balance:       f64,
     pub locked_balance:        f64,
@@ -104,21 +90,21 @@ pub struct BalanceItem {
 
 ```rust
 pub struct GlobalBalance {
-    pub btc_balance_total:    f64,    // Доступный (свободный + locked, минус долги)
-    pub btc_balance_locked:   f64,    // Заблокировано в ордерах / залогах
-    pub btc_balance_full:     f64,    // Полный включая нереализованный PnL
-    pub special_coin_balance: f64,    // USDT для futures / BUSD/USDC при MA mode
+    pub btc_balance_total:    f64,  // Available balance: free plus locked, minus debts.
+    pub btc_balance_locked:   f64,  // Locked in open orders or collateral.
+    pub btc_balance_full:     f64,  // Full balance including unrealized PnL.
+    pub special_coin_balance: f64,  // USDT for futures, or BUSD/USDC in MA mode.
 }
 ```
 
-Все суммы в BTC equivalent. Обновляются в `cmd_id=4` только если `global_changed=true`.
+All amounts are BTC equivalents. For `cmd_id=4`, these fields are updated only when `global_changed=true`.
 
-## BalancesState API
+## API state
 
 ```rust
 pub struct BalancesState {
     pub global:     GlobalBalance,
-    pub by_market:  HashMap<String, BalanceItem>,   // key = market_name
+    pub by_market:  HashMap<String, BalanceItem>,  // key = market_name
     pub last_epoch: u16,
     // ...
 }
@@ -130,7 +116,7 @@ impl BalancesState {
 }
 ```
 
-## События
+## Events
 
 ```rust
 pub enum BalanceEvent {
@@ -141,31 +127,14 @@ pub enum BalanceEvent {
 }
 ```
 
-## Refresh request
-
-```rust
-// Принудительно запросить full snapshot балансов:
-client.balance_request_refresh();
-```
-
-Это `TBalanceRequestRefresh` (sub-cmd 5, UK_BalanceFull). Сервер ответит
-`TBalanceCommand` с cmd_id=3 (full snapshot).
-
-Альтернатива: `client.api_get_markets_balance_full()` через Engine API.
-
-## OOM cap
-
-`BalancesState` имеет `MAX_BALANCE_MARKETS = 20_000` — DoS guard. Реальная биржа
-имеет сотни маркетов, 20K — щедрый запас.
-
 ## Wire format
 
 ```
 TBalanceCommand (CmdId 2/3/4):
   Header: CmdId(1) + ver(2) + UID(8) = 11 bytes
   epoch:                u16
-  global_changed:       bool (1)  [только cmd_id=4]
-  btc_balance_total:    f64       [cmd_id=2/3 или cmd_id=4 если global_changed]
+  global_changed:       bool (1)  [cmd_id=4 only]
+  btc_balance_total:    f64       [cmd_id=2/3, or cmd_id=4 when global_changed=true]
   btc_balance_locked:   f64       [...]
   btc_balance_full:     f64       [...]
   special_coin_balance: f64       [...]
@@ -173,17 +142,16 @@ TBalanceCommand (CmdId 2/3/4):
   items[count]:
     market_name:        string (u16-prefixed UTF-8)
     balance_hash:       u64
-    flags:              u32       // bitmask какие поля присутствуют
-    [field values по битам flags]
+    flags:              u32       [bitmask of fields present in this item]
+    [field values selected by flags bits]
 ```
 
-Bitmask `flags` определяет какие поля из BalanceItem присутствуют в payload.
-Парсер заполняет только присутствующие; остальные остаются default (для нового
-item) или сохраняют старое значение (для merge в существующий).
+The `flags` bitmask defines which `BalanceItem` fields are present in the payload. The parser
+updates only those fields; all other fields keep the default value for a new item or preserve
+their previous value when merging into an existing item.
 
-## См. также
+## See Also
 
-- [arb.md](arb.md) — `TArbPricesCommand` тоже в канале MPC_Balance (CmdId=6).
-- [markets.md](markets.md) — для расчёта balance_usdt нужна цена из MarketsState.
-- [engine_api.md](engine_api.md) — `api_get_markets_balance_full`.
-- [events.md](events.md) — EventDispatcher + Event::Balance.
+- [arb.md](arb.md): `TArbPricesCommand` also uses the MPC_Balance channel (CmdId=6)
+- [markets.md](markets.md): balance_usdt calculation needs prices from `MarketsState`
+- [engine_api.md](engine_api.md): `balance_request_refresh` (CmdId=5)
