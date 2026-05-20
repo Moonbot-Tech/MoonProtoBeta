@@ -267,8 +267,8 @@
 
 | # | Delphi pas:line | Sub-command | Rust strat.rs | ✅ |
 |---|---|---|---|---|
-| S1 | :40 | TStratSnapshotRequest (CmdId=1) — empty body | StratCommand::SnapshotRequest | ✅ |
-| S2 | :60 | TStratSnapshot (CmdId=2, Sliced, UK_StratSnapshot) — ServerEpoch + ClientMaxLastDate + Size + Full + Data[Size] | StratCommand::Snapshot + StratSnapshot + `build_snapshot` / `build_snapshot_from_strategies` | ✅ |
+| S1 | :40 | TStratSnapshotRequest (CmdId=1) — empty body, server→client only; server drops client→server request | StratCommand::SnapshotRequest | ✅ |
+| S2 | :60 | TStratSnapshot (CmdId=2, Sliced, UK_StratSnapshot) — ServerEpoch + ClientMaxLastDate + Size + Full + Data[Size], bidirectional | StratCommand::Snapshot + StratSnapshot + `build_snapshot` / `build_snapshot_from_strategies` | ✅ |
 | S3 | :246 | TStratDelete (CmdId=3) — strategy_id + (soft) folder_path | StratCommand::Delete | ✅ |
 | S4 | :276 | TStratSellPriceUpdate (CmdId=4, UK_StratSellPriceUpdate) — strategy_id + sell_price | StratCommand::SellPriceUpdate | ✅ |
 | S5 | :298 | TStratCheckedSync (CmdId=5, Sliced) — count:Word + items + (soft) is_delta | StratCommand::CheckedSync + StratCheckedItem | ✅ |
@@ -283,6 +283,7 @@
 | S-A3 | TStratSnapshot.Data RTTI decode | bin → fields | state/strats.rs:apply_snapshot_decoded → strategy_serializer | ✅ |
 | S-A4 | StrategySerializer.pas:635-705 LoadStrategyFromCompact | existing strategy skips stale snapshot when local LastDate and Ver are both >= incoming | state/strats.rs:upsert_from_snapshot rollback guard | ✅ |
 | S-A5 | MoonProtoClient.pas:757-769 ProcessStratCommand CheckedSync | CheckedSync updates only existing strategies; unknown StrategyID is ignored | state/strats.rs:apply CheckedSync ignores missing id | ✅ |
+| S-A6 | MoonProtoClient.pas:ProcessStratCommand ветка TStratSnapshotRequest | ответ всегда fresh `TStratSnapshot.CreateFromStrats(Strats)`, без кеша последнего server snapshot | events.rs:dispatch_into_active вызывает app-provided `strategy_snapshot_provider`; без provider только эмитит SnapshotRequested для ручного fresh-ответа | ✅ |
 
 ---
 

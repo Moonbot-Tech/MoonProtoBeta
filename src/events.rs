@@ -45,6 +45,57 @@ use crate::commands::market::{
 };
 use crate::state::parse_trades_resend_response;
 
+/// Fresh strategy snapshot returned by the application for a server
+/// `TStratSnapshotRequest`.
+///
+/// Delphi answers that request by rebuilding `TStratSnapshot.CreateFromStrats`
+/// from the live `Strats` object. The Rust library does not own application
+/// strategies, so `EventDispatcher` can only auto-answer when the application
+/// registers a provider through [`EventDispatcher::set_strategy_snapshot_provider`].
+pub struct StrategySnapshotReply {
+    pub server_epoch: u64,
+    pub client_max_last_date: u64,
+    pub full: bool,
+    pub data: Vec<u8>,
+}
+
+impl StrategySnapshotReply {
+    /// Build a reply from an already serialized `TStrategySerializer` payload.
+    pub fn from_payload(
+        server_epoch: u64,
+        client_max_last_date: u64,
+        full: bool,
+        data: Vec<u8>,
+    ) -> Self {
+        Self { server_epoch, client_max_last_date, full, data }
+    }
+
+    /// Build a reply from decoded strategy snapshots.
+    ///
+    /// This is the provider-side counterpart of Delphi
+    /// `TStratSnapshot.CreateFromStrats`: it serializes the current application
+    /// strategy list, computes `ClientMaxLastDate`, and marks the packet as a
+    /// full snapshot by default.
+    pub fn from_strategies(
+        server_epoch: u64,
+        full: bool,
+        strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
+    ) -> Self {
+        let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new();
+        let mut client_max_last_date = 0u64;
+        for strategy in strategies {
+            client_max_last_date = client_max_last_date.max(strategy.last_date);
+            builder.write_strategy(strategy);
+        }
+        Self {
+            server_epoch,
+            client_max_last_date,
+            full,
+            data: builder.finalize(),
+        }
+    }
+}
+
 /// Все возможные события которые dispatcher может выдать.
 #[derive(Debug)]
 pub enum Event {
@@ -119,6 +170,12 @@ pub struct EventDispatcher {
     /// `client.server_time_delta_handle()`, либо автоматически — `dispatch_into_active`
     /// делает lazy-link при первом вызове.
     server_time_delta_source: Option<Arc<AtomicU64>>,
+    /// Provider for fresh application-owned strategies. Called when the server
+    /// sends `TStratSnapshotRequest`; if it returns a snapshot, the dispatcher
+    /// sends `TStratSnapshot` immediately, matching Delphi's fresh
+    /// `CreateFromStrats(Strats)` response.
+    strategy_snapshot_provider:
+        Option<Box<dyn FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static>>,
 }
 
 impl EventDispatcher {
@@ -197,6 +254,28 @@ impl EventDispatcher {
     /// См. `DEVIATION.md #23`.
     pub fn set_server_time_delta_source(&mut self, handle: Arc<AtomicU64>) {
         self.server_time_delta_source = Some(handle);
+    }
+
+    /// Register a provider for fresh strategy snapshots.
+    ///
+    /// The provider is called with the UID of the incoming
+    /// `TStratSnapshotRequest`. The reply itself is sent with a new command UID,
+    /// as Delphi creates a fresh `TStratSnapshot` command object for the answer.
+    ///
+    /// If no provider is registered, or the provider returns `None`,
+    /// `SnapshotRequested` is still emitted and the application can answer
+    /// manually with [`crate::client::Client::strat_send_snapshot_batch`] or
+    /// [`crate::client::Client::strat_send_snapshot_payload`].
+    pub fn set_strategy_snapshot_provider<F>(&mut self, provider: F)
+    where
+        F: FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static,
+    {
+        self.strategy_snapshot_provider = Some(Box::new(provider));
+    }
+
+    /// Remove the strategy snapshot provider.
+    pub fn clear_strategy_snapshot_provider(&mut self) {
+        self.strategy_snapshot_provider = None;
     }
 
     /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
@@ -511,10 +590,11 @@ impl EventDispatcher {
         // последующий update в одном datagram'е). Шлём один запрос на пару.
         use std::collections::HashSet;
         let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
-        // Auto-action 2: StratEvent::SnapshotRequested → если есть last_full_snapshot
-        // — auto-echo через client.strat_send_snapshot_payload. Аналог Delphi
-        // `MoonProtoClient.pas:695-699` где либа сама echo'ит. App получает event для
-        // UI awareness, но НЕ обязан слать reply.
+        // Auto-action 2: StratEvent::SnapshotRequested → если приложение
+        // зарегистрировало provider, берём fresh snapshot из него и шлём ответ.
+        // Delphi `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ
+        // через `TStratSnapshot.CreateFromStrats(Strats)`, кеш последнего
+        // server-snapshot там не используется.
         let mut snapshot_requested_uid: Option<u64> = None;
         // Auto-action 3: OrderEvent::Snapshot → CleanupMissingWorkers.
         // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
@@ -542,20 +622,19 @@ impl EventDispatcher {
                 &crate::commands::engine_request::request_order_book_full(mi, bk),
             );
         }
-        if snapshot_requested_uid.is_some() {
-            if let Some(snapshot) = self.strats.last_full_snapshot.as_ref() {
-                // Echo последний полученный full snapshot. Сервер примет как актуальный
-                // снимок стратегий клиента. Если клиент локально не модифицировал —
-                // это корректно. Иначе локальные изменения теряются (см. F5 docstring).
-                client.strat_send_snapshot_payload(
-                    snapshot.server_epoch,
-                    snapshot.client_max_last_date,
-                    snapshot.full,
-                    &snapshot.data,
-                );
+        if let Some(uid) = snapshot_requested_uid {
+            if let Some(provider) = self.strategy_snapshot_provider.as_mut() {
+                if let Some(snapshot) = provider(uid) {
+                    client.strat_send_snapshot_payload(
+                        snapshot.server_epoch,
+                        snapshot.client_max_last_date,
+                        snapshot.full,
+                        &snapshot.data,
+                    );
+                }
             }
-            // Если last_full_snapshot=None — событие всё равно эмиттится в `out`,
-            // потребитель сам обработает SnapshotRequested (как раньше).
+            // Если provider не задан или вернул None — событие всё равно эмиттится
+            // в `out`, потребитель может ответить вручную.
         }
         if order_snapshot_applied {
             let missing = self.orders.missing_after_snapshot();
@@ -1025,16 +1104,20 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requested_with_cached_snapshot_triggers_auto_echo() {
-        // Active library auto-action 2: при SnapshotRequested → если есть
-        // last_full_snapshot — либа сама шлёт его обратно (без участия app).
+    fn snapshot_requested_with_provider_triggers_fresh_reply() {
+        // Active library auto-action 2: при SnapshotRequested → если приложение
+        // дало provider, либа берёт fresh snapshot из provider'а и шлёт ответ.
         let mut d = EventDispatcher::new();
-        let cached_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
-        d.strats.last_full_snapshot = Some(crate::commands::strat::StratSnapshot {
-            server_epoch: 7,
-            client_max_last_date: 99,
-            full: true,
-            data: cached_snapshot.clone(),
+        let fresh_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let fresh_for_provider = fresh_snapshot.clone();
+        d.set_strategy_snapshot_provider(move |uid| {
+            assert_eq!(uid, 42);
+            Some(StrategySnapshotReply::from_payload(
+                7,
+                99,
+                true,
+                fresh_for_provider.clone(),
+            ))
         });
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -1046,14 +1129,14 @@ mod tests {
 
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — должна быть отправка Command::Strat с полным
+        // Drain event channel — должна быть отправка Command::Strat с fresh
         // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
         let mut found_snapshot_send = false;
         while let Ok(ev) = client.event_rx.try_recv() {
             if let crate::client::ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::Strat as u8 {
                     let data = &msg.item.data;
-                    if data.len() == 11 + 8 + 8 + 4 + 1 + cached_snapshot.len() {
+                    if data.len() == 11 + 8 + 8 + 4 + 1 + fresh_snapshot.len() {
                         let cmd_subcode = data[0];
                         let server_epoch = u64::from_le_bytes(data[11..19].try_into().unwrap());
                         let client_max_last_date = u64::from_le_bytes(data[19..27].try_into().unwrap());
@@ -1063,9 +1146,9 @@ mod tests {
                         if cmd_subcode == 2
                             && server_epoch == 7
                             && client_max_last_date == 99
-                            && size == cached_snapshot.len() as u32
+                            && size == fresh_snapshot.len() as u32
                             && full
-                            && tail == cached_snapshot.as_slice()
+                            && tail == fresh_snapshot.as_slice()
                         {
                             found_snapshot_send = true;
                         }
@@ -1074,7 +1157,7 @@ mod tests {
             }
         }
         assert!(found_snapshot_send,
-            "после SnapshotRequest с cached snapshot — должна быть auto-echo отправка");
+            "после SnapshotRequest с provider — должна быть fresh отправка");
 
         // out содержит event SnapshotRequested (app тоже видит, для UI awareness).
         let has_snapshot_event = out.iter().any(|ev| matches!(
@@ -1085,18 +1168,17 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requested_without_cached_snapshot_does_not_send() {
-        // Если у нас НЕТ last_full_snapshot — auto-echo не происходит.
-        // App получает event и может сам решить что делать.
+    fn snapshot_requested_without_provider_does_not_send() {
+        // Если provider не задан — auto-echo не происходит. App получает event
+        // и может сам решить что делать.
         let mut d = EventDispatcher::new();
-        assert!(d.strats.last_full_snapshot.is_none());
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         let mut out = Vec::new();
         let payload = crate::commands::strat::build_snapshot_request(99);
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — НЕ должно быть Command::Strat send'ов (нет cached snapshot).
+        // Drain event channel — НЕ должно быть Command::Strat send'ов (нет provider).
         let mut strat_sends = 0;
         while let Ok(ev) = client.event_rx.try_recv() {
             if let crate::client::ClientEvent::Send(msg) = ev {
@@ -1105,7 +1187,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(strat_sends, 0, "без cached snapshot — auto-echo не должен сработать");
+        assert_eq!(strat_sends, 0, "без provider — auto-echo не должен сработать");
 
         // Но event SnapshotRequested всё равно прилетает app'у.
         let has_event = out.iter().any(|ev| matches!(

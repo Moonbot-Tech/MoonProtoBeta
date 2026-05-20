@@ -13,7 +13,7 @@
 //! полей через `HashMap<String, FieldValue>` для UI-рендеринга.
 
 use std::collections::HashMap;
-use crate::commands::strat::{StratCommand, StratCheckedItem, StratSnapshot};
+use crate::commands::strat::{StratCommand, StratCheckedItem};
 use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, StrategySnapshot};
 
 /// Информация по одной стратегии — то что хранится клиентом.
@@ -60,10 +60,11 @@ pub enum StratEvent {
     CheckedSynced { changed: usize, is_delta: bool },
     /// Эхо checked-state от сервера (после нашего sync).
     CheckedEcho { count: usize },
-    /// **Сервер просит у нас snapshot стратегий** (audit_responsibility B3).
-    /// Это `TStratSnapshotRequest` от сервера. Если у диспетчера есть cached full
-    /// snapshot, `dispatch_into_active` отвечает автоматически. Иначе приложение
-    /// может построить typed snapshot через `client.strat_send_snapshot_batch(...)`.
+    /// **Сервер просит у нас snapshot стратегий**.
+    /// Это `TStratSnapshotRequest` от сервера. Delphi отвечает fresh rebuild'ом
+    /// из живого `Strats`; Rust dispatcher может сделать то же через
+    /// application-provided strategy snapshot provider, либо приложение отвечает
+    /// вручную через `client.strat_send_snapshot_batch(...)`.
     SnapshotRequested { uid: u64 },
     /// Команда не применима (Unknown).
     Ignored,
@@ -82,23 +83,6 @@ pub struct StratsState {
     /// Серверный epoch последнего применённого snapshot'а — для детекции
     /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
-    /// Последний полный `TStratSnapshot` от сервера (`full=true`). Хранится для
-    /// **auto-echo** на серверный `TStratSnapshotRequest`: либа сама шлёт обратно
-    /// корректный CmdId=2 пакет через `client.strat_send_snapshot_payload(...)`
-    /// в `EventDispatcher::dispatch_into_active`.
-    ///
-    /// Delphi в этой точке пересобирает fresh snapshot из живого `Strats`;
-    /// cached echo остаётся открытым расхождением, см. `DEVIATION.md #31`.
-    ///
-    /// **Внимание**: echo'ится **последний полученный** snapshot. Если приложение
-    /// модифицировало стратегии локально и эти изменения ещё не дошли до сервера
-    /// — они потеряются. Для нормального flow клиент шлёт мутации через
-    /// `client.strat_*` API → сервер их применяет → следующий SnapshotRequest
-    /// получит уже изменённое. См. responsibility audit F5.
-    ///
-    /// `None` пока не пришёл ни один full snapshot — в этом случае auto-echo
-    /// пропускается, app получит `StratEvent::SnapshotRequested` как раньше.
-    pub last_full_snapshot: Option<StratSnapshot>,
 }
 
 impl StratsState {
@@ -116,9 +100,6 @@ impl StratsState {
             StratCommand::Snapshot(snap) => {
                 self.last_server_epoch = snap.server_epoch;
                 if snap.full {
-                    // Сохраняем для auto-echo на следующий SnapshotRequest (audit F5).
-                    // Clone — single full snapshot, частота низкая (~раз в сессию).
-                    self.last_full_snapshot = Some(snap.clone());
                     StratEvent::SnapshotFull { server_epoch: snap.server_epoch, raw_data: snap.data }
                 } else {
                     StratEvent::SnapshotPartial { server_epoch: snap.server_epoch, raw_data: snap.data }
@@ -223,7 +204,6 @@ impl StratsState {
     pub fn clear(&mut self) {
         self.by_id.clear();
         self.last_server_epoch = 0;
-        self.last_full_snapshot = None;
     }
 }
 

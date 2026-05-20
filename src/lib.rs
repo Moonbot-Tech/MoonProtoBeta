@@ -123,5 +123,5 @@ pub use client::{
     EventFn, EventWithStateFn, InitConfig, InitError, InitResult, LifecycleEvent,
     RefreshConfig, EngineRequestError,
 };
-pub use events::{Event, EventDispatcher};
+pub use events::{Event, EventDispatcher, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};

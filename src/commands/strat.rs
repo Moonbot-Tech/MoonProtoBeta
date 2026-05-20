@@ -4,8 +4,8 @@
 //!
 //! ## CmdId маппинг
 //! - 0 — TBaseStratCommand (base)
-//! - 1 — TStratSnapshotRequest (empty, C→S)
-//! - 2 — TStratSnapshot (S→C, Sliced, UK_StratSnapshot)
+//! - 1 — TStratSnapshotRequest (empty, S→C)
+//! - 2 — TStratSnapshot (both directions, Sliced, UK_StratSnapshot)
 //! - 3 — TStratDelete (S↔C)
 //! - 4 — TStratSellPriceUpdate (S↔C, UK_StratSellPriceUpdate)
 //! - 5 — TStratCheckedSync (S↔C, Sliced)

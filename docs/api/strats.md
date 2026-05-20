@@ -30,8 +30,8 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
                 println!("checked changed={changed} delta={is_delta}");
             }
             StratEvent::SnapshotRequested { .. } => {
-                // With a cached full snapshot, the library auto-echoes it.
-                // This event is still emitted for UI/log visibility.
+                // Reply with current application-owned strategies, or register
+                // a snapshot provider on the dispatcher to do this automatically.
             }
             _ => {}
         }
@@ -112,5 +112,19 @@ client.strat_send_snapshot_batch(server_epoch, true, &strategies);
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
 
-`EventDispatcher::dispatch_into_active` auto-echoes the last full snapshot when
-the server sends `SnapshotRequested` and a cached full snapshot exists.
+For automatic replies, register a fresh snapshot provider on the dispatcher:
+
+```rust
+use moonproto::StrategySnapshotReply;
+use moonproto::commands::strategy_serializer::StrategySnapshot;
+
+dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
+    let strategies: Vec<StrategySnapshot> = load_current_strategies();
+    let server_epoch = current_server_epoch();
+    Some(StrategySnapshotReply::from_strategies(server_epoch, true, &strategies))
+});
+```
+
+The provider must return current application-owned strategies. The dispatcher
+does not echo the last server snapshot, because Delphi rebuilds the answer from
+the live `Strats` object on every request.

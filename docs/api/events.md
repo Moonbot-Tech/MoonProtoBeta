@@ -45,7 +45,8 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 - links the dispatcher to this client's `ServerTimeDelta`;
 - resets per-session trades/orderbook state after server-token change;
 - sends `RequestOrderBookFull` when an orderbook gap requires a full snapshot;
-- emits strategy snapshot requests while auto-echoing a cached full snapshot;
+- emits strategy snapshot requests and, when a strategy snapshot provider is
+  registered, sends a fresh application-owned snapshot reply;
 - cooperates with the client loop's periodic trades-gap tick.
 
 ## Event Enum
