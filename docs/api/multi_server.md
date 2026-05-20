@@ -31,13 +31,19 @@ registry, candle aggregators, server-time delta handle, and server identity.
 Run `BaseCheck` during init to fill `client.server_info()`:
 
 ```rust
+use moonproto::{connect_and_init, ConnectConfig, InitConfig};
+
 let init = InitConfig {
     base_check: true,
     auth_check: true,
     fetch_markets: true,
     ..Default::default()
 };
-run_init_sequence(&mut session.client, &mut session.dispatcher, init)?;
+connect_and_init(
+    &mut session.client,
+    &mut session.dispatcher,
+    ConnectConfig::new(init),
+)?;
 
 let info = session.client.server_info();
 let label = info.server_name.as_deref().unwrap_or("Server");

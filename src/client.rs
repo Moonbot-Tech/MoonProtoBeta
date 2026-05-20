@@ -4400,6 +4400,77 @@ impl std::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
+/// Configuration for [`connect_and_init`].
+///
+/// This is the common consumer entry point when an application wants a ready
+/// connection before it starts issuing one-shot requests or subscriptions.
+#[derive(Debug, Clone)]
+pub struct ConnectConfig {
+    /// Maximum time to wait for the client to become connected.
+    pub connect_timeout: Duration,
+    /// Initial requests/subscriptions to run after the transport connection is ready.
+    pub init: InitConfig,
+}
+
+impl Default for ConnectConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(15),
+            init: InitConfig::default(),
+        }
+    }
+}
+
+impl ConnectConfig {
+    pub fn new(init: InitConfig) -> Self {
+        Self {
+            init,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+}
+
+/// Errors returned by [`connect_and_init`].
+#[derive(Debug, Clone)]
+pub enum ConnectError {
+    /// The client did not reach the connected/authenticated state before the
+    /// configured timeout expired.
+    ConnectTimedOut { timeout: Duration },
+    /// The transport connection succeeded, but one of the init steps failed.
+    Init(InitError),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectTimedOut { timeout } => {
+                write!(f, "connection did not become ready within {:?}", timeout)
+            }
+            Self::Init(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Init(err) => Some(err),
+            Self::ConnectTimedOut { .. } => None,
+        }
+    }
+}
+
+impl From<InitError> for ConnectError {
+    fn from(err: InitError) -> Self {
+        Self::Init(err)
+    }
+}
+
 /// Wait for one Engine API response while pumping the client loop.
 ///
 /// `Client::api_*()` returns `Receiver<EngineResponse>`, but responses are only
@@ -4419,6 +4490,35 @@ fn wait_for_api_response(
 ) -> Result<crate::commands::engine_api::EngineResponse, mpsc::RecvTimeoutError> {
     // Internal wrapper, делегирует к публичному `Client::run_until_response`.
     client.run_until_response(dispatcher, rx, timeout)
+}
+
+/// Connect the client and run the configured init sequence.
+///
+/// This helper is the recommended one-shot setup path for regular consumers.
+/// It hides the transport-ready wait before [`run_init_sequence`], while still
+/// using the same `Client::run_with_dispatcher` pump internally. Applications
+/// that need a custom phased UI can keep using `run_with_dispatcher` and
+/// `run_init_sequence` directly.
+pub fn connect_and_init(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cfg: ConnectConfig,
+) -> Result<InitResult, ConnectError> {
+    if !client.is_authorized() {
+        client.run_with_dispatcher(
+            cfg.connect_timeout,
+            dispatcher,
+            Box::new(|_| {}),
+        );
+    }
+
+    if !client.is_authorized() {
+        return Err(ConnectError::ConnectTimedOut {
+            timeout: cfg.connect_timeout,
+        });
+    }
+
+    run_init_sequence(client, dispatcher, cfg.init).map_err(ConnectError::from)
 }
 
 /// Полноценный init sequence: BaseCheck → AuthCheck → GetMarketsList →

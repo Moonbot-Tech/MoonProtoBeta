@@ -86,18 +86,14 @@ client.run_with_dispatcher_state(Duration::from_secs(3600), &mut dispatcher, Box
 for protocol tools that intentionally bypass `EventDispatcher`; otherwise you are
 responsible for the recovery actions that `run_with_dispatcher` normally performs.
 
-## Initial Sync
+## Connection Setup
 
-After authorization, call `run_init_sequence` with the steps your application
-needs:
+For the common setup path, call `connect_and_init` with the init steps your
+application needs:
 
 ```rust
-use moonproto::{run_init_sequence, InitConfig};
-
-client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
-if !client.is_authorized() {
-    return Err("authorization timeout".into());
-}
+use std::time::Duration;
+use moonproto::{connect_and_init, ConnectConfig, InitConfig};
 
 let init = InitConfig {
     base_check: true,
@@ -109,12 +105,20 @@ let init = InitConfig {
     ..Default::default()
 };
 
-let result = run_init_sequence(&mut client, &mut dispatcher, init)?;
+let result = connect_and_init(
+    &mut client,
+    &mut dispatcher,
+    ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+)?;
 println!("orderbooks subscribed: {}", result.orderbooks_subscribed);
 ```
 
-The helper keeps pumping short `run_with_dispatcher` ticks while waiting for each
-Engine API response. It also fills `client.server_info()` after `BaseCheck`.
+The helper keeps the client loop running while it waits for the connection and
+for each Engine API response. It also fills `client.server_info()` after
+`BaseCheck`.
+
+Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
+needs custom progress UI between connection readiness and the init requests.
 
 ## Engine API Requests
 
@@ -246,7 +250,8 @@ client.peer_app_token();
 client.server_info();
 ```
 
-`server_info()` is populated by `run_init_sequence` when `base_check` is enabled.
+`server_info()` is populated by `connect_and_init` or `run_init_sequence` when
+`base_check` is enabled.
 For multi-server details, see [`multi_server.md`](multi_server.md).
 
 ## Shutdown

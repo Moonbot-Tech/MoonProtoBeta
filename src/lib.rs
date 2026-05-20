@@ -15,8 +15,8 @@
 //! ```ignore
 //! use std::time::Duration;
 //! use moonproto::{
-//!     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
-//!     InitConfig, LifecycleEvent,
+//!     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event,
+//!     EventDispatcher, InitConfig, LifecycleEvent,
 //! };
 //! use moonproto::state::{OrderEvent, OrderBookEvent, TradesEvent};
 //!
@@ -34,13 +34,6 @@
 //!     _ => {}
 //! }));
 //!
-//! // Phase 1: handshake до Connected{fresh:true}.
-//! client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
-//! if !client.is_authorized() {
-//!     return Err("authorization timeout".into());
-//! }
-//!
-//! // Phase 2: init sequence (helper сам прокачивает main loop через dispatcher).
 //! let init = InitConfig {
 //!     base_check: true,
 //!     auth_check: true,
@@ -50,9 +43,13 @@
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()
 //! };
-//! run_init_sequence(&mut client, &mut dispatcher, init)?;
+//! connect_and_init(
+//!     &mut client,
+//!     &mut dispatcher,
+//!     ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+//! )?;
 //!
-//! // Phase 3: long-running stream — типизированные events автоматически.
+//! // Long-running stream — типизированные events автоматически.
 //! client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
 //!     match event {
 //!         Event::Order(OrderEvent::Created(uid)) => println!("new order {uid}"),
@@ -83,7 +80,7 @@
 //! the client loop is stopped while the caller waits.
 //!
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
-//! `examples/history_bars.rs`, `examples/get_balance.rs`,
+//! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
 //! `examples/request_client_settings.rs`,
 //! `examples/order_snapshot.rs`,
@@ -122,8 +119,9 @@ pub mod events;
 
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};
 pub use client::{
-    run_init_sequence, Client, ClientConfig, EventFn, EventWithStateFn, InitConfig,
-    InitError, InitResult, LifecycleEvent, RefreshConfig, EngineRequestError,
+    connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
+    EventFn, EventWithStateFn, InitConfig, InitError, InitResult, LifecycleEvent,
+    RefreshConfig, EngineRequestError,
 };
 pub use events::{Event, EventDispatcher};
 pub use key_import::{import_key, ImportedKeys};

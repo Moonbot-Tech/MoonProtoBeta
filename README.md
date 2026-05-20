@@ -25,8 +25,8 @@ moonproto = { path = "../moonproto" }
 ```rust
 use std::time::Duration;
 use moonproto::{
-    import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
-    InitConfig, LifecycleEvent,
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event,
+    EventDispatcher, InitConfig, LifecycleEvent,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,11 +46,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }));
 
-    client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
-    if !client.is_authorized() {
-        return Err("authorization timeout".into());
-    }
-
     let init = InitConfig {
         base_check: true,
         auth_check: true,
@@ -60,7 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         ..Default::default()
     };
-    run_init_sequence(&mut client, &mut dispatcher, init)?;
+    connect_and_init(
+        &mut client,
+        &mut dispatcher,
+        ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+    )?;
 
     client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
         match event {
@@ -83,9 +82,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 1. Import keys with `import_key`.
 2. Build configuration with `ClientConfig::new`.
 3. Create `Client` and one `EventDispatcher` per connection.
-4. Run `client.run_with_dispatcher(...)` until authorization.
-5. Call `run_init_sequence(&mut client, &mut dispatcher, InitConfig { ... })`.
-6. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
+4. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
+5. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
+
+Use the lower-level `run_with_dispatcher` plus `run_init_sequence` pair only
+when the UI needs to show custom progress between the transport connection and
+the init requests.
 
 `run_with_dispatcher` is the main high-level entry point. It dispatches incoming
 payloads into typed events and performs library-owned recovery work:
@@ -160,9 +162,9 @@ typed methods on `ClientSender`.
 Create one `Client` and one `EventDispatcher` per server. State, sockets,
 pending API responses, subscriptions, and server-time delta are per client.
 
-After `run_init_sequence`, `client.server_info()` contains the optional server
-identity returned by `BaseCheck`: bot id, server name, exchange name, base
-currency, and version fields.
+After `connect_and_init` with `base_check` enabled, `client.server_info()`
+contains the optional server identity returned by `BaseCheck`: bot id, server
+name, exchange name, base currency, and version fields.
 
 See `docs/api/multi_server.md`.
 
@@ -183,6 +185,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/client_test.rs` — basic live connection smoke test.
 - `examples/trading_flow.rs` — phased handshake, init, subscriptions, and stream.
 - `examples/history_bars.rs` — request and parse historical candles.
+- `examples/list_markets.rs` — fetch the market catalog and print a summary.
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
 - `examples/request_client_settings.rs` — request the current UI settings snapshot.

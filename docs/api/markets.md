@@ -36,11 +36,15 @@ if tags.contains(TokenTags::ALPHA) {
 Initial fetch:
 
 ```rust
+use moonproto::{connect_and_init, ConnectConfig, InitConfig};
+
 let init = InitConfig {
+    base_check: true,
+    auth_check: true,
     fetch_markets: true,
     ..Default::default()
 };
-run_init_sequence(&mut client, &mut dispatcher, init)?;
+connect_and_init(&mut client, &mut dispatcher, ConnectConfig::new(init))?;
 ```
 
 Long-running price refresh is controlled by `ClientConfig.refresh` and is enabled

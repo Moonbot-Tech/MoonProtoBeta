@@ -14,6 +14,7 @@ Application
 moonproto
   Client              UDP, handshake, retry, reconnect, NTP, pending API
   EventDispatcher     typed events + read-only state models
+  connect_and_init    ready connection + initial requests in one call
   run_init_sequence   BaseCheck/AuthCheck/markets/balances/subscriptions
   commands::*         byte-level parsers/builders
   state::*            orders, orderbooks, trades, balances, strategies, markets
@@ -29,7 +30,8 @@ Use one `Client` plus one `EventDispatcher` per server connection.
 ```rust
 use std::time::Duration;
 use moonproto::{
-    import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig,
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig,
+    EventDispatcher, InitConfig,
 };
 
 let keys = import_key(KEY_B64).expect("invalid key");
@@ -37,9 +39,6 @@ let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 
 let mut client = Client::new(cfg);
 let mut dispatcher = EventDispatcher::new();
-
-client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
-assert!(client.is_authorized());
 
 let init = InitConfig {
     base_check: true,
@@ -50,7 +49,11 @@ let init = InitConfig {
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
-run_init_sequence(&mut client, &mut dispatcher, init)?;
+connect_and_init(
+    &mut client,
+    &mut dispatcher,
+    ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+)?;
 
 client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
     let _ = event;
@@ -93,5 +96,5 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 `commands::*` and `state::*` remain public for custom tooling, tests, and advanced
 consumers. Regular applications should prefer `Client::run_with_dispatcher`,
-`run_init_sequence`, typed `Client::request_*` helpers, `Client::subscribe_*`,
-and the typed events.
+`connect_and_init`, typed `Client::request_*` helpers,
+`Client::subscribe_*`, and the typed events.

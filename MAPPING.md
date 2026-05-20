@@ -409,6 +409,7 @@
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 | E-W9 | Однопоточный SendAndWait-style Engine API flow без ручного `Receiver` wait/parsing | client.rs:`request_engine_response` + typed `request_*` helpers | ✅ |
+| E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence` | ✅ |
 
 ---
 
