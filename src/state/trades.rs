@@ -100,7 +100,8 @@ pub enum TradesEvent {
     Apply(TradesPacket),
     /// Обнаружен gap: пропущены packet_num в `[start..=end]`. Bucket создан, retry начнётся через tick().
     GapDetected { start: u16, end: u16 },
-    /// Пакет был фактически дубликат (packet_num == last) — отброшен.
+    /// Пакет был фактически дубликат (packet_num == last).
+    /// Delphi не двигает gap-state для него, но всё равно применяет payload дальше.
     Duplicate,
     /// Пакет пришёл вне диапазона — может быть после reset, отображает packet_num.
     OutOfOrder { packet_num: u16 },
@@ -236,8 +237,13 @@ impl TradesState {
         }
 
         // === Дубликат ===
+        // Delphi `ProcessTradesStream`: ветка `PacketNum = LastTradesPacketNum`
+        // только логирует duplicate; после tracking-блока процедура всё равно
+        // читает секции и применяет trades. Сохраняем это: сначала diagnostic
+        // event, затем Apply того же payload.
         if packet_num == self.last_packet_num {
             events.push(TradesEvent::Duplicate);
+            events.push(TradesEvent::Apply(pkt));
             return events;
         }
 
@@ -353,11 +359,13 @@ impl TradesState {
             }
             let bucket_range = (b.start_num, b.end_num);
             events.push(TradesEvent::GapFilled { packet_num: pkt.packet_num, bucket_seq_range: bucket_range });
-            events.push(TradesEvent::Apply(pkt));
         } else {
-            // Resend пришёл для давно закрытого bucket'а — игнор.
+            // Resend пришёл для давно закрытого bucket'а. Delphi TrackPackets=False
+            // не помечает bucket, но всё равно ниже разбирает секции и применяет
+            // trades; поэтому отдаём diagnostic OutOfOrder + Apply.
             events.push(TradesEvent::OutOfOrder { packet_num: pkt.packet_num });
         }
+        events.push(TradesEvent::Apply(pkt));
         events
     }
 
@@ -511,6 +519,9 @@ mod tests {
         let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(100), 1010);
         assert!(matches!(evs[0], TradesEvent::Duplicate));
+        assert!(matches!(evs[1], TradesEvent::Apply(_)),
+            "Delphi logs duplicate but still applies the packet payload");
+        assert_eq!(s.last_packet_num(), 100, "duplicate must not advance tracking state");
     }
 
     #[test]
@@ -532,6 +543,28 @@ mod tests {
         let evs = s.on_packet(make_pkt(101), 1020); // fills bucket
         let has_filled = evs.iter().any(|e| matches!(e, TradesEvent::GapFilled { packet_num: 101, .. }));
         assert!(has_filled);
+    }
+
+    #[test]
+    fn late_resend_outside_bucket_is_still_applied_like_delphi() {
+        let mut s = TradesState::new();
+        let evs = s.on_packet_resend(make_pkt(777));
+        assert!(matches!(evs[0], TradesEvent::OutOfOrder { packet_num: 777 }));
+        assert!(matches!(evs[1], TradesEvent::Apply(_)),
+            "Delphi TrackPackets=False applies resend payload even when no bucket matches");
+        assert_eq!(s.last_packet_num(), 0, "resend packets must not advance live tracking");
+    }
+
+    #[test]
+    fn resend_inside_bucket_marks_gap_and_applies_once() {
+        let mut s = TradesState::new();
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(103), 1010);
+        let evs = s.on_packet_resend(make_pkt(101));
+        assert!(matches!(evs[0], TradesEvent::GapFilled { packet_num: 101, .. }));
+        assert!(matches!(evs[1], TradesEvent::Apply(_)));
+        assert_eq!(evs.len(), 2);
+        assert_eq!(s.last_packet_num(), 103, "resend packets must not advance live tracking");
     }
 
     #[test]

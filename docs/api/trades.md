@@ -40,7 +40,7 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
                 }
             }
             TradesEvent::GapDetected { start, end } => log_gap(*start, *end),
-            TradesEvent::Duplicate => {}
+            TradesEvent::Duplicate => log_duplicate_packet(),
             TradesEvent::OutOfOrder { packet_num } => log_out_of_order(*packet_num),
             TradesEvent::GapFilled { packet_num, .. } => log_gap_filled(*packet_num),
             TradesEvent::BucketClosed { .. } => {}
@@ -50,6 +50,10 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 ```
 
 `qty` sign encodes direction: positive is buy-side, negative is sell-side.
+
+`Duplicate` and resend-side `OutOfOrder` are diagnostic events. The dispatcher
+still emits `Apply(packet)` for the same packet payload, matching the Delphi
+client's stream handling.
 
 ## Public Types
 

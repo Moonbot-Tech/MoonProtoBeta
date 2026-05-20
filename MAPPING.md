@@ -221,6 +221,7 @@
 | TS11 | MPC_TradesResendResponse batch parser | multi-packet response | parse_trades_resend_response | ✅ |
 | TS12 | on_packet_resend (не двигает last_packet_num) | historical apply | state/trades.rs:on_packet_resend | ✅ |
 | TS13 | MoonProtoEngine.pas:1649-1658 overflow gap (`gap > MAX_RECVD_SIZE` / buckets full) | reset buckets, текущий пакет всё равно применяется, следующий пакет заново стартует tracking | state/trades.rs:overflow branch | ✅ |
+| TS14 | MoonProtoEngine.pas:1625-1721 duplicate/resend tracking branches | duplicate/out-of-bucket resend не двигают tracking, но payload всё равно применяется секциями ниже | state/trades.rs:on_packet duplicate + on_packet_resend out-of-order emit diagnostic + Apply | ✅ |
 
 ---
 

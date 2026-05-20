@@ -98,8 +98,8 @@ The dispatcher updates these states automatically when relevant packets arrive.
 |---|---|
 | `Order` | Parses `TradeCommand`, applies `Orders`, emits `Event::Order`. |
 | `OrderBook` | Drops until market indexes are synchronized, applies `OrderBooks`, emits one or more `Event::OrderBook`. |
-| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` / `GapDetected` / `Duplicate` / `OutOfOrder` / `GapFilled` / `BucketClosed`). |
-| `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter. |
+| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` / `GapDetected` / `Duplicate` / `OutOfOrder` / `GapFilled` / `BucketClosed`). Duplicate packets also emit `Apply` for their payload. |
+| `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Apply` after `OutOfOrder`. |
 | `Balance` | Applies balance subcommands `2/3/4`; subcommand `6` becomes typed `Event::Arb`. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. |
 | `UI` | Applies settings state and emits `Event::Settings`. |
