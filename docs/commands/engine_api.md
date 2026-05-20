@@ -1,112 +1,142 @@
-# MPC_API — Engine RPC
+# MPC_API - Engine RPC
 
-`MPC_API` (channel byte 31) — RPC-канал для запросов к торговому engine'у сервера
-(подключение к бирже, баланс, ордера, candles). 31 метод определён в перечислении
-`commands::engine_api::EngineMethod`.
+`MPC_API` (channel byte 31) is the request/response RPC channel used for calls
+into the server-side trading engine: exchange connectivity checks, balances,
+orders, candles, subscriptions, and related account operations. The method id is
+defined by `commands::engine_api::EngineMethod`.
 
-## Wire format
+## Wire Format
 
-### Request (C → S)
+### Request (C -> S)
 
-```
-[CmdId=2]        — 1 byte  — request marker
-[ver=3]          — 2 bytes LE — protocol version
-[UID]            — 8 bytes LE — unique request id (для match'а ответа)
-[Method]         — 1 byte  — EngineMethod variant (см. `engine_api.rs`)
-[params...]      — variable, per-method
-```
+`TEngineRequest` is a regular MoonProto command with a common command header and
+the engine request body:
 
-UID — обязательно уникальный per-request. Клиент сохраняет `Receiver<EngineResponse>`
-в pending registry под этим UID. Ответ от сервера приходит с тем же UID, диспетчер
-доставляет в зарегистрированный `Receiver`.
-
-### Response (S → C)
-
-```
-[CmdId=1]        — 1 byte  — response marker
-[ver=3]          — 2 bytes LE
-[UID]            — 8 bytes LE — echo от request'а
-[Method]         — 1 byte  — EngineMethod (для каких метод этот ответ)
-[Success]        — 1 byte  — boolean (0 = error, 1 = success)
-[ErrorTextLen]   — 2 bytes LE
-[ErrorText]      — UTF-8, ErrorTextLen байт — диагностика при Success=0
-[Data]           — variable, формат зависит от Method
+```text
+[CmdId=2]            1 byte       request marker
+[ver=3]              2 bytes LE   command protocol version
+[UID]                8 bytes LE   request command uid
+[Method]             1 byte       EngineMethod ordinal
+[MarketName]         u16 + UTF-8  single-market argument, or an empty string
+[MarketNamesCount]   i32 LE       number of batch market names
+[MarketNames...]     repeated     each item is u16 length + UTF-8
+[ParamsSize]         i32 LE       byte length of Params
+[Params]             variable     method-specific payload
 ```
 
-Формат `Data` различается per-метод. См. doc comments на каждом `EngineMethod`
-variant'е (`cargo doc --open` → `EngineMethod`). Парсеры специфичных форматов:
+`UID` must be unique per request. The client stores a
+`Receiver<EngineResponse>` in the pending registry under this uid. The server
+copies it into `RequestUID` in the response, and the dispatcher delivers the
+response to the registered receiver.
+
+### Response (S -> C)
+
+`TEngineResponse` also starts with the common command header. The header's
+`own_UID` belongs to the response command itself; request matching uses
+`RequestUID`.
+
+```text
+[CmdId=1]            1 byte       response marker
+[ver=3]              2 bytes LE   command protocol version
+[own_UID]            8 bytes LE   response command uid
+[RequestUID]         8 bytes LE   copied from request UID
+[Method]             1 byte       EngineMethod ordinal
+[Success]            1 byte       Delphi Boolean (0 = error, non-zero = success)
+[ErrorCode]          i32 LE       server-side diagnostic code
+[ErrorMsg]           u16 + UTF-8  server-side diagnostic text
+[IsCompressed]       1 byte       Delphi Boolean
+[DataSize]           i32 LE       byte length of Data on the wire
+[Data]               variable     method-specific response payload
+```
+
+`parse_engine_response` strips the common header, matches by `RequestUID`, and
+DEFLATE-decompresses `Data` when `IsCompressed` is set. The public
+`EngineResponse::data` field contains the decompressed payload.
+
+The `Data` format is method-specific. See the doc comments on each
+`EngineMethod` variant (`cargo doc --open` -> `EngineMethod`). Parsers for
+common response payloads:
 
 | Method | Parser |
 |--------|--------|
-| `BaseCheck` | [`commands::engine_api::parse_base_check_response`] → `ServerInfo` |
-| `AuthCheck` | [`commands::engine_api::parse_auth_check_response`] → `AuthCheckResponse` |
-| `GetMarketsList` / `UpdateMarketsList` | [`commands::markets::parse_markets_list_response`] |
+| `BaseCheck` | [`commands::engine_api::parse_base_check_response`] -> `ServerInfo` |
+| `AuthCheck` | [`commands::engine_api::parse_auth_check_response`] -> `AuthCheckResponse` |
+| `GetMarketsList` / `UpdateMarketsList` | [`commands::market::parse_markets_list_response`] |
 | `GetCoinCardCandles` | [`commands::candles::parse_coin_card_candles_response`] |
-| `RequestCandlesData` | [`commands::candles::CandlesAggregator::on_chunk`] (см. ниже) |
-| `GetMarketsIndexes` | inline в `EventDispatcher::dispatch` |
+| `RequestCandlesData` | [`commands::candles::CandlesAggregator::on_chunk`] (see below) |
+| `GetMarketsIndexes` | Applied inline by `EventDispatcher` |
 
-### BaseCheck response — multi-server identity
+### BaseCheck Response - Multi-Server Identity
 
-При `Success=1` сервер пишет 10 опциональных полей в `Data` (в этом порядке):
+When `Success=1`, newer servers append ten optional fields to `Data` in this
+order:
 
+```text
+[bot_id]              i64 LE                  cfg.UniqueBotID
+[server_name]         u16 length + UTF-8      cfg.BotName, default "Server"
+[exchange_code]       u8                      Ord(cfg.Header.Current)
+[exchange_name]       u16 length + UTF-8      "Binance Futures", "Hyper", ...
+[exchange_type_mask]  u8                      bit0=Spot, bit1=Futures, bit2=DEX, bit3=Predict
+[dex_name]            u16 length + UTF-8      HIP-3 DEX name for HL futures, or ""
+[base_currency_name]  u16 length + UTF-8      "USDT", "BTC", "USDC", ...
+[base_currency_code]  u8                      Ord(cfg.BaseCurrency), BC_USDT=1
+[server_version]      i32 LE                  Current_Version_Num_X
+[moonproto_version]   i32 LE                  IntMoonProtoTCPCurrentVer
 ```
-[bot_id]              i64 LE (8 bytes)         cfg.UniqueBotID
-[server_name]         u16 length + UTF-8       cfg.BotName (default "Server")
-[exchange_code]       u8                       Ord(cfg.Header.Current) (TBotPlatform)
-[exchange_name]       u16 length + UTF-8       "Binance Futures", "Hyper", ...
-[exchange_type_mask]  u8                       bit0=Spot, bit1=Futures, bit2=DEX, bit3=Predict
-[dex_name]            u16 length + UTF-8       HIP-3 dex name (HL futures) или ""
-[base_currency_name]  u16 length + UTF-8       "USDT", "BTC", "USDC", ...
-[base_currency_code]  u8                       Ord(cfg.BaseCurrency) (BC_USDT=1)
-[server_version]      i32 LE (4 bytes)         Current_Version_Num_X
-[moonproto_version]   i32 LE (4 bytes)         IntMoonProtoTCPCurrentVer
-```
 
-Forward-compat: парсер ([`parse_base_check_response`]) толерантен к truncate в любом месте — поля до точки обрыва заполнены, остальные = `None`. Старый сервер без расширения пишет пустой payload — `ServerInfo::default()`. См. [`docs/api/engine_api.md`](../api/engine_api.md#serverinfo--multi-server-identification) для семантики полей.
+Forward compatibility: [`parse_base_check_response`] accepts truncation at any
+field boundary or inside a later field. Fields decoded before the truncation are
+filled, the rest stay `None`. Older servers can return an empty payload, which
+parses as `ServerInfo::default()`. See
+[`docs/api/engine_api.md`](../api/engine_api.md#serverinfo) for field semantics.
 
-`Success=0` → `Data` пустой (как раньше).
+When `Success=0`, `Data` is empty.
 
-## Chunked responses
+## Chunked Responses
 
-`RequestCandlesData` возвращает несколько `EngineResponse` пакетов с одним UID
-(разбиение из-за размера). Pending registry **не подходит** — он удаляет sender
-после первого ответа.
+`RequestCandlesData` returns multiple `EngineResponse` packets with the same
+`RequestUID` because candle payloads can exceed a single sliced response. The
+pending registry is not suitable for this method: it removes the sender after
+the first response.
 
-Используй обычный `on_data` callback + `CandlesAggregator::on_chunk(&resp.data)` —
-вернёт `Some(merged)` когда все чанки получены.
+Use the normal `on_data` callback path and feed each `resp.data` into
+`CandlesAggregator::on_chunk(&resp.data)`. It returns `Some(merged)` once all
+chunks for the request have arrived.
 
-## Client wrappers
+## Client Wrappers
 
-Все методы имеют high-level Client-обёртку с автоматическим UID:
+Every method has a high-level `Client` wrapper with automatic uid generation:
 
 ```rust
-let rx = client.api_get_markets_list();        // ничего не передавать
-let rx = client.api_get_order(order_uid);       // с параметрами
+let rx = client.api_get_markets_list();
+let rx = client.api_get_order(order_uid);
 let rx = client.api_set_leverage("BTCUSDT", 10);
 
-let response: EngineResponse = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(5))?;
+let response: EngineResponse =
+    client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(5))?;
+
 if response.success {
     let markets = parse_markets_list_response(&response.data, version)?;
     // ...
 } else {
-    eprintln!("server error: {}", response.error_text);
+    eprintln!("server error {}: {}", response.error_code, response.error_msg);
 }
 ```
 
-Полный список — `client.api_*` методы (`cargo doc --open`).
+The full list is available as `client.api_*` methods in generated Rust docs.
 
 ## Versioning
 
-`ver` поле — текущая версия 3. При получении `ver > 3` команда **пропускается**
-(forward compatibility). При `ver < 3` — backward compatibility поведение зависит
-от метода (большинство просто работают).
+`ver` is currently `3`. Commands with `ver > 3` are skipped for forward
+compatibility. Commands with `ver < 3` use method-specific backward-compatible
+parsing where older formats exist.
 
-## Error codes
+## Errors
 
-`Success=0` означает ошибку на стороне сервера/биржи. `ErrorText` — UTF-8 строка
-для логирования / отображения в UI. Конкретные коды/типы ошибок не выделены — это
-ad-hoc текстовые сообщения биржи через engine.
+`Success=0` means the request reached the server and the trading engine returned
+an error. `ErrorCode` and `ErrorMsg` carry server or exchange diagnostics; there
+is no stable public enum of engine error codes.
 
-Если связь / парсинг ошибся (тот же UID не получен в течение reasonable timeout) —
-это **другая ошибка** уровня транспорта, не Success=0. Обнаруживается через
-`rx.recv_timeout()` → `Err`.
+Transport, parsing, and timeout failures are separate from `Success=0`. For
+example, if the same uid is not received before the caller's timeout, waiting on
+the response receiver returns a timeout error.
