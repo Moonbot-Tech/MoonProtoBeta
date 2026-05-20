@@ -67,45 +67,92 @@ fn sntp_request(host: &str, timeout_ms: u64) -> Option<(f64, f64)> {
     Some((offset, roundtrip))
 }
 
-/// Get best NTP sync (matches TMySNTP.GetBestNTP with TryCount=4).
-/// Returns offset in seconds and best round-trip in ms.
-pub fn get_best_ntp(host: &str, try_count: usize) -> NtpSyncResult {
-    let mut best_delay_ms: i64 = i64::MAX;
-    let mut best_offset: f64 = 0.0;
-    let mut timeout_ms: u64 = 500;
+#[derive(Debug, Clone)]
+struct NtpState {
+    best_delay_ms: i64,
+    receive_timeout_ms: u64,
+    synced_once: bool,
+}
 
-    for attempt in 0..try_count {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(50));
+impl Default for NtpState {
+    fn default() -> Self {
+        Self {
+            best_delay_ms: 0,
+            receive_timeout_ms: 500,
+            synced_once: false,
         }
+    }
+}
 
-        if let Some((offset, roundtrip)) = sntp_request(host, timeout_ms) {
-            let rt_ms = (roundtrip * 1000.0).round() as i64;
+fn get_best_ntp_with_state<F>(
+    state: &mut NtpState,
+    try_count: usize,
+    mut request: F,
+) -> NtpSyncResult
+where
+    F: FnMut(u64) -> Option<(f64, f64)>,
+{
+    let force_sync = state.best_delay_ms == 0;
+    state.best_delay_ms = ((state.best_delay_ms as f64 * 1.05).round() as i64) + 1;
+    let mut large_offset_retry_count = 0;
+    let mut attempts = 0usize;
+    let mut effective_try_count = try_count;
 
-            if rt_ms < best_delay_ms {
-                best_delay_ms = rt_ms;
-                best_offset = offset;
+    while attempts < effective_try_count {
+        attempts += 1;
+
+        if let Some((offset, roundtrip)) = request(state.receive_timeout_ms) {
+            let rt_ms = (roundtrip.abs() * 1000.0).round() as i64;
+
+            if rt_ms < 50 || force_sync || rt_ms < state.best_delay_ms {
+                if offset.abs() > 60.0 && state.synced_once && large_offset_retry_count < 2 {
+                    large_offset_retry_count += 1;
+                    effective_try_count = 6.min(effective_try_count + 1);
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+
+                state.best_delay_ms = rt_ms;
+                state.synced_once = true;
+                return NtpSyncResult {
+                    time_offset: offset,
+                    round_trip_ms: rt_ms,
+                    synced: true,
+                };
             }
-        } else {
-            timeout_ms = (timeout_ms + 100).min(2000);
         }
+
+        std::thread::sleep(Duration::from_millis(50));
     }
 
-    if best_delay_ms == i64::MAX {
+    if !state.synced_once {
+        state.receive_timeout_ms = (state.receive_timeout_ms + 100).min(2000);
+    }
+
+    NtpSyncResult {
+        time_offset: 0.0,
+        round_trip_ms: 0,
+        synced: false,
+    }
+}
+
+/// Get best NTP sync (matches TMySNTP.GetBestNTP with TryCount=4).
+/// Returns offset in seconds and accepted round-trip in ms.
+pub fn get_best_ntp(host: &str, try_count: usize) -> NtpSyncResult {
+    let mut state = NtpState::default();
+    let result = get_best_ntp_with_state(&mut state, try_count, |timeout_ms| {
+        sntp_request(host, timeout_ms)
+    });
+    if result.synced {
+        debug!(
+            "NTP sync ok: host={host} offset={:.1}ms rtt={}ms",
+            result.time_offset * 1000.0,
+            result.round_trip_ms
+        );
+    } else {
         warn!("NTP sync failed: all {try_count} attempts to {host} returned no valid response");
-        return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
     }
-
-    // Sanity check через [`is_reasonable_offset`] — отвергаем явно нереалистичный
-    // offset (MITM / broken RTC). См. robustness audit H4.
-    if !is_reasonable_offset(best_offset) {
-        warn!("NTP sync rejected: host={host} returned implausible offset {:.1}s (> 1 day) — possible MITM/spoof, ignoring",
-              best_offset);
-        return NtpSyncResult { time_offset: 0.0, round_trip_ms: 0, synced: false };
-    }
-
-    debug!("NTP sync ok: host={host} offset={:.1}ms rtt={}ms", best_offset * 1000.0, best_delay_ms);
-    NtpSyncResult { time_offset: best_offset, round_trip_ms: best_delay_ms, synced: true }
+    result
 }
 
 /// Convert NTP timestamp (seconds + fraction since 1900) to seconds as f64.
@@ -128,20 +175,6 @@ fn system_time_to_ntp() -> (u32, u32) {
 /// Since TDateTime is in days: offset_days = offset_seconds / 86400.
 pub fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
     offset_seconds / 86400.0
-}
-
-/// Максимально допустимый offset от NTP — 1 день. Реалистичный clock drift на
-/// современной системе — секунды, не часы. Превышение этого лимита = либо
-/// сломанный RTC (embedded device), либо MITM/DNS-spoof NTP сервер пытается
-/// сдвинуть нас на годы. В обоих случаях лучше отвергнуть offset чем применить —
-/// иначе handshake'и сервер reject'нёт по любому timestamp check.
-/// См. `audit_robustness` H4.
-pub const MAX_REASONABLE_OFFSET_SEC: f64 = 86_400.0;
-
-/// True если offset (в секундах) проходит sanity check (`|offset| ≤ 1 day`).
-/// Используется для anti-poisoning защиты в [`get_best_ntp`].
-pub fn is_reasonable_offset(offset_seconds: f64) -> bool {
-    offset_seconds.abs() <= MAX_REASONABLE_OFFSET_SEC
 }
 
 /// Background NTP sync thread — byte-exact port of `TMoonProtoTymeSyncer.Execute`
@@ -182,9 +215,13 @@ pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sy
     if let Err(e) = std::thread::Builder::new()
         .name("moonproto-ntp-sync".into())
         .spawn(move || {
+            let mut ntp_state = NtpState::default();
+
             // Initial sync (try_count=4) — пропускаем если уже shutdown
             if shutdown_thread.load(Ordering::Relaxed) { return; }
-            let first = get_best_ntp(&host, 4);
+            let first = get_best_ntp_with_state(&mut ntp_state, 4, |timeout_ms| {
+                sntp_request(&host, timeout_ms)
+            });
             let mut min_delay_ms: i64 = if first.synced {
                 apply_fn(first.time_offset);
                 first.round_trip_ms
@@ -209,7 +246,9 @@ pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sy
                 }
 
                 if try_count < 4 {
-                    let r = get_best_ntp(&host, 2);
+                    let r = get_best_ntp_with_state(&mut ntp_state, 2, |timeout_ms| {
+                        sntp_request(&host, timeout_ms)
+                    });
                     if r.synced && r.round_trip_ms < min_delay_ms {
                         min_delay_ms = r.round_trip_ms;
                         apply_fn(r.time_offset);
@@ -250,34 +289,46 @@ mod tests {
         assert!((offset_to_delphi_days(3600.0) - (1.0 / 24.0)).abs() < 1e-9);
     }
 
-    // ===== NTP poisoning reject (H4) =====
+    // ===== Delphi GetBestNTP selection =====
 
     #[test]
-    fn reasonable_offset_accepts_normal_drift() {
-        // Типичные значения NTP drift на здоровой системе — миллисекунды.
-        assert!(is_reasonable_offset(0.0));
-        assert!(is_reasonable_offset(0.001));      // 1ms
-        assert!(is_reasonable_offset(-0.5));       // -500ms
-        assert!(is_reasonable_offset(60.0));       // 1 min (после сильного drift)
-        assert!(is_reasonable_offset(3600.0));     // 1 hour
-        assert!(is_reasonable_offset(-43_200.0));  // -12 hours
+    fn first_sync_accepts_large_offset_like_delphi() {
+        let mut state = NtpState::default();
+        let result = get_best_ntp_with_state(&mut state, 1, |_| {
+            Some((31_536_000.0, 0.120))
+        });
+
+        assert!(result.synced);
+        assert_eq!(result.time_offset, 31_536_000.0);
+        assert_eq!(result.round_trip_ms, 120);
     }
 
     #[test]
-    fn reasonable_offset_rejects_implausible_values() {
-        // Если NTP отдал > 1 дня — это либо MITM, либо broken RTC.
-        assert!(!is_reasonable_offset(86_400.001));   // 1 day + 1ms
-        assert!(!is_reasonable_offset(-86_400.001));
-        assert!(!is_reasonable_offset(31_536_000.0)); // 1 year
-        assert!(!is_reasonable_offset(-31_536_000.0));
-        assert!(!is_reasonable_offset(f64::INFINITY));
+    fn already_synced_large_offset_gets_two_extra_tries() {
+        let mut state = NtpState {
+            best_delay_ms: 10,
+            receive_timeout_ms: 500,
+            synced_once: true,
+        };
+        let mut calls = 0usize;
+
+        let result = get_best_ntp_with_state(&mut state, 2, |_| {
+            calls += 1;
+            Some((120.0 + calls as f64, 0.020))
+        });
+
+        assert!(result.synced);
+        assert_eq!(calls, 3);
+        assert_eq!(result.time_offset, 123.0);
     }
 
     #[test]
-    fn reasonable_offset_boundary_exactly_one_day_accepted() {
-        // ≤ 1 day включительно — accept. NaN — reject (NaN.abs()=NaN, NaN<=86400=false).
-        assert!(is_reasonable_offset(86_400.0));
-        assert!(is_reasonable_offset(-86_400.0));
-        assert!(!is_reasonable_offset(f64::NAN));
+    fn no_sync_increases_receive_timeout_until_delphi_cap() {
+        let mut state = NtpState::default();
+
+        let result = get_best_ntp_with_state(&mut state, 2, |_| None);
+
+        assert!(!result.synced);
+        assert_eq!(state.receive_timeout_ms, 600);
     }
 }

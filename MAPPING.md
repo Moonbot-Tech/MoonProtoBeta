@@ -97,6 +97,15 @@
 | 53 | 319-358 | MPDecompress | compression.rs: synlz_decompress (algo 1) | ✅ |
 | 53a | mORMot SynLZdecompress1pas local `offset: TOffsets` scratch | decompress offsets are per-call scratch, not persistent across packets | compression.rs resets thread-local offsets before each `synlz_decompress_inner` | ✅ |
 
+## NTP time sync (IndyUDPHelper.pas + MoonProtoIntStruct.pas) → ntp.rs
+
+| # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
+|---|---|---|---|---|
+| NTP1 | IndyUDPHelper.pas:459-522 | `TMySNTP.GetBestNTP`: `BestDelay`, `ForceSync`, `ReceiveTimeout`, accept при `d < 50` / force / лучшем delay | ntp.rs: `NtpState` + `get_best_ntp_with_state` | ✅ |
+| NTP2 | IndyUDPHelper.pas:489-496 | После `SyncedOnce` offset больше 1 минуты не принимается первые 2 раза, `TryCount` расширяется до 6 | ntp.rs: `large_offset_retry_count < 2`, `effective_try_count = min(6, +1)` | ✅ |
+| NTP3 | IndyUDPHelper.pas:489-503 | Нет верхнего absolute cap на NTP offset; принятый sample записывается как `TimeOffset` | ntp.rs: удалён Rust-only `|offset| > 1 day` reject | ✅ |
+| NTP4 | MoonProtoIntStruct.pas:1246-1302 | `TMoonProtoTymeSyncer.Execute`: initial sync, 5×100ms sleep, попытки при `GetTimeTryCount < 4`, reset после 1000 циклов | ntp.rs: `spawn_sync_thread` хранит `NtpState` и повторяет цикл | ✅ |
+
 ## UpdateChannelRDown (MoonProtoIntStruct.pas:1003-1055) → ???
 
 | # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
