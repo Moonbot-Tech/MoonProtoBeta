@@ -465,6 +465,15 @@ impl EventDispatcher {
             self.server_time_delta_source = Some(client.server_time_delta_handle());
         }
 
+        // Server restart / PeerAppToken change: Delphi gates stream parsing with
+        // `FLastServerAppToken <> PeerAppToken` until `GetMarketsIndexes` succeeds.
+        // Keep the same behavioral guard here. Otherwise old `indexes_synchronized`
+        // from the previous server process would let fresh TradesStream/OrderBook
+        // packets be decoded through stale market indexes.
+        if client.peer_app_token() != 0 && !client.market_indexes_current_for_peer() {
+            self.markets.mark_indexes_stale();
+        }
+
         // Hard reconnect detection: при смене ServerToken вся per-session state
         // (trades.last_packet_num, order_books.*.expected_seq) устарела — сервер
         // начинает нумерацию заново. Сбрасываем ДО применения нового пакета.
@@ -672,6 +681,25 @@ mod tests {
         let payload = build_all_statuses_request(123);
         let events = d.dispatch(Command::Order, &payload, 1000);
         assert!(!events.is_empty(), "Order должен обрабатываться даже без indexes_synchronized");
+    }
+
+    #[test]
+    fn dispatch_into_active_invalidates_indexes_on_peer_token_mismatch() {
+        let mut d = EventDispatcher::new();
+        d.markets.apply_markets_indexes(vec!["OLDUSDT".to_string()]);
+        assert!(d.markets.indexes_synchronized);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_peer_app_tokens(0x2222, 0x1111);
+
+        let mut out = Vec::new();
+        let dummy_payload = vec![0u8; 32];
+        d.dispatch_into_active(Command::OrderBook, &dummy_payload, 1000, &mut out, &mut client);
+
+        assert!(!d.markets.indexes_synchronized,
+            "PeerAppToken mismatch must close stream gate until fresh GetMarketsIndexes");
+        assert!(out.is_empty(),
+            "OrderBook packet from a new server process must be dropped with stale indexes");
     }
 
     // =========================================================================

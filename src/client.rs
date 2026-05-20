@@ -1118,6 +1118,12 @@ impl Client {
         self.server_token = token;
     }
 
+    #[cfg(test)]
+    pub(crate) fn testing_set_peer_app_tokens(&mut self, peer: u64, tracked: u64) {
+        self.peer_app_token = peer;
+        self.tracked_indexes_peer_app_token = tracked;
+    }
+
     /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
     ///
     /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:
@@ -3857,6 +3863,10 @@ impl Client {
     /// сервера. **Внутри либы используется для auto-refetch markets indexes** — внешнему
     /// потребителю обычно не нужен, выставлен для diagnostic UI / event correlation.
     pub fn peer_app_token(&self) -> u64 { self.peer_app_token }
+
+    pub(crate) fn market_indexes_current_for_peer(&self) -> bool {
+        self.peer_app_token != 0 && self.peer_app_token == self.tracked_indexes_peer_app_token
+    }
 
     // ====================================================================
     //  BytesPerSec — O(1) EMA counter (порт Delphi AddBytesCount)

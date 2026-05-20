@@ -403,6 +403,7 @@
 | EV8 | MoonProtoClient.pas:802-876 ProcessApiCommand | dispatch(Command::API) → parse_engine_response → Event::EngineResponse | ✅ |
 | EV9 | LogMsg / Service / прочие | dispatch(_) → Event::Raw { cmd, payload } | ✅ |
 | EV10 | ParseFailed handling | для каналов с обязательным парсингом — Event::ParseFailed | ✅ |
+| EV11 | MoonProtoEngine.pas:809-816 + 1577-1580 | PeerAppToken mismatch → GetMarketsIndexes, до успеха не обрабатывать market_idx streams | dispatch_into_active закрывает `indexes_synchronized`; GetMarketsIndexes response открывает через MarketsState | ✅ |
 
 ## commands/candles.rs → MarketsU.pas + MoonProtoEngineServer.pas + MoonProtoClient.pas
 

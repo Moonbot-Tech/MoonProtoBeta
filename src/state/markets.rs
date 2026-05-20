@@ -152,6 +152,15 @@ impl MarketsState {
         MarketsEvent::IndexesUpdated { count }
     }
 
+    /// Mark current market indexes as stale after server process restart.
+    ///
+    /// The old `market_indexes` vector is intentionally kept for diagnostics and for
+    /// consumers that need to show the last known mapping, but stream parsing must be
+    /// gated until a fresh `emk_GetMarketsIndexes` response arrives.
+    pub(crate) fn mark_indexes_stale(&mut self) {
+        self.indexes_synchronized = false;
+    }
+
     /// Применить ответ `emk_CheckBinanceTags`.
     /// **Полная замена**: маркеты не в списке → теги удаляются (соответствует серверной
     /// семантике "сервер шлёт только маркеты с не-пустыми тегами, остальные = пусто").
