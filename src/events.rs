@@ -38,7 +38,7 @@ use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::trades_stream::parse_trades_packet;
 use crate::commands::engine_api::{EngineResponse, EngineMethod, parse_engine_response};
 use crate::commands::balance::parse_balance;
-use crate::commands::arb::parse_arb_prices;
+use crate::commands::arb::{ArbPayload, parse_arb_payload_compact, parse_arb_prices};
 use crate::commands::market::{
     parse_markets_list_response, parse_markets_prices_response,
     parse_markets_indexes_response, parse_token_tags_response,
@@ -60,8 +60,8 @@ pub enum Event {
     Trade(TradesEvent),
     /// Balance channel: одно событие на пакет (только для cmd_id_sub 2/3/4).
     Balance(BalanceEvent),
-    /// Arb channel (CmdId=6 внутри MPC_Balance): raw payload — структурный декодер ParseArbPayloadCompact ещё не портирован.
-    Arb { uid: u64, payload: Vec<u8> },
+    /// Arb channel (CmdId=6 внутри MPC_Balance): compact kernel→client payload.
+    Arb { uid: u64, payload: ArbPayload },
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
     /// UI channel: settings updated, MM subscribe changed, etc.
@@ -327,7 +327,14 @@ impl EventDispatcher {
                         None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
                     },
                     6 => match parse_arb_prices(payload) {
-                        Some(arb) => out.push(Event::Arb { uid: arb.uid, payload: arb.payload }),
+                        Some(arb) => {
+                            if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
+                                out.push(Event::Arb {
+                                    uid: arb.uid,
+                                    payload: parsed,
+                                });
+                            }
+                        }
                         None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
                     },
                     _ => out.push(Event::Raw { cmd, payload: payload.to_vec() }),
@@ -527,10 +534,10 @@ impl EventDispatcher {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::arb::build_arb_prices;
     use crate::commands::trade::{TradeCtx, build_all_statuses_request};
     use crate::commands::strat::build_snapshot_request;
 
@@ -588,6 +595,34 @@ mod tests {
                 assert_eq!(msg, "server log message");
             }
             other => panic!("expected ServerLog, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatcher_routes_arb_to_typed_event() {
+        let mut d = EventDispatcher::new();
+        let mut compact = vec![2u8];
+        compact.extend_from_slice(&42u16.to_le_bytes());
+        compact.push(1);
+        compact.push(7);
+        compact.extend_from_slice(&123.25f32.to_le_bytes());
+
+        let payload = build_arb_prices(9, &compact);
+        let events = d.dispatch(Command::Balance, &payload, 1000);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Arb { uid, payload } => match payload {
+                ArbPayload::Price { version, blocks } => {
+                    assert_eq!(*uid, 9);
+                    assert_eq!(*version, 2);
+                    assert_eq!(blocks.len(), 1);
+                    assert_eq!(blocks[0].market_index, 42);
+                    assert_eq!(blocks[0].prices[0].platform_code, 7);
+                    assert_eq!(blocks[0].prices[0].price, 123.25);
+                }
+                other => panic!("expected ArbPayload::Price, got {:?}", other),
+            },
+            other => panic!("expected typed Arb event, got {:?}", other),
         }
     }
 

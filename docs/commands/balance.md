@@ -11,7 +11,7 @@ Server → Client. Balance snapshots and incremental updates with bitmask optimi
 | 003 | SnapshotFull | S→C | Full map (every 10 sec, sliced) |
 | 004 | IncrUpdate | S→C | Incremental changes only (high priority) |
 | 005 | RequestRefresh | C→S | Trigger server to send fresh snapshot |
-| 006 | ArbPrices | S→C | Raw payload relay (low priority) |
+| 006 | ArbPrices | S→C | Compact arb price/isolation relay (low priority) |
 
 ## Balance Snapshot/Command (CmdId 002/003)
 

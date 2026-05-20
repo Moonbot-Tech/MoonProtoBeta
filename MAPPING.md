@@ -24,7 +24,7 @@
 | 16 | 594-617 | MPC_ProbeMTU → ProbeMTUAck (DontFragment!) | client.rs: handle_probe_mtu (TODO: DF flag) | ✅* |
 | 17 | 620-625 | MPC_Sliced → OnNewSliced | client.rs handle Sliced | ✅ |
 | 18 | 627-629 | MPC_SlicedACK → OnNewSlicedACK | client.rs: match arm (no-op, client doesn't send Sliced yet) | ✅ |
-| 19 | 632-661 | MPC_Ping → update RTT/PMTU/OverHeat/RS + rate control | client.rs: handle_ping reads all fields | ✅ |
+| 19 | 632-661 | MPC_Ping → update RTT/PMTU/OverHeat/RS + rate control | client.rs: handle_ping reads fields; PMTU clamp documented in DEVIATION #25 | DEVIATION |
 | 20 | 663 | DataRead(cmd, data, client) | client.rs → on_data callback | ✅ |
 
 ## DataRead (MoonProtoCommon.pas:541-577) → client.rs handle_command
@@ -41,7 +41,7 @@
 |---|---|---|---|---|
 | 24 | 497-500 | MPC_Crypted → DeCrypt | client.rs handle_crypted → crypted::decrypt_command | ✅ |
 | 25 | 502-509 | IsCompressed → MPDecompress | client.rs: data_read_int checks COMPRESSED_FLAG → mp_decompress | ✅ |
-| 26 | 513-528 | Ping → read TmpSlider (ACK bitmap from server) | client.rs: data_read_int reads ack_start + words | ✅ |
+| 26 | 513-528 | Ping → read TmpSlider (ACK bitmap from server) | client.rs: handle_ping reads ack_start + words inline | ✅ |
 | 27 | 530-537 | OnNewData callback | client.rs → on_data | ✅ |
 
 ## Execute main loop (MoonProtoUDPClient.pas:669-828) → client.rs run()
@@ -105,7 +105,7 @@
 
 | # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
 |---|---|---|---|---|
-| 55 | 844-876 | Apply server's ACK slider to PendingH | client.rs: tmp_slider_data stored, apply when H-commands added | ✅* |
+| 55 | 844-876 | Apply server's ACK slider to PendingH | client.rs: handle_ping applies server ACK to pending_h before H retry/send phase | ✅ |
 
 ---
 
@@ -276,7 +276,7 @@
 |---|---|---|---|---|
 | A1 | TArbPricesCommand CmdId=6 в MPC_Balance | sub-command | arb.rs:ARB_PRICES_CMD_ID=6 | ✅ |
 | A2 | header + len:i32 + payload[len] | wire | parse_arb_prices | ✅ |
-| A3 | ParseArbPayloadCompact structured decoder | bytes → typed prices | TODO (Stage 3+) — пробрасываем raw bytes | TODO |
+| A3 | ParseArbPayloadCompact structured decoder | bytes → typed prices/isolation | arb.rs:parse_arb_payload_compact + Event::Arb typed payload | ✅ |
 
 ---
 
@@ -364,8 +364,8 @@
 ## Итого Stage 2: 130+ пунктов
 
 - ✅ = 124+
-- DEVIATION = подтверждённые строки перечислены в `DEVIATION.md`
-- TODO = 1 (ParseArbPayloadCompact — Stage 3+)
+- DEVIATION = строки перечислены в `DEVIATION.md` (статус см. в реестре)
+- TODO = 0
 - N/A = 1 (UnencryptedMethods — server-side)
 
 ═══════════════════════════════════════════════════════════════════════════════

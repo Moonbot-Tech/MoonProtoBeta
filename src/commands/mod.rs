@@ -19,6 +19,7 @@ pub mod candles;
 pub use trades_stream::{TradesPacket, Trade, TradeSection};
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use balance::{BalanceUpdate, BalanceItem};
+pub use arb::{ArbPayload, ArbPriceBlock, ArbPriceItem, ArbIsolationEntry};
 pub use engine_api::{EngineResponse, EngineMethod, AuthCheckResponse, DexInfo, parse_auth_check_response};
 pub use trade::{
     TradeCommand,

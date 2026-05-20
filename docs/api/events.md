@@ -59,7 +59,7 @@ pub enum Event {
     /// `Event::Trade(...)` — no nested `Vec` allocation (audit_rust_quality #11).
     Trade(TradesEvent),
     Balance(BalanceEvent),
-    Arb { uid: u64, payload: Vec<u8> },
+    Arb { uid: u64, payload: ArbPayload },
     Strat(StratEvent),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
@@ -100,7 +100,7 @@ The dispatcher updates these states automatically when relevant packets arrive.
 | `OrderBook` | Drops until market indexes are synchronized, applies `OrderBooks`, emits one or more `Event::OrderBook`. |
 | `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` / `GapDetected` / `Duplicate` / `OutOfOrder` / `GapFilled` / `BucketClosed`). |
 | `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter. |
-| `Balance` | Applies balance subcommands `2/3/4`; subcommand `6` becomes raw `Event::Arb`. |
+| `Balance` | Applies balance subcommands `2/3/4`; subcommand `6` becomes typed `Event::Arb`. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. |
 | `UI` | Applies settings state and emits `Event::Settings`. |
 | `API` | Parses `EngineResponse`; applies markets responses when the method is markets-related. |
