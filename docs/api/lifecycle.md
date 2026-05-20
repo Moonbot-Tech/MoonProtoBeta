@@ -45,7 +45,7 @@ client.on_lifecycle(Box::new(|event| match event {
 | `Reconnecting` | Traffic was silent long enough to trigger soft reconnect. | UI only. |
 | `ServerRestart` | Server app token changed. | UI only. The library refetches indexes and replays subscriptions. |
 | `Disconnected` | Explicit shutdown through `client.disconnect()`. | Treat the client as finished. |
-| `BindFailed` | UDP bind failed across the full port-rotation range repeatedly. | Show OS/network permission or port exhaustion alert. The library keeps retrying. |
+| `BindFailed` | UDP bind failed across the full port-rotation range for at least 15 seconds; repeat events are throttled to about 50 seconds. | Show OS/network permission or port exhaustion alert. The library keeps retrying. |
 
 ## State Flow
 

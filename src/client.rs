@@ -131,6 +131,9 @@ const CLEANUP_INTERVAL_MS: i64 = 5000;     // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80;          // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64;    // MoonProtoDataStruct.pas:31
 const NEVER_SENT_MS: i64 = i64::MIN / 2;   // Эквивалент Delphi LastSentHello=0 при uptime-clock
+const NEVER_TIME_MS: i64 = i64::MIN / 2;
+const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
+const BIND_FAILED_REPEAT_EVENT_MS: i64 = 50_000;
 
 // Send priority (matches TMoonProtoSendPriority)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -494,7 +497,8 @@ pub enum LifecycleEvent {
     /// "Cannot bind UDP socket — check OS network permissions" вместо обычного
     /// "Connecting..." (иначе пользователь будет вечно ждать без понимания
     /// проблемы). Поле `consecutive_failures: u32` = сколько раз подряд весь
-    /// 200-port retry упал (1 = первый сигнал, 2 = ещё через ~5с retry, и т.д.).
+    /// 200-port retry упал. Первый сигнал приходит после 15с непрерывных неудач,
+    /// дальше не чаще одного раза в 50с.
     /// См. robustness audit H9.
     BindFailed { consecutive_failures: u32 },
     /// Детектирован перезапуск сервера: `PeerAppToken` изменился между
@@ -1009,9 +1013,17 @@ pub struct Client {
     /// Сколько раз подряд весь 200-port retry в `bind_socket` упал. На каждой
     /// серии неудач (= один main loop tick где все 200 портов отвергнуты)
     /// инкрементируется; на первом успешном bind сбрасывается в 0. Используется
-    /// для эмиссии `LifecycleEvent::BindFailed` (по нарастающей — сначала через
-    /// 3 серии что ≈15с silent retry, далее каждые 10 серий). См. audit H9.
+    /// для эмиссии `LifecycleEvent::BindFailed`. Событие throttled по реальному
+    /// elapsed time: первый сигнал после 15с непрерывных неудач, дальше не чаще
+    /// одного раза в 50с. См. audit H9.
     bind_failure_streak: u32,
+    first_bind_failure_ms: i64,
+    last_bind_failed_event_ms: i64,
+
+    /// Последнее process-global поколение clock-jump, обработанное этим Client.
+    /// В multi-server процессе один скачок часов должен быть виден каждому
+    /// соединению, поэтому глобальный сигнал нельзя consume'ить через AtomicBool.
+    seen_clock_jump_generation: u64,
 
     /// Shutdown handle для self-managed NTP-thread'а (если `cfg.ntp_host = Some`).
     /// При `Drop for Client` → `store(true)` — NTP-thread завершится в течение
@@ -1169,6 +1181,9 @@ impl Client {
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
+            first_bind_failure_ms: NEVER_TIME_MS,
+            last_bind_failed_event_ms: NEVER_TIME_MS,
+            seen_clock_jump_generation: CLOCK_JUMP_GENERATION.load(Ordering::Relaxed),
             ntp_thread_shutdown,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
@@ -2627,7 +2642,7 @@ impl Client {
 
             // Bind socket if needed
             if self.socket.is_none() && self.need_connect {
-                self.bind_socket();
+                self.bind_socket(cur_tm);
                 self.spawn_reader();
             }
 
@@ -3393,6 +3408,19 @@ impl Client {
         }
     }
 
+    /// audit_robustness H5: process-global clock-jump generation → force_disconnect.
+    /// Извлечён в метод для testability + чтобы main loop был чище.
+    fn check_clock_jump(&mut self) {
+        use std::sync::atomic::Ordering;
+        let generation = CLOCK_JUMP_GENERATION.load(Ordering::Relaxed);
+        if generation != self.seen_clock_jump_generation {
+            self.seen_clock_jump_generation = generation;
+            log::warn!(target: "moonproto::client",
+                "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
+            self.force_disconnect = true;
+        }
+    }
+
     /// Periodic timeout protection для auto-refetch markets indexes. UDP-ответ может
     /// потеряться — без этой проверки `indexes_fetch_in_flight = true` остался бы
     /// навсегда и блокировал бы TradesStream/OrderBook обработку в EventDispatcher.
@@ -3401,18 +3429,6 @@ impl Client {
     /// запрос был отправлен `> INDEXES_FETCH_TIMEOUT_MS` назад и ответ не пришёл —
     /// сбрасываем in_flight; следующий handshake/Ping увидит `peer != tracked` и
     /// переотправит запрос. Cost: 3 сравнения когда in_flight=false (hot path).
-    /// audit_robustness H5: атомарный CLOCK_JUMP_DETECTED → force_disconnect.
-    /// Извлечён в метод для testability + чтобы main loop был чище.
-    /// `swap(false)` атомарно читает и сбрасывает флаг.
-    fn check_clock_jump(&mut self) {
-        use std::sync::atomic::Ordering;
-        if CLOCK_JUMP_DETECTED.swap(false, Ordering::Relaxed) {
-            log::warn!(target: "moonproto::client",
-                "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
-            self.force_disconnect = true;
-        }
-    }
-
     fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
         const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
         if self.indexes_fetch_in_flight
@@ -4143,7 +4159,7 @@ impl Client {
         self.pending_candles.clear();
     }
 
-    fn bind_socket(&mut self) {
+    fn bind_socket(&mut self, cur_tm: i64) {
         self.force_disconnect = false;
         if self.next_port < 1024 || self.next_port > 65000 { self.next_port = 1024; }
         // Bind family выбирается по серверному адресу. Если сервер — IPv6 literal `[2001:db8::1]:3000`
@@ -4164,7 +4180,7 @@ impl Client {
                     self.auth_status = AuthStatus::Connected;
                     // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
                     self.cached_server_addr = None;
-                    self.bind_failure_streak = 0; // recovered → reset streak counter
+                    self.reset_bind_failure_tracking();
                     return;
                 }
                 Err(e) => {
@@ -4194,21 +4210,36 @@ impl Client {
             }
         }
 
-        // audit_robustness H9: bind streak → BindFailed lifecycle event.
-        // Эмитим на 3-й подряд серии (≈ 15с silent retry — достаточно показать
-        // пользователю проблему), далее каждые 10 серий (≈ 50с) чтобы UI знал
-        // что состояние не улучшилось. На успешный bind streak обнуляется.
+        self.record_bind_failure(cur_tm);
+
+        // auth_status оставляем Base — main loop попробует bind ещё раз через DEFAULT_SLEEP_MS.
+        // Если app явно вызвал disconnect() — он сам выставит need_connect=false.
+    }
+
+    fn reset_bind_failure_tracking(&mut self) {
+        self.bind_failure_streak = 0;
+        self.first_bind_failure_ms = NEVER_TIME_MS;
+        self.last_bind_failed_event_ms = NEVER_TIME_MS;
+    }
+
+    fn record_bind_failure(&mut self, cur_tm: i64) {
+        if self.first_bind_failure_ms == NEVER_TIME_MS {
+            self.first_bind_failure_ms = cur_tm;
+        }
         self.bind_failure_streak = self.bind_failure_streak.saturating_add(1);
-        let should_emit = self.bind_failure_streak == 3
-            || (self.bind_failure_streak > 3 && (self.bind_failure_streak - 3) % 10 == 0);
-        if should_emit {
+
+        let first_due = cur_tm.saturating_sub(self.first_bind_failure_ms)
+            >= BIND_FAILED_FIRST_EVENT_MS;
+        let repeat_due = self.last_bind_failed_event_ms == NEVER_TIME_MS
+            || cur_tm.saturating_sub(self.last_bind_failed_event_ms)
+                >= BIND_FAILED_REPEAT_EVENT_MS;
+
+        if first_due && repeat_due {
+            self.last_bind_failed_event_ms = cur_tm;
             self.fire_lifecycle(LifecycleEvent::BindFailed {
                 consecutive_failures: self.bind_failure_streak,
             });
         }
-
-        // auth_status оставляем Base — main loop попробует bind ещё раз через DEFAULT_SLEEP_MS.
-        // Если app явно вызвал disconnect() — он сам выставит need_connect=false.
     }
 
     pub fn is_authorized(&self) -> bool { self.authorized }
@@ -5382,7 +5413,7 @@ mod send_queue_dedup_tests {
 mod active_library_helpers_tests {
     use super::*;
     use std::sync::atomic::Ordering;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -5397,9 +5428,9 @@ mod active_library_helpers_tests {
         }
     }
 
-    /// Сериализует тесты которые трогают `CLOCK_JUMP_DETECTED` (process-global atomic).
+    /// Сериализует тесты которые трогают `CLOCK_JUMP_GENERATION` (process-global atomic).
     /// Cargo test запускает тесты в параллельных thread'ах — без этой блокировки
-    /// race на флаге даёт flaky failures.
+    /// race на generation даёт flaky failures.
     static CLOCK_JUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // =====================================================================
@@ -5409,20 +5440,19 @@ mod active_library_helpers_tests {
     #[test]
     fn clock_jump_check_triggers_force_disconnect() {
         let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed); // reset
+        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed); // reset
         let mut client = Client::new(dummy_cfg());
         assert!(!client.force_disconnect);
-        CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
+        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
         client.check_clock_jump();
         assert!(client.force_disconnect, "clock jump flag → force_disconnect = true");
-        assert!(!CLOCK_JUMP_DETECTED.load(Ordering::Relaxed),
-            "CLOCK_JUMP_DETECTED должен быть сброшен после обработки");
+        assert_eq!(client.seen_clock_jump_generation, 1);
     }
 
     #[test]
     fn clock_jump_check_noop_when_flag_clear() {
         let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed);
+        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed);
         let mut client = Client::new(dummy_cfg());
         client.check_clock_jump();
         assert!(!client.force_disconnect, "без флага — никаких изменений");
@@ -5430,16 +5460,108 @@ mod active_library_helpers_tests {
 
     #[test]
     fn clock_jump_check_idempotent_after_swap() {
-        // Двойной вызов — второй раз должен быть no-op (swap уже сбросил).
+        // Двойной вызов в том же generation — второй раз должен быть no-op.
         let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_DETECTED.store(false, Ordering::Relaxed); // reset
+        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed); // reset
         let mut client = Client::new(dummy_cfg());
-        CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
+        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
         client.check_clock_jump();
         assert!(client.force_disconnect, "первый вызов с flag=true → force_disconnect");
         client.force_disconnect = false; // reset для второй проверки
         client.check_clock_jump();
-        assert!(!client.force_disconnect, "swap сбросил флаг — второй вызов no-op");
+        assert!(!client.force_disconnect, "тот же generation — второй вызов no-op");
+    }
+
+    #[test]
+    fn clock_jump_generation_is_seen_by_each_client() {
+        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
+        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed);
+        let mut a = Client::new(dummy_cfg());
+        let mut b = Client::new(dummy_cfg());
+
+        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
+        a.check_clock_jump();
+        b.check_clock_jump();
+
+        assert!(a.force_disconnect, "первый Client должен увидеть generation");
+        assert!(b.force_disconnect, "второй Client не должен терять global signal");
+        assert_eq!(a.seen_clock_jump_generation, 1);
+        assert_eq!(b.seen_clock_jump_generation, 1);
+    }
+
+    #[test]
+    fn clock_jump_detector_ignores_normal_elapsed_time() {
+        let base = Instant::now();
+        let prev_wall = 45_000.0;
+        let now_wall = prev_wall + 120.0 / 86_400.0;
+
+        assert!(
+            !is_clock_jump(prev_wall, base, now_wall, base + Duration::from_secs(120)),
+            "обычные 120 секунд elapsed не являются скачком wall-clock",
+        );
+    }
+
+    #[test]
+    fn clock_jump_detector_catches_wall_clock_step() {
+        let base = Instant::now();
+        let prev_wall = 45_000.0;
+        let now_wall = prev_wall + 180.0 / 86_400.0;
+
+        assert!(
+            is_clock_jump(prev_wall, base, now_wall, base + Duration::from_secs(10)),
+            "wall-clock ушёл на 180с при 10с monotonic elapsed",
+        );
+    }
+
+    #[test]
+    fn bind_failed_event_waits_for_elapsed_threshold() {
+        let mut client = Client::new(dummy_cfg());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        client.on_lifecycle(Box::new(move |ev| sink.lock().unwrap().push(ev)));
+
+        client.record_bind_failure(1_000);
+        client.record_bind_failure(1_005);
+        client.record_bind_failure(1_010);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "три быстрые серии bind errors не должны сразу шуметь в UI",
+        );
+
+        client.record_bind_failure(16_000);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], LifecycleEvent::BindFailed { .. }));
+    }
+
+    #[test]
+    fn bind_failed_event_repeats_only_after_throttle_window() {
+        let mut client = Client::new(dummy_cfg());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        client.on_lifecycle(Box::new(move |ev| sink.lock().unwrap().push(ev)));
+
+        client.record_bind_failure(0);
+        client.record_bind_failure(15_000);
+        client.record_bind_failure(20_000);
+        assert_eq!(events.lock().unwrap().len(), 1);
+
+        client.record_bind_failure(65_000);
+        assert_eq!(events.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn bind_failure_tracking_resets_after_successful_bind() {
+        let mut client = Client::new(dummy_cfg());
+        client.record_bind_failure(0);
+        client.record_bind_failure(15_000);
+        assert!(client.bind_failure_streak > 0);
+
+        client.reset_bind_failure_tracking();
+
+        assert_eq!(client.bind_failure_streak, 0);
+        assert_eq!(client.first_bind_failure_ms, NEVER_TIME_MS);
+        assert_eq!(client.last_bind_failed_event_ms, NEVER_TIME_MS);
     }
 
     // =====================================================================
@@ -6167,10 +6289,10 @@ pub(crate) fn get_server_time_delta_global() -> f64 {
 /// We use UTC directly (no timezone offset needed — TDateTime in MoonProto = UTC).
 ///
 /// **Clock-jump sanity check** (audit_robustness H6): SystemTime подвержен NTP step и
-/// suspend/resume скачкам. Если детектируем монотонное смещение > 60 сек между подряд
-/// идущими вызовами — log warn (потребитель должен пере-syncнуться через `set_ntp_offset`).
-/// Сам результат возвращаем как есть — иначе handshake/order timestamps будут противоречить
-/// серверу. Защита через лог, не через clamp.
+/// suspend/resume скачкам. Если wall-clock уходит от monotonic elapsed больше чем
+/// на 60 секунд — поднимается process-wide generation; каждый Client выполнит
+/// force reconnect один раз на это поколение. Сам результат возвращаем как есть —
+/// иначе handshake/order timestamps будут противоречить серверу.
 fn delphi_now() -> f64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6178,31 +6300,58 @@ fn delphi_now() -> f64 {
         .as_secs_f64();
     let now = 25569.0 + secs / 86400.0 + get_ntp_offset_days();
 
-    // Детектор скачка: сравним с прошлым вызовом. Days * 86400 = seconds.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static LAST_NOW_BITS: AtomicU64 = AtomicU64::new(0);
-    let prev_bits = LAST_NOW_BITS.swap(now.to_bits(), Ordering::Relaxed);
-    if prev_bits != 0 {
-        let prev = f64::from_bits(prev_bits);
-        let delta_secs = (now - prev) * 86400.0;
-        if delta_secs.abs() > 60.0 {
-            log::warn!(target: "moonproto::client",
-                "delphi_now clock jump detected: {:.1}s — forcing reconnect to re-sync handshake timestamps",
-                delta_secs);
-            // audit_robustness H5: при clock-jump (NTP step / suspend-resume на mobile)
-            // прежний handshake timestamp устарел; сервер reject'нёт hello по
-            // anti-replay window. Без сброса клиент впадает в permanent retry loop с тем
-            // же stale timestamp. Atomic flag читается Client в main loop и триггерит
-            // force_disconnect → full_reset → fresh handshake с актуальным временем.
-            CLOCK_JUMP_DETECTED.store(true, Ordering::Relaxed);
+    // Детектор скачка: сравниваем wall-clock delta с монотонным elapsed.
+    // Обычный простой клиента >60с не считается clock-jump; NTP step и suspend,
+    // где wall-clock ушёл относительно monotonic, поднимают process-wide generation.
+    let mono_now = Instant::now();
+    if let Ok(mut state) = CLOCK_JUMP_STATE.lock() {
+        if let Some((prev_now, prev_mono)) = *state {
+            if is_clock_jump(prev_now, prev_mono, now, mono_now) {
+                let delta_secs = clock_jump_drift_secs(prev_now, prev_mono, now, mono_now);
+                log::warn!(target: "moonproto::client",
+                    "delphi_now clock jump detected: {:.1}s — forcing reconnect to re-sync handshake timestamps",
+                    delta_secs);
+                // audit_robustness H5: при clock-jump (NTP step / suspend-resume на mobile)
+                // прежний handshake timestamp устарел; сервер reject'нёт hello по
+                // anti-replay window. Без сброса клиент впадает в permanent retry loop с тем
+                // же stale timestamp. Generation читается каждым Client отдельно, чтобы
+                // multi-server процесс не терял сигнал после первого обработчика.
+                CLOCK_JUMP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
+        *state = Some((now, mono_now));
     }
     now
 }
 
-/// Сигнал от `delphi_now` к Client'у что системные часы скакнули >60с (NTP step,
-/// suspend/resume на mobile). Main loop читает + сбрасывает в `check_clock_jump`.
-static CLOCK_JUMP_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn clock_jump_drift_secs(
+    prev_wall_days: f64,
+    prev_mono: Instant,
+    now_wall_days: f64,
+    now_mono: Instant,
+) -> f64 {
+    let wall_delta_secs = (now_wall_days - prev_wall_days) * 86400.0;
+    let mono_delta_secs = now_mono
+        .saturating_duration_since(prev_mono)
+        .as_secs_f64();
+    wall_delta_secs - mono_delta_secs
+}
+
+fn is_clock_jump(
+    prev_wall_days: f64,
+    prev_mono: Instant,
+    now_wall_days: f64,
+    now_mono: Instant,
+) -> bool {
+    clock_jump_drift_secs(prev_wall_days, prev_mono, now_wall_days, now_mono).abs() > 60.0
+}
+
+/// Последнее wall-clock/monotonic значение `delphi_now` для детектора скачка часов.
+static CLOCK_JUMP_STATE: std::sync::Mutex<Option<(f64, Instant)>> = std::sync::Mutex::new(None);
+
+/// Process-global поколение скачка системных часов. Каждый Client хранит последнее
+/// обработанное значение и делает force reconnect один раз на поколение.
+static CLOCK_JUMP_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
 /// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").
