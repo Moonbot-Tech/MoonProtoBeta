@@ -1,78 +1,81 @@
 # MPC_Order — Trading Commands
 
-`MPC_Order` (channel byte 28) — канал торговых команд. 30 sub-types, каждый с
-уникальным `CmdId` (1..30). Двунаправленный: клиент шлёт команды (новый ордер,
-отмена, replace), сервер шлёт обновления (статус ордера, snapshot всех ордеров,
-notFound уведомления, и т.д.).
+`MPC_Order` (channel byte 28) is the trading command channel. It contains 30
+sub-types, each identified by a unique `CmdId` (1..30). The channel is
+bidirectional: the client sends commands such as new order, cancel, and replace;
+the server sends updates such as order status, full order snapshots, and
+not-found notifications.
 
-CmdId соответствуют variant'ам `commands::trade::TradeCommand` enum'а.
+`CmdId` values map to variants of the `commands::trade::TradeCommand` enum.
 
 ## Wire format
 
-### Общий header
+### Common Header
 
 ```
 [CmdId]          — 1 byte  — sub-command identifier (1..30)
 [ver=3]          — 2 bytes LE — protocol version
-[UID]            — 8 bytes LE — task_id ордера (или random для not-keyed команд)
+[UID]            — 8 bytes LE — order task_id, or random for non-keyed commands
 [class-specific payload...] — variable
 ```
 
-Version gate: при `ver > 3` команда парсится как `TradeCommand::Unknown { cmd_id, uid }`
-(forward-compatible skip). При `ver <= 3` — полный парсинг.
+Version gate: when `ver > 3`, the command is parsed as
+`TradeCommand::Unknown { cmd_id, uid }` and skipped for forward compatibility.
+When `ver <= 3`, the command is parsed fully.
 
-Wire-форматы packed records см. в `SPEC.md §10.2`:
-- `OrderCompact` — 117 байт (поле в OrderStatus / OrderStatusUpdate / AllStatuses)
-- `StopSettings` — 46 байт (поле в OrderStopsUpdate)
-- `OrderUpdateData` — 66 байт (поле в OrderStatusUpdate)
-- `PriceZone` — 16 байт (поле в CorridorUpdate)
-- `ImmuneItem` — 9 байт (поле в SetImmune)
+Packed record wire formats are described in `SPEC.md §10.2`:
+- `OrderCompact` — 117 bytes (used by `OrderStatus`, `OrderStatusUpdate`, and `AllStatuses`)
+- `StopSettings` — 46 bytes (used by `OrderStopsUpdate`)
+- `OrderUpdateData` — 66 bytes (used by `OrderStatusUpdate`)
+- `PriceZone` — 16 bytes (used by `CorridorUpdate`)
+- `ImmuneItem` — 9 bytes (used by `SetImmune`)
 
-## CmdId таблица (полная, по wire-format)
+## CmdId Table
 
-CmdId'ы взяты непосредственно из `TradeCommand::parse` (`commands/trade.rs`).
-Парсер версии 3 знает все 30 значений.
+The `CmdId` values are taken directly from `TradeCommand::parse`
+(`commands/trade.rs`). The version 3 parser knows all 30 values.
 
-| CmdId | Variant | Direction | Описание | Rust struct |
+| CmdId | Variant | Direction | Description | Rust struct |
 |-------|---------|-----------|----------|-------------|
-| 1 | `BaseMarket` | n/a | Ancestor type (raw `MarketCommandHeader`) — на проводе не используется отдельно. | `MarketCommandHeader` |
-| 2 | `TradeEpoch` | n/a | Ancestor type (raw `TradeEpochHeader`) — на проводе не используется отдельно. | `TradeEpochHeader` |
-| 3 | `NewOrder` | **C→S** | Открыть новый ордер. | `NewOrderCommand` |
-| 4 | `OrderStatus` | **S→C** | Полный snapshot ордера (создание, либо после reconnect). | `OrderStatus` (содержит `OrderCompact` 117б) |
-| 5 | `OrderStatusUpdate` | **S→C** | Delta-update полей ордера. | `OrderStatusUpdate` (содержит `OrderUpdateData` 66б) |
-| 6 | `OrderReplace` | **C→S** | Replace ордера новой ценой. | `OrderReplaceCommand` |
-| 7 | `OrderReplaceResponse` | **S→C** | Подтверждение от сервера на replace. | `OrderReplaceResponse` |
-| 8 | `AllStatuses` | **S→C** | Снапшот всех ордеров (для `CleanupMissing` на клиенте). | `AllStatuses` (массив `OrderCompact`) |
-| 9 | `AllStatusesRequest` | **C→S** | Запрос на получение всех ордеров. | `BaseCommandHeader` |
-| 10 | `OrderCancel` | **C→S** | Отмена ордера. | `OrderCancelCommand` |
-| 11 | `JoinOrders` | **C→S** | Объединить открытые ордера в одну позицию. | `JoinOrdersCommand` |
-| 12 | `SplitOrder` | **C→S** | Разделить позицию на N частей. | `SplitOrderCommand` |
-| 13 | `MoveAllSells` | **C→S** | Batch-move всех sell-ордеров. | `MoveAllSellsCommand` |
-| 14 | `DoClosePosition` | **C→S** | Закрыть позицию (market-close). | `DoClosePositionCommand` |
-| 15 | `DoLimitClosePosition` | **C→S** | Limit-закрытие позиции. | `JoinOrdersCommand` (re-use payload format) |
-| 16 | `DoSplitPosition` | **C→S** | Разделить позицию (split-close). | `JoinOrdersCommand` (re-use) |
-| 17 | `DoSellOrder` | **C→S** | Прямой sell-ордер (цена + размер). | `DoSellOrderCommand` |
-| 18 | `OrderStatusRequest` | **C→S** | Запрос конкретного ордера по UID (CleanupMissing). | `TradeEpochHeader` |
-| 19 | `OrderNotFound` | **S→C** | Сервер сообщает что ордер с этим UID не найден. | `TradeEpochHeader` |
-| 20 | `OrderStopsUpdate` | **C→S** или **S→C** | Обновление stops (SL/TP) — клиент шлёт изменения, сервер шлёт echo/notify. | `OrderStopsUpdate` (содержит `StopSettings` 46б) |
-| 21 | `TurnPanicSell` | **C→S** | Включить/выключить panic-sell режим. | `TurnPanicSellCommand` |
-| 22 | `SetImmune` | **C→S** | Пометить ордера как immune от UI-кликов (защита от случайных). | `SetImmuneCommand` (массив `ImmuneItem` 9б каждый) |
-| 23 | `Penalty` | **C→S** | Пометить маркет penalty (cooldown). | `MarketCommandHeader` |
-| 24 | `TradeVisual` | **S→C** | Visual-only команда (base type для diagnostic пакетов). | `MarketCommandHeader` |
-| 25 | `OrderTracePoint` | **S→C** | Точка трейс-графика ордера (для UI визуализации). | `OrderTracePoint` |
-| 26 | `CorridorUpdate` | **S→C** | Обновление price corridor для позиции. | `CorridorUpdate` (содержит `PriceZone` 16б) |
-| 27 | `MoveAllBuys` | **C→S** | Batch-move всех buy-ордеров. | `MoveAllBuysCommand` |
-| 28 | `BulkReplaceNotify` | **S→C** | Уведомление о массовом replace результатах. | `BulkReplaceNotify` |
-| 29 | `VStopUpdate` | **C→S** или **S→C** | Обновление virtual stop. | `VStopUpdate` |
-| 30 | `DoMarketSplitPosition` | **C→S** | Market-split позиции. | `JoinOrdersCommand` (re-use) |
+| 1 | `BaseMarket` | n/a | Ancestor type (raw `MarketCommandHeader`); not used as a standalone wire command. | `MarketCommandHeader` |
+| 2 | `TradeEpoch` | n/a | Ancestor type (raw `TradeEpochHeader`); not used as a standalone wire command. | `TradeEpochHeader` |
+| 3 | `NewOrder` | **C→S** | Open a new order. | `NewOrderCommand` |
+| 4 | `OrderStatus` | **S→C** | Full order snapshot, used for creation and reconnect recovery. | `OrderStatus` (contains 117-byte `OrderCompact`) |
+| 5 | `OrderStatusUpdate` | **S→C** | Delta update for order fields. | `OrderStatusUpdate` (contains 66-byte `OrderUpdateData`) |
+| 6 | `OrderReplace` | **C→S** | Replace an order with a new price. | `OrderReplaceCommand` |
+| 7 | `OrderReplaceResponse` | **S→C** | Server acknowledgement for an order replace. | `OrderReplaceResponse` |
+| 8 | `AllStatuses` | **S→C** | Snapshot of all orders, used by client-side `CleanupMissing`. | `AllStatuses` (`OrderCompact` array) |
+| 9 | `AllStatusesRequest` | **C→S** | Request all order statuses. | `BaseCommandHeader` |
+| 10 | `OrderCancel` | **C→S** | Cancel an order. | `OrderCancelCommand` |
+| 11 | `JoinOrders` | **C→S** | Join open orders into one position. | `JoinOrdersCommand` |
+| 12 | `SplitOrder` | **C→S** | Split a position into N parts. | `SplitOrderCommand` |
+| 13 | `MoveAllSells` | **C→S** | Batch-move all sell orders. | `MoveAllSellsCommand` |
+| 14 | `DoClosePosition` | **C→S** | Close a position with a market order. | `DoClosePositionCommand` |
+| 15 | `DoLimitClosePosition` | **C→S** | Close a position with a limit order. | `JoinOrdersCommand` (reuses payload format) |
+| 16 | `DoSplitPosition` | **C→S** | Split-close a position. | `JoinOrdersCommand` (reused) |
+| 17 | `DoSellOrder` | **C→S** | Direct sell order with price and size. | `DoSellOrderCommand` |
+| 18 | `OrderStatusRequest` | **C→S** | Request a specific order by UID for `CleanupMissing`. | `TradeEpochHeader` |
+| 19 | `OrderNotFound` | **S→C** | The server reports that the order with this UID was not found. | `TradeEpochHeader` |
+| 20 | `OrderStopsUpdate` | **C→S** or **S→C** | Stop settings update (SL/TP). The client sends changes; the server sends echo/notify updates. | `OrderStopsUpdate` (contains 46-byte `StopSettings`) |
+| 21 | `TurnPanicSell` | **C→S** | Enable or disable panic-sell mode. | `TurnPanicSellCommand` |
+| 22 | `SetImmune` | **C→S** | Mark orders as immune to UI clicks. | `SetImmuneCommand` (`ImmuneItem` array, 9 bytes each) |
+| 23 | `Penalty` | **C→S** | Mark a market as penalized or cooled down. | `MarketCommandHeader` |
+| 24 | `TradeVisual` | **S→C** | Visual-only command, used as a base type for diagnostic packets. | `MarketCommandHeader` |
+| 25 | `OrderTracePoint` | **S→C** | Point in an order trace chart for UI visualization. | `OrderTracePoint` |
+| 26 | `CorridorUpdate` | **S→C** | Price corridor update for a position. | `CorridorUpdate` (contains 16-byte `PriceZone`) |
+| 27 | `MoveAllBuys` | **C→S** | Batch-move all buy orders. | `MoveAllBuysCommand` |
+| 28 | `BulkReplaceNotify` | **S→C** | Notification with bulk replace results. | `BulkReplaceNotify` |
+| 29 | `VStopUpdate` | **C→S** or **S→C** | Virtual stop update. | `VStopUpdate` |
+| 30 | `DoMarketSplitPosition` | **C→S** | Market-split a position. | `JoinOrdersCommand` (reused) |
 
-**Замечание по направлениям:** некоторые команды (`OrderStopsUpdate`, `VStopUpdate`)
-ходят в обе стороны — клиент обновляет, сервер шлёт echo/notify об изменениях
-сделанных другим клиентом или engine'ом.
+**Direction note:** some commands (`OrderStopsUpdate`, `VStopUpdate`) travel in
+both directions. The client sends local updates, and the server sends echo or
+notify updates for changes made by another client or by the engine.
 
 ## Order state machine
 
-См. `OrderWorkerStatus` doc comment в `commands::trade::OrderWorkerStatus`:
+See the `OrderWorkerStatus` doc comment in
+`commands::trade::OrderWorkerStatus`:
 
 ```text
 None ──► BuySet ──► BuyDone ──► SellSet ──► SelLAlmostDone ──► SelLDone
@@ -83,14 +86,16 @@ None ──► BuySet ──► BuyDone ──► SellSet ──► SelLAlmostDo
 
 **Terminal states:** `SelLDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
 
-## UKey dedup для команд
+## UKey Deduplication
 
-Некоторые команды имеют `[MoonCmdUnique]` атрибут в Delphi — UniqueKey-based dedup
-в очереди отправки. Если ты шлёшь `replace_order` 5 раз подряд (быстро), в очередь
-попадёт только **последняя версия** (UK_OrderMove dedup по task_id). Полезно для
-UI: drag-replace генерирует поток, на сервер уходит финальное значение.
+Some commands have the `[MoonCmdUnique]` attribute in Delphi, which enables
+unique-key deduplication in the send queue. If `replace_order` is sent five
+times in quick succession, only the **last version** remains queued
+(`UK_OrderMove` dedup by `task_id`). This is useful for UI drag-replace flows:
+the UI may generate a stream of updates, but only the final value is sent to the
+server.
 
-| Команда | UKey |
+| Command | UKey |
 |---------|------|
 | `OrderReplace` (CmdId 6) | `UK_OrderMove(task_id)` |
 | `OrderCancel` (CmdId 10) | `UK_OrderMove(task_id)` |
@@ -99,43 +104,47 @@ UI: drag-replace генерирует поток, на сервер уходит
 | `VStopUpdate` (CmdId 29) | `UK_OrderMove(task_id)` |
 | `SetImmune` (CmdId 22) | `UK_ImmuneClicks(items_uid_sum)` |
 
-Остальные команды отправляются без dedup.
+All other commands are sent without deduplication.
 
-## Priority и retries
+## Priority and Retries
 
-Все Order команды отправляются как:
+All Order commands are sent as:
 - **Encrypted** (envelope Crypted + AES-GCM)
-- **Priority** = High (быстрая доставка, ACK piggyback через Ping)
-- **MaxRetries** = 3 — кроме `DoClose*` (CmdId 14-17, 30) где **MaxRetries = 1**
-  (опасные команды, не ретраить много раз чтобы случайно не закрыть позицию дважды).
+- **Priority** = High (fast delivery, ACK piggybacked through Ping)
+- **MaxRetries** = 3, except `DoClose*` (CmdId 14-17, 30), where
+  **MaxRetries = 1** because close-position commands are dangerous to retry many
+  times.
 
-Эти параметры зашиты в Client-обёртки (`client.new_order`, `client.cancel_order`, ...)
-— потребитель не управляет ими вручную.
+These parameters are built into the `Client` wrappers (`client.new_order`,
+`client.cancel_order`, and others); consumers do not set them manually.
 
-## EventDispatcher → типизированные события
+## EventDispatcher and Typed Events
 
-EventDispatcher автоматически парсит входящие `MPC_Order` и обновляет `Orders` sync-state.
-Потребитель получает `Event::Order(OrderEvent)` через `dispatcher.dispatch(cmd, payload, now_ms)`.
+`EventDispatcher` automatically parses incoming `MPC_Order` packets and updates
+the `Orders` sync state. Consumers receive `Event::Order(OrderEvent)` through
+`dispatcher.dispatch(cmd, payload, now_ms)`.
 
-OrderEvent variants (см. `state::orders::OrderEvent`):
-- `Created` — новый ордер (после первого OrderStatus с этим task_id)
-- `Updated` — обновление полей (OrderStatusUpdate или повторный OrderStatus)
-- `Removed` — удалён (OrderNotFound, terminal status, явное удаление сервером)
-- `TracePoint` — пришёл OrderTracePoint
-- ... (см. полный список в state/orders.rs)
+`OrderEvent` variants (see `state::orders::OrderEvent`):
+- `Created` — new order after the first `OrderStatus` for this `task_id`
+- `Updated` — field update from `OrderStatusUpdate` or a repeated `OrderStatus`
+- `Removed` — removed by `OrderNotFound`, a terminal status, or an explicit server removal
+- `TracePoint` — received `OrderTracePoint`
+- ... see the full list in `state/orders.rs`
 
-**Note:** `OrderEvent` — это **высокоуровневое** API для UI потребителя, не сырая
-wire-команда. Маппинг wire CmdId → OrderEvent делается внутри `Orders::apply`.
+**Note:** `OrderEvent` is a **high-level** API for UI consumers, not a raw wire
+command. The wire `CmdId` to `OrderEvent` mapping is handled inside
+`Orders::apply`.
 
-## Wire-format детали
+## Wire Format Details
 
-Полный byte-layout каждой sub-команды + packed records:
-- **OrderCompact** (117 байт) — содержит UID, task_id, market_id, status, price, size,
-  filled, stops, и т.д.
-- **StopSettings** (46 байт) — SL/TP цены + флаги.
-- **OrderUpdateData** (66 байт) — delta-поля для OrderStatusUpdate.
-- **PriceZone** (16 байт) — top/bottom цены corridor'а.
-- **ImmuneItem** (9 байт) — UID ордера + immune flag.
+Full byte layouts for each sub-command and packed record:
+- **OrderCompact** (117 bytes) — contains UID, `task_id`, `market_id`, status,
+  price, size, filled amount, stops, and related order fields.
+- **StopSettings** (46 bytes) — SL/TP prices and flags.
+- **OrderUpdateData** (66 bytes) — delta fields for `OrderStatusUpdate`.
+- **PriceZone** (16 bytes) — top and bottom prices of the corridor.
+- **ImmuneItem** (9 bytes) — order UID plus the immune flag.
 
-Точные смещения и типы каждого поля — во внутреннем `SPEC.md §10.2` (вместе с
-ссылками на Delphi-source для проверки byte-exact wire-совместимости).
+Exact offsets and field types are listed in the internal `SPEC.md §10.2`,
+together with Delphi source references used to verify byte-exact wire
+compatibility.
