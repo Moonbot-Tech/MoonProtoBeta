@@ -1,264 +1,196 @@
 # moonproto
 
-Rust клиент протокола MoonProto — UDP-связь с торговым ботом MoonBot
-(Delphi-сервер на VPS).
+Rust client library for the MoonProto UDP protocol used by MoonBot servers.
 
-## Что делает
+The crate implements the encrypted transport, handshake, keepalive, reconnect,
+PMTU discovery, reliable sliced messages, typed command parsers/builders, state
+models, and the high-level active session API.
 
-- Подключение к MoonBot серверу через зашифрованный UDP
-- Полный цикл соединения: handshake, keepalive, soft/hard reconnect, NAT-rebind recovery
-- Приём рыночных данных: trades stream, order book, balances, market info
-- Отправка торговых команд: новый ордер, отмена, replace, stops, panic-sell, и т.д.
-- Engine API: 25+ RPC-методов (subscribe trades, request candles, set leverage, ...)
-- Большие сообщения через slicing + ACK
-- PMTU discovery, adaptive rate, replay protection
-- Cross-platform: Windows / Linux / macOS / Android / iOS
+## Install
 
-## Quick start
+```toml
+[dependencies]
+moonproto = "0.1"
+```
+
+For local development inside this workspace:
 
 ```toml
 [dependencies]
 moonproto = { path = "../moonproto" }
 ```
 
-### Подключение к серверу
+## Quick Start
 
 ```rust
 use std::time::Duration;
-use moonproto::client::{Client, ClientConfig, LifecycleEvent};
-use moonproto::events::EventDispatcher;
-use moonproto::key_import;
-use moonproto::ntp;
-
-// 1. Импорт ключа из base64-экспорта MoonBot
-//    (в MoonBot UI: Settings → Export Key → копируешь base64 строку).
-let keys = key_import::import_key(KEY_B64).expect("invalid key");
-
-// 2. NTP sync — рекомендуется для корректных timestamps в ордерах.
-let ntp_result = ntp::get_best_ntp("pool.ntp.org", 4);
-if ntp_result.synced {
-    moonproto::client::set_ntp_offset(ntp_result.time_offset);
-}
-
-// 3. Конфигурация клиента.
-let cfg = ClientConfig {
-    server_ip:   "127.0.0.1".to_string(),
-    server_port: 3000,
-    master_key:  keys.master_key,
-    mac_key:     keys.mac_key,
-    mask_ver:    0,                 // 0 = base, 1/2 требует moonext binary
-    client_id:   rand::random(),
+use moonproto::{
+    import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
+    InitConfig, LifecycleEvent,
 };
-let mut client = Client::new(cfg);
+use moonproto::state::OrderBookKind;
 
-// 4. Lifecycle callback (опционально).
-client.on_lifecycle(Box::new(|ev: LifecycleEvent| {
-    println!("[lifecycle] {:?}", ev);
-}));
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let keys = import_key(KEY_B64).expect("invalid MoonBot key");
+    let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 
-// 5. EventDispatcher — авто-парсит входящие в типизированные события + sync state.
-let mut dispatcher = EventDispatcher::new();
+    let mut client = Client::new(cfg);
+    let mut dispatcher = EventDispatcher::new();
 
-// 6. Запуск (блокирует поток на duration).
-client.run(Duration::from_secs(60), Box::new(move |cmd, payload| {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
-    for event in dispatcher.dispatch(cmd, payload, now_ms) {
-        // обработка типизированных событий — см. `moonproto::events::Event`
-        let _ = event;
+    client.on_lifecycle(Box::new(|event| match event {
+        LifecycleEvent::Connected { fresh } => eprintln!("connected fresh={fresh}"),
+        LifecycleEvent::Reconnecting => eprintln!("reconnecting"),
+        LifecycleEvent::ServerRestart => eprintln!("server restarted"),
+        LifecycleEvent::SendBacklogCritical { u_key_uid, .. } => {
+            eprintln!("critical send backlog for order {u_key_uid}");
+        }
+        LifecycleEvent::BindFailed { consecutive_failures } => {
+            eprintln!("UDP bind failed {consecutive_failures} times");
+        }
+        _ => {}
+    }));
+
+    client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
+    if !client.is_authorized() {
+        return Err("authorization timeout".into());
     }
-}));
+
+    let init = InitConfig {
+        base_check: true,
+        auth_check: true,
+        fetch_markets: true,
+        fetch_balance: true,
+        subscribe_trades: Some(false),
+        subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+        ..Default::default()
+    };
+    run_init_sequence(&mut client, &mut dispatcher, init)?;
+
+    client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
+        match event {
+            Event::Order(order_event) => println!("order: {order_event:?}"),
+            Event::OrderBook(book_event) => println!("orderbook: {book_event:?}"),
+            Event::Trade(trade_event) => println!("trade event: {trade_event:?}"),
+            Event::EngineResponse(resp) if !resp.success => {
+                eprintln!("engine error {}: {}", resp.error_code, resp.error_msg);
+            }
+            _ => {}
+        }
+    }));
+
+    Ok(())
+}
 ```
 
-Полный рабочий пример: `examples/client_test.rs`.
+## Recommended Flow
 
-### Отправка команд (после Authenticated)
+1. Import keys with `import_key`.
+2. Build configuration with `ClientConfig::new`.
+3. Create `Client` and one `EventDispatcher` per connection.
+4. Run `client.run_with_dispatcher(...)` until authorization.
+5. Call `run_init_sequence(&mut client, &mut dispatcher, InitConfig { ... })`.
+6. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
+
+`run_with_dispatcher` is the main high-level entry point. It dispatches incoming
+payloads into typed events and performs library-owned recovery work:
+
+- replaying registered subscriptions after reconnect;
+- resynchronizing market indexes after server restart;
+- blocking orderbook/trades packets until indexes are synchronized;
+- sending `RequestOrderBookFull` when a gap requires a full snapshot;
+- ticking trades gap recovery and sending resend requests;
+- routing Engine API responses into pending receivers;
+- applying per-client `ServerTimeDelta`;
+- merging chunked candle responses.
+
+When an event callback needs the already-updated read model, use
+`run_with_dispatcher_state`:
 
 ```rust
-// Engine API (async response через mpsc::Receiver)
+client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+    println!("orders in state: {}", state.orders().len());
+    let _ = event;
+}));
+```
+
+## Engine API Requests
+
+Most `Client::api_*` methods return `std::sync::mpsc::Receiver<EngineResponse>`.
+If the same thread owns the `Client`, wait through `run_until_response` so UDP is
+still pumped while the response is pending:
+
+```rust
 let rx = client.api_get_markets_list();
-// в другом месте: rx.recv_timeout(Duration::from_secs(5))
-
-// Trade команды
-client.new_order(ctx, "BTCUSDT", false, 50000.0, strategy_id, 0.001);
-client.cancel_order(ctx, "BTCUSDT", epoch, status);
-client.replace_order(ctx, "BTCUSDT", epoch, status, order_type, 51000.0);
-
-// UI команды
-client.ui_send_settings(&client_settings);
-client.ui_mm_subscribe(true);
-client.ui_switch_dex("Binance");
-
-// Strategy команды
-client.strat_snapshot_request();
-client.strat_sell_price_update(strategy_id, new_price);
-
-// Balance
-client.balance_request_refresh();
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 ```
 
-Полный список методов — в doc comments на каждом методе `Client` (`cargo doc --open`).
+Calling `rx.recv_timeout(...)` directly is only correct when another thread is
+already running the client loop.
 
-## Setup / Initialization Flow
+## Subscriptions
 
-Полная последовательность для написания клиента с нуля:
+Use the registry-aware subscription API:
 
-1. **Получи base64-строку ключа** в MoonBot: Settings → Export Key → копируй.
-2. **Импорт ключа**: `key_import::import_key(base64_str)` → `Keys { master_key, mac_key }`.
-3. **NTP sync** (рекомендуется): `ntp::get_best_ntp("pool.ntp.org", 4)` → если `synced`,
-   передай offset в `client::set_ntp_offset(offset)`. Без NTP timestamps в ордерах
-   будут с uncorrected системным временем (расхождение часов клиент/сервер).
-4. **Конфигурация**: `ClientConfig` — IP, порт, оба ключа, `mask_ver` (0 для базового
-   транспорта; 1/2 если используешь DPI-bypass через `moonext.dll`/`.so`/`.dylib`).
-5. **Client::new(cfg)** — конструктор. Сокет ещё не создан.
-6. **Callbacks (опционально)**:
-   - `client.on_lifecycle(cb)` — Connecting / Authenticated / Reconnecting / Disconnected
-     / ServerRestart.
-7. **Подготовь EventDispatcher** (`EventDispatcher::new()`) — он держит sync-state
-   (orders, order_books, trades, balances, strats, settings, markets) и парсит
-   входящие команды.
-8. **`client.run(duration, on_data)`** — БЛОКИРУЕТ поток на `duration`. Из callback
-   `on_data` вызывай `dispatcher.dispatch(cmd, payload, now_ms)` чтобы получить
-   `Vec<Event>` — типизированные события (OrderEvent, TradesEvent, ...).
-9. **На `LifecycleEvent::Authenticated`** — обычно нужно: подписаться на trades
-   (`client.api_subscribe_all_trades()`), запросить статусы ордеров
-   (`client.request_all_statuses(uid)`), запросить snapshot стратегий
-   (`client.strat_snapshot_request()`), settings (`client.ui_settings_request()`).
-10. **Завершение**: `client.disconnect()` отправит LogOff и закроет сокет.
-
-## Gotchas
-
-- `client.run()` **блокирует** поток на duration — для async оборачивай в
-  `std::thread::spawn`.
-- **NTP sync обязателен** для корректных timestamps. Без него ордера будут с
-  uncorrected системным временем (расхождение видно в UI).
-- **PMTU стартует с 508 байт** и растёт через probe. Первые Sliced-сообщения
-  фрагментируются мелко, нормально.
-- **UKey dedup**: команды с одним UniqueKey замещают друг друга в очереди отправки.
-  `replace_order` 5 раз подряд → сервер увидит только последний. Полезное
-  свойство для UI (drag-replace), но знай об этом.
-- **`LifecycleEvent::ServerRestart`** — сервер перезагрузился, market indexes
-  невалидны. Сбрось кэши, re-subscribe на order books, request fresh snapshot.
-- **`LifecycleEvent::Reconnecting`** — клиент сам soft-reconnect'ится, ничего не
-  делай. `Disconnected` — финальное, нужен новый `Client`.
-- **Compression** автоматическая для payload > 64 байт — не управляешь вручную.
-- **Order phases**: `None → BuySet → BuyDone → SellSet → SelLAlmostDone → SelLDone`.
-  Terminal states: `SelLDone`, `BuyCancel`, `BuyFail`, `SellCancel`, `SellFail`.
-- **Reading EngineResponse**: для большинства Engine API методов есть
-  `parse_*_response(&resp.data)` в соответствующих модулях (`commands::markets`,
-  `commands::candles`, ...). Pending registry автоматически dispatches response в
-  `Receiver<EngineResponse>` который вернул `api_*_async` метод.
-- **CandlesAggregator**: `api_request_candles_data` возвращает **chunked** response
-  — несколько `EngineResponse` пакетов. Pending registry не подходит, используй
-  обычный `on_data` callback + `commands::candles::CandlesAggregator::on_chunk`.
-
-## Архитектура
-
-```
-moonproto (this crate)
-├── client/         — Client struct, lifecycle, handshake, retry, NTP, lifecycle events
-├── crypto/         — AES-128-GCM, SHAKE-128 key derivation
-├── protocol/       — Slider (replay), SlicingReceiver (re-assembly), CryptedHeader
-├── commands/       — wire-format builders/parsers для 11 каналов
-├── state/          — sync-state модели (Orders, OrderBooks, Trades, Balances, ...)
-├── events/         — EventDispatcher — типизированные события
-├── api_pending/    — registry для async-ответов Engine API
-├── compression/    — SynLZ (byte-exact с mORMot)
-├── ntp/            — SNTP клиент с background thread (TryCount=4)
-└── key_import/     — парсинг base64-ключа из MoonBot
-
-depends on:
-moonproto-transport — packet framing, MAC, обфускация, ext_loader для moonext
+```rust
+client.subscribe_all_trades(false);
+client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
 ```
 
-## Transport modes
+The library remembers these subscriptions and replays them automatically after a
+hard reconnect. From another thread, clone `client.sender()` and call the same
+typed methods on `ClientSender`.
 
-| Mode | Описание | Требует |
-|------|----------|---------|
-| 0 | Base transport (xoshiro128+ обфускация + HMAC-CRC32C) | Ничего |
-| 1 | Extended transport — DPI bypass mode 1 | `moonext` library |
-| 2 | Extended transport — DPI bypass mode 2 | `moonext` library |
+## Multi-Server
 
-Mode определяется конфигурацией сервера. Mode 0 работает без дополнительных файлов.
-Mode 1/2 требует `moonext.dll`/`.so`/`.dylib` рядом с exe (см. moonext Releases).
+Create one `Client` and one `EventDispatcher` per server. State, sockets,
+pending API responses, subscriptions, and server-time delta are per client.
 
-## Protocol overview
+After `run_init_sequence`, `client.server_info()` contains the optional server
+identity returned by `BaseCheck`: bot id, server name, exchange name, base
+currency, and version fields.
 
-### Connection flow
+See `docs/api/multi_server.md`.
+
+## Transport Modes
+
+Mode `0` is the open base transport and works by itself. Modes `1` and `2` use
+the optional extended transport binary distributed separately for each platform.
+
+Configure the mode with:
+
+```rust
+let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
+    .with_transport_mode(0);
 ```
-Client                          Server
-  |--- Hello (AES-GCM/MasterKey) ->|
-  |<-- WhoAreYou (AES-GCM) --------|   server token + app token
-  |--- ImFriend ----------------->|    (отправляется дважды с паузой 32ms)
-  |<-- Fine ----------------------|    authenticated
-  |                                |
-  |<-- Ping (~1s) ----------------|    keepalive + channel quality
-  |<-- Crypted/Sliced commands ---|    application data
-  |--- SlicedACK ---------------->|
-  |--- Crypted commands --------->|
-```
 
-### Key types
+## Examples
 
-- **MasterKey** (16 b): pre-shared, handshake encryption + AAD=ClientID для GCM tag.
-- **MacKey** (16 b): HMAC-CRC32C для transport integrity + xoshiro128+ seed для обфускации.
-- **SubKey[true/false]** (16 b): session-derived через SHAKE-128 + 5 раундов XOR-fold.
-  Direction-specific: `false` = client→server encrypted commands, `true` = server→client.
+- `examples/client_test.rs` — basic live connection smoke test.
+- `examples/trading_flow.rs` — phased handshake, init, subscriptions, and stream.
+- `examples/history_bars.rs` — request and parse historical candles.
+- `examples/multi_client_test.rs` — two independent clients in one process.
 
-## API reference
+## API Documentation
 
-См. `cargo doc --open` для полной документации публичного API. Ключевые модули:
+Detailed public API notes live in `docs/api/`:
 
-- [`client::Client`] — главный entry point, lifecycle, send/receive
-- [`events::EventDispatcher`] / [`events::Event`] — типизированные события
-- [`commands::trade`] / [`commands::ui`] / [`commands::strat`] / ... — wire builders/parsers
-- [`commands::engine_api::EngineMethod`] / [`commands::engine_api::EngineResponse`] — RPC
+- `overview.md`
+- `client.md`
+- `events.md`
+- `lifecycle.md`
+- `engine_api.md`
+- `markets.md`
+- `order_books.md`
+- `trades.md`
+- `orders.md`
+- `trade_actions.md`
+- `strats.md`
+- `candles.md`
+- `multi_server.md`
 
-## Building
-
-Rust 1.75+, без системных зависимостей.
+## Build
 
 ```bash
 cargo build --release
 cargo test
 ```
-
-## Test tools (`examples/`)
-
-Debug / load-testing утилиты, не production:
-
-- `client_test` — минимальный CLI: handshake + subscribe + receive trades.
-- `loss_logger` — детальный лосс-логгер с опциональной симуляцией client-side drop.
-  Полезен для верификации gap recovery, reconnect, slicing retry под degraded network.
-
-```bash
-# Обычный запуск:
-cargo run --example loss_logger --release -- <key_b64> 127.0.0.1:3000 loss.log
-
-# Stress test с 75% client-side packet drop:
-cargo run --example loss_logger --release -- <key_b64> 127.0.0.1:3000 loss.log 75
-```
-
-### `client::set_err_emu(percent)` — **TEST USE ONLY**
-
-Зеркало серверного debug-флага: дропает входящие UDP-пакеты с указанной долей после
-MAC/version validation. Service commands (Ping / handshake / ACK) дропаются в 2 раза
-реже чтобы соединение не развалилось. Default `0`. **Не использовать в production.**
-
-## Performance
-
-Замеры на x86_64 release:
-
-| Компонент | Throughput |
-|-----------|-----------|
-| Packet obfuscation (xoshiro128+) | ~920 MB/s |
-| Packet MAC (HMAC-CRC32C) | ~5-7 GB/s |
-| AES-128-GCM | Hardware-accelerated (AES-NI) |
-
-Hot-path функции inlined через cross-crate boundary (см. `#[inline]` маркеры в
-`moonproto-transport`). Кэшированный `Aes128Gcm` cipher в `Client` устраняет
-key schedule expansion на каждый зашифрованный пакет.
-
-## License
-
-Open source. См. LICENSE.
