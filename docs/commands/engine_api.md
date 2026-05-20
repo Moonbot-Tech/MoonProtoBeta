@@ -125,6 +125,11 @@ if response.success {
 }
 ```
 
+For custom raw request payloads that need cleanup tied to the caller's timeout,
+use `Client::request_engine_response`. Receiver-based `api_*` wrappers keep the
+pending slot until a matching response arrives, a reconnect clears the session,
+or the same UID is registered again.
+
 Current reference-server gaps:
 
 - `GetMarketsBalanceFull` calls the server-side refresh method, but

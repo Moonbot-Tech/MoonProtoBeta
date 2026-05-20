@@ -128,6 +128,11 @@ flows. If the same thread owns the `Client`, wait through
 `run_until_response`; direct `rx.recv_timeout(...)` is only correct when another
 thread is already running the client loop.
 
+`Client::request_engine_response` owns the pending slot for its caller timeout
+and removes it on timeout. The lower-level receiver path keeps the slot until a
+matching response arrives, a reconnect clears the session, or the same UID is
+registered again.
+
 UI settings use the UI channel rather than Engine API pending responses:
 
 ```rust

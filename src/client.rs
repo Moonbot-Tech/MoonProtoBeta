@@ -1339,13 +1339,14 @@ impl Client {
     /// already running the client loop.
     ///
     /// One-shot request helpers remove the pending slot when the caller's
-    /// timeout expires. Raw receiver users can rely on main-loop stale pending
-    /// cleanup.
+    /// timeout expires. Raw receiver users should keep pumping the client until
+    /// the response arrives or use [`Self::request_engine_response`] when they
+    /// need timeout-owned cleanup.
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
         // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
         // паниковала при len<11 — public API не должен валить процесс из-за плохого input'а.
         let uid = engine_request_uid(request_payload).unwrap_or(0);
-        let rx = self.api_pending.register(uid, self.now_ms());
+        let rx = self.api_pending.register(uid);
         self.send_api_request(request_payload);
         rx
     }
@@ -2747,15 +2748,9 @@ impl Client {
                 self.flush_send_batch();
                 self.retry_sliced(cur_tm);
 
-                // Cleanup periodic (api_pending / pending_candles).
+                // Cleanup periodic (sliced receiver / pending_candles).
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
                     self.slicer.clear_old();
-                    let removed = self.api_pending.cleanup_old(cur_tm, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
-                    if removed > 0 {
-                        log::debug!(target: "moonproto::client",
-                            "api_pending: cleaned up {} stale slots (>{}ms old)",
-                            removed, crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS);
-                    }
                     let candles_before = self.pending_candles.len();
                     self.pending_candles.retain(|_uid, partial| {
                         (cur_tm - partial.registered_at_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
@@ -4471,27 +4466,6 @@ impl From<InitError> for ConnectError {
     }
 }
 
-/// Wait for one Engine API response while pumping the client loop.
-///
-/// `Client::api_*()` returns `Receiver<EngineResponse>`, but responses are only
-/// delivered while UDP packets are processed. This helper runs short
-/// `run_with_dispatcher` ticks until the matching response arrives or the
-/// timeout expires. `run_init_sequence` and the public one-shot
-/// `Client::request_*` helpers use this path internally.
-///
-/// `EventDispatcher` is required so Engine API responses continue to update
-/// markets, indexes, tags, and other active-library state while the caller is
-/// waiting.
-fn wait_for_api_response(
-    client: &mut Client,
-    dispatcher: &mut crate::events::EventDispatcher,
-    rx: &mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
-    timeout: Duration,
-) -> Result<crate::commands::engine_api::EngineResponse, mpsc::RecvTimeoutError> {
-    // Internal wrapper, делегирует к публичному `Client::run_until_response`.
-    client.run_until_response(dispatcher, rx, timeout)
-}
-
 /// Connect the client and run the configured init sequence.
 ///
 /// This helper is the recommended one-shot setup path for regular consumers.
@@ -4567,8 +4541,8 @@ pub fn run_init_sequence(
     // При успехе — парсим server identity и сохраняем в Client.server_info
     // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
     if cfg.base_check {
-        let rx = client.api_base_check();
-        match wait_for_api_response(client, dispatcher, &rx, timeout) {
+        let req = crate::commands::engine_request::base_check();
+        match client.request_engine_response(dispatcher, &req, timeout) {
             Ok(resp) if resp.success => {
                 result.base_check_ok = true;
                 let info = crate::commands::engine_api::parse_base_check_response(&resp.data);
@@ -4587,8 +4561,8 @@ pub fn run_init_sequence(
 
     // === 2. AuthCheck === критический шаг
     if cfg.auth_check {
-        let rx = client.api_auth_check();
-        match wait_for_api_response(client, dispatcher, &rx, timeout) {
+        let req = crate::commands::engine_request::auth_check();
+        match client.request_engine_response(dispatcher, &req, timeout) {
             Ok(resp) if resp.success => { result.auth_check_ok = true; }
             Ok(resp) => {
                 result.errors.push(format!("AuthCheck error: code={} msg={}",
@@ -4605,8 +4579,8 @@ pub fn run_init_sequence(
     // Markets state в dispatcher обновляется автоматически через
     // `EventDispatcher::dispatch_into` ветка Command::API → GetMarketsList.
     if cfg.fetch_markets {
-        let rx = client.api_get_markets_list();
-        match wait_for_api_response(client, dispatcher, &rx, timeout) {
+        let req = crate::commands::engine_request::get_markets_list();
+        match client.request_engine_response(dispatcher, &req, timeout) {
             Ok(resp) if resp.success => {
                 result.markets_response_bytes = resp.data.len();
             }
@@ -4623,8 +4597,8 @@ pub fn run_init_sequence(
     // Delphi currently refreshes balances server-side but does not serialize a
     // balance snapshot in the response (`WriteBalancesToStream` is TODO).
     if cfg.fetch_balance {
-        let rx = client.api_get_markets_balance_full();
-        match wait_for_api_response(client, dispatcher, &rx, timeout) {
+        let req = crate::commands::engine_request::get_markets_balance_full();
+        match client.request_engine_response(dispatcher, &req, timeout) {
             Ok(resp) if resp.success => {
                 result.balances_response_bytes = resp.data.len();
             }
@@ -4887,7 +4861,7 @@ mod api_pending_dispatch_tests {
     fn pending_api_response_still_reaches_dispatcher_state() {
         let mut client = Client::new(dummy_cfg());
         let request_uid = 0x1122_3344_5566_7788;
-        let rx = client.api_pending.register(request_uid, client.now_ms());
+        let rx = client.api_pending.register(request_uid);
 
         let names = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         let response_data = build_markets_indexes_response(&names);
@@ -4933,7 +4907,7 @@ mod api_pending_dispatch_tests {
     fn pending_api_response_is_not_duplicated_to_callback_sink() {
         let mut client = Client::new(dummy_cfg());
         let request_uid = 7;
-        let rx = client.api_pending.register(request_uid, client.now_ms());
+        let rx = client.api_pending.register(request_uid);
         let payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
 
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

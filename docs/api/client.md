@@ -147,6 +147,11 @@ The response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the
 client.
 
+Use `request_engine_response` when a custom Engine API payload needs
+caller-scoped timeout cleanup. Raw `api_*` receivers keep their pending slot
+until the response arrives, a reconnect clears the session, or the same UID is
+registered again.
+
 ## UI Settings Request
 
 The UI settings channel is not an Engine API request, so it has no pending

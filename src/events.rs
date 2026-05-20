@@ -583,6 +583,12 @@ mod tests {
     };
     use crate::commands::strat::build_snapshot_request;
 
+    static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn server_time_delta_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        SERVER_TIME_DELTA_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn order_book_payload(market_index: u16) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.extend_from_slice(&market_index.to_le_bytes());
@@ -860,6 +866,7 @@ mod tests {
 
     #[test]
     fn current_delta_falls_back_to_global_when_source_is_none() {
+        let _guard = server_time_delta_test_lock();
         // Single-Client back-compat: без линковки dispatcher читает global.
         let d = EventDispatcher::new();
         assert!(d.server_time_delta_source.is_none());
@@ -872,6 +879,7 @@ mod tests {
 
     #[test]
     fn current_delta_reads_from_source_when_set() {
+        let _guard = server_time_delta_test_lock();
         // Multi-Client: с линковкой dispatcher читает per-Client handle,
         // НЕ global. Изменения global на этот dispatcher не влияют.
         let handle = Arc::new(AtomicU64::new(0));

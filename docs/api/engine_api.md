@@ -30,6 +30,11 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 Calling `rx.recv_timeout(...)` directly on the same thread usually times out
 because no UDP packets are processed during that wait.
 
+For custom raw payloads with caller-owned timeout cleanup, call
+`Client::request_engine_response`. Raw `api_*` receivers keep their pending slot
+until a matching response arrives, a reconnect clears the session, or the same
+UID is registered again.
+
 ## Client Wrappers
 
 | Group | Methods |
