@@ -321,9 +321,13 @@ fn main() {
 
                 for ev in events {
                     match ev {
-                        Event::Trades(tev_list) => {
+                        // audit_rust_quality #11: Event::Trades(Vec) → Event::Trade(single).
+                        // Каждое TradesEvent теперь приходит отдельным events. trades_pkts
+                        // counter переименован семантически — теперь это сумма всех TradesEvent
+                        // (включая Duplicate/GapDetected), а не количество пакетов с сервера.
+                        Event::Trade(tev) => {
                             counters_cb.trades_pkts.fetch_add(1, Ordering::Relaxed);
-                            for tev in tev_list {
+                            {
                                 match tev {
                                     TradesEvent::Apply(pkt) => {
                                         counters_cb.trades_apply.fetch_add(1, Ordering::Relaxed);

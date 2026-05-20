@@ -5,14 +5,15 @@
 //!
 //! ```ignore
 //! use moonproto::events::{EventDispatcher, Event};
+//! use moonproto::state::{OrderEvent, OrderBookEvent, TradesEvent};
 //!
 //! let mut dispatcher = EventDispatcher::new();
 //! client.on_data(move |cmd, payload| {
 //!     for ev in dispatcher.dispatch(cmd, payload, now_ms()) {
 //!         match ev {
-//!             Event::Order(OrderEvent::Created(o)) => { /* show new order */ }
-//!             Event::OrderBook { market_idx, book_kind, .. } => { /* redraw */ }
-//!             Event::Trades(TradesEvent::Sequential) => { /* process pkt */ }
+//!             Event::Order(OrderEvent::Created(uid)) => { /* show new order */ }
+//!             Event::OrderBook(OrderBookEvent::Apply { market_index, .. }) => { /* redraw */ }
+//!             Event::Trade(TradesEvent::Apply(pkt)) => { /* process pkt */ }
 //!             _ => {}
 //!         }
 //!     }
@@ -51,8 +52,12 @@ pub enum Event {
     Order(OrderEvent),
     /// OrderBook channel: применение/запрос Full snapshot.
     OrderBook(OrderBookEvent),
-    /// TradesStream channel: пакет принят, дубликат, gap, etc. (может быть несколько при drain'е cache).
-    Trades(Vec<TradesEvent>),
+    /// TradesStream channel: одно событие (Apply/Duplicate/GapDetected/...).
+    /// audit_rust_quality #11: variant изменён с `Trades(Vec<TradesEvent>)` на
+    /// `Trade(TradesEvent)` — каждый sub-event пушится в out отдельно, без
+    /// nested Vec allocation на каждом TradesStream пакете. На пике 50K pps это
+    /// экономит ~50K Vec alloc/sec + matching dealloc.
+    Trade(TradesEvent),
     /// Balance channel: одно событие на пакет (только для cmd_id_sub 2/3/4).
     Balance(BalanceEvent),
     /// Arb channel (CmdId=6 внутри MPC_Balance): raw payload — структурный декодер ParseArbPayloadCompact ещё не портирован.
@@ -283,8 +288,10 @@ impl EventDispatcher {
                 }
                 match parse_trades_packet(payload) {
                     Some(pkt) => {
-                        let evs = self.trades.on_packet(pkt, now_ms);
-                        out.push(Event::Trades(evs));
+                        // Flatten: каждое TradesEvent пушится в out отдельно — без nested Vec.
+                        for ev in self.trades.on_packet(pkt, now_ms) {
+                            out.push(Event::Trade(ev));
+                        }
                     }
                     None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
                 }
@@ -295,8 +302,9 @@ impl EventDispatcher {
                 for inner in inner_payloads {
                     match parse_trades_packet(&inner) {
                         Some(pkt) => {
-                            let evs = self.trades.on_packet_resend(pkt);
-                            out.push(Event::Trades(evs));
+                            for ev in self.trades.on_packet_resend(pkt) {
+                                out.push(Event::Trade(ev));
+                            }
                         }
                         None => out.push(Event::ParseFailed { cmd, len: inner.len() }),
                     }

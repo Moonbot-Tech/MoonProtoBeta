@@ -15,6 +15,37 @@
 
 type Offsets = [usize; 4096];
 
+// Thread-local scratch буфер для SynLZ decompress (32 KB = `[usize; 4096]` × 8 байт).
+//
+// Раньше — `Box::new([0; 4096])` per call (~30 нс alloc + ~10 нс free).
+// На пике TradesStream/OrderBook ~50K decompress/sec это ~2 мс/сек чистого CPU
+// на alloc/dealloc + allocator pressure. Thread-local: alloc один раз per thread
+// при первом вызове, далее — zero alloc.
+//
+// Безопасность stale содержимого: SynLZ алгоритм пишет `offset[h] = lh` ПЕРЕД
+// тем как может его прочитать для back-reference в этом же вызове. Stale значения
+// от предыдущего вызова никогда не читаются как валидные offsets — на каждый
+// back-ref (`copy_from = offset[h_idx]`) применяется bounds check
+// `copy_from > dst_pos` (новый dst, не старый) → corrupt значение reject'ится.
+//
+// Рекурсии нет: `synlz_decompress` нигде сам себя не вызывает. RefCell гарантирует
+// safety если кто-то нарушит этот invariant (try_borrow_mut вернёт Err → fallback на свой alloc).
+thread_local! {
+    static DECOMPRESS_OFFSETS: std::cell::RefCell<Box<Offsets>> =
+        std::cell::RefCell::new(Box::new([0usize; 4096]));
+}
+
+// Thread-local scratch для SynLZ compress: offset (32 KB) + cache (16 KB) = 48 KB.
+// Аналогично — alloc один раз, переиспользуется. cache требует reset до `0` для
+// корректной работы алгоритма (используется как `v ^ cache[h]`); offset инициализируется
+// `usize::MAX` (sentinel "не было записи").
+thread_local! {
+    static COMPRESS_OFFSETS: std::cell::RefCell<Box<[usize; 4096]>> =
+        std::cell::RefCell::new(Box::new([usize::MAX; 4096]));
+    static COMPRESS_CACHE: std::cell::RefCell<Box<[u32; 4096]>> =
+        std::cell::RefCell::new(Box::new([0u32; 4096]));
+}
+
 /// Maximum allowed output size for SynLZ decompression (DoS protection).
 ///
 /// MoonProto-сообщения внутри Sliced ограничены ~384 KB (256 блоков × PMTU ≤ ~1.5 KB).
@@ -43,7 +74,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
 
     // Read output size header (matches SynLZdecompress1pas:10719-10733)
     let first_word = u16::from_le_bytes([src[0], src[1]]);
-    let mut pos: usize;
+    let pos: usize;
     if first_word == 0 {
         return Some(Vec::new());
     }
@@ -67,12 +98,45 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut dst = vec![0u8; out_size];
-    let mut dst_pos = 0usize;
-    // audit_rust_quality #2: 32 KB на стеке (`[usize; 4096]` × 8 байт) — близко к лимиту
-    // вторичных потоков на iOS (~512 KB) при глубоком callstack. Heap-аллокация ~30 нс
-    // на каждый вызов, незначительно на фоне самого decompress.
-    let mut offset: Box<Offsets> = Box::new([0; 4096]);
 
+    // Используем thread-local scratch buffer для offsets (32 KB). См. doc на
+    // DECOMPRESS_OFFSETS — stale содержимое безвредно (bounds check + write-before-read
+    // инварианты алгоритма).
+    let result = DECOMPRESS_OFFSETS.with(|cell| {
+        match cell.try_borrow_mut() {
+            Ok(mut guard) => synlz_decompress_inner(src, &mut dst, &mut **guard, pos, out_size),
+            Err(_) => {
+                // Recursion — невозможно по invariant, но если кто-то нарушит контракт —
+                // fallback на свой alloc.
+                let mut fallback: Box<Offsets> = Box::new([0usize; 4096]);
+                synlz_decompress_inner(src, &mut dst, &mut *fallback, pos, out_size)
+            }
+        }
+    });
+
+    match result {
+        DecompressResult::Ok(final_pos) => {
+            dst.truncate(final_pos.min(out_size));
+            Some(dst)
+        }
+        DecompressResult::Corrupt => None,
+    }
+}
+
+enum DecompressResult {
+    Ok(usize),    // final dst_pos
+    Corrupt,
+}
+
+/// Внутренняя реализация — изолирует thread_local borrow от `?` early returns.
+fn synlz_decompress_inner(
+    src: &[u8],
+    dst: &mut [u8],
+    offset: &mut Offsets,
+    mut pos: usize,
+    out_size: usize,
+) -> DecompressResult {
+    let mut dst_pos = 0usize;
     // last_hashed = dst - 1 в Delphi pointer-math (на 1 позицию ДО буфера).
     // В Rust используем i64, где -1 представляет это начальное состояние.
     let mut last_hashed: i64 = -1;
@@ -89,7 +153,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         while pos < src_end {
             if cw & cwbit == 0 {
                 // === LITERAL ===
-                if dst_pos >= out_size { return Some(dst); }
+                if dst_pos >= out_size { return DecompressResult::Ok(dst_pos); }
                 dst[dst_pos] = src[pos];
                 pos += 1;
                 dst_pos += 1;
@@ -115,13 +179,13 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
                 }
             } else {
                 // === BACK-REFERENCE ===
-                if pos + 2 > src_end { return Some(dst); }
+                if pos + 2 > src_end { return DecompressResult::Ok(dst_pos); }
                 let h_word = u16::from_le_bytes([src[pos], src[pos+1]]);
                 pos += 2;
 
                 let mut t = (h_word & 15) as usize + 2;
                 if t == 2 {
-                    if pos >= src_end { return Some(dst); }
+                    if pos >= src_end { return DecompressResult::Ok(dst_pos); }
                     t = src[pos] as usize + 18;
                     pos += 1;
                 }
@@ -132,14 +196,14 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
                 // Копируем t байт (учитываем overlap — Delphi MoveByOne для overlap'а).
                 if dst_pos + t > out_size {
                     // Защита от записи за границу буфера — Delphi полагается на корректность.
-                    return None;
+                    return DecompressResult::Corrupt;
                 }
                 // D-V2-05 fix: malicious/corrupt SynLZ stream может выставить copy_from
                 // указывающий за пределы уже декомпрессированных данных. Delphi (без bounds
                 // check) делает out-of-bounds read; в Rust это panic. Отказываемся вместо
                 // panic — corrupt input не должен валить long-running клиент.
                 if copy_from.saturating_add(t) > dst.len() || copy_from > dst_pos {
-                    return None;
+                    return DecompressResult::Corrupt;
                 }
                 if dst_pos.saturating_sub(copy_from) < t {
                     // Overlap: byte-by-byte (MoveByOne)
@@ -147,8 +211,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
                         dst[dst_pos + i] = dst[copy_from + i];
                     }
                 } else {
-                    // No overlap: можно block-copy (но в Rust нельзя dst[..].copy_within с overlap
-                    // если intervals don't overlap — используем split_at_mut логику через copy_within).
+                    // No overlap: copy_within работает.
                     dst.copy_within(copy_from..copy_from + t, dst_pos);
                 }
 
@@ -156,7 +219,6 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
 
                 // Update hash table: хэшируем позиции **до** copying-target (до `dst_pos`).
                 // Delphi: `if last_hashed < dst then repeat inc(last_hashed); hash; until last_hashed >= dst`.
-                // dst здесь = ДО `inc(dst, t)`, т.е. = dst_pos в текущий момент.
                 let target = dst_pos as i64;
                 while last_hashed < target {
                     last_hashed += 1;
@@ -181,9 +243,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         break;
     }
 
-    // Если расшифровка не дошла до out_size — возвращаем что есть (Delphi полагается на size).
-    dst.truncate(dst_pos.min(out_size));
-    Some(dst)
+    DecompressResult::Ok(dst_pos)
 }
 
 /// Decompress MoonProto packet (MPDecompress).
@@ -213,10 +273,50 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
         if size == 0 { return; }
     }
 
-    // audit_rust_quality #2: 32+16=48 KB на стеке — слишком много для mobile вторичных потоков.
-    let mut offset: Box<[usize; 4096]> = Box::new([usize::MAX; 4096]);
-    let mut cache: Box<[u32; 4096]> = Box::new([0u32; 4096]);
+    // Thread-local scratch — 32 KB offset + 16 KB cache. **cache требует reset**
+    // (используется как `v ^ cache[h]` для определения "повтор ли"); offset
+    // тоже сбрасывается в `usize::MAX` — sentinel "не было записи под этим hash".
+    // Без reset результат был бы wire-несовместимый со свежим compress.
+    COMPRESS_OFFSETS.with(|off_cell| {
+        COMPRESS_CACHE.with(|cache_cell| {
+            let mut offset = off_cell.try_borrow_mut()
+                .map(|g| Some(g)).unwrap_or(None);
+            let mut cache  = cache_cell.try_borrow_mut()
+                .map(|g| Some(g)).unwrap_or(None);
 
+            // Fallback на свой alloc если try_borrow_mut не сработал (рекурсия — не должно случаться).
+            let mut fallback_off: Box<[usize; 4096]> = Box::new([usize::MAX; 4096]);
+            let mut fallback_cache: Box<[u32; 4096]> = Box::new([0u32; 4096]);
+
+            let off_ref: &mut [usize; 4096] = match offset.as_mut() {
+                Some(g) => {
+                    // Reset thread-local к начальному состоянию.
+                    for v in g.iter_mut() { *v = usize::MAX; }
+                    &mut **g
+                }
+                None => &mut *fallback_off,
+            };
+            let cache_ref: &mut [u32; 4096] = match cache.as_mut() {
+                Some(g) => {
+                    for v in g.iter_mut() { *v = 0; }
+                    &mut **g
+                }
+                None => &mut *fallback_cache,
+            };
+
+            synlz_compress_inner(src, dst, off_ref, cache_ref);
+        });
+    });
+}
+
+/// Внутренняя реализация compress — изолирует thread_local borrow.
+fn synlz_compress_inner(
+    src: &[u8],
+    dst: &mut Vec<u8>,
+    offset: &mut [usize; 4096],
+    cache: &mut [u32; 4096],
+) {
+    let size = src.len();
     let srcend = size;
     let srcendmatch = if size > 11 { size - 11 } else { 0 };
     let mut src_pos: usize = 0;

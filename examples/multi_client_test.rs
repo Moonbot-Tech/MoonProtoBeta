@@ -119,7 +119,7 @@ fn run_client(
         Box::new(move |ev| {
             count_stats.raw_packets.fetch_add(1, Ordering::Relaxed);
             match ev {
-                moonproto::events::Event::Trades(_) => {
+                moonproto::events::Event::Trade(_) => {
                     count_stats.trades_packets.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {}

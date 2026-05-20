@@ -877,6 +877,20 @@ pub struct Client {
     /// off-by-50-1000ms timestamps в ордерах (последний Client перезаписывает
     /// delta всех остальных).
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Cached MAC context — один раз вычисленные ipad CRC + opad block для `cfg.mac_key`.
+    /// Используется в transport_pack/unpack hot-path вместо пересчёта HMAC ipad/opad
+    /// (128 XOR + crc32c) на каждом пакете. См. `moonproto_transport::MacContext`.
+    ///
+    /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в ClientConfig
+    /// и не меняется) — этот context тоже фиксирован. Clone() в `spawn_reader`
+    /// для передачи в reader thread.
+    mac_ctx: moonproto_transport::MacContext,
+
+    /// Reusable buffer для `transport_pack_into_with_mac` — экономит alloc/dealloc на каждый
+    /// исходящий пакет. Capacity растёт до peak packet size и переиспользуется.
+    /// audit_rust_quality #4: 50K pps × 1500б = 75 MB/s allocator pressure eximinated.
+    send_buf: Vec<u8>,
 }
 
 impl Client {
@@ -892,6 +906,11 @@ impl Client {
         let ntp_thread_shutdown = cfg.ntp_host.as_ref().map(|host| {
             crate::ntp::spawn_sync_thread(host.clone(), set_ntp_offset)
         });
+
+        // Кэшированный MacContext для cfg.mac_key — фиксирован на всю life Client'а.
+        // Создание делает 128 XOR + crc32c(ipad_block) единожды; затем `mac()` вызовы
+        // только crc32c_append(cached, data) + crc32c_append(prev, opad_block).
+        let mac_ctx = moonproto_transport::MacContext::new(&cfg.mac_key);
 
         Self {
             cfg,
@@ -979,6 +998,8 @@ impl Client {
             server_info: crate::commands::engine_api::ServerInfo::default(),
             last_update_markets_ms: i64::MIN / 2,
             last_check_tags_ms: i64::MIN / 2,
+            mac_ctx,
+            send_buf: Vec::with_capacity(2048),    // типичный send packet ~500-1500 байт
         }
     }
 
@@ -2284,6 +2305,7 @@ impl Client {
             }
         };
         let mac_key = self.cfg.mac_key;
+        let mac_ctx = self.mac_ctx.clone();    // shared cached HMAC context (hot path).
         let mask_ver = self.cfg.mask_ver;
         let event_tx = self.event_tx.clone();
         // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
@@ -2333,9 +2355,9 @@ impl Client {
                     }
                 };
 
-                // Transport unpack (OLC + MAC + ver check)
-                let Some((hdr, payload)) = moonproto_transport::transport_unpack(
-                    &mac_key, &buf[..n], mask_ver,
+                // Transport unpack (OLC + MAC + ver check) — кэшированный MacContext.
+                let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
+                    &mac_ctx, &mac_key, &buf[..n], mask_ver,
                 ) else { continue; };
 
                 // ErrEmu: симуляция packet loss на стороне клиента (зеркало Delphi
@@ -3336,18 +3358,43 @@ impl Client {
 
     fn send_raw_packet_cmd(&mut self, cmd: u8, payload: &[u8]) {
         let Some(addr) = self.server_socket_addr() else { return };
-        let (packet, extra) = moonproto_transport::transport_pack(
-            &self.cfg.mac_key, cmd, self.cfg.client_id, payload, self.cfg.mask_ver,
+        // Zero-alloc fast path: reuse self.send_buf + cached MacContext.
+        let extra = moonproto_transport::transport_pack_into_with_mac(
+            &mut self.send_buf,
+            &self.mac_ctx,
+            &self.cfg.mac_key,
+            cmd,
+            self.cfg.client_id,
+            payload,
+            self.cfg.mask_ver,
         );
+        // Извлекаем packet чтобы borrow checker не ругался на двойной &mut self
+        // (dispatch_send берёт &mut self, ему не нужен send_buf после copy в socket).
+        // Из send_buf берём slice — оно живёт в self, socket.send_to не сохранит ссылку.
+        // SAFETY pattern: take/restore чтобы &mut self в dispatch_send не пересекался с
+        // &self.send_buf — но проще: pass slice через owned vec swap.
+        let packet = std::mem::take(&mut self.send_buf);
         self.dispatch_send(cmd, &packet, extra.as_deref(), addr);
+        // Возвращаем буфер обратно (capacity сохранился, content сейчас не нужен).
+        self.send_buf = packet;
+        self.send_buf.clear();
     }
 
     fn send_raw_packet(&mut self, cmd: Command, payload: &[u8]) {
         let Some(addr) = self.server_socket_addr() else { return };
-        let (packet, extra) = moonproto_transport::transport_pack(
-            &self.cfg.mac_key, cmd as u8, self.cfg.client_id, payload, self.cfg.mask_ver,
+        let extra = moonproto_transport::transport_pack_into_with_mac(
+            &mut self.send_buf,
+            &self.mac_ctx,
+            &self.cfg.mac_key,
+            cmd as u8,
+            self.cfg.client_id,
+            payload,
+            self.cfg.mask_ver,
         );
+        let packet = std::mem::take(&mut self.send_buf);
         self.dispatch_send(cmd as u8, &packet, extra.as_deref(), addr);
+        self.send_buf = packet;
+        self.send_buf.clear();
     }
 
     /// Реально отправляет пакет (плюс optional extra-пакет от moonext) с обработкой ошибок.
