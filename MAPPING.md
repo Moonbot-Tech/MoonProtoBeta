@@ -255,7 +255,7 @@
 | # | Delphi pas:line | Sub-command | Rust strat.rs | ✅ |
 |---|---|---|---|---|
 | S1 | :40 | TStratSnapshotRequest (CmdId=1) — empty body | StratCommand::SnapshotRequest | ✅ |
-| S2 | :60 | TStratSnapshot (CmdId=2, Sliced, UK_StratSnapshot) — ServerEpoch + ClientMaxLastDate + Size + Full + Data[Size] | StratCommand::Snapshot + StratSnapshot | ✅ |
+| S2 | :60 | TStratSnapshot (CmdId=2, Sliced, UK_StratSnapshot) — ServerEpoch + ClientMaxLastDate + Size + Full + Data[Size] | StratCommand::Snapshot + StratSnapshot + `build_snapshot` / `build_snapshot_from_strategies` | ✅ |
 | S3 | :246 | TStratDelete (CmdId=3) — strategy_id + (soft) folder_path | StratCommand::Delete | ✅ |
 | S4 | :276 | TStratSellPriceUpdate (CmdId=4, UK_StratSellPriceUpdate) — strategy_id + sell_price | StratCommand::SellPriceUpdate | ✅ |
 | S5 | :298 | TStratCheckedSync (CmdId=5, Sliced) — count:Word + items + (soft) is_delta | StratCommand::CheckedSync + StratCheckedItem | ✅ |

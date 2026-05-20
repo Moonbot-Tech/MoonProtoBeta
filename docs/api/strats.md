@@ -97,6 +97,20 @@ client.strat_checked_sync(&items, true);
 client.strat_checked_echo(&items);
 ```
 
+To answer a snapshot request with application-owned strategy data, use the typed
+batch API. It serializes the `StrategySnapshot` values, computes
+`ClientMaxLastDate`, and sends the full CmdId=2 `TStratSnapshot` wire body:
+
+```rust
+use moonproto::commands::strategy_serializer::StrategySnapshot;
+
+let strategies: Vec<StrategySnapshot> = load_current_strategies();
+client.strat_send_snapshot_batch(server_epoch, true, &strategies);
+```
+
+If the application already has a compressed `TStrategySerializer` payload, use
+`strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
+
 `EventDispatcher::dispatch_into_active` auto-echoes the last full snapshot when
 the server sends `SnapshotRequested` and a cached full snapshot exists.
 

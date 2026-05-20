@@ -2078,8 +2078,6 @@ impl Client {
     //  High-level Strat wrappers (Command::Strat, encrypted=true)
     //  Покрывают MClient.SendStratCmd(T*Command.Create(...)) семантику Delphi.
     //  Аудит docs_api B-02: было 5 build_* функций без Client-обёрток.
-    //  ВНИМАНИЕ: отправка StratSnapshot полного через CreateFromStrats требует
-    //  StrategySerializer (Stage 3) — здесь только raw-payload entry.
     // ====================================================================
 
     /// `TStratSnapshotRequest` (Strat CmdId=1, High) — запрос snapshot стратегий с сервера.
@@ -2088,25 +2086,62 @@ impl Client {
         self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
-    /// `TStratSnapshot.CreateFromStrats` raw entry (Strat CmdId=2, Sliced, UK_StratSnapshot).
-    /// `serialized_payload` — уже сериализованный через `StrategySerializer` блок
-    /// без обёртывающего заголовка команды; функция сама добавляет CmdId/ver/uid.
-    /// Полный snapshot замещает любой предыдущий pending snapshot.
+    fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
+        self.send_cmd_keyed(
+            raw,
+            Command::Strat,
+            SendPriority::Sliced,
+            true,
+            6,
+            UniqueKey::strat_snapshot(),
+        );
+    }
+
+    /// `TStratSnapshot` (Strat CmdId=2, Sliced, UK_StratSnapshot) from an already
+    /// serialized `TStrategySerializer` payload.
     ///
-    /// **Stage 3:** StrategySerializer Rust writer не готов; до его реализации
-    /// этот метод можно использовать только если ты сам сериализовал стратегии
-    /// другим способом, совместимым с Delphi wire-format.
-    pub fn strat_send_snapshot(&self, serialized_payload: &[u8]) {
-        const CMD_STRAT_SNAPSHOT: u8 = 2;
-        const CURRENT_PROTO_CMD_VER: u16 = 3;
+    /// `data` is only the `TStratSnapshot.Data` blob. The method adds the required
+    /// Delphi fields: `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
+    /// Use [`Client::strat_send_snapshot_batch`] when the application has decoded
+    /// `StrategySnapshot` values rather than a prebuilt serializer payload.
+    pub fn strat_send_snapshot_payload(
+        &self,
+        server_epoch: u64,
+        client_max_last_date: u64,
+        full: bool,
+        data: &[u8],
+    ) {
         let uid: u64 = rand::random();
-        let mut raw = Vec::with_capacity(11 + serialized_payload.len());
-        raw.push(CMD_STRAT_SNAPSHOT);
-        raw.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
-        raw.extend_from_slice(&uid.to_le_bytes());
-        raw.extend_from_slice(serialized_payload);
-        self.send_cmd_keyed(raw, Command::Strat, SendPriority::Sliced, true, 6,
-                            UniqueKey::strat_snapshot());
+        let raw = crate::commands::strat::build_snapshot(
+            uid,
+            server_epoch,
+            client_max_last_date,
+            full,
+            data,
+        );
+        self.send_strat_snapshot_command(raw);
+    }
+
+    /// `TStratSnapshot` (Strat CmdId=2, Sliced, UK_StratSnapshot) from typed
+    /// strategy snapshots.
+    ///
+    /// This is the high-level counterpart to Delphi `CreateFromStrats` /
+    /// `CreateFromList`: it serializes the batch, computes `ClientMaxLastDate`,
+    /// and sends a valid CmdId=2 packet.
+    pub fn strat_send_snapshot_batch(
+        &self,
+        server_epoch: u64,
+        full: bool,
+        strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
+    ) {
+        let uid: u64 = rand::random();
+        let raw = crate::commands::strat::build_snapshot_from_strategies(
+            uid,
+            server_epoch,
+            full,
+            strategies,
+        );
+        self.send_strat_snapshot_command(raw);
     }
 
     /// `TStratDelete` (Strat CmdId=3, High) — удалить стратегию по id.

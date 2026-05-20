@@ -506,8 +506,8 @@ impl EventDispatcher {
         // последующий update в одном datagram'е). Шлём один запрос на пару.
         use std::collections::HashSet;
         let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
-        // Auto-action 2: StratEvent::SnapshotRequested → если есть last_full_snapshot_raw
-        // — auto-echo через client.strat_send_snapshot. Аналог Delphi
+        // Auto-action 2: StratEvent::SnapshotRequested → если есть last_full_snapshot
+        // — auto-echo через client.strat_send_snapshot_payload. Аналог Delphi
         // `MoonProtoClient.pas:695-699` где либа сама echo'ит. App получает event для
         // UI awareness, но НЕ обязан слать reply.
         let mut snapshot_requested_uid: Option<u64> = None;
@@ -530,14 +530,18 @@ impl EventDispatcher {
             );
         }
         if snapshot_requested_uid.is_some() {
-            if let Some(raw) = self.strats.last_full_snapshot_raw.as_ref() {
+            if let Some(snapshot) = self.strats.last_full_snapshot.as_ref() {
                 // Echo последний полученный full snapshot. Сервер примет как актуальный
                 // снимок стратегий клиента. Если клиент локально не модифицировал —
                 // это корректно. Иначе локальные изменения теряются (см. F5 docstring).
-                let raw_clone = raw.clone();
-                client.strat_send_snapshot(&raw_clone);
+                client.strat_send_snapshot_payload(
+                    snapshot.server_epoch,
+                    snapshot.client_max_last_date,
+                    snapshot.full,
+                    &snapshot.data,
+                );
             }
-            // Если last_full_snapshot_raw=None — событие всё равно эмиттится в `out`,
+            // Если last_full_snapshot=None — событие всё равно эмиттится в `out`,
             // потребитель сам обработает SnapshotRequested (как раньше).
         }
     }
@@ -870,12 +874,17 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requested_with_cached_raw_triggers_auto_echo() {
+    fn snapshot_requested_with_cached_snapshot_triggers_auto_echo() {
         // Active library auto-action 2: при SnapshotRequested → если есть
-        // last_full_snapshot_raw — либа сама шлёт его обратно (без участия app).
+        // last_full_snapshot — либа сама шлёт его обратно (без участия app).
         let mut d = EventDispatcher::new();
         let cached_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
-        d.strats.last_full_snapshot_raw = Some(cached_snapshot.clone());
+        d.strats.last_full_snapshot = Some(crate::commands::strat::StratSnapshot {
+            server_epoch: 7,
+            client_max_last_date: 99,
+            full: true,
+            data: cached_snapshot.clone(),
+        });
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         let mut out = Vec::new();
@@ -886,18 +895,27 @@ mod tests {
 
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — должна быть отправка Command::Strat с CMD_STRAT_SNAPSHOT
-        // (=2) + ver + uid + cached_snapshot content.
+        // Drain event channel — должна быть отправка Command::Strat с полным
+        // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
         let mut found_snapshot_send = false;
         while let Ok(ev) = client.event_rx.try_recv() {
             if let crate::client::ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::Strat as u8 {
                     let data = &msg.item.data;
-                    // Header: cmd_subcode(1) + ver(2) + uid(8) = 11; затем payload.
-                    if data.len() >= 11 + cached_snapshot.len() {
+                    if data.len() == 11 + 8 + 8 + 4 + 1 + cached_snapshot.len() {
                         let cmd_subcode = data[0];
-                        let tail = &data[11..];
-                        if cmd_subcode == 2 && tail == cached_snapshot.as_slice() {
+                        let server_epoch = u64::from_le_bytes(data[11..19].try_into().unwrap());
+                        let client_max_last_date = u64::from_le_bytes(data[19..27].try_into().unwrap());
+                        let size = u32::from_le_bytes(data[27..31].try_into().unwrap());
+                        let full = data[31] != 0;
+                        let tail = &data[32..];
+                        if cmd_subcode == 2
+                            && server_epoch == 7
+                            && client_max_last_date == 99
+                            && size == cached_snapshot.len() as u32
+                            && full
+                            && tail == cached_snapshot.as_slice()
+                        {
                             found_snapshot_send = true;
                         }
                     }
@@ -916,11 +934,11 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requested_without_cached_raw_does_not_send() {
-        // Если у нас НЕТ last_full_snapshot_raw — auto-echo не происходит.
+    fn snapshot_requested_without_cached_snapshot_does_not_send() {
+        // Если у нас НЕТ last_full_snapshot — auto-echo не происходит.
         // App получает event и может сам решить что делать.
         let mut d = EventDispatcher::new();
-        assert!(d.strats.last_full_snapshot_raw.is_none());
+        assert!(d.strats.last_full_snapshot.is_none());
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         let mut out = Vec::new();

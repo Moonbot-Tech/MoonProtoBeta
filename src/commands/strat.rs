@@ -13,10 +13,10 @@
 //!
 //! ## Замечание про TStratSnapshot.Data
 //! `Data: bytes(Size)` — это сериализованный bin-формат `TStrategySerializer` (RTTI-driven,
-//! ~1118 строк). В этом модуле сохраняется как **raw Vec\<u8\>** — полный декодер
-//! `commands::strategy_serializer` (Stage 3) распакует в HashMap<FieldName, FieldValue>.
+//! ~1118 строк). Декодер и writer находятся в `commands::strategy_serializer`.
 
 use super::registry::{CURRENT_PROTO_CMD_VER, read_string, write_string};
+use super::strategy_serializer::{StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot};
 
 const BASE_STRAT_CLASS_CMD_ID_BASE: u8 = 0; // TBaseStratCommand
 const CMD_SNAPSHOT_REQUEST: u8 = 1;
@@ -40,7 +40,7 @@ pub struct StratSnapshot {
     pub client_max_last_date: u64,
     /// True если это полный snapshot (Markets и Strats заменяются). False — частичный.
     pub full: bool,
-    /// Сырой `TStrategySerializer` bin payload. Декодер — в `commands::strategy_serializer` (Stage 3).
+    /// Сырой `TStrategySerializer` bin payload. Декодер/writer — в `commands::strategy_serializer`.
     pub data: Vec<u8>,
 }
 
@@ -195,6 +195,49 @@ pub fn build_snapshot_request(uid: u64) -> Vec<u8> {
     out
 }
 
+/// `TStratSnapshot` (CmdId=2).
+///
+/// `data` is the compressed `TStrategySerializer` payload (`TStratSnapshot.Data`),
+/// not the full command body. This builder adds the Delphi fields
+/// `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
+pub fn build_snapshot(
+    uid: u64,
+    server_epoch: u64,
+    client_max_last_date: u64,
+    full: bool,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11 + 8 + 8 + 4 + 1 + data.len());
+    write_header(&mut out, CMD_SNAPSHOT, uid);
+    out.extend_from_slice(&server_epoch.to_le_bytes());
+    out.extend_from_slice(&client_max_last_date.to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.push(full as u8);
+    out.extend_from_slice(data);
+    out
+}
+
+/// Build a `TStratSnapshot` from decoded strategy snapshots.
+///
+/// This is the typed counterpart to Delphi `TStratSnapshot.CreateFromStrats` /
+/// `CreateFromList`: it serializes strategies through `StrategyBatchBuilder`,
+/// computes `ClientMaxLastDate`, and wraps the result as CmdId=2.
+pub fn build_snapshot_from_strategies(
+    uid: u64,
+    server_epoch: u64,
+    full: bool,
+    strategies: &[StrategySerializerSnapshot],
+) -> Vec<u8> {
+    let mut builder = StrategyBatchBuilder::new();
+    let mut client_max_last_date = 0u64;
+    for strategy in strategies {
+        client_max_last_date = client_max_last_date.max(strategy.last_date);
+        builder.write_strategy(strategy);
+    }
+    let data = builder.finalize();
+    build_snapshot(uid, server_epoch, client_max_last_date, full, &data)
+}
+
 /// `TStratDelete` (CmdId=3).
 pub fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
@@ -321,6 +364,64 @@ mod tests {
                 assert_eq!(s.client_max_last_date, 20);
                 assert!(s.full);
                 assert_eq!(s.data, vec![1, 2, 3, 4]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn build_snapshot_wraps_serializer_payload() {
+        let payload = [1, 2, 3, 4];
+        let raw = build_snapshot(77, 10, 20, true, &payload);
+        let cmd = StratCommand::parse(&raw).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 10);
+                assert_eq!(s.client_max_last_date, 20);
+                assert!(s.full);
+                assert_eq!(s.data, payload);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn build_snapshot_from_strategies_computes_max_last_date() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+        use std::collections::HashMap;
+
+        let mut fields = HashMap::new();
+        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        let strategies = vec![
+            StrategySnapshot {
+                strategy_id: 1,
+                strategy_ver: 1,
+                last_date: 10,
+                checked: true,
+                kind: 1,
+                path: "P".to_string(),
+                fields: fields.clone(),
+            },
+            StrategySnapshot {
+                strategy_id: 2,
+                strategy_ver: 1,
+                last_date: 30,
+                checked: false,
+                kind: 1,
+                path: "P".to_string(),
+                fields,
+            },
+        ];
+        let raw = build_snapshot_from_strategies(78, 11, false, &strategies);
+        let cmd = StratCommand::parse(&raw).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 11);
+                assert_eq!(s.client_max_last_date, 30);
+                assert!(!s.full);
+                let batch = crate::commands::strategy_serializer::parse_strategy_batch(&s.data)
+                    .expect("strategy payload must parse");
+                assert_eq!(batch.strategies.len(), 2);
             }
             _ => panic!("wrong variant"),
         }
