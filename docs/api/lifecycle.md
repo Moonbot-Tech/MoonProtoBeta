@@ -1,31 +1,72 @@
 # Lifecycle callbacks
 
-Типизированные события состояния канала. Уведомляют потребителя о фазах подключения: handshake, ready, reconnect, server restart, disconnect.
+Типизированные события состояния канала связи с сервером. Подключай callback
+через [`Client::on_lifecycle`](client.md). Callback выполняется в **main thread**
+(тот же что обрабатывает приём UDP, retry, heartbeat).
 
 ## LifecycleEvent
 
 ```rust
 pub enum LifecycleEvent {
-    /// Handshake начат (Hello отправлен), но Fine ещё не получен.
-    /// Эмитится при первом подключении (cold start) И при soft reconnect (после Offline).
+    /// Handshake начат (Hello отправлен), Fine ещё не получен. Никаких действий
+    /// от app не нужно — клиент сам пробует, retry'ит, переключает порты.
     Connecting,
-    
-    /// Fine получен — канал авторизован и готов к работе.
-    Authenticated,
-    
-    /// Потеря связи (>= 7000ms без активности), ждём соединения.
-    /// Эмитится при переходе AuthDone → Offline.
-    Reconnecting,
-    
-    /// Сервер перезапустился (PeerAppToken изменился между сессиями).
-    /// Прикладной слой должен сбросить кэши и сделать re-init (markets, balances, ...).
-    /// Эмитится в `handle_handshake` при детекции изменения `peer_app_token`.
-    ServerRestart,
-    
-    /// Канал закрыт. Возможные причины:
-    /// - Явный `client.disconnect()` от потребителя.
-    /// - `bind_socket` failure (200 неудачных попыток подряд).
+
+    /// Fine получен — канал авторизован и готов.
+    ///
+    /// `fresh: true`  — это **первый** Connected с момента `Client::new`.
+    ///                  App может одноразово показать "Welcome" / выполнить init.
+    /// `fresh: false` — это re-connect после потери связи / server restart /
+    ///                  port rotation. Registry уже выполнил re-subscribe — app
+    ///                  ничего делать не должен.
+    Connected { fresh: bool },
+
+    /// Канал закрыт явным `client.disconnect()`. Финальное состояние — для
+    /// возобновления связи нужен новый `Client::new`.
     Disconnected,
+
+    /// Потеря связи > порога (RECONNECT_WAITING_MS = 7с). Клиент **сам** пытается
+    /// soft-reconnect (HelloAgain без полного handshake). Если HelloAgain не
+    /// проходит (сервер не помнит этого клиента) — следующий цикл начнётся с
+    /// нового Hello → новый Connecting. **Никаких actionable действий от app**,
+    /// только UI индикатор "переподключаемся".
+    Reconnecting,
+
+    /// ⚠ КРИТИЧЕСКОЕ: переполнен буфер pending H-priority команд (MAX_PENDING_H = 256).
+    /// При долгой server silence без ACK retry-копии накапливаются, либа **молча
+    /// выбрасывает** самые старые. Среди старых могут быть cancel_order /
+    /// replace_order — потеря таких команд = торговый риск.
+    ///
+    /// App **обязан** реагировать: показать критический индикатор пользователю,
+    /// возможно retry команды через свой механизм (если знает что недоотменено).
+    SendBacklogCritical {
+        cmd:       u8,    // TMoonProtoCommand этой команды (обычно Command::Order as u8)
+        u_key_uid: u64,   // UKey.uid потерянного pending (для cancel/replace = Order.uid)
+    },
+
+    /// ⚠ КРИТИЧЕСКОЕ: невозможно открыть локальный UDP-сокет. 200 попыток `bind`
+    /// упали несколько раз подряд. Типичные причины:
+    /// - iOS/Android background restrictions (приложение в фоне);
+    /// - CGNAT / ulimit (исчерпаны эфемерные порты);
+    /// - EPERM / SELinux (нет прав на bind);
+    /// - VPN config conflict (порт занят VPN-tunnel'ом).
+    ///
+    /// Либа сама retry'ит forever. App должен показать
+    /// "Cannot bind UDP socket — check OS network permissions" вместо обычного
+    /// "Connecting..." — иначе пользователь будет ждать молча.
+    BindFailed {
+        consecutive_failures: u32,   // сколько раз подряд весь 200-port retry упал
+    },
+
+    /// Детектирован перезапуск сервера: `PeerAppToken` изменился между сессиями.
+    /// Liба сама:
+    /// - отметила MarketsState.indexes_synchronized = false;
+    /// - отправила api_get_markets_indexes();
+    /// - блокирует обработку TradesStream/OrderBook пакетов до синхронизации;
+    /// - после ServerToken change auto-replays subscriptions из registry.
+    ///
+    /// **Никаких actionable действий от app** — только UI tooltip "сервер был перезапущен".
+    ServerRestart,
 }
 ```
 
@@ -40,17 +81,31 @@ client.on_lifecycle(Box::new(|ev| {
         LifecycleEvent::Connecting => {
             ui.show_status("Подключение...");
         }
-        LifecycleEvent::Authenticated => {
+        LifecycleEvent::Connected { fresh: true } => {
             ui.show_status("Подключено");
-            // Запросить начальный snapshot
+            // Welcome-баннер / one-time init.
+        }
+        LifecycleEvent::Connected { fresh: false } => {
+            ui.show_status("Подключено");
+            // Никаких re-subscribe — либа сама сделала.
         }
         LifecycleEvent::Reconnecting => {
             ui.show_status("Переподключение...");
         }
         LifecycleEvent::ServerRestart => {
-            // Сервер рестарт — сбросить кэши, перезапросить markets/balance
-            cache.clear();
-            client.api_get_markets_list();  // и т.д.
+            ui.tooltip("Сервер был перезапущен. Данные обновляются.");
+            // НЕ нужно делать api_get_markets_list() — либа сама.
+        }
+        LifecycleEvent::SendBacklogCritical { cmd, u_key_uid } => {
+            ui.show_critical(format!(
+                "Команда {cmd}/{u_key_uid} потерялась. Проверьте состояние ордера."
+            ));
+        }
+        LifecycleEvent::BindFailed { consecutive_failures } => {
+            ui.show_critical(format!(
+                "Не могу открыть UDP-сокет ({} попыток). Проверьте сетевые разрешения.",
+                consecutive_failures
+            ));
         }
         LifecycleEvent::Disconnected => {
             ui.show_status("Отключено");
@@ -58,31 +113,35 @@ client.on_lifecycle(Box::new(|ev| {
     }
 }));
 
-client.run(/* ... */);
+client.run_with_dispatcher(/* ... */);
 ```
 
 ## State machine
 
 ```
-       ┌──────────────────────────────────────────────────┐
-       │                                                  │
-       ▼                                                  │
-   ┌─────┐  Connecting   ┌───────────┐  Authenticated ┌──────────┐
-   │Base │──────────────▶│ Connected │──────────────▶│ AuthDone │
-   └─────┘               └───────────┘                └─────┬────┘
-       ▲                                                    │
-       │                                                    │ Reconnecting
-       │ Disconnected                                       ▼
-       │                                              ┌──────────┐
-       │                  Connecting                  │ Offline  │
-       │       ┌──────────────────────────────────────┴──────────┘
-       │       │
-       │       └──▶ (back to Connected → AuthDone)
+       ┌─────────────────────────────────────────────────────┐
+       │                                                     │
+       ▼                                                     │
+   ┌─────┐   Connecting    ┌───────────┐   Connected{fresh}  │
+   │Base │────────────────▶│ Connected │──────────────────▶ ┌──────────┐
+   └─────┘                 └───────────┘                    │ AuthDone │
+       ▲                                                    └─────┬────┘
+       │                                                          │
+       │ Disconnected                                              │ Reconnecting
+       │                                                           ▼
+       │                  Connecting                         ┌──────────┐
+       │       ┌────────────────────────────────────────────┤ Offline  │
+       │       │                                              └──────────┘
+       │       └──▶ (back to Connected → AuthDone, fresh:false)
        │
-       └─────── on `client.disconnect()` или bind failure
+       └─────── on `client.disconnect()` или forever-retry эскалация
 ```
 
-`ServerRestart` — горизонтальное событие, эмитится во время `handshake` при переходе `Connecting → Authenticated` если детектирована смена `peer_app_token` (не меняет state-machine выше).
+`ServerRestart` — горизонтальное событие, эмитится во время handshake при
+смене `peer_app_token` (не меняет state-machine).
+
+`SendBacklogCritical` и `BindFailed` — горизонтальные алерты, эмитятся в любом
+состоянии (`SendBacklogCritical` обычно в AuthDone, `BindFailed` обычно в Base).
 
 ## Семантика переходов
 
@@ -90,10 +149,13 @@ client.run(/* ... */);
 |---|---|
 | `Base → Connected` | `Connecting` (cold start) |
 | `Offline → Connected` | `Connecting` (soft reconnect) |
-| `* → AuthDone` (если был не AuthDone) | `Authenticated` |
+| `* → AuthDone` (первый раз за life Client) | `Connected { fresh: true }` |
+| `Offline → AuthDone` (re-handshake) | `Connected { fresh: false }` |
 | `AuthDone → Offline` | `Reconnecting` |
-| `* → Base` (явный disconnect или bind fail) | `Disconnected` |
-| при handshake | `ServerRestart` (если `peer_app_token` изменился) |
+| `* → Disconnected` | `Disconnected` (от `disconnect()`) |
+| на handshake (PeerAppToken changed) | `ServerRestart` |
+| при переполнении pending_h | `SendBacklogCritical { cmd, u_key_uid }` |
+| при многократных bind failures | `BindFailed { consecutive_failures }` |
 
 ## ServerRestart detection — детали
 
@@ -114,35 +176,95 @@ if prev_app_token != 0 && prev_app_token != hello.app_token {
 }
 ```
 
-- `prev_app_token != 0` — исключает cold start (первое подключение тоже меняет 0 → hello.app_token, но это не "restart").
+- `prev_app_token != 0` — исключает cold start (первое подключение тоже меняет
+  0 → app_token, но это не "restart").
 - `prev != new` — реальная смена → сервер перезапустился между нашими сессиями.
 
-## Disconnect от bind_socket failure
+После эмиссии события либа автоматически:
+1. Помечает `MarketsState.indexes_synchronized = false`.
+2. Отправляет `api_get_markets_indexes()`.
+3. Блокирует обработку TradesStream/OrderBook пакетов до синхронизации.
+4. После ServerToken change → `replay_subscriptions()` шлёт все subscriptions заново.
 
-Если `bind_socket()` не смог открыть сокет 200 попыток подряд (все порты заняты или нет прав), эмитится `Disconnected` с переходом в `Base`:
+App только красит UI индикатор.
 
+## `Connected { fresh: bool }` — точная семантика
+
+`fresh = true` только при **первом** Connected за всю жизнь `Client` (флаг
+`was_ever_connected` в Client). Для всех последующих re-handshake'ев — `false`.
+
+Удобно для UI: показать "Welcome" / запустить init **один раз**, не дублировать
+на каждом soft-reconnect.
+
+В Delphi-боте этой различкой нет — там was-ever-connected отслеживался в
+application layer. В Rust перенесено в либу (active library principle —
+useful info для UI всегда).
+
+## SendBacklogCritical — что делать
+
+`pending_h` (pending H-priority команд с retry) имеет лимит `MAX_PENDING_H = 256`.
+При server silence без ACK команды накапливаются. На превышении лимита — drop
+oldest (FIFO) + emit event с информацией о dropped command.
+
+**Среди dropped могут быть critical trade commands** (`replace_order`,
+`cancel_order` с UK_OrderMove). Если такая команда не дошла — ордер не отменился /
+не перенесён. Это торговый риск.
+
+App pattern:
 ```rust
-// bind_socket внутри:
-if self.auth_status != AuthStatus::Base {
-    self.auth_status = AuthStatus::Base;
-    self.need_connect = false;
-    self.fire_lifecycle(LifecycleEvent::Disconnected);
+LifecycleEvent::SendBacklogCritical { cmd, u_key_uid } => {
+    // 1. Показать алерт пользователю.
+    ui.alert(format!("Команда cmd={cmd} uid={u_key_uid} потерялась"));
+
+    // 2. Если знаем что это была отмена/переустановка ордера — попробовать
+    //    через api_get_order(u_key_uid) узнать текущее состояние на сервере.
+    let rx = client.api_get_order(u_key_uid);
+    if let Ok(resp) = rx.recv_timeout(Duration::from_secs(5)) {
+        // Решить retry или ничего.
+    }
 }
 ```
 
-Это уведомление потребителю что **транспорт сдохол** — раньше клиент молча висел.
+См. `audit_robustness` C3 (HANDOFF reference).
+
+## BindFailed — что делать
+
+При невозможности `bind` UDP socket'а 200 попыток подряд — серия упала. На
+каждой серии (cycle main loop) эмитится событие с `consecutive_failures` (1, 2, ...).
+
+Типовое значение `consecutive_failures = 1` — первая серия. `≥ 3` = systemic
+проблема (15+ секунд retry'ев впустую).
+
+App pattern:
+```rust
+LifecycleEvent::BindFailed { consecutive_failures: n } => {
+    if n >= 3 {
+        ui.show_blocking_error(
+            "Невозможно подключиться: операционная система блокирует UDP socket.\n\
+             Проверьте network permissions / firewall / VPN-конфигурацию."
+        );
+    }
+}
+```
+
+См. `audit_robustness` H9.
 
 ## Тяжёлые операции в callback'е
 
-Lifecycle callback вызывается из **main thread** Client'а (тот же поток что обрабатывает приём UDP и retry/heartbeat). Тяжёлые операции в нём блокируют send loop. **Правило**: складывать события в очередь и обрабатывать в отдельном потоке:
+Lifecycle callback вызывается из main thread. Тяжёлые операции в нём блокируют
+send loop. **Правило**: складывать события в очередь и обрабатывать в отдельном
+потоке:
 
 ```rust
-let (tx, rx) = std::sync::mpsc::channel::<LifecycleEvent>();
+use std::sync::mpsc;
+use std::thread;
+
+let (tx, rx) = mpsc::channel::<LifecycleEvent>();
 client.on_lifecycle(Box::new(move |ev| { let _ = tx.send(ev); }));
 
-std::thread::spawn(move || {
+thread::spawn(move || {
     while let Ok(ev) = rx.recv() {
-        // тяжёлая обработка
+        // тяжёлая обработка — log в DB, push notification, etc.
     }
 });
 ```
@@ -150,5 +272,5 @@ std::thread::spawn(move || {
 ## См. также
 
 - [client.md](client.md) — `Client::on_lifecycle`, AuthStatus, soft/hard reconnect.
-- [events.md](events.md) — `EventDispatcher` для других каналов.
-- DEVIATION #18 — Lifecycle abstraction (Rust extension, нет в Delphi).
+- [events.md](events.md) — `EventDispatcher` для data событий (Order/Trades/...).
+- [multi_server.md](multi_server.md) — independent lifecycle на Client'ы.

@@ -1,21 +1,26 @@
 # Strats channel (MPC_Strat)
 
-Канал стратегий: snapshot полной структуры стратегий + дельты (sell-price update, checked-sync, delete).
+Канал стратегий: snapshot полной структуры стратегий + дельты (sell-price update,
+checked-sync, delete).
 
 ## Что это
 
-`TStrategy` (Delphi) — большая структура (~200+ полей) с настройками одной торговой стратегии: имя, тип, фильтры, размер ордера, стоп-лоссы, корзина монет, hotkeys, телеграм-настройки и т.д. Сервер отправляет полный snapshot всех стратегий через **RTTI-driven сериализацию** в `TStratSnapshot` команду, а дальше шлёт компактные дельты:
+`TStrategy` (Delphi) — большая структура (~200+ полей) с настройками одной
+торговой стратегии. Сервер отправляет полный snapshot всех стратегий через
+**RTTI-driven сериализацию** в `TStratSnapshot` команду, а дальше шлёт
+компактные дельты:
 
 - `TStratSellPriceUpdate` — изменилась цена продажи.
 - `TStratCheckedSync` — синхронизация checked-флагов (UI чекбоксы старт/стоп).
 - `TStratDelete` — стратегия удалена.
 
-В Rust порте сделано:
+В Rust порте:
 1. **Wire-парсеры подкоманд** в `commands::strat` (7 подкоманд CmdId 0..6).
-2. **RTTI-driven payload decoder** в `commands::strategy_serializer` — парсит сжатый snapshot в `Vec<StrategySnapshot>` с `HashMap<FieldName, FieldValue>` для каждой.
-3. **Sync state** в `state::StratsState` — `HashMap<strategy_id, StrategyInfo>` + автоматическое применение дельт.
-
----
+2. **RTTI-driven payload decoder** в `commands::strategy_serializer` — парсит
+   сжатый snapshot в `Vec<StrategySnapshot>` с `HashMap<FieldName, FieldValue>`
+   для каждой.
+3. **Sync state** в `state::StratsState` — `HashMap<strategy_id, StrategyInfo>` +
+   автоматическое применение дельт.
 
 ## Подкоманды
 
@@ -23,14 +28,54 @@
 |---|---|---|---|---|
 | 1 | `SnapshotRequest` | C→S | High | "Пришли мне полный snapshot" |
 | 2 | `Snapshot` | S→C | Sliced | Полный или partial snapshot (DEFLATE-compressed bin) |
-| 3 | `Delete` | both | High | Стратегия удалена + folder_path (soft-read) |
+| 3 | `Delete` | both | High | Стратегия удалена + folder_path |
 | 4 | `SellPriceUpdate` | both | High (UK_StratSellPriceUpdate) | Изменилась цена продажи |
 | 5 | `CheckedSync` | both | Sliced | Sync checked-флагов (full или delta) |
 | 6 | `CheckedEcho` | C→S | High | ACK на дельту checked |
 
----
+## Получение событий (через EventDispatcher)
 
-## Парсинг входящих
+```rust
+use moonproto::events::{EventDispatcher, Event};
+use moonproto::state::StratEvent;
+
+let mut dispatcher = EventDispatcher::new();
+client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|ev| match ev {
+    Event::Strat(StratEvent::SnapshotFull { server_epoch, raw_data }) => {
+        // Декодировать полный snapshot:
+        let batch = moonproto::commands::strategy_serializer::parse_strategy_batch(raw_data)
+            .expect("parse_strategy_batch failed");
+        for s in &batch.strategies {
+            println!("Strategy {}: {} fields", s.strategy_id, s.fields.len());
+        }
+    }
+    Event::Strat(StratEvent::SellPriceUpdated { strategy_id, sell_price }) => {
+        // state уже обновлён — dispatcher.strats().by_id.get(strategy_id) даст актуальное.
+    }
+    Event::Strat(StratEvent::Deleted { strategy_id }) => { /* ... */ }
+    Event::Strat(StratEvent::CheckedSynced { changed, is_delta }) => { /* ... */ }
+    Event::Strat(StratEvent::SnapshotRequested { uid }) => {
+        // Active library: если есть last_full_snapshot_raw в state —
+        // dispatch_into_active уже отправил его автоматически через strat_send_snapshot.
+        // Event для UI awareness.
+    }
+    _ => {}
+}));
+```
+
+## Active library — auto-echo snapshot
+
+Когда сервер шлёт `TStratSnapshotRequest` ("дай мне snapshot стратегий"), либа
+**автоматически** echo'ит последний полученный `last_full_snapshot_raw` через
+`client.strat_send_snapshot(...)`. App получает событие `SnapshotRequested` для
+UI awareness, но **не обязан** слать reply сам.
+
+Аналог Delphi `MoonProtoClient.pas:695-699` (там либа сама echo'ит).
+
+Если `last_full_snapshot_raw = None` (никогда не получали snapshot) — event
+эмитится, но auto-echo не происходит. Тогда app может сам обработать.
+
+## Низкоуровневый pattern
 
 ```rust
 use moonproto::commands::strat::StratCommand;
@@ -40,52 +85,34 @@ let mut state = StratsState::new();
 
 if let Some(cmd) = StratCommand::parse(&payload) {
     let event = state.apply(cmd);
-    match event {
-        StratEvent::SnapshotFull { server_epoch, raw_data } => {
-            // Полный snapshot — нужно декодировать (см. ниже)
-            let batch = state.apply_snapshot_decoded(&raw_data).unwrap();
-            for s in &batch.strategies {
-                println!("Strategy {}: {} fields", s.strategy_id, s.fields.len());
-            }
-        }
-        StratEvent::SellPriceUpdated { strategy_id, sell_price } => {
-            // Цена обновилась — state.by_id.get(strategy_id).sell_price уже = sell_price
-        }
-        StratEvent::Deleted { strategy_id } => {
-            // Стратегия удалена из state.by_id
-        }
-        StratEvent::CheckedSynced { changed, is_delta } => {
-            // is_delta=true: только переданные стратегии затронуты
-            // is_delta=false: остальные сброшены в unchecked
-        }
-        _ => {}
-    }
+    // ... обработать event ...
 }
 ```
 
----
+## Sync state — StrategyInfo
 
-## Sync state
-
-`StratsState` — лёгкая sync-сводка для UI отображения списка стратегий и быстрого lookup.
+`StratsState` — лёгкая sync-сводка для UI отображения списка стратегий.
 
 ```rust
 pub struct StrategyInfo {
     pub strategy_id: u64,
-    pub last_date: u64,    // unix epoch ms — время последнего апдейта
-    pub sell_price: f64,    // последнее значение SellPrice
-    pub checked: bool,      // UI чекбокс старт/стоп
-    pub folder_path: String, // папка в дереве стратегий
+    pub last_date:   u64,       // unix epoch ms — время последнего апдейта
+    pub sell_price:  f64,       // последнее значение SellPrice
+    pub checked:     bool,      // UI чекбокс старт/стоп
+    pub folder_path: String,    // папка в дереве стратегий
 }
 ```
 
-**ВАЖНО:** Полные `TStrategy` поля (StrategyName, OrderSize, Comment, CoinsBlackList, BuyVolume, ...) в `StrategyInfo` НЕ хранятся — это observer-state, не полноценный кэш. Полный декодированный `StrategyBatch` возвращается из `apply_snapshot_decoded()` — потребитель сам решает что с ним делать (показать в UI, кэшировать, фильтровать).
-
----
+**ВАЖНО:** Полные `TStrategy` поля (StrategyName, OrderSize, Comment,
+CoinsBlackList, BuyVolume, ...) в `StrategyInfo` НЕ хранятся — это
+observer-state, не полноценный кэш. Полный декодированный `StrategyBatch`
+получается из `parse_strategy_batch(snapshot.raw_data)` — потребитель сам решает
+что с ним делать (показать в UI, кэшировать, фильтровать).
 
 ## strategy_serializer — RTTI-driven decoder
 
-`commands::strategy_serializer` парсит `TStratSnapshot.data` (DEFLATE-compressed bin) в типизированный `StrategyBatch`.
+`commands::strategy_serializer` парсит `TStratSnapshot.data` (DEFLATE-compressed
+bin) в типизированный `StrategyBatch`.
 
 ### Wire format
 
@@ -125,14 +152,14 @@ Strategies[StratCount]:
 | 10 | `Single` | 4 bytes | f32 LE |
 | 0x80 | flag | — | ZERO_FLAG: значение = zero для типа, value bytes отсутствуют |
 
-Unknown TypeID (выходящий из 1..10) — fallback skip 8 байт, поле игнорируется.
+Unknown TypeID — fallback skip 8 байт, поле игнорируется.
 
 ### Использование
 
 ```rust
 use moonproto::commands::strategy_serializer::*;
 
-let batch = parse_strategy_batch(&snapshot.data).unwrap();
+let batch = parse_strategy_batch(snapshot_raw_data).unwrap();
 for s in &batch.strategies {
     if let Some(FieldValue::String(name)) = s.fields.get("StrategyName") {
         println!("Strategy {}: {}", s.strategy_id, name);
@@ -162,34 +189,31 @@ pub enum FieldValue {
 
 Хелперы: `.type_id()`, `.is_zero()`, `FieldValue::zero(type_id) -> Option<Self>`.
 
----
-
-## Действия от клиента
-
-### Запросить snapshot
+## Действия от клиента — Client methods
 
 ```rust
-use moonproto::commands::strat::build_snapshot_request;
+// Запросить snapshot
+client.strat_snapshot_request();
 
-let raw = build_snapshot_request(rand::random::<u64>());
-client.send(MPC_STRAT, &raw).await?;
-// Сервер ответит TStratSnapshot
-```
+// Отправить snapshot (auto-echo делает либа сама — обычно вручную не нужно)
+client.strat_send_snapshot(&serialized_payload);
 
-### Подтвердить delta checked (CheckedEcho)
+// Удалить стратегию
+client.strat_delete(strategy_id, "folder/path");
 
-```rust
-use moonproto::commands::strat::{StratCheckedItem, build_checked_echo};
+// Изменить sell price
+client.strat_sell_price_update(strategy_id, 50100.0);
 
+// Sync checked state
 let items = vec![
-    StratCheckedItem { strategy_id: 100, checked: true },
-    StratCheckedItem { strategy_id: 200, checked: false },
+    moonproto::commands::strat::StratCheckedItem { strategy_id: 100, checked: true },
+    moonproto::commands::strat::StratCheckedItem { strategy_id: 200, checked: false },
 ];
-let raw = build_checked_echo(rand::random::<u64>(), &items);
-client.send(MPC_STRAT, &raw).await?;
-```
+client.strat_checked_sync(&items, /* is_delta = */ true);
 
----
+// Подтвердить delta checked (CheckedEcho)
+client.strat_checked_echo(&items);
+```
 
 ## UniqueKeys
 
@@ -198,9 +222,12 @@ client.send(MPC_STRAT, &raw).await?;
 | `Snapshot` (CmdId=2) | `UK_StratSnapshot` (UID=1, overlap) |
 | `SellPriceUpdate` (CmdId=4) | `UK_StratSellPriceUpdate` (UID = strategy_id) |
 
----
+## OOM cap
+
+`StratsState` имеет `MAX_STRATEGIES = 50_000` — DoS guard от malicious server.
 
 ## См. также
 
-- [ui.md](ui.md) — `StratStartStop`/`StratStartStopV2` посылают команды старт/стоп стратегий
-- [orders.md](orders.md) — ордера созданные стратегиями имеют `strat_id` поле
+- [ui.md](ui.md) — `client.ui_strat_start_stop()` посылает команды старт/стоп стратегий.
+- [orders.md](orders.md) — ордера созданные стратегиями имеют `strat_id` поле.
+- [events.md](events.md) — EventDispatcher + Event::Strat.

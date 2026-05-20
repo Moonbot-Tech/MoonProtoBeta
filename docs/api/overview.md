@@ -1,8 +1,37 @@
 # moonproto — обзор библиотеки
 
-Rust client library для **MoonProto** wire protocol. Byte-exact порт Delphi `MoonProto/*.pas`. Используется в `MoonKernel` (кросс-платформенный трейдинг-терминал к MoonBot Delphi-серверу).
+Rust клиент **MoonProto** wire protocol — UDP-протокол связи с торговым ботом
+**MoonBot** (Delphi-сервер на VPS). Byte-exact порт `MoonProto/*.pas`.
 
-## Архитектура
+Криптография AES-128-GCM, аутентифицированный HMAC-CRC32C MAC, replay protection
+через sliding bitmap window, reliable delivery поверх UDP (Sliced+ACK256),
+PMTU discovery, port rotation, опциональный extended transport mode 1/2 для
+DPI bypass через [`moonext`](#extended-transport).
+
+## Active session manager — главный принцип
+
+**Если работа делается одинаково у всех потребителей либы — это работа либы, не app.**
+`moonproto` — не пассивный transport, а **active session manager**:
+
+- **Subscription registry** — `subscribe_orderbook(name, kind)` запоминается и
+  автоматически переотправляется после любого hard-reconnect.
+- **Auto-refetch markets indexes** при server restart + 12с timeout protection.
+- **EventDispatcher блокирует** TradesStream/OrderBook парсинг пока
+  `MarketsState.indexes_synchronized = false`.
+- **Auto-request OrderBookFull** при corruption (dedup).
+- **Periodic trades tick** каждые ~100мс — gap recovery без участия app.
+- **NTP self-managed** — `Client::new` сам spawn'ит NTP-thread (если задан `ntp_host`).
+- **Per-Client ServerTimeDelta** — auto-applied к Orders state (`Arc<AtomicU64>` handle).
+- **Clock-jump recovery** — при jump >60с → force_disconnect → fresh handshake.
+- **Bind socket forever-retry** + `LifecycleEvent::BindFailed` уведомление.
+- **OOM caps** для всех state-структур (Orders/Strats/Balances/Sliced).
+
+**App** содержит **только UI/business решения** — что подписать, какой ордер,
+какие настройки. Никаких recovery/reconnect-handling в callback'ах.
+
+См. [client.md](client.md) и [lifecycle.md](lifecycle.md) для деталей.
+
+## Архитектура слоёв
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -14,32 +43,35 @@ Rust client library для **MoonProto** wire protocol. Byte-exact порт Delp
 ┌─────────────────────────────────────────────────────────────┐
 │                       moonproto                              │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │  Stage 3: High-level API                              │    │
-│  │  - EventDispatcher (auto-apply 7 state'ов)            │    │
+│  │  High-level API                                       │    │
+│  │  - Client::run_with_dispatcher (главный entry-point)  │    │
+│  │  - run_init_sequence (BaseCheck → AuthCheck → ...)    │    │
+│  │  - EventDispatcher (auto-apply 7 state'ов + actions)  │    │
 │  │  - LifecycleEvent callbacks                           │    │
+│  │  - ClientSender (thread-safe subscribe)               │    │
 │  │  - 29 Engine API wrappers (api_get_markets_list, ...) │    │
-│  │  - 17 Trade action wrappers (cancel_order, ...)       │    │
+│  │  - 18 Trade action wrappers (cancel_order, ...)       │    │
 │  │  - ApiPending registry (async Receiver)               │    │
 │  │  - CandlesAggregator (chunked candles)                │    │
 │  └──────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │  Stage 2: Sync state models (state::*)                │    │
+│  │  Sync state models (state::*)                         │    │
 │  │  Orders, OrderBooks, TradesState, BalancesState,      │    │
 │  │  StratsState, SettingsState, MarketsState             │    │
 │  └──────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │  Stage 2: Wire-парсеры/билдеры (commands::*)          │    │
+│  │  Wire-парсеры/билдеры (commands::*)                   │    │
 │  │  trade, balance, order_book, trades_stream, strat,    │    │
 │  │  arb, ui, market, engine_api, engine_request,         │    │
 │  │  strategy_serializer, candles, registry               │    │
 │  └──────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │  Stage 1: Client transport                            │    │
+│  │  Client transport + crypto                            │    │
 │  │  Client (UDP, handshake, retry, slicing, UKey dedup)  │    │
 │  │  Crypto (AES-128-GCM, SHAKE-128, HMAC-CRC32C)         │    │
 │  │  Compression (SynLZ)                                  │    │
 │  │  Protocol (handshake, slicing, slider, crypted)       │    │
-│  │  NTP background sync thread                           │    │
+│  │  NTP background sync thread (self-managed)            │    │
 │  └──────────────────────────────────────────────────────┘    │
 └──────────────────────────┬──────────────────────────────────┘
                            │ UDP + MoonProto wire format
@@ -50,7 +82,7 @@ Rust client library для **MoonProto** wire protocol. Byte-exact порт Delp
                   └─────────────────────┘
 ```
 
-## Каналы (Stage 2)
+## Каналы команд
 
 | Канал | Что | Direction | Docs |
 |---|---|---|---|
@@ -64,101 +96,89 @@ Rust client library для **MoonProto** wire protocol. Byte-exact порт Delp
 | Market | Engine API ответы маркетов | S→C | [markets.md](markets.md) |
 | Engine API | RPC requests/responses | both | [engine_api.md](engine_api.md) |
 | StrategySerializer | RTTI bin-формат стратегий | — | (внутри strats.md) |
+| Candles | Исторические свечи | S→C | [candles.md](candles.md) |
 
-## High-level API (Stage 3)
+## High-level API
 
 | Документ | Что |
 |---|---|
-| [client.md](client.md) | Client lifecycle, send/run, observability |
-| [events.md](events.md) | EventDispatcher — auto-apply state + типизированные Event |
-| [lifecycle.md](lifecycle.md) | LifecycleEvent { Connecting / Authenticated / Reconnecting / ServerRestart / Disconnected } |
-| [trade_actions.md](trade_actions.md) | 17 trade wrappers с UKey dedup |
-| [candles.md](candles.md) | DeepPrice + CandlesAggregator (chunked) |
-
-## Что предоставляет либа
-
-### Stage 1: Wire protocol + crypto + handshake
-Полный byte-exact порт. Тестировано на live сервере `207.148.91.186:3000`.
-
-### Stage 2: Wire-парсеры и sync state
-Каждая MoonProto-команда имеет:
-- Парсер: `commands::<ch>::<Cmd>::parse(payload) -> Option<Self>`.
-- Builder: `commands::<ch>::build_<cmd>(uid, params) -> Vec<u8>`.
-
-Для каждого канала есть `state::<X>State` с автоматическим применением входящих команд.
-
-### Stage 3: High-level Client API
-- **EventDispatcher** — один callback вместо ручной маршрутизации 9 каналов.
-- **Trade wrappers** — `client.cancel_order(ctx, ...)` вместо `build_*` + `send_cmd` + UKey ручной.
-- **Engine API wrappers** — `client.api_get_markets_list()` вместо ручной отправки + регистрация UID.
-- **Lifecycle callbacks** — типизированные события Connecting/Authenticated/Reconnecting/ServerRestart/Disconnected.
-- **CandlesAggregator** — собирает chunked candles из множественных response'ов.
+| [client.md](client.md) | `Client` lifecycle, `run_with_dispatcher`, NTP, subscribe API |
+| [events.md](events.md) | `EventDispatcher` — auto-apply state + типизированные Event |
+| [lifecycle.md](lifecycle.md) | `LifecycleEvent` — Connecting/Connected{fresh}/Reconnecting/SendBacklogCritical/BindFailed/ServerRestart/Disconnected |
+| [trade_actions.md](trade_actions.md) | 18 trade wrappers с UKey dedup |
+| [candles.md](candles.md) | DeepPrice + chunked aggregator |
+| [multi_server.md](multi_server.md) | Подключение к нескольким серверам одновременно |
 
 ## Quick start
 
-### Минимальный вариант (raw `on_data`)
-
 ```rust
-use moonproto::*;
-use moonproto::commands::*;
-use moonproto::state::*;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let key = key_import::import_master_key("v3oshQy/...")?;
-    let cfg = ClientConfig {
-        server_ip: "207.148.91.186".to_string(),
-        server_port: 3000,
-        master_key: key.master_key,
-        mac_key: key.mac_key,
-        mask_ver: 0,
-        client_id: rand::random(),
-    };
-
-    let mut client = Client::new(cfg);
-    client.run(Duration::from_secs(60), Box::new(|cmd, payload| {
-        println!("got {:?}: {} bytes", cmd, payload.len());
-    }));
-    Ok(())
-}
-```
-
-### Рекомендуемый вариант (EventDispatcher + lifecycle + auto-state)
-
-```rust
-use moonproto::*;
+use std::time::Duration;
+use moonproto::client::{Client, ClientConfig, LifecycleEvent, RefreshConfig, InitConfig, run_init_sequence};
 use moonproto::events::{EventDispatcher, Event};
-use moonproto::client::LifecycleEvent;
-use moonproto::ntp;
+use moonproto::key_import;
+use moonproto::state::{OrderBookKind, OrderEvent};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let key = key_import::import_master_key("v3oshQy/...")?;
-    let cfg = /* ClientConfig as above */;
+    // 1. Импорт ключа из base64-экспорта MoonBot (Settings → Export Key).
+    let keys = key_import::import_key("v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC...")
+        .ok_or("invalid key")?;
+
+    // 2. Конфиг клиента. Liба сама spawn'ит NTP thread (если ntp_host=Some).
+    let cfg = ClientConfig {
+        server_ip:   "207.148.91.186".to_string(),
+        server_port: 3000,
+        master_key:  keys.master_key,
+        mac_key:     keys.mac_key,
+        mask_ver:    0,                                     // 0 = base transport, 1/2 требует moonext
+        client_id:   rand::random(),
+        ntp_host:    Some("pool.ntp.org".to_string()),      // None = отключить NTP
+        refresh:     RefreshConfig::default(),              // UpdateMarketsList каждые 60с
+    };
     let mut client = Client::new(cfg);
 
-    // 1. NTP background sync (daemon thread)
-    ntp::spawn_sync_thread("pool.ntp.org".into(), client::set_ntp_offset);
-
-    // 2. Lifecycle UI status
-    client.on_lifecycle(Box::new(|ev| match ev {
-        LifecycleEvent::Connecting     => println!("→ connecting"),
-        LifecycleEvent::Authenticated  => println!("→ ready"),
-        LifecycleEvent::Reconnecting   => println!("→ reconnecting"),
-        LifecycleEvent::ServerRestart  => println!("→ server restarted, cache cleared"),
-        LifecycleEvent::Disconnected   => println!("→ disconnected"),
+    // 3. Lifecycle callback (опционально) — UI индикатор.
+    client.on_lifecycle(Box::new(|ev: LifecycleEvent| {
+        match ev {
+            LifecycleEvent::Connecting                       => println!("→ connecting"),
+            LifecycleEvent::Connected { fresh: true }        => println!("→ connected (first time)"),
+            LifecycleEvent::Connected { fresh: false }       => println!("→ reconnected"),
+            LifecycleEvent::Reconnecting                     => println!("→ reconnecting"),
+            LifecycleEvent::ServerRestart                    => println!("→ server restarted (liба сама восстановит state)"),
+            LifecycleEvent::SendBacklogCritical { cmd, u_key_uid } =>
+                eprintln!("⚠ critical: pending command dropped (cmd={cmd}, uid={u_key_uid})"),
+            LifecycleEvent::BindFailed { consecutive_failures } =>
+                eprintln!("⚠ cannot bind UDP socket ({} consecutive failures)", consecutive_failures),
+            LifecycleEvent::Disconnected                     => println!("→ disconnected"),
+        }
     }));
 
-    // 3. Event-based state management
     let mut dispatcher = EventDispatcher::new();
-    client.run(Duration::from_secs(60), Box::new(move |cmd, payload| {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        for ev in dispatcher.dispatch(cmd, payload, now_ms) {
-            match ev {
-                Event::Order(o) => println!("order event: {:?}", o),
-                Event::OrderBook(_) => { /* redraw */ }
-                Event::Trades(_) => { /* update chart */ }
-                Event::ServerLog { msg, .. } => eprintln!("[srv] {}", msg),
-                _ => {}
-            }
+
+    // 4. Phase 1: short run для handshake (~3с до Connected{fresh:true}).
+    client.run_with_dispatcher(Duration::from_secs(3), &mut dispatcher, Box::new(|_| {}));
+
+    // 5. Phase 2: init sequence (BaseCheck → AuthCheck → GetMarketsList → подписки).
+    let init = InitConfig {
+        base_check: true,
+        auth_check: true,
+        fetch_markets: true,
+        fetch_balance: false,
+        subscribe_trades: Some(false),                       // false = без MM ордеров
+        subscribe_orderbooks: vec![
+            ("BTCUSDT".to_string(), OrderBookKind::Futures),
+        ],
+        ..Default::default()
+    };
+    let _result = run_init_sequence(&mut client, &mut dispatcher, init)?;
+
+    // 6. Phase 3: long-running stream — типизированные события автоматически.
+    client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|ev| {
+        match ev {
+            Event::Order(OrderEvent::Created(uid)) => println!("new order {uid}"),
+            Event::OrderBook(_)  => { /* redraw orderbook */ }
+            Event::Trade(_)      => { /* update chart */ }
+            Event::ServerLog { msg, .. } => eprintln!("[srv] {msg}"),
+            _ => {}
         }
     }));
 
@@ -166,48 +186,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Trade actions
+Полный рабочий пример — [`examples/multi_client_test.rs`](https://github.com/anthropics/moonkernel/blob/main/moonproto/examples/multi_client_test.rs) и [`examples/trading_flow.rs`](https://github.com/anthropics/moonkernel/blob/main/moonproto/examples/trading_flow.rs).
+
+## Низкоуровневый вариант (без EventDispatcher)
+
+Для случаев когда нужен **сырой** канал без auto-apply state:
 
 ```rust
-use moonproto::commands::trade::{TradeCtx, OrderType, OrderWorkerStatus};
+use moonproto::client::Client;
+use moonproto::protocol::Command;
+use std::time::Duration;
 
-let ctx = TradeCtx::new(order_uid);  // ctx.uid = TaskID ордера для UKey dedup
-client.replace_order(ctx, "BTCUSDT", epoch, status, OrderType::Sell, 50100.0);
-client.cancel_order(ctx, "BTCUSDT", epoch, status);
+let mut client = Client::new(cfg);
+client.run(Duration::from_secs(60), Box::new(|cmd: Command, payload: &[u8]| {
+    println!("got {:?}: {} bytes", cmd, payload.len());
+    // Сам parse'ишь через commands::* parsers.
+}));
 ```
 
-### Engine API async
+Применимо для специализированных задач (трейд-логгер, отладка wire-format).
+В большинстве случаев `run_with_dispatcher` удобнее — он же даёт active-library auto-actions.
+
+## Thread-safe subscribe (UI thread)
 
 ```rust
-let rx = client.api_get_markets_list();
-let resp = rx.recv_timeout(Duration::from_secs(10))?;
-// resp.data — already DEFLATE-decompressed
-let list = parse_markets_list_response(&resp.data, 2)?;
+use moonproto::client::Client;
+use moonproto::state::OrderBookKind;
+use std::thread;
+
+let mut client = Client::new(cfg);
+let sender = client.sender();    // ClientSender — clone'абельный handle
+
+// UI thread:
+thread::spawn(move || {
+    sender.subscribe_orderbook("DOGEUSDT", OrderBookKind::Futures);
+    sender.subscribe_all_trades(true);
+});
+
+// Main thread:
+client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|_| {}));
 ```
 
-## Не входит в либу
+`ClientSender::subscribe_*` fire-and-forget. Для обратной связи — `try_subscribe_*` варианты
+возвращают `Result<(), SubscribeError>`. Подробнее — [client.md → thread-safe subscribe](client.md#thread-safe-subscribe-api-f4).
+
+## Что **не** входит в либу
 
 - **Бизнес-логика трейдинга**: worker'ы, расчёт сигналов, ML — задача потребителя.
 - **UI рендеринг**: чарт, стакан, таблицы — это **moonkernel-terminal** (отдельный Tauri repo, ещё не начат).
-- **TStrategy.* setters с побочными эффектами**: state хранит wire-данные как observer-snapshot (DEVIATION #5).
-- **DPI bypass**: реализуется в опциональной closed-source библиотеке `moonext` (mode 1/2). V0 (open) работает standalone.
+- **TStrategy.* setters с побочными эффектами**: state хранит wire-данные как observer-snapshot.
+
+## Extended transport
+
+`moonext` — опциональная **closed-source** библиотека (~100 строк, .dll/.so/.dylib),
+добавляющая extended transport **mode 1** и **2** (DPI bypass для сложных сетей).
+
+- **V0 (open-source) работает standalone** — все сервера MoonBot принимают V0 как fallback.
+- **Mode 1/2** — для случаев когда V0 фильтруется DPI/firewall.
+  Включается `cfg.mask_ver = 1` или `2` + наличие `moonext.dll/.so/.dylib` рядом с exe.
+- Без `moonext` бинарника при `mask_ver != 0` клиент откатывается на V0.
+
+Скачать → Releases в GitHub репо проекта.
 
 ## Cargo features
 
-Нет feature flags — все компоненты обязательны.
+Нет feature flags — все компоненты обязательны и собираются всегда.
 
 ## Версии
 
-- Rust: edition 2021, stable 1.95+ (тестировано на portable Rust 1.95.0).
-- Зависимости: `aes-gcm`, `sha3`, `flate2`, `crc32c`, `rand`, `libloading`.
+- **Rust**: edition 2021, stable 1.95+.
+- **Зависимости**: `aes-gcm`, `sha3`, `flate2`, `crc32c`, `rand`, `socket2`, `libloading`, `log`, `base64`.
 
 ## См. также
 
-- [client.md](client.md) — детали Client transport.
-- [engine_api.md](engine_api.md) — RPC к Engine на сервере.
-- [events.md](events.md) — EventDispatcher.
-- [lifecycle.md](lifecycle.md) — Lifecycle callbacks.
-- [trade_actions.md](trade_actions.md) — Trade wrappers.
-- [candles.md](candles.md) — Candles aggregator.
-- DEVIATION.md (в корне репозитория) — 18 архитектурных отклонений.
-- MAPPING.md (в moonproto/ и moonproto-transport/) — построчная сверка с Delphi.
+- [client.md](client.md) — детали `Client`, NTP, subscribe API.
+- [events.md](events.md) — `EventDispatcher`, `Event` enum.
+- [lifecycle.md](lifecycle.md) — все 7 `LifecycleEvent` variants.
+- [multi_server.md](multi_server.md) — несколько `Client` в одном процессе.
+- [engine_api.md](engine_api.md) — RPC к Engine + `ServerInfo`.
+- [trade_actions.md](trade_actions.md) — 18 trade wrappers.
+- [candles.md](candles.md) — chunked candles aggregator.
+- DEVIATION.md (в корне репозитория) — реестр отклонений от Delphi.
+- MAPPING.md (в `moonproto/` и `moonproto-transport/`) — построчная сверка с Delphi.

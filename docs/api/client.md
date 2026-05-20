@@ -1,174 +1,440 @@
 # Client — главная точка входа
 
-`moonproto::Client` — handle для подключения к MoonProto серверу. Управляет:
-- UDP socket'ом и port rotation.
-- Handshake'ом (Hello → WhoAreYou → ImFriend → Fine).
-- Heartbeat'ами (Ping каждую секунду).
-- Slicing'ом больших сообщений + ACK256.
-- Replay protection через sliding window slider.
-- Retry'ями (H priority + Sliced) с UKey dedup.
-- NTP offset для синхронизации времени с сервером.
-- Reconnect при потере связи.
-- Lifecycle callbacks для UI status.
+`moonproto::client::Client` — handle для подключения к одному MoonProto-серверу.
+Управляет всем что делает либа сама (active session manager): UDP socket с port
+rotation, handshake, heartbeat, slicing, replay protection, retry с UKey dedup,
+NTP sync, subscription registry, reconnect.
 
 ## Создание и запуск
 
 ```rust
-use moonproto::{Client, key_import::import_master_key, ClientConfig};
+use std::time::Duration;
+use moonproto::client::{Client, ClientConfig, LifecycleEvent, RefreshConfig};
+use moonproto::events::EventDispatcher;
+use moonproto::key_import;
 
-let key = import_master_key("v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC...")
+let keys = key_import::import_key("v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC...")
     .expect("invalid key");
 
 let cfg = ClientConfig {
-    server_ip: "207.148.91.186".to_string(),
+    server_ip:   "207.148.91.186".to_string(),
     server_port: 3000,
-    master_key: key.master_key,
-    mac_key: key.mac_key,
-    mask_ver: 0,
-    client_id: rand::random(),
+    master_key:  keys.master_key,
+    mac_key:     keys.mac_key,
+    mask_ver:    0,
+    client_id:   rand::random(),
+    ntp_host:    Some("pool.ntp.org".to_string()),
+    refresh:     RefreshConfig::default(),
 };
 let mut client = Client::new(cfg);
+let mut dispatcher = EventDispatcher::new();
 
-// on_data callback — для каждого декодированного MPC_* пакета.
-client.run(Duration::from_secs(60), Box::new(|cmd_class, payload| {
-    println!("Received {} bytes for {:?}", payload.len(), cmd_class);
-}));
+// Рекомендуемый entry-point — типизированные Event'ы + active-library auto-actions.
+client.run_with_dispatcher(
+    Duration::from_secs(3600),
+    &mut dispatcher,
+    Box::new(|ev| {
+        // ev: &moonproto::events::Event — обрабатывай что нужно.
+    }),
+);
 ```
 
-Для **auto-apply** state'ов — использовать [`EventDispatcher`](events.md):
+## Два варианта main loop
+
+### `Client::run_with_dispatcher` (рекомендуется)
+
+Внутри: парсит каждый входящий пакет через `EventDispatcher::dispatch_into_active`,
+делает auto-actions (RequestOrderBookFull dedup, periodic trades tick, indexes
+sync gate), эмитит типизированные `Event` в callback.
 
 ```rust
-let mut dispatcher = EventDispatcher::new();
-client.run(Duration::from_secs(60), Box::new(move |cmd, payload| {
-    for ev in dispatcher.dispatch(cmd, payload, current_ms()) {
-        match ev { /* ... */ }
-    }
-}));
+fn run_with_dispatcher(
+    &mut self,
+    duration: Duration,
+    dispatcher: &mut EventDispatcher,
+    on_event: Box<dyn FnMut(&Event) + Send>,
+);
 ```
+
+### `Client::run` (raw callback)
+
+Низкоуровневый вариант: callback получает `(Command, &[u8])` — потребитель сам
+парсит через `commands::*`. Active-library auto-actions **не выполняются**.
+Используй только для специализированных задач (трейд-логгер, отладка).
+
+```rust
+fn run(&mut self, duration: Duration, on_data: Box<dyn FnMut(Command, &[u8]) + Send>);
+```
+
+## Конфигурация
+
+```rust
+pub struct ClientConfig {
+    /// "207.148.91.186" / "10.0.0.1" / "[2001:db8::1]" (IPv6 в скобках).
+    pub server_ip:   String,
+    pub server_port: u16,
+    /// 16 байт AES-128 master key (из key_import::import_key).
+    pub master_key:  MoonKey,
+    /// 16 байт HMAC-CRC32C MAC key (тоже из key_import).
+    pub mac_key:     MoonKey,
+    /// 0 = base transport V0 (open source, всегда работает).
+    /// 1/2 = extended (требует moonext.dll/.so рядом с exe).
+    pub mask_ver:    u8,
+    /// Per-installation unique ID (генерируется один раз, сохраняется на диск).
+    pub client_id:   u64,
+    /// `Some(host)` → liба сама spawn'ит NTP thread (рекомендуется).
+    /// `None` → отключить (или управлять NTP вручную через `ntp::spawn_sync_thread`).
+    pub ntp_host:    Option<String>,
+    /// Periodic refresh — auto UpdateMarketsList / CheckBinanceTags.
+    pub refresh:     RefreshConfig,
+}
+
+pub struct RefreshConfig {
+    /// Default `Some(60s)` — auto UpdateMarketsList для свежих prices/funding.
+    pub update_markets_every: Option<Duration>,
+    /// Default `None` — Binance-специфичная проверка futures permissions.
+    pub check_tags_every:     Option<Duration>,
+}
+```
+
+`MoonKey = [u8; 16]` — re-export из `moonproto_transport`.
+
+`ClientConfig::Debug` — `master_key` и `mac_key` redacted в логах (`<REDACTED>`).
+
+IPv6: bind_address выбирается автоматически по наличию `:` в `server_ip` —
+`[::]:port` для IPv6, `0.0.0.0:port` для IPv4.
 
 ## Lifecycle
 
-См. [lifecycle.md](lifecycle.md) для подробностей.
+Подключай callback через `Client::on_lifecycle`. Полная таблица событий и
+семантика переходов — [lifecycle.md](lifecycle.md).
 
 ```rust
 use moonproto::client::LifecycleEvent;
 
 client.on_lifecycle(Box::new(|ev| match ev {
-    LifecycleEvent::Connecting     => ui_status("Подключение..."),
-    LifecycleEvent::Authenticated  => ui_status("Подключено"),
-    LifecycleEvent::Reconnecting   => ui_status("Переподключение..."),
-    LifecycleEvent::ServerRestart  => cache.invalidate(),
-    LifecycleEvent::Disconnected   => ui_status("Отключено"),
+    LifecycleEvent::Connecting                       => println!("→ connecting"),
+    LifecycleEvent::Connected { fresh: true }        => println!("→ ready (first connect)"),
+    LifecycleEvent::Connected { fresh: false }       => println!("→ reconnected"),
+    LifecycleEvent::Reconnecting                     => println!("→ reconnecting (либа сама)"),
+    LifecycleEvent::ServerRestart                    => println!("→ server restart detected"),
+    LifecycleEvent::SendBacklogCritical { cmd, u_key_uid } =>
+        eprintln!("⚠ pending dropped: cmd={cmd} uid={u_key_uid}"),
+    LifecycleEvent::BindFailed { consecutive_failures } =>
+        eprintln!("⚠ cannot bind UDP ({} failures)", consecutive_failures),
+    LifecycleEvent::Disconnected                     => println!("→ disconnected"),
 }));
 ```
 
-## Lifecycle переходов
+**Active library**: app только красит UI индикатор. Recovery/reconnect/re-subscribe
+делает либа сама. Единственные events требующие реакции app — `SendBacklogCritical`
+(торговый риск: дропнута cancel/replace команда) и `BindFailed` (OS network problem).
 
-1. **Bind**: UDP socket с port rotation. При неудаче 200 раз подряд → `LifecycleEvent::Disconnected`.
-2. **Handshake**:
-   - C→S `Hello(56 bytes, encrypted with master_key)`
-   - S→C `WhoAreYou(challenge)` — **детекция `ServerRestart`** по изменению `peer_app_token`
-   - C→S `ImFriend(answer)` — **двойная отправка** с 32ms паузой (DPI-resistant)
-   - S→C `Fine` → `LifecycleEvent::Authenticated`
-3. **Steady-state**: Ping каждую секунду, команды каналов, retry, heartbeat.
-4. **Sliced**: пакеты > PMTU режутся на 256б куски + ACK256 на каждый.
-5. **Reconnect**: при отсутствии трафика > 7s → `LifecycleEvent::Reconnecting` → re-handshake → `Connecting` → `Authenticated`.
+## Init sequence
 
-## Отправка данных
-
-### Низкоуровневое
+После handshake (Connected{fresh:true}) обычно нужно: BaseCheck → AuthCheck →
+GetMarketsList → подписки. Это **один логический шаг** — упакован в
+`run_init_sequence`:
 
 ```rust
-// High priority с retry (encrypted, MaxRetries=3)
-client.send_cmd(payload.clone(), Command::Order, SendPriority::High, true, 3);
+use moonproto::client::{InitConfig, run_init_sequence};
+use moonproto::state::OrderBookKind;
+use std::time::Duration;
 
-// С UKey dedup (старая pending команда того же UKey удалится)
-client.send_cmd_keyed(payload, Command::Order, SendPriority::High, true, 3, u_key);
+// Phase 1: handshake до Connected{fresh:true}.
+client.run_with_dispatcher(Duration::from_secs(3), &mut dispatcher, Box::new(|_| {}));
+
+// Phase 2: init.
+let cfg = InitConfig {
+    base_check: true,
+    auth_check: true,
+    fetch_markets: true,
+    fetch_balance: false,
+    subscribe_trades: Some(false),                       // false = без MM ордеров
+    subscribe_orderbooks: vec![
+        ("BTCUSDT".to_string(), OrderBookKind::Futures),
+    ],
+    step_timeout: Some(Duration::from_secs(5)),
+};
+match run_init_sequence(&mut client, &mut dispatcher, cfg) {
+    Ok(r) => println!("init ok: base={} auth={} markets={}B",
+                       r.base_check_ok, r.auth_check_ok, r.markets_response_bytes),
+    Err(e) => panic!("init failed: {e}"),
+}
+
+// Phase 3: long stream.
+client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|ev| { /* ... */ }));
+```
+
+Внутри: chunked main loop pump (~50мс тики) между `api_*().recv_timeout` — без
+этого main loop не работает во время `wait_for_api_response` и ответы не доходят.
+
+```rust
+pub struct InitConfig {
+    pub base_check:           bool,
+    pub auth_check:           bool,
+    pub fetch_markets:        bool,
+    pub fetch_balance:        bool,
+    pub subscribe_trades:     Option<bool>,                                 // None = пропустить, Some(want_mm)
+    pub subscribe_orderbooks: Vec<(String, OrderBookKind)>,
+    pub step_timeout:         Option<Duration>,                             // default = 12с
+}
+
+pub struct InitResult {
+    pub base_check_ok:           bool,
+    pub auth_check_ok:           bool,
+    pub markets_response_bytes:  usize,
+    pub balances_response_bytes: usize,
+    pub trades_subscribed:       bool,
+    pub orderbooks_subscribed:   usize,
+    pub errors:                  Vec<String>,    // non-critical step errors
+}
+
+pub enum InitError {
+    SendChannelClosed,
+    CriticalStepTimedOut(&'static str),    // BaseCheck/AuthCheck timeout
+    NotAuthenticated,                       // нужен Connected{fresh:true} перед init
+}
+```
+
+`BaseCheck` ответ парсится в `ServerInfo` и сохраняется в
+`client.server_info()` (для multi-server идентификации — см.
+[multi_server.md](multi_server.md)).
+
+## Отправка команд
+
+### High-level trade actions
+
+18 методов с автоматическим UKey dedup и правильными retry settings — см.
+[trade_actions.md](trade_actions.md).
+
+```rust
+use moonproto::commands::trade::{TradeCtx, OrderType, OrderWorkerStatus};
+
+let ctx = TradeCtx::new(order_uid);
+client.replace_order(ctx, "BTCUSDT", OrderWorkerStatus::SellSet, OrderType::Sell, 50100.0);
+client.cancel_order(ctx, "BTCUSDT", OrderWorkerStatus::SellSet);
+client.do_close_position(ctx, "BTCUSDT", true);
 ```
 
 ### Engine API (RPC)
 
-См. [engine_api.md](engine_api.md). 29 high-level wrappers:
+29 high-level wrappers возвращают `mpsc::Receiver<EngineResponse>` — см.
+[engine_api.md](engine_api.md).
 
 ```rust
-let rx = client.api_get_markets_list();           // GetMarketsList
-let rx = client.api_get_balance("USDT");          // GetBalance
-let rx = client.api_set_leverage("BTCUSDT", 10);  // SetLeverage
-// ... и т.д.
-let resp = rx.recv_timeout(Duration::from_secs(5))?;
+use std::time::Duration;
+
+let rx = client.api_get_markets_list();
+let resp = rx.recv_timeout(Duration::from_secs(10))?;
+// resp.data — уже DEFLATE-decompressed.
 ```
 
-### Trade actions
+### UI / Strat commands
 
-См. [trade_actions.md](trade_actions.md). 17 высокоуровневых методов:
+15 UI-методов (`ui_*`) + 6 Strat-методов (`strat_*`) — см. [ui.md](ui.md) и
+[strats.md](strats.md).
+
+### Низкоуровневые `send_cmd` / `send_cmd_keyed`
 
 ```rust
-let ctx = TradeCtx::new(order_uid);
-client.replace_order(ctx, "BTCUSDT", epoch, status, OrderType::Sell, 50100.0);
-client.cancel_order(ctx, "BTCUSDT", epoch, status);
-client.do_close_position(ctx, "BTCUSDT", true);
-// ... 14 ещё ...
+use moonproto::client::{SendPriority, UniqueKey};
+use moonproto::protocol::Command;
+
+// Без dedup:
+client.send_cmd(payload.clone(), Command::Order, SendPriority::High, true, 3);
+
+// С UKey dedup (старая pending команда того же UKey удалится):
+client.send_cmd_keyed(payload, Command::Order, SendPriority::High, true, 3,
+                       UniqueKey::order_move(order_uid));
 ```
 
-### Candles
+## Thread-safe subscribe API (F4)
 
-См. [candles.md](candles.md):
+Subscribe/unsubscribe доступны как `&self` методы — можно вызывать из любого
+thread'а **во время** `run_with_dispatcher` (без `&mut Client` lock).
 
 ```rust
-let rx = client.api_get_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour1);
-// ... или chunked:
-client.api_request_candles_data();
+use moonproto::client::Client;
+use moonproto::state::OrderBookKind;
+use std::thread;
+
+let mut client = Client::new(cfg);
+let sender = client.sender();    // ClientSender — Clone, Send + Sync
+
+// UI thread:
+thread::spawn(move || {
+    sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+    sender.subscribe_all_trades(true);
+});
+
+// Main thread:
+client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|_| {}));
 ```
 
-## ApiPending registry
+Внутри: subscribe методы пушат `ClientEvent::Subscribe*` в bounded mpsc
+(capacity 1024). Main loop в `run_with_dispatcher` дренирует каждый тик
+(~5мс), применяет к `subscription_registry`, отправляет wire-запрос.
+Идемпотентно — повторный subscribe для уже подписанной пары no-op.
 
-Pending Engine API requests маршрутизируются автоматически. `send_api_request_async` возвращает `Receiver`:
+**Auto-replay на reconnect.** При смене `ServerToken` либа сама шлёт все
+зарегистрированные подписки заново — app **не должно** дублировать на
+`LifecycleEvent::ServerRestart`.
+
+**Channel overflow.** Если main loop забит и channel переполнен —
+fire-and-forget `subscribe_*` пишет warning в log и теряет событие.
+Для обратной связи — `try_*` варианты:
 
 ```rust
-let rx = client.send_api_request_async(&engine_request::base_check());
-let resp = rx.recv_timeout(Duration::from_secs(5))?;
+use moonproto::client::SubscribeError;
+
+match client.sender().try_subscribe_orderbook("BTCUSDT", OrderBookKind::Futures) {
+    Ok(())                              => {}
+    Err(SubscribeError::ChannelFull)    => { /* retry через несколько ms */ }
+    Err(SubscribeError::Disconnected)   => { /* Client уже дропнут */ }
+}
 ```
 
-Если потребитель хочет вручную:
+### `Client::sender()` vs `Client::event_sender()`
+
+- `Client::sender()` → **`ClientSender`** (высокоуровневый, с typed-методами
+  `subscribe_*`/`try_subscribe_*`) — главный публичный API.
+- `Client::event_sender()` → **raw `SyncSender<ClientEvent>`** для custom-протокольных
+  сценариев (отправка `ClientEvent::Send(SendMsg { item })` напрямую). Использовать редко.
+
+### Convenience-методы на `&Client`
+
+Те же subscribe методы доступны прямо на `&Client` (внутри пушат через
+`sender()`):
 
 ```rust
-let raw = engine_request::get_markets_list();
-let uid = u64::from_le_bytes(raw[3..11].try_into().unwrap());
-let rx = client.api_pending.register(uid);
-client.send_api_request(&raw);
-// потом recv через rx
+client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+client.subscribe_all_trades(true);
+client.unsubscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+client.unsubscribe_all_trades();
 ```
 
-Не забыть `client.api_pending.remove(uid)` при timeout — иначе sender зависнет в map.
+## Periodic refresh (F6/F7)
+
+`ClientConfig.refresh: RefreshConfig` управляет автоматическими refresh-командами
+которые либа сама шлёт в main loop:
+
+```rust
+RefreshConfig {
+    update_markets_every: Some(Duration::from_secs(60)),  // дефолт
+    check_tags_every:     None,                            // дефолт
+}
+```
+
+**`update_markets_every`** — раз в указанный интервал шлёт `emk_UpdateMarketsList`
+(fire-and-forget). Сервер обновляет `cfg.Markets` (prices, funding) каждые ~60с —
+без этого пинга клиент будет показывать stale prices через час сессии. Parity с Delphi.
+
+**`check_tags_every`** — Binance-специфичная проверка futures permissions через
+`emk_CheckBinanceTags`. По умолчанию выключено. Включай если используешь Binance
+API и нужна периодическая валидация прав.
+
+Отключить refresh целиком:
+```rust
+RefreshConfig { update_markets_every: None, check_tags_every: None }
+```
+
+Тики обрабатываются только когда `auth_status = AuthDone` — до handshake запрос
+потеряется впустую.
 
 ## NTP синхронизация
+
+Liба сама spawn'ит NTP thread если `cfg.ntp_host = Some(host)`. Поток автоматически
+останавливается в `Drop for Client`. По дефолту `Some("pool.ntp.org")` — рекомендуется
+для корректных timestamp'ов в торговых командах.
+
+Управление NTP вручную (если `ntp_host = None`):
 
 ```rust
 use moonproto::ntp;
 use moonproto::client::set_ntp_offset;
 
-// Сделать запрос к NTP-серверу (синхронный)
+// Синхронный запрос — best of 4 attempts.
 let result = ntp::get_best_ntp("pool.ntp.org", 4);
 if result.synced {
     set_ntp_offset(result.time_offset);
 }
 
-// Или daemon thread (рекомендуется):
-ntp::spawn_sync_thread("pool.ntp.org".to_string(), set_ntp_offset);
-// Thread сам делает init + cycle с уточнением, byte-exact с TMoonProtoTymeSyncer.
+// Или daemon thread (то же что Client делает сам если ntp_host=Some):
+let shutdown = ntp::spawn_sync_thread("pool.ntp.org".to_string(), set_ntp_offset);
+// shutdown.store(true, Ordering::Relaxed) — остановить.
 ```
+
+**NTP-poisoning защита.** Если NTP сервер вернул offset `|offset| > 1 day`
+(possible MITM / broken RTC) — offset rejected, лог warn. См. `ntp::is_reasonable_offset`.
+
+## Server identity (multi-server)
+
+После успешного `run_init_sequence` `client.server_info()` несёт идентификацию
+сервера (`bot_id`, `exchange_name`, `base_currency_name`, версии). Это нужно для
+multi-server терминалов — см. [multi_server.md](multi_server.md) и
+[engine_api.md → ServerInfo](engine_api.md#serverinfo--multi-server-identification).
+
+```rust
+let info = client.server_info();
+if let (Some(id), Some(name)) = (info.bot_id, &info.exchange_name) {
+    println!("Bot #{} = {}", id, name);
+}
+```
+
+До первого BaseCheck `server_info()` возвращает `ServerInfo::default()`
+(`has_identity()=false`).
+
+`client.set_server_info(info)` — manual override (если init делается своим
+pattern'ом без `run_init_sequence`).
+
+## ApiPending registry
+
+Pending Engine API requests маршрутизируются автоматически. Большинство API
+вызывается через high-level wrappers (`client.api_*()`) которые сами регистрируют
+UID и возвращают `Receiver`.
+
+Если нужен низкий уровень:
+
+```rust
+use std::time::Duration;
+use moonproto::commands::engine_request;
+
+let raw = engine_request::base_check();
+let uid = u64::from_le_bytes(raw[3..11].try_into().unwrap());
+let rx  = client.api_pending.register(uid, /* registered_at_ms = */ client_now_ms);
+client.send_api_request(&raw);
+
+match rx.recv_timeout(Duration::from_secs(10)) {
+    Ok(resp) => process(resp),
+    Err(_)   => { client.api_pending.remove(uid); /* timeout */ }
+}
+```
+
+`Client::send_api_request_async(raw) -> Receiver<EngineResponse>` — удобная
+оболочка над `register` + `send_api_request`.
+
+**Auto-cleanup** устаревших pending slots делает либа сама из main loop
+(default age = 12с, parity с Delphi engine).
 
 ## Observability
 
 ```rust
-client.ping_count();             // u32 — сколько Ping'ов обработано
-client.total_sent();             // u64 — суммарно отправлено
-client.total_recv();             // u64 — суммарно получено
-client.bytes_per_sec_sent();     // u64 — среднее за последние 10 сек
+client.is_authorized();                  // bool — handshake завершён
+client.auth_status();                    // AuthStatus { Base, Connected, AuthDone, Offline }
+client.ping_count();                     // u32 — сколько Ping'ов обработано
+client.total_sent() / .total_recv();     // u64 — суммарно байт
+client.bytes_per_sec_sent();             // u64 — среднее за ~10с (EMA, O(1))
 client.bytes_per_sec_recv();
-client.avg_over_heat();          // f64 % retransmission overhead (Sliced)
-client.is_authorized();
-client.auth_status();            // AuthStatus enum
+client.round_trip_delay_ms();            // i64 — последний измеренный RTT
+client.actual_pmtu();                    // u16 — текущий PMTU
+client.rs();                             // f64 — receive success ratio (для AIMD)
+client.avg_over_heat();                  // f64 % retransmission overhead
+client.server_time_delta_days();         // f64 — TDateTime offset от server
+client.net_lag_ping_ms();                // i64 — abs(NTP-corrected time − server time)
+client.global_timing_orders();           // u16
+client.server_token();                   // u64 — текущий ServerToken
+client.peer_app_token();                 // u64 — PeerAppToken (для server-restart detection)
 ```
 
 Log throttle (anti-spam для warning'ов):
@@ -179,146 +445,22 @@ if client.should_log("transport_mismatch", 1000) {
 }
 ```
 
-## Cross-thread safety
-
-- **Reader thread** принимает UDP, пушит `ClientEvent::Recv` в mpsc channel.
-- **Main thread** (`run()`) обрабатывает: handle Ping/Sliced/Crypted, retry, heartbeat, on_data, lifecycle callbacks.
-- **API pending registry** (`client.api_pending`) — thread-safe (`Arc<Mutex<HashMap>>`), можно клонировать в любой поток.
-
-`on_data` и `on_lifecycle` callback'и вызываются в main thread. **Правило:** лёгкие callback'и (ms-уровень). Тяжёлая обработка — в отдельный thread через channel.
-
-## Конфигурация
+## Завершение
 
 ```rust
-pub struct ClientConfig {
-    pub server_ip: String,        // "207.148.91.186" или "[2001:db8::1]" для IPv6
-    pub server_port: u16,
-    pub master_key: MoonKey,      // 16 байт AES-128 key
-    pub mac_key: MoonKey,         // 16 байт HMAC-CRC32C key
-    pub mask_ver: u8,             // 0=V0 open, 1/2=extended (требует moonext.dll/.so)
-    pub client_id: u64,
-}
+client.disconnect();    // явный завершить main loop → LifecycleEvent::Disconnected.
 ```
 
-IPv6: bind_address выбирается автоматически по наличию `:` в `server_ip` — `[::]:port` для IPv6, `0.0.0.0:port` для IPv4.
-
-## Thread-safe subscribe API (F4)
-
-`subscribe_orderbook` / `subscribe_all_trades` / соответствующие unsubscribe доступны как `&self` методы — можно вызывать из любого thread'а **во время** `client.run_with_dispatcher(...)` (без `&mut Client` lock).
-
-```rust
-use moonproto::client::Client;
-use moonproto::state::OrderBookKind;
-use std::thread;
-
-let mut client = Client::new(cfg);
-let sender = client.sender();  // ClientSender — clone'абельный handle
-
-// UI thread:
-thread::spawn(move || {
-    // Пользователь нажал "открыть BTCUSDT" — подписаться:
-    sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
-});
-
-// Main thread:
-client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, ...);
-```
-
-**Что под капотом.** Subscribe методы пушат `ClientEvent::SubscribeOrderBook { ... }` в bounded mpsc channel (capacity 1024). Main loop в `run_with_dispatcher` дренирует channel каждый тик (~5мс), применяет к `subscription_registry`, отправляет wire-запрос. Идемпотентно: повторный subscribe для уже подписанной пары — no-op.
-
-**Channel overflow.** Если main loop забит и channel переполнен (≥1024 событий) — fire-and-forget `subscribe_*` пишет warning в лог и теряет событие (subscribe — non-critical UI action, пользователь может повторить). Для обратной связи используй `try_*` варианты:
-
-```rust
-use moonproto::client::SubscribeError;
-
-match client.sender().try_subscribe_orderbook("BTCUSDT", OrderBookKind::Futures) {
-    Ok(()) => {}
-    Err(SubscribeError::ChannelFull) => { /* retry через несколько ms */ }
-    Err(SubscribeError::Disconnected) => { /* Client уже дропнут */ }
-}
-```
-
-**Auto-replay на reconnect.** При смене `ServerToken` (новый Fine) либа автоматически отправляет все зарегистрированные подписки заново — приложение **не должно** дублировать `subscribe_*` на `LifecycleEvent::ServerRestart`.
-
-### `Client::sender()` vs `Client::event_sender()`
-
-- `Client::sender()` → **`ClientSender`** (высокоуровневый, с typed-методами `subscribe_*`/`try_subscribe_*`) — **главный публичный API**.
-- `Client::event_sender()` → **raw `SyncSender<ClientEvent>`** для custom-протокольных сценариев (отправка `ClientEvent::Send(SendMsg { item })` напрямую). Использовать редко.
-
-## Periodic refresh (F6/F7)
-
-`ClientConfig.refresh: RefreshConfig` управляет автоматическими refresh-командами которые либа сама шлёт в main loop. Дефолт:
-
-```rust
-RefreshConfig {
-    update_markets_every: Some(Duration::from_secs(60)),  // дефолт: каждые 60с
-    check_tags_every: None,                                // дефолт: выключено
-}
-```
-
-**`update_markets_every`** — раз в указанный интервал отправляет `emk_UpdateMarketsList` (fire-and-forget). Сервер обновляет `cfg.Markets` (prices, funding) каждые ~60с — без этого пинга клиент будет показывать stale prices через час сессии. Parity с Delphi.
-
-**`check_tags_every`** — Binance-специфичная проверка futures permissions через `emk_CheckBinanceTags`. По умолчанию выключено (большинству пользователей не нужно). Если используешь Binance API и нужна валидация прав на старте сессии и периодически — выставь `Some(Duration::from_secs(300))`.
-
-Отключить refresh целиком:
-```rust
-let cfg = ClientConfig {
-    refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
-    ..
-};
-```
-
-Тики обрабатываются только когда `auth_status = AuthDone` — до handshake запрос потеряется впустую.
-
-## Multi-server поддержка
-
-Каждый `Client` представляет ОДНО подключение к одному серверу. Для multi-server терминалов держи `Vec<Client>` (или `HashMap<bot_id, Client>`).
-
-### Server identity
-
-После успешного `emk_BaseCheck` (автоматически в `run_init_sequence`, или вручную через `parse_base_check_response` + `client.set_server_info(...)`) доступно через getter:
-
-```rust
-let info = client.server_info();
-println!("Bot {}: {} ({}, version {})",
-    info.bot_id.unwrap_or(0),
-    info.server_name.as_deref().unwrap_or("?"),
-    info.exchange_name.as_deref().unwrap_or("?"),
-    info.server_version.unwrap_or(0));
-
-// Capabilities check:
-use moonproto::commands::engine_api::exchange_type_flags;
-if info.supports(exchange_type_flags::FUTURES) {
-    // показать UI для futures-only функций
-}
-```
-
-До успешного BaseCheck `server_info()` возвращает дефолт (`bot_id = None`, `has_identity() == false`).
-
-Подробнее — [engine_api.md → ServerInfo](engine_api.md#serverinfo--multi-server-identification).
-
-### ServerTimeDelta linkage (per-Client)
-
-При multi-Client каждый `Client` имеет свой `ServerTimeDelta` (разные серверы — разный clock drift). `EventDispatcher` должен быть привязан к Client'у через handle, иначе все диспетчеры читают один глобальный atomic и timestamps в ордерах будут off by 50-1000ms.
-
-**Auto-link.** Если используешь `client.run_with_dispatcher(...)` или `dispatcher.dispatch_into_active(&mut client)` — линковка делается автоматически на первом вызове, ручная работа не нужна.
-
-**Manual.** При своём pattern'е:
-```rust
-let mut dispatcher = EventDispatcher::new();
-dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
-// Теперь dispatcher для Command::Order применяет delta этого Client'а.
-```
-
-`client.server_time_delta_handle()` возвращает `Arc<AtomicU64>` clone — можно держать в любом контексте, atomic snapshot всегда актуален.
-
-См. [DEVIATION.md #23](../../../DEVIATION.md) — обоснование и тесты multi-Client изоляции.
+`Drop for Client` сигналит reader thread'у И self-managed NTP-thread'у
+завершиться. Reader выйдет через макс ~1с (read_timeout), NTP — через ~100мс.
 
 ## См. также
 
-- [overview.md](overview.md) — общий обзор библиотеки.
-- [events.md](events.md) — EventDispatcher (auto-apply state).
-- [lifecycle.md](lifecycle.md) — детали lifecycle callbacks.
-- [engine_api.md](engine_api.md) — RPC методы + ServerInfo wire-format.
-- [trade_actions.md](trade_actions.md) — Trade high-level wrappers.
-- DEVIATION.md — список архитектурных отклонений (mpsc channel, IV mask, NTP thread и т.д.).
+- [overview.md](overview.md) — общий обзор.
+- [events.md](events.md) — `EventDispatcher` (auto-apply state).
+- [lifecycle.md](lifecycle.md) — детали lifecycle.
+- [multi_server.md](multi_server.md) — multi-Client терминал.
+- [engine_api.md](engine_api.md) — RPC + ServerInfo.
+- [trade_actions.md](trade_actions.md) — 18 trade wrappers.
+- [candles.md](candles.md) — chunked candles aggregator.
+- DEVIATION.md (в корне) — реестр архитектурных отклонений от Delphi.
