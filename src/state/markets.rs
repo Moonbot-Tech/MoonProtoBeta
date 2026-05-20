@@ -184,6 +184,12 @@ impl MarketsState {
         self.prices.get(m_index as usize)
     }
 
+    pub(crate) fn has_server_market_index(&self, m_index: u16) -> bool {
+        self.market_indexes
+            .get(m_index as usize)
+            .is_some_and(|name| self.by_name.contains_key(name))
+    }
+
     /// Получить цену маркета по имени (через by_name lookup).
     pub fn price(&self, market_name: &str) -> Option<&MarketPrice> {
         self.by_name.get(market_name).and_then(|&i| self.prices.get(i))

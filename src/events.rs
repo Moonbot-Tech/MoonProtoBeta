@@ -273,6 +273,9 @@ impl EventDispatcher {
                 }
                 match parse_order_book_packet(payload) {
                     Some(pkt) => {
+                        if !self.markets.has_server_market_index(pkt.market_index) {
+                            return;
+                        }
                         for ev in self.order_books.on_packet(pkt, now_ms) {
                             out.push(Event::OrderBook(ev));
                         }
@@ -554,6 +557,15 @@ mod tests {
     use crate::commands::trade::{TradeCtx, build_all_statuses_request};
     use crate::commands::strat::build_snapshot_request;
 
+    fn order_book_payload(market_index: u16) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&market_index.to_le_bytes());
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.push(1); // Full, Futures.
+        raw.extend_from_slice(&0u16.to_le_bytes()); // buy_count=0, sell_count=0.
+        crate::compression::synlz_compress(&raw)
+    }
+
     #[test]
     fn dispatcher_routes_order_to_orders_state() {
         let mut d = EventDispatcher::new();
@@ -668,6 +680,24 @@ mod tests {
         let _events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
         // Теперь либо успешный parse, либо ParseFailed (но не пусто).
         // Точное значение зависит от содержимого dummy_payload — главное что блок снят.
+    }
+
+    #[test]
+    fn dispatcher_drops_orderbook_for_unknown_market_index() {
+        let mut d = EventDispatcher::new();
+        d.markets.indexes_synchronized = true;
+        d.markets.market_indexes = vec!["BTCUSDT".to_string()];
+        d.markets.by_name.insert("BTCUSDT".to_string(), 0);
+
+        let events = d.dispatch(Command::OrderBook, &order_book_payload(1), 1000);
+        assert!(events.is_empty(), "unknown server market index must be dropped");
+        assert!(d.order_books.is_empty(), "unknown index must not create OrderBooks cache");
+
+        d.markets.market_indexes = vec!["UNKNOWNUSDT".to_string()];
+        d.markets.by_name.clear();
+        let events = d.dispatch(Command::OrderBook, &order_book_payload(0), 1000);
+        assert!(events.is_empty(), "index mapped to unknown local market must be dropped");
+        assert!(d.order_books.is_empty(), "unknown local market must not create cache");
     }
 
     #[test]

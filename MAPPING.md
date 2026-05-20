@@ -211,6 +211,7 @@
 | OB10 | MoonProtoEngine.pas:ProcessOrderBookPacket corrupted mode | Apply diff as-is, then if count>=64 DropOldest, then cache Add, then throttled RequestFull | state/order_books.rs:corrupted branch + drop_oldest/add | ✅ |
 | OB11 | MoonProtoEngine.pas:ProcessOrderBookPacket normal gap | Add gap packet; if cache expired OR count > 64 then Corrupted=true + TryRequestFull; cache is not cleared | state/order_books.rs:gap branch | ✅ |
 | OB12 | MoonProtoOrderBook.pas:MoonProto_TryApplyCached | Drop stale cached packets, apply exact ExpectedSeq chain, stop at next gap | state/order_books.rs:drain_cache | ✅ |
+| OB13 | MoonProtoEngine.pas:ProcessOrderBookPacket | `SrvMarkets.FindByServerIndex(marketIndex) = nil` → drop packet before cache/apply | events.rs:OrderBook dispatch checks `MarketsState::has_server_market_index` | ✅ |
 
 ---
 
