@@ -40,7 +40,6 @@ use moonproto::client::{
 };
 use moonproto::events::{EventDispatcher, Event};
 use moonproto::key_import;
-use moonproto::state::OrderBookKind;
 
 const STREAM_DURATION_SECS: u64 = 15;
 
@@ -121,9 +120,7 @@ fn runtime_smoke_full_happy_path() {
         fetch_markets: true,
         fetch_balance: false,
         subscribe_trades: Some(false),
-        subscribe_orderbooks: vec![
-            ("BTCUSDT".to_string(), OrderBookKind::Futures),
-        ],
+        subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         step_timeout: Some(Duration::from_secs(10)),
     };
     let init_result = run_init_sequence(&mut client, &mut dispatcher, init_cfg)

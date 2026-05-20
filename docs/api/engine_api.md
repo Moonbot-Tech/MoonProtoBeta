@@ -42,7 +42,7 @@ For subscriptions, prefer the registry-aware APIs:
 
 ```rust
 client.subscribe_all_trades(false);
-client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+client.subscribe_orderbook("BTCUSDT");
 ```
 
 Those APIs are replayed automatically after reconnect. Raw `api_subscribe_*`

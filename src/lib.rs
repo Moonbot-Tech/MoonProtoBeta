@@ -18,7 +18,7 @@
 //!     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
 //!     InitConfig, LifecycleEvent,
 //! };
-//! use moonproto::state::{OrderBookKind, OrderEvent, OrderBookEvent, TradesEvent};
+//! use moonproto::state::{OrderEvent, OrderBookEvent, TradesEvent};
 //!
 //! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
 //! let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
@@ -50,7 +50,7 @@
 //!     fetch_markets: true,
 //!     fetch_balance: true,
 //!     subscribe_trades: Some(false),
-//!     subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+//!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()
 //! };
 //! run_init_sequence(&mut client, &mut dispatcher, init)?;
@@ -82,6 +82,7 @@
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
+//! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
 //! `examples/multi_client_test.rs`.
 //!

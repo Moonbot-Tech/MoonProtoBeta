@@ -31,7 +31,6 @@ use std::time::Duration;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig,
 };
-use moonproto::state::OrderBookKind;
 
 let keys = import_key(KEY_B64).expect("invalid key");
 let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
@@ -48,7 +47,7 @@ let init = InitConfig {
     fetch_markets: true,
     fetch_balance: true,
     subscribe_trades: Some(false),
-    subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+    subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
 run_init_sequence(&mut client, &mut dispatcher, init)?;

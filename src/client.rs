@@ -21,7 +21,6 @@ use crate::protocol::{Command, handshake, slider::Slider, slicing, crypted};
 use crate::api_pending::ApiPending;
 use crate::commands::engine_api::{EngineResponse, EngineMethod, parse_engine_response};
 use crate::commands::candles::{CandlesAggregator, DeepPrice, parse_coin_card_candles_response};
-use crate::state::OrderBookKind;
 
 // =============================================================================
 //  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
@@ -209,9 +208,9 @@ pub enum ClientEvent {
     Send(SendMsg),
     /// Подписаться на orderbook рынка. Main loop обновит registry и отправит
     /// `emk_SubscribeOrderBook` если подписки ещё не было (idempotent).
-    SubscribeOrderBook { market_name: String, kind: crate::state::OrderBookKind },
+    SubscribeOrderBook { market_name: String },
     /// Отписаться от orderbook рынка.
-    UnsubscribeOrderBook { market_name: String, kind: crate::state::OrderBookKind },
+    UnsubscribeOrderBook { market_name: String },
     /// Подписаться на all-trades поток с параметром `want_mm` (нужны ли MM-ордера).
     SubscribeAllTrades { want_mm: bool },
     /// Отписаться от all-trades потока.
@@ -252,7 +251,7 @@ impl std::error::Error for SubscribeError {}
 /// let sender = client.sender();
 /// // Передаём sender в UI-thread:
 /// thread::spawn(move || {
-///     sender.subscribe_orderbook("DOGEUSDT", OrderBookKind::Futures);
+///     sender.subscribe_orderbook("DOGEUSDT");
 /// });
 /// // Main thread тем временем:
 /// client.run_with_dispatcher(...);
@@ -269,18 +268,18 @@ pub struct ClientSender {
 
 impl ClientSender {
     /// Подписаться на orderbook (fire-and-forget; warn-log при channel full).
-    pub fn subscribe_orderbook(&self, market_name: &str, kind: crate::state::OrderBookKind) {
-        if let Err(e) = self.try_subscribe_orderbook(market_name, kind) {
+    pub fn subscribe_orderbook(&self, market_name: &str) {
+        if let Err(e) = self.try_subscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
-                "subscribe_orderbook({market_name}, {kind:?}) dropped: {e}");
+                "subscribe_orderbook({market_name}) dropped: {e}");
         }
     }
 
     /// Отписаться от orderbook (fire-and-forget; warn-log при channel full).
-    pub fn unsubscribe_orderbook(&self, market_name: &str, kind: crate::state::OrderBookKind) {
-        if let Err(e) = self.try_unsubscribe_orderbook(market_name, kind) {
+    pub fn unsubscribe_orderbook(&self, market_name: &str) {
+        if let Err(e) = self.try_unsubscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
-                "unsubscribe_orderbook({market_name}, {kind:?}) dropped: {e}");
+                "unsubscribe_orderbook({market_name}) dropped: {e}");
         }
     }
 
@@ -304,22 +303,18 @@ impl ClientSender {
     pub fn try_subscribe_orderbook(
         &self,
         market_name: &str,
-        kind: crate::state::OrderBookKind,
     ) -> Result<(), SubscribeError> {
         self.try_send(ClientEvent::SubscribeOrderBook {
             market_name: market_name.to_string(),
-            kind,
         })
     }
 
     pub fn try_unsubscribe_orderbook(
         &self,
         market_name: &str,
-        kind: crate::state::OrderBookKind,
     ) -> Result<(), SubscribeError> {
         self.try_send(ClientEvent::UnsubscribeOrderBook {
             market_name: market_name.to_string(),
-            kind,
         })
     }
 
@@ -707,7 +702,7 @@ pub struct TradesSubscription {
 /// `replay_subscriptions` отправит все подписки заново.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
-    pub orderbook_subs: HashSet<(String, OrderBookKind)>,
+    pub orderbook_subs: HashSet<String>,
     pub trades_sub: Option<TradesSubscription>,
     pub last_subscribed_token: u64,
 }
@@ -1532,7 +1527,7 @@ impl Client {
     /// let mut client = Client::new(cfg);
     /// let sender = client.sender();
     /// thread::spawn(move || {
-    ///     sender.subscribe_orderbook("DOGEUSDT", OrderBookKind::Futures);
+    ///     sender.subscribe_orderbook("DOGEUSDT");
     /// });
     /// client.run_with_dispatcher(...);
     /// ```
@@ -1540,7 +1535,7 @@ impl Client {
         ClientSender { tx: self.event_tx.clone() }
     }
 
-    /// Подписаться на orderbook рынка `market_name` типа `kind`.
+    /// Подписаться на orderbook рынка `market_name`.
     ///
     /// Convenience-обёртка вокруг `self.sender().subscribe_orderbook(...)`. Можно
     /// вызывать с `&self` ссылки или прямо на Arc<Client>. Fire-and-forget — при
@@ -1550,14 +1545,15 @@ impl Client {
     /// Подписка запоминается в registry — при reconnect / ServerToken change либа
     /// автоматически переподписывается. Resolve `market_name → market_idx` делает
     /// сервер, поэтому можно подписаться ДО получения `emk_GetMarketsList`.
-    /// Идемпотентный.
-    pub fn subscribe_orderbook(&self, market_name: &str, kind: OrderBookKind) {
-        self.sender().subscribe_orderbook(market_name, kind);
+    /// Идемпотентный. Delphi-сервер подписывает рынок целиком; Futures/Spot
+    /// различаются уже в приходящих orderbook packets через `book_kind`.
+    pub fn subscribe_orderbook(&self, market_name: &str) {
+        self.sender().subscribe_orderbook(market_name);
     }
 
     /// Отписаться от orderbook'а рынка. См. [`Client::subscribe_orderbook`].
-    pub fn unsubscribe_orderbook(&self, market_name: &str, kind: OrderBookKind) {
-        self.sender().unsubscribe_orderbook(market_name, kind);
+    pub fn unsubscribe_orderbook(&self, market_name: &str) {
+        self.sender().unsubscribe_orderbook(market_name);
     }
 
     /// Подписаться на all-trades поток. `want_mm` — нужны ли MM ордера (Delphi
@@ -1633,22 +1629,21 @@ impl Client {
     /// Вызывается main loop при получении `ClientEvent::Subscribe*`/`Unsubscribe*`.
     fn apply_subscribe_event(&mut self, ev: ClientEvent) {
         match ev {
-            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+            ClientEvent::SubscribeOrderBook { market_name } => {
                 // Wire подписка идёт по `market_name` (resolve делает сервер) — поэтому
-                // подписку можно вызвать ДО получения `emk_GetMarketsList`. Registry
-                // хранит и kind — при replay шлём отдельные batch'и per kind, сервер
-                // по-разному маршрутизирует Futures/Spot книги.
-                let key = (market_name.clone(), kind);
-                let newly_added = self.subscription_registry.orderbook_subs.insert(key);
+                // подписку можно вызвать ДО получения `emk_GetMarketsList`.
+                let newly_added = self
+                    .subscription_registry
+                    .orderbook_subs
+                    .insert(market_name.clone());
                 if newly_added {
                     self.send_api_request(
                         &crate::commands::engine_request::subscribe_order_book(&[&market_name]),
                     );
                 }
             }
-            ClientEvent::UnsubscribeOrderBook { market_name, kind } => {
-                let key = (market_name.clone(), kind);
-                if self.subscription_registry.orderbook_subs.remove(&key) {
+            ClientEvent::UnsubscribeOrderBook { market_name } => {
+                if self.subscription_registry.orderbook_subs.remove(&market_name) {
                     self.send_api_request(
                         &crate::commands::engine_request::unsubscribe_order_book(&[&market_name]),
                     );
@@ -1677,29 +1672,24 @@ impl Client {
     /// Re-play всех зарегистрированных подписок на новом ServerToken.
     /// Вызывается из `handle_handshake` после `Fine` если token изменился.
     ///
-    /// OrderBook подписки группируются по `OrderBookKind` и отправляются ОДНИМ
-    /// `emk_SubscribeOrderBook` per kind — экономит N-1 datagram'ов на reconnect'е
-    /// с большим количеством подписок. Группировка через `HashMap<OrderBookKind,
-    /// Vec<&str>>` (futureproof — при добавлении новых kind в enum не нужно
-    /// править этот код).
+    /// OrderBook подписки отправляются одним `emk_SubscribeOrderBook` batch'ем:
+    /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
     fn replay_subscriptions(&mut self) {
         if let Some(sub) = self.subscription_registry.trades_sub {
             self.send_api_request(
                 &crate::commands::engine_request::subscribe_all_trades(sub.want_mm),
             );
         }
-        // Группируем по kind через HashMap — добавление нового OrderBookKind variant
-        // не требует правки этой функции (futureproof против изменения enum).
-        let mut by_kind: HashMap<OrderBookKind, Vec<&str>> = HashMap::new();
-        for (name, kind) in &self.subscription_registry.orderbook_subs {
-            by_kind.entry(*kind).or_default().push(name.as_str());
-        }
-        for (_kind, refs) in by_kind.iter() {
-            if !refs.is_empty() {
-                self.send_api_request(
-                    &crate::commands::engine_request::subscribe_order_book(refs),
-                );
-            }
+        let refs: Vec<&str> = self
+            .subscription_registry
+            .orderbook_subs
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if !refs.is_empty() {
+            self.send_api_request(
+                &crate::commands::engine_request::subscribe_order_book(&refs),
+            );
         }
         self.subscription_registry.last_subscribed_token = self.server_token;
     }
@@ -3988,9 +3978,9 @@ pub struct InitConfig {
     pub fetch_balance: bool,
     /// Подписаться на all-trades с указанным `want_mm`. None = пропустить.
     pub subscribe_trades: Option<bool>,
-    /// Подписаться на orderbook'и (`(market_name, kind)` пары). Resolve по имени
-    /// делает сервер — можно подписаться до получения GetMarketsList.
-    pub subscribe_orderbooks: Vec<(String, crate::state::OrderBookKind)>,
+    /// Подписаться на orderbook'и по имени рынка. Resolve по имени делает сервер —
+    /// можно подписаться до получения GetMarketsList.
+    pub subscribe_orderbooks: Vec<String>,
     /// Per-step timeout. Default = `DEFAULT_PENDING_TIMEOUT_MS` (12с).
     pub step_timeout: Option<Duration>,
 }
@@ -4050,7 +4040,7 @@ impl std::error::Error for InitError {}
 /// let cfg = InitConfig {
 ///     base_check: true, auth_check: true, fetch_markets: true,
 ///     fetch_balance: true, subscribe_trades: Some(false),
-///     subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+///     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 ///     ..Default::default()
 /// };
 /// let result = run_init_sequence(&mut client, cfg)?;
@@ -4215,9 +4205,9 @@ pub fn run_init_sequence(
         result.trades_subscribed = true;
     }
 
-    // === 6. Subscribe orderbooks === fire-and-forget per kind через registry
-    for (name, kind) in &cfg.subscribe_orderbooks {
-        client.subscribe_orderbook(name, *kind);
+    // === 6. Subscribe orderbooks === fire-and-forget через registry
+    for name in &cfg.subscribe_orderbooks {
+        client.subscribe_orderbook(name);
         result.orderbooks_subscribed += 1;
     }
 
@@ -4524,7 +4514,6 @@ mod api_pending_dispatch_tests {
 #[cfg(test)]
 mod client_sender_tests {
     use super::*;
-    use crate::state::OrderBookKind;
 
     fn make_sender(capacity: usize) -> (ClientSender, mpsc::Receiver<ClientEvent>) {
         let (tx, rx) = mpsc::sync_channel::<ClientEvent>(capacity);
@@ -4534,11 +4523,10 @@ mod client_sender_tests {
     #[test]
     fn subscribe_orderbook_pushes_event_with_correct_fields() {
         let (sender, rx) = make_sender(8);
-        sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+        sender.subscribe_orderbook("BTCUSDT");
         match rx.try_recv().expect("event should be queued") {
-            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+            ClientEvent::SubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "BTCUSDT");
-                assert_eq!(kind, OrderBookKind::Futures);
             }
             other => panic!("expected SubscribeOrderBook, got {:?}",
                 std::mem::discriminant(&other)),
@@ -4548,11 +4536,10 @@ mod client_sender_tests {
     #[test]
     fn unsubscribe_orderbook_pushes_event() {
         let (sender, rx) = make_sender(8);
-        sender.unsubscribe_orderbook("ETHUSDT", OrderBookKind::Spot);
+        sender.unsubscribe_orderbook("ETHUSDT");
         match rx.try_recv().unwrap() {
-            ClientEvent::UnsubscribeOrderBook { market_name, kind } => {
+            ClientEvent::UnsubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "ETHUSDT");
-                assert_eq!(kind, OrderBookKind::Spot);
             }
             _ => panic!("expected UnsubscribeOrderBook"),
         }
@@ -4583,7 +4570,7 @@ mod client_sender_tests {
     #[test]
     fn try_subscribe_returns_ok_when_channel_has_room() {
         let (sender, _rx) = make_sender(2);
-        assert!(sender.try_subscribe_orderbook("BTC", OrderBookKind::Futures).is_ok());
+        assert!(sender.try_subscribe_orderbook("BTC").is_ok());
         assert!(sender.try_subscribe_all_trades(true).is_ok());
     }
 
@@ -4591,9 +4578,9 @@ mod client_sender_tests {
     fn try_subscribe_returns_channel_full_on_overflow() {
         // capacity=1 → второй try_send блокирующее не работает; должен вернуть Full.
         let (sender, _rx) = make_sender(1);
-        assert!(sender.try_subscribe_orderbook("BTC", OrderBookKind::Futures).is_ok());
+        assert!(sender.try_subscribe_orderbook("BTC").is_ok());
         // Канал заполнен (rx не читали), следующий должен дать ChannelFull.
-        let err = sender.try_subscribe_orderbook("ETH", OrderBookKind::Futures).unwrap_err();
+        let err = sender.try_subscribe_orderbook("ETH").unwrap_err();
         assert_eq!(err, SubscribeError::ChannelFull);
     }
 
@@ -4611,8 +4598,8 @@ mod client_sender_tests {
         // один и тот же channel который слушает main loop.
         let (sender_a, rx) = make_sender(8);
         let sender_b = sender_a.clone();
-        sender_a.subscribe_orderbook("A", OrderBookKind::Futures);
-        sender_b.subscribe_orderbook("B", OrderBookKind::Spot);
+        sender_a.subscribe_orderbook("A");
+        sender_b.subscribe_orderbook("B");
         let evs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(evs.len(), 2);
         // FIFO: первое событие — от sender_a.
@@ -4639,7 +4626,6 @@ mod client_sender_tests {
 #[cfg(test)]
 mod client_subscribe_integration_tests {
     use super::*;
-    use crate::state::OrderBookKind;
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -4660,12 +4646,11 @@ mod client_subscribe_integration_tests {
         // событие в тот же event channel который main loop слушает. До запуска
         // run_with_dispatcher event лежит в channel и виден через event_rx.
         let client = Client::new(dummy_cfg());
-        client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+        client.subscribe_orderbook("BTCUSDT");
         let ev = client.event_rx.try_recv().expect("event should be queued");
         match ev {
-            ClientEvent::SubscribeOrderBook { market_name, kind } => {
+            ClientEvent::SubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "BTCUSDT");
-                assert_eq!(kind, OrderBookKind::Futures);
             }
             _ => panic!("expected SubscribeOrderBook"),
         }
@@ -4691,10 +4676,8 @@ mod client_subscribe_integration_tests {
         let mut client = Client::new(dummy_cfg());
         client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
             market_name: "BTC".to_string(),
-            kind: OrderBookKind::Futures,
         });
-        let key = ("BTC".to_string(), OrderBookKind::Futures);
-        assert!(client.subscription_registry.orderbook_subs.contains(&key));
+        assert!(client.subscription_registry.orderbook_subs.contains("BTC"));
     }
 
     #[test]
@@ -4702,14 +4685,11 @@ mod client_subscribe_integration_tests {
         let mut client = Client::new(dummy_cfg());
         client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
             market_name: "BTC".to_string(),
-            kind: OrderBookKind::Futures,
         });
         client.apply_subscribe_event(ClientEvent::UnsubscribeOrderBook {
             market_name: "BTC".to_string(),
-            kind: OrderBookKind::Futures,
         });
-        let key = ("BTC".to_string(), OrderBookKind::Futures);
-        assert!(!client.subscription_registry.orderbook_subs.contains(&key));
+        assert!(!client.subscription_registry.orderbook_subs.contains("BTC"));
     }
 
     #[test]
@@ -4720,7 +4700,6 @@ mod client_subscribe_integration_tests {
         let mut client = Client::new(dummy_cfg());
         let ev = || ClientEvent::SubscribeOrderBook {
             market_name: "ETH".to_string(),
-            kind: OrderBookKind::Spot,
         };
         client.apply_subscribe_event(ev());
         client.apply_subscribe_event(ev());
@@ -5169,7 +5148,6 @@ mod active_library_helpers_tests {
 mod replay_subscriptions_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
-    use crate::state::OrderBookKind;
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -5226,37 +5204,38 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_orderbooks_of_one_kind_batched_into_single_request() {
+    fn replay_orderbooks_are_batched_into_single_request() {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.orderbook_subs
-            .insert(("BTC".to_string(), OrderBookKind::Futures));
+            .insert("BTC".to_string());
         client.subscription_registry.orderbook_subs
-            .insert(("ETH".to_string(), OrderBookKind::Futures));
+            .insert("ETH".to_string());
         client.subscription_registry.orderbook_subs
-            .insert(("XRP".to_string(), OrderBookKind::Futures));
+            .insert("XRP".to_string());
         client.server_token = 1;
         client.replay_subscriptions();
         let sent = drain_api_requests(&client);
-        // Все три futures-подписки должны уйти ОДНИМ batch'ем, не тремя.
-        assert_eq!(sent.len(), 1, "3 подписки одного kind → 1 batch wire-запрос");
+        // Все три подписки должны уйти ОДНИМ batch'ем, не тремя.
+        assert_eq!(sent.len(), 1, "3 orderbook подписки → 1 batch wire-запрос");
         assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeOrderBook as u8));
     }
 
     #[test]
-    fn replay_orderbooks_of_different_kinds_get_separate_batches() {
+    fn replay_orderbooks_dedup_by_market_name() {
         let mut client = Client::new(dummy_cfg());
-        client.subscription_registry.orderbook_subs
-            .insert(("BTC".to_string(), OrderBookKind::Futures));
-        client.subscription_registry.orderbook_subs
-            .insert(("ETH".to_string(), OrderBookKind::Spot));
+        assert!(client
+            .subscription_registry
+            .orderbook_subs
+            .insert("BTC".to_string()));
+        assert!(!client
+            .subscription_registry
+            .orderbook_subs
+            .insert("BTC".to_string()));
         client.server_token = 1;
         client.replay_subscriptions();
         let sent = drain_api_requests(&client);
-        // Два разных kind → два batch'а (HashMap order undefined, но количество детерминировано).
-        assert_eq!(sent.len(), 2, "2 разных kind → 2 batch wire-запроса");
-        for payload in &sent {
-            assert_eq!(method_id(payload), Some(EngineMethod::SubscribeOrderBook as u8));
-        }
+        assert_eq!(sent.len(), 1, "same market is one server-side subscription");
+        assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeOrderBook as u8));
     }
 
     #[test]
@@ -5264,21 +5243,21 @@ mod replay_subscriptions_tests {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
         client.subscription_registry.orderbook_subs
-            .insert(("BTC".to_string(), OrderBookKind::Futures));
+            .insert("BTC".to_string());
         client.subscription_registry.orderbook_subs
-            .insert(("XRP".to_string(), OrderBookKind::Spot));
+            .insert("XRP".to_string());
         client.server_token = 1;
         client.replay_subscriptions();
         let sent = drain_api_requests(&client);
-        assert_eq!(sent.len(), 3, "1 trades + 2 orderbook (per kind) = 3 запроса");
+        assert_eq!(sent.len(), 2, "1 trades + 1 orderbook batch = 2 запроса");
         let methods: Vec<Option<u8>> = sent.iter().map(|p| method_id(p)).collect();
         // Один из запросов — SubscribeAllTrades.
         assert!(methods.contains(&Some(EngineMethod::SubscribeAllTrades as u8)));
-        // Два запроса — SubscribeOrderBook.
+        // Один запрос — SubscribeOrderBook batch.
         let book_count = methods.iter()
             .filter(|m| **m == Some(EngineMethod::SubscribeOrderBook as u8))
             .count();
-        assert_eq!(book_count, 2);
+        assert_eq!(book_count, 1);
     }
 
     #[test]
@@ -5556,9 +5535,9 @@ mod subscription_registry_tests {
     #[test]
     fn registry_orderbook_insert_dedups() {
         let mut r = SubscriptionRegistry::default();
-        assert!(r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Futures)));
-        assert!(!r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Futures)));
-        assert!(r.orderbook_subs.insert(("BTCUSDT".to_string(), OrderBookKind::Spot)));
+        assert!(r.orderbook_subs.insert("BTCUSDT".to_string()));
+        assert!(!r.orderbook_subs.insert("BTCUSDT".to_string()));
+        assert!(r.orderbook_subs.insert("ETHUSDT".to_string()));
         assert_eq!(r.orderbook_subs.len(), 2);
     }
 

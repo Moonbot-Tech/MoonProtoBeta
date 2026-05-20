@@ -93,7 +93,6 @@ needs:
 
 ```rust
 use moonproto::{run_init_sequence, InitConfig};
-use moonproto::state::OrderBookKind;
 
 client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
 if !client.is_authorized() {
@@ -106,7 +105,7 @@ let init = InitConfig {
     fetch_markets: true,
     fetch_balance: true,
     subscribe_trades: Some(false),
-    subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+    subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
 
@@ -137,20 +136,22 @@ Use registry-aware methods:
 
 ```rust
 client.subscribe_all_trades(false);
-client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
-client.unsubscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+client.subscribe_orderbook("BTCUSDT");
+client.unsubscribe_orderbook("BTCUSDT");
 client.unsubscribe_all_trades();
 ```
 
 The registry is replayed automatically after a hard reconnect. Do not repeat
 subscriptions from `LifecycleEvent::ServerRestart` or `Connected { fresh: false }`.
+Orderbook subscriptions are per market name; incoming events carry `book_kind`
+so the application can render futures and spot books separately.
 
 For UI threads, clone a `ClientSender`:
 
 ```rust
 let sender = client.sender();
 std::thread::spawn(move || {
-    sender.subscribe_orderbook("ETHUSDT", OrderBookKind::Futures);
+    sender.subscribe_orderbook("ETHUSDT");
 });
 ```
 
@@ -158,7 +159,7 @@ Fire-and-forget methods log and drop on a full internal channel. Use `try_*`
 methods when the UI needs explicit retry:
 
 ```rust
-match client.sender().try_subscribe_orderbook("BTCUSDT", OrderBookKind::Futures) {
+match client.sender().try_subscribe_orderbook("BTCUSDT") {
     Ok(()) => {}
     Err(err) => eprintln!("subscribe failed: {err:?}"),
 }

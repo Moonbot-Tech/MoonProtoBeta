@@ -28,7 +28,6 @@ use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
     InitConfig, LifecycleEvent,
 };
-use moonproto::state::OrderBookKind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keys = import_key(KEY_B64).expect("invalid MoonBot key");
@@ -61,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fetch_markets: true,
         fetch_balance: true,
         subscribe_trades: Some(false),
-        subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+        subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         ..Default::default()
     };
     run_init_sequence(&mut client, &mut dispatcher, init)?;
@@ -147,7 +146,7 @@ Use the registry-aware subscription API:
 
 ```rust
 client.subscribe_all_trades(false);
-client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+client.subscribe_orderbook("BTCUSDT");
 ```
 
 The library remembers these subscriptions and replays them automatically after a
@@ -184,6 +183,8 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/history_bars.rs` — request and parse historical candles.
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
+- `examples/order_book_stream.rs` — subscribe to one orderbook stream.
+- `examples/market_refresh.rs` — observe automatic market refresh events.
 - `examples/multi_client_test.rs` — two independent clients in one process.
 
 ## API Documentation

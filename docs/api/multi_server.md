@@ -88,7 +88,7 @@ Clone a typed sender for UI threads:
 let sender = session.client.sender();
 
 ui_thread.spawn(move || {
-    sender.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+    sender.subscribe_orderbook("BTCUSDT");
     sender.subscribe_all_trades(false);
 });
 ```

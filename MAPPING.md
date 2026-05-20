@@ -366,6 +366,7 @@
 | E6 | UnencryptedMethods set | exclude from encryption | server-side, client принимает оба | N/A |
 | E7 | MoonProtoEngineServer.pas:315-319 emk_GetBalance response `WriteDouble(q)` | typed payload parser | engine_api.rs:parse_get_balance_response | ✅ |
 | E8 | MoonProtoEngineServer.pas:341-344 emk_QueryHedgeMode response `WriteBool(hedgeMode)` | typed payload parser | engine_api.rs:parse_query_hedge_mode_response | ✅ |
+| E9 | MoonProtoServer.pas:1070-1128 emk_SubscribeOrderBook/emk_UnsubscribeOrderBook uses only `MarketNames`; MoonProtoOrderBook.pas:287-293 marks both `TOrderBookKind` books | high-level orderbook subscribe registry is per `market_name`; `OrderBookKind` remains event/full-request state only | client.rs:subscribe_orderbook/unsubscribe_orderbook + SubscriptionRegistry | ✅ |
 
 ### High-level wrappers in client.rs (Stage 3)
 | # | Что | Rust | ✅ |

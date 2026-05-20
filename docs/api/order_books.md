@@ -7,14 +7,16 @@ cache ordering and full-snapshot recovery.
 ## Subscribe
 
 ```rust
-use moonproto::state::OrderBookKind;
-
-client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
-client.subscribe_orderbook("ETHUSDT", OrderBookKind::Spot);
+client.subscribe_orderbook("BTCUSDT");
+client.subscribe_orderbook("ETHUSDT");
 ```
 
 Subscriptions are stored in the client registry and replayed automatically after
 hard reconnect. Do not resubscribe from `ServerRestart`.
+
+The server subscription is per market name. `OrderBookKind` is not part of the
+subscribe request; it is carried by incoming orderbook packets and by full-book
+recovery requests.
 
 ## Events
 

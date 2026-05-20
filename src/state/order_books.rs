@@ -33,8 +33,8 @@ use crate::commands::order_book::{OrderBookUpdate, compare_seq};
 /// Тип orderbook'а: фьючерсы или spot. Wire-формат — 1 байт.
 ///
 /// Соответствует Delphi `TBookKind` (MoonProtoOrderBook.pas:5) с ord-кодами
-/// 0=`bk_Futures`, 1=`bk_Spot`. Используется в публичном API подписок
-/// и в внутренних структурах state.
+/// 0=`bk_Futures`, 1=`bk_Spot`. Используется в incoming orderbook packets,
+/// full-book recovery requests and internal state keys.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrderBookKind {

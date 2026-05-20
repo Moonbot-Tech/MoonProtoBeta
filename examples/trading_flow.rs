@@ -150,8 +150,7 @@ fn main() {
     // market_idx` делает сервер — поэтому можно вызвать ДО получения
     // `emk_GetMarketsList`.
     {
-        use moonproto::state::OrderBookKind;
-        client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
+        client.subscribe_orderbook("BTCUSDT");
     }
 
     // ---- 8. Phase 3: ждать ответ на api_get_markets_list ----
