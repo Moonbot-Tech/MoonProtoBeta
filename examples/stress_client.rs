@@ -53,7 +53,6 @@ struct SharedStats {
     lifecycle_reconnecting: AtomicU64,
     lifecycle_server_restart: AtomicU64,
     lifecycle_bind_failed: AtomicU64,
-    lifecycle_backlog: AtomicU64,
     events_total: AtomicU64,
     trades_apply: AtomicU64,
     trades_gap: AtomicU64,
@@ -491,9 +490,6 @@ fn run_one_client(
             LifecycleEvent::BindFailed { .. } => {
                 stats.lifecycle_bind_failed.fetch_add(1, Ordering::Relaxed);
             }
-            LifecycleEvent::SendBacklogCritical { .. } => {
-                stats.lifecycle_backlog.fetch_add(1, Ordering::Relaxed);
-            }
             _ => {}
         }));
     }
@@ -648,14 +644,13 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
 
         println!("[{label}] client_id={client_id:#x}");
         println!(
-            "[{label}] auth={} init={} fresh={} reconnects={} server_restarts={} bind_failed={} backlog={}",
+            "[{label}] auth={} init={} fresh={} reconnects={} server_restarts={} bind_failed={}",
             authorized,
             init_ok,
             stats.lifecycle_connected_fresh.load(Ordering::Relaxed),
             stats.lifecycle_reconnecting.load(Ordering::Relaxed),
             stats.lifecycle_server_restart.load(Ordering::Relaxed),
             stats.lifecycle_bind_failed.load(Ordering::Relaxed),
-            stats.lifecycle_backlog.load(Ordering::Relaxed),
         );
         println!(
             "[{label}] events={} trades={} trades_gap={} dup={} ob={} ob_full={} ob_req_full={} balance={} order={} settings={} markets={} engine={} logs={} parse_failed={}",

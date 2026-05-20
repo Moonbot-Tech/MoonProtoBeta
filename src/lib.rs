@@ -28,9 +28,6 @@
 //! client.on_lifecycle(Box::new(|ev| match ev {
 //!     LifecycleEvent::Connected { fresh } => println!("connected fresh={fresh}"),
 //!     LifecycleEvent::Reconnecting => println!("reconnecting"),
-//!     LifecycleEvent::SendBacklogCritical { u_key_uid, .. } => {
-//!         eprintln!("critical send backlog for order {u_key_uid}");
-//!     }
 //!     LifecycleEvent::BindFailed { consecutive_failures } => {
 //!         eprintln!("UDP bind failed {consecutive_failures} times");
 //!     }

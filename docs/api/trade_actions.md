@@ -107,6 +107,3 @@ not be duplicated by retries use `MaxRetries = 1`:
 - `do_split_position`;
 - `do_sell_order`;
 - `do_market_split_position`.
-
-If `LifecycleEvent::SendBacklogCritical` is emitted, a high-priority pending
-command was dropped under prolonged server silence. Show a trading-risk alert.

@@ -109,10 +109,6 @@ const CLEANUP_INTERVAL_MS: i64 = 5000;     // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80;          // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64;    // MoonProtoDataStruct.pas:31
 
-/// DoS guard: верхний лимит pending_h. При долгой server silence без ACK retry-копии
-/// накапливаются. 256 — щедрый запас для нормальной торговой нагрузки (burst orders).
-const MAX_PENDING_H: usize = 256;
-
 // Send priority (matches TMoonProtoSendPriority)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SendPriority {
@@ -417,18 +413,6 @@ pub enum LifecycleEvent {
     /// нового Hello → новый `Connecting`. **Никаких действий от потребителя
     /// не требуется**, можно только показать в UI индикатор "переподключаемся".
     Reconnecting,
-    /// **Критическое событие**: переполнен буфер pending H-priority команд
-    /// (`MAX_PENDING_H = 256`). Это происходит при долгой server silence без
-    /// ACK — retry-копии накапливаются, либа **молча выбрасывает** самые старые
-    /// чтобы освободить место. Среди старых могут быть `cancel_order` /
-    /// `replace_order` — потеря таких команд = ордер не отменился = торговый риск.
-    ///
-    /// App **обязан** реагировать: показать критический индикатор пользователю,
-    /// возможно retry команды через свой механизм (если знает что недоотменено).
-    /// Поле `cmd: u8` = TMoonProtoCommand этой команды (обычно `Command::Order`),
-    /// `u_key_uid: u64` = `UKey.uid` потерянного pending'а (для cancel/replace =
-    /// `Order.uid`). См. robustness audit C3.
-    SendBacklogCritical { cmd: u8, u_key_uid: u64 },
     /// **Критическое событие**: 200 попыток `UdpSocket::bind` упали несколько раз
     /// подряд — невозможно открыть локальный UDP-сокет. Типичные причины:
     /// - **iOS/Android background restrictions** (приложение в фоне);
@@ -3176,27 +3160,6 @@ impl Client {
     /// запрос был отправлен `> INDEXES_FETCH_TIMEOUT_MS` назад и ответ не пришёл —
     /// сбрасываем in_flight; следующий handshake/Ping увидит `peer != tracked` и
     /// переотправит запрос. Cost: 3 сравнения когда in_flight=false (hot path).
-    #[inline]
-    /// audit_robustness C3: при достижении `MAX_PENDING_H` лимита drop oldest +
-    /// emit `LifecycleEvent::SendBacklogCritical`. Извлечён в метод для testability.
-    ///
-    /// **Финансовый риск**: среди старых pending могут быть `cancel_order` /
-    /// `replace_order` — потеря таких команд = ордер не отменился = исполнится по
-    /// старой цене. Событие даёт app возможность отреагировать (показать критический
-    /// индикатор / retry через свой механизм).
-    fn enforce_pending_h_capacity(&mut self) {
-        if self.pending_h.len() >= MAX_PENDING_H {
-            let dropped = self.pending_h.remove(0);
-            log::warn!(target: "moonproto::client",
-                "pending_h saturated; dropped oldest u_key=({:?}, uid={}) cmd={:?} — emitting SendBacklogCritical",
-                dropped.u_key.kind, dropped.u_key.uid, dropped.cmd);
-            self.fire_lifecycle(LifecycleEvent::SendBacklogCritical {
-                cmd: dropped.cmd,
-                u_key_uid: dropped.u_key.uid,
-            });
-        }
-    }
-
     /// audit_robustness H5: атомарный CLOCK_JUMP_DETECTED → force_disconnect.
     /// Извлечён в метод для testability + чтобы main loop был чище.
     /// `swap(false)` атомарно читает и сбрасывает флаг.
@@ -3450,16 +3413,9 @@ impl Client {
                 // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
                 // alloc здесь (необходимый — pending_h хранит копию между retry).
                 pending_item.data = eff_data.into_owned();
-                // DoS guard: pending_h может неконтролируемо расти если сервер живой по MAC,
-                // но не ACK'ает H-priority. На burst торговых команд при долгой server silence —
-                // мегабайты + O(N) обход в retry_pending_h каждый цикл.
-                //
-                // **Финансовый риск**: среди старых pending могут быть `cancel_order` /
-                // `replace_order` (UK_ORDER_MOVE) — потеря таких команд = ордер не отменился =
-                // исполнится по старой цене. Эмитим `LifecycleEvent::SendBacklogCritical` чтобы
-                // app мог отреагировать (показать критический индикатор, retry через свой
-                // механизм если знает что не отменено). См. robustness audit C3.
-                self.enforce_pending_h_capacity();
+                // Delphi `PendingH` не имеет capacity-cap: H-команды живут до ACK
+                // или исчерпания `RetryLeft`. Старые trading-команды не дропаются
+                // искусственно при большом burst'е.
                 self.pending_h.push(pending_item);
             }
         } else {
@@ -5103,114 +5059,6 @@ mod send_queue_dedup_tests {
             vec![0, 3, 4, 5],
             "Delphi SendCmdInt removes older queued items with same non-empty UKey",
         );
-    }
-}
-
-#[cfg(test)]
-mod pending_h_overflow_tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-
-    fn dummy_cfg() -> ClientConfig {
-        ClientConfig {
-            server_ip: "127.0.0.1".to_string(),
-            server_port: 3000,
-            master_key: [0; 16],
-            mac_key: [0; 16],
-            mask_ver: 0,
-            client_id: 0,
-            ntp_host: None,
-            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
-        }
-    }
-
-    fn dummy_send_item(uid: u64) -> SendItem {
-        SendItem {
-            data: vec![],
-            cmd: Command::Order as u8,
-            encrypted: true,
-            priority: SendPriority::High,
-            retry_left: 0,
-            max_retries: 1,
-            msg_num: 0,
-            last_sent_at: 0,
-            u_key: UniqueKey { kind: 1, uid },
-        }
-    }
-
-    #[test]
-    fn enforce_does_nothing_when_under_limit() {
-        let mut client = Client::new(dummy_cfg());
-        let captured: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let cap = Arc::clone(&captured);
-        client.on_lifecycle(Box::new(move |ev| cap.lock().unwrap().push(ev)));
-
-        for i in 0..(MAX_PENDING_H - 10) {
-            client.pending_h.push(dummy_send_item(i as u64));
-        }
-        client.enforce_pending_h_capacity();
-        assert_eq!(client.pending_h.len(), MAX_PENDING_H - 10,
-            "ниже лимита — никаких drop'ов");
-        assert!(captured.lock().unwrap().is_empty(),
-            "ниже лимита — никаких событий");
-    }
-
-    #[test]
-    fn enforce_drops_oldest_and_emits_when_at_limit() {
-        let mut client = Client::new(dummy_cfg());
-        let captured: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let cap = Arc::clone(&captured);
-        client.on_lifecycle(Box::new(move |ev| cap.lock().unwrap().push(ev)));
-
-        // Заполняем до лимита (256 элементов с uid 0..255).
-        for i in 0..MAX_PENDING_H {
-            client.pending_h.push(dummy_send_item(i as u64));
-        }
-        client.enforce_pending_h_capacity();
-
-        assert_eq!(client.pending_h.len(), MAX_PENDING_H - 1,
-            "ровно 1 элемент drop'нут (oldest)");
-
-        let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 1, "одно SendBacklogCritical событие");
-        match events[0] {
-            LifecycleEvent::SendBacklogCritical { u_key_uid, cmd } => {
-                assert_eq!(u_key_uid, 0, "drop'нут самый старый (uid=0)");
-                assert_eq!(cmd, Command::Order as u8);
-            }
-            other => panic!("expected SendBacklogCritical, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn enforce_called_each_time_keeps_capacity() {
-        // Если pending растёт сверх лимита (push без enforce), повторные enforce
-        // drop'ят по одному. Симулируем что у нас есть лимит+5 элементов и зовём
-        // enforce 5 раз → drop 5 raz, events 5.
-        let mut client = Client::new(dummy_cfg());
-        let captured: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let cap = Arc::clone(&captured);
-        client.on_lifecycle(Box::new(move |ev| cap.lock().unwrap().push(ev)));
-
-        for i in 0..(MAX_PENDING_H + 5) {
-            client.pending_h.push(dummy_send_item(i as u64));
-        }
-        for _ in 0..6 {
-            client.enforce_pending_h_capacity();
-        }
-
-        // 261 элементов → 6 drop'ов → 255 осталось (ниже лимита).
-        assert_eq!(client.pending_h.len(), MAX_PENDING_H - 1);
-        let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 6, "6 enforce calls — 6 SendBacklogCritical events");
-        // Проверяем FIFO drop: первый drop = uid 0, последний = uid 5.
-        for (i, ev) in events.iter().enumerate() {
-            match ev {
-                LifecycleEvent::SendBacklogCritical { u_key_uid, .. } =>
-                    assert_eq!(*u_key_uid, i as u64, "drop'ы FIFO от oldest"),
-                _ => panic!(),
-            }
-        }
     }
 }
 

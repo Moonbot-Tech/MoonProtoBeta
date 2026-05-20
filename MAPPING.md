@@ -389,7 +389,7 @@
 | E-W3 | dispatch on Command::API → pending dispatch or fallback to on_data | client.rs:data_read_int | ✅ |
 | E-W4 | 46+ high-level wrappers (29 Engine API + 17 Trade + Candles) | client.rs `impl Client` | ✅ |
 | E-W5 | Trade wrappers с UKey dedup (UK_OrderMove, UK_ImmuneClicks) | client.rs:send_trade_keyed + UniqueKey constants | ✅ |
-| E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/SendBacklogCritical/BindFailed | client.rs:check_lifecycle_transition + send/bind failure paths | ✅ |
+| E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/BindFailed | client.rs:check_lifecycle_transition + bind failure path | ✅ |
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 

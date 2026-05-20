@@ -40,9 +40,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         LifecycleEvent::Connected { fresh } => eprintln!("connected fresh={fresh}"),
         LifecycleEvent::Reconnecting => eprintln!("reconnecting"),
         LifecycleEvent::ServerRestart => eprintln!("server restarted"),
-        LifecycleEvent::SendBacklogCritical { u_key_uid, .. } => {
-            eprintln!("critical send backlog for order {u_key_uid}");
-        }
         LifecycleEvent::BindFailed { consecutive_failures } => {
             eprintln!("UDP bind failed {consecutive_failures} times");
         }

@@ -12,7 +12,6 @@ pub enum LifecycleEvent {
     Connected { fresh: bool },
     Disconnected,
     Reconnecting,
-    SendBacklogCritical { cmd: u8, u_key_uid: u64 },
     BindFailed { consecutive_failures: u32 },
     ServerRestart,
 }
@@ -30,9 +29,6 @@ client.on_lifecycle(Box::new(|event| match event {
     LifecycleEvent::Reconnecting => ui_status("reconnecting"),
     LifecycleEvent::ServerRestart => ui_status("server restarted"),
     LifecycleEvent::Disconnected => ui_status("disconnected"),
-    LifecycleEvent::SendBacklogCritical { u_key_uid, .. } => {
-        show_trading_alert(u_key_uid);
-    }
     LifecycleEvent::BindFailed { consecutive_failures } => {
         show_network_alert(consecutive_failures);
     }
@@ -49,7 +45,6 @@ client.on_lifecycle(Box::new(|event| match event {
 | `Reconnecting` | Traffic was silent long enough to trigger soft reconnect. | UI only. |
 | `ServerRestart` | Server app token changed. | UI only. The library refetches indexes and replays subscriptions. |
 | `Disconnected` | Explicit shutdown through `client.disconnect()`. | Treat the client as finished. |
-| `SendBacklogCritical` | Pending high-priority send queue overflowed and an old command was dropped. | Show a trading-risk alert; retry only if your app can prove the intended command is still needed. |
 | `BindFailed` | UDP bind failed across the full port-rotation range repeatedly. | Show OS/network permission or port exhaustion alert. The library keeps retrying. |
 
 ## State Flow
