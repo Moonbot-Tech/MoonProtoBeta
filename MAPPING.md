@@ -294,6 +294,8 @@
 | SS13 | :160-161 MBClassic backfill | If empty → = MarketName | (применимо к Market.pas, не Serializer) | N/A |
 | SS14 | :615 RTTI propmask iteration | RTTI order | DEVIATION #15 (writer alphabetical) | DEVIATION |
 | SS15 | :513-516 ReadField type mismatch skip | Schema check | Rust читает по wire TypeID (no schema) | DEVIATION (by design) |
+| SS16 | :746-750 LoadStrategiesFromStream | Decompressed.CopyFrom(TDecompressionStream, 0) без верхнего лимита распакованного snapshot | parse_strategy_batch читает DeflateDecoder до EOF без `.take()` cap | ✅ |
+| SS17 | :760-783 LoadStrategiesFromStream | Count:Word стратегий; новые стратегии добавляются через Strats.Add без cap | StratsState добавляет все новые strategy_id без `MAX_STRATEGIES` cap | ✅ |
 
 ---
 

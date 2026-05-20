@@ -96,28 +96,13 @@ pub struct StratsState {
     pub last_full_snapshot: Option<StratSnapshot>,
 }
 
-/// DoS guard: верхний лимит количества стратегий. Реальный бот держит сотни-
-/// единицы тысяч стратегий. Враждебный сервер мог бы залить unique strategy_id
-/// поток (50K msg/sec × ~150 байт = 7.5MB/sec до OOM). 50_000 — щедрый потолок.
-/// При попытке создать новый entry когда `by_id.len() >= MAX_STRATEGIES` —
-/// reject с warn-логом. См. `audit_robustness` C-2.
-pub const MAX_STRATEGIES: usize = 50_000;
-
 impl StratsState {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// DoS guard helper: вставляет новый `StrategyInfo` если cap не достигнут.
-    /// Возвращает `Some(&mut entry)` при success либо `None` если новый id
-    /// отвергается (cap). Existing id — всегда `Some`.
-    fn try_get_or_insert(&mut self, strategy_id: u64) -> Option<&mut StrategyInfo> {
-        if !self.by_id.contains_key(&strategy_id) && self.by_id.len() >= MAX_STRATEGIES {
-            log::warn!(target: "moonproto::strats",
-                "StratsState.by_id at MAX_STRATEGIES ({MAX_STRATEGIES}) — rejecting strategy_id={strategy_id}");
-            return None;
-        }
-        Some(self.by_id.entry(strategy_id).or_insert_with(|| StrategyInfo::new(strategy_id)))
+    fn get_or_insert(&mut self, strategy_id: u64) -> &mut StrategyInfo {
+        self.by_id.entry(strategy_id).or_insert_with(|| StrategyInfo::new(strategy_id))
     }
 
     /// Применить распарсенную команду.
@@ -139,9 +124,7 @@ impl StratsState {
                 StratEvent::Deleted { strategy_id: d.strategy_id }
             }
             StratCommand::SellPriceUpdate(u) => {
-                let Some(entry) = self.try_get_or_insert(u.strategy_id) else {
-                    return StratEvent::Ignored;
-                };
+                let entry = self.get_or_insert(u.strategy_id);
                 entry.sell_price = u.sell_price;
                 StratEvent::SellPriceUpdated { strategy_id: u.strategy_id, sell_price: u.sell_price }
             }
@@ -154,9 +137,7 @@ impl StratsState {
                     }
                 }
                 for it in &s.items {
-                    let Some(entry) = self.try_get_or_insert(it.strategy_id) else {
-                        continue; // cap достигнут — skip этот item, остальные продолжаем
-                    };
+                    let entry = self.get_or_insert(it.strategy_id);
                     if entry.checked != it.checked {
                         entry.checked = it.checked;
                         changed += 1;
@@ -171,9 +152,8 @@ impl StratsState {
     }
 
     /// Обновить стратегию из распарсенного TStrategySerializer snapshot'а.
-    /// При достижении `MAX_STRATEGIES` новый strategy_id отвергается (no-op + warn).
     pub fn upsert(&mut self, strategy_id: u64, last_date: u64, folder_path: String) {
-        let Some(entry) = self.try_get_or_insert(strategy_id) else { return };
+        let entry = self.get_or_insert(strategy_id);
         entry.last_date = last_date;
         entry.folder_path = folder_path;
     }
@@ -181,9 +161,8 @@ impl StratsState {
     /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
     /// Обновляет `last_date`, `folder_path`, `checked` из header'а. Поля стратегии (`fields`)
     /// отдаются потребителю наружу — этот state хранит только sync-сводку.
-    /// При достижении `MAX_STRATEGIES` новый strategy_id отвергается (no-op + warn).
     pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) {
-        let Some(entry) = self.try_get_or_insert(s.strategy_id) else { return };
+        let entry = self.get_or_insert(s.strategy_id);
         entry.last_date = s.last_date;
         entry.folder_path = s.path.clone();
         entry.checked = s.checked;
@@ -204,7 +183,7 @@ impl StratsState {
 
     pub fn upsert_checked_items(&mut self, items: &[StratCheckedItem]) {
         for it in items {
-            let Some(entry) = self.try_get_or_insert(it.strategy_id) else { continue };
+            let entry = self.get_or_insert(it.strategy_id);
             entry.checked = it.checked;
         }
     }
@@ -270,6 +249,17 @@ mod tests {
         assert!(s.get(1).unwrap().checked);
         // id=2 не трогался.
         assert!(!s.get(2).unwrap().checked);
+    }
+
+    #[test]
+    fn checked_sync_accepts_more_than_former_rust_cap() {
+        let mut s = StratsState::new();
+        for strategy_id in 1..=50_001u64 {
+            s.upsert_checked_items(&[StratCheckedItem { strategy_id, checked: true }]);
+        }
+
+        assert_eq!(s.len(), 50_001);
+        assert!(s.get(50_001).unwrap().checked);
     }
 
     #[test]

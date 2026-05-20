@@ -113,8 +113,3 @@ If the application already has a compressed `TStrategySerializer` payload, use
 
 `EventDispatcher::dispatch_into_active` auto-echoes the last full snapshot when
 the server sends `SnapshotRequested` and a cached full snapshot exists.
-
-## Limits
-
-`MAX_STRATEGIES = 50_000`. New strategy ids beyond the cap are rejected to avoid
-unbounded memory growth; updates for existing ids remain allowed.
