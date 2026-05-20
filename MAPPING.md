@@ -188,7 +188,7 @@
 | O-A4 | MoonProtoClient.pas:553-555 | Filter not.FromCache AND m≠nil | DEVIATION #6 — Rust сохраняет все | DEVIATION |
 | O-A5 | TaskWorkers.pas:1475-1666 setters | ApplyTo/Stops/VStop с побочными эффектами | DEVIATION #5 — Rust observer | DEVIATION |
 | O-A6 | TaskWorkers.pas:7836-8167 TOrderNotFound | Сначала flag, удаление позже | DEVIATION #7 — Rust удаляет сразу + флаг | DEVIATION |
-| O-A7 | MoonProtoClient.pas:570-590 CleanupMissingWorkers | После AllStatuses удалить не пришедшие | state/orders.rs:missing_after_snapshot | ✅ |
+| O-A7 | MoonProtoClient.pas:570-590 CleanupMissingWorkers | После AllStatuses запросить статусы worker'ов, не пришедших в snapshot | state/orders.rs:missing_after_snapshot + events.rs:dispatch_into_active auto `request_order_status` | ✅ |
 | O-A8 | server_time_delta correction | Ping.InitialTime - Now → applied к TDateTime fields | state/orders.rs:apply через server_time_delta | ✅ |
 | O-A9 | TBulkReplaceNotify | Set flag на upcoming order replaces | state/orders.rs:apply BulkReplaceNotify | ✅ |
 | O-A10 | TaskWorkers.pas:7836-8155,7400-7445 | Terminal order statuses remove worker/cache; `OS_SelLAlmostDone` is terminal like sell-done paths | commands/trade.rs:`OrderWorkerStatus::is_terminal`, state/orders.rs removal on terminal status | ✅ |

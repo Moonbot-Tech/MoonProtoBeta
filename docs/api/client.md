@@ -143,6 +143,24 @@ let settings = client.request_client_settings(
 println!("xSell={}", settings.x_sell);
 ```
 
+## Order Snapshot Request
+
+Use `request_order_snapshot` when the application needs the current active
+orders as a one-shot operation:
+
+```rust
+let orders = client.request_order_snapshot(
+    &mut dispatcher,
+    Duration::from_secs(10),
+)?;
+println!("active orders={}", orders.len());
+```
+
+The helper sends `TAllStatusesReq`, keeps the UDP loop running, applies the
+snapshot into `EventDispatcher::orders()`, and waits until the dispatcher has
+finished Delphi `CleanupMissingWorkers` follow-up requests for orders absent
+from the fresh snapshot.
+
 ## Subscriptions
 
 Use registry-aware methods:

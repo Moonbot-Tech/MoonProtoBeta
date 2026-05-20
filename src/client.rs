@@ -1792,6 +1792,42 @@ impl Client {
         self.send_trade(raw, 3);
     }
 
+    /// Request the current order snapshot and wait until it is applied to
+    /// `EventDispatcher::orders()`.
+    ///
+    /// This is the high-level consumer helper for `TAllStatusesReq`. It hides the
+    /// protocol UID, pumps the UDP loop while waiting, and also waits for the
+    /// active dispatcher to finish Delphi `CleanupMissingWorkers` follow-up
+    /// requests for orders absent from the snapshot.
+    pub fn request_order_snapshot(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<Vec<crate::state::Order>, mpsc::RecvTimeoutError> {
+        const TICK: Duration = Duration::from_millis(50);
+
+        let previous_snapshot_flag = dispatcher.orders().current_snapshot_flag();
+        let deadline = Instant::now() + timeout;
+        self.request_all_statuses(rand::random());
+
+        loop {
+            let snapshot_seen =
+                dispatcher.orders().current_snapshot_flag() != previous_snapshot_flag;
+            if snapshot_seen && dispatcher.orders().missing_after_snapshot().is_empty() {
+                return Ok(dispatcher.orders().iter().cloned().collect());
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let tick = remaining.min(TICK);
+            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+        }
+    }
+
     /// `TOrderCancelCommand` (CmdId=10, UK_OrderMove) — отменить ордер.
     /// `ctx.uid` должен быть **task_id ордера** для корректного dedup'а.
     /// `Epoch=0` (внутри). См. `replace_order`.

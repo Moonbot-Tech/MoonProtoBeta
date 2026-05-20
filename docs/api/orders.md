@@ -5,6 +5,19 @@ orders through `EventDispatcher::orders()` and react to `Event::Order`.
 
 ## Reading Orders
 
+For a one-shot active-order snapshot, use `Client::request_order_snapshot`:
+
+```rust
+let orders = client.request_order_snapshot(
+    &mut dispatcher,
+    Duration::from_secs(10),
+)?;
+```
+
+The helper sends `TAllStatusesReq`, keeps the UDP loop running, and waits for
+the dispatcher to finish missing-order cleanup requests. For continuous UI
+updates, read order events from the dispatcher:
+
 ```rust
 use moonproto::Event;
 use moonproto::state::OrderEvent;
@@ -37,6 +50,8 @@ Important fields:
 pub struct Order {
     pub uid: u64,
     pub market_name: String,
+    pub currency: u8,
+    pub platform: u8,
     pub status: OrderWorkerStatus,
     pub buy_order: OrderCompact,
     pub sell_order: OrderCompact,

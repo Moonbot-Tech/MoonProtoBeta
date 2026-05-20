@@ -153,6 +153,10 @@ pub struct Order {
     pub uid: u64,
     /// Имя маркета (например "BTCUSDT").
     pub market_name: String,
+    /// Base currency byte copied from the order command market header.
+    pub currency: u8,
+    /// Exchange/platform byte copied from the order command market header.
+    pub platform: u8,
     /// Текущая фаза lifecycle.
     pub status: OrderWorkerStatus,
     /// Buy ордер на бирже.
@@ -215,6 +219,8 @@ impl Order {
         Self {
             uid: status_cmd.epoch_header.market.base.uid,
             market_name: status_cmd.epoch_header.market.market_name.clone(),
+            currency: status_cmd.epoch_header.market.currency,
+            platform: status_cmd.epoch_header.market.platform,
             status: status_cmd.epoch_header.status,
             buy_order: status_cmd.buy_order,
             sell_order: status_cmd.sell_order,
@@ -661,6 +667,9 @@ impl Orders {
         sell.adjust_time(server_time_delta);
 
         entry.status = st.epoch_header.status;
+        entry.market_name = st.epoch_header.market.market_name.clone();
+        entry.currency = st.epoch_header.market.currency;
+        entry.platform = st.epoch_header.market.platform;
         entry.buy_order = buy;
         entry.sell_order = sell;
         entry.stops = st.stops;

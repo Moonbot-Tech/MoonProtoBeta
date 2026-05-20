@@ -144,6 +144,15 @@ let settings = client.request_client_settings(&mut dispatcher, Duration::from_se
 println!("xSell={}", settings.x_sell);
 ```
 
+Order snapshots use the order channel. The high-level helper sends
+`TAllStatusesReq`, pumps the client loop, applies the snapshot into
+`EventDispatcher::orders()`, and waits for missing-order follow-up requests:
+
+```rust
+let orders = client.request_order_snapshot(&mut dispatcher, Duration::from_secs(10))?;
+println!("active orders={}", orders.len());
+```
+
 ## Subscriptions
 
 Use the registry-aware subscription API:
@@ -188,6 +197,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
 - `examples/request_client_settings.rs` — request the current UI settings snapshot.
+- `examples/order_snapshot.rs` — request the current order snapshot.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.
 - `examples/market_refresh.rs` — observe automatic market refresh events.
 - `examples/multi_client_test.rs` — two independent clients in one process.

@@ -230,7 +230,9 @@ impl EventDispatcher {
     ///   1. блокирует обработку TradesStream/OrderBook пакетов когда
     ///      `MarketsState.indexes_synchronized = false` (event drop'ается тихо);
     ///   2. автоматически шлёт `api_request_order_book_full` на
-    ///      `OrderBookEvent::RequestFullNeeded` — потребитель не должен делать это сам.
+    ///      `OrderBookEvent::RequestFullNeeded` — потребитель не должен делать это сам;
+    ///   3. automatically sends `TOrderStatusRequest` for orders missing from a
+    ///      fresh `TAllStatuses` snapshot, matching Delphi `CleanupMissingWorkers`.
     /// `dispatch_into` (без Client) — backwards compat, потребитель должен сам
     /// обрабатывать RequestFullNeeded events.
     ///
@@ -514,10 +516,18 @@ impl EventDispatcher {
         // `MoonProtoClient.pas:695-699` где либа сама echo'ит. App получает event для
         // UI awareness, но НЕ обязан слать reply.
         let mut snapshot_requested_uid: Option<u64> = None;
+        // Auto-action 3: OrderEvent::Snapshot → CleanupMissingWorkers.
+        // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
+        // statuses, then requests exact status for workers absent from the fresh
+        // snapshot. The application must not know about snapshot flags.
+        let mut order_snapshot_applied = false;
         for ev in &out[start_len..] {
             match ev {
                 Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) => {
                     to_request_full.insert((*market_index, *book_kind));
+                }
+                Event::Order(OrderEvent::Snapshot) => {
+                    order_snapshot_applied = true;
                 }
                 Event::Strat(crate::state::StratEvent::SnapshotRequested { uid }) => {
                     snapshot_requested_uid = Some(*uid);
@@ -547,6 +557,19 @@ impl EventDispatcher {
             // Если last_full_snapshot=None — событие всё равно эмиттится в `out`,
             // потребитель сам обработает SnapshotRequested (как раньше).
         }
+        if order_snapshot_applied {
+            let missing = self.orders.missing_after_snapshot();
+            for uid in missing {
+                if let Some(order) = self.orders.get(uid) {
+                    let ctx = crate::commands::trade::TradeCtx {
+                        uid,
+                        currency: order.currency,
+                        platform: order.platform,
+                    };
+                    client.request_order_status(ctx, &order.market_name);
+                }
+            }
+        }
     }
 }
 
@@ -554,7 +577,10 @@ impl EventDispatcher {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
-    use crate::commands::trade::{TradeCtx, build_all_statuses_request};
+    use crate::commands::trade::{
+        BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, OrderWorkerStatus,
+        StopSettings, TradeCommand, TradeCtx, TradeEpochHeader, build_all_statuses_request,
+    };
     use crate::commands::strat::build_snapshot_request;
 
     fn order_book_payload(market_index: u16) -> Vec<u8> {
@@ -564,6 +590,45 @@ mod tests {
         raw.push(1); // Full, Futures.
         raw.extend_from_slice(&0u16.to_le_bytes()); // buy_count=0, sell_count=0.
         crate::compression::synlz_compress(&raw)
+    }
+
+    fn empty_all_statuses_payload(uid: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(15);
+        out.push(8);
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&uid.to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out
+    }
+
+    fn order_status_for_test(
+        uid: u64,
+        market_name: &str,
+        currency: u8,
+        platform: u8,
+        status: OrderWorkerStatus,
+    ) -> OrderStatus {
+        OrderStatus {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader { cmd_id: 4, ver: 3, uid },
+                    currency,
+                    platform,
+                    market_name: market_name.to_string(),
+                },
+                epoch: 1,
+                status,
+            },
+            buy_order: OrderCompact::default(),
+            sell_order: OrderCompact::default(),
+            stops: StopSettings::default(),
+            strat_id: 0,
+            is_short: false,
+            db_id: 0,
+            from_cache: false,
+            emulator_mode: false,
+            immune_for_clicks: false,
+        }
     }
 
     #[test]
@@ -734,6 +799,54 @@ mod tests {
             "PeerAppToken mismatch must close stream gate until fresh GetMarketsIndexes");
         assert!(out.is_empty(),
             "OrderBook packet from a new server process must be dropped with stale indexes");
+    }
+
+    #[test]
+    fn dispatch_into_active_requests_missing_order_status_after_snapshot() {
+        let mut d = EventDispatcher::new();
+        let stale_uid = 0xAABB_CCDD_0011_2233;
+        let status = order_status_for_test(
+            stale_uid,
+            "BTCUSDT",
+            7,
+            9,
+            OrderWorkerStatus::BuySet,
+        );
+        let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(status));
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let mut out = Vec::new();
+        d.dispatch_into_active(
+            Command::Order,
+            &empty_all_statuses_payload(0x55),
+            1000,
+            &mut out,
+            &mut client,
+        );
+
+        assert!(out.iter().any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
+
+        let mut found = false;
+        while let Ok(ev) = client.event_rx.try_recv() {
+            let crate::client::ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            if msg.item.cmd != Command::Order as u8 {
+                continue;
+            }
+            let Some(TradeCommand::OrderStatusRequest(req)) =
+                TradeCommand::parse(&msg.item.data)
+            else {
+                continue;
+            };
+            assert_eq!(req.market.base.uid, stale_uid);
+            assert_eq!(req.market.market_name, "BTCUSDT");
+            assert_eq!(req.market.currency, 7);
+            assert_eq!(req.market.platform, 9);
+            found = true;
+        }
+
+        assert!(found, "missing order must trigger TOrderStatusRequest");
     }
 
     // =========================================================================

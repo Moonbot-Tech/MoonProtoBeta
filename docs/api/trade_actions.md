@@ -21,7 +21,8 @@ That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
 |---|---|
 | `new_order(ctx, market, is_short, price, strat_id, order_size)` | Open a new order. |
 | `replace_order(ctx, market, order_type, new_price)` | Move an order price. |
-| `request_all_statuses(uid)` | Request full order snapshot. |
+| `request_order_snapshot(&mut dispatcher, timeout)` | Request and wait for the current order snapshot. |
+| `request_all_statuses(uid)` | Low-level `TAllStatusesReq`; regular consumers should use `request_order_snapshot`. |
 | `cancel_order(ctx, market, status)` | Cancel an order. |
 | `join_orders(ctx, market, is_short)` | Join open orders. |
 | `split_order(ctx, market, split_parts, split_small, split_small_sell)` | Split an order. |

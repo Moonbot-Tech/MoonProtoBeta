@@ -80,6 +80,7 @@
 //! `examples/history_bars.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
 //! `examples/request_client_settings.rs`,
+//! `examples/order_snapshot.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
 //! `examples/multi_client_test.rs`,
