@@ -85,7 +85,8 @@
 //! `examples/request_client_settings.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
-//! `examples/multi_client_test.rs`.
+//! `examples/multi_client_test.rs`,
+//! `examples/stress_client.rs`.
 //!
 //! ## Главные публичные модули
 //!
