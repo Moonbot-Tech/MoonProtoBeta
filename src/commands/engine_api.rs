@@ -44,17 +44,28 @@ pub enum EngineMethod {
     /// `GetBalance` — текущий баланс по конкретной валюте. Параметр: `currency` (string).
     /// Ответ: one Delphi `Double`, parse with [`parse_get_balance_response`].
     GetBalance = 6,
-    /// `GetMarketsBalanceFull` — полный balance snapshot по всем рынкам (`TBalanceItem`
-    /// записи). Без параметров. Используется для initial sync после Authenticated.
+    /// `GetMarketsBalanceFull` — server-side full balance refresh. Без параметров.
+    ///
+    /// Current Delphi `MoonProtoEngineServer.pas → ProcessRequest` calls
+    /// `Engine.GetMarketsBalanceFull`, but the response writer is still a TODO
+    /// (`WriteBalancesToStream` is not implemented), so a successful response has
+    /// an empty `data` payload.
     GetMarketsBalanceFull = 7,
-    /// `GetOrder` — детали конкретного ордера. Параметр: `order_uid` (u64).
-    /// Ответ: полный `OrderCompact` (117 байт wire-format).
+    /// `GetOrder` — enum value exists in `TEngineMethodKind`.
+    ///
+    /// The current Delphi reference server has no `ProcessRequest` branch for this
+    /// method, so it returns `Unknown method` (error 400). Raw wrapper is kept for
+    /// protocol completeness / future server versions.
     GetOrder = 8,
-    /// `GetOpenOrders` — все открытые (non-terminal) ордера. Без параметров. Ответ:
-    /// массив `OrderCompact`.
+    /// `GetOpenOrders` — enum value exists in `TEngineMethodKind`.
+    ///
+    /// The current Delphi reference server has no request-handler branch for this
+    /// method and returns `Unknown method` (error 400).
     GetOpenOrders = 9,
-    /// `GetActiveOrders` — ордера с активным state-machine (фильтр PartiallyFilled
-    /// и т.д., в отличие от GetOpenOrders). Ответ: массив `OrderCompact`.
+    /// `GetActiveOrders` — enum value exists in `TEngineMethodKind`.
+    ///
+    /// The current Delphi reference server has no request-handler branch for this
+    /// method and returns `Unknown method` (error 400).
     GetActiveOrders = 10,
     /// `CancelAllOrders` — отменить все открытые ордера. Без параметров. Опасная команда.
     CancelAllOrders = 11,

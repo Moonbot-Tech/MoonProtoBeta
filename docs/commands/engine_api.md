@@ -110,7 +110,7 @@ Every method has a high-level `Client` wrapper with automatic uid generation:
 
 ```rust
 let rx = client.api_get_markets_list();
-let rx = client.api_get_order(order_uid);
+let rx = client.api_get_balance("USDT");
 let rx = client.api_set_leverage("BTCUSDT", 10);
 
 let response: EngineResponse =
@@ -123,6 +123,15 @@ if response.success {
     eprintln!("server error {}: {}", response.error_code, response.error_msg);
 }
 ```
+
+Current reference-server gaps:
+
+- `GetMarketsBalanceFull` calls the server-side refresh method, but
+  `MoonProtoEngineServer.pas → ProcessRequest` still has `WriteBalancesToStream`
+  as TODO, so successful responses carry empty `Data`.
+- `GetOrder`, `GetOpenOrders`, and `GetActiveOrders` exist in
+  `TEngineMethodKind`, but the current Delphi server has no request-handler
+  branches for them and returns `Unknown method` (error 400).
 
 The full list is available as `client.api_*` methods in generated Rust docs.
 

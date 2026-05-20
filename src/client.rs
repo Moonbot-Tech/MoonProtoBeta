@@ -1537,22 +1537,34 @@ impl Client {
         self.send_api_request_async(&crate::commands::engine_request::get_balance(currency))
     }
 
-    /// `emk_GetMarketsBalanceFull` — полный snapshot всех балансов.
+    /// `emk_GetMarketsBalanceFull` — trigger server-side full balance refresh.
+    ///
+    /// The current Delphi server does not serialize a balance snapshot in this
+    /// response yet, so a successful response normally has empty `data`.
     pub fn api_get_markets_balance_full(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_markets_balance_full())
     }
 
-    /// `emk_GetOrder` по UID ордера.
+    /// `emk_GetOrder` by order UID.
+    ///
+    /// The current Delphi reference server has no request-handler branch for this
+    /// method and returns `Unknown method`.
     pub fn api_get_order(&self, order_uid: u64) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_order(order_uid))
     }
 
-    /// `emk_GetOpenOrders` — список открытых ордеров.
+    /// `emk_GetOpenOrders`.
+    ///
+    /// The current Delphi reference server has no request-handler branch for this
+    /// method and returns `Unknown method`.
     pub fn api_get_open_orders(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_open_orders())
     }
 
     /// `emk_GetActiveOrders`.
+    ///
+    /// The current Delphi reference server has no request-handler branch for this
+    /// method and returns `Unknown method`.
     pub fn api_get_active_orders(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_active_orders())
     }
@@ -4341,7 +4353,10 @@ pub struct InitConfig {
     pub auth_check: bool,
     /// Выполнить `api_get_markets_list` (полный snapshot маркетов).
     pub fetch_markets: bool,
-    /// Выполнить `api_get_markets_balance_full` (snapshot всех балансов).
+    /// Выполнить `api_get_markets_balance_full`.
+    ///
+    /// В текущем Delphi-эталоне это триггер server-side refresh без serialized
+    /// payload; `balances_response_bytes` обычно равен 0.
     pub fetch_balance: bool,
     /// Подписаться на all-trades с указанным `want_mm`. None = пропустить.
     pub subscribe_trades: Option<bool>,
@@ -4514,7 +4529,9 @@ pub fn run_init_sequence(
         }
     }
 
-    // === 4. GetMarketsBalanceFull === не критический
+    // === 4. GetMarketsBalanceFull === не критический.
+    // Delphi currently refreshes balances server-side but does not serialize a
+    // balance snapshot in the response (`WriteBalancesToStream` is TODO).
     if cfg.fetch_balance {
         let rx = client.api_get_markets_balance_full();
         match wait_for_api_response(client, dispatcher, &rx, timeout) {

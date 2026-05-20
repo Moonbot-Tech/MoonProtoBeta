@@ -150,7 +150,11 @@ pub fn update_markets_list() -> Vec<u8> {
     build_engine_request(EngineMethod::UpdateMarketsList, "", &[])
 }
 
-/// `emk_GetMarketsBalanceFull` — полный snapshot балансов.
+/// `emk_GetMarketsBalanceFull` — asks the server to refresh full market balances.
+///
+/// Current Delphi server code calls `Engine.GetMarketsBalanceFull`, but does not
+/// serialize balances into the response yet (`WriteBalancesToStream` is TODO), so
+/// successful responses have an empty payload.
 pub fn get_markets_balance_full() -> Vec<u8> {
     build_engine_request(EngineMethod::GetMarketsBalanceFull, "", &[])
 }
@@ -285,7 +289,9 @@ pub fn update_transfer_assets(e_kind: u8) -> Vec<u8> {
     build_engine_request_full(EngineMethod::UpdateTransferAssets, "", &[], &params)
 }
 
-/// `emk_GetOrder(AOrder)` — запросить статус конкретного ордера по UID.
+/// `emk_GetOrder(AOrder)` — enum/request wire exists, but the current Delphi
+/// reference server does not implement this request branch and returns
+/// `Unknown method`.
 /// Wire: WriteInt64(uid).
 pub fn get_order(uid: u64) -> Vec<u8> {
     let mut params = Vec::with_capacity(8);
@@ -301,7 +307,9 @@ pub fn get_balance(currency: &str) -> Vec<u8> {
     build_engine_request_full(EngineMethod::GetBalance, "", &[], &params)
 }
 
-/// `emk_GetOpenOrders` / `emk_GetActiveOrders` — без параметров.
+/// `emk_GetOpenOrders` / `emk_GetActiveOrders` — enum/request wire exists, but
+/// the current Delphi reference server does not implement these request branches
+/// and returns `Unknown method`.
 pub fn get_open_orders() -> Vec<u8> {
     build_engine_request(EngineMethod::GetOpenOrders, "", &[])
 }

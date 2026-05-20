@@ -38,7 +38,7 @@ because no UDP packets are processed during that wait.
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
-| Orders | `api_get_order(uid)`, `api_get_open_orders`, `api_get_active_orders`, `api_cancel_all_orders` |
+| Orders | `api_cancel_all_orders` |
 | Account settings | `api_set_leverage(market, lev)`, `api_set_hedge_mode(bool)`, `api_query_hedge_mode`, `api_check_expiration_time` |
 | Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
 | Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
@@ -75,6 +75,15 @@ println!("hedge_mode={hedge_mode}");
 
 For raw payload access, `api_get_balance` and `api_query_hedge_mode` remain
 available and return `Receiver<EngineResponse>`.
+
+`api_get_markets_balance_full` is intentionally low-level. The current Delphi
+server calls `Engine.GetMarketsBalanceFull`, but does not serialize the balance
+snapshot yet, so a successful response has an empty `data` payload.
+
+`api_get_order`, `api_get_open_orders`, and `api_get_active_orders` are retained
+as raw wrappers because their enum values exist in `TEngineMethodKind`. The
+current Delphi reference server has no request-handler branches for them and
+returns `Unknown method` (error 400).
 
 ## EngineResponse
 
