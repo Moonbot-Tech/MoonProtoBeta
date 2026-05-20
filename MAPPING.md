@@ -183,6 +183,7 @@
 | O-A7 | MoonProtoClient.pas:570-590 CleanupMissingWorkers | После AllStatuses удалить не пришедшие | state/orders.rs:missing_after_snapshot | ✅ |
 | O-A8 | server_time_delta correction | Ping.InitialTime - Now → applied к TDateTime fields | state/orders.rs:apply через server_time_delta | ✅ |
 | O-A9 | TBulkReplaceNotify | Set flag на upcoming order replaces | state/orders.rs:apply BulkReplaceNotify | ✅ |
+| O-A10 | TaskWorkers.pas:7836-8155,7400-7445 | Terminal order statuses remove worker/cache; `OS_SelLAlmostDone` is terminal like sell-done paths | commands/trade.rs:`OrderWorkerStatus::is_terminal`, state/orders.rs removal on terminal status | ✅ |
 
 ---
 

@@ -401,20 +401,8 @@ impl Orders {
                 }
                 let entry = self.map.entry(uid).or_insert_with(|| Order::from_status(&st));
 
-                // Epoch check (wrap-safe, byte-exact с Delphi EpochIsOK + AcceptServerCommand)
-                let phase_idx = st.epoch_header.status as usize;
-                if phase_idx < entry.server_latest_epoch.len() {
-                    if !epoch_is_ok(entry.server_latest_epoch[phase_idx], st.epoch_header.epoch) {
-                        return (ApplyResult::OutOfOrder, OrderEvent::Ignored { uid, reason: ApplyResult::OutOfOrder });
-                    }
-                    entry.server_latest_epoch[phase_idx] = st.epoch_header.epoch;
-                }
-
-                // Phase rollback check (byte-exact с Delphi HandleServerCommand:1480-1488)
-                let new_phase = status_phase(st.epoch_header.status);
-                let cur_phase = status_phase(entry.status);
-                if new_phase > 0 && cur_phase > 0 && new_phase < cur_phase {
-                    return (ApplyResult::PhaseRollback, OrderEvent::Ignored { uid, reason: ApplyResult::PhaseRollback });
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
                 }
 
                 Self::apply_status_inner(entry, &st, self.server_time_delta);
@@ -436,18 +424,8 @@ impl Orders {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
 
-                let phase_idx = up.epoch_header.status as usize;
-                if phase_idx < entry.server_latest_epoch.len() {
-                    if !epoch_is_ok(entry.server_latest_epoch[phase_idx], up.epoch_header.epoch) {
-                        return (ApplyResult::OutOfOrder, OrderEvent::Ignored { uid, reason: ApplyResult::OutOfOrder });
-                    }
-                    entry.server_latest_epoch[phase_idx] = up.epoch_header.epoch;
-                }
-
-                let new_phase = status_phase(up.epoch_header.status);
-                let cur_phase = status_phase(entry.status);
-                if new_phase > 0 && cur_phase > 0 && new_phase < cur_phase {
-                    return (ApplyResult::PhaseRollback, OrderEvent::Ignored { uid, reason: ApplyResult::PhaseRollback });
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
                 }
 
                 // Apply delta-update.
@@ -490,10 +468,8 @@ impl Orders {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
 
-                let phase_idx = rr.epoch_header.status as usize;
-                if phase_idx < entry.server_latest_epoch.len()
-                    && !epoch_is_ok(entry.server_latest_epoch[phase_idx], rr.epoch_header.epoch) {
-                    return (ApplyResult::OutOfOrder, OrderEvent::Ignored { uid, reason: ApplyResult::OutOfOrder });
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &rr.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
                 }
 
                 let mut data = rr.update_data;
@@ -532,6 +508,9 @@ impl Orders {
                 let Some(entry) = self.map.get_mut(&uid) else {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &su.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
+                }
                 entry.stops = su.stops;
                 (ApplyResult::Applied, OrderEvent::StopsChanged(uid))
             }
@@ -541,6 +520,9 @@ impl Orders {
                 let Some(entry) = self.map.get_mut(&uid) else {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &vs.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
+                }
                 entry.vstop_on = vs.vstop_on;
                 entry.vstop_fixed = vs.vstop_fixed;
                 entry.vstop_level = vs.vstop_level;
@@ -602,6 +584,9 @@ impl Orders {
                 let Some(entry) = self.map.get_mut(&uid) else {
                     return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
                 };
+                if let Err(reason) = Self::accept_epoch_and_phase(entry, &ts.epoch_header) {
+                    return (reason, OrderEvent::Ignored { uid, reason });
+                }
                 if entry.panic_sell != ts.turn_on {
                     entry.panic_sell = ts.turn_on;
                     return (ApplyResult::Applied, OrderEvent::PanicSellChanged(uid));
@@ -649,6 +634,24 @@ impl Orders {
                 (ApplyResult::NotApplicable, OrderEvent::Ignored { uid, reason: ApplyResult::NotApplicable })
             }
         }
+    }
+
+    fn accept_epoch_and_phase(entry: &mut Order, header: &TradeEpochHeader) -> Result<(), ApplyResult> {
+        let phase_idx = header.status as usize;
+        if phase_idx < entry.server_latest_epoch.len() {
+            if !epoch_is_ok(entry.server_latest_epoch[phase_idx], header.epoch) {
+                return Err(ApplyResult::OutOfOrder);
+            }
+            entry.server_latest_epoch[phase_idx] = header.epoch;
+        }
+
+        let new_phase = status_phase(header.status);
+        let cur_phase = status_phase(entry.status);
+        if new_phase > 0 && cur_phase > 0 && new_phase < cur_phase {
+            return Err(ApplyResult::PhaseRollback);
+        }
+
+        Ok(())
     }
 
     fn apply_status_inner(entry: &mut Order, st: &OrderStatus, server_time_delta: f64) {
@@ -755,6 +758,18 @@ mod tests {
     }
 
     #[test]
+    fn sell_almost_done_is_terminal() {
+        let mut orders = Orders::new();
+        orders.apply(TradeCommand::OrderStatus(make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1)));
+
+        let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLAlmostDone, 2);
+        let (res, ev) = orders.apply(TradeCommand::OrderStatus(s2));
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Removed(42)));
+        assert!(orders.get(42).is_none());
+    }
+
+    #[test]
     fn phase_rollback_rejected() {
         let mut orders = Orders::new();
         // SellSet (phase 3) → потом BuySet (phase 1) → rollback
@@ -798,6 +813,61 @@ mod tests {
         // wrap: 65500 → 200, backDist = 65500-200 = 65300 > 100 → accept (новое сообщение)
         let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 200)));
         assert_eq!(res, ApplyResult::Applied);
+    }
+
+    #[test]
+    fn replace_response_updates_epoch_slot() {
+        let mut orders = Orders::new();
+        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+
+        let rr = OrderReplaceResponse {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
+            order_type: OrderType::Buy,
+            price: 123.0,
+            update_data: OrderUpdateData::default(),
+            quantity_base: 0.0,
+        };
+
+        let (res, _) = orders.apply(TradeCommand::OrderReplaceResponse(rr.clone()));
+        assert_eq!(res, ApplyResult::Applied);
+
+        let (res, _) = orders.apply(TradeCommand::OrderReplaceResponse(rr));
+        assert_eq!(res, ApplyResult::OutOfOrder);
+    }
+
+    #[test]
+    fn stops_update_uses_epoch_guard() {
+        let mut orders = Orders::new();
+        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+
+        let mut stops = StopSettings::default();
+        stops.stop_loss_on = 1;
+        let stale = OrderStopsUpdate {
+            epoch_header: make_epoch(1, 3, "X", 5, OrderWorkerStatus::BuySet),
+            stops,
+        };
+
+        let (res, _) = orders.apply(TradeCommand::OrderStopsUpdate(stale));
+        assert_eq!(res, ApplyResult::OutOfOrder);
+        assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, 0);
+    }
+
+    #[test]
+    fn vstop_update_uses_phase_guard() {
+        let mut orders = Orders::new();
+        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::SellSet, 10)));
+
+        let rollback = VStopUpdate {
+            epoch_header: make_epoch(1, 3, "X", 200, OrderWorkerStatus::BuySet),
+            vstop_on: true,
+            vstop_fixed: false,
+            vstop_level: 42.0,
+            vstop_vol: 1.0,
+        };
+
+        let (res, _) = orders.apply(TradeCommand::VStopUpdate(rollback));
+        assert_eq!(res, ApplyResult::PhaseRollback);
+        assert!(!orders.get(1).unwrap().vstop_on);
     }
 
     #[test]

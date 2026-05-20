@@ -52,21 +52,22 @@ impl OrderType {
 ///
 /// Standard flow для long-позиции:
 /// ```text
-///   None ──► BuySet ──► BuyDone ──► SellSet ──► SelLAlmostDone ──► SelLDone
+///   None ──► BuySet ──► BuyDone ──► SellSet ──► SelLDone
 ///             │           │           │            │
 ///             ▼           ▼           ▼            ▼
 ///          BuyFail    BuyCancel   SellFail    SellCancel
 /// ```
 ///
 /// **Terminal states** (ордер закрыт, дальнейших переходов не будет):
-/// `SelLDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
+/// `SelLDone`, `SelLAlmostDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
 ///
 /// **Phase semantics** (для UI группировки):
 /// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) — ожидание/исполнение
 ///   входа в позицию.
 /// - **Sell phase** (`SellSet`/`SelLAlmostDone`/`SelLDone`/`SellFail`/`SellCancel`) —
 ///   выход из позиции (take-profit / stop-loss / manual close).
-/// - `SelLAlmostDone` — частичное исполнение sell-ордера, ждём остаток.
+/// - `SelLAlmostDone` — sell уже завершился во время replace/market-stop path,
+///   в Delphi worker выходит из цикла так же как при финальных sell-statuses.
 ///
 /// **Server constraints** (см. ARCHITECTURE.md §17 sync state):
 /// - Откат фазы запрещён сервером (нельзя из SellSet вернуться в BuySet).
@@ -94,7 +95,7 @@ pub enum OrderWorkerStatus {
     /// Sell-ордер полностью исполнен — позиция закрыта. Final terminal state для
     /// успешной торговой сделки.
     SelLDone = 8,
-    /// Sell-ордер частично исполнен — ждём fill остатка.
+    /// Sell завершился через intermediate path; terminal для worker/state.
     SelLAlmostDone = 9,
 }
 
@@ -118,7 +119,15 @@ impl OrderWorkerStatus {
 
     /// Terminal status — ордер закрыт, воркер удалить.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::SelLDone | Self::BuyCancel | Self::BuyFail | Self::SellFail | Self::SellCancel)
+        matches!(
+            self,
+            Self::SelLDone
+                | Self::SelLAlmostDone
+                | Self::BuyCancel
+                | Self::BuyFail
+                | Self::SellFail
+                | Self::SellCancel
+        )
     }
 }
 
