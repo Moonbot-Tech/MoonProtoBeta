@@ -1397,21 +1397,14 @@ pub fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, epoch: u16,
 
 /// CmdId=22: TSetImmuneCommand.
 pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 1 + items.len() * 9);
+    let wire_count = items.len() as u8;
+    let wire_items = &items[..wire_count as usize];
+    let mut out = Vec::with_capacity(11 + 1 + wire_items.len() * 9);
     write_base_command_header(&mut out, 22, uid);
-    if items.len() > 255 {
-        // Delphi: Count записывается как Byte → максимум 255 элементов.
-        out.push(255);
-        for it in &items[..255] {
-            out.extend_from_slice(&it.uid.to_le_bytes());
-            out.push(it.value as u8);
-        }
-    } else {
-        out.push(items.len() as u8);
-        for it in items {
-            out.extend_from_slice(&it.uid.to_le_bytes());
-            out.push(it.value as u8);
-        }
+    out.push(wire_count);
+    for it in wire_items {
+        out.extend_from_slice(&it.uid.to_le_bytes());
+        out.push(it.value as u8);
     }
     out
 }
@@ -1511,5 +1504,54 @@ mod tests {
         let mut roundtrip = Vec::new();
         parsed.write_to(&mut roundtrip);
         assert_eq!(roundtrip, expected);
+    }
+
+    #[test]
+    fn set_immune_wire_layout_matches_delphi_record() {
+        let payload = build_set_immune(
+            0x0102_0304_0506_0708,
+            &[ImmuneItem { uid: 0x1112_1314_1516_1718, value: true }],
+        );
+
+        let mut expected = Vec::new();
+        expected.push(22);
+        expected.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+        expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+        expected.push(1);
+        expected.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
+        expected.push(1);
+
+        assert_eq!(payload, expected);
+        match TradeCommand::parse(&payload).expect("valid SetImmune") {
+            TradeCommand::SetImmune(cmd) => {
+                assert_eq!(cmd.header.uid, 0x0102_0304_0506_0708);
+                assert_eq!(cmd.items.len(), 1);
+                assert_eq!(cmd.items[0].uid, 0x1112_1314_1516_1718);
+                assert!(cmd.items[0].value);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_immune_count_is_written_as_byte_without_clamp() {
+        let items: Vec<_> = (0..260u64)
+            .map(|uid| ImmuneItem { uid, value: uid % 2 == 0 })
+            .collect();
+
+        let payload = build_set_immune(0xAA, &items);
+
+        assert_eq!(payload[11], 4);
+        assert_eq!(payload.len(), 11 + 1 + 4 * 9);
+        match TradeCommand::parse(&payload).expect("valid SetImmune") {
+            TradeCommand::SetImmune(cmd) => {
+                assert_eq!(cmd.items.len(), 4);
+                assert_eq!(cmd.items[0].uid, 0);
+                assert!(cmd.items[0].value);
+                assert_eq!(cmd.items[3].uid, 3);
+                assert!(!cmd.items[3].value);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

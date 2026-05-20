@@ -155,7 +155,7 @@
 | O19 | :594 | TOrderNotFound (CmdId=19) — epoch_header | TradeCommand::OrderNotFound | ✅ |
 | O20 | :614 | TOrderStopsUpdate (CmdId=20) — epoch_header + StopSettings | TradeCommand::OrderStopsUpdate | ✅ |
 | O21 | :634 | TTurnPanicSellCommand (CmdId=21) — epoch_header + turn_on | TradeCommand::TurnPanicSell | ✅ |
-| O22 | :654 | TSetImmuneCommand (CmdId=22) — base_header + count:byte + items[uid:u64+value:bool]*count | TradeCommand::SetImmune + ImmuneItem | ✅ |
+| O22 | :210-223,778-812 | TSetImmuneCommand (CmdId=22) — base_header + count:byte + items[uid:u64+value:bool]*count; UKey.UID=sum(items.uid) | TradeCommand::SetImmune + ImmuneItem; builder writes byte count without clamp | ✅ |
 | O23 | :689 | TPenaltyCommand (CmdId=23) — market_header | TradeCommand::Penalty | ✅ |
 | O24 | :702 | TTradeVisualCommand (CmdId=24) — market_header | TradeCommand::TradeVisual | ✅ |
 | O25 | :716 | TOrderTracePoint (CmdId=25) — market_header + trace_time + trace_price/base_price/stop_price:single + ord_type + flags | TradeCommand::OrderTracePoint | ✅ |
