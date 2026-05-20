@@ -224,12 +224,13 @@
 | B1 | TBalanceCommand header: CmdId(1) + ver(2) + UID(8) | base | balance.rs:parse_balance_update | ✅ |
 | B2 | cmd_id_sub: 2=legacy, 3=full, 4=incremental | mode dispatch | BalanceUpdate.cmd_id | ✅ |
 | B3 | epoch:u16 + global_changed:bool + (if global) global_data | global block | BalanceUpdate.global + epoch | ✅ |
-| B4 | count:u16 + items[]: mask:u32 + market_idx:u16 + masked_fields | per-market | BalanceItem.parse | ✅ |
+| B4 | count:integer + items[]: market_name:utf8 + balance_hash:uint64 + flags:cardinal + masked_fields | per-market | BalanceItem.parse | ✅ |
 | B5 | 22 fields with bitmask flags | optional fields | BalanceItem 22 поля | ✅ |
 | B6 | cmd_id=3 full: missing markets → reset to default | snapshot semantics | state/balances.rs:apply cmd_id=3 | ✅ |
 | B7 | cmd_id=2 legacy: missing not reset | merge semantics | state/balances.rs:apply cmd_id=2 | ✅ |
 | B8 | cmd_id=4 incremental: merge + global_changed gate | partial update | state/balances.rs:apply cmd_id=4 | ✅ |
-| B9 | EpochIsOK protection | out-of-order reject | state/balances.rs:epoch_is_ok | ✅ |
+| B9 | Incremental `EpochIsOK(m.LastBalanceEpoch, cmd.Epoch)` per market; full snapshot has no global epoch gate | out-of-order reject | state/balances.rs:last_epoch_by_market | ✅ |
+| B10 | `ApplyBalanceItem`: `bnMaxValue` updates only when `item.bnMaxValue > _eps` | preserve previous max position value | state/balances.rs:preserve_max_value | ✅ |
 
 ---
 

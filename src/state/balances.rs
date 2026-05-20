@@ -11,9 +11,14 @@
 //! - **2** = `TBalanceCommand` (legacy snapshot) — обновить globals + items.
 //! - **3** = `TBalanceSnapshotFull` — то же что 2 + маркеты не в Items сбрасываются в default.
 //! - **4** = `TBalanceIncrUpdate` — incremental: GlobalChanged-gated globals + merge items.
+//!
+//! В Delphi epoch для incremental проверяется на уровне отдельного рынка
+//! (`m.LastBalanceEpoch`), а full snapshot не проходит через общий epoch-gate.
 
 use std::collections::HashMap;
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
+
+const BALANCE_EPS: f64 = 0.00000001;
 
 /// Глобальные суммарные балансы аккаунта (в BTC equivalent).
 #[derive(Debug, Clone, Default)]
@@ -41,10 +46,13 @@ pub struct BalancesState {
     pub global: GlobalBalance,
     /// Per-маркет балансы: ключ = `market_name` (e.g. "BTCUSDT"), значение = строка `BalanceItem`.
     pub by_market: HashMap<String, BalanceItem>,
-    /// Последний применённый epoch (wrap-safe сравнение через `EpochIsOK`).
+    /// Последний применённый epoch любого accepted balance-пакета.
+    ///
+    /// Это поле оставлено для диагностики/back-compat. Для отбрасывания stale
+    /// incremental items используется `last_epoch_by_market`, как в Delphi.
     pub last_epoch: u16,
-    /// Epoch уже выставлялся (после первого apply). До этого epoch=0 принимается как валидный.
-    epoch_set: bool,
+    /// Последний применённый epoch по market_name (Delphi `m.LastBalanceEpoch`).
+    last_epoch_by_market: HashMap<String, u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,14 +99,42 @@ impl BalancesState {
         true
     }
 
-    /// Применить распарсенный `BalanceUpdate`.
-    /// Epoch protection: `EpochIsOK` byte-exact с `MoonProtoFunc.pas:188-203`.
-    pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
-        // Epoch check (wrap-safe). До первого apply (epoch_set=false) принимаем любой.
-        if self.epoch_set && !epoch_is_ok(self.last_epoch, upd.epoch) {
-            return BalanceEvent::EpochStale { incoming: upd.epoch, last: self.last_epoch };
+    fn preserve_max_value(mut item: BalanceItem, previous_max_value: Option<f64>) -> BalanceItem {
+        if !(item.max_value > BALANCE_EPS) {
+            item.max_value = previous_max_value.unwrap_or(0.0);
         }
+        item
+    }
 
+    fn prepare_item_for_apply(&self, item: BalanceItem) -> BalanceItem {
+        let previous_max_value = self.by_market.get(&item.market_name).map(|prev| prev.max_value);
+        Self::preserve_max_value(item, previous_max_value)
+    }
+
+    fn insert_balance_mark_epoch(&mut self, item: BalanceItem, epoch: u16) -> bool {
+        let item = self.prepare_item_for_apply(item);
+        let market_name = item.market_name.clone();
+        if self.try_insert_balance(item) {
+            self.last_epoch_by_market.insert(market_name, epoch);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn apply_incremental_item(&mut self, item: BalanceItem, epoch: u16) -> bool {
+        if let Some(last) = self.last_epoch_by_market.get(&item.market_name).copied() {
+            if !epoch_is_ok(last, epoch) {
+                return false;
+            }
+        }
+        self.insert_balance_mark_epoch(item, epoch)
+    }
+
+    /// Применить распарсенный `BalanceUpdate`.
+    /// Epoch protection для incremental: `EpochIsOK` byte-exact с
+    /// `MoonProtoFunc.pas:188-203`, применяется per-market как в Delphi.
+    pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
         match upd.cmd_id {
             2 => self.apply_legacy_snapshot(upd),
             3 => self.apply_full_snapshot(upd),
@@ -116,10 +152,9 @@ impl BalancesState {
         };
         let mut count = 0;
         for it in upd.items {
-            if self.try_insert_balance(it) { count += 1; }
+            if self.insert_balance_mark_epoch(it, upd.epoch) { count += 1; }
         }
         self.last_epoch = upd.epoch;
-        self.epoch_set = true;
         BalanceEvent::LegacySnapshotApplied { count, epoch: upd.epoch }
     }
 
@@ -137,11 +172,15 @@ impl BalancesState {
         let mut new_map: HashMap<String, BalanceItem> = HashMap::new();
         let count = upd.items.len();
         for it in upd.items {
+            let previous_max_value = new_map.get(&it.market_name)
+                .map(|prev| prev.max_value)
+                .or_else(|| self.by_market.get(&it.market_name).map(|prev| prev.max_value));
+            let it = Self::preserve_max_value(it, previous_max_value);
+            self.last_epoch_by_market.insert(it.market_name.clone(), upd.epoch);
             new_map.insert(it.market_name.clone(), it);
         }
         self.by_market = new_map;
         self.last_epoch = upd.epoch;
-        self.epoch_set = true;
         BalanceEvent::SnapshotApplied { count, epoch: upd.epoch }
     }
 
@@ -157,10 +196,11 @@ impl BalancesState {
         }
         let mut count = 0;
         for it in upd.items {
-            if self.try_insert_balance(it) { count += 1; }
+            if self.apply_incremental_item(it, upd.epoch) { count += 1; }
         }
-        self.last_epoch = upd.epoch;
-        self.epoch_set = true;
+        if global_changed || count > 0 {
+            self.last_epoch = upd.epoch;
+        }
         BalanceEvent::IncrementalApplied { count, epoch: upd.epoch, global_changed }
     }
 
@@ -182,9 +222,9 @@ impl BalancesState {
 
     pub fn clear(&mut self) {
         self.by_market.clear();
+        self.last_epoch_by_market.clear();
         self.global = GlobalBalance::default();
         self.last_epoch = 0;
-        self.epoch_set = false;
     }
 }
 
@@ -255,12 +295,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_epoch_rejected() {
+    fn full_snapshot_does_not_use_global_epoch_gate() {
         let mut s = BalancesState::new();
-        s.apply(upd(3, 50, vec![]));
-        let ev = s.apply(upd(3, 45, vec![]));
-        assert!(matches!(ev, BalanceEvent::EpochStale { .. }));
-        assert_eq!(s.last_epoch, 50);
+        s.apply(upd(3, 50, vec![make_item("BTCUSDT", 100.0)]));
+        let ev = s.apply(upd(3, 45, vec![make_item("BTCUSDT", 200.0)]));
+        assert!(matches!(ev, BalanceEvent::SnapshotApplied { .. }));
+        assert_eq!(s.last_epoch, 45);
+        assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 200.0);
     }
 
     #[test]
@@ -292,5 +333,62 @@ mod tests {
         u.global_changed = true;
         s.apply(u);
         assert_eq!(s.global.btc_balance_total, 999.0);
+    }
+
+    #[test]
+    fn incremental_epoch_is_checked_per_market() {
+        let mut s = BalancesState::new();
+        s.apply(upd(4, 10, vec![make_item("BTCUSDT", 100.0)]));
+        s.apply(upd(4, 20, vec![make_item("ETHUSDT", 200.0)]));
+
+        let ev = s.apply(upd(
+            4,
+            15,
+            vec![make_item("BTCUSDT", 150.0), make_item("ETHUSDT", 250.0)],
+        ));
+
+        assert!(matches!(ev, BalanceEvent::IncrementalApplied { count: 1, .. }));
+        assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 150.0);
+        assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 200.0);
+    }
+
+    #[test]
+    fn incremental_for_new_market_not_rejected_by_other_market_epoch() {
+        let mut s = BalancesState::new();
+        s.apply(upd(4, 100, vec![make_item("BTCUSDT", 100.0)]));
+
+        let ev = s.apply(upd(4, 90, vec![make_item("ETHUSDT", 90.0)]));
+
+        assert!(matches!(ev, BalanceEvent::IncrementalApplied { count: 1, .. }));
+        assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 90.0);
+    }
+
+    #[test]
+    fn max_value_zero_preserves_previous_like_delphi() {
+        let mut s = BalancesState::new();
+        let mut first = make_item("BTCUSDT", 100.0);
+        first.max_value = 500.0;
+        s.apply(upd(3, 1, vec![first]));
+
+        let second = make_item("BTCUSDT", 200.0);
+        s.apply(upd(4, 2, vec![second]));
+
+        let item = s.get("BTCUSDT").unwrap();
+        assert_eq!(item.initial_balance, 200.0);
+        assert_eq!(item.max_value, 500.0);
+    }
+
+    #[test]
+    fn max_value_positive_updates_previous() {
+        let mut s = BalancesState::new();
+        let mut first = make_item("BTCUSDT", 100.0);
+        first.max_value = 500.0;
+        s.apply(upd(3, 1, vec![first]));
+
+        let mut second = make_item("BTCUSDT", 200.0);
+        second.max_value = 600.0;
+        s.apply(upd(4, 2, vec![second]));
+
+        assert_eq!(s.get("BTCUSDT").unwrap().max_value, 600.0);
     }
 }

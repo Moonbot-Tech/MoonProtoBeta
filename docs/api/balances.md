@@ -32,7 +32,7 @@ if let Some(update) = parse_balance(cmd_id, &payload) {
             println!("Incremental: {} markets changed, global={}", count, global_changed);
         }
         BalanceEvent::EpochStale { incoming, last } => {
-            // Old packet after reconnect/reordering; skipped.
+            // Unknown or explicitly rejected update.
         }
     }
 }
@@ -49,11 +49,15 @@ println!("BTC total: {}, locked: {}, full: {}", g.btc_balance_total, g.btc_balan
 
 ## Epoch protection
 
-Each update carries `epoch: u16`, a wrapping counter used to reject out-of-order packets.
+Each update carries `epoch: u16`, a wrapping counter. Incremental updates use
+per-market epoch protection, matching Delphi `m.LastBalanceEpoch`: stale items
+are skipped, while newer items from the same packet can still be applied. Full
+snapshots are not rejected by a global epoch gate.
+
 `BalancesState::apply` uses `epoch_is_ok(last, new)` (wrap-safe, matching Delphi
-`MoonProtoFunc.pas:188-203`): if `new` is a duplicate or stale value within the
-RFC 1982 half-cycle window (up to 32767 steps behind with u16 wrapping), it emits
-`EpochStale` and leaves the state unchanged.
+`MoonProtoFunc.pas:188-203`) with the RFC 1982 half-cycle window (32767 steps).
+`IncrementalApplied.count` is the number of market rows actually applied after
+that per-market stale filtering.
 
 ## BalanceItem Fields
 
@@ -105,7 +109,7 @@ All amounts are BTC equivalents. For `cmd_id=4`, these fields are updated only w
 pub struct BalancesState {
     pub global:     GlobalBalance,
     pub by_market:  HashMap<String, BalanceItem>,  // key = market_name
-    pub last_epoch: u16,
+    pub last_epoch: u16, // diagnostic: last accepted balance packet epoch
     // ...
 }
 
@@ -146,9 +150,12 @@ TBalanceCommand (CmdId 2/3/4):
     [field values selected by flags bits]
 ```
 
-The `flags` bitmask defines which `BalanceItem` fields are present in the payload. The parser
-updates only those fields; all other fields keep the default value for a new item or preserve
-their previous value when merging into an existing item.
+The `flags` bitmask defines which `BalanceItem` fields are present in the payload.
+Omitted fields decode to their command defaults. Applying an item replaces the
+stored row with the decoded item, except `max_value`: Delphi only updates
+`bnMaxValue` when the incoming value is greater than `_eps`, so Rust preserves the
+previous `max_value` when the decoded value is zero or otherwise not greater than
+`1e-8`.
 
 ## See Also
 
