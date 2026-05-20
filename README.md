@@ -187,6 +187,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
 - `examples/request_client_settings.rs` — request the current UI settings snapshot.
 - `examples/order_snapshot.rs` — request the current order snapshot.
+- `examples/trades_stream.rs` — subscribe to the trades stream and resolve market names.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.
 - `examples/market_refresh.rs` — observe automatic market refresh events.
 - `examples/multi_client_test.rs` — two independent clients in one process.

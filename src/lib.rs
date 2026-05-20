@@ -87,6 +87,7 @@
 //! `examples/query_hedge_mode.rs`,
 //! `examples/request_client_settings.rs`,
 //! `examples/order_snapshot.rs`,
+//! `examples/trades_stream.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
 //! `examples/multi_client_test.rs`,

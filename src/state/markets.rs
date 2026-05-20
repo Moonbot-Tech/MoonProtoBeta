@@ -179,6 +179,40 @@ impl MarketsState {
         self.by_name.get(market_name).map(|&i| &self.markets[i])
     }
 
+    /// Resolve a server `mIndex` into the canonical market name from
+    /// `emk_GetMarketsIndexes`.
+    ///
+    /// Returns `None` while indexes are stale after a server restart. During
+    /// that window `EventDispatcher` also gates market-index streams, so regular
+    /// consumers do not see trades/orderbook events with an old mapping.
+    pub fn market_name_by_index(&self, m_index: u16) -> Option<&str> {
+        if !self.indexes_synchronized {
+            return None;
+        }
+        self.market_indexes.get(m_index as usize).map(String::as_str)
+    }
+
+    /// Resolve a server `mIndex` into the full market snapshot.
+    pub fn market_by_index(&self, m_index: u16) -> Option<&Market> {
+        let name = self.market_name_by_index(m_index)?;
+        self.get(name)
+    }
+
+    /// Resolve a market name into the current server `mIndex`.
+    ///
+    /// Uses the canonical `emk_GetMarketsIndexes` mapping rather than the
+    /// `markets` vector position, because this is the index carried by stream
+    /// packets.
+    pub fn market_index_by_name(&self, market_name: &str) -> Option<u16> {
+        if !self.indexes_synchronized {
+            return None;
+        }
+        self.market_indexes
+            .iter()
+            .position(|name| name == market_name)
+            .and_then(|idx| u16::try_from(idx).ok())
+    }
+
     /// Получить цену маркета по `mIndex`.
     pub fn price_by_index(&self, m_index: u16) -> Option<&MarketPrice> {
         self.prices.get(m_index as usize)
@@ -429,5 +463,35 @@ mod tests {
         assert!(!st.indexes_synchronized, "default: not synchronized");
         st.apply_markets_indexes(vec!["A".to_string()]);
         assert!(st.indexes_synchronized, "after apply: synchronized");
+    }
+
+    #[test]
+    fn market_index_helpers_use_server_mapping() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
+
+        assert_eq!(st.market_name_by_index(0), Some("ETHUSDT"));
+        assert_eq!(st.market_by_index(1).unwrap().bn_market_name, "BTCUSDT");
+        assert_eq!(st.market_index_by_name("BTCUSDT"), Some(1));
+        assert_eq!(st.market_index_by_name("NOPE"), None);
+    }
+
+    #[test]
+    fn market_index_helpers_hide_stale_mapping() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+        st.mark_indexes_stale();
+
+        assert_eq!(st.market_name_by_index(0), None);
+        assert_eq!(st.market_by_index(0), None);
+        assert_eq!(st.market_index_by_name("BTCUSDT"), None);
     }
 }

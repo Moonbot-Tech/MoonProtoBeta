@@ -20,7 +20,7 @@ use moonproto::Event;
 use moonproto::state::TradesEvent;
 use moonproto::commands::trades_stream::TradeSection;
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
     if let Event::Trade(trade_event) = event {
         match trade_event {
             TradesEvent::Apply(packet) => {
@@ -28,7 +28,8 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
                     match section {
                         TradeSection::Trades(trades) => {
                             for trade in trades {
-                                on_trade(trade.market_index, trade.is_spot, trade.price, trade.qty);
+                                let market_name = state.markets().market_name_by_index(trade.market_index);
+                                on_trade(market_name, trade.is_spot, trade.price, trade.qty);
                             }
                         }
                         TradeSection::MMOrders(orders) => on_mm_orders(orders),
@@ -50,6 +51,10 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 ```
 
 `qty` sign encodes direction: positive is buy-side, negative is sell-side.
+Use `MarketsState::market_name_by_index` / `market_by_index` to resolve the
+stream `market_index` into the canonical market name. The active dispatcher
+keeps that mapping fresh and suppresses stream events while indexes are stale
+after a server restart.
 
 `Duplicate` and resend-side `OutOfOrder` are diagnostic events. The dispatcher
 still emits `Apply(packet)` for the same packet payload, matching the Delphi

@@ -21,6 +21,10 @@ if let Some(price) = dispatcher.markets().price("BTCUSDT") {
     println!("bid={} ask={} mark={}", price.bid, price.ask, price.mark_price);
 }
 
+if let Some(name) = dispatcher.markets().market_name_by_index(0) {
+    println!("mIndex 0 is {name}");
+}
+
 let tags = dispatcher.markets().tags("BTCUSDT");
 if tags.contains(TokenTags::ALPHA) {
     println!("BTCUSDT has ALPHA tag");
@@ -81,12 +85,19 @@ Convenience methods:
 
 ```rust
 dispatcher.markets().get("BTCUSDT");
+dispatcher.markets().market_name_by_index(0);
+dispatcher.markets().market_by_index(0);
+dispatcher.markets().market_index_by_name("BTCUSDT");
 dispatcher.markets().price("BTCUSDT");
 dispatcher.markets().price_by_index(0);
 dispatcher.markets().tags("BTCUSDT");
 dispatcher.markets().market_count();
 dispatcher.markets().corr_count();
 ```
+
+The index helpers return `None` while the mapping is stale after a server
+restart. In the normal `run_with_dispatcher` path, trades and orderbook events
+are gated until fresh indexes are received.
 
 ## TokenTags
 
