@@ -217,6 +217,11 @@ pub enum ClientEvent {
     UnsubscribeAllTrades,
 }
 
+enum QueuedControlEvent {
+    Subscribe(ClientEvent),
+    MmOrdersSubscribe(bool),
+}
+
 /// Ошибки при отправке subscribe-запроса через [`ClientSender`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
@@ -704,6 +709,13 @@ pub struct TradesSubscription {
 pub(crate) struct SubscriptionRegistry {
     pub orderbook_subs: HashSet<String>,
     pub trades_sub: Option<TradesSubscription>,
+    /// Последний серверный флаг `IsMMOrdersSubscribed`.
+    ///
+    /// Delphi обновляет его двумя путями: `emk_SubscribeAllTrades` с bool-параметром
+    /// и прямой `TMMOrdersSubscribeCommand` из UI/strategy state. После reconnect
+    /// новый серверный client-state стартует с false, поэтому active library должна
+    /// воспроизвести последний известный intent.
+    pub mm_orders_sub: Option<bool>,
     pub last_subscribed_token: u64,
 }
 
@@ -1651,6 +1663,7 @@ impl Client {
             }
             ClientEvent::SubscribeAllTrades { want_mm } => {
                 self.subscription_registry.trades_sub = Some(TradesSubscription { want_mm });
+                self.subscription_registry.mm_orders_sub = Some(want_mm);
                 self.send_api_request(
                     &crate::commands::engine_request::subscribe_all_trades(want_mm),
                 );
@@ -1669,6 +1682,35 @@ impl Client {
         }
     }
 
+    fn outgoing_mm_orders_subscribe_intent(item: &SendItem) -> Option<bool> {
+        if item.cmd != Command::UI as u8 || item.u_key != UniqueKey::turn_mm_detection() {
+            return None;
+        }
+        if item.data.first().copied() != Some(5) {
+            return None;
+        }
+        item.data.last().map(|v| *v != 0)
+    }
+
+    fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
+        self.subscription_registry.mm_orders_sub = Some(subscribe);
+        if let Some(trades_sub) = self.subscription_registry.trades_sub.as_mut() {
+            trades_sub.want_mm = subscribe;
+        }
+    }
+
+    fn send_mm_orders_subscribe_cmd(&self, subscribe: bool) {
+        let raw = crate::commands::ui::build_mm_orders_subscribe(rand::random(), subscribe);
+        self.send_cmd_keyed(
+            raw,
+            Command::UI,
+            SendPriority::High,
+            true,
+            3,
+            UniqueKey::turn_mm_detection(),
+        );
+    }
+
     /// Re-play всех зарегистрированных подписок на новом ServerToken.
     /// Вызывается из `handle_handshake` после `Fine` если token изменился.
     ///
@@ -1676,9 +1718,15 @@ impl Client {
     /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
     fn replay_subscriptions(&mut self) {
         if let Some(sub) = self.subscription_registry.trades_sub {
+            let want_mm = self
+                .subscription_registry
+                .mm_orders_sub
+                .unwrap_or(sub.want_mm);
             self.send_api_request(
-                &crate::commands::engine_request::subscribe_all_trades(sub.want_mm),
+                &crate::commands::engine_request::subscribe_all_trades(want_mm),
             );
+        } else if let Some(subscribe) = self.subscription_registry.mm_orders_sub {
+            self.send_mm_orders_subscribe_cmd(subscribe);
         }
         let refs: Vec<&str> = self
             .subscription_registry
@@ -1903,9 +1951,7 @@ impl Client {
     /// `TMMOrdersSubscribeCommand` (UI CmdId=5, High, UK_TurnMMDetection) —
     /// включить/выключить подписку на market-maker ордера.
     pub fn ui_mm_subscribe(&self, subscribe: bool) {
-        let raw = crate::commands::ui::build_mm_orders_subscribe(rand::random(), subscribe);
-        self.send_cmd_keyed(raw, Command::UI, SendPriority::High, true, 3,
-                            UniqueKey::turn_mm_detection());
+        self.send_mm_orders_subscribe_cmd(subscribe);
     }
 
     /// `TUpdateVersionCommand` (UI CmdId=6, High) — уведомить сервер о версии клиента.
@@ -2277,40 +2323,57 @@ impl Client {
                 let mut sliced = Vec::new();
                 let mut h_items = Vec::new();
                 let mut l_items = Vec::new();
-                // F4: subscribe/unsubscribe events применяются ПОСЛЕ closure (нужен
+                // F4: subscribe/unsubscribe/control events применяются ПОСЛЕ closure (нужен
                 // &mut self для registry mutation + send_api_request — borrow checker
                 // не пропустит внутри closure которая уже держит &mut на четыре Vec).
-                let mut subscribe_events: Vec<ClientEvent> = Vec::new();
+                let mut control_events: Vec<QueuedControlEvent> = Vec::new();
 
                 let handle_event = |ev: ClientEvent,
                                          recv_msgs: &mut Vec<RecvMsg>,
                                          sliced: &mut Vec<SendItem>,
                                          h_items: &mut Vec<SendItem>,
                                          l_items: &mut Vec<SendItem>,
-                                         subscribe_events: &mut Vec<ClientEvent>| {
+                                         control_events: &mut Vec<QueuedControlEvent>| {
                     match ev {
                         ClientEvent::Recv(m) => recv_msgs.push(m),
                         ClientEvent::Send(s) => match s.item.priority {
-                            SendPriority::Sliced => sliced.push(s.item),
-                            SendPriority::High => h_items.push(s.item),
-                            SendPriority::Low => l_items.push(s.item),
+                            SendPriority::Sliced => {
+                                if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
+                                    control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
+                                }
+                                sliced.push(s.item);
+                            }
+                            SendPriority::High => {
+                                if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
+                                    control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
+                                }
+                                h_items.push(s.item);
+                            }
+                            SendPriority::Low => {
+                                if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
+                                    control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
+                                }
+                                l_items.push(s.item);
+                            }
                         },
                         ev @ ClientEvent::SubscribeOrderBook { .. }
                         | ev @ ClientEvent::UnsubscribeOrderBook { .. }
                         | ev @ ClientEvent::SubscribeAllTrades { .. }
-                        | ev @ ClientEvent::UnsubscribeAllTrades => subscribe_events.push(ev),
+                        | ev @ ClientEvent::UnsubscribeAllTrades => {
+                            control_events.push(QueuedControlEvent::Subscribe(ev));
+                        }
                     }
                 };
 
                 match first_event {
-                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut subscribe_events),
+                    Ok(ev) => handle_event(ev, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut control_events),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
 
                 // Дренируем всё что накопилось дополнительно (без блокировки).
                 while let Ok(event) = self.event_rx.try_recv() {
-                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut subscribe_events);
+                    handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut control_events);
                 }
 
                 // Delphi `SendCmdInt` deduplicates the selected send queue before
@@ -2319,12 +2382,16 @@ impl Client {
                 Self::dedup_send_items_by_u_key(&mut sliced);
                 Self::dedup_send_items_by_u_key(&mut h_items);
 
-                // F4: применяем subscribe/unsubscribe события до отправки accumulated batch'ей.
+                // F4: применяем subscribe/unsubscribe/control события до отправки accumulated batch'ей.
                 // Если приложение успело пушнуть subscribe + send в одном тике — порядок
                 // соответствует FIFO в channel'е (subscribe раньше, поэтому wire-команда
                 // подписки уйдёт перед прикладной отправкой).
-                for ev in subscribe_events {
-                    self.apply_subscribe_event(ev);
+                for ev in control_events {
+                    match ev {
+                        QueuedControlEvent::Subscribe(ev) => self.apply_subscribe_event(ev),
+                        QueuedControlEvent::MmOrdersSubscribe(subscribe) =>
+                            self.apply_mm_orders_subscribe_intent(subscribe),
+                    }
                 }
 
                 // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
@@ -4667,6 +4734,20 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
+    fn client_ui_mm_subscribe_pushes_keyed_send_event() {
+        let client = Client::new(dummy_cfg());
+        client.ui_mm_subscribe(true);
+        let ev = client.event_rx.try_recv().expect("event queued via ui wrapper");
+        let ClientEvent::Send(msg) = ev else {
+            panic!("expected Send event");
+        };
+        assert_eq!(
+            Client::outgoing_mm_orders_subscribe_intent(&msg.item),
+            Some(true),
+        );
+    }
+
+    #[test]
     fn apply_subscribe_event_inserts_into_registry() {
         // apply_subscribe_event — точка где main loop принимает решение
         // обновить registry. Без живого сервера wire-команда уходит в socket=None
@@ -4712,12 +4793,14 @@ mod client_subscribe_integration_tests {
             client.subscription_registry.trades_sub,
             Some(TradesSubscription { want_mm: true }),
         );
+        assert_eq!(client.subscription_registry.mm_orders_sub, Some(true));
         // Повторный с другим want_mm — обновляет registry.
         client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
         assert_eq!(
             client.subscription_registry.trades_sub,
             Some(TradesSubscription { want_mm: false }),
         );
+        assert_eq!(client.subscription_registry.mm_orders_sub, Some(false));
     }
 
     #[test]
@@ -4726,6 +4809,26 @@ mod client_subscribe_integration_tests {
         client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
         client.apply_subscribe_event(ClientEvent::UnsubscribeAllTrades);
         assert!(client.subscription_registry.trades_sub.is_none());
+        assert_eq!(
+            client.subscription_registry.mm_orders_sub,
+            Some(true),
+            "Delphi UnsubscribeAllTrades clears IsTradesSubscribed but not the MM flag",
+        );
+    }
+
+    #[test]
+    fn apply_mm_orders_subscribe_updates_registry_and_active_trades_flag() {
+        let mut client = Client::new(dummy_cfg());
+        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
+        let _ = client.event_rx.try_recv(); // drain SubscribeAllTrades send event
+
+        client.apply_mm_orders_subscribe_intent(true);
+
+        assert_eq!(client.subscription_registry.mm_orders_sub, Some(true));
+        assert_eq!(
+            client.subscription_registry.trades_sub,
+            Some(TradesSubscription { want_mm: true }),
+        );
     }
 }
 
@@ -5167,6 +5270,13 @@ mod replay_subscriptions_tests {
         Some(payload[11])
     }
 
+    fn subscribe_all_trades_want_mm(payload: &[u8]) -> Option<bool> {
+        if method_id(payload)? != EngineMethod::SubscribeAllTrades as u8 {
+            return None;
+        }
+        payload.last().map(|v| *v != 0)
+    }
+
     /// Дренирует event channel клиента, собирая wire-payload'ы отправленных API-запросов.
     fn drain_api_requests(client: &Client) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
@@ -5175,6 +5285,16 @@ mod replay_subscriptions_tests {
                 if msg.item.cmd == Command::API as u8 {
                     out.push(msg.item.data);
                 }
+            }
+        }
+        out
+    }
+
+    fn drain_send_items(client: &Client) -> Vec<SendItem> {
+        let mut out = Vec::new();
+        while let Ok(ev) = client.event_rx.try_recv() {
+            if let ClientEvent::Send(msg) = ev {
+                out.push(msg.item);
             }
         }
         out
@@ -5199,6 +5319,35 @@ mod replay_subscriptions_tests {
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 1, "только trades → 1 wire-запрос");
         assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeAllTrades as u8));
+        assert_eq!(subscribe_all_trades_want_mm(&sent[0]), Some(true));
+    }
+
+    #[test]
+    fn replay_trades_uses_latest_mm_orders_flag() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
+        client.subscription_registry.mm_orders_sub = Some(true);
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(method_id(&sent[0]), Some(EngineMethod::SubscribeAllTrades as u8));
+        assert_eq!(subscribe_all_trades_want_mm(&sent[0]), Some(true));
+    }
+
+    #[test]
+    fn replay_mm_orders_without_trades_sends_ui_subscription() {
+        let mut client = Client::new(dummy_cfg());
+        client.subscription_registry.mm_orders_sub = Some(true);
+        client.server_token = 1;
+        client.replay_subscriptions();
+        let sent = drain_send_items(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].cmd, Command::UI as u8);
+        assert_eq!(sent[0].priority, SendPriority::High);
+        assert_eq!(sent[0].u_key, UniqueKey::turn_mm_detection());
+        assert_eq!(sent[0].data.first().copied(), Some(5));
+        assert_eq!(sent[0].data.last().copied(), Some(1));
     }
 
     #[test]

@@ -311,6 +311,7 @@
 | U3 | :82 | 3 | TStratStartStopCommand — IsStart:bool | UICommand::StratStartStop | ✅ |
 | U4 | :93 | 4 | TStratStartStopCommandV2 — IsStart + Items[StratCheckedItem] | UICommand::StratStartStopV2 | ✅ |
 | U5 | :105 | 5 | TMMOrdersSubscribeCommand (UK_TurnMMDetection) — Subscribe:bool | UICommand::MMOrdersSubscribe | ✅ |
+| U5a | Unit1.pas/Strategies.pas + MoonProtoEngine.pas SubscribeAllTrades | MMOrders-флаг обновляется прямой UI-командой и bool-параметром `emk_SubscribeAllTrades`; после нового ServerToken должен быть восстановлен последний флаг | client.rs: `SubscriptionRegistry.mm_orders_sub`, распознавание исходящего `TMMOrdersSubscribeCommand`, `replay_subscriptions` | ✅ |
 | U6 | :120 | 6 | TUpdateVersionCommand — VersionName:utf8 + IsRelease:bool | UICommand::UpdateVersion | ✅ |
 | U7 | :131 | 7 | TEmuTradesCommand (Sliced) — mIndex + BaseTime + Points[6б each] | UICommand::EmuTrades + EmuTradePoint | ✅ |
 | U8 | :144 | 8 | TNewMarketNotifyCommand — empty (Priority=High) | UICommand::NewMarketNotify | ✅ |

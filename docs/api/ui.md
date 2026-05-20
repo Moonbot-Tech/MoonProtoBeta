@@ -55,6 +55,10 @@ client.ui_switch_dex("Main");
 client.ui_switch_spot(0);
 ```
 
+`ui_mm_subscribe` records the latest MM-orders intent in the client registry.
+After a reconnect, the library replays that flag; if an all-trades subscription
+is active, the replay folds the flag into `SubscribeAllTrades(want_mm)`.
+
 Low-level builders in `commands::ui` remain available for tools that need raw
 payloads, but normal applications should not call `send_cmd` directly.
 
