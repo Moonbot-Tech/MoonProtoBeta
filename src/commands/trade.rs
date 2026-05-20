@@ -1467,3 +1467,49 @@ pub fn build_new_order(ctx: TradeCtx, market_name: &str, is_short: bool,
     out.extend_from_slice(&order_size.to_le_bytes());
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_settings_wire_layout_matches_delphi_record() {
+        let stops = StopSettings {
+            stop_loss_on: 1,
+            sl_fixed: 0,
+            sl_level: 1.25,
+            sl_spread: 2.5,
+            trailing_on: 1,
+            trailing_fixed: 1,
+            trailing_level: 3.75,
+            ts_spread: 4.5,
+            use_take_profit: 0,
+            take_profit: 5.125,
+            take_profit_changed: 1,
+        };
+
+        let mut expected = Vec::new();
+        expected.push(1);
+        expected.push(0);
+        expected.extend_from_slice(&1.25f64.to_le_bytes());
+        expected.extend_from_slice(&2.5f64.to_le_bytes());
+        expected.push(1);
+        expected.push(1);
+        expected.extend_from_slice(&3.75f64.to_le_bytes());
+        expected.extend_from_slice(&4.5f64.to_le_bytes());
+        expected.push(0);
+        expected.extend_from_slice(&5.125f64.to_le_bytes());
+        expected.push(1);
+
+        let mut encoded = Vec::new();
+        stops.write_to(&mut encoded);
+
+        assert_eq!(STOP_SETTINGS_SIZE, 46);
+        assert_eq!(encoded, expected);
+
+        let parsed = StopSettings::from_bytes(&expected).expect("valid StopSettings");
+        let mut roundtrip = Vec::new();
+        parsed.write_to(&mut roundtrip);
+        assert_eq!(roundtrip, expected);
+    }
+}
