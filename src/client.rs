@@ -110,6 +110,16 @@ fn engine_request_uid(request_payload: &[u8]) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
+#[inline]
+fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
+    let elapsed = start.elapsed();
+    if elapsed >= timeout {
+        None
+    } else {
+        Some(timeout.saturating_sub(elapsed))
+    }
+}
+
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5;           // MoonProtoFunc.pas:19
 const RECONNECT_WAITING_MS: i64 = 7000;    // MoonProtoUDPClient.pas:88
@@ -1345,7 +1355,13 @@ impl Client {
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
         // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
         // паниковала при len<11 — public API не должен валить процесс из-за плохого input'а.
-        let uid = engine_request_uid(request_payload).unwrap_or(0);
+        let Some(uid) = engine_request_uid(request_payload) else {
+            log::warn!(target: "moonproto::client",
+                "send_api_request_async: malformed Engine API request ({} bytes) — not queued",
+                request_payload.len());
+            let (_tx, rx) = mpsc::channel();
+            return rx;
+        };
         let rx = self.api_pending.register(uid);
         self.send_api_request(request_payload);
         rx
@@ -2003,7 +2019,7 @@ impl Client {
         const TICK: Duration = Duration::from_millis(50);
 
         let previous_snapshot_flag = dispatcher.orders().current_snapshot_flag();
-        let deadline = Instant::now() + timeout;
+        let start = Instant::now();
         self.request_all_statuses(rand::random());
 
         loop {
@@ -2013,12 +2029,10 @@ impl Client {
                 return Ok(dispatcher.orders().iter().cloned().collect());
             }
 
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(remaining) = timeout_remaining(start, timeout) else {
                 return Err(mpsc::RecvTimeoutError::Timeout);
-            }
+            };
 
-            let remaining = deadline.saturating_duration_since(now);
             let tick = remaining.min(TICK);
             self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
         }
@@ -2186,7 +2200,7 @@ impl Client {
             .client_settings
             .as_ref()
             .map(|settings| settings.uid);
-        let deadline = Instant::now() + timeout;
+        let start = Instant::now();
         self.ui_settings_request();
 
         loop {
@@ -2196,12 +2210,10 @@ impl Client {
                 }
             }
 
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(remaining) = timeout_remaining(start, timeout) else {
                 return Err(mpsc::RecvTimeoutError::Timeout);
-            }
+            };
 
-            let remaining = deadline.saturating_duration_since(now);
             let tick = remaining.min(TICK);
             self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
         }
@@ -2561,7 +2573,7 @@ impl Client {
         timeout: Duration,
     ) -> Result<T, mpsc::RecvTimeoutError> {
         const TICK: Duration = Duration::from_millis(50);
-        let deadline = Instant::now() + timeout;
+        let start = Instant::now();
         loop {
             match rx.try_recv() {
                 Ok(resp) => return Ok(resp),
@@ -2570,11 +2582,9 @@ impl Client {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(remaining) = timeout_remaining(start, timeout) else {
                 return Err(mpsc::RecvTimeoutError::Timeout);
-            }
-            let remaining = deadline.saturating_duration_since(now);
+            };
             let tick = remaining.min(TICK);
             self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
         }
@@ -4922,6 +4932,31 @@ mod api_pending_dispatch_tests {
 
         assert!(rx.try_recv().is_ok(), "pending receiver must get response");
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn malformed_api_request_async_returns_closed_receiver_without_pending_slot() {
+        let client = Client::new(dummy_cfg());
+
+        let rx = client.send_api_request_async(&[2, 3, 0]);
+
+        assert_eq!(client.api_pending.pending_count(), 0);
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+        assert!(matches!(client.event_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn run_until_response_does_not_overflow_huge_timeout_when_ready() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+        let (tx, rx) = mpsc::channel();
+        tx.send(123u32).unwrap();
+
+        let value = client
+            .run_until_response(&mut dispatcher, &rx, Duration::MAX)
+            .expect("ready response should be returned without touching timeout arithmetic");
+
+        assert_eq!(value, 123);
     }
 }
 
