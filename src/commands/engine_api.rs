@@ -285,6 +285,19 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     })
 }
 
+/// Parse `EngineResponse.data` for `emk_GetBalance` (`EngineMethod::GetBalance`).
+///
+/// The Delphi server writes exactly one little-endian `Double` on success:
+/// `MoonProtoEngineServer.pas:315-319` (`resp.WriteDouble(q)`). Extra trailing
+/// bytes are ignored so newer servers can append fields without breaking old
+/// consumers.
+pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
+    if data.len() < 8 {
+        return None;
+    }
+    Some(f64::from_le_bytes(data[0..8].try_into().unwrap()))
+}
+
 // =============================================================================
 //  AuthCheck response parser (audit_api_docs C4)
 // =============================================================================
@@ -712,6 +725,15 @@ mod parse_engine_response_tests {
         let resp = parse_engine_response(&payload).expect("parse ok");
         assert_eq!(resp.data, blob);
         assert_eq!(resp.method, EngineMethod::GetMarketsList);
+    }
+
+    #[test]
+    fn parse_get_balance_response_reads_delphi_double() {
+        let mut data = 1234.5f64.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0xAA, 0xBB]);
+
+        assert_eq!(parse_get_balance_response(&data), Some(1234.5));
+        assert_eq!(parse_get_balance_response(&data[..7]), None);
     }
 
     #[test]

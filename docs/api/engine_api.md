@@ -48,6 +48,23 @@ client.subscribe_orderbook("BTCUSDT", OrderBookKind::Futures);
 Those APIs are replayed automatically after reconnect. Raw `api_subscribe_*`
 calls are useful for custom tools but do not update the subscription registry.
 
+## Balance
+
+`api_get_balance(currency)` returns the current quantity for one currency. The
+server payload is parsed with `parse_get_balance_response`:
+
+```rust
+use moonproto::commands::parse_get_balance_response;
+
+let rx = client.api_get_balance("USDT");
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+
+if resp.success {
+    let qty = parse_get_balance_response(&resp.data).expect("bad balance response");
+    println!("USDT balance={qty}");
+}
+```
+
 ## EngineResponse
 
 ```rust

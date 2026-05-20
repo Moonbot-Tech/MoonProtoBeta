@@ -127,6 +127,16 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 Calling `rx.recv_timeout(...)` directly is only correct when another thread is
 already running the client loop.
 
+Typed parsers are provided for common response payloads:
+
+```rust
+use moonproto::commands::parse_get_balance_response;
+
+let rx = client.api_get_balance("USDT");
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let qty = parse_get_balance_response(&resp.data).expect("bad GetBalance payload");
+```
+
 ## Subscriptions
 
 Use the registry-aware subscription API:

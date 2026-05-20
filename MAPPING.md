@@ -364,6 +364,7 @@
 | E4 | TEngineStreamCommand.Write*/Read* (Double/Int/Word/Byte/Int64/Bool/Str) | primitives | params::write_* / EngineStreamReader | ✅ |
 | E5 | DEFLATE on Data if IsCompressed | response decompression | parse_engine_response Deflate | ✅ |
 | E6 | UnencryptedMethods set | exclude from encryption | server-side, client принимает оба | N/A |
+| E7 | MoonProtoEngineServer.pas:315-319 emk_GetBalance response `WriteDouble(q)` | typed payload parser | engine_api.rs:parse_get_balance_response | ✅ |
 
 ### High-level wrappers in client.rs (Stage 3)
 | # | Что | Rust | ✅ |
