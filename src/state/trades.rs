@@ -242,6 +242,7 @@ impl TradesState {
         // читает секции и применяет trades. Сохраняем это: сначала diagnostic
         // event, затем Apply того же payload.
         if packet_num == self.last_packet_num {
+            self.last_packet_time_ms = now_ms;
             events.push(TradesEvent::Duplicate);
             events.push(TradesEvent::Apply(pkt));
             return events;
@@ -272,6 +273,7 @@ impl TradesState {
                 b.recvd[recvd_idx] = true;
             }
             let bucket_range = (b.start_num, b.end_num);
+            self.last_packet_time_ms = now_ms;
             events.push(TradesEvent::GapFilled { packet_num, bucket_seq_range: bucket_range });
             events.push(TradesEvent::Apply(pkt));
             return events;
@@ -525,6 +527,18 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_refreshes_pause_timer_like_delphi() {
+        let mut s = TradesState::new();
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(100), 20_000);
+
+        assert_eq!(
+            s.last_packet_time_ms, 20_000,
+            "Delphi updates LastTradesPacketTime for every TrackPackets=true packet, including duplicates"
+        );
+    }
+
+    #[test]
     fn gap_creates_bucket() {
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(100), 1000);
@@ -543,6 +557,25 @@ mod tests {
         let evs = s.on_packet(make_pkt(101), 1020); // fills bucket
         let has_filled = evs.iter().any(|e| matches!(e, TradesEvent::GapFilled { packet_num: 101, .. }));
         assert!(has_filled);
+    }
+
+    #[test]
+    fn out_of_order_live_packet_refreshes_pause_timer() {
+        let mut s = TradesState::new();
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(103), 1010); // creates bucket [101, 102]
+        let _ = s.on_packet(make_pkt(101), 20_000); // in-bucket live packet
+
+        assert_eq!(
+            s.last_packet_time_ms, 20_000,
+            "in-bucket TrackPackets=true packets refresh LastTradesPacketTime in Delphi"
+        );
+
+        let _ = s.on_packet(make_pkt(104), 45_000);
+        assert_eq!(
+            s.used_buckets(), 1,
+            "packet 104 is only 25s after the in-bucket packet, so the bucket for still-missing 102 must survive"
+        );
     }
 
     #[test]

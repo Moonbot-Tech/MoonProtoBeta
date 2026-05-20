@@ -215,8 +215,8 @@
 | # | Delphi | Что | Rust | ✅ |
 |---|---|---|---|---|
 | TS1 | TRADES_FLAG_COMPRESSED=0x01, TRADES_FLAG_HAS_TAKER=0x02 | flags trailing byte | trades_stream.rs:parse_trades_packet | ✅ |
-| TS2 | packet_num:u32 | header | TradesPacket.packet_num | ✅ |
-| TS3 | section: kind(1) + market_idx(2) + count(2) + trades[] | section layout | TradeSection | ✅ |
+| TS2 | PacketNum: Word | header | TradesPacket.packet_num: u16 | ✅ |
+| TS3 | section: market_idx+kind flags(2) + count(1) + trades[] | section layout | TradeSection | ✅ |
 | TS4 | kinds 0,2=Trades; 1=MMOrders; 3=Extended (Liq/Watcher) | sub-types | TradeSection.kind | ✅ |
 | TS5 | zigzag-packed delta encoding | trades compression | parse_trades_packet delta decode | ✅ |
 | TS6 | SynLZ over whole packet if compressed flag | outer compression | parse_trades_packet → SynLZ | ✅ |
@@ -228,6 +228,7 @@
 | TS12 | on_packet_resend (не двигает last_packet_num) | historical apply | state/trades.rs:on_packet_resend | ✅ |
 | TS13 | MoonProtoEngine.pas:1649-1658 overflow gap (`gap > MAX_RECVD_SIZE` / buckets full) | reset buckets, текущий пакет всё равно применяется, следующий пакет заново стартует tracking | state/trades.rs:overflow branch | ✅ |
 | TS14 | MoonProtoEngine.pas:1625-1721 duplicate/resend tracking branches | duplicate/out-of-bucket resend не двигают tracking, но payload всё равно применяется секциями ниже | state/trades.rs:on_packet duplicate + on_packet_resend out-of-order emit diagnostic + Apply | ✅ |
+| TS15 | MoonProtoEngine.pas:ProcessTradesStream TrackPackets=true branch | LastTradesPacketTime обновляется для duplicate и in-bucket out-of-order пакетов тоже | state/trades.rs:on_packet early-return branches refresh last_packet_time_ms | ✅ |
 
 ---
 
