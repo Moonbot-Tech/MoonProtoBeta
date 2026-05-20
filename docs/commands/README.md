@@ -11,7 +11,7 @@ Used by terminal UI developers to understand what data arrives from the server.
 | Balance | 32 (MPC_Balance) | Account balances | 6 sub-types (snapshot, incremental, refresh) |
 | Strategy | 30 (MPC_Strat) | Strategy management | 6 sub-types (snapshot, delete, checked sync) |
 | UI | 29 (MPC_UI) | Settings and notifications | 15 sub-types |
-| Engine API | 31 (MPC_API) | RPC calls | 26 methods |
+| Engine API | 31 (MPC_API) | RPC calls | 31 methods |
 | TradesStream | 33 (MPC_TradesStream) | Real-time trade feed | Single format, sections per market |
 | OrderBook | 36 (MPC_OrderBook) | Order book updates | Full snapshot or diff |
 

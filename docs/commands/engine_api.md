@@ -49,8 +49,9 @@ response to the registered receiver.
 [Data]               variable     method-specific response payload
 ```
 
-`parse_engine_response` strips the common header, matches by `RequestUID`, and
-DEFLATE-decompresses `Data` when `IsCompressed` is set. The public
+`parse_engine_response` strips the common header, extracts `RequestUID`, and
+DEFLATE-decompresses `Data` when `IsCompressed` is set. `ApiPending` then uses
+`RequestUID` to match the response to the registered receiver. The public
 `EngineResponse::data` field contains the decompressed payload.
 
 The `Data` format is method-specific. See the doc comments on each
