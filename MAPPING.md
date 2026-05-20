@@ -95,6 +95,7 @@
 |---|---|---|---|---|
 | 52 | 283-316 | MPCompress (SynLZ / Deflate / RLE+SynLZ) | compression.rs + client.rs `maybe_compress` for outgoing payload >64B | ✅ |
 | 53 | 319-358 | MPDecompress | compression.rs: synlz_decompress (algo 1) | ✅ |
+| 53a | mORMot SynLZdecompress1pas local `offset: TOffsets` scratch | decompress offsets are per-call scratch, not persistent across packets | compression.rs resets thread-local offsets before each `synlz_decompress_inner` | ✅ |
 
 ## UpdateChannelRDown (MoonProtoIntStruct.pas:1003-1055) → ???
 
@@ -198,16 +199,18 @@
 
 | # | Delphi | Что | Rust | ✅ |
 |---|---|---|---|---|
-| OB1 | MoonProtoOrderBook.pas:WriteOrderBookFull/Diff | SynLZ compress + format | parse_order_book_packet (SynLZ decompress) | ✅ |
+| OB1 | MoonProtoOrderBook.pas:PackUpdate/WriteGlass | SynLZ compress + format | parse_order_book_packet (SynLZ decompress) | ✅ |
 | OB2 | wire: market_idx(2) + seq(2) + flags(1) | header | parse_order_book_packet header | ✅ |
-| OB3 | buy_count(1) + buys[]:16б + sells[остаток] | levels | OrderLevel { price:f64, qty:f64 } × n | ✅ |
+| OB3 | WriteGlass / MoonProto_ReadAndApplyFull/Diff | buy_count:Word + buys[]:(Single,Single) + sells[остаток] | OrderLevel { rate:f32, quantity:f32 } × n | ✅ |
 | OB4 | flags bit 0 = Full vs Diff | type detection | OrderBookUpdate.is_full | ✅ |
-| OB5 | TOrderBookCache reordering buffer | до 64 пакетов sorted by seq | state/order_books.rs cache | ✅ |
+| OB5 | TOrderBookCache.FindInsertPos/Add | sorted insert by `CompareSeq`, duplicate seq is inserted too | state/order_books.rs:binary_search_insert/add | ✅ |
 | OB6 | BOOK_EXPIRED_TIMEOUT = 800ms | stale diff drop | state/order_books.rs:BOOK_EXPIRED_TIMEOUT | ✅ |
 | OB7 | BOOK_FULL_REQUEST_THROTTLE = 5000ms | повторный full не чаще | state/order_books.rs:BOOK_FULL_REQUEST_THROTTLE | ✅ |
-| OB8 | MoonProtoEngine.pas:2042-2048 first Diff without Full when `MoonProtoBookSeq = 0` | state/order_books.rs: `last_applied_seq == 0` applies first Diff, no RequestFull | ✅ |
+| OB8 | MoonProtoEngine.pas:ProcessOrderBookPacket normal mode | `(seq = ExpectedSeq) or (MoonProtoBookSeq = 0)` проверяется до stale-drop | state/order_books.rs: `cmp == 0 || last_applied_seq == 0` before stale branch | ✅ |
 | OB9 | compare_seq wrapping math | u16 sequence comparison | state/order_books.rs:compare_seq | ✅ |
-| OB10 | MoonProtoEngine.pas:2021-2039 corrupted mode | Apply diff as-is + keep requesting Full | state/order_books.rs:corrupted branch | ✅ |
+| OB10 | MoonProtoEngine.pas:ProcessOrderBookPacket corrupted mode | Apply diff as-is, then if count>=64 DropOldest, then cache Add, then throttled RequestFull | state/order_books.rs:corrupted branch + drop_oldest/add | ✅ |
+| OB11 | MoonProtoEngine.pas:ProcessOrderBookPacket normal gap | Add gap packet; if cache expired OR count > 64 then Corrupted=true + TryRequestFull; cache is not cleared | state/order_books.rs:gap branch | ✅ |
+| OB12 | MoonProtoOrderBook.pas:MoonProto_TryApplyCached | Drop stale cached packets, apply exact ExpectedSeq chain, stop at next gap | state/order_books.rs:drain_cache | ✅ |
 
 ---
 

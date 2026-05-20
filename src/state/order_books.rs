@@ -103,13 +103,6 @@ struct OrderBookCache {
     last_full_request_ms: i64,
     /// Время, когда кэш стал непустым (0 если пуст). Используется в `is_expired`.
     cache_not_empty_since_ms: i64,
-    /// Время последнего успешного `Apply` (Full или Diff) — true LRU метрика.
-    /// Используется для eviction при переполнении `caches`. Healthy books с
-    /// `last_full_request_ms = 0` больше не выкидываются первыми (audit H1):
-    /// раньше LRU работала по `last_full_request_ms`, который у healthy кэшей =
-    /// 0 (никогда не запрашивали Full) — это делало healthy подписки самыми
-    /// "старыми" и эвиктировало их при atomic attack с distinct fake market_idx.
-    last_apply_ms: i64,
 }
 
 impl OrderBookCache {
@@ -129,22 +122,12 @@ impl OrderBookCache {
             self.cache_not_empty_since_ms = now_ms;
         }
         let pos = self.binary_search_insert(seq);
-        // Защита от дубликатов: не добавлять если уже есть тот же seq.
-        if pos < self.packets.len() && self.packets[pos].seq == seq {
-            return;
-        }
         self.packets.insert(pos, CachedPacket { seq, pkt });
+    }
 
-        // D-V2-11 fix: при переполнении кэша **не дропаем середину** sequence (раньше
-        // `remove(0)` снимало самый старый = самый нужный для recovery → скрытые gap'ы
-        // в orderbook → corrupted UI state). Вместо этого — помечаем corrupted + сбрасываем
-        // кэш. На следующем packet'е orderbook_cache_handler запросит fresh Full snapshot.
-        if self.packets.len() > BOOK_CACHE_MAX_PACKETS {
-            log::warn!(target: "moonproto::order_books",
-                "OrderBook cache overflow ({} packets) — clearing + will request Full",
-                self.packets.len());
-            self.corrupted = true;
-            self.packets.clear();
+    fn drop_oldest(&mut self) {
+        self.packets.pop_front();
+        if self.packets.is_empty() {
             self.cache_not_empty_since_ms = 0;
         }
     }
@@ -226,12 +209,6 @@ pub enum OrderBookEvent {
     },
 }
 
-/// DoS guard: верхний лимит уникальных (market_index, book_kind) ключей.
-/// На реальной бирже сотни маркетов × 2 book_kind = единицы тысяч. 4096 — щедрый запас,
-/// закрывает медленный grow-attack когда злой/багнутый сервер отправляет Diff пакеты
-/// с разными market_index чтобы наполнить HashMap до OOM.
-pub const MAX_ORDERBOOK_CACHES: usize = 4096;
-
 /// Главный sync state — кэш на каждый (market_index, book_kind).
 #[derive(Debug, Default)]
 pub struct OrderBooks {
@@ -251,24 +228,6 @@ impl OrderBooks {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let mut events = Vec::new();
 
-        // DoS guard: если caches заполнен и пришёл пакет на новый ключ — выкидываем
-        // самый старый по `last_apply_ms` (true LRU). audit H1: раньше eviction шёл
-        // по `last_full_request_ms`, который у healthy кэшей = 0 → они стояли в
-        // начале сортировки и эвиктировались первыми при slow-grow attack с distinct
-        // fake market_idx. `last_apply_ms` обновляется на каждом Apply event'е →
-        // активные подписки получают свежее время → защищены от эвикции.
-        if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ORDERBOOK_CACHES {
-            if let Some((evict_key, _)) = self.caches.iter()
-                .min_by_key(|(_, c)| c.last_apply_ms)
-                .map(|(k, c)| (*k, c.last_apply_ms))
-            {
-                log::warn!(target: "moonproto::order_books",
-                    "caches saturated ({}); evicting {:?} (LRU by last_apply_ms)",
-                    self.caches.len(), evict_key);
-                self.caches.remove(&evict_key);
-            }
-        }
-
         let cache = self.caches.entry(key).or_default();
 
         // === 1. Full snapshot — всегда применяется (это reset кэша) ===
@@ -279,7 +238,6 @@ impl OrderBooks {
             // Чистим cache от старых seq < expected_seq.
             cache.packets.retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
             cache.check_cache_empty();
-            cache.last_apply_ms = now_ms;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 book_kind: pkt.book_kind,
@@ -289,7 +247,7 @@ impl OrderBooks {
                 sells: pkt.sells,
             });
             // Попробовать применить накопленные diff из cache.
-            self.drain_cache(key, now_ms, &mut events);
+            self.drain_cache(key, &mut events);
             return events;
         }
 
@@ -299,9 +257,8 @@ impl OrderBooks {
         // в этом режиме отбрасывались — UI замораживался на время ожидания.
         if cache.corrupted {
             let seq = pkt.seq;
-            cache.add(seq, pkt.clone(), now_ms);
+            let cached_pkt = pkt.clone();
             cache.last_applied_seq = seq;
-            cache.last_apply_ms = now_ms;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 book_kind: pkt.book_kind,
@@ -310,6 +267,10 @@ impl OrderBooks {
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
+            if cache.packets.len() >= BOOK_CACHE_MAX_PACKETS {
+                cache.drop_oldest();
+            }
+            cache.add(seq, cached_pkt, now_ms);
             if cache.try_request_full(now_ms) {
                 events.push(OrderBookEvent::RequestFullNeeded {
                     market_index: key.0,
@@ -321,7 +282,27 @@ impl OrderBooks {
 
         let cmp = compare_seq(pkt.seq, cache.expected_seq);
 
-        // === 3. Stale: seq < expected → отброс ===
+        // === 3. In-order OR первый Diff без Full (DEVIATION #24) ===
+        // Delphi `MoonProtoEngine.pas:2042-2048`: если `MoonProtoBookSeq = 0`
+        // (последний применённый seq = 0) — применяет первый Diff без ожидания
+        // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
+        if cmp == 0 || cache.last_applied_seq == 0 {
+            cache.expected_seq = pkt.seq.wrapping_add(1);
+            cache.last_applied_seq = pkt.seq;
+            events.push(OrderBookEvent::Apply {
+                market_index: pkt.market_index,
+                book_kind: pkt.book_kind,
+                is_full: false,
+                seq: pkt.seq,
+                buys: pkt.buys,
+                sells: pkt.sells,
+            });
+            // Может быть в cache следующие seq — drain.
+            self.drain_cache(key, &mut events);
+            return events;
+        }
+
+        // === 4. Stale: seq < expected → отброс ===
         if cmp < 0 {
             events.push(OrderBookEvent::Ignored {
                 market_index: pkt.market_index,
@@ -332,31 +313,10 @@ impl OrderBooks {
             return events;
         }
 
-        // === 4. In-order OR первый Diff без Full (DEVIATION #24) ===
-        // Delphi `MoonProtoEngine.pas:2042-2048`: если `MoonProtoBookSeq = 0`
-        // (последний применённый seq = 0) — применяет первый Diff без ожидания
-        // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
-        if cmp == 0 || cache.last_applied_seq == 0 {
-            cache.expected_seq = pkt.seq.wrapping_add(1);
-            cache.last_applied_seq = pkt.seq;
-            cache.last_apply_ms = now_ms;
-            events.push(OrderBookEvent::Apply {
-                market_index: pkt.market_index,
-                book_kind: pkt.book_kind,
-                is_full: false,
-                seq: pkt.seq,
-                buys: pkt.buys,
-                sells: pkt.sells,
-            });
-            // Может быть в cache следующие seq — drain.
-            self.drain_cache(key, now_ms, &mut events);
-            return events;
-        }
-
         // === 5. Gap: seq > expected → положить в cache, проверить expired/corrupted ===
         let seq = pkt.seq;
         cache.add(seq, pkt.clone(), now_ms);
-        if cache.is_expired(now_ms) {
+        if cache.is_expired(now_ms) || cache.packets.len() > BOOK_CACHE_MAX_PACKETS {
             cache.corrupted = true;
         }
         if cache.try_request_full(now_ms) {
@@ -376,7 +336,7 @@ impl OrderBooks {
 
     /// Разгрести cache — применить все последовательные пакеты `expected_seq, +1, +2 ...`.
     /// Соответствует `MoonProto_TryApplyCached` (MoonProtoOrderBook.pas:682-720).
-    fn drain_cache(&mut self, key: BookKey, now_ms: i64, events: &mut Vec<OrderBookEvent>) {
+    fn drain_cache(&mut self, key: BookKey, events: &mut Vec<OrderBookEvent>) {
         let cache = match self.caches.get_mut(&key) {
             Some(c) => c,
             None => return,
@@ -395,7 +355,6 @@ impl OrderBooks {
                 let entry = cache.packets.pop_front().unwrap();
                 cache.expected_seq = entry.seq.wrapping_add(1);
                 cache.last_applied_seq = entry.seq;
-                cache.last_apply_ms = now_ms;
                 events.push(OrderBookEvent::Apply {
                     market_index: entry.pkt.market_index,
                     book_kind: entry.pkt.book_kind,
@@ -555,6 +514,73 @@ mod tests {
         // Diff для futures at seq 11 — должен примениться независимо.
         let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
         assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 11, book_kind: 0, .. })));
+    }
+
+    #[test]
+    fn book_seq_zero_overrides_stale_compare_like_delphi() {
+        // Delphi normal-mode условие проверяет `m.MoonProtoBookSeq = 0` до
+        // stale-drop. Поэтому при начальном seq=0 пакет 65535 всё равно
+        // применяется, хотя CompareSeq(65535, 0) < 0.
+        let mut ob = OrderBooks::new();
+        let events = ob.on_packet(make_pkt(9, 0, u16::MAX, false), 1000);
+        assert!(
+            events.iter().any(|e| matches!(e, OrderBookEvent::Apply { seq: u16::MAX, .. })),
+            "MoonProtoBookSeq=0 должен применить Diff до stale-check"
+        );
+    }
+
+    #[test]
+    fn duplicate_gap_packets_are_cached_like_delphi() {
+        let mut ob = OrderBooks::new();
+        let _ = ob.on_packet(make_pkt(10, 0, 1, true), 1000);
+        let _ = ob.on_packet(make_pkt(10, 0, 3, false), 1010);
+        let _ = ob.on_packet(make_pkt(10, 0, 3, false), 1020);
+
+        let cache = ob.caches.get(&(10, 0)).unwrap();
+        assert_eq!(
+            cache.packets.len(),
+            2,
+            "TOrderBookCache.Add inserts duplicate seq packets; stale cleanup happens during drain"
+        );
+    }
+
+    #[test]
+    fn normal_gap_overflow_enters_corrupted_without_clearing_cache() {
+        let mut ob = OrderBooks::new();
+        let _ = ob.on_packet(make_pkt(11, 0, 1, true), 1000);
+
+        let mut request_full_seen = false;
+        for seq in 3..=67 {
+            let events = ob.on_packet(make_pkt(11, 0, seq, false), 1000 + seq as i64);
+            request_full_seen |= events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. }));
+        }
+
+        let cache = ob.caches.get(&(11, 0)).unwrap();
+        assert!(cache.corrupted, "Count > BOOK_CACHE_MAX_PACKETS переводит cache в corrupted");
+        assert!(request_full_seen, "TryRequestFull должен сработать при входе в corrupted");
+        assert_eq!(
+            cache.packets.len(),
+            65,
+            "Delphi normal-mode не очищает cache при overflow; 65-й gap-пакет остаётся в списке"
+        );
+    }
+
+    #[test]
+    fn corrupted_mode_drops_oldest_before_add() {
+        let mut ob = OrderBooks::new();
+        let _ = ob.on_packet(make_pkt(12, 0, 1, true), 1000);
+        for seq in 3..=67 {
+            let _ = ob.on_packet(make_pkt(12, 0, seq, false), 1000 + seq as i64);
+        }
+
+        let _ = ob.on_packet(make_pkt(12, 0, 68, false), 2000);
+        let cache = ob.caches.get(&(12, 0)).unwrap();
+        assert_eq!(cache.packets.len(), 65);
+        assert_eq!(
+            cache.packets.front().map(|p| p.seq),
+            Some(4),
+            "в corrupted mode Delphi DropOldest выполняется перед Add нового diff"
+        );
     }
 
     #[test]

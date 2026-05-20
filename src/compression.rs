@@ -22,11 +22,11 @@ type Offsets = [usize; 4096];
 // на alloc/dealloc + allocator pressure. Thread-local: alloc один раз per thread
 // при первом вызове, далее — zero alloc.
 //
-// Безопасность stale содержимого: SynLZ алгоритм пишет `offset[h] = lh` ПЕРЕД
-// тем как может его прочитать для back-reference в этом же вызове. Stale значения
-// от предыдущего вызова никогда не читаются как валидные offsets — на каждый
-// back-ref (`copy_from = offset[h_idx]`) применяется bounds check
-// `copy_from > dst_pos` (новый dst, не старый) → corrupt значение reject'ится.
+// Важно: offset scratch должен быть сброшен перед каждым decompress. Live
+// OrderBook-пакеты могут ссылаться на hash slot до записи в него в рамках
+// текущего вызова; persistent значение от предыдущего packet'а превращает такой
+// back-reference в ложный Corrupt. В Rust thread-local буфер обязан вести себя
+// как свежий scratch на каждый `SynLZdecompress1pas`, поэтому сбрасываем его в 0.
 //
 // Рекурсии нет: `synlz_decompress` нигде сам себя не вызывает. RefCell гарантирует
 // safety если кто-то нарушит этот invariant (try_borrow_mut вернёт Err → fallback на свой alloc).
@@ -104,7 +104,10 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     // инварианты алгоритма).
     let result = DECOMPRESS_OFFSETS.with(|cell| {
         match cell.try_borrow_mut() {
-            Ok(mut guard) => synlz_decompress_inner(src, &mut dst, &mut **guard, pos, out_size),
+            Ok(mut guard) => {
+                for v in guard.iter_mut() { *v = 0; }
+                synlz_decompress_inner(src, &mut dst, &mut **guard, pos, out_size)
+            }
             Err(_) => {
                 // Recursion — невозможно по invariant, но если кто-то нарушит контракт —
                 // fallback на свой alloc.
@@ -397,5 +400,39 @@ pub fn mp_compress(data: &[u8]) -> Option<Vec<u8>> {
         Some(compressed)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        assert!(s.len() % 2 == 0);
+        let mut out = Vec::with_capacity(s.len() / 2);
+        let bytes = s.as_bytes();
+        for i in (0..bytes.len()).step_by(2) {
+            let hi = (bytes[i] as char).to_digit(16).unwrap();
+            let lo = (bytes[i + 1] as char).to_digit(16).unwrap();
+            out.push(((hi << 4) | lo) as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn synlz_decompress_resets_thread_local_offsets() {
+        let live_orderbook_payload = hex_to_bytes(
+            "3f001000000001000300013084759647a037953d801b88475873803b00f87147faedeb3ae13e97800000004700000000464134791f4597476f12833b2145974700000000",
+        );
+
+        DECOMPRESS_OFFSETS.with(|cell| {
+            let mut offsets = cell.borrow_mut();
+            offsets[768] = usize::MAX;
+            offsets[1939] = usize::MAX;
+        });
+
+        let decoded = synlz_decompress(&live_orderbook_payload)
+            .expect("decompress must not depend on stale thread-local offsets");
+        assert_eq!(decoded.len(), 63);
     }
 }
