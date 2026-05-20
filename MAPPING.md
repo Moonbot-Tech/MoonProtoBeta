@@ -71,11 +71,11 @@
 
 | # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
 |---|---|---|---|---|
-| 41 | 399 | Decode WhoAreYou with MasterKey, AAD=ClientID | client.rs: decrypt with &[] (AAD discarded by mORMot) | ✅ DEVIATION |
+| 41 | 399 | Decode WhoAreYou with MasterKey, AAD=ClientID | client.rs: decrypt with `client_id.to_le_bytes()` AAD | ✅ |
 | 42 | 416-419 | Save ServerToken, PeerAppToken | client.rs: self.server_token = ... | ✅ |
 | 43 | 421-422 | Update Hello: MixTS, AppToken | client.rs: im.mix_ts, im.app_token | ✅ |
 | 44 | 427 | GenerateSubKeys(MasterKey, ServerToken) | client.rs: generate_sub_keys | ✅ |
-| 45 | 430-431 | FClient.Encode (session key, AAD=ClientID) | client.rs: encrypt(&encode_key, &[], ...) AAD discarded | ✅ DEVIATION |
+| 45 | 430-431 | FClient.Encode (session key, AAD=ClientID) | client.rs: encrypt with `client_id.to_le_bytes()` AAD | ✅ |
 | 46 | 433-436 | SendCommand ImFriend x2 (Sleep 32ms) | client.rs: send x2, sleep 32ms | ✅ |
 | 47 | 439-449 | MPC_Fine → AuthDone | client.rs: authorized=true, AuthDone | ✅ |
 
@@ -92,7 +92,7 @@
 
 | # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
 |---|---|---|---|---|
-| 52 | 283-316 | MPCompress (SynLZ / Deflate / RLE+SynLZ) | compression.rs: not needed client-side (server compresses) | N/A |
+| 52 | 283-316 | MPCompress (SynLZ / Deflate / RLE+SynLZ) | compression.rs + client.rs `maybe_compress` for outgoing payload >64B | ✅ |
 | 53 | 319-358 | MPDecompress | compression.rs: synlz_decompress (algo 1) | ✅ |
 
 ## UpdateChannelRDown (MoonProtoIntStruct.pas:1003-1055) → ???
@@ -111,13 +111,12 @@
 
 ## Итого Stage 1: 55 пунктов
 
-- ✅ = 51
-- ✅* = 2 (структура готова, заработает когда клиент будет слать H-commands / полный Sliced)
-- N/A = 1 (MPCompress — клиент не сжимает, только распаковывает)
-- DEVIATION = 2 (AAD в строках 41, 45 — подтверждённое поведение mORMot)
-
-**Открытый вопрос:** DontFragment flag (MAPPING #16, M5) — platform-specific, требует raw socket opt.
-Записано в DEVIATION.md.
+- Все пункты закрыты или имеют подтверждённое описание поведения.
+- AAD в handshake актуализирован: текущий Delphi `MakeCorrectAAD = true`, Rust
+  передаёт `client_id` как AAD.
+- DontFragment закрыт cross-platform реализацией, см. `DEVIATION #19`.
+- MPCompress подключён через `client.rs::maybe_compress` для исходящих
+  payload >64B (auto-compression, byte-exact с Delphi).
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -186,8 +185,9 @@
 | OB5 | TOrderBookCache reordering buffer | до 64 пакетов sorted by seq | state/order_books.rs cache | ✅ |
 | OB6 | BOOK_EXPIRED_TIMEOUT = 800ms | stale diff drop | state/order_books.rs:BOOK_EXPIRED_TIMEOUT | ✅ |
 | OB7 | BOOK_FULL_REQUEST_THROTTLE = 5000ms | повторный full не чаще | state/order_books.rs:BOOK_FULL_REQUEST_THROTTLE | ✅ |
-| OB8 | Diff до Full → emit RequestFullNeeded | gap recovery | OrderBookEvent::RequestFullNeeded | ✅ |
+| OB8 | MoonProtoEngine.pas:2042-2048 first Diff without Full when `MoonProtoBookSeq = 0` | state/order_books.rs: `last_applied_seq == 0` applies first Diff, no RequestFull | ✅ |
 | OB9 | compare_seq wrapping math | u16 sequence comparison | state/order_books.rs:compare_seq | ✅ |
+| OB10 | MoonProtoEngine.pas:2021-2039 corrupted mode | Apply diff as-is + keep requesting Full | state/order_books.rs:corrupted branch | ✅ |
 
 ---
 
@@ -207,6 +207,7 @@
 | TS10 | emk_TradesResend batches (200/batch) | batched resend request | state/trades.rs:tick batches | ✅ |
 | TS11 | MPC_TradesResendResponse batch parser | multi-packet response | parse_trades_resend_response | ✅ |
 | TS12 | on_packet_resend (не двигает last_packet_num) | historical apply | state/trades.rs:on_packet_resend | ✅ |
+| TS13 | MoonProtoEngine.pas:1649-1658 overflow gap (`gap > MAX_RECVD_SIZE` / buckets full) | reset buckets, текущий пакет всё равно применяется, следующий пакет заново стартует tracking | state/trades.rs:overflow branch | ✅ |
 
 ---
 
@@ -355,15 +356,15 @@
 | E-W3 | dispatch on Command::API → pending dispatch or fallback to on_data | client.rs:data_read_int | ✅ |
 | E-W4 | 46+ high-level wrappers (29 Engine API + 17 Trade + Candles) | client.rs `impl Client` | ✅ |
 | E-W5 | Trade wrappers с UKey dedup (UK_OrderMove, UK_ImmuneClicks) | client.rs:send_trade_keyed + UniqueKey constants | ✅ |
-| E-W6 | LifecycleEvent: Connecting/Authenticated/Disconnected/Reconnecting/ServerRestart | client.rs:check_lifecycle_transition + handle_handshake ServerRestart detection | ✅ |
-| E-W7 | bind_socket failure → Disconnected event | client.rs:bind_socket failure path | ✅ |
+| E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/SendBacklogCritical/BindFailed | client.rs:check_lifecycle_transition + send/bind failure paths | ✅ |
+| E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 
 ---
 
 ## Итого Stage 2: 130+ пунктов
 
-- ✅ = 124
-- DEVIATION = 7 (#5, #6, #7, #14, #15, #16, #17 — все зафиксированы)
+- ✅ = 124+
+- DEVIATION = подтверждённые строки перечислены в `DEVIATION.md`
 - TODO = 1 (ParseArbPayloadCompact — Stage 3+)
 - N/A = 1 (UnencryptedMethods — server-side)
 
@@ -407,8 +408,8 @@
 |---|---|---|---|
 | AP1 | MoonProtoClient.pas:878-892 PendingRequests + FastLock | ApiPending { Mutex<HashMap<u64, Sender<EngineResponse>>> } | ✅ |
 | AP2 | MoonProtoClient.pas:880-885 search by RequestUID | dispatch(resp) → map.remove(resp.request_uid) | ✅ |
-| AP3 | Delphi: SendAndWait blocks until response | Rust: register(uid) → Receiver, потребитель делает recv_timeout | ✅ |
-| AP4 | timeout cleanup | remove(uid) для timeout (потребитель сам) | ✅ |
+| AP3 | Delphi: SendAndWait blocks until response | Rust: register(uid) → Receiver; same-thread wait через `Client::run_until_response` | ✅ |
+| AP4 | timeout cleanup | `cleanup_old` из main loop + explicit `remove(uid)` для caller timeout | ✅ |
 
 ## key_import.rs → MoonProtoFunc.pas DecodeBuffer + base64 import
 
@@ -416,7 +417,7 @@
 |---|---|---|---|
 | KI1 | Base64 decode | base64 crate decode | ✅ |
 | KI2 | MoonProtoFunc.pas DecodeBuffer (XOR с фиксированным паттерном) | decode_buffer (byte-exact) | ✅ |
-| KI3 | Layout: server_addr + master_key(16) + mac_key(16) + ... | import_master_key parse | ✅ |
+| KI3 | Layout: server_addr + master_key(16) + mac_key(16) + ... | `import_key` parse | ✅ |
 
 ## Связанные DEVIATION'ы
 
@@ -430,3 +431,9 @@
 - #16: from_utf8_lossy vs UTF8 fallback '?' — ПОДТВЕРЖДЕНО
 - #17: cpu_timestamp non-x86 fallback — ПОДТВЕРЖДЕНО
 - #18: LifecycleEvent abstraction (Stage 3 high-level API) — ПОДТВЕРЖДЕНО
+- #19: cross-platform DontFragment — ИСПРАВЛЕНО
+- #20: socket buffers 8MB — ИСПРАВЛЕНО
+- #21: reader shutdown handle — ИСПРАВЛЕНО
+- #22: active session manager boundary — ПОДТВЕРЖДЕНО
+- #23: per-Client ServerTimeDelta — ИСПРАВЛЕНО
+- #24: first OrderBook Diff with local seq 0 + corrupted-mode diffs — ИСПРАВЛЕНО

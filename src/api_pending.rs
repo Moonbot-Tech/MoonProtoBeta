@@ -1,22 +1,19 @@
-//! Pending Engine API responses registry.
+//! Pending Engine API response registry.
 //!
-//! Клиент отправляет `TEngineRequest` с уникальным UID; сервер отвечает `TEngineResponse`
-//! с тем же UID. `ApiPending` хранит маппинг `uid → mpsc::Sender<EngineResponse>` чтобы
-//! приложение могло **дождаться** ответа через blocking `recv` или `recv_timeout`.
+//! Клиент отправляет `TEngineRequest` с уникальным UID; сервер отвечает
+//! `TEngineResponse` с тем же UID. `ApiPending` хранит маппинг
+//! `uid → mpsc::Sender<EngineResponse>`.
 //!
-//! Использование (sync):
+//! Обычным приложениям лучше использовать `Client::api_*` wrappers совместно с
+//! [`crate::client::Client::run_until_response`] — тогда тот же thread продолжает
+//! прокачивать UDP main loop пока ждёт response:
 //! ```ignore
-//! let raw = build_get_markets_list();
-//! let uid = u64::from_le_bytes(raw[3..11].try_into().unwrap());
-//! let rx = client.api_pending.register(uid);
-//! client.send_api_request(&raw);
-//! match rx.recv_timeout(Duration::from_secs(10)) {
-//!     Ok(resp) => process(resp),
-//!     Err(_) => { client.api_pending.remove(uid); /* timeout */ }
-//! }
+//! let rx = client.api_get_markets_list();
+//! let response = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 //! ```
 //!
-//! Для async (tokio) — потребитель оборачивает `recv` в `spawn_blocking`.
+//! Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже крутит
+//! main loop клиента.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -73,8 +70,11 @@ impl ApiPending {
     }
 
     /// Зарегистрировать ожидание ответа по `uid` с timestamp `registered_at_ms`
-    /// (от `client.now_ms()` — монотонное время). Возвращает receiver — потребитель
-    /// делает `rx.recv_timeout(...)` для ожидания.
+    /// (от `client.now_ms()` — монотонное время).
+    ///
+    /// Для обычного однопоточного клиента передай возвращённый receiver в
+    /// [`crate::client::Client::run_until_response`]. Прямой `rx.recv_timeout(...)`
+    /// подходит только когда другой thread уже крутит main loop клиента.
     ///
     /// Если на тот же `uid` уже была регистрация — старый sender дропается (старый
     /// receiver получит "channel closed").

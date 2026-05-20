@@ -181,17 +181,13 @@ fn main() {
     let keys = key_import::import_key(key_b64).expect("Failed to import key");
     log_line(&mut log, t0, "[KEY] imported");
 
-    let cfg = ClientConfig {
-        server_ip: ip,
-        server_port: port,
-        master_key: keys.master_key,
-        mac_key: keys.mac_key,
-        mask_ver: 0,
-        client_id: rand::random(),
-        ntp_host: None, // loss_logger — короткий стресс-тест, NTP не нужен
-        // Periodic refresh не нужен в стресс-тесте — отключаем чтобы не зашумлять трафик.
-        refresh: moonproto::client::RefreshConfig { update_markets_every: None, check_tags_every: None },
-    };
+    // loss_logger — короткий стресс-тест: без NTP, без periodic refresh.
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key)
+        .without_ntp()
+        .with_refresh(moonproto::client::RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: None,
+        });
 
     let mut client = Client::new(cfg);
     let sender = client.event_sender();

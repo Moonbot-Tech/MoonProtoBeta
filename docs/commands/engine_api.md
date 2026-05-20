@@ -84,7 +84,7 @@ let rx = client.api_get_markets_list();        // ничего не переда
 let rx = client.api_get_order(order_uid);       // с параметрами
 let rx = client.api_set_leverage("BTCUSDT", 10);
 
-let response: EngineResponse = rx.recv_timeout(Duration::from_secs(5))?;
+let response: EngineResponse = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(5))?;
 if response.success {
     let markets = parse_markets_list_response(&response.data, version)?;
     // ...

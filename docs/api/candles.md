@@ -45,7 +45,10 @@ use std::time::Duration;
 use moonproto::commands::candles::{DeepHistoryKind, parse_coin_card_candles_response};
 
 let rx = client.api_get_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour1);
-match rx.recv_timeout(Duration::from_secs(10)) {
+// `run_until_response` крутит main loop тиками пока ждёт ответ — нужно
+// потому что в single-threaded коде `rx.recv_timeout(...)` обычно timeout'ит
+// (main loop стоит во время блокирующего wait).
+match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10)) {
     Ok(resp) if resp.success => {
         let candles = parse_coin_card_candles_response(&resp.data).unwrap();
         for c in &candles {
@@ -76,7 +79,7 @@ candles: N × TDeepPrice (28 bytes each)
 use std::time::Duration;
 
 let rx = client.api_request_candles_data_async();
-match rx.recv_timeout(Duration::from_secs(30)) {
+match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
     Ok(merged) => {
         // merged.uid     — request_uid
         // merged.candles — Vec<DeepPrice> уже распарсенный

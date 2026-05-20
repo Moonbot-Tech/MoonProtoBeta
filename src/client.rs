@@ -500,6 +500,64 @@ pub struct ClientConfig {
     pub refresh: RefreshConfig,
 }
 
+impl ClientConfig {
+    /// Создать конфиг с продакшен-дефолтами для V0 (open base transport):
+    /// - `mask_ver = 0`;
+    /// - `client_id = rand::random()`;
+    /// - `ntp_host = Some("pool.ntp.org")`;
+    /// - `refresh = RefreshConfig::default()` (UpdateMarketsList каждые 60с).
+    ///
+    /// Тесты и оффлайн-инструменты могут вызвать [`Self::without_ntp`].
+    /// Приложения с extended transport — [`Self::with_transport_mode`].
+    pub fn new(
+        server_ip: impl Into<String>,
+        server_port: u16,
+        master_key: MoonKey,
+        mac_key: MoonKey,
+    ) -> Self {
+        Self {
+            server_ip: server_ip.into(),
+            server_port,
+            master_key,
+            mac_key,
+            mask_ver: 0,
+            client_id: rand::random(),
+            ntp_host: Some("pool.ntp.org".to_string()),
+            refresh: RefreshConfig::default(),
+        }
+    }
+
+    /// Override transport mode (`0` = base, `1/2` = extended требует moonext).
+    pub fn with_transport_mode(mut self, mask_ver: u8) -> Self {
+        self.mask_ver = mask_ver;
+        self
+    }
+
+    /// Override random client_id. Полезно для воспроизводимых тестов.
+    pub fn with_client_id(mut self, client_id: u64) -> Self {
+        self.client_id = client_id;
+        self
+    }
+
+    /// Override NTP host для self-managed NTP thread'а.
+    pub fn with_ntp_host(mut self, host: impl Into<String>) -> Self {
+        self.ntp_host = Some(host.into());
+        self
+    }
+
+    /// Отключить self-managed NTP thread.
+    pub fn without_ntp(mut self) -> Self {
+        self.ntp_host = None;
+        self
+    }
+
+    /// Override periodic refresh поведение.
+    pub fn with_refresh(mut self, refresh: RefreshConfig) -> Self {
+        self.refresh = refresh;
+        self
+    }
+}
+
 // Custom Debug — secret keys redacted (audit rust_quality #20).
 impl std::fmt::Debug for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -517,6 +575,17 @@ impl std::fmt::Debug for ClientConfig {
 }
 
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
+
+/// Callback который получает только `&Event`. Используется в
+/// [`Client::run_with_dispatcher`].
+pub type EventFn = Box<dyn FnMut(&crate::events::Event) + Send>;
+
+/// Callback который получает `&Event` + read-only `&EventDispatcher` чтобы
+/// сразу читать актуальное state (например `dispatcher.orders().by_id.get(&uid)`
+/// для уid из `OrderEvent::Updated(uid)`). Используется в
+/// [`Client::run_with_dispatcher_state`].
+pub type EventWithStateFn =
+    Box<dyn FnMut(&crate::events::Event, &crate::events::EventDispatcher) + Send>;
 
 /// Куда доставлять `Command + payload` после внутренней обработки (decrypt,
 /// decompress, Grouped split, API pending dispatch). Два варианта:
@@ -570,12 +639,33 @@ pub(crate) enum RunMode<'a> {
     },
     Dispatcher {
         dispatcher: &'a mut crate::events::EventDispatcher,
-        on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
+        on_event: DispatcherEventFn,
         /// Переиспользуемый буфер событий (избегаем alloc per packet).
         event_buf: Vec<crate::events::Event>,
         /// Переиспользуемый буфер payload'ов из handle_udp_command.
         payload_buf: Vec<(Command, Vec<u8>)>,
     },
+}
+
+/// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcher)`.
+/// Изоляция позволяет иметь два публичных метода (`run_with_dispatcher` /
+/// `run_with_dispatcher_state`) без дубликации main loop кода.
+pub(crate) enum DispatcherEventFn {
+    EventOnly(EventFn),
+    EventWithState(EventWithStateFn),
+}
+
+impl DispatcherEventFn {
+    fn call(
+        &mut self,
+        event: &crate::events::Event,
+        dispatcher: &crate::events::EventDispatcher,
+    ) {
+        match self {
+            Self::EventOnly(cb) => cb(event),
+            Self::EventWithState(cb) => cb(event, dispatcher),
+        }
+    }
 }
 
 // =============================================================================
@@ -749,10 +839,6 @@ pub struct Client {
     total_sent: u64,
     next_port: u16,
     ping_count: u32,
-
-    // audit_robustness M8: throttle для SizeTest/ProbeMTU ответов (anti-amplification).
-    last_size_test_ack_ms: i64,
-    last_probe_mtu_ack_ms: i64,
 
     /// Реестр pending Engine API запросов. Shareable через `Arc::clone`.
     /// При получении `Command::API` пакета — `dispatch` доставит response
@@ -976,8 +1062,6 @@ impl Client {
             total_sent: 0,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
-            last_size_test_ack_ms: 0,
-            last_probe_mtu_ack_ms: 0,
             api_pending: ApiPending::new_arc(),
             lifecycle_cb: None,
             prev_auth_status: AuthStatus::Base,
@@ -1170,8 +1254,10 @@ impl Client {
     /// Send Engine API request + регистрация в `api_pending` для ожидания ответа.
     ///
     /// UID извлекается из payload (offset 3..11 в TBaseCommand header).
-    /// Возвращает `mpsc::Receiver<EngineResponse>` — потребитель делает
-    /// `rx.recv_timeout(Duration::from_secs(N))` для блокирующего ожидания.
+    /// Возвращает `mpsc::Receiver<EngineResponse>`. В однопоточном consumer-коде
+    /// жди ответ через [`Client::run_until_response`], чтобы main loop продолжал
+    /// обрабатывать UDP. Прямой `rx.recv_timeout(...)` подходит только если
+    /// `Client` уже запущен в другом потоке.
     ///
     /// При timeout вызвать `client.api_pending.remove(uid)` чтобы освободить slot.
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
@@ -1364,8 +1450,8 @@ impl Client {
     }
 
     /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
-    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель делает
-    /// `rx.recv_timeout(Duration::from_secs(N))` и получает уже собранный набор свечей.
+    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель ждёт
+    /// его через [`Client::run_until_response`] и получает уже собранный набор свечей.
     ///
     /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
     /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
@@ -2024,7 +2110,7 @@ impl Client {
         &mut self,
         duration: Duration,
         dispatcher: &mut crate::events::EventDispatcher,
-        on_event: Box<dyn FnMut(&crate::events::Event) + Send>,
+        on_event: EventFn,
     ) {
         // Тонкий wrapper над унифицированным `run_inner`. Все active-library
         // auto-actions (RequestOrderBookFull, periodic trades.tick, indexes
@@ -2032,11 +2118,75 @@ impl Client {
         // в `dispatch_into_active` + `run_inner`.
         let mode = RunMode::Dispatcher {
             dispatcher,
-            on_event,
+            on_event: DispatcherEventFn::EventOnly(on_event),
             event_buf: Vec::with_capacity(8),
             payload_buf: Vec::with_capacity(4),
         };
         self.run_inner(duration, mode);
+    }
+
+    /// То же что [`Self::run_with_dispatcher`], но callback получает также
+    /// read-only `&EventDispatcher` для немедленного чтения state.
+    ///
+    /// Удобный pattern для UI-уровневых событий с id-only payload
+    /// (`OrderEvent::Updated(uid)`): сразу читай `dispatcher.orders().by_id.get(&uid)`
+    /// без второго dispatch'а.
+    pub fn run_with_dispatcher_state(
+        &mut self,
+        duration: Duration,
+        dispatcher: &mut crate::events::EventDispatcher,
+        on_event: EventWithStateFn,
+    ) {
+        let mode = RunMode::Dispatcher {
+            dispatcher,
+            on_event: DispatcherEventFn::EventWithState(on_event),
+            event_buf: Vec::with_capacity(8),
+            payload_buf: Vec::with_capacity(4),
+        };
+        self.run_inner(duration, mode);
+    }
+
+    /// Ждать ответ из `Receiver<T>` пока крутит UDP main loop тиками.
+    ///
+    /// `Client::api_*` методы возвращают `mpsc::Receiver<T>`, но response
+    /// доставляется **только пока Client работает**. Прямой `rx.recv_timeout(...)`
+    /// в том же thread'е что владеет Client'ом обычно timeout'ит — main loop
+    /// стоит во время блокирующего wait, UDP пакеты не парсятся.
+    ///
+    /// Этот helper решает проблему: крутит короткие `run_with_dispatcher` тики
+    /// (~50мс) до получения значения, disconnect'а или общего timeout.
+    /// Работает с любым `Receiver<T>` — Engine API responses, candles aggregator,
+    /// custom registry slots.
+    ///
+    /// **Pattern**:
+    /// ```ignore
+    /// let rx = client.api_get_markets_list();
+    /// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+    /// ```
+    pub fn run_until_response<T>(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        rx: &mpsc::Receiver<T>,
+        timeout: Duration,
+    ) -> Result<T, mpsc::RecvTimeoutError> {
+        const TICK: Duration = Duration::from_millis(50);
+        let deadline = Instant::now() + timeout;
+        loop {
+            match rx.try_recv() {
+                Ok(resp) => return Ok(resp),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(mpsc::RecvTimeoutError::Disconnected);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let tick = remaining.min(TICK);
+            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+        }
     }
 
     /// Унифицированный main loop. Закрывает дубликацию `run`/`run_with_dispatcher`
@@ -2261,7 +2411,7 @@ impl Client {
                     event_buf.clear();
                     dispatcher.dispatch_into_active(c, &p, cur_tm, event_buf, self);
                     for ev in event_buf.iter() {
-                        on_event(ev);
+                        on_event.call(ev, dispatcher);
                     }
                 }
             }
@@ -2872,14 +3022,10 @@ impl Client {
         // не передаёт пакетов > MaxNeededDatagramSize (8000 по IPv6 limit).
         const MAX_SIZE_PROBE: u16 = 8192;
         if size > MAX_SIZE_PROBE || (size as usize) < 6 { return; }
-        // audit_robustness M8: throttle ответов на SizeTest до 10/sec. Защита от amplification
-        // attack (адверсарь шлёт burst → клиент шлёт burst 8KB ответов в ответ = mobile data
-        // drain). Реальный PMTU discovery шлёт ~17 пакетов на серию каждые ~5сек → 10/sec хватает.
-        let now = self.now_ms();
-        if now.saturating_sub(self.last_size_test_ack_ms) < 100 {
-            return;
-        }
-        self.last_size_test_ack_ms = now;
+        // PMTU discovery шлёт серию ~17 SizeTest пакетов каждые ~5с (Delphi
+        // MoonProtoUDPClient.pas). Старый throttle 10/sec **ломал** PMTU
+        // discovery — серия не помещалась в окно. Delphi не throttle'ит,
+        // возвращаем byte-exact behavior.
         let mut ack = vec![0u8; size as usize];
         ack[0..2].copy_from_slice(&size.to_le_bytes());
         ack[4..6].copy_from_slice(&series.to_le_bytes());
@@ -2896,12 +3042,7 @@ impl Client {
         // D-V2-07 fix: см. handle_size_test выше — clamp до MAX_SIZE_PROBE.
         const MAX_SIZE_PROBE: u16 = 8192;
         if test_size > MAX_SIZE_PROBE || (test_size as usize) < 5 { return; }
-        // audit_robustness M8: throttle до 10/sec (см. handle_size_test).
-        let now = self.now_ms();
-        if now.saturating_sub(self.last_probe_mtu_ack_ms) < 100 {
-            return;
-        }
-        self.last_probe_mtu_ack_ms = now;
+        // ProbeMTU тоже не throttle — см. handle_size_test rationale.
         let mut ack = vec![0u8; test_size as usize];
         ack[0..2].copy_from_slice(&probe_id.to_le_bytes());
         ack[2] = probe_index;
@@ -3882,22 +4023,8 @@ fn wait_for_api_response(
     rx: &mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
     timeout: Duration,
 ) -> Result<crate::commands::engine_api::EngineResponse, mpsc::RecvTimeoutError> {
-    const TICK: Duration = Duration::from_millis(50);
-    let deadline = Instant::now() + timeout;
-    loop {
-        match rx.try_recv() {
-            Ok(resp) => return Ok(resp),
-            Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(mpsc::RecvTimeoutError::Timeout);
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let tick = remaining.min(TICK);
-        client.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
-    }
+    // Internal wrapper, делегирует к публичному `Client::run_until_response`.
+    client.run_until_response(dispatcher, rx, timeout)
 }
 
 /// Полноценный init sequence: BaseCheck → AuthCheck → GetMarketsList →
@@ -5063,26 +5190,25 @@ fn get_ntp_offset_days() -> f64 {
     f64::from_bits(NTP_OFFSET_DAYS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Global server-time-delta (days), обновляется Client при каждом Ping update.
-/// `EventDispatcher` читает в `dispatch_into` и **автоматически** применяет к
-/// `Orders::apply` через `Orders::set_server_time_delta()` — потребитель либы НЕ
-/// должен делать manual bridge (audit_responsibility A5 / active library principle).
+/// Back-compat fallback для low-level `EventDispatcher::dispatch_into` callers
+/// которые не привязали per-client `ServerTimeDelta` source. Рекомендуемый
+/// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
+/// через `dispatch_into_active` и **не использует** это global значение.
 ///
-/// **Ограничение**: глобальная переменная = один Client per process. Multi-Client
-/// (multi-server терминал, Stage 3 backlog в HANDOFF Roadmap) перезапишет delta
-/// последнего активного Client'а на все остальные → silent timestamp corruption.
-/// См. `DEVIATION.md #23`. Фикс при необходимости: `Arc<AtomicU64>` per Client +
-/// bind в `EventDispatcher` через ссылку на Client.
+/// DEVIATION #23 закрыт: multi-Client больше не страдает от перезаписи —
+/// каждый Client имеет свой `Arc<AtomicU64>` handle.
 static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Установить server_time_delta (в днях, как TDateTime). Вызывается из Client::handle_ping
-/// автоматически — публично выставлен только для тестов.
-pub fn set_server_time_delta_global(delta_days: f64) {
+/// Установить fallback server_time_delta (в днях, как TDateTime).
+/// Вызывается из `Client::handle_ping` (back-compat write); потребитель НЕ должен
+/// вызывать напрямую — используй `client.server_time_delta_handle()` для multi-Client.
+pub(crate) fn set_server_time_delta_global(delta_days: f64) {
     SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Получить server_time_delta (дни). Используется EventDispatcher.
-pub fn get_server_time_delta_global() -> f64 {
+/// Получить fallback server_time_delta (дни). Используется `EventDispatcher` когда
+/// per-Client source не привязан (single-Client back-compat).
+pub(crate) fn get_server_time_delta_global() -> f64 {
     f64::from_bits(SERVER_TIME_DELTA_DAYS.load(std::sync::atomic::Ordering::Relaxed))
 }
 

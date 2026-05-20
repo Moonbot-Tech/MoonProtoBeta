@@ -84,7 +84,7 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 
 ```rust
 let rx = client.api_get_markets_list();
-let resp = rx.recv_timeout(Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 // resp.data — уже распакованный DEFLATE payload.
 let list = parse_markets_list_response(&resp.data, 2)?;
 ```
@@ -186,7 +186,7 @@ use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_f
 use std::time::Duration;
 
 let rx = client.api_base_check();
-let resp = rx.recv_timeout(Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 if resp.success {
     let info = parse_base_check_response(&resp.data);
     if let (Some(id), Some(name)) = (info.bot_id, &info.exchange_name) {
@@ -357,7 +357,7 @@ let rx = client.api_pending.register(uid, now_ms);
 
 client.send_api_request(&raw);
 
-match rx.recv_timeout(Duration::from_secs(10)) {
+match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10)) {
     Ok(resp) => process(resp),
     Err(_)   => { client.api_pending.remove(uid); }
 }

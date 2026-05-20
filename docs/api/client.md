@@ -16,16 +16,10 @@ use moonproto::key_import;
 let keys = key_import::import_key("v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC...")
     .expect("invalid key");
 
-let cfg = ClientConfig {
-    server_ip:   "207.148.91.186".to_string(),
-    server_port: 3000,
-    master_key:  keys.master_key,
-    mac_key:     keys.mac_key,
-    mask_ver:    0,
-    client_id:   rand::random(),
-    ntp_host:    Some("pool.ntp.org".to_string()),
-    refresh:     RefreshConfig::default(),
-};
+// `ClientConfig::new` устанавливает production-defaults: mask_ver=0, client_id=random,
+// ntp_host=Some("pool.ntp.org"), refresh=RefreshConfig::default().
+// Overrides — через builder methods (`.with_transport_mode(2)`, `.without_ntp()` и т.д.).
+let cfg = ClientConfig::new("207.148.91.186", 3000, keys.master_key, keys.mac_key);
 let mut client = Client::new(cfg);
 let mut dispatcher = EventDispatcher::new();
 
@@ -39,7 +33,7 @@ client.run_with_dispatcher(
 );
 ```
 
-## Два варианта main loop
+## Три варианта main loop
 
 ### `Client::run_with_dispatcher` (рекомендуется)
 
@@ -52,7 +46,23 @@ fn run_with_dispatcher(
     &mut self,
     duration: Duration,
     dispatcher: &mut EventDispatcher,
-    on_event: Box<dyn FnMut(&Event) + Send>,
+    on_event: EventFn,    // = Box<dyn FnMut(&Event) + Send>
+);
+```
+
+### `Client::run_with_dispatcher_state` (UI ergonomic)
+
+То же что `run_with_dispatcher`, но callback дополнительно получает read-only
+`&EventDispatcher` — удобно для events с id-only payload типа
+`OrderEvent::Updated(uid)`: сразу читай `dispatcher.orders().by_id.get(&uid)` без
+второго dispatch'а.
+
+```rust
+fn run_with_dispatcher_state(
+    &mut self,
+    duration: Duration,
+    dispatcher: &mut EventDispatcher,
+    on_event: EventWithStateFn,    // = Box<dyn FnMut(&Event, &EventDispatcher) + Send>
 );
 ```
 
@@ -63,8 +73,31 @@ fn run_with_dispatcher(
 Используй только для специализированных задач (трейд-логгер, отладка).
 
 ```rust
-fn run(&mut self, duration: Duration, on_data: Box<dyn FnMut(Command, &[u8]) + Send>);
+fn run(&mut self, duration: Duration, on_data: OnDataFn);
 ```
+
+## `Client::run_until_response` — single-thread API wait
+
+Большинство `client.api_*()` методов возвращают `mpsc::Receiver<T>`. **Response
+доставляется только пока Client работает.** Прямой `rx.recv_timeout(...)` в том
+же thread'е что владеет Client'ом обычно timeout'ит — main loop стоит во время
+блокирующего wait.
+
+`run_until_response` решает: крутит короткие `run_with_dispatcher` тики (~50мс) до
+получения значения, disconnect'а или общего timeout. Generic, работает с любым
+`Receiver<T>` — Engine API responses, `MergedCandles` aggregator, и т.д.
+
+```rust
+let rx = client.api_get_markets_list();
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+
+// Или candles aggregator:
+let rx = client.api_request_candles_data_async();
+let candles = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30))?;
+```
+
+Если `Client` уже запущен в другом thread'е — обычный `rx.recv_timeout(...)`
+работает (main loop работает параллельно).
 
 ## Конфигурация
 
@@ -103,6 +136,31 @@ pub struct RefreshConfig {
 
 IPv6: bind_address выбирается автоматически по наличию `:` в `server_ip` —
 `[::]:port` для IPv6, `0.0.0.0:port` для IPv4.
+
+### Builder API
+
+Для типичных случаев используй `ClientConfig::new()` + builder methods:
+
+```rust
+// Production defaults: mask_ver=0, client_id=random, ntp=pool.ntp.org, refresh=60s.
+let cfg = ClientConfig::new("207.148.91.186", 3000, master_key, mac_key);
+
+// Builder overrides:
+let cfg = ClientConfig::new("10.0.0.1", 3000, master_key, mac_key)
+    .with_transport_mode(2)           // extended mode (требует moonext.dll/.so)
+    .with_client_id(0x1234_5678)      // фиксированный ID (для воспроизводимых тестов)
+    .without_ntp()                    // отключить NTP thread (test/offline режим)
+    .with_refresh(RefreshConfig {     // custom periodic refresh
+        update_markets_every: None,
+        check_tags_every: Some(Duration::from_secs(300)),
+    });
+```
+
+Полный список builder methods: `with_transport_mode`, `with_client_id`,
+`with_ntp_host`, `without_ntp`, `with_refresh`.
+
+Struct literal (`ClientConfig { ... }`) тоже работает — все поля `pub`, builder
+просто более concise.
 
 ## Lifecycle
 
@@ -226,7 +284,7 @@ client.do_close_position(ctx, "BTCUSDT", true);
 use std::time::Duration;
 
 let rx = client.api_get_markets_list();
-let resp = rx.recv_timeout(Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 // resp.data — уже DEFLATE-decompressed.
 ```
 
@@ -405,7 +463,9 @@ let uid = u64::from_le_bytes(raw[3..11].try_into().unwrap());
 let rx  = client.api_pending.register(uid, /* registered_at_ms = */ client_now_ms);
 client.send_api_request(&raw);
 
-match rx.recv_timeout(Duration::from_secs(10)) {
+// В однопоточном коде используй run_until_response — main loop не работает
+// во время блокирующего rx.recv_timeout, ответ никогда не придёт.
+match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10)) {
     Ok(resp) => process(resp),
     Err(_)   => { client.api_pending.remove(uid); /* timeout */ }
 }

@@ -124,16 +124,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("invalid key")?;
 
     // 2. Конфиг клиента. Liба сама spawn'ит NTP thread (если ntp_host=Some).
-    let cfg = ClientConfig {
-        server_ip:   "207.148.91.186".to_string(),
-        server_port: 3000,
-        master_key:  keys.master_key,
-        mac_key:     keys.mac_key,
-        mask_ver:    0,                                     // 0 = base transport, 1/2 требует moonext
-        client_id:   rand::random(),
-        ntp_host:    Some("pool.ntp.org".to_string()),      // None = отключить NTP
-        refresh:     RefreshConfig::default(),              // UpdateMarketsList каждые 60с
-    };
+    // ClientConfig::new устанавливает production-defaults: mask_ver=0, client_id=random,
+    // ntp_host=Some("pool.ntp.org"), refresh=RefreshConfig::default() (UpdateMarketsList /60с).
+    // Builder methods для overrides: .with_transport_mode(1), .without_ntp(), и т.д.
+    let cfg = ClientConfig::new("207.148.91.186", 3000, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
 
     // 3. Lifecycle callback (опционально) — UI индикатор.

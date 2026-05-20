@@ -62,17 +62,7 @@ fn main() {
     let keys = key_import::import_key(key_b64).expect("Failed to import key");
     println!("[key] OK, connecting to {}:{}", ip, port);
 
-    let cfg = ClientConfig {
-        server_ip: ip,
-        server_port: port,
-        master_key: keys.master_key,
-        mac_key: keys.mac_key,
-        mask_ver: 0,
-        client_id: rand::random(),
-        ntp_host: Some("pool.ntp.org".to_string()),
-        refresh: moonproto::client::RefreshConfig::default(),
-    };
-
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
 
     // Phase 1: connect and auth (10 seconds)

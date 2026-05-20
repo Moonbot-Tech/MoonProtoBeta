@@ -251,8 +251,8 @@ impl TradesState {
 
         // === Out-of-order или Gap ===
         let last = self.last_packet_num;
-        // packet_num > last+1 → новый gap. Wrapping diff:
-        let gap_size = packet_num.wrapping_sub(last.wrapping_add(1)) as usize + 1;
+        // packet_num > last+1 → новый gap. Missing range is [last+1 .. packet_num-1].
+        let gap_size = packet_num.wrapping_sub(last.wrapping_add(1)) as usize;
 
         // Если packet_num фактически "впереди" last (forward gap), создаём bucket.
         // Wrap-safe forward detection: packet_num != last && packet_num != last+1.
@@ -312,18 +312,21 @@ impl TradesState {
         if !extended {
             // Проверяем размер. Слишком большой gap или buckets переполнены.
             if gap_size > MAX_RECVD_SIZE || self.used_buckets >= MAX_GAP_BUCKETS {
-                // audit_robustness H8: раньше reset_buckets + accept. Это даёт adversarial
-                // server возможность держать state в постоянном reset через пакеты
-                // `last + 3001` каждые 100мс → silent trade loss (gap recovery не работает).
+                // Delphi MoonProtoEngine.pas:1649-1658: при overflow сбрасывает buckets,
+                // НЕ обновляет LastTradesPacketNum, но текущий пакет всё равно дальше
+                // применяется к рынкам. Следующий обычный пакет заново стартует tracking.
                 //
-                // Legitimate reset (смена ServerToken) обрабатывается на dispatcher-уровне
-                // через `EventDispatcher.last_known_server_token` + `trades.full_reset()`
-                // ДО applying пакета. Поэтому здесь, при тех же server keys/token, такой
-                // jump = adversarial поведение → **drop packet** + warn (не reset).
+                // Старый "anti-DoS H8" drop+warn был самодеятельностью: ServerToken
+                // change уже handled через `EventDispatcher.last_known_server_token`
+                // ДО применения пакета, поэтому здесь нет adversarial vector — есть
+                // легитимный backpressure от сервера (например после restart).
                 log::warn!(target: "moonproto::trades",
-                    "suspicious packet_num jump {} -> {} (gap_size={} > MAX_RECVD_SIZE={} or buckets full); dropping packet, state preserved",
+                    "packet_num jump {} -> {} (gap_size={} > MAX_RECVD_SIZE={} or buckets full); resetting gap buckets like Delphi",
                     last, packet_num, gap_size, MAX_RECVD_SIZE);
-                events.push(TradesEvent::Duplicate);
+                self.reset_buckets();
+                self.trades_started = false;
+                self.last_packet_time_ms = now_ms;
+                events.push(TradesEvent::Apply(pkt));
                 return events;
             }
 
@@ -610,16 +613,44 @@ mod tests {
     }
 
     #[test]
-    fn extend_respects_max_recvd_size() {
-        // Если расширение превысит MAX_RECVD_SIZE — должен создаться новый bucket.
+    fn overflow_gap_resets_buckets_but_applies_packet_like_delphi() {
+        // Если gap превышает MAX_RECVD_SIZE, Delphi сбрасывает buckets, но не
+        // выбрасывает текущий пакет.
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(0), 1000);
         let _ = s.on_packet(make_pkt(2900), 1010); // bucket [1..2899]
-        // Теперь новый gap [2901..N], N - 0 > MAX_RECVD_SIZE → не extend → reset.
+        assert_eq!(s.used_buckets(), 1);
+
+        // Теперь новый gap [2901..N] больше MAX_RECVD_SIZE → reset + Apply.
         let evs = s.on_packet(make_pkt(7000), 1020);
-        // reset_buckets → 0 buckets потом нет дополнительного create если gap > MAX.
-        let _ = evs;
-        // Не проверяем точное состояние — главное что не упало.
+        assert_eq!(s.used_buckets(), 0);
+        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7000)));
+        assert!(!evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { .. })));
+
+        // Следующий пакет стартует tracking заново, потому что reset оставил
+        // trades_started=false как в Delphi ResetGapBuckets.
+        let evs = s.on_packet(make_pkt(7001), 1030);
+        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7001)));
+        assert_eq!(s.last_packet_num(), 7001);
+    }
+
+    #[test]
+    fn max_sized_gap_is_accepted() {
+        // gap_size = packet_num - last - 1 (missing range [last+1 .. packet_num-1]).
+        // Если gap_size == MAX_RECVD_SIZE — bucket должен создаться без overflow.
+        let mut s = TradesState::new();
+        let first = 100u16;
+        let next = first.wrapping_add(MAX_RECVD_SIZE as u16 + 1);
+        let _ = s.on_packet(make_pkt(first), 1000);
+
+        let evs = s.on_packet(make_pkt(next), 1010);
+
+        assert!(
+            evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { start, end }
+                if *start == first.wrapping_add(1) && *end == next.wrapping_sub(1))),
+            "gap with exactly MAX_RECVD_SIZE missing packets must create a bucket"
+        );
+        assert_eq!(s.used_buckets(), 1);
     }
 
     #[test]

@@ -44,16 +44,7 @@ use moonproto::events::EventDispatcher;
 use moonproto::key_import;
 
 fn run_one_server(label: &str, ip: String, port: u16, keys: key_import::ImportedKeys) {
-    let cfg = ClientConfig {
-        server_ip:   ip,
-        server_port: port,
-        master_key:  keys.master_key,
-        mac_key:     keys.mac_key,
-        mask_ver:    0,
-        client_id:   rand::random(),
-        ntp_host:    Some("pool.ntp.org".to_string()),
-        refresh:     RefreshConfig::default(),
-    };
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
     let mut dispatcher = EventDispatcher::new();
 

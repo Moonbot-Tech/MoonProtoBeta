@@ -61,20 +61,8 @@ fn main() {
         println!("[setup] NTP failed, continuing with system clock");
     }
 
-    // ---- 3. Client config ----
-    let cfg = ClientConfig {
-        server_ip:   ip,
-        server_port: port,
-        master_key:  keys.master_key,
-        mac_key:     keys.mac_key,
-        mask_ver:    0,
-        client_id:   rand::random(),
-        // Active library F8: либа сама spawn'ит NTP-sync thread в Client::new
-        // и завершает в Drop. Без отдельного ntp::spawn_sync_thread снаружи.
-        ntp_host:    Some("pool.ntp.org".to_string()),
-        // F6/F7: периодический pull свежих prices (дефолт каждые 60с).
-        refresh:     moonproto::client::RefreshConfig::default(),
-    };
+    // ---- 3. Client config (active library: NTP + UpdateMarketsList дефолтами) ----
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
 
     // ---- 4. Lifecycle callback ----

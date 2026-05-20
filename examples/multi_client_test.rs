@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use moonproto::client::{Client, ClientConfig, LifecycleEvent, RefreshConfig};
+use moonproto::client::{Client, ClientConfig, LifecycleEvent};
 use moonproto::commands::engine_api::ServerInfo;
 use moonproto::events::EventDispatcher;
 use moonproto::key_import;
@@ -49,16 +49,8 @@ fn run_client(
     *stats.label.lock().unwrap() = label.to_string();
     *stats.client_id.lock().unwrap() = client_id;
 
-    let cfg = ClientConfig {
-        server_ip: ip,
-        server_port: port,
-        master_key: keys.master_key,
-        mac_key: keys.mac_key,
-        mask_ver: 0,
-        client_id,
-        ntp_host: Some("pool.ntp.org".to_string()),
-        refresh: RefreshConfig::default(),
-    };
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key)
+        .with_client_id(client_id);
 
     let mut client = Client::new(cfg);
     let mut dispatcher = EventDispatcher::new();

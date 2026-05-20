@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moonproto::client::{
-    Client, ClientConfig, InitConfig, LifecycleEvent, RefreshConfig, run_init_sequence,
+    Client, ClientConfig, InitConfig, LifecycleEvent, run_init_sequence,
 };
 use moonproto::events::{EventDispatcher, Event};
 use moonproto::key_import;
@@ -68,17 +68,8 @@ fn runtime_smoke_full_happy_path() {
     let keys = key_import::import_key(&key_b64).expect("invalid MOONPROTO_KEY");
     println!("OK: key_import");
 
-    // === Phase 0: build Client ===
-    let cfg = ClientConfig {
-        server_ip:   ip.clone(),
-        server_port: port,
-        master_key:  keys.master_key,
-        mac_key:     keys.mac_key,
-        mask_ver:    0,
-        client_id:   rand::random(),
-        ntp_host:    Some("pool.ntp.org".to_string()),
-        refresh:     RefreshConfig::default(),
-    };
+    // === Phase 0: build Client (новый builder API — codex merge) ===
+    let cfg = ClientConfig::new(&ip[..], port, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
     let mut dispatcher = EventDispatcher::new();
     println!("OK: client_new");

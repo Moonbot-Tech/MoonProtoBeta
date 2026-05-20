@@ -338,6 +338,23 @@ impl EventDispatcher {
                 match StratCommand::parse(payload) {
                     Some(cmd_v) => {
                         let ev = self.strats.apply(cmd_v);
+                        // Active library: auto-decode strategy snapshot raw bytes
+                        // в `StratsState`. Раньше app должен был сам вызывать
+                        // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
+                        // делает это сама на SnapshotFull/Partial event'ах.
+                        match &ev {
+                            crate::state::StratEvent::SnapshotFull { raw_data, .. }
+                            | crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
+                                if self.strats.apply_snapshot_decoded(raw_data).is_none() {
+                                    log::warn!(
+                                        target: "moonproto::events",
+                                        "failed to decode strategy snapshot payload ({} bytes)",
+                                        raw_data.len()
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
                         out.push(Event::Strat(ev));
                     }
                     None => out.push(Event::ParseFailed { cmd, len: payload.len() }),

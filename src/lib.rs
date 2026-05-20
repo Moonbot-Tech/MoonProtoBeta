@@ -1,102 +1,103 @@
 //! # moonproto
 //!
-//! Rust клиент MoonProto — UDP-протокол связи с торговым ботом MoonBot
-//! (Delphi-сервер на VPS). Криптография AES-128-GCM, аутентифицированный
-//! HMAC-CRC32C MAC, replay protection через sliding bitmap window,
-//! reliable delivery поверх UDP через Sliced+ACK, PMTU discovery.
+//! Rust клиент UDP-протокола MoonProto для серверов MoonBot (Delphi на VPS).
+//! Wire-format, криптография (AES-128-GCM + HMAC-CRC32C MAC), handshake, retry,
+//! slicing, ACK'и, PMTU discovery, и payload commands — byte-exact с Delphi
+//! референсом.
 //!
-//! ## Quick start
+//! `moonproto` — **active session manager**: subscription replay, recovery
+//! при reconnect, markets-index resync, orderbook full requests, trades gap
+//! recovery, pending API routing, NTP sync, candle chunk merging — всё внутри
+//! либы. Приложение решает только что подписать и какие команды отправить.
+//!
+//! ## Quick Start
 //!
 //! ```ignore
 //! use std::time::Duration;
-//! use moonproto::client::{Client, ClientConfig, LifecycleEvent};
-//! use moonproto::events::EventDispatcher;
-//! use moonproto::key_import;
-//! use moonproto::ntp;
-//!
-//! // 1. Импорт ключа из base64-экспорта MoonBot (Settings → Export Key).
-//! let keys = key_import::import_key(KEY_B64).expect("invalid key");
-//!
-//! // 2. NTP sync — рекомендуется для корректных timestamp'ов в ордерах.
-//! let ntp_result = ntp::get_best_ntp("pool.ntp.org", 4);
-//! if ntp_result.synced {
-//!     moonproto::client::set_ntp_offset(ntp_result.time_offset);
-//! }
-//!
-//! // 3. Конфиг клиента.
-//! let cfg = ClientConfig {
-//!     server_ip:   "127.0.0.1".to_string(),
-//!     server_port: 3000,
-//!     master_key:  keys.master_key,
-//!     mac_key:     keys.mac_key,
-//!     mask_ver:    0,                 // 0 = base transport, 1/2 требует moonext
-//!     client_id:   rand::random(),
+//! use moonproto::{
+//!     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher,
+//!     InitConfig, LifecycleEvent,
 //! };
+//! use moonproto::state::{OrderBookKind, OrderEvent, OrderBookEvent, TradesEvent};
+//!
+//! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
+//! let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 //! let mut client = Client::new(cfg);
-//!
-//! // 4. Lifecycle callback (опционально) — Connecting / Connected{fresh} / Reconnecting / etc.
-//! client.on_lifecycle(Box::new(|ev: LifecycleEvent| {
-//!     println!("[lifecycle] {:?}", ev);
-//! }));
-//!
-//! // 5. EventDispatcher — авто-парсит входящие команды в типизированные события
-//! //    (OrderEvent / TradesEvent / BalanceEvent / etc.) и обновляет sync-state.
 //! let mut dispatcher = EventDispatcher::new();
 //!
-//! // 6. Запуск main loop — блокирующий вызов; возвращается через `duration` или
-//! //    при `client.disconnect()`. Для async — оберни в `std::thread::spawn`.
-//! client.run(Duration::from_secs(60), Box::new(move |cmd, payload| {
-//!     let now_ms = std::time::SystemTime::now()
-//!         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
-//!     for event in dispatcher.dispatch(cmd, payload, now_ms) {
-//!         // обработка типизированных событий — см. `moonproto::events::Event`
-//!         let _ = event;
+//! client.on_lifecycle(Box::new(|ev| match ev {
+//!     LifecycleEvent::Connected { fresh } => println!("connected fresh={fresh}"),
+//!     LifecycleEvent::Reconnecting => println!("reconnecting"),
+//!     LifecycleEvent::SendBacklogCritical { u_key_uid, .. } => {
+//!         eprintln!("critical send backlog for order {u_key_uid}");
+//!     }
+//!     LifecycleEvent::BindFailed { consecutive_failures } => {
+//!         eprintln!("UDP bind failed {consecutive_failures} times");
+//!     }
+//!     _ => {}
+//! }));
+//!
+//! // Phase 1: handshake до Connected{fresh:true}.
+//! client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
+//! if !client.is_authorized() {
+//!     return Err("authorization timeout".into());
+//! }
+//!
+//! // Phase 2: init sequence (helper сам прокачивает main loop через dispatcher).
+//! let init = InitConfig {
+//!     base_check: true,
+//!     auth_check: true,
+//!     fetch_markets: true,
+//!     fetch_balance: true,
+//!     subscribe_trades: Some(false),
+//!     subscribe_orderbooks: vec![("BTCUSDT".to_string(), OrderBookKind::Futures)],
+//!     ..Default::default()
+//! };
+//! run_init_sequence(&mut client, &mut dispatcher, init)?;
+//!
+//! // Phase 3: long-running stream — типизированные events автоматически.
+//! client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
+//!     match event {
+//!         Event::Order(OrderEvent::Created(uid)) => println!("new order {uid}"),
+//!         Event::OrderBook(OrderBookEvent::Apply { market_index, .. }) => {
+//!             // redraw orderbook
+//!             let _ = market_index;
+//!         }
+//!         Event::Trade(TradesEvent::Apply(pkt)) => {
+//!             // process trades packet (pkt.sections)
+//!             let _ = pkt;
+//!         }
+//!         Event::EngineResponse(resp) if !resp.success => {
+//!             eprintln!("engine error: {}", resp.error_msg);
+//!         }
+//!         _ => {}
 //!     }
 //! }));
 //! ```
 //!
-//! Полный рабочий пример — `examples/client_test.rs`.
+//! Для ожидания Engine API response в том же thread'е используй
+//! [`Client::run_until_response`] — не прямой `rx.recv_timeout(...)` (main loop
+//! не работает во время блокирующего wait).
 //!
-//! ## Архитектура
+//! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
+//! `examples/history_bars.rs`, `examples/multi_client_test.rs`.
 //!
-//! - [`crypto`] — AES-128-GCM с PKCS7 padding, SHAKE-128 key derivation
-//! - [`protocol`] — Slider (replay protection), SlicingReceiver (re-assembly), CryptedHeader
-//! - [`client`] — Client struct, lifecycle, handshake, retry, NTP, lifecycle events
-//! - [`commands`] — wire-format builders/parsers для 11 каналов команд
-//! - [`state`] — sync-state модели: Orders, OrderBooks, Trades, Balances, Strats, ...
-//! - [`events`] — EventDispatcher — авто-роутинг входящих команд в типизированные события
-//! - [`key_import`] — парсинг base64-экспорта ключей MoonBot
-//! - [`ntp`] — SNTP клиент с 4-запросной reliability (TryCount=4)
-//! - [`api_pending`] — registry для async-ответов на Engine API запросы
-//! - [`compression`] — SynLZ decompress (byte-exact с mORMot)
+//! ## Главные публичные модули
 //!
-//! Зависит от [`moonproto_transport`] — низкоуровневый wire-layer (MAC, обфускация,
-//! headers, опциональная загрузка `moonext` для extended transport mode 1/2).
+//! - [`client`] — [`Client`], `ClientConfig` builder, lifecycle, init sequence,
+//!   high-level команды.
+//! - [`events`] — [`EventDispatcher`] и типизированные [`Event`] values.
+//! - [`commands`] — wire-format builders/parsers для каналов протокола.
+//! - [`state`] — sync-state модели: Orders / OrderBooks / Trades / Balances /
+//!   Strats / Settings / Markets.
+//! - [`key_import`] — парсер base64 MoonBot exported key.
+//! - [`ntp`] — SNTP клиент для self-managed NTP thread.
+//! - [`api_pending`] — registry для pending Engine API responses.
+//! - [`compression`] — SynLZ/DEFLATE helpers для wire-format.
 //!
-//! ## Gotchas
-//!
-//! - `client.run(duration, on_data)` **блокирует** вызывающий поток — для async
-//!   запускай через `std::thread::spawn`.
-//! - NTP-sync рекомендован до старта (без него timestamps в ордерах будут с
-//!   uncorrected системным временем).
-//! - PMTU стартует с 508 байт и растёт по probe — первые Sliced-сообщения
-//!   фрагментируются мелко, нормально.
-//! - UKey-dedup: команды с тем же UniqueKey замещают предыдущие в очереди
-//!   отправки. Если шлёшь `replace_order` 5 раз подряд — сервер увидит только
-//!   последний (полезное свойство, но знай об этом).
-//! - На `LifecycleEvent::ServerRestart` нужно сбросить кэшированные market
-//!   indexes и заново подписаться на order books — индексы рынков на сервере
-//!   могли измениться при перезапуске.
-//! - Compression auto-applied на payload > 64 байт (MIN_SIZE_TO_COMPRESS) —
-//!   потребитель не управляет этим вручную.
-//! - `LifecycleEvent::Reconnecting` — клиент сам пытается soft-reconnect, никакого
-//!   действия не требуется. `Disconnected` — финальное состояние, нужен новый Client.
-//!
-//! ## Wire-format reference
-//!
-//! Подробная wire-документация per-команда: `moonproto/docs/commands/`.
-//! Концептуальная архитектура задач протокола: внутренний `ARCHITECTURE.md`
-//! проекта (поставляется в отдельной публикации для архитектора порта).
+//! Зависит от [`moonproto_transport`] — низкоуровневый wire-layer (MAC,
+//! обфускация, headers, опциональная загрузка `moonext` для extended transport
+//! mode 1/2).
 
 pub mod crypto;
 pub mod protocol;
@@ -110,3 +111,9 @@ pub mod api_pending;
 pub mod events;
 
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};
+pub use client::{
+    run_init_sequence, Client, ClientConfig, EventFn, EventWithStateFn, InitConfig,
+    InitError, InitResult, LifecycleEvent, RefreshConfig,
+};
+pub use events::{Event, EventDispatcher};
+pub use key_import::{import_key, ImportedKeys};

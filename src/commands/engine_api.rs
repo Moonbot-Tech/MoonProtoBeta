@@ -311,7 +311,7 @@ pub struct DexInfo {
 /// Используется потребителем после `Client::api_auth_check()`:
 /// ```ignore
 /// let rx = client.api_auth_check();
-/// let resp = rx.recv_timeout(Duration::from_secs(10))?;
+/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 /// if let Some(auth) = parse_auth_check_response(&resp.data) {
 ///     println!("Account: {}, BTC addr: {}", auth.account_id, auth.btc_address);
 ///     for dex in &auth.known_dexes {
@@ -480,7 +480,7 @@ pub mod exchange_type_flags {
 /// ```ignore
 /// use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_flags};
 /// let rx = client.api_base_check();
-/// let resp = rx.recv_timeout(Duration::from_secs(10))?;
+/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 /// if resp.success {
 ///     let info = parse_base_check_response(&resp.data);
 ///     if let (Some(name), Some(mask)) = (&info.exchange_name, info.exchange_type_mask) {

@@ -219,7 +219,7 @@ LifecycleEvent::SendBacklogCritical { cmd, u_key_uid } => {
     // 2. Если знаем что это была отмена/переустановка ордера — попробовать
     //    через api_get_order(u_key_uid) узнать текущее состояние на сервере.
     let rx = client.api_get_order(u_key_uid);
-    if let Ok(resp) = rx.recv_timeout(Duration::from_secs(5)) {
+    if let Ok(resp) = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(5)) {
         // Решить retry или ничего.
     }
 }
