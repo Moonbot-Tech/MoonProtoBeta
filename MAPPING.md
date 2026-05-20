@@ -17,8 +17,8 @@
 | 9 | 543 | DoCleanUp (clear old Receiving) | ✅ client.rs: slicer.clear_old() every 5s |
 | 10 | 545-546 | Handshake cmds → FWaitingHello := false | client.rs handle_handshake sets waiting_hello=false | ✅ |
 | 11 | 548-553 | MPC_WrongHello → MPS_Connected | client.rs:294 | ✅ |
-| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect | client.rs: full_reset() + flags; `Sending` cleanup отличается, см. DEVIATION #27 | DEVIATION |
-| 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) | client.rs: last_need_hello_again + 700ms check | ✅ |
+| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect + `LastSentHello := 0` как немедленный retry sentinel | client.rs: full_reset() + flags + `NEVER_SENT_MS`; `Sending` cleanup отличается, см. DEVIATION #27 | DEVIATION |
+| 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) + `LastSentHello := 0` как немедленный retry sentinel | client.rs: last_need_hello_again + 700ms check + `NEVER_SENT_MS` | ✅ |
 | 14 | 578-581 | WhoAreYou/Fine → HandleHandShake | client.rs handle_handshake | ✅ |
 | 15 | 583-591 | MPC_SizeTest → SendSizeAck | client.rs handle_size_test | ✅ |
 | 15a | 347-351 | DoSendPacket: `Package Size Too Big` не рвёт соединение | client.rs send_raw_packet ignores datagram-too-large errors | ✅ |

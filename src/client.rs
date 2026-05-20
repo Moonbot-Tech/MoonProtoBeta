@@ -120,6 +120,7 @@ const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
 const CLEANUP_INTERVAL_MS: i64 = 5000;     // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80;          // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64;    // MoonProtoDataStruct.pas:31
+const NEVER_SENT_MS: i64 = i64::MIN / 2;   // Эквивалент Delphi LastSentHello=0 при uptime-clock
 
 // Send priority (matches TMoonProtoSendPriority)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1106,13 +1107,13 @@ impl Client {
             encode_cipher: None,
             decode_cipher: None,
             _start: Instant::now(),
-            // NEVER_SENT sentinel: i64::MIN/2 = "очень давно". Любое `(cur_tm - NEVER_SENT) > interval`
+            // NEVER_SENT sentinel = "очень давно". Любое `(cur_tm - NEVER_SENT) > interval`
             // мгновенно true → первый Hello / cleanup / etc выстреливают на первом тике main loop
             // (5мс после bind вместо 2 секунд задержки). Делфи использовал `GetTickCount64`
             // (миллисекунды с boot) ≈ 10^7+ при инициализации `FLastSentHello := 0`, что давало
             // тот же эффект; в Rust `now_ms()` = `Instant::elapsed()` стартует с 0 → нужен явный
             // sentinel. См. delphi_deviation audit #1.
-            last_sent_hello: i64::MIN / 2,
+            last_sent_hello: NEVER_SENT_MS,
             waiting_hello_start: 0,
             last_socket_recreate: i64::MIN / 2,
             last_need_hello_again: i64::MIN / 2,
@@ -3014,7 +3015,7 @@ impl Client {
             Command::WrongHello => { self.auth_status = AuthStatus::Connected; }
             Command::WantNewHello => {
                 self.full_reset();
-                self.last_sent_hello = 0;
+                self.last_sent_hello = NEVER_SENT_MS;
                 self.auth_status = AuthStatus::Connected;
                 self.authorized = false;
                 self.need_connect = true;
@@ -3026,7 +3027,7 @@ impl Client {
                     self.last_need_hello_again = now;
                     if !self.waiting_hello { self.waiting_hello_start = now; }
                     self.waiting_hello = true;
-                    self.last_sent_hello = 0;
+                    self.last_sent_hello = NEVER_SENT_MS;
                 }
             }
             Command::WhoAreYou | Command::Fine => { self.handle_handshake(cmd, payload); }
@@ -4125,7 +4126,7 @@ impl Client {
         self.slider = Slider::new();
         self.slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
-        self.last_sent_hello = 0;
+        self.last_sent_hello = NEVER_SENT_MS;
         // D-02: при full reset (новый handshake) — старый отложенный second ImFriend больше не нужен.
         self.pending_second_imfriend = None;
         // Аудит #9 (audit_delphi_deviation): очистка stale Sliced состояния при hard
@@ -5945,6 +5946,77 @@ mod service_cmd_tests {
 
         let permission = std::io::Error::from_raw_os_error(13);
         assert!(!is_datagram_too_large_error(&permission));
+    }
+}
+
+#[cfg(test)]
+mod reconnect_timing_tests {
+    use super::*;
+
+    fn dummy_client() -> Client {
+        Client::new(ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig {
+                update_markets_every: None,
+                check_tags_every: None,
+            },
+        })
+    }
+
+    fn callback_sink<'a>(cb: &'a mut OnDataFn) -> DispatchSink<'a> {
+        DispatchSink::Callback(cb)
+    }
+
+    #[test]
+    fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
+        let mut client = dummy_client();
+        let mut cb: OnDataFn = Box::new(|_, _| {});
+        let mut sink = callback_sink(&mut cb);
+
+        client.handle_udp_command(
+            Command::WantNewHello,
+            Command::WantNewHello as u8,
+            &[],
+            &mut sink,
+        );
+
+        assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
+        client.check_hello_send(100);
+
+        assert_eq!(
+            client.last_sent_hello, 100,
+            "Delphi LastSentHello=0 означает немедленный retry; Rust Instant clock не должен ждать 2с",
+        );
+        assert!(client.waiting_hello);
+    }
+
+    #[test]
+    fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
+        let mut client = dummy_client();
+        let mut cb: OnDataFn = Box::new(|_, _| {});
+        let mut sink = callback_sink(&mut cb);
+
+        client.handle_udp_command(
+            Command::NeedHelloAgain,
+            Command::NeedHelloAgain as u8,
+            &[],
+            &mut sink,
+        );
+
+        assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
+        client.check_offline_reconnect(100);
+
+        assert_eq!(
+            client.last_sent_hello, 100,
+            "NeedHelloAgain должен обходить минимум 200мс после Delphi-сброса LastSentHello в ноль",
+        );
+        assert!(client.waiting_hello);
     }
 }
 
