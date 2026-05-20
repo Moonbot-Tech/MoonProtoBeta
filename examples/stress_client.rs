@@ -1,7 +1,8 @@
 //! Accumulating live stress client for MoonProto.
 //!
 //! Run two independent client instances against one server and keep several
-//! subscriptions plus Engine API requests in flight at the same time:
+//! subscriptions plus Engine API and chunked candles requests in flight at the
+//! same time:
 //!
 //!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0
 //!
@@ -21,7 +22,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use moonproto::client::{Client, ClientConfig, ClientSender, LifecycleEvent};
+use moonproto::client::{Client, ClientConfig, ClientSender, LifecycleEvent, MergedCandles};
 use moonproto::commands::candles::{parse_coin_card_candles_response, DeepHistoryKind};
 use moonproto::commands::{
     parse_get_balance_response, parse_query_hedge_mode_response,
@@ -39,7 +40,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const INIT_TIMEOUT: Duration = Duration::from_secs(12);
 const TICK: Duration = Duration::from_millis(250);
 const API_TIMEOUT: Duration = Duration::from_secs(20);
+const CANDLES_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_PENDING_API: usize = 48;
+const MAX_PENDING_CANDLES: usize = 4;
 
 #[derive(Default)]
 struct SharedStats {
@@ -72,6 +75,12 @@ struct SharedStats {
     api_error: AtomicU64,
     api_timeout: AtomicU64,
     api_disconnected: AtomicU64,
+    candles_chunked_sent: AtomicU64,
+    candles_chunked_ok: AtomicU64,
+    candles_chunked_timeout: AtomicU64,
+    candles_chunked_disconnected: AtomicU64,
+    candles_chunked_empty: AtomicU64,
+    max_pending_candles: AtomicU64,
     settings_requests: AtomicU64,
     balance_refresh_requests: AtomicU64,
     strat_snapshot_requests: AtomicU64,
@@ -84,6 +93,11 @@ struct PendingApi {
     method: EngineMethod,
     sent_at: Instant,
     rx: std::sync::mpsc::Receiver<EngineResponse>,
+}
+
+struct PendingCandles {
+    sent_at: Instant,
+    rx: std::sync::mpsc::Receiver<MergedCandles>,
 }
 
 #[derive(Clone)]
@@ -193,9 +207,11 @@ fn push_pending(
 fn schedule_safe_burst(
     client: &mut Client,
     pending: &mut VecDeque<PendingApi>,
+    pending_candles: &mut VecDeque<PendingCandles>,
     stats: &SharedStats,
     market: &str,
     burst_no: u64,
+    allow_candles: bool,
 ) {
     if pending.len() >= MAX_PENDING_API {
         return;
@@ -233,6 +249,28 @@ fn schedule_safe_burst(
             EngineMethod::GetCoinCardCandles,
             client.api_get_coin_card_candles(market, DeepHistoryKind::Hour1),
         );
+    }
+
+    if allow_candles && burst_no % 5 == 1 && pending_candles.len() < MAX_PENDING_CANDLES {
+        let rx = client.api_request_candles_data_async();
+        stats.candles_chunked_sent.fetch_add(1, Ordering::Relaxed);
+        pending_candles.push_back(PendingCandles {
+            sent_at: Instant::now(),
+            rx,
+        });
+        let len = pending_candles.len() as u64;
+        let mut prev = stats.max_pending_candles.load(Ordering::Relaxed);
+        while len > prev {
+            match stats.max_pending_candles.compare_exchange(
+                prev,
+                len,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => prev = next,
+            }
+        }
     }
 
     client.ui_settings_request();
@@ -275,6 +313,40 @@ fn drain_pending(label: &str, pending: &mut VecDeque<PendingApi>, stats: &Shared
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 stats.api_disconnected.fetch_add(1, Ordering::Relaxed);
                 println!("[{label}] api disconnected method={:?}", item.method);
+            }
+        }
+    }
+
+    *pending = kept;
+}
+
+fn drain_pending_candles(
+    label: &str,
+    pending: &mut VecDeque<PendingCandles>,
+    stats: &SharedStats,
+) {
+    let now = Instant::now();
+    let mut kept = VecDeque::with_capacity(pending.len());
+
+    while let Some(item) = pending.pop_front() {
+        match item.rx.try_recv() {
+            Ok(merged) => {
+                stats.candles_chunked_ok.fetch_add(1, Ordering::Relaxed);
+                validate_chunked_candles(label, &merged, stats);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if now.duration_since(item.sent_at) >= CANDLES_TIMEOUT {
+                    stats.candles_chunked_timeout.fetch_add(1, Ordering::Relaxed);
+                    println!("[{label}] chunked candles timeout");
+                } else {
+                    kept.push_back(item);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                stats
+                    .candles_chunked_disconnected
+                    .fetch_add(1, Ordering::Relaxed);
+                println!("[{label}] chunked candles disconnected");
             }
         }
     }
@@ -332,6 +404,36 @@ fn validate_response(label: &str, resp: &EngineResponse, stats: &SharedStats) {
             }
         }
         _ => {}
+    }
+}
+
+fn validate_chunked_candles(label: &str, merged: &MergedCandles, stats: &SharedStats) {
+    if merged.candles.is_empty() {
+        stats.candles_chunked_empty.fetch_add(1, Ordering::Relaxed);
+        println!("[{label}] chunked candles uid={} returned 0 candles", merged.uid);
+        return;
+    }
+
+    for candle in &merged.candles {
+        let prices = [candle.open_p, candle.max_p, candle.min_p, candle.close_p];
+        let bad = prices.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || !candle.vol.is_finite()
+            || candle.vol < 0.0
+            || !candle.time.is_finite();
+        if bad {
+            stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+            println!(
+                "[{label}] invalid chunked candle uid={} open={} high={} low={} close={} vol={} time={}",
+                merged.uid,
+                candle.open_p,
+                candle.max_p,
+                candle.min_p,
+                candle.close_p,
+                candle.vol,
+                candle.time
+            );
+            return;
+        }
     }
 }
 
@@ -559,6 +661,7 @@ fn run_one_client(
 
     let deadline = Instant::now() + args.duration;
     let mut pending = VecDeque::new();
+    let mut pending_candles = VecDeque::new();
     let mut burst_no = 0u64;
     let mut next_burst = Instant::now();
     let mut next_report = Instant::now() + Duration::from_secs(15);
@@ -571,15 +674,23 @@ fn run_one_client(
 
     while Instant::now() < deadline {
         let now = Instant::now();
-        if now >= next_burst
-            && deadline.saturating_duration_since(now) > API_TIMEOUT + Duration::from_secs(2)
-        {
-            schedule_safe_burst(&mut client, &mut pending, &stats, &args.market, burst_no);
+        let remaining = deadline.saturating_duration_since(now);
+        if now >= next_burst && remaining > API_TIMEOUT + Duration::from_secs(2) {
+            schedule_safe_burst(
+                &mut client,
+                &mut pending,
+                &mut pending_candles,
+                &stats,
+                &args.market,
+                burst_no,
+                remaining > CANDLES_TIMEOUT + Duration::from_secs(2),
+            );
             burst_no = burst_no.wrapping_add(1);
             next_burst = now + Duration::from_secs(2);
         }
 
         drain_pending(label, &mut pending, &stats);
+        drain_pending_candles(label, &mut pending_candles, &stats);
 
         let tick = TICK.min(deadline.saturating_duration_since(Instant::now()));
         let stats_cb = Arc::clone(&stats);
@@ -591,13 +702,16 @@ fn run_one_client(
 
         if Instant::now() >= next_report {
             println!(
-                "[{label}] stats events={} trades={} ob={} api_ok={} api_timeout={} pending={} sent={} recv={}",
+                "[{label}] stats events={} trades={} ob={} api_ok={} api_timeout={} pending={} candles_ok={} candles_timeout={} candles_pending={} sent={} recv={}",
                 stats.events_total.load(Ordering::Relaxed),
                 stats.trades_apply.load(Ordering::Relaxed),
                 stats.orderbook_apply.load(Ordering::Relaxed),
                 stats.api_ok.load(Ordering::Relaxed),
                 stats.api_timeout.load(Ordering::Relaxed),
                 pending.len(),
+                stats.candles_chunked_ok.load(Ordering::Relaxed),
+                stats.candles_chunked_timeout.load(Ordering::Relaxed),
+                pending_candles.len(),
                 client.total_sent(),
                 client.total_recv(),
             );
@@ -606,9 +720,14 @@ fn run_one_client(
     }
 
     drain_pending(label, &mut pending, &stats);
+    drain_pending_candles(label, &mut pending_candles, &stats);
     for item in pending {
         println!("[{label}] pending at shutdown method={:?}", item.method);
         stats.api_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+    for _ in pending_candles {
+        println!("[{label}] chunked candles pending at shutdown");
+        stats.candles_chunked_timeout.fetch_add(1, Ordering::Relaxed);
     }
 
     stop_churn.store(true, Ordering::Relaxed);
@@ -639,6 +758,8 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
         let ob = stats.orderbook_apply.load(Ordering::Relaxed);
         let api_timeout = stats.api_timeout.load(Ordering::Relaxed);
         let api_disconnected = stats.api_disconnected.load(Ordering::Relaxed);
+        let candles_timeout = stats.candles_chunked_timeout.load(Ordering::Relaxed);
+        let candles_disconnected = stats.candles_chunked_disconnected.load(Ordering::Relaxed);
         let parse_failed = stats.parse_failed.load(Ordering::Relaxed);
         let invalid_numbers = stats.invalid_numbers.load(Ordering::Relaxed);
 
@@ -684,6 +805,15 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             invalid_numbers,
         );
         println!(
+            "[{label}] candles_chunked sent={} ok={} timeout={} disconnected={} empty={} max_pending={}",
+            stats.candles_chunked_sent.load(Ordering::Relaxed),
+            stats.candles_chunked_ok.load(Ordering::Relaxed),
+            candles_timeout,
+            candles_disconnected,
+            stats.candles_chunked_empty.load(Ordering::Relaxed),
+            stats.max_pending_candles.load(Ordering::Relaxed),
+        );
+        println!(
             "[{label}] server_info bot_id={:?} name={:?} exchange={:?} base={:?} version={:?}",
             info.bot_id,
             info.server_name,
@@ -703,7 +833,13 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             println!("[{label}] FAIL: subscribed orderbook produced no apply events");
             ok = false;
         }
-        if api_timeout > 0 || api_disconnected > 0 || parse_failed > 0 || invalid_numbers > 0 {
+        if api_timeout > 0
+            || api_disconnected > 0
+            || candles_timeout > 0
+            || candles_disconnected > 0
+            || parse_failed > 0
+            || invalid_numbers > 0
+        {
             ok = false;
         }
     }
