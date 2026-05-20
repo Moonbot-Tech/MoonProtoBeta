@@ -111,31 +111,20 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 
 ## Engine API Requests
 
-Most `Client::api_*` methods return `std::sync::mpsc::Receiver<EngineResponse>`.
-If the same thread owns the `Client`, wait through `run_until_response` so UDP is
-still pumped while the response is pending:
+For common one-shot Engine API calls, use the typed `request_*` helpers. They
+send the request, keep the UDP loop running through `EventDispatcher`, check the
+server status, and parse the response payload:
 
 ```rust
-let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 ```
 
-Calling `rx.recv_timeout(...)` directly is only correct when another thread is
-already running the client loop.
-
-Typed parsers are provided for common response payloads:
-
-```rust
-use moonproto::commands::{parse_get_balance_response, parse_query_hedge_mode_response};
-
-let rx = client.api_get_balance("USDT");
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-let qty = parse_get_balance_response(&resp.data).expect("bad GetBalance payload");
-
-let rx = client.api_query_hedge_mode();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-let hedge_mode = parse_query_hedge_mode_response(&resp.data).expect("bad hedge payload");
-```
+Lower-level `Client::api_*` methods still return
+`std::sync::mpsc::Receiver<EngineResponse>` for background-thread and custom
+flows. If the same thread owns the `Client`, wait through
+`run_until_response`; direct `rx.recv_timeout(...)` is only correct when another
+thread is already running the client loop.
 
 UI settings use the UI channel rather than Engine API pending responses:
 

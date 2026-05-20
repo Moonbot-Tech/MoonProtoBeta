@@ -72,9 +72,15 @@
 //! }));
 //! ```
 //!
-//! Для ожидания Engine API response в том же thread'е используй
-//! [`Client::run_until_response`] — не прямой `rx.recv_timeout(...)` (main loop
-//! не работает во время блокирующего wait).
+//! For common one-shot Engine API operations, use typed helpers such as
+//! [`Client::request_balance`], [`Client::request_hedge_mode`], and
+//! [`Client::request_coin_card_candles`]. They keep the client loop running,
+//! check the server status, and parse the response payload.
+//!
+//! Lower-level `Client::api_*` calls return receivers for custom async flows.
+//! In a single-threaded caller, wait for those receivers through
+//! [`Client::run_until_response`], not direct `rx.recv_timeout(...)`; otherwise
+//! the client loop is stopped while the caller waits.
 //!
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/get_balance.rs`,
@@ -117,7 +123,7 @@ pub mod events;
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};
 pub use client::{
     run_init_sequence, Client, ClientConfig, EventFn, EventWithStateFn, InitConfig,
-    InitError, InitResult, LifecycleEvent, RefreshConfig,
+    InitError, InitResult, LifecycleEvent, RefreshConfig, EngineRequestError,
 };
 pub use events::{Event, EventDispatcher};
 pub use key_import::{import_key, ImportedKeys};

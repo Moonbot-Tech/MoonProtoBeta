@@ -1,8 +1,7 @@
 //! Query the account hedge mode through the public Engine API.
 //!
-//! Demonstrates `run_init_sequence` + `api_query_hedge_mode` +
-//! `parse_query_hedge_mode_response`. The consumer does not need to know that
-//! the server payload is one Delphi `Boolean`.
+//! Demonstrates `run_init_sequence` + `Client::request_hedge_mode`. The consumer
+//! does not need to know that the server payload is one Delphi `Boolean`.
 //!
 //! Run:
 //!   cargo run --example query_hedge_mode --release -- "<key_base64>" "host:port"
@@ -13,7 +12,6 @@ use std::time::Duration;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig,
 };
-use moonproto::commands::parse_query_hedge_mode_response;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -62,23 +60,12 @@ fn main() {
     }
 
     println!("[request] query hedge mode");
-    let rx = client.api_query_hedge_mode();
-    let resp = match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(15)) {
-        Ok(resp) => resp,
+    let hedge_mode = match client.request_hedge_mode(&mut dispatcher, Duration::from_secs(15)) {
+        Ok(value) => value,
         Err(err) => {
-            eprintln!("[request] timeout/disconnected: {err:?}");
+            eprintln!("[request] failed: {err}");
             std::process::exit(4);
         }
-    };
-
-    if !resp.success {
-        eprintln!("[response] error {}: {}", resp.error_code, resp.error_msg);
-        std::process::exit(5);
-    }
-
-    let Some(hedge_mode) = parse_query_hedge_mode_response(&resp.data) else {
-        eprintln!("[response] malformed QueryHedgeMode payload: {} bytes", resp.data.len());
-        std::process::exit(6);
     };
     println!("[response] hedge_mode={hedge_mode}");
 

@@ -19,7 +19,11 @@ use crate::crypto;
 use crate::compression;
 use crate::protocol::{Command, handshake, slider::Slider, slicing, crypted};
 use crate::api_pending::ApiPending;
-use crate::commands::engine_api::{EngineResponse, EngineMethod, parse_engine_response};
+use crate::commands::engine_api::{
+    AuthCheckResponse, EngineResponse, EngineMethod, ServerInfo, parse_auth_check_response,
+    parse_base_check_response, parse_engine_response, parse_get_balance_response,
+    parse_query_hedge_mode_response,
+};
 use crate::commands::candles::{CandlesAggregator, DeepPrice, parse_coin_card_candles_response};
 
 // =============================================================================
@@ -96,6 +100,14 @@ fn is_datagram_too_large_error(e: &std::io::Error) -> bool {
         )) => true,
         _ => false,
     }
+}
+
+#[inline]
+fn engine_request_uid(request_payload: &[u8]) -> Option<u64> {
+    request_payload
+        .get(3..11)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
 }
 
 // === Constants matching Delphi exactly ===
@@ -361,6 +373,55 @@ pub enum AuthStatus {
     AuthDone,
     Offline,
 }
+
+/// Error returned by one-shot Engine API helpers such as
+/// [`Client::request_balance`] and [`Client::request_coin_card_candles`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineRequestError {
+    /// No response was delivered before the caller's timeout.
+    Timeout,
+    /// The pending response channel was closed, usually because the client loop
+    /// cleared in-flight requests during reconnect or shutdown.
+    Disconnected,
+    /// The server returned an Engine API failure response.
+    Server {
+        method: EngineMethod,
+        code: i32,
+        message: String,
+    },
+    /// The server reported success, but the method-specific payload parser
+    /// could not decode `EngineResponse::data`.
+    MalformedPayload {
+        method: EngineMethod,
+        len: usize,
+    },
+}
+
+impl From<mpsc::RecvTimeoutError> for EngineRequestError {
+    fn from(value: mpsc::RecvTimeoutError) -> Self {
+        match value {
+            mpsc::RecvTimeoutError::Timeout => Self::Timeout,
+            mpsc::RecvTimeoutError::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
+impl std::fmt::Display for EngineRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => write!(f, "engine request timed out"),
+            Self::Disconnected => write!(f, "engine request channel disconnected"),
+            Self::Server { method, code, message } => {
+                write!(f, "engine request {method:?} failed with code {code}: {message}")
+            }
+            Self::MalformedPayload { method, len } => {
+                write!(f, "engine request {method:?} returned malformed payload ({len} bytes)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EngineRequestError {}
 
 /// Lifecycle event — уведомления о смене состояния канала связи с сервером.
 ///
@@ -1283,26 +1344,163 @@ impl Client {
         );
     }
 
-    /// Send Engine API request + регистрация в `api_pending` для ожидания ответа.
+    /// Send an Engine API request and register it in `api_pending`.
     ///
-    /// UID извлекается из payload (offset 3..11 в TBaseCommand header).
-    /// Возвращает `mpsc::Receiver<EngineResponse>`. В однопоточном consumer-коде
-    /// жди ответ через [`Client::run_until_response`], чтобы main loop продолжал
-    /// обрабатывать UDP. Прямой `rx.recv_timeout(...)` подходит только если
-    /// `Client` уже запущен в другом потоке.
+    /// The UID is read from the payload at offset `3..11` in the
+    /// `TBaseCommand` header. In single-threaded consumer code, prefer
+    /// [`Self::request_engine_response`] or wait for the returned receiver
+    /// through [`Self::run_until_response`] so the UDP loop keeps running.
+    /// Direct `rx.recv_timeout(...)` is only correct when another thread is
+    /// already running the client loop.
     ///
-    /// При timeout вызвать `client.api_pending.remove(uid)` чтобы освободить slot.
+    /// One-shot request helpers remove the pending slot when the caller's
+    /// timeout expires. Raw receiver users can rely on main-loop stale pending
+    /// cleanup.
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
         // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
-        // паниковала при len<11 — publis API не должен валить процесс из-за плохого input'а.
-        let uid = request_payload
-            .get(3..11)
-            .and_then(|s| s.try_into().ok())
-            .map(u64::from_le_bytes)
-            .unwrap_or(0);
+        // паниковала при len<11 — public API не должен валить процесс из-за плохого input'а.
+        let uid = engine_request_uid(request_payload).unwrap_or(0);
         let rx = self.api_pending.register(uid, self.now_ms());
         self.send_api_request(request_payload);
         rx
+    }
+
+    /// Send one Engine API request and wait for the matching `EngineResponse`
+    /// while the client loop keeps running.
+    ///
+    /// This is the one-shot counterpart to [`Self::send_api_request_async`].
+    /// It is the preferred single-threaded API when the caller wants a direct
+    /// request/response operation: it registers the pending UID, sends the
+    /// request, pumps [`Self::run_with_dispatcher`] in short ticks, and removes
+    /// the pending slot if the caller's timeout expires.
+    pub fn request_engine_response(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        request_payload: &[u8],
+        timeout: Duration,
+    ) -> Result<EngineResponse, mpsc::RecvTimeoutError> {
+        let uid = engine_request_uid(request_payload);
+        let rx = self.send_api_request_async(request_payload);
+        match self.run_until_response(dispatcher, &rx, timeout) {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                if let Some(uid) = uid {
+                    self.api_pending.remove(uid);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn request_engine_parsed<T>(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        request_payload: &[u8],
+        timeout: Duration,
+        parse: impl FnOnce(&[u8]) -> Option<T>,
+    ) -> Result<T, EngineRequestError> {
+        let resp = self
+            .request_engine_response(dispatcher, request_payload, timeout)
+            .map_err(EngineRequestError::from)?;
+
+        if !resp.success {
+            return Err(EngineRequestError::Server {
+                method: resp.method,
+                code: resp.error_code,
+                message: resp.error_msg,
+            });
+        }
+
+        let method = resp.method;
+        let len = resp.data.len();
+        parse(&resp.data).ok_or(EngineRequestError::MalformedPayload { method, len })
+    }
+
+    /// Run `emk_BaseCheck`, store the returned server identity in
+    /// [`Self::server_info`], and return it.
+    pub fn request_base_check(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<ServerInfo, EngineRequestError> {
+        let resp = self
+            .request_engine_response(
+                dispatcher,
+                &crate::commands::engine_request::base_check(),
+                timeout,
+            )
+            .map_err(EngineRequestError::from)?;
+
+        if !resp.success {
+            return Err(EngineRequestError::Server {
+                method: resp.method,
+                code: resp.error_code,
+                message: resp.error_msg,
+            });
+        }
+
+        let info = parse_base_check_response(&resp.data);
+        self.set_server_info(info.clone());
+        Ok(info)
+    }
+
+    /// Run `emk_AuthCheck` and parse the account metadata payload.
+    pub fn request_auth_check(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<AuthCheckResponse, EngineRequestError> {
+        self.request_engine_parsed(
+            dispatcher,
+            &crate::commands::engine_request::auth_check(),
+            timeout,
+            parse_auth_check_response,
+        )
+    }
+
+    /// Run `emk_GetBalance` and parse the returned quantity.
+    pub fn request_balance(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        currency: &str,
+        timeout: Duration,
+    ) -> Result<f64, EngineRequestError> {
+        self.request_engine_parsed(
+            dispatcher,
+            &crate::commands::engine_request::get_balance(currency),
+            timeout,
+            parse_get_balance_response,
+        )
+    }
+
+    /// Run `emk_QueryHedgeMode` and parse the returned hedge-mode flag.
+    pub fn request_hedge_mode(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<bool, EngineRequestError> {
+        self.request_engine_parsed(
+            dispatcher,
+            &crate::commands::engine_request::query_hedge_mode(),
+            timeout,
+            parse_query_hedge_mode_response,
+        )
+    }
+
+    /// Run `emk_GetCoinCardCandles` and parse the returned historical candles.
+    pub fn request_coin_card_candles(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        market: &str,
+        ticks: crate::commands::candles::DeepHistoryKind,
+        timeout: Duration,
+    ) -> Result<Vec<DeepPrice>, EngineRequestError> {
+        self.request_engine_parsed(
+            dispatcher,
+            &crate::commands::candles::get_coin_card_candles(market, ticks),
+            timeout,
+            parse_coin_card_candles_response,
+        )
     }
 
     // ====================================================================
@@ -4197,51 +4395,17 @@ impl std::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-/// Запустить init pipeline после `Connected{fresh:true}`.
+/// Wait for one Engine API response while pumping the client loop.
 ///
-/// **Pattern**:
-/// ```ignore
-/// // Phase 1: ждём авторизацию.
-/// client.run_with_dispatcher(Duration::from_secs(15), &mut dispatcher, ...);
-/// if !client.is_authorized() { panic!("auth failed"); }
+/// `Client::api_*()` returns `Receiver<EngineResponse>`, but responses are only
+/// delivered while UDP packets are processed. This helper runs short
+/// `run_with_dispatcher` ticks until the matching response arrives or the
+/// timeout expires. `run_init_sequence` and the public one-shot
+/// `Client::request_*` helpers use this path internally.
 ///
-/// // Phase 2: init.
-/// let cfg = InitConfig {
-///     base_check: true, auth_check: true, fetch_markets: true,
-///     fetch_balance: true, subscribe_trades: Some(false),
-///     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
-///     ..Default::default()
-/// };
-/// let result = run_init_sequence(&mut client, cfg)?;
-///
-/// // Phase 3: main monitoring loop.
-/// client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, ...);
-/// ```
-///
-/// **NB**: между phase 1 и phase 2 `api_*` ответы ДОЛЖНЫ дойти. Для этого после
-/// каждого `api_*().recv_timeout(...)` сам recv_timeout дренирует mpsc, **но**
-/// доставка пакета от сервера до dispatcher требует чтобы main loop крутился.
-/// Решение в trading_flow.rs: короткий run_with_dispatcher между шагами; для
-/// production-кода с непрерывным run — использовать pattern с отдельным
-/// init-thread'ом (см. HANDOFF Stage 3 backlog).
-///
-/// На текущей реализации эта функция работает корректно если вызывается ВО
-/// ВРЕМЯ короткого `run_with_dispatcher` — но это невозможно из-за `&mut`. То
-/// есть useful pattern — последовательно: short_run → init → long_run.
-/// Ожидание ответа на `api_*` request с **chunked main loop pump**.
-///
-/// `Client::api_*()` возвращает `Receiver<EngineResponse>` — но response приходит
-/// только когда main loop **крутится** и обрабатывает UDP пакеты. Если вызвать
-/// `rx.recv_timeout(...)` в том же thread'е что владеет Client'ом — main loop
-/// не работает в это время и response никогда не доставится → timeout.
-///
-/// Этот helper решает проблему: периодически (~50ms тиков) запускает короткий
-/// `run_with_dispatcher` пока не пришёл response или не истёк общий timeout.
-/// Тики достаточно короткие чтобы reagировать без задержки.
-///
-/// **EventDispatcher обязателен** потому что без него `Markets` / `OrderBooks` /
-/// `Trades` state НЕ обновляются автоматически при доставке Engine API responses
-/// (см. `EventDispatcher::dispatch_into` для `Command::API`).
+/// `EventDispatcher` is required so Engine API responses continue to update
+/// markets, indexes, tags, and other active-library state while the caller is
+/// waiting.
 fn wait_for_api_response(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,

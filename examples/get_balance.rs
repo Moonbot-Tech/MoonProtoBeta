@@ -1,8 +1,7 @@
 //! Fetch one currency balance through the public Engine API.
 //!
-//! Demonstrates `run_init_sequence` + `api_get_balance` +
-//! `parse_get_balance_response`. The consumer does not need to know that the
-//! server payload is one Delphi `Double`.
+//! Demonstrates `run_init_sequence` + `Client::request_balance`. The consumer
+//! does not need to know that the server payload is one Delphi `Double`.
 //!
 //! Run:
 //!   cargo run --example get_balance --release -- "<key_base64>" "host:port" USDT
@@ -13,7 +12,6 @@ use std::time::Duration;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig,
 };
-use moonproto::commands::parse_get_balance_response;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -63,23 +61,12 @@ fn main() {
     }
 
     println!("[request] balance currency={currency}");
-    let rx = client.api_get_balance(currency);
-    let resp = match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(15)) {
-        Ok(resp) => resp,
+    let quantity = match client.request_balance(&mut dispatcher, currency, Duration::from_secs(15)) {
+        Ok(quantity) => quantity,
         Err(err) => {
-            eprintln!("[request] timeout/disconnected: {err:?}");
+            eprintln!("[request] failed: {err}");
             std::process::exit(4);
         }
-    };
-
-    if !resp.success {
-        eprintln!("[response] error {}: {}", resp.error_code, resp.error_msg);
-        std::process::exit(5);
-    }
-
-    let Some(quantity) = parse_get_balance_response(&resp.data) else {
-        eprintln!("[response] malformed GetBalance payload: {} bytes", resp.data.len());
-        std::process::exit(6);
     };
     println!("[response] {currency} balance={quantity}");
 

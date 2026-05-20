@@ -4,7 +4,10 @@
 //! `TEngineResponse` с тем же UID. `ApiPending` хранит маппинг
 //! `uid → mpsc::Sender<EngineResponse>`.
 //!
-//! Обычным приложениям лучше использовать `Client::api_*` wrappers совместно с
+//! Обычным приложениям лучше использовать one-shot helpers вроде
+//! [`crate::client::Client::request_balance`] или
+//! [`crate::client::Client::request_engine_response`]. Если нужен raw async
+//! receiver, используй `Client::api_*` wrappers совместно с
 //! [`crate::client::Client::run_until_response`] — тогда тот же thread продолжает
 //! прокачивать UDP main loop пока ждёт response:
 //! ```ignore

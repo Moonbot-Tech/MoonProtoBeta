@@ -118,17 +118,30 @@ Engine API response. It also fills `client.server_info()` after `BaseCheck`.
 
 ## Engine API Requests
 
-Most `Client::api_*` methods send a request and return
-`std::sync::mpsc::Receiver<EngineResponse>`:
+For common one-shot reads, prefer typed request helpers:
+
+```rust
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+```
+
+These helpers send the request, keep the UDP loop running through
+`EventDispatcher`, validate the server response, and parse the payload. They
+return `EngineRequestError` for timeout, disconnect, server error, or malformed
+payload.
+
+Lower-level `Client::api_*` methods still return
+`std::sync::mpsc::Receiver<EngineResponse>` for custom async flows:
 
 ```rust
 let rx = client.api_get_markets_list();
 let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 ```
 
-Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`;
-the response is delivered only while the client loop is running. Direct
-`recv_timeout` is correct only when another thread is already running the client.
+Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
+The response is delivered only while the client loop is running. Direct
+`recv_timeout` is correct only when another thread is already running the
+client.
 
 ## UI Settings Request
 

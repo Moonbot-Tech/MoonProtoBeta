@@ -392,6 +392,7 @@
 | E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/BindFailed | client.rs:check_lifecycle_transition + bind failure path | ✅ |
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
+| E-W9 | Однопоточный SendAndWait-style Engine API flow без ручного `Receiver` wait/parsing | client.rs:`request_engine_response` + typed `request_*` helpers | ✅ |
 
 ---
 

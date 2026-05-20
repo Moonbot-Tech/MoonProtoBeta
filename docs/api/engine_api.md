@@ -3,31 +3,38 @@
 `MPC_API` is the request/response RPC channel between the client and the server
 engine. Requests and responses are correlated by `request_uid`.
 
-Use `Client::api_*` wrappers for normal application code.
+Use typed `Client::request_*` helpers for common one-shot reads. Use
+`Client::api_*` wrappers when you need the raw `EngineResponse` receiver for a
+custom asynchronous flow.
 
 ## Waiting for a Response
 
 ```rust
 use std::time::Duration;
-use moonproto::commands::market::parse_markets_list_response;
 
-let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-
-if resp.success {
-    let markets = parse_markets_list_response(&resp.data, 2).expect("bad markets response");
-    println!("markets={}", markets.markets.len());
-}
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 ```
 
-`run_until_response` keeps pumping the UDP loop through short
-`run_with_dispatcher` ticks. Calling `rx.recv_timeout(...)` directly on the same
-thread usually times out because no UDP packets are processed during that wait.
+The one-shot helpers keep pumping the UDP loop through short
+`run_with_dispatcher` ticks, validate `EngineResponse::success`, and parse the
+method-specific payload. They return `EngineRequestError`.
+
+For custom flows, use the lower-level receiver path:
+
+```rust
+let rx = client.api_get_markets_list();
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+```
+
+Calling `rx.recv_timeout(...)` directly on the same thread usually times out
+because no UDP packets are processed during that wait.
 
 ## Client Wrappers
 
 | Group | Methods |
 |---|---|
+| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_coin_card_candles` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
@@ -50,37 +57,24 @@ calls are useful for custom tools but do not update the subscription registry.
 
 ## Balance
 
-`api_get_balance(currency)` returns the current quantity for one currency. The
-server payload is parsed with `parse_get_balance_response`:
+`request_balance(currency)` returns the current quantity for one currency:
 
 ```rust
-use moonproto::commands::parse_get_balance_response;
-
-let rx = client.api_get_balance("USDT");
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-
-if resp.success {
-    let qty = parse_get_balance_response(&resp.data).expect("bad balance response");
-    println!("USDT balance={qty}");
-}
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+println!("USDT balance={qty}");
 ```
 
 ## Account Settings
 
-`api_query_hedge_mode()` returns the current hedge-mode flag. The server payload
-is parsed with `parse_query_hedge_mode_response`:
+`request_hedge_mode()` returns the current hedge-mode flag:
 
 ```rust
-use moonproto::commands::parse_query_hedge_mode_response;
-
-let rx = client.api_query_hedge_mode();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-
-if resp.success {
-    let hedge_mode = parse_query_hedge_mode_response(&resp.data).expect("bad hedge payload");
-    println!("hedge_mode={hedge_mode}");
-}
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+println!("hedge_mode={hedge_mode}");
 ```
+
+For raw payload access, `api_get_balance` and `api_query_hedge_mode` remain
+available and return `Receiver<EngineResponse>`.
 
 ## EngineResponse
 
@@ -138,6 +132,12 @@ if info.supports(exchange_type_flags::FUTURES) {
 }
 ```
 
+One-shot parsing and storage:
+
+```rust
+let info = client.request_base_check(&mut dispatcher, Duration::from_secs(10))?;
+```
+
 Fields:
 
 | Field | Type | Meaning |
@@ -172,13 +172,8 @@ exchange_type_flags::PREDICT;
 `parse_auth_check_response` parses the payload returned by `api_auth_check`:
 
 ```rust
-use moonproto::commands::engine_api::parse_auth_check_response;
-
-let rx = client.api_auth_check();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
-if let Some(auth) = parse_auth_check_response(&resp.data) {
-    println!("account={}", auth.account_id);
-}
+let auth = client.request_auth_check(&mut dispatcher, Duration::from_secs(10))?;
+println!("account={}", auth.account_id);
 ```
 
 ## Low-Level Builders

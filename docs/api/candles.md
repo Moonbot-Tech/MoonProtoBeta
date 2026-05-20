@@ -43,23 +43,21 @@ ordinal is sent as a single byte.
 
 ```rust
 use std::time::Duration;
-use moonproto::commands::candles::{DeepHistoryKind, parse_coin_card_candles_response};
+use moonproto::commands::candles::DeepHistoryKind;
 
-let rx = client.api_get_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour1);
-// `run_until_response` keeps pumping the UDP main loop in short ticks while
-// it waits. Calling `rx.recv_timeout(...)` directly on the same thread that
-// owns `Client` would time out because no UDP packets are processed during
-// that blocking wait.
-match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10)) {
-    Ok(resp) if resp.success => {
-        let candles = parse_coin_card_candles_response(&resp.data).unwrap();
+match client.request_coin_card_candles(
+    &mut dispatcher,
+    "BTCUSDT",
+    DeepHistoryKind::Hour1,
+    Duration::from_secs(10),
+) {
+    Ok(candles) => {
         for c in &candles {
             println!("{} open={} close={} vol={}",
                 c.time, c.open_p, c.close_p, c.vol);
         }
     }
-    Ok(resp) => eprintln!("error: {}", resp.error_msg),
-    Err(_)   => eprintln!("timeout"),
+    Err(err) => eprintln!("request failed: {err}"),
 }
 ```
 
@@ -185,5 +183,6 @@ fn delphi_to_unix_secs(td: f64) -> f64 {
 
 - [engine_api.md](engine_api.md) — RPC channel, ApiPending registry.
 - [events.md](events.md) — `Event::EngineResponse` for raw response tracking.
-- [client.md](client.md) — `client.api_get_coin_card_candles()` /
-  `api_request_candles_data()` / `api_request_candles_data_async()`.
+- [client.md](client.md) — `client.request_coin_card_candles()` /
+  `api_get_coin_card_candles()` / `api_request_candles_data()` /
+  `api_request_candles_data_async()`.

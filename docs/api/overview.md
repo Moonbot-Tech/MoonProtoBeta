@@ -64,7 +64,8 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 - Refetches market indexes after server restart and blocks indexed streams until they are synchronized.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
 - Detects trades gaps and sends `TradesResend` requests on periodic ticks.
-- Routes Engine API responses into the `Receiver` returned by the matching `api_*` call.
+- Routes Engine API responses into one-shot `request_*` helpers or the
+  `Receiver` returned by lower-level `api_*` calls.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the optional NTP sync thread when `ClientConfig::ntp_host` is set.
 - Aggregates chunked candle responses through `api_request_candles_data_async`.
@@ -92,4 +93,5 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 `commands::*` and `state::*` remain public for custom tooling, tests, and advanced
 consumers. Regular applications should prefer `Client::run_with_dispatcher`,
-`run_init_sequence`, `Client::api_*`, `Client::subscribe_*`, and the typed events.
+`run_init_sequence`, typed `Client::request_*` helpers, `Client::subscribe_*`,
+and the typed events.

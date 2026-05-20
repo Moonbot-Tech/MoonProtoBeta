@@ -1,8 +1,6 @@
 //! Fetch one batch of historical candles through the public library API.
 //!
-//! Demonstrates `run_init_sequence` + `api_get_coin_card_candles` +
-//! `Client::run_until_response` (the recommended single-thread pattern for
-//! waiting on Engine API responses).
+//! Demonstrates `run_init_sequence` + `Client::request_coin_card_candles`.
 //!
 //! Run:
 //!   cargo run --example history_bars --release -- "<key_base64>" "host:port" BTCUSDT 1h
@@ -13,9 +11,7 @@ use std::time::Duration;
 use moonproto::client::{
     run_init_sequence, Client, ClientConfig, InitConfig,
 };
-use moonproto::commands::candles::{
-    parse_coin_card_candles_response, DeepHistoryKind, DeepPrice,
-};
+use moonproto::commands::candles::{DeepHistoryKind, DeepPrice};
 use moonproto::events::EventDispatcher;
 use moonproto::key_import;
 
@@ -99,22 +95,18 @@ fn main() {
     }
 
     println!("[request] candles market={market} kind={kind:?}");
-    let rx = client.api_get_coin_card_candles(market, kind);
-    let resp = match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(15)) {
-        Ok(resp) => resp,
+    let candles = match client.request_coin_card_candles(
+        &mut dispatcher,
+        market,
+        kind,
+        Duration::from_secs(15),
+    ) {
+        Ok(candles) => candles,
         Err(err) => {
-            eprintln!("[request] timeout/disconnected: {err:?}");
+            eprintln!("[request] failed: {err}");
             std::process::exit(4);
         }
     };
-
-    if !resp.success {
-        eprintln!("[response] error {}: {}", resp.error_code, resp.error_msg);
-        std::process::exit(5);
-    }
-
-    let candles = parse_coin_card_candles_response(&resp.data)
-        .expect("server returned malformed candle payload");
     println!("[response] {} candles", candles.len());
     if let Some(first) = candles.first() {
         print_candle("first", first);
