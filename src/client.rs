@@ -2275,6 +2275,12 @@ impl Client {
                     handle_event(event, &mut recv_msgs, &mut sliced, &mut h_items, &mut l_items, &mut subscribe_events);
                 }
 
+                // Delphi `SendCmdInt` deduplicates the selected send queue before
+                // `CheckSeningData` copies it for transmission. Do the same for
+                // commands accumulated from the event channel during this tick.
+                Self::dedup_send_items_by_u_key(&mut sliced);
+                Self::dedup_send_items_by_u_key(&mut h_items);
+
                 // F4: применяем subscribe/unsubscribe события до отправки accumulated batch'ей.
                 // Если приложение успело пушнуть subscribe + send в одном тике — порядок
                 // соответствует FIFO в channel'е (subscribe раньше, поэтому wire-команда
@@ -3255,6 +3261,18 @@ impl Client {
             self.tmp_send_size += item_size;
         }
         item.last_sent_at = cur_tm;
+    }
+
+    fn dedup_send_items_by_u_key(items: &mut Vec<SendItem>) {
+        let mut idx = 0;
+        while idx < items.len() {
+            let u_key = items[idx].u_key;
+            if !u_key.is_none() && items[idx + 1..].iter().any(|item| item.u_key == u_key) {
+                items.remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
     }
 
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
@@ -4625,6 +4643,46 @@ mod pmtu_tests {
 
         client.create_sliced_and_send(&item);
         assert!(client.sending.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod send_queue_dedup_tests {
+    use super::*;
+
+    fn item(kind: u8, uid: u64, marker: u8) -> SendItem {
+        SendItem {
+            data: vec![marker],
+            cmd: Command::Order as u8,
+            encrypted: true,
+            priority: SendPriority::High,
+            retry_left: 2,
+            max_retries: 3,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey { kind, uid },
+        }
+    }
+
+    #[test]
+    fn send_queue_dedup_keeps_last_item_for_same_u_key() {
+        let mut items = vec![
+            item(UK_NONE, 0, 0),
+            item(UK_ORDER_MOVE, 7, 1),
+            item(UK_ORDER_MOVE, 8, 2),
+            item(UK_ORDER_MOVE, 7, 3),
+            item(UK_NONE, 0, 4),
+            item(UK_ORDER_MOVE, 8, 5),
+        ];
+
+        Client::dedup_send_items_by_u_key(&mut items);
+
+        let markers: Vec<u8> = items.iter().map(|item| item.data[0]).collect();
+        assert_eq!(
+            markers,
+            vec![0, 3, 4, 5],
+            "Delphi SendCmdInt removes older queued items with same non-empty UKey",
+        );
     }
 }
 

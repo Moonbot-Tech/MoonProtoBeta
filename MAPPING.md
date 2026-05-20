@@ -107,9 +107,15 @@
 |---|---|---|---|---|
 | 55 | 844-876 | Apply server's ACK slider to PendingH | client.rs: handle_ping applies server ACK to pending_h before H retry/send phase | ✅ |
 
+## SendCmdInt / UKey dedup (MoonProtoCommon.pas:765-792, 896-939) → client.rs run loop
+
+| # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
+|---|---|---|---|---|
+| 56 | MoonProtoCommon.pas:780-787,900-906,931-939 + MoonProtoIntStruct.pas:1152-1168 | `UKey != UK_None`: новая Sliced/High команда вытесняет старую с тем же ключом в очереди; при отправке чистит `Sending`/`PendingH` по ключу | client.rs: `dedup_send_items_by_u_key`, затем `sending.retain` / `pending_h.retain` перед `create_sliced_and_send` / `send_h_item` | ✅ |
+
 ---
 
-## Итого Stage 1: 55 пунктов
+## Итого Stage 1: 56 пунктов
 
 - Все пункты закрыты или имеют подтверждённое описание поведения.
 - AAD в handshake актуализирован: текущий Delphi `MakeCorrectAAD = true`, Rust
