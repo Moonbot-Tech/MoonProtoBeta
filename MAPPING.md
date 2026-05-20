@@ -17,7 +17,7 @@
 | 9 | 543 | DoCleanUp (clear old Receiving) | ✅ client.rs: slicer.clear_old() every 5s |
 | 10 | 545-546 | Handshake cmds → FWaitingHello := false | client.rs handle_handshake sets waiting_hello=false | ✅ |
 | 11 | 548-553 | MPC_WrongHello → MPS_Connected | client.rs:294 | ✅ |
-| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect | client.rs: full_reset() + flags | ✅ |
+| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect | client.rs: full_reset() + flags; `Sending` cleanup отличается, см. DEVIATION #27 | DEVIATION |
 | 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) | client.rs: last_need_hello_again + 700ms check | ✅ |
 | 14 | 578-581 | WhoAreYou/Fine → HandleHandShake | client.rs handle_handshake | ✅ |
 | 15 | 583-591 | MPC_SizeTest → SendSizeAck | client.rs handle_size_test | ✅ |
@@ -55,7 +55,7 @@
 | 32 | 772-785 | Offline detection → HelloAgain | client.rs: check_offline_reconnect | ✅ |
 | 33 | 789-796 | HelloAgain timeout 7s → socket recreate | client.rs check_reconnect_timeout | ✅ |
 | 34 | 799-804 | Dead zone (5s) → force reconnect | client.rs check_dead_zone | ✅ |
-| 35 | 806-822 | ForceDisconnect: LogOff, close socket, Reset | client.rs: do_force_disconnect + full_reset | ✅ |
+| 35 | 806-822 | ForceDisconnect: LogOff, close socket, Reset | client.rs: do_force_disconnect + full_reset; `Sending`/pending API cleanup отличается, см. DEVIATION #27 | DEVIATION |
 | 36 | 826 | Sleep(DefaultNetThreadSleepTime = 5ms) | client.rs: sleep(5ms) | ✅ |
 
 ## SendPing (MoonProtoUDPClient.pas:213-232) → client.rs handle_ping (response)
