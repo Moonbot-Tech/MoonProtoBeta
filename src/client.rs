@@ -2780,19 +2780,11 @@ impl Client {
         // TMoonProtoPing fields (matches MoonProtoDataStruct.pas:63-74)
         let initial_time = f64::from_le_bytes(payload[8..16].try_into().unwrap());
         self.round_trip_delay = i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64;
-        // D-V2-06 fix: clamp PMTU — corrupt/malicious Ping не должен дать pmtu < header_size
-        // (=19), иначе arithmetic underflow в create_sliced_and_send. MinSafeDatagramSize=508
-        // по протоколу — это нижняя граница договорённого PMTU.
-        // PMTU clamp: снизу — `MIN_PMTU=64` чтобы create_sliced_and_send не упёрся в
-        // underflow при вычитании header_size. Сверху — `MAX_PMTU=8192` (= MaxNeededDatagramSize
-        // по IPv6 protocol limit). Без upper-clamp malicious Ping pmtu=65535 заставил бы
-        // отправлять 65 KB UDP датаграммы → `send_to()` возвращает EMSGSIZE → каскад
-        // force_disconnect → permanent reconnect loop с одного malicious пакета.
-        // См. robustness audit C4.
-        const MIN_PMTU: u16 = 64;
-        const MAX_PMTU: u16 = 8192;
+        // Delphi assigns APing.PMTU verbatim (MoonProtoUDPClient.pas:632-635).
+        // Runtime ProbeMTU can legitimately grow above MaxNeededDatagramSize=8000
+        // by +32 steps, so upper clamping here would break discovery.
         let pmtu_raw = u16::from_le_bytes(payload[20..22].try_into().unwrap());
-        self.actual_pmtu = pmtu_raw.clamp(MIN_PMTU, MAX_PMTU);
+        self.actual_pmtu = pmtu_raw;
         self.global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
         self.overheat = payload[24];
         // B-19: умножение на const reciprocal вместо деления (FDIV → FMUL).
@@ -3016,12 +3008,7 @@ impl Client {
         if payload.len() < 6 { return; }
         let size = u16::from_le_bytes(payload[0..2].try_into().unwrap());
         let series = u16::from_le_bytes(payload[4..6].try_into().unwrap());
-        // D-V2-07 fix: clamp size до разумного верхнего предела. Атакующий сервер мог бы
-        // прислать SizeTest шторм с size=65535 → 64KB alloc/packet → DoS. PMTU тестовые
-        // пакеты ограничены сверху MAX_DATAGRAM_PROBE (см. ARCHITECTURE §7). MoonProto
-        // не передаёт пакетов > MaxNeededDatagramSize (8000 по IPv6 limit).
-        const MAX_SIZE_PROBE: u16 = 8192;
-        if size > MAX_SIZE_PROBE || (size as usize) < 6 { return; }
+        if (size as usize) < 6 { return; }
         // PMTU discovery шлёт серию ~17 SizeTest пакетов каждые ~5с (Delphi
         // MoonProtoUDPClient.pas). Старый throttle 10/sec **ломал** PMTU
         // discovery — серия не помещалась в окно. Delphi не throttle'ит,
@@ -3039,9 +3026,7 @@ impl Client {
         let probe_id = u16::from_le_bytes(payload[0..2].try_into().unwrap());
         let probe_index = payload[2];
         let test_size = u16::from_le_bytes(payload[3..5].try_into().unwrap());
-        // D-V2-07 fix: см. handle_size_test выше — clamp до MAX_SIZE_PROBE.
-        const MAX_SIZE_PROBE: u16 = 8192;
-        if test_size > MAX_SIZE_PROBE || (test_size as usize) < 5 { return; }
+        if (test_size as usize) < 5 { return; }
         // ProbeMTU тоже не throttle — см. handle_size_test rationale.
         let mut ack = vec![0u8; test_size as usize];
         ack[0..2].copy_from_slice(&probe_id.to_le_bytes());
@@ -3067,7 +3052,12 @@ impl Client {
         let slice_hdr_size = 4u16;
 
         // MaxSlicedDataSize check (matches IntStruct.pas:1071-1079)
-        let pmtu_for_check = (self.actual_pmtu - header_size - slice_hdr_size) as usize;
+        let pmtu_for_check_i32 =
+            self.actual_pmtu as i32 - header_size as i32 - slice_hdr_size as i32;
+        if pmtu_for_check_i32 <= 0 {
+            return;
+        }
+        let pmtu_for_check = pmtu_for_check_i32 as usize;
         let max_sliced_data_size = pmtu_for_check * 256 - 12 - 1; // 12=CryptoHeader, 1=cmd byte
         if item.data.len() > max_sliced_data_size {
             return; // too large, drop (Delphi logs + exits)
@@ -3808,7 +3798,8 @@ impl Client {
     /// `TMoonProtoNetClient.RoundTripDelay` (MoonProtoClient.pas:62).
     pub fn round_trip_delay_ms(&self) -> i64 { self.round_trip_delay }
 
-    /// Текущий Path MTU в байтах (от 508 до 8000, адаптируется PMTU discovery).
+    /// Текущий Path MTU в байтах. Стартует с 508; runtime ProbeMTU может
+    /// увеличивать значение выше 8000 шагами по 32 байта.
     /// Соответствует Delphi `TMoonProtoNetClient.PMTU`.
     pub fn actual_pmtu(&self) -> u16 { self.actual_pmtu }
 
@@ -4572,6 +4563,68 @@ mod client_subscribe_integration_tests {
         client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
         client.apply_subscribe_event(ClientEvent::UnsubscribeAllTrades);
         assert!(client.subscription_registry.trades_sub.is_none());
+    }
+}
+
+#[cfg(test)]
+mod pmtu_tests {
+    use super::*;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+        }
+    }
+
+    fn ping_payload_with_pmtu(pmtu: u16) -> Vec<u8> {
+        let mut payload = vec![0u8; 50];
+        payload[20..22].copy_from_slice(&pmtu.to_le_bytes());
+        payload[41] = 255; // RSQ
+        payload
+    }
+
+    #[test]
+    fn ping_pmtu_above_8192_is_preserved() {
+        let mut client = Client::new(dummy_cfg());
+        let mut delivered = Vec::new();
+        let mut sink = DispatchSink::Buffer(&mut delivered);
+
+        client.handle_ping(&ping_payload_with_pmtu(8_224), &mut sink);
+
+        assert_eq!(client.actual_pmtu(), 8_224);
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, Command::Ping);
+    }
+
+    #[test]
+    fn tiny_ping_pmtu_does_not_underflow_sliced_send() {
+        let mut client = Client::new(dummy_cfg());
+        let mut delivered = Vec::new();
+        let mut sink = DispatchSink::Buffer(&mut delivered);
+        client.handle_ping(&ping_payload_with_pmtu(18), &mut sink);
+        assert_eq!(client.actual_pmtu(), 18);
+
+        let item = SendItem {
+            data: vec![1],
+            cmd: Command::UI as u8,
+            encrypted: false,
+            priority: SendPriority::Sliced,
+            retry_left: 0,
+            max_retries: 0,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+
+        client.create_sliced_and_send(&item);
+        assert!(client.sending.is_empty());
     }
 }
 
