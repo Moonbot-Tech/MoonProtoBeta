@@ -1263,16 +1263,16 @@ impl Client {
         self.event_tx.clone()
     }
 
-    /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=3).
-    /// Matches: SendAPICmd → SendCmd → DataToSend(MPS_Sliced, FCrypted=true, MaxRetries=3).
-    /// TBaseCommand.FMaxRetries = 3 (BaseStruct.pas:141, default из SetDefaults).
+    /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
+    /// Matches Delphi: `TEngineRequest` has explicit `MoonCmdPriority(MPS_Sliced)`,
+    /// and `TCommandRegistry.InitRegistry` gives Sliced commands `MaxRetries=6`.
     pub fn send_api_request(&self, request_payload: &[u8]) {
         self.send_cmd(
             request_payload.to_vec(),
             Command::API,
             SendPriority::Sliced,
             true,    // Engine API is always encrypted
-            3,       // TBaseCommand.FMaxRetries = 3 (BaseStruct.pas:141)
+            6,       // TEngineRequest effective MaxRetries for MPS_Sliced
         );
     }
 
@@ -4836,6 +4836,41 @@ mod pmtu_tests {
         assert_eq!(wire_len, 60);
         assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
         assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
+    }
+}
+
+#[cfg(test)]
+mod api_retry_tests {
+    use super::*;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
+        }
+    }
+
+    #[test]
+    fn engine_api_sliced_requests_use_delphi_retry_count() {
+        let client = Client::new(dummy_cfg());
+        let raw = crate::commands::engine_request::query_hedge_mode();
+
+        client.send_api_request(&raw);
+
+        let ev = client.event_rx.try_recv().expect("send event queued");
+        let ClientEvent::Send(msg) = ev else {
+            panic!("expected send event");
+        };
+        assert_eq!(msg.item.cmd, Command::API as u8);
+        assert_eq!(msg.item.priority, SendPriority::Sliced);
+        assert_eq!(msg.item.max_retries, 6);
+        assert_eq!(msg.item.retry_left, 5);
     }
 }
 

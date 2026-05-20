@@ -130,11 +130,15 @@ already running the client loop.
 Typed parsers are provided for common response payloads:
 
 ```rust
-use moonproto::commands::parse_get_balance_response;
+use moonproto::commands::{parse_get_balance_response, parse_query_hedge_mode_response};
 
 let rx = client.api_get_balance("USDT");
 let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
 let qty = parse_get_balance_response(&resp.data).expect("bad GetBalance payload");
+
+let rx = client.api_query_hedge_mode();
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let hedge_mode = parse_query_hedge_mode_response(&resp.data).expect("bad hedge payload");
 ```
 
 ## Subscriptions
@@ -178,6 +182,8 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/client_test.rs` — basic live connection smoke test.
 - `examples/trading_flow.rs` — phased handshake, init, subscriptions, and stream.
 - `examples/history_bars.rs` — request and parse historical candles.
+- `examples/get_balance.rs` — request and parse one currency balance.
+- `examples/query_hedge_mode.rs` — request and parse account hedge mode.
 - `examples/multi_client_test.rs` — two independent clients in one process.
 
 ## API Documentation

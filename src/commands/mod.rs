@@ -22,7 +22,7 @@ pub use balance::{BalanceUpdate, BalanceItem};
 pub use arb::{ArbPayload, ArbPriceBlock, ArbPriceItem, ArbIsolationEntry};
 pub use engine_api::{
     EngineResponse, EngineMethod, AuthCheckResponse, DexInfo, parse_auth_check_response,
-    parse_get_balance_response,
+    parse_get_balance_response, parse_query_hedge_mode_response,
 };
 pub use trade::{
     TradeCommand,

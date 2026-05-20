@@ -65,6 +65,23 @@ if resp.success {
 }
 ```
 
+## Account Settings
+
+`api_query_hedge_mode()` returns the current hedge-mode flag. The server payload
+is parsed with `parse_query_hedge_mode_response`:
+
+```rust
+use moonproto::commands::parse_query_hedge_mode_response;
+
+let rx = client.api_query_hedge_mode();
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+
+if resp.success {
+    let hedge_mode = parse_query_hedge_mode_response(&resp.data).expect("bad hedge payload");
+    println!("hedge_mode={hedge_mode}");
+}
+```
+
 ## EngineResponse
 
 ```rust

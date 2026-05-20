@@ -365,6 +365,7 @@
 | E5 | DEFLATE on Data if IsCompressed | response decompression | parse_engine_response Deflate | ✅ |
 | E6 | UnencryptedMethods set | exclude from encryption | server-side, client принимает оба | N/A |
 | E7 | MoonProtoEngineServer.pas:315-319 emk_GetBalance response `WriteDouble(q)` | typed payload parser | engine_api.rs:parse_get_balance_response | ✅ |
+| E8 | MoonProtoEngineServer.pas:341-344 emk_QueryHedgeMode response `WriteBool(hedgeMode)` | typed payload parser | engine_api.rs:parse_query_hedge_mode_response | ✅ |
 
 ### High-level wrappers in client.rs (Stage 3)
 | # | Что | Rust | ✅ |
@@ -376,6 +377,7 @@
 | E-W5 | Trade wrappers с UKey dedup (UK_OrderMove, UK_ImmuneClicks) | client.rs:send_trade_keyed + UniqueKey constants | ✅ |
 | E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/SendBacklogCritical/BindFailed | client.rs:check_lifecycle_transition + send/bind failure paths | ✅ |
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
+| E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 
 ---
 

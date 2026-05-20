@@ -42,7 +42,7 @@ pub enum EngineMethod {
     /// декодирования market_index в имя.
     GetMarketsIndexes = 5,
     /// `GetBalance` — текущий баланс по конкретной валюте. Параметр: `currency` (string).
-    /// Ответ: float баланс + locked + другие поля валюты.
+    /// Ответ: one Delphi `Double`, parse with [`parse_get_balance_response`].
     GetBalance = 6,
     /// `GetMarketsBalanceFull` — полный balance snapshot по всем рынкам (`TBalanceItem`
     /// записи). Без параметров. Используется для initial sync после Authenticated.
@@ -63,7 +63,8 @@ pub enum EngineMethod {
     SetLeverage = 12,
     /// `SetHedgeMode` — включить/выключить hedge mode (Binance Futures). Параметр: bool.
     SetHedgeMode = 13,
-    /// `QueryHedgeMode` — текущий статус hedge mode. Без параметров. Ответ: bool.
+    /// `QueryHedgeMode` — текущий статус hedge mode. Без параметров.
+    /// Ответ: one Delphi `Boolean`, parse with [`parse_query_hedge_mode_response`].
     QueryHedgeMode = 14,
     /// `CheckAPIExpirationTime` — срок действия API ключа на бирже. Без параметров.
     /// Ответ: timestamp + дни до истечения. Полезно для UI warning'а.
@@ -296,6 +297,16 @@ pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
         return None;
     }
     Some(f64::from_le_bytes(data[0..8].try_into().unwrap()))
+}
+
+/// Parse `EngineResponse.data` for `emk_QueryHedgeMode`
+/// (`EngineMethod::QueryHedgeMode`).
+///
+/// The Delphi server writes one `Boolean` byte on success:
+/// `MoonProtoEngineServer.pas:341-344` (`resp.WriteBool(hedgeMode)`). Extra
+/// trailing bytes are ignored for forward compatibility.
+pub fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
+    data.first().map(|&v| v != 0)
 }
 
 // =============================================================================
@@ -734,6 +745,14 @@ mod parse_engine_response_tests {
 
         assert_eq!(parse_get_balance_response(&data), Some(1234.5));
         assert_eq!(parse_get_balance_response(&data[..7]), None);
+    }
+
+    #[test]
+    fn parse_query_hedge_mode_response_reads_delphi_bool() {
+        assert_eq!(parse_query_hedge_mode_response(&[0]), Some(false));
+        assert_eq!(parse_query_hedge_mode_response(&[1]), Some(true));
+        assert_eq!(parse_query_hedge_mode_response(&[2, 0xAA]), Some(true));
+        assert_eq!(parse_query_hedge_mode_response(&[]), None);
     }
 
     #[test]
