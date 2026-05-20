@@ -272,6 +272,8 @@
 | S-A1 | MoonProtoClient.pas:689-800 ProcessStratCommand | sync state apply | state/strats.rs:apply | ✅ |
 | S-A2 | CheckedSync delta=false → reset others; delta=true → merge | full/delta semantics | state/strats.rs:apply CheckedSync | ✅ |
 | S-A3 | TStratSnapshot.Data RTTI decode | bin → fields | state/strats.rs:apply_snapshot_decoded → strategy_serializer | ✅ |
+| S-A4 | StrategySerializer.pas:635-705 LoadStrategyFromCompact | existing strategy skips stale snapshot when local LastDate and Ver are both >= incoming | state/strats.rs:upsert_from_snapshot rollback guard | ✅ |
+| S-A5 | MoonProtoClient.pas:757-769 ProcessStratCommand CheckedSync | CheckedSync updates only existing strategies; unknown StrategyID is ignored | state/strats.rs:apply CheckedSync ignores missing id | ✅ |
 
 ---
 

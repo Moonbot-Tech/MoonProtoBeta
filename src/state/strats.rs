@@ -6,7 +6,8 @@
 //!
 //! Сервер шлёт сериализованную пачку стратегий в `TStratSnapshot.data: Vec<u8>` через
 //! `TStrategySerializer` (RTTI-driven). `apply_snapshot_decoded()` парсит этот blob через
-//! `commands::strategy_serializer::parse_strategy_batch` и upsert'ит каждую стратегию в state.
+//! `commands::strategy_serializer::parse_strategy_batch` и применяет каждую стратегию в state
+//! с Delphi rollback guard по `StrategyLastDate`/`StrategyVer`.
 //! События `StratEvent::SnapshotFull/Partial { raw_data }` сохраняют исходный
 //! `TStrategySerializer` payload для потребителей, которым нужен полный набор
 //! полей через `HashMap<String, FieldValue>` для UI-рендеринга.
@@ -20,6 +21,8 @@ use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, 
 pub struct StrategyInfo {
     /// Уникальный идентификатор стратегии (от сервера). 0 = не валидный.
     pub strategy_id: u64,
+    /// Версия стратегии из `TStrategySerializer` header.
+    pub strategy_ver: i32,
     /// Время последнего апдейта (TDateTime f64 packed как UInt64).
     pub last_date: u64,
     /// Цена продажи (из TStratSellPriceUpdate). 0.0 если не было апдейта.
@@ -34,6 +37,7 @@ impl StrategyInfo {
     fn new(strategy_id: u64) -> Self {
         Self {
             strategy_id,
+            strategy_ver: 0,
             last_date: 0,
             sell_price: 0.0,
             checked: false,
@@ -82,8 +86,9 @@ pub struct StratsState {
     /// **auto-echo** на серверный `TStratSnapshotRequest`: либа сама шлёт обратно
     /// корректный CmdId=2 пакет через `client.strat_send_snapshot_payload(...)`
     /// в `EventDispatcher::dispatch_into_active`.
-    /// Это аналог Delphi `MoonProtoClient.pas:695-699` где клиент auto-respond'ит
-    /// `TStratSnapshot.CreateFromStrats(Strats)`.
+    ///
+    /// Delphi в этой точке пересобирает fresh snapshot из живого `Strats`;
+    /// cached echo остаётся открытым расхождением, см. `DEVIATION.md #31`.
     ///
     /// **Внимание**: echo'ится **последний полученный** snapshot. Если приложение
     /// модифицировало стратегии локально и эти изменения ещё не дошли до сервера
@@ -124,9 +129,13 @@ impl StratsState {
                 StratEvent::Deleted { strategy_id: d.strategy_id }
             }
             StratCommand::SellPriceUpdate(u) => {
-                let entry = self.get_or_insert(u.strategy_id);
-                entry.sell_price = u.sell_price;
-                StratEvent::SellPriceUpdated { strategy_id: u.strategy_id, sell_price: u.sell_price }
+                match self.by_id.get_mut(&u.strategy_id) {
+                    Some(entry) => {
+                        entry.sell_price = u.sell_price;
+                        StratEvent::SellPriceUpdated { strategy_id: u.strategy_id, sell_price: u.sell_price }
+                    }
+                    None => StratEvent::Ignored,
+                }
             }
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
@@ -137,10 +146,11 @@ impl StratsState {
                     }
                 }
                 for it in &s.items {
-                    let entry = self.get_or_insert(it.strategy_id);
-                    if entry.checked != it.checked {
-                        entry.checked = it.checked;
-                        changed += 1;
+                    if let Some(entry) = self.by_id.get_mut(&it.strategy_id) {
+                        if entry.checked != it.checked {
+                            entry.checked = it.checked;
+                            changed += 1;
+                        }
                     }
                 }
                 StratEvent::CheckedSynced { changed, is_delta: s.is_delta }
@@ -161,11 +171,17 @@ impl StratsState {
     /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
     /// Обновляет `last_date`, `folder_path`, `checked` из header'а. Поля стратегии (`fields`)
     /// отдаются потребителю наружу — этот state хранит только sync-сводку.
-    pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) {
+    pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) -> bool {
+        let existed = self.by_id.contains_key(&s.strategy_id);
         let entry = self.get_or_insert(s.strategy_id);
+        if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
+            return false;
+        }
+        entry.strategy_ver = s.strategy_ver;
         entry.last_date = s.last_date;
         entry.folder_path = s.path.clone();
         entry.checked = s.checked;
+        true
     }
 
     /// Применить всю batch стратегий из `TStratSnapshot.data` (DEFLATE-compressed payload).
@@ -217,12 +233,31 @@ mod tests {
     use crate::commands::strat::{StratSellPriceUpdate, StratDelete, StratCheckedSync};
 
     #[test]
-    fn sell_price_creates_entry() {
+    fn sell_price_update_ignores_unknown_strategy() {
         let mut s = StratsState::new();
-        s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
+        let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
             strategy_id: 100,
             sell_price: 50.5,
         }));
+        assert!(matches!(ev, StratEvent::Ignored));
+        assert!(s.get(100).is_none());
+    }
+
+    #[test]
+    fn sell_price_update_existing_strategy() {
+        let mut s = StratsState::new();
+        s.upsert(100, 0, "F".into());
+        let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
+            strategy_id: 100,
+            sell_price: 50.5,
+        }));
+        match ev {
+            StratEvent::SellPriceUpdated { strategy_id, sell_price } => {
+                assert_eq!(strategy_id, 100);
+                assert_eq!(sell_price, 50.5);
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
         assert_eq!(s.get(100).unwrap().sell_price, 50.5);
     }
 
@@ -324,8 +359,88 @@ mod tests {
             items: vec![StratCheckedItem { strategy_id: 1, checked: true }],
             is_delta: false,
         });
-        s.apply(cmd);
+        let ev = s.apply(cmd);
+        assert!(matches!(ev, StratEvent::CheckedSynced { changed: 1, is_delta: false }));
         assert!(s.get(1).unwrap().checked);
         assert!(!s.get(2).unwrap().checked);
+    }
+
+    #[test]
+    fn checked_sync_ignores_unknown_strategy() {
+        let mut s = StratsState::new();
+        s.upsert(1, 0, "".into());
+        let cmd = StratCommand::CheckedSync(StratCheckedSync {
+            items: vec![
+                StratCheckedItem { strategy_id: 1, checked: true },
+                StratCheckedItem { strategy_id: 999, checked: true },
+            ],
+            is_delta: true,
+        });
+        let ev = s.apply(cmd);
+
+        assert!(matches!(ev, StratEvent::CheckedSynced { changed: 1, is_delta: true }));
+        assert!(s.get(1).unwrap().checked);
+        assert!(s.get(999).is_none());
+    }
+
+    #[test]
+    fn snapshot_does_not_roll_back_newer_existing_strategy() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+
+        let mut s = StratsState::new();
+        let mut fields = HashMap::new();
+        fields.insert("Name".to_string(), FieldValue::String("Old".to_string()));
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 7,
+            last_date: 200,
+            checked: true,
+            kind: 1,
+            path: "NewPath".to_string(),
+            fields: fields.clone(),
+        });
+
+        let changed = s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 6,
+            last_date: 199,
+            checked: false,
+            kind: 1,
+            path: "OldPath".to_string(),
+            fields,
+        });
+
+        assert!(!changed);
+        let info = s.get(100).unwrap();
+        assert_eq!(info.strategy_ver, 7);
+        assert_eq!(info.last_date, 200);
+        assert_eq!(info.folder_path, "NewPath");
+        assert!(info.checked);
+    }
+
+    #[test]
+    fn snapshot_applies_new_zero_version_strategy() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+
+        let mut s = StratsState::new();
+        let mut fields = HashMap::new();
+        fields.insert("Name".to_string(), FieldValue::String("Zero".to_string()));
+
+        let changed = s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 0,
+            last_date: 0,
+            checked: true,
+            kind: 1,
+            path: "ZeroPath".to_string(),
+            fields,
+        });
+
+        assert!(changed);
+        let info = s.get(100).unwrap();
+        assert_eq!(info.strategy_ver, 0);
+        assert_eq!(info.last_date, 0);
+        assert_eq!(info.folder_path, "ZeroPath");
+        assert!(info.checked);
     }
 }

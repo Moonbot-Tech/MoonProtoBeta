@@ -47,6 +47,7 @@ If you only need the full field map, parse `raw_data` through
 ```rust
 pub struct StrategyInfo {
     pub strategy_id: u64,
+    pub strategy_ver: i32,
     pub last_date: u64,
     pub sell_price: f64,
     pub checked: bool,
