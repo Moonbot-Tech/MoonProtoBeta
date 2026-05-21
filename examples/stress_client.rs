@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use moonproto::client::{Client, ClientConfig, ClientSender, LifecycleEvent, MergedCandles};
 use moonproto::commands::candles::{parse_coin_card_candles_response, DeepHistoryKind};
+use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::commands::{
     parse_get_balance_response, parse_query_hedge_mode_response,
 };
@@ -41,6 +42,7 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(12);
 const TICK: Duration = Duration::from_millis(250);
 const API_TIMEOUT: Duration = Duration::from_secs(20);
 const CANDLES_TIMEOUT: Duration = Duration::from_secs(35);
+const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_API: usize = 48;
 const MAX_PENDING_CANDLES: usize = 4;
 
@@ -81,6 +83,20 @@ struct SharedStats {
     candles_chunked_disconnected: AtomicU64,
     candles_chunked_empty: AtomicU64,
     max_pending_candles: AtomicU64,
+    helper_settings_sent: AtomicU64,
+    helper_settings_ok: AtomicU64,
+    helper_settings_timeout: AtomicU64,
+    helper_settings_disconnected: AtomicU64,
+    helper_balance_sent: AtomicU64,
+    helper_balance_ok: AtomicU64,
+    helper_balance_timeout: AtomicU64,
+    helper_balance_disconnected: AtomicU64,
+    helper_orders_sent: AtomicU64,
+    helper_orders_ok: AtomicU64,
+    helper_orders_timeout: AtomicU64,
+    helper_orders_disconnected: AtomicU64,
+    helper_queued_events: AtomicU64,
+    helper_max_queued_events: AtomicU64,
     settings_requests: AtomicU64,
     balance_refresh_requests: AtomicU64,
     strat_snapshot_requests: AtomicU64,
@@ -98,6 +114,16 @@ struct PendingApi {
 struct PendingCandles {
     sent_at: Instant,
     rx: std::sync::mpsc::Receiver<MergedCandles>,
+}
+
+fn record_max(target: &AtomicU64, value: u64) {
+    let mut prev = target.load(Ordering::Relaxed);
+    while value > prev {
+        match target.compare_exchange(prev, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => prev = next,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -437,6 +463,287 @@ fn validate_chunked_candles(label: &str, merged: &MergedCandles, stats: &SharedS
     }
 }
 
+fn validate_settings_snapshot(
+    label: &str,
+    settings: &ClientSettingsCommand,
+    stats: &SharedStats,
+) {
+    let floats64 = [settings.fixed_sell_price, settings.g_take_profit];
+    let floats32 = [
+        settings.price_drop_level,
+        settings.trailing_drop,
+        settings.s_price[0],
+        settings.s_price[1],
+        settings.s_price[2],
+        settings.s_price[3],
+        settings.s_price[4],
+        settings.s_price[5],
+    ];
+    let bad = floats64.iter().any(|v| !v.is_finite())
+        || floats32.iter().any(|v| !v.is_finite())
+        || settings.temp_bl_times.iter().any(|v| !v.is_finite());
+
+    if bad {
+        stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+        println!(
+            "[{label}] invalid settings uid={} fixed_sell={} take_profit={} temp_bl={}",
+            settings.uid,
+            settings.fixed_sell_price,
+            settings.g_take_profit,
+            settings.temp_bl_times.len()
+        );
+    }
+}
+
+fn validate_balance_snapshot(
+    label: &str,
+    balances: &moonproto::state::BalancesState,
+    stats: &SharedStats,
+) {
+    let globals = [
+        balances.global.btc_balance_total,
+        balances.global.btc_balance_locked,
+        balances.global.btc_balance_full,
+        balances.global.special_coin_balance,
+    ];
+    if globals.iter().any(|v| !v.is_finite()) {
+        stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+        println!(
+            "[{label}] invalid balance globals epoch={} total={} locked={} full={} special={}",
+            balances.last_epoch,
+            balances.global.btc_balance_total,
+            balances.global.btc_balance_locked,
+            balances.global.btc_balance_full,
+            balances.global.special_coin_balance
+        );
+        return;
+    }
+
+    for (_, item) in balances.iter() {
+        let values = [
+            item.initial_balance,
+            item.locked_balance,
+            item.pos_size,
+            item.pos_price,
+            item.liq_price,
+            item.long_pos_size,
+            item.long_pos_price,
+            item.long_liq_price,
+            item.short_pos_size,
+            item.short_pos_price,
+            item.short_liq_price,
+            item.asset_balance,
+            item.asset_balance_full,
+            item.total_profit_b,
+            item.total_profit_l,
+            item.total_profit_s,
+            item.max_value,
+        ];
+        if values.iter().any(|v| !v.is_finite()) {
+            stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+            println!(
+                "[{label}] invalid balance market={} epoch={} initial={} locked={} pos={} asset_full={}",
+                item.market_name,
+                balances.last_epoch,
+                item.initial_balance,
+                item.locked_balance,
+                item.pos_size,
+                item.asset_balance_full
+            );
+            return;
+        }
+    }
+}
+
+fn validate_order_compact(
+    label: &str,
+    uid: u64,
+    side: &str,
+    order: &moonproto::commands::trade::OrderCompact,
+    stats: &SharedStats,
+) {
+    let quantity = order.quantity;
+    let quantity_remaining = order.quantity_remaining;
+    let total_btc = order.total_btc;
+    let spent_btc = order.spent_btc;
+    let open_time = order.open_time;
+    let close_time = order.close_time;
+    let actual_price = order.actual_price;
+    let mean_price = order.mean_price;
+    let quantity_base = order.quantity_base;
+    let actual_q = order.actual_q;
+    let tmp_btc = order.tmp_btc;
+    let create_time = order.create_time;
+    let panic_sell_down = order.panic_sell_down;
+    let values = [
+        quantity,
+        quantity_remaining,
+        total_btc,
+        spent_btc,
+        open_time,
+        close_time,
+        actual_price,
+        mean_price,
+        quantity_base,
+        actual_q,
+        tmp_btc,
+        create_time,
+    ];
+    let bad = values.iter().any(|v| !v.is_finite())
+        || !panic_sell_down.is_finite()
+        || actual_price < 0.0
+        || mean_price < 0.0;
+
+    if bad {
+        stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+        println!(
+            "[{label}] invalid order uid={} side={} qty={} remain={} actual={} mean={}",
+            uid,
+            side,
+            quantity,
+            quantity_remaining,
+            actual_price,
+            mean_price
+        );
+    }
+}
+
+fn validate_order_snapshot(
+    label: &str,
+    orders: &[moonproto::state::Order],
+    stats: &SharedStats,
+) {
+    for order in orders {
+        if order.market_name.is_empty()
+            || !order.vstop_level.is_finite()
+            || !order.vstop_vol.is_finite()
+            || !order.corridor_price_down.is_finite()
+            || !order.corridor_price_up.is_finite()
+        {
+            stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+            println!(
+                "[{label}] invalid order snapshot uid={} market='{}' status={:?}",
+                order.uid, order.market_name, order.status
+            );
+            return;
+        }
+        validate_order_compact(label, order.uid, "buy", &order.buy_order, stats);
+        validate_order_compact(label, order.uid, "sell", &order.sell_order, stats);
+    }
+}
+
+fn record_helper_error(
+    label: &str,
+    helper: &str,
+    err: std::sync::mpsc::RecvTimeoutError,
+    timeout: &AtomicU64,
+    disconnected: &AtomicU64,
+) {
+    match err {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            timeout.fetch_add(1, Ordering::Relaxed);
+            println!("[{label}] helper {helper} timeout");
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            disconnected.fetch_add(1, Ordering::Relaxed);
+            println!("[{label}] helper {helper} disconnected");
+        }
+    }
+}
+
+fn drain_helper_queued_events(
+    label: &str,
+    dispatcher: &mut EventDispatcher,
+    stats: &SharedStats,
+) {
+    let events = dispatcher.take_queued_events();
+    if events.is_empty() {
+        return;
+    }
+
+    let count = events.len() as u64;
+    stats.helper_queued_events.fetch_add(count, Ordering::Relaxed);
+    record_max(&stats.helper_max_queued_events, count);
+    for event in &events {
+        handle_event(label, event, stats);
+    }
+}
+
+fn run_one_shot_helper_round(
+    label: &str,
+    client: &mut Client,
+    dispatcher: &mut EventDispatcher,
+    stats: &SharedStats,
+    round: u64,
+) {
+    match round % 3 {
+        0 => {
+            stats.helper_settings_sent.fetch_add(1, Ordering::Relaxed);
+            match client.request_client_settings(dispatcher, HELPER_TIMEOUT) {
+                Ok(settings) => {
+                    stats.helper_settings_ok.fetch_add(1, Ordering::Relaxed);
+                    validate_settings_snapshot(label, &settings, stats);
+                    println!(
+                        "[{label}] helper settings ok queued={}",
+                        dispatcher.queued_event_count()
+                    );
+                }
+                Err(err) => record_helper_error(
+                    label,
+                    "settings",
+                    err,
+                    &stats.helper_settings_timeout,
+                    &stats.helper_settings_disconnected,
+                ),
+            }
+        }
+        1 => {
+            stats.helper_balance_sent.fetch_add(1, Ordering::Relaxed);
+            match client.request_balance_snapshot(dispatcher, HELPER_TIMEOUT) {
+                Ok(balances) => {
+                    stats.helper_balance_ok.fetch_add(1, Ordering::Relaxed);
+                    validate_balance_snapshot(label, &balances, stats);
+                    println!(
+                        "[{label}] helper balance ok rows={} queued={}",
+                        balances.len(),
+                        dispatcher.queued_event_count()
+                    );
+                }
+                Err(err) => record_helper_error(
+                    label,
+                    "balance",
+                    err,
+                    &stats.helper_balance_timeout,
+                    &stats.helper_balance_disconnected,
+                ),
+            }
+        }
+        _ => {
+            stats.helper_orders_sent.fetch_add(1, Ordering::Relaxed);
+            match client.request_order_snapshot(dispatcher, HELPER_TIMEOUT) {
+                Ok(orders) => {
+                    stats.helper_orders_ok.fetch_add(1, Ordering::Relaxed);
+                    validate_order_snapshot(label, &orders, stats);
+                    println!(
+                        "[{label}] helper orders ok count={} queued={}",
+                        orders.len(),
+                        dispatcher.queued_event_count()
+                    );
+                }
+                Err(err) => record_helper_error(
+                    label,
+                    "orders",
+                    err,
+                    &stats.helper_orders_timeout,
+                    &stats.helper_orders_disconnected,
+                ),
+            }
+        }
+    }
+
+    drain_helper_queued_events(label, dispatcher, stats);
+}
+
 fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
     stats.events_total.fetch_add(1, Ordering::Relaxed);
     match event {
@@ -664,6 +971,8 @@ fn run_one_client(
     let mut pending_candles = VecDeque::new();
     let mut burst_no = 0u64;
     let mut next_burst = Instant::now();
+    let mut helper_round = 0u64;
+    let mut next_helper = Instant::now() + Duration::from_secs(10);
     let mut next_report = Instant::now() + Duration::from_secs(15);
 
     println!(
@@ -689,6 +998,12 @@ fn run_one_client(
             next_burst = now + Duration::from_secs(2);
         }
 
+        if now >= next_helper && remaining > HELPER_TIMEOUT + Duration::from_secs(2) {
+            run_one_shot_helper_round(label, &mut client, &mut dispatcher, &stats, helper_round);
+            helper_round = helper_round.wrapping_add(1);
+            next_helper = Instant::now() + Duration::from_secs(23);
+        }
+
         drain_pending(label, &mut pending, &stats);
         drain_pending_candles(label, &mut pending_candles, &stats);
 
@@ -702,7 +1017,7 @@ fn run_one_client(
 
         if Instant::now() >= next_report {
             println!(
-                "[{label}] stats events={} trades={} ob={} api_ok={} api_timeout={} pending={} candles_ok={} candles_timeout={} candles_pending={} sent={} recv={}",
+                "[{label}] stats events={} trades={} ob={} api_ok={} api_timeout={} pending={} candles_ok={} candles_timeout={} candles_pending={} helper_ok={} helper_queued={} sent={} recv={}",
                 stats.events_total.load(Ordering::Relaxed),
                 stats.trades_apply.load(Ordering::Relaxed),
                 stats.orderbook_apply.load(Ordering::Relaxed),
@@ -712,6 +1027,10 @@ fn run_one_client(
                 stats.candles_chunked_ok.load(Ordering::Relaxed),
                 stats.candles_chunked_timeout.load(Ordering::Relaxed),
                 pending_candles.len(),
+                stats.helper_settings_ok.load(Ordering::Relaxed)
+                    + stats.helper_balance_ok.load(Ordering::Relaxed)
+                    + stats.helper_orders_ok.load(Ordering::Relaxed),
+                stats.helper_queued_events.load(Ordering::Relaxed),
                 client.total_sent(),
                 client.total_recv(),
             );
@@ -761,6 +1080,12 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
         let candles_timeout = stats.candles_chunked_timeout.load(Ordering::Relaxed);
         let candles_disconnected = stats.candles_chunked_disconnected.load(Ordering::Relaxed);
         let candles_empty = stats.candles_chunked_empty.load(Ordering::Relaxed);
+        let helper_timeout = stats.helper_settings_timeout.load(Ordering::Relaxed)
+            + stats.helper_balance_timeout.load(Ordering::Relaxed)
+            + stats.helper_orders_timeout.load(Ordering::Relaxed);
+        let helper_disconnected = stats.helper_settings_disconnected.load(Ordering::Relaxed)
+            + stats.helper_balance_disconnected.load(Ordering::Relaxed)
+            + stats.helper_orders_disconnected.load(Ordering::Relaxed);
         let parse_failed = stats.parse_failed.load(Ordering::Relaxed);
         let invalid_numbers = stats.invalid_numbers.load(Ordering::Relaxed);
 
@@ -815,6 +1140,23 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             stats.max_pending_candles.load(Ordering::Relaxed),
         );
         println!(
+            "[{label}] helpers settings={}/{}/{}/{} balance={}/{}/{}/{} orders={}/{}/{}/{} queued_events={} max_queued_batch={}",
+            stats.helper_settings_sent.load(Ordering::Relaxed),
+            stats.helper_settings_ok.load(Ordering::Relaxed),
+            stats.helper_settings_timeout.load(Ordering::Relaxed),
+            stats.helper_settings_disconnected.load(Ordering::Relaxed),
+            stats.helper_balance_sent.load(Ordering::Relaxed),
+            stats.helper_balance_ok.load(Ordering::Relaxed),
+            stats.helper_balance_timeout.load(Ordering::Relaxed),
+            stats.helper_balance_disconnected.load(Ordering::Relaxed),
+            stats.helper_orders_sent.load(Ordering::Relaxed),
+            stats.helper_orders_ok.load(Ordering::Relaxed),
+            stats.helper_orders_timeout.load(Ordering::Relaxed),
+            stats.helper_orders_disconnected.load(Ordering::Relaxed),
+            stats.helper_queued_events.load(Ordering::Relaxed),
+            stats.helper_max_queued_events.load(Ordering::Relaxed),
+        );
+        println!(
             "[{label}] server_info bot_id={:?} name={:?} exchange={:?} base={:?} version={:?}",
             info.bot_id,
             info.server_name,
@@ -839,6 +1181,8 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             || candles_timeout > 0
             || candles_disconnected > 0
             || candles_empty > 0
+            || helper_timeout > 0
+            || helper_disconnected > 0
             || parse_failed > 0
             || invalid_numbers > 0
         {
