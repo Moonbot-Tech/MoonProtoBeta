@@ -243,6 +243,41 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/multi_client_test.rs` — two independent clients in one process.
 - `examples/stress_client.rs` — two-client live stress with optional packet-loss emulation (`post_init` by default, `pre_connect` for handshake loss).
 
+## FireTest
+
+`tests/fire_test.rs` is the live health test for the active library. It is
+ignored by normal `cargo test` because it needs a real MoonBot server and
+mutates test-server settings/strategy state.
+
+Put the local config outside this crate repo, one directory above `moonproto/`:
+
+```text
+moonproto.firetest.conf
+server = 127.0.0.1:3000
+key = <exported MoonBot key>
+allow_mutation = true
+market = BTCUSDT
+strategy_field = Comment
+# strategy_id = 123456789
+# candles_timeout_secs = 30
+```
+
+Run:
+
+```powershell
+cargo test --test fire_test -- --ignored --nocapture
+```
+
+The test starts two clients, runs one Init per client, verifies settings,
+strategies, trades, and the configured orderbook. It enables client-side
+`err_emu=10%` before connect, requests the full chunked candles snapshot and
+fails unless all chunks are merged and parsed. Then it checks settings/strategy
+broadcast from client A to client B, uses a hidden debug send-blackhole hook to
+force reconnect, and verifies that trades and orderbook continue afterwards.
+The `--nocapture` log is intentionally diagnostic: lifecycle events, server
+messages, EngineResponse/candle chunks, parse failures, and compact stream
+summaries are printed without dumping keys or full payloads.
+
 ## API Documentation
 
 Detailed public API notes live in `docs/api/`:

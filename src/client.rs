@@ -1181,6 +1181,12 @@ pub struct Client {
     /// синхронизирует индексы, затем обновляет prices/funding.
     update_markets_after_indexes: bool,
 
+    /// FireTest-only hook: drop every outgoing datagram before socket send.
+    /// This lets the live health test force a real server-side disconnect and
+    /// then verify the library reconnect path. It is deliberately hidden from
+    /// public API docs.
+    debug_outgoing_blackhole: bool,
+
     /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
     /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
     /// сбрасываем `indexes_fetch_in_flight = false`. Сам timeout handler запрос
@@ -1368,6 +1374,7 @@ impl Client {
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
             update_markets_after_indexes: false,
+            debug_outgoing_blackhole: false,
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
@@ -2141,6 +2148,16 @@ impl Client {
         ClientSender {
             tx: self.event_tx.clone(),
         }
+    }
+
+    /// Hidden FireTest hook: when enabled, no outgoing datagrams are sent.
+    ///
+    /// Normal applications must not use this. The live FireTest uses it to make
+    /// the MoonBot server stop hearing from this client, then verifies that the
+    /// library reconnects and restores subscriptions after the flag is cleared.
+    #[doc(hidden)]
+    pub fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
+        self.debug_outgoing_blackhole = enabled;
     }
 
     /// Подписаться на orderbook рынка `market_name`.
@@ -4885,6 +4902,20 @@ impl Client {
     /// но не меняют reconnect-state: Delphi `DoSendPacket` возвращает false и не ставит
     /// `ForceDisconnect`.
     fn dispatch_send(&mut self, cmd: u8, packet: &[u8], extra: Option<&[u8]>, addr: SocketAddr) {
+        if self.debug_outgoing_blackhole {
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
+                    Command::from_byte(cmd),
+                    cmd,
+                    packet.len(),
+                    extra.map(|p| p.len()).unwrap_or(0),
+                    addr
+                );
+            }
+            return;
+        }
+
         if trace_io_enabled() {
             eprintln!(
                 "[mp-io-tx-attempt] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
