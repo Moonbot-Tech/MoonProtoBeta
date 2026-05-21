@@ -65,7 +65,7 @@ common response payloads:
 | `AuthCheck` | [`commands::engine_api::parse_auth_check_response`] -> `AuthCheckResponse` |
 | `GetMarketsList` / `UpdateMarketsList` | [`commands::market::parse_markets_list_response`] |
 | `GetCoinCardCandles` | [`commands::candles::parse_coin_card_candles_response`] |
-| `RequestCandlesData` | [`commands::candles::CandlesAggregator::on_chunk`] (see below) |
+| `RequestCandlesData` | [`Client::request_candles_data`](../api/candles.md#emk_requestcandlesdata--chunked-response-one-shot-helper-recommended) |
 | `GetMarketsIndexes` | Applied inline by `EventDispatcher` |
 
 ### BaseCheck Response - Multi-Server Identity
@@ -97,14 +97,16 @@ When `Success=0`, `Data` is empty.
 ## Chunked Responses
 
 `RequestCandlesData` returns multiple `EngineResponse` packets with the same
-`RequestUID` because candle payloads can exceed a single sliced response. The
-pending registry is not suitable for this method: it removes the sender after
-the first response.
+`RequestUID` because candle payloads can exceed a single sliced response.
+`Client::request_candles_data` is the normal public API for this method: it
+registers the chunk aggregator, keeps the client loop running, merges all
+chunks, and returns one `MergedCandles` value.
 
-Use the normal `on_data` callback path and feed each `resp.data` into
-`CandlesAggregator::on_chunk(&resp.data)`. It returns `Some(merged)` once all
-chunks for the request have arrived. The merged bytes are the zlib stream from
-Delphi `TMarkets.StoreCandlesToZip`; parse them with
+For custom async flows, `Client::api_request_candles_data_async` exposes the
+same internal chunk registry as a `Receiver<MergedCandles>`. Manual
+`CandlesAggregator` use is only needed by protocol tools that intentionally
+route raw `EngineResponse` packets themselves. The merged bytes are the zlib
+stream from Delphi `TMarkets.StoreCandlesToZip`; parse them with
 `parse_request_candles_data_response`, not with the CoinCard candles parser.
 
 ## Client Wrappers
@@ -125,6 +127,13 @@ if response.success {
 } else {
     eprintln!("server error {}: {}", response.error_code, response.error_msg);
 }
+```
+
+For chunked candles, prefer the one-shot helper:
+
+```rust
+let merged = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
+println!("markets={}", merged.markets.len());
 ```
 
 For custom raw request payloads that need cleanup tied to the caller's timeout,

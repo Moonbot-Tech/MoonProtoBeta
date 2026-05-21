@@ -4,11 +4,11 @@
 //!   cargo run --example request_candles_data --release -- "<key_base64>" "host:port" 30
 
 use std::env;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event, EventDispatcher,
-    InitConfig, RefreshConfig,
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher, InitConfig,
+    RefreshConfig,
 };
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
@@ -61,57 +61,27 @@ fn main() {
         std::process::exit(2);
     }
 
-    let rx = client.api_request_candles_data_async();
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match rx.try_recv() {
-            Ok(merged) => {
-                let candles: usize = merged.markets.iter().map(|m| m.candles_5m.len()).sum();
-                println!(
-                    "ok uid={} zipped={} markets={} candles={}",
-                    merged.uid,
-                    merged.zipped_data.len(),
-                    merged.markets.len(),
-                    candles
-                );
-                client.disconnect();
-                return;
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                eprintln!("disconnected");
-                client.disconnect();
-                std::process::exit(3);
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+    match client.request_candles_data(&mut dispatcher, timeout) {
+        Ok(merged) => {
+            let candles: usize = merged.markets.iter().map(|m| m.candles_5m.len()).sum();
+            println!(
+                "ok uid={} zipped={} markets={} candles={}",
+                merged.uid,
+                merged.zipped_data.len(),
+                merged.markets.len(),
+                candles
+            );
+            client.disconnect();
         }
-
-        client.run_with_dispatcher(
-            Duration::from_millis(100),
-            &mut dispatcher,
-            Box::new(|event| {
-                match event {
-                    Event::EngineResponse(resp) => {
-                        println!(
-                            "raw response method={:?} success={} code={} msg={} data={}",
-                            resp.method,
-                            resp.success,
-                            resp.error_code,
-                            resp.error_msg,
-                            resp.data.len()
-                        );
-                    }
-                    Event::ServerLog { msg, .. } => {
-                        if msg.contains("Candles") || msg.contains("candles") {
-                            println!("server log: {msg}");
-                        }
-                    }
-                    _ => {}
-                }
-            }),
-        );
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            eprintln!("disconnected");
+            client.disconnect();
+            std::process::exit(3);
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            eprintln!("timeout");
+            client.disconnect();
+            std::process::exit(4);
+        }
     }
-
-    eprintln!("timeout");
-    client.disconnect();
-    std::process::exit(4);
 }

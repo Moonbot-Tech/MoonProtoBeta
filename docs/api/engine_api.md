@@ -15,6 +15,7 @@ use std::time::Duration;
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
 The one-shot helpers keep pumping the UDP loop through short
@@ -52,7 +53,7 @@ UID is registered again.
 | Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
 | Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
 | Position/transfer | `api_change_position_type`, `api_convert_dust_bnb`, `api_confirm_risk_limit`, `api_set_ma_mode`, `api_do_transfer_asset`, `api_update_transfer_assets` |
-| Candles | `api_get_coin_card_candles`, `api_request_candles_data_async` |
+| Candles | `request_coin_card_candles`, `request_candles_data`, `api_get_coin_card_candles`, `api_request_candles_data_async` |
 
 For subscriptions, prefer the registry-aware APIs:
 
@@ -96,6 +97,12 @@ if let Some(unix) = expiration.unix_seconds() {
 For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
 `api_check_expiration_time` remain available and return
 `Receiver<EngineResponse>`.
+
+`request_candles_data` is the high-level API for
+`emk_RequestCandlesData`. It registers the chunk aggregator, keeps the client
+loop running, and returns one `MergedCandles` value after all chunks are merged.
+Use `api_request_candles_data_async` only for custom async flows that already
+own a running client loop.
 
 `api_get_markets_balance_full` is intentionally low-level. The current Delphi
 server calls `Engine.GetMarketsBalanceFull`, but does not serialize the balance

@@ -77,7 +77,7 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
   notifications are not lost while the helper owns the run loop.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the optional process-level NTP syncer when `ClientConfig::ntp_host` is set.
-- Aggregates chunked candle responses through `api_request_candles_data_async`.
+- Aggregates chunked candle responses through `request_candles_data`.
 
 Applications use lifecycle events for UI status and alerting, not for recovery.
 

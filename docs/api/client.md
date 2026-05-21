@@ -142,6 +142,7 @@ For common one-shot reads, prefer typed request helpers:
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
 These helpers send the request, keep the UDP loop running through
@@ -180,6 +181,17 @@ Use `request_engine_response` when a custom Engine API payload needs
 caller-scoped timeout cleanup. Raw `api_*` receivers keep their pending slot
 until the response arrives, a reconnect clears the session, or the same UID is
 registered again.
+
+Chunked candles use a dedicated aggregator rather than the normal one-response
+pending slot. Use `request_candles_data` for the common one-shot flow:
+
+```rust
+let merged = client.request_candles_data(
+    &mut dispatcher,
+    Duration::from_secs(30),
+)?;
+println!("markets={}", merged.markets.len());
+```
 
 ## UI Settings Request
 

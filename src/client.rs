@@ -1754,20 +1754,9 @@ impl Client {
         self.send_api_request(&crate::commands::engine_request::request_candles_data());
     }
 
-    /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
-    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель ждёт
-    /// его пока main loop продолжает крутиться и получает уже собранный zlib stream
-    /// от Delphi `TMarkets.StoreCandlesToZip` плюс parsed market entries.
-    ///
-    /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
-    /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
-    /// через `CandlesAggregator`, парсит через `parse_request_candles_data_response`,
-    /// уведомляет sender → потребитель получает `MergedCandles`.
-    ///
-    /// Auto-cleanup: pending slot удаляется автоматически если финальный chunk не пришёл
-    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` от последнего принятого chunk —
-    /// sender дропается, receiver получает `Err(Disconnected)`.
-    pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
+    fn api_request_candles_data_async_registered(
+        &mut self,
+    ) -> (u64, mpsc::Receiver<MergedCandles>) {
         let raw = crate::commands::engine_request::request_candles_data();
         // UID извлекается из BaseCommand header offset 3..11 (тот же что в send_api_request_async).
         let uid = raw.get(3..11)
@@ -1784,7 +1773,47 @@ impl Client {
         // receiver получит Err(Disconnected) (что корректно при двойном вызове).
         self.pending_candles.insert(uid, partial);
         self.send_api_request(&raw);
-        rx
+        (uid, rx)
+    }
+
+    /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
+    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель ждёт
+    /// его пока main loop продолжает крутиться и получает уже собранный zlib stream
+    /// от Delphi `TMarkets.StoreCandlesToZip` плюс parsed market entries.
+    ///
+    /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
+    /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
+    /// через `CandlesAggregator`, парсит через `parse_request_candles_data_response`,
+    /// уведомляет sender → потребитель получает `MergedCandles`.
+    ///
+    /// Auto-cleanup: pending slot удаляется автоматически если финальный chunk не пришёл
+    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` от последнего принятого chunk —
+    /// sender дропается, receiver получает `Err(Disconnected)`.
+    pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
+        self.api_request_candles_data_async_registered().1
+    }
+
+    /// Request the full chunked candles stream and wait for the merged result
+    /// while the client loop keeps running.
+    ///
+    /// This is the one-shot counterpart to
+    /// [`Self::api_request_candles_data_async`]. It registers the chunked
+    /// aggregator, sends `emk_RequestCandlesData`, pumps
+    /// [`Self::run_with_dispatcher`] in short ticks, and removes the pending
+    /// candles slot if the caller's timeout expires before the final chunk.
+    pub fn request_candles_data(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<MergedCandles, mpsc::RecvTimeoutError> {
+        let (uid, rx) = self.api_request_candles_data_async_registered();
+        match self.run_until_response(dispatcher, &rx, timeout) {
+            Ok(merged) => Ok(merged),
+            Err(err) => {
+                self.pending_candles.remove(&uid);
+                Err(err)
+            }
+        }
     }
 
     // ====================================================================
@@ -5131,6 +5160,19 @@ mod api_pending_dispatch_tests {
         assert_eq!(client.api_pending.pending_count(), 0);
         assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
         assert!(matches!(client.event_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn request_candles_data_timeout_removes_pending_slot() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+
+        let err = client
+            .request_candles_data(&mut dispatcher, Duration::from_millis(0))
+            .expect_err("zero timeout should expire before any chunk arrives");
+
+        assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
+        assert!(client.pending_candles.is_empty());
     }
 
     #[test]

@@ -129,6 +129,7 @@ server status, and parse the response payload:
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
 Lower-level `Client::api_*` methods still return
@@ -210,6 +211,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/client_test.rs` — basic live connection smoke test.
 - `examples/trading_flow.rs` — phased handshake, init, subscriptions, and stream.
 - `examples/history_bars.rs` — request and parse historical candles.
+- `examples/request_candles_data.rs` — request and merge the full chunked candles stream.
 - `examples/list_markets.rs` — fetch the market catalog and print a summary.
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.

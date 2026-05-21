@@ -71,11 +71,13 @@
 //!
 //! For common one-shot Engine API operations, use typed helpers such as
 //! [`Client::request_balance`], [`Client::request_hedge_mode`],
-//! [`Client::request_api_expiration_time`], and
-//! [`Client::request_coin_card_candles`]. They keep the client loop running,
-//! check the server status, and parse the response payload. Events observed
-//! during the wait are queued in [`EventDispatcher::queued_events`] and can be
-//! drained with [`EventDispatcher::take_queued_events`].
+//! [`Client::request_api_expiration_time`],
+//! [`Client::request_coin_card_candles`], and
+//! [`Client::request_candles_data`]. They keep the client loop running, check
+//! the server status or channel completion, and parse or merge the response
+//! payload. Events observed during the wait are queued in
+//! [`EventDispatcher::queued_events`] and can be drained with
+//! [`EventDispatcher::take_queued_events`].
 //!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.
 //! In a single-threaded caller, wait for those receivers through

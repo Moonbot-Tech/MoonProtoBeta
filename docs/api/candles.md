@@ -1,8 +1,8 @@
 # Candles
 
 Historical candles are requested through Engine API. Two methods are exposed:
-`emk_GetCoinCardCandles` (single response) and `emk_RequestCandlesData` (chunked,
-wrapped by an async helper).
+`emk_GetCoinCardCandles` (single response) and `emk_RequestCandlesData`
+(chunked, wrapped by a one-shot helper).
 
 ## DeepPrice
 
@@ -67,20 +67,19 @@ count: i32 LE
 candles: N × TDeepPrice (28 bytes each)
 ```
 
-## emk_RequestCandlesData — chunked response (async helper recommended)
+## emk_RequestCandlesData — chunked response (one-shot helper recommended)
 
 The server replies with multiple `EngineResponse` packets carrying the same
 `request_uid`. Each packet is a chunk of the form `ChunkIndex:u16 +
 ChunkTotal:u16 + payload`. The library aggregates them through
 `CandlesAggregator` and returns the merged Delphi candles stream.
 
-### Async API (recommended)
+### One-Shot API (recommended)
 
 ```rust
 use std::time::Duration;
 
-let rx = client.api_request_candles_data_async();
-match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
+match client.request_candles_data(&mut dispatcher, Duration::from_secs(30)) {
     Ok(merged) => {
         // merged.uid         — request_uid
         // merged.zipped_data — raw zlib stream from Delphi StoreCandlesToZip
@@ -92,6 +91,10 @@ match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
     Err(_) => eprintln!("candles timeout"),
 }
 ```
+
+The helper registers the chunk aggregator, keeps the UDP loop running through
+short dispatcher ticks, and removes the pending candles slot if the caller's
+timeout expires before the final chunk.
 
 `MergedCandles`:
 ```rust
@@ -113,6 +116,16 @@ Stale pending candles slots are auto-cleaned —
 `DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 15_000` (15 seconds) from the last
 received chunk, matching Delphi `Markets.LastChunkTime`. A slot is freed either
 when all chunks have arrived or on timeout.
+
+### Async Receiver API
+
+`api_request_candles_data_async` remains available for custom flows that already
+run the client loop elsewhere:
+
+```rust
+let rx = client.api_request_candles_data_async();
+let merged = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30))?;
+```
 
 ### Low-level CandlesAggregator
 
@@ -200,5 +213,5 @@ fn delphi_to_unix_secs(td: f64) -> f64 {
 - [engine_api.md](engine_api.md) — RPC channel and `EngineResponse` format.
 - [events.md](events.md) — `Event::EngineResponse` for raw response tracking.
 - [client.md](client.md) — `client.request_coin_card_candles()` /
-  `api_get_coin_card_candles()` / `api_request_candles_data()` /
-  `api_request_candles_data_async()`.
+  `client.request_candles_data()` / `api_get_coin_card_candles()` /
+  `api_request_candles_data()` / `api_request_candles_data_async()`.

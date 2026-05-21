@@ -407,7 +407,7 @@
 | E-W1 | api_pending registry: uid → Receiver | api_pending.rs:ApiPending | ✅ |
 | E-W2 | send_api_request_async(raw) → Receiver | client.rs:send_api_request_async | ✅ |
 | E-W3 | dispatch on Command::API → pending dispatch or fallback to on_data | client.rs:data_read_int | ✅ |
-| E-W4 | 46+ high-level wrappers (29 Engine API + 17 Trade + Candles) | client.rs `impl Client` | ✅ |
+| E-W4 | 47+ high-level wrappers (29 Engine API + 17 Trade + Candles) | client.rs `impl Client` | ✅ |
 | E-W5 | Trade wrappers с UKey dedup (UK_OrderMove, UK_ImmuneClicks) | client.rs:send_trade_keyed + UniqueKey constants | ✅ |
 | E-W6 | LifecycleEvent: Connecting/Connected{fresh}/Disconnected/Reconnecting/ServerRestart/BindFailed | client.rs:check_lifecycle_transition + bind failure path | ✅ |
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
@@ -416,6 +416,7 @@
 | E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence`; init opens `domain_ready` only after bootstrap | ✅ |
 | E-W11 | Rust active API: one-shot ожидания не теряют typed events, пришедшие пока helper крутит loop | events.rs:`EventDispatcher::queued_events`/`take_queued_events`; client.rs:`run_with_dispatcher_queued` используется `run_until_response` и one-shot helpers | ✅ |
 | E-W12 | Unit1.pas:5946-5950 post-InitDone ActiveClient resync: TAllStatusesReq, TStratSnapshot.CreateFromStrats, TSettingsRequest, TMMOrdersSubscribeCommand, TRequestBalanceRefresh | client.rs:`run_init_sequence` после bootstrap вызывает `send_post_init_resync`; strategy snapshot берётся из fresh provider или ставит queued `SnapshotRequested`, затем отправляются пользовательские trades/orderbook подписки | ✅ |
+| E-W13 | MoonProtoClient.pas:ProcessApiCommand специальная сборка `emk_RequestCandlesData` chunks до финального stream | client.rs:`request_candles_data` one-shot helper регистрирует pending chunk aggregator, крутит dispatcher loop и чистит slot при caller timeout | ✅ |
 
 ---
 
