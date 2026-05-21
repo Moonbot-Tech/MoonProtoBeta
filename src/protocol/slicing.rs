@@ -94,16 +94,10 @@ pub struct SlicedData {
     received_count: usize,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
     pub dup_count: u8,       // DupCount (matches IntStruct.pas:539)
-    /// Время прибытия ПЕРВОГО блока этой датаграммы. Используется для LRU eviction
-    /// при `MAX_RECEIVING_DATAGRAMS` overflow — выкидываем oldest incomplete.
-    /// Без этого raньше silent drop НОВЫХ датаграмм → adversarial server мог
-    /// заглушить legitimate trade snapshots после atomic'а из 256 fake datagram_num.
-    /// См. robustness audit H2/H3.
-    pub first_seen_ms: i64,
 }
 
 impl SlicedData {
-    pub fn new(datagram_num: u16, max_block_num: u8, now_ms: i64) -> Self {
+    pub fn new(datagram_num: u16, max_block_num: u8) -> Self {
         let count = (max_block_num as usize) + 1;
         Self {
             datagram_num,
@@ -112,7 +106,6 @@ impl SlicedData {
             received_count: 0,
             ack_flags: [0u8; 32],
             dup_count: 0,
-            first_seen_ms: now_ms,
         }
     }
 
@@ -204,12 +197,6 @@ const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
                                              // early timestamp. A never-seen slot must sit outside the duplicate window.
 const NEVER_RECEIVED_MS: i64 = -TIME_WHEN_CAN_RECEIVE_RPT - 1;
 
-/// DoS guard: верхний лимит на число одновременно собираемых датаграмм.
-/// Реалистично клиент имеет 2-10 параллельных Sliced датаграмм одновременно.
-/// 256 — щедрый запас, закрывает burst-bomb vector когда злой/багнутый сервер
-/// отправляет пакеты с distinct datagram_num чтобы наполнить HashMap.
-const MAX_RECEIVING_DATAGRAMS: usize = 256;
-
 impl Default for SlicingReceiver {
     fn default() -> Self {
         Self::new()
@@ -290,30 +277,10 @@ impl SlicingReceiver {
             action = "new";
             // Remove any old entry with same number
             self.receiving.remove(&datagram_num);
-            // DoS guard: при штатной работе клиента в receiving одновременно <20 датаграмм.
-            // При saturation — эвиктим OLDEST incomplete (по first_seen_ms) вместо drop_new.
-            // audit_robustness H2/H3: stale incomplete всё равно не достроится (sender бы
-            // уже ретранслировал), а свежая datagram может достроиться → новый contains
-            // legitimate trade snapshot который надо принять. Старая семантика drop_new
-            // позволяла adversarial server'у заглушить legitimate sliced через 256 fake
-            // datagram_num.
-            if self.receiving.len() >= MAX_RECEIVING_DATAGRAMS {
-                let oldest = self
-                    .receiving
-                    .iter()
-                    .min_by_key(|(_, s)| s.first_seen_ms)
-                    .map(|(k, _)| *k);
-                if let Some(evict_key) = oldest {
-                    log::warn!(target: "moonproto::slicing",
-                        "receiving saturated ({}); evicting oldest dgram={} to make room for dgram={}",
-                        self.receiving.len(), evict_key, datagram_num);
-                    self.receiving.remove(&evict_key);
-                }
-            }
             // Create new SlicedData
             self.receiving.insert(
                 datagram_num,
-                SlicedData::new(datagram_num, hdr.max_block_num, self.last_online),
+                SlicedData::new(datagram_num, hdr.max_block_num),
             );
         } else if !self.receiving.contains_key(&datagram_num) {
             // Not new, not in receiving → already completed, send full ACK
@@ -341,7 +308,7 @@ impl SlicingReceiver {
                 self.receiving.remove(&datagram_num);
                 self.receiving.insert(
                     datagram_num,
-                    SlicedData::new(datagram_num, hdr.max_block_num, self.last_online),
+                    SlicedData::new(datagram_num, hdr.max_block_num),
                 );
             }
         }
@@ -401,14 +368,20 @@ impl SlicingReceiver {
     }
 
     /// Clean old incomplete datagrams (called periodically).
-    /// Matches TMoonProtoClient.ClearOldReceiving.
-    /// A-18 fix: однопроходный `retain` вместо collect→remove (без промежуточного `Vec` alloc).
+    /// Matches TMoonProtoClient.ClearOldReceiving: for every removed datagram Delphi calls
+    /// `IsNewDatagram`, which also refreshes the timestamp bucket.
     pub fn clear_old(&mut self) {
         let last_online = self.last_online;
-        let last_recvd_ts = &self.last_recvd_ts;
+        let last_recvd_ts = &mut self.last_recvd_ts;
         self.receiving.retain(|&k, _| {
             let idx = (k as usize) % LAST_RECVD_BUF_SIZE;
-            (last_online - last_recvd_ts[idx]).abs() <= TIME_WHEN_CAN_RECEIVE_RPT
+            let is_old = (last_online - last_recvd_ts[idx]).abs() > TIME_WHEN_CAN_RECEIVE_RPT;
+            if is_old {
+                last_recvd_ts[idx] = last_online;
+                false
+            } else {
+                true
+            }
         });
     }
 }
@@ -527,5 +500,57 @@ mod tests {
         assert_eq!(cmd, 0x1F);
         assert_eq!(data, vec![0xAA, 0xBB]);
         assert_eq!(blocks_count, 1);
+    }
+
+    #[test]
+    fn incoming_sliced_datagrams_are_not_capped() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        for datagram in 0u16..300 {
+            let payload = vec![
+                (datagram & 0xFF) as u8,
+                (datagram >> 8) as u8,
+                1,
+                1,
+                datagram as u8,
+            ];
+            let (assembled, _) = recv.on_new_sliced(&payload);
+            assert!(assembled.is_none());
+        }
+
+        assert_eq!(recv.receiving.len(), 300);
+
+        let block0 = vec![0, 0, 0, 1, 0x1C, 0xAA];
+        let (assembled, _) = recv.on_new_sliced(&block0);
+        let (cmd, data, _dup_count, blocks_count) =
+            assembled.expect("oldest incomplete datagram must not be evicted by a Rust-only cap");
+
+        assert_eq!(cmd, 0x1C);
+        assert_eq!(blocks_count, 2);
+        assert_eq!(data, vec![0xAA, 0x00]);
+    }
+
+    #[test]
+    fn clear_old_refreshes_duplicate_window_like_delphi() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let stale_block1 = vec![42, 0, 1, 1, 0xBB];
+        let (assembled, _) = recv.on_new_sliced(&stale_block1);
+        assert!(assembled.is_none());
+        assert_eq!(recv.receiving.len(), 1);
+
+        recv.set_last_online(20000);
+        recv.clear_old();
+        assert!(recv.receiving.is_empty());
+
+        let late_block0 = vec![42, 0, 0, 1, 0x1C, 0xAA];
+        let (assembled, ack) = recv.on_new_sliced(&late_block0);
+
+        assert!(assembled.is_none());
+        assert!(recv.receiving.is_empty());
+        assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
+        assert_eq!(&ack[32..34], &42u16.to_le_bytes());
     }
 }

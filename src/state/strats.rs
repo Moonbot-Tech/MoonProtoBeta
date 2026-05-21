@@ -8,9 +8,9 @@
 //! `TStrategySerializer` (RTTI-driven). `apply_snapshot_decoded()` парсит этот blob через
 //! `commands::strategy_serializer::parse_strategy_batch` и применяет каждую стратегию в state
 //! с Delphi rollback guard по `StrategyLastDate`/`StrategyVer`.
-//! События `StratEvent::SnapshotFull/Partial { raw_data }` сохраняют исходный
-//! `TStrategySerializer` payload для потребителей, которым нужен полный набор
-//! полей через `HashMap<String, FieldValue>` для UI-рендеринга.
+//! State хранит и lightweight `StrategyInfo`, и полный decoded `StrategySnapshot`.
+//! Поэтому active library может сама отвечать на `TStratSnapshotRequest`, а
+//! приложение может читать последний полный snapshot через public API.
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, StrategySnapshot};
@@ -68,9 +68,9 @@ pub enum StratEvent {
     CheckedEcho { count: usize },
     /// **Сервер просит у нас snapshot стратегий**.
     /// Это `TStratSnapshotRequest` от сервера. Delphi отвечает fresh rebuild'ом
-    /// из живого `Strats`; Rust dispatcher может сделать то же через
-    /// application-provided strategy snapshot provider, либо приложение отвечает
-    /// вручную через `client.strat_send_snapshot_batch(...)`.
+    /// из живого `Strats`; Rust dispatcher делает то же из `StratsState`.
+    /// Если приложение ещё не дало стратегий и серверный snapshot ещё не пришёл,
+    /// ответом будет корректный пустой `TStratSnapshot`.
     SnapshotRequested { uid: u64 },
     /// Команда не применима (Unknown).
     Ignored,
@@ -80,12 +80,16 @@ pub enum StratEvent {
 /// `MPC_Strat` от сервера.
 ///
 /// **Snapshot применяется через `apply_snapshot_decoded(deflate_data)`** — для полного
-/// snapshot'а потребитель должен распаковать raw payload через
-/// [`crate::commands::strategy_serializer`] и применить декодированный batch.
+/// snapshot'а dispatcher распаковывает raw payload через
+/// [`crate::commands::strategy_serializer`] и применяет декодированный batch.
 #[derive(Debug, Default)]
 pub struct StratsState {
     /// `strategy_id → StrategyInfo`. Удаляется при `TStratDelete`.
     pub by_id: HashMap<u64, StrategyInfo>,
+    /// `strategy_id → StrategySnapshot`. Полный decoded snapshot, которым владеет
+    /// active library: из него строится ответ на `TStratSnapshotRequest` и его же
+    /// читает пользовательский код через API.
+    snapshots_by_id: HashMap<u64, StrategySnapshot>,
     /// Серверный epoch последнего применённого snapshot'а — для детекции
     /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
@@ -100,6 +104,11 @@ impl StratsState {
         self.by_id
             .entry(strategy_id)
             .or_insert_with(|| StrategyInfo::new(strategy_id))
+    }
+
+    fn clear_entries(&mut self) {
+        self.by_id.clear();
+        self.snapshots_by_id.clear();
     }
 
     /// Применить распарсенную команду.
@@ -121,6 +130,7 @@ impl StratsState {
             }
             StratCommand::Delete(d) => {
                 self.by_id.remove(&d.strategy_id);
+                self.snapshots_by_id.remove(&d.strategy_id);
                 StratEvent::Deleted {
                     strategy_id: d.strategy_id,
                 }
@@ -142,6 +152,9 @@ impl StratsState {
                     for (_, info) in self.by_id.iter_mut() {
                         info.checked = false;
                     }
+                    for snapshot in self.snapshots_by_id.values_mut() {
+                        snapshot.checked = false;
+                    }
                 }
                 for it in &s.items {
                     if let Some(entry) = self.by_id.get_mut(&it.strategy_id) {
@@ -149,6 +162,9 @@ impl StratsState {
                             entry.checked = it.checked;
                             changed += 1;
                         }
+                    }
+                    if let Some(snapshot) = self.snapshots_by_id.get_mut(&it.strategy_id) {
+                        snapshot.checked = it.checked;
                     }
                 }
                 StratEvent::CheckedSynced {
@@ -171,19 +187,52 @@ impl StratsState {
         entry.folder_path = folder_path;
     }
 
+    /// Заменить owned strategy list списком из приложения.
+    ///
+    /// Это public API для active library: пользовательский код вызывает его до
+    /// init, dispatcher дальше сам поддерживает этот список через протокол.
+    pub fn replace_with_snapshots(&mut self, strategies: &[StrategySnapshot]) {
+        self.clear_entries();
+        for strategy in strategies {
+            self.insert_snapshot_unchecked(strategy.clone());
+        }
+    }
+
+    /// Вставить/обновить одну application-owned стратегию без rollback guard.
+    ///
+    /// Для локального списка приложение является источником правды, поэтому явно
+    /// переданный snapshot должен заменить прежний даже при равных датах/версиях.
+    pub fn upsert_local_snapshot(&mut self, strategy: StrategySnapshot) {
+        self.insert_snapshot_unchecked(strategy);
+    }
+
+    fn insert_snapshot_unchecked(&mut self, s: StrategySnapshot) {
+        {
+            let entry = self.get_or_insert(s.strategy_id);
+            entry.strategy_ver = s.strategy_ver;
+            entry.last_date = s.last_date;
+            entry.folder_path = s.path.clone();
+            entry.checked = s.checked;
+        }
+        self.snapshots_by_id.insert(s.strategy_id, s);
+    }
+
     /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
-    /// Обновляет `last_date`, `folder_path`, `checked` из header'а. Поля стратегии (`fields`)
-    /// отдаются потребителю наружу — этот state хранит только sync-сводку.
+    /// Обновляет `last_date`, `folder_path`, `checked` из header'а и сохраняет
+    /// полный `StrategySnapshot` для API и ответа на `TStratSnapshotRequest`.
     pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) -> bool {
         let existed = self.by_id.contains_key(&s.strategy_id);
-        let entry = self.get_or_insert(s.strategy_id);
-        if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
-            return false;
+        {
+            let entry = self.get_or_insert(s.strategy_id);
+            if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
+                return false;
+            }
+            entry.strategy_ver = s.strategy_ver;
+            entry.last_date = s.last_date;
+            entry.folder_path = s.path.clone();
+            entry.checked = s.checked;
         }
-        entry.strategy_ver = s.strategy_ver;
-        entry.last_date = s.last_date;
-        entry.folder_path = s.path.clone();
-        entry.checked = s.checked;
+        self.snapshots_by_id.insert(s.strategy_id, s.clone());
         true
     }
 
@@ -192,12 +241,23 @@ impl StratsState {
     /// (поля стратегий доступны как `HashMap<String, FieldValue>`).
     ///
     /// Возвращает `None` если payload повреждён.
-    pub fn apply_snapshot_decoded(&mut self, deflate_data: &[u8]) -> Option<StrategyBatch> {
+    pub fn apply_snapshot_decoded_with_mode(
+        &mut self,
+        deflate_data: &[u8],
+        full: bool,
+    ) -> Option<StrategyBatch> {
         let batch = parse_strategy_batch(deflate_data)?;
+        if full {
+            self.clear_entries();
+        }
         for s in &batch.strategies {
             self.upsert_from_snapshot(s);
         }
         Some(batch)
+    }
+
+    pub fn apply_snapshot_decoded(&mut self, deflate_data: &[u8]) -> Option<StrategyBatch> {
+        self.apply_snapshot_decoded_with_mode(deflate_data, false)
     }
 
     pub fn upsert_checked_items(&mut self, items: &[StratCheckedItem]) {
@@ -209,6 +269,20 @@ impl StratsState {
 
     pub fn get(&self, strategy_id: u64) -> Option<&StrategyInfo> {
         self.by_id.get(&strategy_id)
+    }
+
+    pub fn snapshot(&self, strategy_id: u64) -> Option<&StrategySnapshot> {
+        self.snapshots_by_id.get(&strategy_id)
+    }
+
+    pub fn snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
+        self.snapshots_by_id.values()
+    }
+
+    pub fn snapshot_vec(&self) -> Vec<StrategySnapshot> {
+        let mut out: Vec<_> = self.snapshots_by_id.values().cloned().collect();
+        out.sort_by_key(|s| s.strategy_id);
+        out
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &StrategyInfo)> {
@@ -224,7 +298,7 @@ impl StratsState {
     }
 
     pub fn clear(&mut self) {
-        self.by_id.clear();
+        self.clear_entries();
         self.last_server_epoch = 0;
     }
 }
@@ -233,6 +307,7 @@ impl StratsState {
 mod tests {
     use super::*;
     use crate::commands::strat::{StratCheckedSync, StratDelete, StratSellPriceUpdate};
+    use crate::commands::strategy_serializer::FieldValue;
 
     #[test]
     fn sell_price_update_ignores_unknown_strategy() {
@@ -269,12 +344,23 @@ mod tests {
     #[test]
     fn delete_removes_entry() {
         let mut s = StratsState::new();
-        s.upsert(100, 0, "F".into());
+        let mut fields = HashMap::new();
+        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: true,
+            kind: 1,
+            path: "F".into(),
+            fields,
+        });
         s.apply(StratCommand::Delete(StratDelete {
             strategy_id: 100,
             folder_path: "".into(),
         }));
         assert!(s.get(100).is_none());
+        assert!(s.snapshot(100).is_none());
     }
 
     #[test]
@@ -361,6 +447,10 @@ mod tests {
         assert_eq!(info100.last_date, 1737000000000);
         assert_eq!(info100.folder_path, "F/A");
         assert!(info100.checked);
+        assert_eq!(
+            s.snapshot(100).and_then(|snap| snap.fields.get("Name")),
+            Some(&FieldValue::String("Strat-A".to_string()))
+        );
 
         let info200 = s.get(200).unwrap();
         assert_eq!(info200.folder_path, "F/B");
@@ -380,6 +470,45 @@ mod tests {
         let result = s.apply_snapshot_decoded(&[0xFF, 0xFF, 0xFF, 0xFF]);
         assert!(result.is_none());
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn full_snapshot_replaces_missing_strategies() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
+
+        let mut old_fields = HashMap::new();
+        old_fields.insert("Name".to_string(), FieldValue::String("Old".to_string()));
+        let mut s = StratsState::new();
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 1,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: true,
+            kind: 1,
+            path: "OldPath".to_string(),
+            fields: old_fields,
+        });
+
+        let mut new_fields = HashMap::new();
+        new_fields.insert("Name".to_string(), FieldValue::String("New".to_string()));
+        let mut builder = StrategyBatchBuilder::new();
+        builder.write_strategy(&StrategySnapshot {
+            strategy_id: 2,
+            strategy_ver: 1,
+            last_date: 2,
+            checked: false,
+            kind: 1,
+            path: "NewPath".to_string(),
+            fields: new_fields,
+        });
+
+        let payload = builder.finalize();
+        s.apply_snapshot_decoded_with_mode(&payload, true).unwrap();
+
+        assert!(s.get(1).is_none());
+        assert!(s.snapshot(1).is_none());
+        assert!(s.get(2).is_some());
+        assert!(s.snapshot(2).is_some());
     }
 
     #[test]

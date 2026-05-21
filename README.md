@@ -78,16 +78,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 1. Import keys with `import_key`.
 2. Build configuration with `ClientConfig::new`.
 3. Create `Client` and one `EventDispatcher` per connection.
-4. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
-5. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
+4. Before init, call `dispatcher.set_local_strategies(&strategies)` if the
+   application has local strategies. An empty list is valid.
+5. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
+6. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
 
 Before init completes, `run_with_dispatcher` drops domain snapshots and streams
 that the server may push immediately after transport auth. After a successful
 init it sends the same refresh set as the Delphi client: order snapshot request,
-strategy snapshot reply when a strategy provider is registered, settings request,
-MM-orders subscription state, and balance refresh request. Without a strategy
-provider, init queues a `SnapshotRequested` event so the application can answer
-with its own fresh strategy state.
+strategy snapshot reply from the dispatcher-owned strategy list, settings
+request, MM-orders subscription state, and balance refresh request. If the
+application did not provide strategies, the reply is a valid empty strategy
+snapshot; later server snapshots fill the same read model.
 
 Use the lower-level `run_with_dispatcher` plus `run_init_sequence` pair only
 when the UI needs to show custom progress between the transport connection and

@@ -78,6 +78,12 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
+User/API sends and subscription intents use a separate unbounded app→main FIFO
+from accepted UDP packets. This matches Delphi `SendCmdInt` queues: dense
+incoming streams cannot keep user commands or Engine API requests behind the
+reader backlog, and there is no local capacity cap that drops accepted packets
+or queued sends.
+
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`:
 
@@ -99,7 +105,10 @@ responsible for the recovery actions that `run_with_dispatcher` normally perform
 `moonproto::client::set_err_emu(percent)` enables Delphi-style client-side
 packet loss emulation for tests. It is process-global, affects every `Client` in
 the process, and drops only incoming packets after MoonProto transport
-verification succeeds. Outgoing packets are still sent normally.
+verification succeeds. A valid packet selected for emulated drop still updates
+transport side effects first (`total_recv`, online timestamp, receive counters),
+matching Delphi `UDPRead`; it is then withheld from the protocol dispatcher.
+Outgoing packets are still sent normally.
 
 Service packets use half of the configured drop rate, matching Delphi
 `MoonProtoErrEmu`: `Ping`, handshake/reconnect commands, MTU probes, and
@@ -339,8 +348,10 @@ std::thread::spawn(move || {
 });
 ```
 
-Fire-and-forget methods log and drop on a full internal channel. Use `try_*`
-methods when the UI needs explicit retry:
+Fire-and-forget methods enqueue into an unbounded internal FIFO, matching the
+Delphi client queues: subscriptions and trading/API intents are not dropped by
+a local capacity cap. Use `try_*` methods when the UI needs explicit feedback
+that the client loop is still alive:
 
 ```rust
 match client.sender().try_subscribe_orderbook("BTCUSDT") {

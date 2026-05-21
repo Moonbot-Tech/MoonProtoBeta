@@ -35,6 +35,7 @@ use crate::commands::market::{
 };
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::strat::StratCommand;
+use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::TradeCommand;
 use crate::commands::trades_stream::parse_trades_packet;
 use crate::commands::ui::UICommand;
@@ -46,13 +47,13 @@ use crate::state::{
     TradesState,
 };
 
-/// Fresh strategy snapshot returned by the application for a server
+/// Fresh strategy snapshot override returned by the application for a server
 /// `TStratSnapshotRequest`.
 ///
-/// Delphi answers that request by rebuilding `TStratSnapshot.CreateFromStrats`
-/// from the live `Strats` object. The Rust library does not own application
-/// strategies, so `EventDispatcher` can only auto-answer when the application
-/// registers a provider through [`EventDispatcher::set_strategy_snapshot_provider`].
+/// Normal active-library flow: the application gives strategies to
+/// [`EventDispatcher::set_local_strategies`] before init, and the dispatcher
+/// answers from its owned `StratsState`. This provider is only an advanced
+/// escape hatch for callers that need to rebuild payload bytes themselves.
 pub struct StrategySnapshotReply {
     pub server_epoch: u64,
     pub client_max_last_date: u64,
@@ -82,11 +83,7 @@ impl StrategySnapshotReply {
     /// `TStratSnapshot.CreateFromStrats`: it serializes the current application
     /// strategy list, computes `ClientMaxLastDate`, and marks the packet as a
     /// full snapshot by default.
-    pub fn from_strategies(
-        server_epoch: u64,
-        full: bool,
-        strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
-    ) -> Self {
+    pub fn from_strategies(server_epoch: u64, full: bool, strategies: &[StrategySnapshot]) -> Self {
         let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new();
         let mut client_max_last_date = 0u64;
         for strategy in strategies {
@@ -178,10 +175,8 @@ pub struct EventDispatcher {
     /// `client.server_time_delta_handle()`, либо автоматически — `dispatch_into_active`
     /// делает lazy-link при первом вызове.
     server_time_delta_source: Option<Arc<AtomicU64>>,
-    /// Provider for fresh application-owned strategies. Called when the server
-    /// sends `TStratSnapshotRequest`; if it returns a snapshot, the dispatcher
-    /// sends `TStratSnapshot` immediately, matching Delphi's fresh
-    /// `CreateFromStrats(Strats)` response.
+    /// Optional override for fresh application-owned strategies. Without an
+    /// override the dispatcher answers from `strats.snapshot_vec()`.
     strategy_snapshot_provider:
         Option<Box<dyn FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static>>,
     /// Events produced while a one-shot helper is pumping the client loop.
@@ -223,6 +218,41 @@ impl EventDispatcher {
     /// Read-only доступ к `StratsState` (стратегии: uid → StratSnapshot).
     pub fn strats(&self) -> &StratsState {
         &self.strats
+    }
+
+    /// Replace the library-owned strategy list before init.
+    ///
+    /// This is the normal active-library path. The dispatcher stores the full
+    /// decoded snapshots, answers server `TStratSnapshotRequest` automatically,
+    /// and keeps the list current when server strategy snapshots/deltas arrive.
+    pub fn set_local_strategies(&mut self, strategies: &[StrategySnapshot]) {
+        self.strats.replace_with_snapshots(strategies);
+    }
+
+    /// Upsert one application-owned strategy into the library state.
+    pub fn upsert_local_strategy(&mut self, strategy: StrategySnapshot) {
+        self.strats.upsert_local_snapshot(strategy);
+    }
+
+    /// Clear the owned strategy list. The next server request will receive an
+    /// empty `TStratSnapshot` unless a provider override supplies one.
+    pub fn clear_local_strategies(&mut self) {
+        self.strats.replace_with_snapshots(&[]);
+    }
+
+    /// Read one full decoded strategy snapshot from the active-library state.
+    pub fn strategy_snapshot(&self, strategy_id: u64) -> Option<&StrategySnapshot> {
+        self.strats.snapshot(strategy_id)
+    }
+
+    /// Iterate full decoded strategy snapshots currently owned by the library.
+    pub fn strategy_snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
+        self.strats.snapshots()
+    }
+
+    /// Clone the current strategy snapshot list in deterministic id order.
+    pub fn strategy_snapshot_vec(&self) -> Vec<StrategySnapshot> {
+        self.strats.snapshot_vec()
     }
 
     /// Read-only доступ к `SettingsState` (`TClientSettingsCommand` snapshot).
@@ -320,16 +350,16 @@ impl EventDispatcher {
         self.server_time_delta_source = Some(handle);
     }
 
-    /// Register a provider for fresh strategy snapshots.
+    /// Register an override provider for fresh strategy snapshots.
     ///
     /// The provider is called with the UID of the incoming
     /// `TStratSnapshotRequest`. The reply itself is sent with a new command UID,
     /// as Delphi creates a fresh `TStratSnapshot` command object for the answer.
     ///
-    /// If no provider is registered, or the provider returns `None`,
-    /// `SnapshotRequested` is still emitted and the application can answer
-    /// manually with [`crate::client::Client::strat_send_snapshot_batch`] or
-    /// [`crate::client::Client::strat_send_snapshot_payload`].
+    /// Normal callers should prefer [`Self::set_local_strategies`]. If no
+    /// provider is registered, or the provider returns `None`, the dispatcher
+    /// sends the current library-owned strategy list. `SnapshotRequested` is
+    /// still emitted for UI/diagnostic awareness.
     pub fn set_strategy_snapshot_provider<F>(&mut self, provider: F)
     where
         F: FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static,
@@ -347,12 +377,17 @@ impl EventDispatcher {
         request_uid: u64,
         client: &crate::client::Client,
     ) -> bool {
-        let Some(provider) = self.strategy_snapshot_provider.as_mut() else {
-            return false;
-        };
-        let Some(snapshot) = provider(request_uid) else {
-            return false;
-        };
+        let snapshot = self
+            .strategy_snapshot_provider
+            .as_mut()
+            .and_then(|provider| provider(request_uid))
+            .unwrap_or_else(|| {
+                StrategySnapshotReply::from_strategies(
+                    self.strats.last_server_epoch,
+                    true,
+                    &self.strats.snapshot_vec(),
+                )
+            });
         client.strat_send_snapshot_payload(
             snapshot.server_epoch,
             snapshot.client_max_last_date,
@@ -367,14 +402,12 @@ impl EventDispatcher {
         request_uid: u64,
         client: &crate::client::Client,
     ) -> bool {
-        if self.send_strategy_snapshot_reply(request_uid, client) {
-            return true;
-        }
+        self.send_strategy_snapshot_reply(request_uid, client);
         self.queued_events
             .push(Event::Strat(crate::state::StratEvent::SnapshotRequested {
                 uid: request_uid,
             }));
-        false
+        true
     }
 
     /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
@@ -575,15 +608,31 @@ impl EventDispatcher {
                         // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
                         // делает это сама на SnapshotFull/Partial event'ах.
                         match &ev {
-                            crate::state::StratEvent::SnapshotFull { raw_data, .. }
-                            | crate::state::StratEvent::SnapshotPartial { raw_data, .. }
-                                if self.strats.apply_snapshot_decoded(raw_data).is_none() =>
-                            {
-                                log::warn!(
-                                    target: "moonproto::events",
-                                    "failed to decode strategy snapshot payload ({} bytes)",
-                                    raw_data.len()
-                                );
+                            crate::state::StratEvent::SnapshotFull { raw_data, .. } => {
+                                if self
+                                    .strats
+                                    .apply_snapshot_decoded_with_mode(raw_data, true)
+                                    .is_none()
+                                {
+                                    log::warn!(
+                                        target: "moonproto::events",
+                                        "failed to decode full strategy snapshot payload ({} bytes)",
+                                        raw_data.len()
+                                    );
+                                }
+                            }
+                            crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
+                                if self
+                                    .strats
+                                    .apply_snapshot_decoded_with_mode(raw_data, false)
+                                    .is_none()
+                                {
+                                    log::warn!(
+                                        target: "moonproto::events",
+                                        "failed to decode partial strategy snapshot payload ({} bytes)",
+                                        raw_data.len()
+                                    );
+                                }
                             }
                             _ => {}
                         }
@@ -764,11 +813,10 @@ impl EventDispatcher {
         // последующий update в одном datagram'е). Шлём один запрос на пару.
         use std::collections::HashSet;
         let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
-        // Auto-action 2: StratEvent::SnapshotRequested → если приложение
-        // зарегистрировало provider, берём fresh snapshot из него и шлём ответ.
-        // Delphi `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ
-        // через `TStratSnapshot.CreateFromStrats(Strats)`, кеш последнего
-        // server-snapshot там не используется.
+        // Auto-action 2: StratEvent::SnapshotRequested → шлём fresh snapshot
+        // из library-owned StratsState (или provider override). Delphi
+        // `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ через
+        // `TStratSnapshot.CreateFromStrats(Strats)`.
         let mut snapshot_requested_uid: Option<u64> = None;
         // Auto-action 3: OrderEvent::Snapshot → CleanupMissingWorkers.
         // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
@@ -810,8 +858,7 @@ impl EventDispatcher {
         }
         if let Some(uid) = snapshot_requested_uid {
             self.send_strategy_snapshot_reply(uid, client);
-            // Если provider не задан или вернул None — событие всё равно эмиттится
-            // в `out`, потребитель может ответить вручную.
+            // Событие всё равно эмиттится в `out` для UI/диагностики.
         }
         if order_snapshot_applied {
             let missing = self.orders.missing_after_snapshot();
@@ -1169,7 +1216,7 @@ mod tests {
             .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
 
         let mut found = false;
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             let crate::client::ClientEvent::Send(msg) = ev else {
                 continue;
             };
@@ -1234,7 +1281,7 @@ mod tests {
         );
 
         let mut found = false;
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             let crate::client::ClientEvent::Send(msg) = ev else {
                 continue;
             };
@@ -1486,7 +1533,7 @@ mod tests {
         // Drain event channel — должна быть отправка Command::Strat с fresh
         // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
         let mut found_snapshot_send = false;
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             if let crate::client::ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::Strat as u8 {
                     let data = &msg.item.data;
@@ -1530,9 +1577,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requested_without_provider_does_not_send() {
-        // Если provider не задан — auto-echo не происходит. App получает event
-        // и может сам решить что делать.
+    fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
+        // Если provider не задан и локальных стратегий нет, dispatcher всё равно
+        // отвечает корректным пустым snapshot'ом. Это active-lib механика:
+        // сервер не должен ждать ручного ответа от приложения.
         let mut d = EventDispatcher::new();
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -1541,21 +1589,34 @@ mod tests {
         let payload = crate::commands::strat::build_snapshot_request(99);
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — НЕ должно быть Command::Strat send'ов (нет provider).
-        let mut strat_sends = 0;
-        while let Ok(ev) = client.event_rx.try_recv() {
+        // Drain event channel — должен быть Command::Strat с пустым serializer batch.
+        let mut empty_snapshot_sends = 0;
+        for ev in client.drain_app_events_for_test() {
             if let crate::client::ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::Strat as u8 {
-                    strat_sends += 1;
+                    let cmd = crate::commands::strat::StratCommand::parse(&msg.item.data)
+                        .expect("sent strat command must parse");
+                    match cmd {
+                        crate::commands::strat::StratCommand::Snapshot(snapshot) => {
+                            let batch = crate::commands::strategy_serializer::parse_strategy_batch(
+                                &snapshot.data,
+                            )
+                            .expect("empty strategy batch must parse");
+                            assert!(snapshot.full);
+                            assert!(batch.strategies.is_empty());
+                            empty_snapshot_sends += 1;
+                        }
+                        other => panic!("expected snapshot reply, got {other:?}"),
+                    }
                 }
             }
         }
         assert_eq!(
-            strat_sends, 0,
-            "без provider — auto-echo не должен сработать"
+            empty_snapshot_sends, 1,
+            "без provider — должен уйти пустой owned snapshot"
         );
 
-        // Но event SnapshotRequested всё равно прилетает app'у.
+        // Event SnapshotRequested всё равно прилетает app'у для UI/диагностики.
         let has_event = out.iter().any(|ev| {
             matches!(
                 ev,
@@ -1563,6 +1624,66 @@ mod tests {
             )
         });
         assert!(has_event);
+    }
+
+    #[test]
+    fn snapshot_requested_uses_local_strategies() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+        use std::collections::HashMap;
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "Comment".to_string(),
+            FieldValue::String("local".to_string()),
+        );
+        let strategy = StrategySnapshot {
+            strategy_id: 0xF17E,
+            strategy_ver: 3,
+            last_date: 1234,
+            checked: true,
+            kind: 1,
+            path: "FireTest".to_string(),
+            fields,
+        };
+
+        let mut d = EventDispatcher::new();
+        d.set_local_strategies(std::slice::from_ref(&strategy));
+        assert_eq!(
+            d.strategy_snapshot(strategy.strategy_id).unwrap().last_date,
+            1234
+        );
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let payload = crate::commands::strat::build_snapshot_request(100);
+        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+
+        let mut found = false;
+        for ev in client.drain_app_events_for_test() {
+            let crate::client::ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            if msg.item.cmd != Command::Strat as u8 {
+                continue;
+            }
+            let cmd = crate::commands::strat::StratCommand::parse(&msg.item.data)
+                .expect("sent strat command must parse");
+            if let crate::commands::strat::StratCommand::Snapshot(snapshot) = cmd {
+                let batch =
+                    crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
+                        .expect("local strategy batch must parse");
+                assert_eq!(snapshot.client_max_last_date, 1234);
+                assert_eq!(batch.strategies.len(), 1);
+                assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
+                assert_eq!(
+                    batch.strategies[0].fields.get("Comment"),
+                    Some(&FieldValue::String("local".to_string()))
+                );
+                found = true;
+            }
+        }
+        assert!(found, "local strategy snapshot must be sent");
     }
 
     #[test]

@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moonproto::client::set_err_emu;
+use moonproto::commands::arb::ArbPayload;
 use moonproto::commands::candles::{parse_request_candles_data_response, CandlesAggregator};
 use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
 use moonproto::commands::strategy_serializer::{
@@ -42,6 +43,7 @@ use moonproto::{
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
+const FIRETEST_STRATEGY_ID: u64 = 0xF17E_5737_0000_0001;
 const DEFAULT_WAIT_SECS: u64 = 5;
 const DEFAULT_CANDLES_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_DISCONNECT_TIMEOUT_SECS: u64 = 45;
@@ -85,7 +87,7 @@ impl FireConfig {
 
         let mut values = HashMap::<String, String>::new();
         for raw in text.lines() {
-            let line = raw.trim();
+            let line = raw.trim_start_matches('\u{feff}').trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -224,6 +226,7 @@ impl CandlesSnapshotSummary {
 #[derive(Default)]
 struct SessionStats {
     label: String,
+    connected_now: bool,
     server_events: u64,
     connected_fresh: u64,
     connected_again: u64,
@@ -251,6 +254,7 @@ impl Clone for SessionStats {
     fn clone(&self) -> Self {
         Self {
             label: self.label.clone(),
+            connected_now: self.connected_now,
             server_events: self.server_events,
             connected_fresh: self.connected_fresh,
             connected_again: self.connected_again,
@@ -292,7 +296,8 @@ impl SessionStats {
                 )
             });
         format!(
-            "fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strategy_rows={} trades={} books={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strategy_rows={} trades={} books={} parse_failed={} candles={}",
+            self.connected_now,
             self.connected_fresh,
             self.connected_again,
             self.reconnecting,
@@ -319,7 +324,12 @@ struct Session {
 }
 
 impl Session {
-    fn connect(label: &str, cfg: &FireConfig, keys: ImportedKeys) -> Self {
+    fn connect(
+        label: &str,
+        cfg: &FireConfig,
+        keys: ImportedKeys,
+        provided_strategy: Option<StrategySnapshot>,
+    ) -> Self {
         let stats = Arc::new(Mutex::new(SessionStats {
             label: label.to_string(),
             ..Default::default()
@@ -334,16 +344,36 @@ impl Session {
         client.on_lifecycle(Box::new(move |event| {
             let mut st = lc_stats.lock().unwrap();
             match event {
-                LifecycleEvent::Connected { fresh: true } => st.connected_fresh += 1,
-                LifecycleEvent::Connected { fresh: false } => st.connected_again += 1,
-                LifecycleEvent::Reconnecting => st.reconnecting += 1,
-                LifecycleEvent::Disconnected => st.disconnected += 1,
+                LifecycleEvent::Connected { fresh: true } => {
+                    st.connected_now = true;
+                    st.connected_fresh += 1;
+                }
+                LifecycleEvent::Connected { fresh: false } => {
+                    st.connected_now = true;
+                    st.connected_again += 1;
+                }
+                LifecycleEvent::Reconnecting => {
+                    st.connected_now = false;
+                    st.reconnecting += 1;
+                }
+                LifecycleEvent::Disconnected => {
+                    st.connected_now = false;
+                    st.disconnected += 1;
+                }
                 _ => {}
             }
             println!("LIFECYCLE->{lifecycle_label}: {event:?}");
         }));
 
         let mut dispatcher = EventDispatcher::new();
+        if let Some(strategy) = provided_strategy.as_ref() {
+            dispatcher.set_local_strategies(std::slice::from_ref(strategy));
+            println!(
+                "FIRETEST {label}: local strategy snapshot seeded id={} ver={} last_date={}",
+                strategy.strategy_id, strategy.strategy_ver, strategy.last_date
+            );
+        }
+
         let init = InitConfig {
             mm_orders_subscribe: Some(true),
             subscribe_trades: Some(false),
@@ -392,7 +422,17 @@ impl Session {
         self.stats.lock().unwrap().clone()
     }
 
+    fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
+        self.dispatcher.strategy_snapshot(strategy_id).cloned()
+    }
+
     fn request_candles_snapshot(&mut self) {
+        let raw = moonproto::commands::engine_request::request_candles_data();
+        let uid = raw
+            .get(3..11)
+            .and_then(|s| s.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
         {
             let mut st = self.stats.lock().unwrap();
             st.candles_requested = true;
@@ -401,9 +441,14 @@ impl Session {
             st.candles_last_progress = (0, 0);
             st.candles_complete = None;
             st.candles_aggregator.reset();
-            println!("FIRETEST {}: request full candles snapshot", st.label);
+            println!(
+                "FIRETEST {}: request full candles snapshot uid={} payload_len={}",
+                st.label,
+                uid,
+                raw.len()
+            );
         }
-        self.client.api_request_candles_data();
+        self.client.send_api_request(&raw);
     }
 }
 
@@ -533,6 +578,13 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
         }
         Event::EngineResponse(resp) => {
             record_engine_response(&mut st, event_no, resp);
+        }
+        Event::Arb { uid, payload } => {
+            log_server_event(
+                &st,
+                event_no,
+                format!("Arb uid={} {}", uid, arb_summary(payload)),
+            );
         }
         Event::ServerLog { time, msg } => {
             st.server_logs += 1;
@@ -683,6 +735,41 @@ fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineRes
     log_server_event(st, event_no, detail);
 }
 
+fn arb_summary(payload: &ArbPayload) -> String {
+    match payload {
+        ArbPayload::Price { version, blocks } => {
+            let price_items: usize = blocks.iter().map(|b| b.prices.len()).sum();
+            let preview = blocks
+                .iter()
+                .take(8)
+                .map(|b| format!("{}:{}", b.market_index, b.prices.len()))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "Price version={} blocks={} price_items={} preview=[{}]",
+                version,
+                blocks.len(),
+                price_items,
+                preview
+            )
+        }
+        ArbPayload::Isolation { version, entries } => {
+            let preview = entries
+                .iter()
+                .take(8)
+                .map(|e| format!("{}:{}:{}", e.market_index, e.platform_code, e.flags))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "Isolation version={} entries={} preview=[{}]",
+                version,
+                entries.len(),
+                preview
+            )
+        }
+    }
+}
+
 fn candles_chunk_info(data: &[u8]) -> Option<(usize, usize, usize)> {
     if data.len() < 4 {
         return None;
@@ -766,35 +853,11 @@ where
 }
 
 fn has_initial_health(st: &SessionStats) -> bool {
-    st.settings_events > 0
-        && st.strategy_events > 0
+    st.connected_now
+        && st.settings_events > 0
         && st.trades_apply > 0
         && st.orderbook_apply > 0
         && st.parse_failed == 0
-}
-
-fn select_strategy(stats: &SessionStats, cfg: &FireConfig) -> (StrategySnapshot, String) {
-    let mut candidates: Vec<_> = stats.strategies_by_id.values().cloned().collect();
-    candidates.sort_by_key(|s| s.strategy_id);
-
-    if let Some(id) = cfg.strategy_id {
-        let strategy = candidates
-            .into_iter()
-            .find(|s| s.strategy_id == id)
-            .unwrap_or_else(|| panic!("configured strategy_id={id} was not received"));
-        let field = select_field(&strategy, &cfg.strategy_field);
-        return (strategy, field);
-    }
-
-    for strategy in candidates {
-        if let Some(field) = try_select_field(&strategy, &cfg.strategy_field) {
-            return (strategy, field);
-        }
-    }
-    panic!(
-        "no received strategy has string field `{}` or any fallback string field",
-        cfg.strategy_field
-    );
 }
 
 fn select_field(strategy: &StrategySnapshot, preferred: &str) -> String {
@@ -845,6 +908,30 @@ fn with_strategy_string(
     strategy
 }
 
+fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
+    let strategy_id = cfg.strategy_id.unwrap_or(FIRETEST_STRATEGY_ID);
+    let mut fields = HashMap::new();
+    fields.insert(
+        "StrategyName".to_string(),
+        FieldValue::String("MoonProto FireTest".to_string()),
+    );
+    fields.insert(
+        "Comment".to_string(),
+        FieldValue::String("firetest-initial".to_string()),
+    );
+    fields.insert("AcceptCommands".to_string(), FieldValue::Bool(true));
+    fields.insert("OrderSize".to_string(), FieldValue::Double(0.0));
+    StrategySnapshot {
+        strategy_id,
+        strategy_ver: 1,
+        last_date: now_epoch_ms(),
+        checked: false,
+        kind: 0,
+        path: "FireTest".to_string(),
+        fields,
+    }
+}
+
 fn now_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -892,15 +979,22 @@ fn fire_test_active_library_health() {
         cfg.candles_timeout
     );
     let keys = import_key(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+    let seeded_strategy = firetest_strategy(&cfg);
+    let seeded_strategy_id = seeded_strategy.strategy_id;
 
-    let mut a = Session::connect("A", &cfg, keys);
-    let mut b = Session::connect("B", &cfg, keys);
+    let mut a = Session::connect("A", &cfg, keys, Some(seeded_strategy.clone()));
+    let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
+    assert!(
+        a.strategy_snapshot(seeded_strategy_id).is_some()
+            && b.strategy_snapshot(seeded_strategy_id).is_some(),
+        "FireTest local strategies must be available through EventDispatcher API before stream checks"
+    );
 
     assert!(
         pump_pair_until(&mut a, &mut b, cfg.wait, "initial health", |a, b| {
             has_initial_health(a) && has_initial_health(b)
         }),
-        "FireTest initial health failed: both clients must receive settings, strategies, trades, and configured orderbook within {:?}",
+        "FireTest initial health failed: both clients must receive settings, trades, and configured orderbook within {:?}",
         cfg.wait
     );
 
@@ -930,11 +1024,14 @@ fn fire_test_active_library_health() {
         .last_settings
         .clone()
         .expect("settings were counted but not stored");
-    let (original_strategy, field) = select_strategy(&a_initial, &cfg);
-    let original_field_value =
-        strategy_field_string(&a_initial, original_strategy.strategy_id, &field)
-            .expect("selected field missing")
-            .to_string();
+    let original_strategy = a
+        .strategy_snapshot(seeded_strategy_id)
+        .expect("seeded strategy missing from dispatcher state");
+    let field = select_field(&original_strategy, &cfg.strategy_field);
+    let original_field_value = match original_strategy.fields.get(&field) {
+        Some(FieldValue::String(value)) => value.clone(),
+        _ => panic!("selected field `{field}` missing from seeded strategy"),
+    };
 
     let run_id = now_epoch_ms();
     let mutated_field_value = format!("firetest-{run_id}");

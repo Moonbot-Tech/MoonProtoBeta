@@ -21,12 +21,12 @@ use log::{debug, error, warn};
 /// - Communication: shared state protected by Mutex (≡ Delphi FastLock, benchmarked: same perf)
 ///
 /// See MAPPING.md for line-by-line correspondence.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "diagnostic-trace")]
 use std::sync::OnceLock;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,8 +42,12 @@ use std::time::{Duration, Instant};
 //
 // Зеркало серверного `MoonProtoErrEmu` (Delphi `MoonProtoUDPClient.pas:534-541` и
 // `MoonProtoUDPServer.pas:1281-1288`): дроп происходит **после** успешной проверки
-// MAC и version, до dispatch'а. Служебные команды (Ping / handshake-related / ACK)
-// дропаются с rate/2 чтобы handshake не отваливался полностью.
+// MAC и version, а в Delphi-клиенте ещё и после побочных эффектов `TotalRecvBytes`
+// / `LastOnline`. Rust сохраняет тот же порядок: валидный packet, выбранный ErrEmu
+// для дропа, всё равно доезжает до main-loop, обновляет transport stats, и только
+// потом не dispatch'ится в protocol layer. Служебные команды (Ping /
+// handshake-related / ACK) дропаются с rate/2 чтобы handshake не отваливался
+// полностью.
 //
 // Использование (пример: 75% loss):
 //   moonproto::client::set_err_emu(75);
@@ -95,6 +99,18 @@ fn is_service_cmd(cmd: u8) -> bool {
             | Command::ProbeMTU
             | Command::SlicedACK
     )
+}
+
+/// Команды, которые main loop должен обработать сразу при чтении из reader→main очереди.
+///
+/// `MPC_Sliced` намеренно НЕ входит в [`is_service_cmd`]: Delphi ErrEmu дропает
+/// sliced data с полным процентом потерь. Но после того как UDP-пакет уже
+/// принят Rust-reader'ом, внутренняя очередь не имеет права добавлять локальный
+/// drop/backpressure поверх UDP: это ломает reliable sliced reassembly и особенно
+/// большие chunked EngineResponse вроде `RequestCandlesData`.
+#[inline]
+fn is_transport_critical_cmd(cmd: u8) -> bool {
+    is_service_cmd(cmd) || matches!(Command::from_byte(cmd), Command::Sliced)
 }
 
 /// Возвращает `true` если пакет нужно дропнуть согласно ErrEmu.
@@ -153,6 +169,10 @@ fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
 
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
+                                 // Rust has one reader→main channel, while Delphi has UDPRead plus a regular
+                                 // send cycle. Never require the channel to become empty before send/retry work:
+                                 // under a live market stream it may stay non-empty indefinitely.
+const EVENT_DRAIN_BUDGET: usize = 512;
 const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
@@ -310,6 +330,10 @@ pub(crate) struct RecvMsg {
     payload: Vec<u8>,
     recv_bytes: u64,
     timestamp_ms: i64,
+    /// Delphi updates `TotalRecvBytes`/`LastOnline` for a valid packet before
+    /// `MoonProtoErrEmu` drops it. Keep the packet in the reader→main FIFO so
+    /// main can apply those side effects, then skip protocol parsing.
+    err_emu_drop: bool,
     /// Аудит #7 (audit_delphi_deviation E-V2-02): эпоха reader thread'а который создал
     /// это сообщение. Инкрементируется на каждый `spawn_reader`. Main loop игнорирует
     /// сообщения с epoch != `current_reader_epoch` — это защита от пакетов старого
@@ -352,6 +376,27 @@ pub(crate) enum ClientEvent {
     UnsubscribeAllTrades,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecvEnqueue {
+    Delivered,
+    Disconnected,
+}
+
+fn enqueue_recv_event(
+    event_tx: &mpsc::Sender<ClientEvent>,
+    msg: RecvMsg,
+    _start_time: Instant,
+) -> RecvEnqueue {
+    // Delphi has no bounded reader->main queue after UDPRead accepted a packet.
+    // Once Rust reader got a valid datagram from the kernel, it must not add a
+    // second local loss mode on top of UDP/ErrEmu. The unbounded channel keeps
+    // FIFO delivery; EVENT_DRAIN_BUDGET below prevents main-loop starvation.
+    match event_tx.send(ClientEvent::Recv(msg)) {
+        Ok(()) => RecvEnqueue::Delivered,
+        Err(_) => RecvEnqueue::Disconnected,
+    }
+}
+
 enum QueuedControlEvent {
     Subscribe(ClientEvent),
     MmOrdersSubscribe(bool),
@@ -360,10 +405,9 @@ enum QueuedControlEvent {
 /// Ошибки при отправке subscribe-запроса через [`ClientSender`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
-    /// Channel переполнен (sync_channel capacity 1024). Очень редко — subscribe
-    /// события идут редко (UI клики), 1024 events практически не накапливается.
-    /// Если случилось — main loop забит другой работой, разумно retry через
-    /// несколько ms.
+    /// Legacy/reserved. The client event channel is intentionally unbounded to
+    /// match Delphi queues: accepted packets and user intents are not dropped
+    /// by a local capacity check. Current code does not return this variant.
     ChannelFull,
     /// `Client` был дропнут или main loop вышел — sender больше нельзя использовать.
     Disconnected,
@@ -372,7 +416,7 @@ pub enum SubscribeError {
 impl std::fmt::Display for SubscribeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelFull => write!(f, "Client event channel is full"),
+            Self::ChannelFull => write!(f, "Client event channel has no capacity cap"),
             Self::Disconnected => write!(f, "Client event channel disconnected"),
         }
     }
@@ -397,17 +441,18 @@ impl std::error::Error for SubscribeError {}
 /// client.run_with_dispatcher(...);
 /// ```
 ///
-/// Все методы fire-and-forget: при `ChannelFull` логируется warning, но операция
-/// тихо пропускается (subscribe — non-critical UI action, пользователь может
-/// нажать кнопку ещё раз). Если нужна обратная связь — используй `try_*` варианты
-/// возвращающие `Result<(), SubscribeError>`.
+/// Все методы fire-and-forget: событие кладётся во внутреннюю FIFO-очередь без
+/// capacity cap, как Delphi `TList`-очереди. Ошибка возможна только если main
+/// loop уже завершён и channel disconnected. Если нужна обратная связь —
+/// используй `try_*` варианты возвращающие `Result<(), SubscribeError>`.
 #[derive(Clone)]
 pub struct ClientSender {
-    tx: mpsc::SyncSender<ClientEvent>,
+    app_events: Arc<Mutex<VecDeque<ClientEvent>>>,
+    app_queue_alive: Arc<AtomicBool>,
 }
 
 impl ClientSender {
-    /// Подписаться на orderbook (fire-and-forget; warn-log при channel full).
+    /// Подписаться на orderbook (fire-and-forget; warn-log если main loop dead).
     pub fn subscribe_orderbook(&self, market_name: &str) {
         if let Err(e) = self.try_subscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
@@ -415,7 +460,7 @@ impl ClientSender {
         }
     }
 
-    /// Отписаться от orderbook (fire-and-forget; warn-log при channel full).
+    /// Отписаться от orderbook (fire-and-forget; warn-log если main loop dead).
     pub fn unsubscribe_orderbook(&self, market_name: &str) {
         if let Err(e) = self.try_unsubscribe_orderbook(market_name) {
             log::warn!(target: "moonproto::client",
@@ -423,7 +468,7 @@ impl ClientSender {
         }
     }
 
-    /// Подписаться на all-trades (fire-and-forget; warn-log при channel full).
+    /// Подписаться на all-trades (fire-and-forget; warn-log если main loop dead).
     pub fn subscribe_all_trades(&self, want_mm: bool) {
         if let Err(e) = self.try_subscribe_all_trades(want_mm) {
             log::warn!(target: "moonproto::client",
@@ -431,7 +476,7 @@ impl ClientSender {
         }
     }
 
-    /// Отписаться от all-trades (fire-and-forget; warn-log при channel full).
+    /// Отписаться от all-trades (fire-and-forget; warn-log если main loop dead).
     pub fn unsubscribe_all_trades(&self) {
         if let Err(e) = self.try_unsubscribe_all_trades() {
             log::warn!(target: "moonproto::client",
@@ -439,7 +484,7 @@ impl ClientSender {
         }
     }
 
-    /// Explicit подписка с возвратом ошибки если channel переполнен / disconnected.
+    /// Explicit подписка с возвратом ошибки если main loop disconnected.
     pub fn try_subscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
         self.try_send(ClientEvent::SubscribeOrderBook {
             market_name: market_name.to_string(),
@@ -461,11 +506,11 @@ impl ClientSender {
     }
 
     fn try_send(&self, ev: ClientEvent) -> Result<(), SubscribeError> {
-        match self.tx.try_send(ev) {
-            Ok(()) => Ok(()),
-            Err(mpsc::TrySendError::Full(_)) => Err(SubscribeError::ChannelFull),
-            Err(mpsc::TrySendError::Disconnected(_)) => Err(SubscribeError::Disconnected),
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
         }
+        self.app_events.lock().unwrap().push_back(ev);
+        Ok(())
     }
 }
 
@@ -1016,18 +1061,36 @@ struct SentSliced {
     u_key: UniqueKey, // for UKey dedup (matches TMoonProtoSlicedData.UKey)
 }
 
+impl SentSliced {
+    #[inline]
+    fn is_block_acked(&self, block_num: usize) -> bool {
+        self.ack_flags[block_num / 8] & (1 << (block_num % 8)) != 0
+    }
+
+    fn refresh_last_checked_from_unacked(&mut self, fallback: i64) {
+        self.last_checked = (0..self.blocks_count)
+            .filter(|&block| !self.is_block_acked(block))
+            .map(|block| self.piece_last_checked[block])
+            .min()
+            .unwrap_or(fallback);
+    }
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
 
-    // Единый event-канал: reader + app шлют ClientEvent → main делает recv_timeout(5ms).
-    // Аудит #1 (audit_delphi_deviation): bounded channel вместо unbounded mpsc::channel().
-    // Раньше на burst 50K pps + slow callback канал рос неограниченно → OOM-vector (50K msgs ×
-    // ~1500б payload = 75MB/sec). Теперь sync_channel(1024) + try_send + drop+warn при overflow.
-    // UDP уже lossy → drop пакета на user-level семантически эквивалентен kernel drop при
-    // переполнении SO_RCVBUF (что делает Delphi через ThreadedEvent inline handling).
-    event_tx: mpsc::SyncSender<ClientEvent>,
+    // Reader → main FIFO: только уже принятые UDP packets. Unbounded, как Delphi
+    // UDPRead path: принятый packet не должен пропадать из-за Rust-only capacity.
+    event_tx: mpsc::Sender<ClientEvent>,
     pub(crate) event_rx: mpsc::Receiver<ClientEvent>,
+
+    // App/user → main FIFO: отдельная очередь SendCmd/subscribe intents.
+    // Delphi `SendCmdInt` кладёт команды в DataToSend/DataToSendH/DataToSendL
+    // отдельно от входящего UDP потока; dense stream не может закрыть путь к
+    // отправке пользовательской/API команды. Очередь unbounded, без capacity drop.
+    app_events: Arc<Mutex<VecDeque<ClientEvent>>>,
+    app_queue_alive: Arc<AtomicBool>,
 
     // Pending H-commands (main thread only, no sharing)
     pending_h: Vec<SendItem>,
@@ -1080,13 +1143,14 @@ pub struct Client {
     net_lag_ping: i64,      // NetLagPing (ms abs diff between NTP-corrected time and server time)
 
     // Adaptive rate control (matches MoonProtoIntStruct.pas:197-245)
-    trip_delay_k: f64,       // TripDelayK (1.05-1.25, init 1.1)
-    last_set_trip_k: i64,    // LastSetTripK
-    avg_dup_count: f64,      // AvgDupCount
-    avg_over_heat: f64,      // AvgOverHeat (% retransmission overhead, EMA, matches :1210-1212)
-    can_send_rate: i32,      // CanSendRate (bytes/sec, init 2MB/s)
-    used_sliced_limit: bool, // UsedSlicedLimit
-    actual_sleep_time: f64,  // ActualSleepTime (EMA of actual loop cycle time)
+    trip_delay_k: f64,        // TripDelayK (1.05-1.25, init 1.1)
+    last_set_trip_k: i64,     // LastSetTripK
+    last_checked_slices: i64, // LastCheckedSlices: outer CheckSeningData gate
+    avg_dup_count: f64,       // AvgDupCount
+    avg_over_heat: f64,       // AvgOverHeat (% retransmission overhead, EMA, matches :1210-1212)
+    can_send_rate: i32,       // CanSendRate (bytes/sec, init 2MB/s)
+    used_sliced_limit: bool,  // UsedSlicedLimit
+    actual_sleep_time: f64,   // ActualSleepTime (EMA of actual loop cycle time)
 
     // BytesPerSec sliding window (10 sec) — observability метрик.
     // B-13 fix: running sum поддерживается одновременно с window — `bytes_per_sec_*` O(1)
@@ -1278,10 +1342,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(cfg: ClientConfig) -> Self {
-        // Аудит #1: bounded channel. 1024 events × ~1500б payload = ~1.5MB worst case.
-        // При burst 10K pps это 100мс задержки main loop без потери. После — drop+warn.
-        const EVENT_CHANNEL_CAPACITY: usize = 1024;
-        let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
+        // Delphi queues are ordinary grow-only TList/TDictionary structures with no
+        // fixed capacity cap. Keep Rust queues unbounded too: accepted UDP packets
+        // and user commands must not disappear because a local channel filled up.
+        // Reader packets and app commands are separate so dense incoming streams
+        // cannot keep user/API sends behind an ever-growing recv backlog.
+        let (event_tx, event_rx) = mpsc::channel();
+        let app_events = Arc::new(Mutex::new(VecDeque::new()));
+        let app_queue_alive = Arc::new(AtomicBool::new(true));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
         // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
@@ -1300,6 +1368,8 @@ impl Client {
             cfg,
             event_tx,
             event_rx,
+            app_events,
+            app_queue_alive,
             pending_h: Vec::new(),
             sending: Vec::new(),
             socket: None,
@@ -1344,6 +1414,7 @@ impl Client {
             net_lag_ping: 0,
             trip_delay_k: 1.1,
             last_set_trip_k: i64::MIN / 2,
+            last_checked_slices: 0,
             avg_dup_count: 0.0,
             avg_over_heat: 0.0,
             can_send_rate: 2 * 1024 * 1024, // StartCanSendRate = 2 MB/s
@@ -1565,20 +1636,12 @@ impl Client {
     /// проверить статус через `LifecycleEvent::Disconnected` callback и не
     /// шарашить новые команды после.
     ///
-    /// **BACKPRESSURE BEHAVIOR (audit_responsibility B4 / hints #6)**: внутренний
-    /// event channel — `mpsc::sync_channel` с capacity 1024. Если main loop отстаёт
-    /// (тяжёлый on_data callback / OS scheduling), очередь может заполниться.
-    /// `send_cmd` **БЛОКИРУЕТ** caller-поток до освобождения слота — никогда не
-    /// дропает торговую команду молча.
-    ///
-    /// Это РАЗУМНО для торгового приложения (drop ордеров catastrofично), но имеет
-    /// следствие: вызов из UI-потока может зависнуть на десятки/сотни ms при burst'е.
-    /// Рекомендация: для UI вызывайте через `tokio::spawn_blocking` или отдельный
-    /// worker-thread; не вызывайте `send_cmd` прямо из main UI-loop.
-    ///
-    /// (В Delphi `MoonProtoCommon.pas:749 SendCmd` под FastLock без верхнего лимита
-    /// очереди — не блокирует caller, но рискует OOM на патологии. Rust bounded =
-    /// безопаснее по памяти, цена — потенциальная блокировка caller-потока.)
+    /// **QUEUE BEHAVIOR:** internal event channel is unbounded. This matches
+    /// Delphi `MoonProtoCommon.pas:749 SendCmd`: user commands are appended to
+    /// protocol queues without a fixed capacity cap. `send_cmd` does not block
+    /// on local queue fullness and never silently drops a trading/API command
+    /// because the Rust main loop is busy. If the main loop is gone, the channel
+    /// is disconnected and the error is logged.
     pub fn send_cmd(
         &self,
         data: Vec<u8>,
@@ -1617,19 +1680,35 @@ impl Client {
             last_sent_at: 0,
             u_key,
         };
-        // Аудит #1 + E-V2-06: для send команд (app → main) используем blocking `send` (не
-        // `try_send`). Application threads ОБЯЗАНЫ ждать пока main loop разгрузит канал —
-        // в отличие от UDP пакетов, торговая команда не должна быть дропнута. Если main loop
-        // мёртв (channel closed) — логируем и возвращаемся (потребитель проверит lifecycle).
+        // App → main uses a separate unbounded FIFO from reader → main. This
+        // matches Delphi `SendCmdInt`: outgoing user/API commands are appended
+        // to send queues independently of UDPRead traffic and cannot be delayed
+        // behind an ever-growing recv backlog.
         if self
-            .event_tx
-            .send(ClientEvent::Send(SendMsg { item }))
+            .enqueue_app_event(ClientEvent::Send(SendMsg { item }))
             .is_err()
         {
             log::error!(target: "moonproto::client",
-                "send_cmd: event channel closed (main loop dead?) — packet cmd={:?} priority={:?} dropped",
+                "send_cmd: app queue closed (client dropped?) — packet cmd={:?} priority={:?} dropped",
                 cmd, priority);
         }
+    }
+
+    fn enqueue_app_event(&self, ev: ClientEvent) -> Result<(), SubscribeError> {
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        self.app_events.lock().unwrap().push_back(ev);
+        Ok(())
+    }
+
+    fn pop_app_event(&self) -> Option<ClientEvent> {
+        self.app_events.lock().unwrap().pop_front()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_app_events_for_test(&self) -> Vec<ClientEvent> {
+        self.app_events.lock().unwrap().drain(..).collect()
     }
 
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
@@ -2146,7 +2225,8 @@ impl Client {
     /// ```
     pub fn sender(&self) -> ClientSender {
         ClientSender {
-            tx: self.event_tx.clone(),
+            app_events: Arc::clone(&self.app_events),
+            app_queue_alive: Arc::clone(&self.app_queue_alive),
         }
     }
 
@@ -2163,9 +2243,10 @@ impl Client {
     /// Подписаться на orderbook рынка `market_name`.
     ///
     /// Convenience-обёртка вокруг `self.sender().subscribe_orderbook(...)`. Можно
-    /// вызывать с `&self` ссылки или прямо на Arc<Client>. Fire-and-forget — при
-    /// переполненном event channel логируется warning. Для обратной связи об
-    /// ошибке используй `client.sender().try_subscribe_orderbook(...)`.
+    /// вызывать с `&self` ссылки или прямо на Arc<Client>. Fire-and-forget:
+    /// событие кладётся в unbounded FIFO; warning возможен только если main loop
+    /// уже завершён. Для обратной связи об ошибке используй
+    /// `client.sender().try_subscribe_orderbook(...)`.
     ///
     /// Подписка запоминается в registry. До Init reconnect её не шлёт; после Init
     /// либа сама восстанавливает её при reconnect без повторного Init.
@@ -3388,91 +3469,57 @@ impl Client {
             }
 
             if self.socket.is_some() {
-                // === Главное изменение для устранения 5мс латентности ===
-                // Ждём событие до 5ms — любой пакет от reader или команда от app будят main мгновенно.
-                let first_event = self
-                    .event_rx
-                    .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS));
-
-                let mut recv_msgs: Vec<RecvMsg> = Vec::new();
                 let mut sliced = Vec::new();
                 let mut h_items = Vec::new();
                 let mut l_items = Vec::new();
+                let mut deferred_recv = Vec::new();
                 // F4: subscribe/unsubscribe/control events применяются ПОСЛЕ closure (нужен
                 // &mut self для registry mutation + send_api_request — borrow checker
                 // не пропустит внутри closure которая уже держит &mut на четыре Vec).
                 let mut control_events: Vec<QueuedControlEvent> = Vec::new();
 
-                let handle_event =
-                    |ev: ClientEvent,
-                     recv_msgs: &mut Vec<RecvMsg>,
-                     sliced: &mut Vec<SendItem>,
-                     h_items: &mut Vec<SendItem>,
-                     l_items: &mut Vec<SendItem>,
-                     control_events: &mut Vec<QueuedControlEvent>| {
-                        match ev {
-                            ClientEvent::Recv(m) => recv_msgs.push(m),
-                            ClientEvent::Send(s) => match s.item.priority {
-                                SendPriority::Sliced => {
-                                    if let Some(subscribe) =
-                                        Self::outgoing_mm_orders_subscribe_intent(&s.item)
-                                    {
-                                        control_events
-                                            .push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
-                                    }
-                                    sliced.push(s.item);
-                                }
-                                SendPriority::High => {
-                                    if let Some(subscribe) =
-                                        Self::outgoing_mm_orders_subscribe_intent(&s.item)
-                                    {
-                                        control_events
-                                            .push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
-                                    }
-                                    h_items.push(s.item);
-                                }
-                                SendPriority::Low => {
-                                    if let Some(subscribe) =
-                                        Self::outgoing_mm_orders_subscribe_intent(&s.item)
-                                    {
-                                        control_events
-                                            .push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
-                                    }
-                                    l_items.push(s.item);
-                                }
-                            },
-                            ev @ ClientEvent::SubscribeOrderBook { .. }
-                            | ev @ ClientEvent::UnsubscribeOrderBook { .. }
-                            | ev @ ClientEvent::SubscribeAllTrades { .. }
-                            | ev @ ClientEvent::UnsubscribeAllTrades => {
-                                control_events.push(QueuedControlEvent::Subscribe(ev));
-                            }
+                let mut processed_events = 0usize;
+                let mut waited_for_reader = false;
+
+                // Delphi separates app SendCmdInt queues from UDPRead. Drain app
+                // intents first so user/API sends cannot sit behind a dense recv
+                // backlog. Reader packets still have a bounded processing budget.
+                while processed_events < EVENT_DRAIN_BUDGET {
+                    let event = if let Some(ev) = self.pop_app_event() {
+                        Some(ev)
+                    } else if !waited_for_reader && processed_events == 0 {
+                        waited_for_reader = true;
+                        match self
+                            .event_rx
+                            .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
+                        {
+                            Ok(ev) => Some(ev),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match self.event_rx.try_recv() {
+                            Ok(ev) => Some(ev),
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => return,
                         }
                     };
 
-                match first_event {
-                    Ok(ev) => handle_event(
-                        ev,
-                        &mut recv_msgs,
-                        &mut sliced,
-                        &mut h_items,
-                        &mut l_items,
-                        &mut control_events,
-                    ),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-
-                // Дренируем всё что накопилось дополнительно (без блокировки).
-                while let Ok(event) = self.event_rx.try_recv() {
-                    handle_event(
-                        event,
-                        &mut recv_msgs,
-                        &mut sliced,
-                        &mut h_items,
-                        &mut l_items,
-                        &mut control_events,
-                    );
+                    if let Some(ev) = event {
+                        processed_events += 1;
+                        self.handle_main_event(
+                            ev,
+                            cur_tm,
+                            &mut mode,
+                            &mut sliced,
+                            &mut h_items,
+                            &mut l_items,
+                            &mut deferred_recv,
+                            &mut control_events,
+                        );
+                    } else {
+                        break;
+                    }
                 }
 
                 // Delphi `SendCmdInt` deduplicates the selected send queue before
@@ -3492,29 +3539,6 @@ impl Client {
                             self.apply_mm_orders_subscribe_intent(subscribe)
                         }
                     }
-                }
-
-                // Сначала обрабатываем входящие пакеты (handshake / Ping / Sliced / ACK / data).
-                // Фильтр stale epoch — пакеты от старого reader thread'а после reconnect
-                // (epoch-tag дает эквивалент Delphi `UDPClient.Active := false`).
-                let current_epoch = self.current_reader_epoch;
-                for msg in recv_msgs {
-                    if msg.epoch != current_epoch {
-                        if self.should_log("stale_reader_epoch", 5000) {
-                            warn!(target: "moonproto::client",
-                                "dropping stale packet from old reader epoch (msg.epoch={} current={})",
-                                msg.epoch, current_epoch);
-                        }
-                        continue;
-                    }
-                    self.connected = true;
-                    if self.auth_status == AuthStatus::Base {
-                        self.auth_status = AuthStatus::Connected;
-                    }
-                    self.total_recv += msg.recv_bytes;
-                    self.track_recv(msg.recv_bytes, msg.timestamp_ms);
-                    self.last_online = msg.timestamp_ms;
-                    self.process_recv_msg(msg, cur_tm, &mut mode);
                 }
 
                 // UKey dedup: delete old items with same key (Delphi: DeleteSendingByKey + DeletePendingByKey)
@@ -3543,6 +3567,10 @@ impl Client {
                 }
                 self.flush_send_batch();
                 self.retry_sliced(cur_tm);
+
+                for msg in deferred_recv {
+                    self.process_recv_event(msg, cur_tm, &mut mode);
+                }
 
                 // Cleanup periodic (sliced receiver / pending_candles).
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
@@ -3594,6 +3622,67 @@ impl Client {
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
         }
+    }
+
+    fn handle_main_event(
+        &mut self,
+        ev: ClientEvent,
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+        sliced: &mut Vec<SendItem>,
+        h_items: &mut Vec<SendItem>,
+        l_items: &mut Vec<SendItem>,
+        deferred_recv: &mut Vec<RecvMsg>,
+        control_events: &mut Vec<QueuedControlEvent>,
+    ) {
+        match ev {
+            ClientEvent::Recv(msg) if is_transport_critical_cmd(msg.cmd) => {
+                self.process_recv_event(msg, cur_tm, mode)
+            }
+            ClientEvent::Recv(msg) => deferred_recv.push(msg),
+            ClientEvent::Send(s) => {
+                if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
+                    control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
+                }
+                match s.item.priority {
+                    SendPriority::Sliced => sliced.push(s.item),
+                    SendPriority::High => h_items.push(s.item),
+                    SendPriority::Low => l_items.push(s.item),
+                }
+            }
+            ev @ ClientEvent::SubscribeOrderBook { .. }
+            | ev @ ClientEvent::UnsubscribeOrderBook { .. }
+            | ev @ ClientEvent::SubscribeAllTrades { .. }
+            | ev @ ClientEvent::UnsubscribeAllTrades => {
+                control_events.push(QueuedControlEvent::Subscribe(ev));
+            }
+        }
+    }
+
+    fn process_recv_event(&mut self, msg: RecvMsg, cur_tm: i64, mode: &mut RunMode<'_>) {
+        // Фильтр stale epoch — пакеты от старого reader thread'а после reconnect
+        // (epoch-tag дает эквивалент Delphi `UDPClient.Active := false`).
+        let current_epoch = self.current_reader_epoch;
+        if msg.epoch != current_epoch {
+            if self.should_log("stale_reader_epoch", 5000) {
+                warn!(target: "moonproto::client",
+                    "dropping stale packet from old reader epoch (msg.epoch={} current={})",
+                    msg.epoch, current_epoch);
+            }
+            return;
+        }
+
+        self.connected = true;
+        if self.auth_status == AuthStatus::Base {
+            self.auth_status = AuthStatus::Connected;
+        }
+        self.total_recv += msg.recv_bytes;
+        self.track_recv(msg.recv_bytes, msg.timestamp_ms);
+        self.last_online = msg.timestamp_ms;
+        if msg.err_emu_drop {
+            return;
+        }
+        self.process_recv_msg(msg, cur_tm, mode);
     }
 
     /// Обработать один входящий UDP-пакет: decrypt/decompress/Grouped-split через
@@ -3751,7 +3840,8 @@ impl Client {
                 // MoonProtoUDPClient.pas:534-541). Дроп ПОСЛЕ checksum+ver checks,
                 // т.е. валидный пакет просто отбрасывается. Служебные команды дропаются
                 // с rate/2 (чтобы handshake/ping не отваливались полностью).
-                if err_emu_should_drop(hdr.cmd) {
+                let err_emu_drop = err_emu_should_drop(hdr.cmd);
+                if err_emu_drop {
                     if trace_io_enabled() {
                         eprintln!(
                             "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
@@ -3773,7 +3863,6 @@ impl Client {
                             eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
                         }
                     }
-                    continue;
                 }
 
                 // B-V3-02 fix: монотонный timestamp через Instant вместо SystemTime
@@ -3782,34 +3871,16 @@ impl Client {
                 // Тот же time base что в `Client::now_ms` — diff'ы остаются корректны.
                 let timestamp_ms = start_time.elapsed().as_millis() as i64;
 
-                let msg = RecvMsg { cmd: hdr.cmd, payload, recv_bytes: n as u64, timestamp_ms, epoch: my_epoch };
-                // Data packets remain best-effort on internal backpressure, but service
-                // packets must not be artificially dropped: losing `Fine` under a startup
-                // state burst can leave the active dispatcher path unauthenticated even
-                // though the UDP exchange succeeded.
-                if is_service_cmd(hdr.cmd) {
-                    if event_tx.send(ClientEvent::Recv(msg)).is_err() {
-                        break; // main thread dropped rx → exit reader
-                    }
-                } else {
-                    match event_tx.try_send(ClientEvent::Recv(msg)) {
-                        Ok(()) => {},
-                        Err(mpsc::TrySendError::Full(_)) => {
-                            // Throttle лога: 1 на 1000мс через статический counter.
-                            use std::sync::atomic::{AtomicI64, Ordering};
-                            static LAST_LOG_MS: AtomicI64 = AtomicI64::new(0);
-                            let now = start_time.elapsed().as_millis() as i64;
-                            let last = LAST_LOG_MS.load(Ordering::Relaxed);
-                            if now.saturating_sub(last) > 1000 {
-                                LAST_LOG_MS.store(now, Ordering::Relaxed);
-                                warn!(target: "moonproto::reader",
-                                    "event channel full — data packet dropped (main loop slow / overflow)");
-                            }
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            break; // main thread dropped rx → exit reader
-                        }
-                    }
+                let msg = RecvMsg {
+                    cmd: hdr.cmd,
+                    payload,
+                    recv_bytes: n as u64,
+                    timestamp_ms,
+                    err_emu_drop,
+                    epoch: my_epoch,
+                };
+                if enqueue_recv_event(&event_tx, msg, start_time) == RecvEnqueue::Disconnected {
+                    break; // main thread dropped rx → exit reader
                 }
             }
         });
@@ -3897,34 +3968,78 @@ impl Client {
                     ack_flags.copy_from_slice(&payload[0..32]);
                     let ack_dgram = u16::from_le_bytes([payload[32], payload[33]]);
 
-                    // Сбор overhead ratios для завершённых Sliced (AvgOverHeat EMA).
-                    let mut completed_ratios: Vec<f64> = Vec::new();
+                    let now_ms = self.now_ms();
 
-                    self.sending.retain_mut(|s| {
-                        if s.datagram_num != ack_dgram {
-                            return true;
-                        }
-                        // Merge ACK flags (set union, like Delphi Flags := Flags + ACK.Flags)
+                    // Delphi `TMoonProtoClient.ApplyACK` applies the ACK to the
+                    // first matching Sending item and then breaks. This matters on
+                    // u16 datagram wrap/collision: an old ACK must not mutate every
+                    // queued datagram with the same number.
+                    let mut completed_ratio = None;
+                    let mut completed_idx = None;
+                    if let Some(idx) = self
+                        .sending
+                        .iter()
+                        .position(|s| s.datagram_num == ack_dgram)
+                    {
+                        let s = &mut self.sending[idx];
+                        // Merge ACK flags (set union, like Delphi Flags := Flags + ACK.Flags).
+                        // If no new flag appears, Delphi `ApplyACK` exits before touching
+                        // the piece list; keep the same no-op machine effect.
+                        let mut changed = false;
                         for (dst, src) in s.ack_flags.iter_mut().zip(ack_flags) {
+                            let before = *dst;
                             *dst |= src;
+                            changed |= before != *dst;
                         }
-                        // Check if all blocks ACK'd
-                        for block in 0..s.blocks_count {
-                            if s.ack_flags[block / 8] & (1 << (block % 8)) == 0 {
-                                return true; // not all ACK'd, keep
+                        if changed {
+                            // Check if all blocks ACK'd
+                            let complete = (0..s.blocks_count).all(|block| s.is_block_acked(block));
+                            if complete {
+                                // All ACK'd — записываем overhead ratio перед удалением
+                                // (matches MoonProtoIntStruct.pas:1210-1212).
+                                if s.blocks_count > 0 {
+                                    completed_ratio = Some(
+                                        (s.sent_count as f64 / s.blocks_count as f64 - 1.0) * 100.0,
+                                    );
+                                }
+                                if trace_io_enabled() {
+                                    eprintln!(
+                                        "[mp-sliced-ack] d={} acked={}/{} complete=true sent_count={}",
+                                        s.datagram_num,
+                                        s.blocks_count,
+                                        s.blocks_count,
+                                        s.sent_count
+                                    );
+                                }
+                                completed_idx = Some(idx);
+                            } else {
+                                // Delphi `TMoonProtoSlicedData.ApplyACK` frees ACKed
+                                // pieces before the next retry pass. Rust keeps the
+                                // arrays indexed by block number, so `last_checked`
+                                // must be recomputed over unACKed pieces only.
+                                s.refresh_last_checked_from_unacked(now_ms);
+                                if trace_io_enabled() {
+                                    let acked = (0..s.blocks_count)
+                                        .filter(|&block| s.is_block_acked(block))
+                                        .count();
+                                    eprintln!(
+                                        "[mp-sliced-ack] d={} acked={}/{} complete=false last_checked={}",
+                                        s.datagram_num,
+                                        acked,
+                                        s.blocks_count,
+                                        s.last_checked
+                                    );
+                                }
                             }
                         }
-                        // All ACK'd — записываем overhead ratio перед удалением
-                        // (matches MoonProtoIntStruct.pas:1210-1212).
-                        if s.blocks_count > 0 {
-                            let ratio = (s.sent_count as f64 / s.blocks_count as f64 - 1.0) * 100.0;
-                            completed_ratios.push(ratio);
-                        }
-                        false
-                    });
+                    }
+
+                    if let Some(idx) = completed_idx {
+                        self.sending.remove(idx);
+                    }
 
                     // EMA update: avg_over_heat = (avg * 9 + new) / 10 (matches pas:1212).
-                    for ratio in completed_ratios {
+                    if let Some(ratio) = completed_ratio {
                         self.avg_over_heat = if self.avg_over_heat == 0.0 {
                             ratio
                         } else {
@@ -4433,6 +4548,27 @@ impl Client {
         let datagram_num = self.send_datagram_num;
         self.send_datagram_num = self.send_datagram_num.wrapping_add(1);
 
+        if trace_io_enabled() {
+            let api = if item.cmd == Command::API as u8 && item.data.len() >= 12 {
+                let uid = u64::from_le_bytes(item.data[3..11].try_into().unwrap());
+                let method = item.data[11];
+                format!(" api_uid={uid} api_method={method}")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[mp-sliced-queue] d={} inner_cmd={:?} raw={} encrypted={} payload_len={} blocks={} max_retries={}{}",
+                datagram_num,
+                Command::from_byte(item.cmd),
+                item.cmd,
+                item.encrypted,
+                item.data.len(),
+                n_blocks,
+                item.max_retries,
+                api
+            );
+        }
+
         let mut data_pos = 0;
         let mut sent_slices = Vec::with_capacity(n_blocks);
         for block_num in 0..n_blocks {
@@ -4452,21 +4588,22 @@ impl Client {
                 data_pos += write_size;
             }
 
-            // B-V2-07 fix: сначала отправляем (borrow), потом move в sent_slices без clone.
-            self.send_raw_packet(Command::Sliced, &slice);
             sent_slices.push(slice);
         }
 
         // Store in Sending list with priority insert (matches IntStruct.pas:1112-1116)
-        let now = self.now_ms();
         let new_sliced = SentSliced {
             datagram_num,
-            piece_last_checked: vec![now; n_blocks],
+            // Delphi `TMoonProtoSlice.Create` and `TMoonProtoSlicedData.Create`
+            // initialise LastChecked to 0. `CreateSlicedObject` only enqueues the
+            // slices; actual sends happen below in `retry_sliced` / CheckSeningData
+            // under ClientLimit.
+            piece_last_checked: vec![0; n_blocks],
             slices: sent_slices,
             ack_flags: [0u8; 32],
             blocks_count: n_blocks,
-            sent_count: n_blocks,
-            last_checked: now,
+            sent_count: 0,
+            last_checked: 0,
             retry_count: 0,
             max_retry_count: item.max_retries,
             u_key: item.u_key,
@@ -4478,6 +4615,7 @@ impl Client {
             .position(|s| s.blocks_count > n_blocks)
             .unwrap_or(self.sending.len());
         self.sending.insert(insert_pos, new_sliced);
+        self.last_checked_slices = 0;
 
         // NB: Sliced retry уже работает через self.sending + retry_sliced (per-piece LastChecked,
         // ClientLimit, FRetryCount → MaxRetryCount). Не добавляем в pending_h — это двойной retry.
@@ -4657,12 +4795,24 @@ impl Client {
         if self.sending.is_empty() {
             return;
         }
-        if self.round_trip_delay < 1 {
+
+        // Outer gate: only check if enough time passed (matches Common.pas:970).
+        if (cur_tm - self.last_checked_slices).abs() <= self.round_trip_delay {
             return;
         }
 
-        // Outer gate: only check if enough time passed (matches :970)
-        // Note: Delphi uses per-client LastCheckedSlices, we use the min of all sliced.last_checked
+        // TripDelayK adaptation every 2s (matches :975-979). Delphi does this
+        // before PathDelay is computed, so the same tick uses the new K.
+        if (cur_tm - self.last_set_trip_k).abs() > 2000 {
+            self.last_set_trip_k = cur_tm;
+            if self.avg_dup_count > 5.0 {
+                self.trip_delay_k = (self.trip_delay_k + 0.05).min(1.25);
+            }
+            if self.avg_dup_count == 0.0 {
+                self.trip_delay_k = (self.trip_delay_k - 0.01).max(1.05);
+            }
+        }
+
         let path_delay = (self.round_trip_delay as f64 * self.trip_delay_k + 10.0).round() as i64;
         let cycle_time_ms = 5.0f64.max(self.actual_sleep_time).min(15.0);
         // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
@@ -4670,6 +4820,7 @@ impl Client {
         // so keep rounding instead of truncating on the hot retry boundary.
         let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
         let mut bytes_sent_at_once: usize = 0;
+        self.last_checked_slices = cur_tm;
 
         // Аудит #2 (audit_delphi_deviation): индексы вместо clone. Раньше каждый
         // ретранслируемый блок копировался в `to_send: Vec<Vec<u8>>` — 200 alloc/sec
@@ -4689,9 +4840,7 @@ impl Client {
             sliced.last_checked = cur_tm;
 
             for (block_num, slice_data) in sliced.slices.iter().enumerate() {
-                let byte_idx = block_num / 8;
-                let bit_idx = block_num % 8;
-                if sliced.ack_flags[byte_idx] & (1 << bit_idx) != 0 {
+                if sliced.is_block_acked(block_num) {
                     continue;
                 } // ACK'd
 
@@ -4706,38 +4855,36 @@ impl Client {
                     break;
                 }
 
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-sliced-tx] d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={}",
+                        sliced.datagram_num,
+                        block_num,
+                        sliced.blocks_count.saturating_sub(1),
+                        sliced.retry_count,
+                        sliced.sent_count,
+                        bytes_sent_at_once,
+                        client_limit
+                    );
+                }
                 to_send_indices.push((idx, block_num));
                 sliced.piece_last_checked[block_num] = cur_tm;
                 sliced.sent_count += 1;
                 bytes_sent_at_once += slice_data.len();
             }
 
-            // Sliced.LastChecked = Min(all piece_last_checked) (matches :996)
-            sliced.last_checked = sliced
-                .piece_last_checked
-                .iter()
-                .copied()
-                .min()
-                .unwrap_or(cur_tm);
+            // Sliced.LastChecked = Min(remaining Piece.LastChecked) (matches :996
+            // after Delphi `ApplyACK` removed ACKed pieces from the list).
+            sliced.refresh_last_checked_from_unacked(cur_tm);
 
             // Conditional increment (matches :998-999)
             if prev_last_checked != sliced.last_checked {
                 sliced.retry_count += 1;
             }
+            self.last_checked_slices = self.last_checked_slices.min(sliced.last_checked);
 
             if sliced.retry_count > sliced.max_retry_count {
                 to_remove.push(idx);
-            }
-        }
-
-        // TripDelayK adaptation every 2s (matches :975-979)
-        if (cur_tm - self.last_set_trip_k).abs() > 2000 {
-            self.last_set_trip_k = cur_tm;
-            if self.avg_dup_count > 5.0 {
-                self.trip_delay_k = (self.trip_delay_k + 0.05).min(1.25);
-            }
-            if self.avg_dup_count == 0.0 {
-                self.trip_delay_k = (self.trip_delay_k - 0.01).max(1.05);
             }
         }
 
@@ -5944,6 +6091,7 @@ fn send_post_init_resync(
 /// это был последний клиент, общий NTP worker остановится.
 impl Drop for Client {
     fn drop(&mut self) {
+        self.app_queue_alive.store(false, Ordering::Relaxed);
         self.reader_shutdown.store(true, Ordering::Relaxed);
     }
 }
@@ -6096,7 +6244,7 @@ mod api_pending_dispatch_tests {
 
     fn drain_base_check_sends(client: &mut Client) -> usize {
         let mut count = 0;
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             let ClientEvent::Send(msg) = ev else {
                 continue;
             };
@@ -6251,10 +6399,7 @@ mod api_pending_dispatch_tests {
             rx.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
-        assert!(matches!(
-            client.event_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
+        assert!(client.drain_app_events_for_test().is_empty());
     }
 
     #[test]
@@ -6302,6 +6447,7 @@ mod api_pending_dispatch_tests {
                 payload,
                 recv_bytes: 64,
                 timestamp_ms: client.now_ms(),
+                err_emu_drop: false,
                 epoch: client.current_reader_epoch,
             }))
             .unwrap();
@@ -6354,7 +6500,7 @@ mod api_pending_dispatch_tests {
         let mut seen_mm_orders_true = false;
         let mut seen_balance_refresh = false;
 
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             let ClientEvent::Send(msg) = ev else {
                 continue;
             };
@@ -6398,7 +6544,7 @@ mod api_pending_dispatch_tests {
     }
 
     #[test]
-    fn post_init_resync_without_strategy_provider_queues_manual_request() {
+    fn post_init_resync_without_strategy_provider_sends_empty_strategy_snapshot() {
         let mut client = Client::new(dummy_cfg());
         let mut dispatcher = EventDispatcher::new();
         let cfg = InitConfig::default();
@@ -6407,13 +6553,29 @@ mod api_pending_dispatch_tests {
         send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
 
         assert!(result.post_init_resync_sent);
-        assert!(!result.strategy_snapshot_sent);
+        assert!(result.strategy_snapshot_sent);
+
+        let mut seen_strat_snapshot = false;
+        for ev in client.drain_app_events_for_test() {
+            let ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            if Command::from_byte(msg.item.cmd) == Command::Strat
+                && msg.item.data.first().copied() == Some(2)
+            {
+                seen_strat_snapshot = true;
+            }
+        }
+        assert!(
+            seen_strat_snapshot,
+            "without provider, init must still send an empty strategy snapshot"
+        );
         assert!(
             dispatcher.queued_events().iter().any(|event| matches!(
                 event,
                 crate::events::Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
             )),
-            "without provider, init must surface a manual fresh strategy snapshot request"
+            "init still surfaces SnapshotRequested for app/UI awareness"
         );
     }
 }
@@ -6422,16 +6584,35 @@ mod api_pending_dispatch_tests {
 mod client_sender_tests {
     use super::*;
 
-    fn make_sender(capacity: usize) -> (ClientSender, mpsc::Receiver<ClientEvent>) {
-        let (tx, rx) = mpsc::sync_channel::<ClientEvent>(capacity);
-        (ClientSender { tx }, rx)
+    fn make_sender() -> (
+        ClientSender,
+        Arc<Mutex<VecDeque<ClientEvent>>>,
+        Arc<AtomicBool>,
+    ) {
+        let app_events = Arc::new(Mutex::new(VecDeque::new()));
+        let app_queue_alive = Arc::new(AtomicBool::new(true));
+        (
+            ClientSender {
+                app_events: Arc::clone(&app_events),
+                app_queue_alive: Arc::clone(&app_queue_alive),
+            },
+            app_events,
+            app_queue_alive,
+        )
+    }
+
+    fn pop_event(q: &Arc<Mutex<VecDeque<ClientEvent>>>) -> ClientEvent {
+        q.lock()
+            .unwrap()
+            .pop_front()
+            .expect("event should be queued")
     }
 
     #[test]
     fn subscribe_orderbook_pushes_event_with_correct_fields() {
-        let (sender, rx) = make_sender(8);
+        let (sender, q, _) = make_sender();
         sender.subscribe_orderbook("BTCUSDT");
-        match rx.try_recv().expect("event should be queued") {
+        match pop_event(&q) {
             ClientEvent::SubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "BTCUSDT");
             }
@@ -6444,9 +6625,9 @@ mod client_sender_tests {
 
     #[test]
     fn unsubscribe_orderbook_pushes_event() {
-        let (sender, rx) = make_sender(8);
+        let (sender, q, _) = make_sender();
         sender.unsubscribe_orderbook("ETHUSDT");
-        match rx.try_recv().unwrap() {
+        match pop_event(&q) {
             ClientEvent::UnsubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "ETHUSDT");
             }
@@ -6456,14 +6637,14 @@ mod client_sender_tests {
 
     #[test]
     fn subscribe_all_trades_carries_want_mm_flag() {
-        let (sender, rx) = make_sender(8);
+        let (sender, q, _) = make_sender();
         sender.subscribe_all_trades(true);
         sender.subscribe_all_trades(false);
-        match rx.try_recv().unwrap() {
+        match pop_event(&q) {
             ClientEvent::SubscribeAllTrades { want_mm } => assert!(want_mm),
             _ => panic!("expected SubscribeAllTrades(true)"),
         }
-        match rx.try_recv().unwrap() {
+        match pop_event(&q) {
             ClientEvent::SubscribeAllTrades { want_mm } => assert!(!want_mm),
             _ => panic!("expected SubscribeAllTrades(false)"),
         }
@@ -6471,35 +6652,33 @@ mod client_sender_tests {
 
     #[test]
     fn unsubscribe_all_trades_pushes_event() {
-        let (sender, rx) = make_sender(8);
+        let (sender, q, _) = make_sender();
         sender.unsubscribe_all_trades();
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ClientEvent::UnsubscribeAllTrades
-        ));
+        assert!(matches!(pop_event(&q), ClientEvent::UnsubscribeAllTrades));
     }
 
     #[test]
-    fn try_subscribe_returns_ok_when_channel_has_room() {
-        let (sender, _rx) = make_sender(2);
+    fn try_subscribe_returns_ok() {
+        let (sender, _, _) = make_sender();
         assert!(sender.try_subscribe_orderbook("BTC").is_ok());
         assert!(sender.try_subscribe_all_trades(true).is_ok());
     }
 
     #[test]
-    fn try_subscribe_returns_channel_full_on_overflow() {
-        // capacity=1 → второй try_send блокирующее не работает; должен вернуть Full.
-        let (sender, _rx) = make_sender(1);
-        assert!(sender.try_subscribe_orderbook("BTC").is_ok());
-        // Канал заполнен (rx не читали), следующий должен дать ChannelFull.
-        let err = sender.try_subscribe_orderbook("ETH").unwrap_err();
-        assert_eq!(err, SubscribeError::ChannelFull);
+    fn try_subscribe_has_no_capacity_cap() {
+        let (sender, _, _) = make_sender();
+        for i in 0..4096 {
+            assert!(
+                sender.try_subscribe_orderbook(&format!("M{i}")).is_ok(),
+                "unbounded event queue must not fail on local capacity"
+            );
+        }
     }
 
     #[test]
     fn try_subscribe_returns_disconnected_when_receiver_dropped() {
-        let (sender, rx) = make_sender(8);
-        drop(rx);
+        let (sender, _, alive) = make_sender();
+        alive.store(false, Ordering::Relaxed);
         let err = sender.try_unsubscribe_all_trades().unwrap_err();
         assert_eq!(err, SubscribeError::Disconnected);
     }
@@ -6508,11 +6687,11 @@ mod client_sender_tests {
     fn cloned_sender_pushes_into_same_channel() {
         // Это база для thread-safe API: получили sender, клонировали, оба пушат в
         // один и тот же channel который слушает main loop.
-        let (sender_a, rx) = make_sender(8);
+        let (sender_a, q, _) = make_sender();
         let sender_b = sender_a.clone();
         sender_a.subscribe_orderbook("A");
         sender_b.subscribe_orderbook("B");
-        let evs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let evs: Vec<_> = q.lock().unwrap().drain(..).collect();
         assert_eq!(evs.len(), 2);
         // FIFO: первое событие — от sender_a.
         match &evs[0] {
@@ -6530,7 +6709,7 @@ mod client_sender_tests {
         // Просто проверка что Display impl работает (полезно для логирования).
         assert_eq!(
             format!("{}", SubscribeError::ChannelFull),
-            "Client event channel is full"
+            "Client event channel has no capacity cap"
         );
         assert_eq!(
             format!("{}", SubscribeError::Disconnected),
@@ -6603,11 +6782,14 @@ mod client_subscribe_integration_tests {
     #[test]
     fn client_subscribe_orderbook_pushes_event_through_sender() {
         // Convenience-метод `Client::subscribe_orderbook(&self, ...)` должен пушить
-        // событие в тот же event channel который main loop слушает. До запуска
-        // run_with_dispatcher event лежит в channel и виден через event_rx.
+        // событие в app→main queue. До запуска run_with_dispatcher event лежит
+        // в очереди и будет обработан первым сетевым тиком.
         let client = Client::new(dummy_cfg());
         client.subscribe_orderbook("BTCUSDT");
-        let ev = client.event_rx.try_recv().expect("event should be queued");
+        let ev = client
+            .drain_app_events_for_test()
+            .pop()
+            .expect("event should be queued");
         match ev {
             ClientEvent::SubscribeOrderBook { market_name } => {
                 assert_eq!(market_name, "BTCUSDT");
@@ -6619,12 +6801,14 @@ mod client_subscribe_integration_tests {
     #[test]
     fn client_sender_can_be_held_independently_of_client() {
         // Sender держит clone; даже если client держится по `&` ссылке — sender
-        // независим (Send + Sync через mpsc::SyncSender Clone). Это база для
-        // multi-thread субскрайба.
+        // независим. Это база для multi-thread субскрайба.
         let client = Client::new(dummy_cfg());
         let sender = client.sender();
         sender.subscribe_all_trades(true);
-        let ev = client.event_rx.try_recv().expect("event queued via sender");
+        let ev = client
+            .drain_app_events_for_test()
+            .pop()
+            .expect("event queued via sender");
         assert!(matches!(
             ev,
             ClientEvent::SubscribeAllTrades { want_mm: true }
@@ -6642,8 +6826,8 @@ mod client_subscribe_integration_tests {
         client.cancel_tracked_order(&order);
 
         let ev = client
-            .event_rx
-            .try_recv()
+            .drain_app_events_for_test()
+            .pop()
             .expect("send event should be queued");
         let ClientEvent::Send(msg) = ev else {
             panic!("expected Send event");
@@ -6671,8 +6855,8 @@ mod client_subscribe_integration_tests {
         let client = Client::new(dummy_cfg());
         client.ui_mm_subscribe(true);
         let ev = client
-            .event_rx
-            .try_recv()
+            .drain_app_events_for_test()
+            .pop()
             .expect("event queued via ui wrapper");
         let ClientEvent::Send(msg) = ev else {
             panic!("expected Send event");
@@ -6756,7 +6940,7 @@ mod client_subscribe_integration_tests {
     fn apply_mm_orders_subscribe_updates_registry_and_active_trades_flag() {
         let mut client = Client::new(dummy_cfg());
         client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
-        let _ = client.event_rx.try_recv(); // drain SubscribeAllTrades send event
+        let _ = client.drain_app_events_for_test(); // drain SubscribeAllTrades send event
 
         client.apply_mm_orders_subscribe_intent(true);
 
@@ -6845,6 +7029,32 @@ mod pmtu_tests {
 
         client.create_sliced_and_send(&item);
         assert!(client.sending.is_empty());
+    }
+
+    #[test]
+    fn create_sliced_object_queues_without_immediate_send_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        let item = SendItem {
+            data: vec![0x11, 0x22, 0x33],
+            cmd: Command::UI as u8,
+            encrypted: false,
+            priority: SendPriority::Sliced,
+            retry_left: 0,
+            max_retries: 5,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+
+        client.create_sliced_and_send(&item);
+
+        assert_eq!(client.sending.len(), 1);
+        assert_eq!(client.sending[0].sent_count, 0);
+        assert_eq!(client.sending[0].last_checked, 0);
+        assert!(client.sending[0]
+            .piece_last_checked
+            .iter()
+            .all(|&last_checked| last_checked == 0));
     }
 
     #[test]
@@ -6953,6 +7163,126 @@ mod pmtu_tests {
 
         assert!(!client.used_sliced_limit);
     }
+
+    #[test]
+    fn sliced_retry_uses_delphi_last_checked_slices_outer_gate() {
+        let mut client = Client::new(dummy_cfg());
+        client.round_trip_delay = 100;
+        client.trip_delay_k = 1.1; // PathDelay = round(100 * 1.1 + 10) = 120
+        client.actual_sleep_time = 5.0;
+        client.can_send_rate = 1_000_000;
+        client.last_checked_slices = 1000;
+        client.sending.push(sent_sliced_with_lengths(&[10], 1000));
+
+        client.retry_sliced(1105);
+        assert_eq!(
+            client.sending[0].sent_count, 1,
+            "Delphi outer gate may run before PathDelay and sends nothing"
+        );
+        assert_eq!(
+            client.last_checked_slices, 1105,
+            "Delphi still writes LastCheckedSlices := CurTm on that empty pass"
+        );
+
+        client.retry_sliced(1126);
+        assert_eq!(
+            client.sending[0].sent_count, 1,
+            "after the empty pass Delphi waits another RoundTripDelay before retry"
+        );
+
+        client.retry_sliced(1206);
+        assert_eq!(client.sending[0].sent_count, 2);
+    }
+
+    #[test]
+    fn sliced_retry_updates_trip_delay_k_before_path_delay_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        client.round_trip_delay = 1000;
+        client.trip_delay_k = 1.1;
+        client.avg_dup_count = 10.0;
+        client.last_set_trip_k = 0;
+        client.last_checked_slices = 0;
+        client.actual_sleep_time = 5.0;
+        client.can_send_rate = 1_000_000;
+        client.sending.push(sent_sliced_with_lengths(&[10], 1360));
+
+        client.retry_sliced(2500);
+
+        assert!((client.trip_delay_k - 1.15).abs() < 1e-12);
+        assert_eq!(
+            client.sending[0].sent_count, 1,
+            "Delphi raises TripDelayK before PathDelay; this tick is not due yet with the new K"
+        );
+    }
+
+    #[test]
+    fn sliced_retry_clock_ignores_acked_blocks_like_delphi_apply_ack_removes_them() {
+        let mut client = Client::new(dummy_cfg());
+        client.round_trip_delay = 100;
+        client.trip_delay_k = 1.1;
+        client.actual_sleep_time = 5.0;
+        client.can_send_rate = 1_000_000;
+        client
+            .sending
+            .push(sent_sliced_with_lengths(&[10, 10, 10], 100));
+
+        let mut ack = [0u8; 34];
+        ack[0] = 0b0000_0011; // blocks 0 and 1 ACKed; block 2 still pending.
+        ack[32..34].copy_from_slice(&1u16.to_le_bytes());
+        let mut delivered = Vec::new();
+        let mut sink = DispatchSink::Buffer(&mut delivered);
+        client.handle_udp_command(
+            Command::SlicedACK,
+            Command::SlicedACK as u8,
+            &ack,
+            &mut sink,
+        );
+
+        client.retry_sliced(300);
+        assert_eq!(client.sending[0].sent_count, 4);
+        assert_eq!(client.sending[0].piece_last_checked[2], 300);
+        assert_eq!(client.sending[0].last_checked, 300);
+
+        client.retry_sliced(500);
+        assert_eq!(
+            client.sending[0].sent_count, 5,
+            "unACKed block must be retried again; ACKed old blocks must not pin LastChecked"
+        );
+        assert_eq!(client.sending[0].piece_last_checked[2], 500);
+        assert_eq!(client.sending[0].last_checked, 500);
+    }
+
+    #[test]
+    fn sliced_ack_applies_only_first_matching_datagram_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+
+        let mut first = sent_sliced_with_lengths(&[10], 100);
+        first.datagram_num = 7;
+        let mut second = sent_sliced_with_lengths(&[10, 10], 100);
+        second.datagram_num = 7;
+        client.sending.push(first);
+        client.sending.push(second);
+
+        let mut ack = [0u8; 34];
+        ack[0] = 0b0000_0001; // complete for first datagram, partial for second if wrongly applied.
+        ack[32..34].copy_from_slice(&7u16.to_le_bytes());
+        let mut delivered = Vec::new();
+        let mut sink = DispatchSink::Buffer(&mut delivered);
+
+        client.handle_udp_command(
+            Command::SlicedACK,
+            Command::SlicedACK as u8,
+            &ack,
+            &mut sink,
+        );
+
+        assert_eq!(client.sending.len(), 1);
+        assert_eq!(client.sending[0].blocks_count, 2);
+        assert_eq!(
+            client.sending[0].ack_flags[0], 0,
+            "Delphi breaks after the first matching Sending item; a wrapped DatagramNum ACK must not mutate the next item"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6982,7 +7312,10 @@ mod api_retry_tests {
 
         client.send_api_request(&raw);
 
-        let ev = client.event_rx.try_recv().expect("send event queued");
+        let ev = client
+            .drain_app_events_for_test()
+            .pop()
+            .expect("send event queued");
         let ClientEvent::Send(msg) = ev else {
             panic!("expected send event");
         };
@@ -7266,10 +7599,7 @@ mod active_library_helpers_tests {
             client.indexes_fetch_started_ms, 0,
             "no re-send means started timestamp is unchanged"
         );
-        assert!(
-            client.event_rx.try_recv().is_err(),
-            "timeout cleanup must not enqueue GetMarketsIndexes without init intent"
-        );
+        assert!(client.drain_app_events_for_test().is_empty());
     }
 
     #[test]
@@ -7287,8 +7617,8 @@ mod active_library_helpers_tests {
         assert!(client.indexes_fetch_in_flight);
         assert_eq!(client.indexes_fetch_started_ms, 13_000);
         let ev = client
-            .event_rx
-            .try_recv()
+            .drain_app_events_for_test()
+            .pop()
             .expect("post-init timeout must retry GetMarketsIndexes");
         let ClientEvent::Send(msg) = ev else {
             panic!("expected Send event");
@@ -7356,7 +7686,7 @@ mod registry_subscription_restore_tests {
     /// Дренирует event channel клиента, собирая wire-payload'ы отправленных API-запросов.
     fn drain_api_requests(client: &Client) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             if let ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::API as u8 {
                     out.push(msg.item.data);
@@ -7368,7 +7698,7 @@ mod registry_subscription_restore_tests {
 
     fn drain_send_items(client: &Client) -> Vec<SendItem> {
         let mut out = Vec::new();
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             if let ClientEvent::Send(msg) = ev {
                 out.push(msg.item);
             }
@@ -7525,7 +7855,7 @@ mod refresh_tick_tests {
 
     fn drain_api_methods(client: &Client) -> Vec<u8> {
         let mut out = Vec::new();
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             if let ClientEvent::Send(msg) = ev {
                 if msg.item.cmd == Command::API as u8 && msg.item.data.len() >= 12 {
                     out.push(msg.item.data[11]);
@@ -7930,8 +8260,147 @@ mod subscription_registry_tests {
 }
 
 #[cfg(test)]
+mod event_loop_fairness_tests {
+    use super::*;
+    use crate::events::EventDispatcher;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig {
+                update_markets_every: None,
+                check_tags_every: None,
+            },
+        }
+    }
+
+    fn stale_recv_event() -> ClientEvent {
+        ClientEvent::Recv(RecvMsg {
+            cmd: Command::OrderBook as u8,
+            payload: Vec::new(),
+            recv_bytes: 0,
+            timestamp_ms: 0,
+            err_emu_drop: false,
+            epoch: u32::MAX,
+        })
+    }
+
+    #[test]
+    fn send_phase_runs_with_recv_backlog() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+
+        for _ in 0..(EVENT_DRAIN_BUDGET / 2) {
+            client.event_tx.send(stale_recv_event()).unwrap();
+        }
+        client
+            .event_tx
+            .send(ClientEvent::Send(SendMsg {
+                item: SendItem {
+                    data: vec![1, 2, 3, 4],
+                    cmd: Command::UI as u8,
+                    priority: SendPriority::Sliced,
+                    encrypted: false,
+                    retry_left: 0,
+                    max_retries: 0,
+                    msg_num: 0,
+                    last_sent_at: 0,
+                    u_key: UniqueKey::none(),
+                },
+            }))
+            .unwrap();
+        for _ in 0..EVENT_DRAIN_BUDGET {
+            client.event_tx.send(stale_recv_event()).unwrap();
+        }
+
+        client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
+
+        assert!(
+            !client.sending.is_empty(),
+            "send phase must run even when recv backlog remains possible"
+        );
+    }
+
+    #[test]
+    fn app_send_queue_is_not_blocked_by_reader_backlog() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+
+        for _ in 0..(EVENT_DRAIN_BUDGET * 2) {
+            client.event_tx.send(stale_recv_event()).unwrap();
+        }
+        client.send_cmd(
+            vec![1, 2, 3, 4],
+            Command::UI,
+            SendPriority::Sliced,
+            false,
+            0,
+        );
+
+        client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
+
+        assert!(
+            !client.sending.is_empty(),
+            "app/user sends must use the separate outgoing queue, not wait behind reader backlog"
+        );
+    }
+
+    #[test]
+    fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
+        let mut client = Client::new(dummy_cfg());
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delivered_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |_, _| {
+                delivered_cb.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        client.process_recv_event(
+            RecvMsg {
+                cmd: Command::OrderBook as u8,
+                payload: vec![1, 2, 3],
+                recv_bytes: 1234,
+                timestamp_ms: 777,
+                err_emu_drop: true,
+                epoch: client.current_reader_epoch,
+            },
+            777,
+            &mut mode,
+        );
+
+        assert!(client.connected);
+        assert_eq!(client.auth_status, AuthStatus::Connected);
+        assert_eq!(client.total_recv, 1234);
+        assert_eq!(client.last_online, 777);
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            0,
+            "ErrEmu drop must happen after Delphi stats side effects but before protocol delivery"
+        );
+    }
+}
+
+#[cfg(test)]
 mod service_cmd_tests {
     use super::*;
+
+    fn test_recv_msg(cmd: Command) -> RecvMsg {
+        RecvMsg {
+            cmd: cmd as u8,
+            payload: Vec::new(),
+            recv_bytes: 0,
+            timestamp_ms: 0,
+            err_emu_drop: false,
+            epoch: 0,
+        }
+    }
 
     #[test]
     fn service_cmds_include_handshake_and_keepalive() {
@@ -7963,6 +8432,46 @@ mod service_cmd_tests {
         ] {
             assert!(!is_service_cmd(cmd as u8), "{cmd:?} must stay data");
         }
+    }
+
+    #[test]
+    fn sliced_is_transport_critical_but_not_err_emu_service() {
+        assert!(
+            !is_service_cmd(Command::Sliced as u8),
+            "ErrEmu must drop MPC_Sliced with the full configured rate like Delphi"
+        );
+        assert!(
+            is_transport_critical_cmd(Command::Sliced as u8),
+            "accepted MPC_Sliced blocks must not be dropped by the internal Rust queue"
+        );
+    }
+
+    #[test]
+    fn recv_event_queue_has_no_capacity_cap_for_data_packets() {
+        let (tx, rx) = mpsc::channel();
+
+        for _ in 0..4096 {
+            let result = enqueue_recv_event(&tx, test_recv_msg(Command::OrderBook), Instant::now());
+            assert_eq!(result, RecvEnqueue::Delivered);
+        }
+
+        assert_eq!(rx.try_iter().count(), 4096);
+    }
+
+    #[test]
+    fn recv_event_queue_has_no_capacity_cap_for_accepted_sliced_packets() {
+        let (tx, rx) = mpsc::channel();
+
+        for _ in 0..4096 {
+            let result = enqueue_recv_event(&tx, test_recv_msg(Command::Sliced), Instant::now());
+            assert_eq!(result, RecvEnqueue::Delivered);
+        }
+
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ClientEvent::Recv(msg) => assert_eq!(msg.cmd, Command::Sliced as u8),
+            _ => panic!("expected Sliced Recv event"),
+        }
+        assert_eq!(rx.try_iter().count(), 4095);
     }
 
     #[test]
@@ -8059,7 +8568,7 @@ mod reconnect_timing_tests {
 
     fn drain_send_items(client: &Client) -> Vec<SendItem> {
         let mut out = Vec::new();
-        while let Ok(ev) = client.event_rx.try_recv() {
+        for ev in client.drain_app_events_for_test() {
             let ClientEvent::Send(msg) = ev else {
                 continue;
             };
@@ -8182,7 +8691,7 @@ mod reconnect_timing_tests {
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
         assert!(
-            client.event_rx.try_recv().is_err(),
+            client.drain_app_events_for_test().is_empty(),
             "first Fine must not restore; restore starts only after a completed Init session",
         );
     }

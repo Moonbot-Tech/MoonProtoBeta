@@ -4,22 +4,34 @@ The strategy channel carries full strategy snapshots and compact updates:
 delete, sell-price update, checked-state sync, and snapshot requests.
 
 `EventDispatcher` maintains `StratsState` and emits `Event::Strat`. Snapshot
-payloads are decoded automatically into the lightweight `StrategyInfo` state; the
-raw snapshot remains in the event for applications that need full field maps.
+payloads are decoded automatically into both the lightweight `StrategyInfo`
+state and the full `StrategySnapshot` map.
+
+Before init, user code may give the library its current local strategies with
+`EventDispatcher::set_local_strategies`. The dispatcher owns that list after
+that point: it answers server `TStratSnapshotRequest` automatically and applies
+strategy snapshots/deletes/checked updates received from the server. If user
+code does not provide local strategies, the list starts empty and is filled only
+by server snapshots; the current server snapshot is still available through the
+same read API.
 
 ## Reading Strategy State
 
 ```rust
 use moonproto::Event;
 use moonproto::state::StratEvent;
-use moonproto::commands::strategy_serializer::parse_strategy_batch;
+use moonproto::commands::strategy_serializer::FieldValue;
 
 client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
     if let Event::Strat(strat_event) = event {
         match strat_event {
-            StratEvent::SnapshotFull { raw_data, .. } => {
-                let batch = parse_strategy_batch(raw_data).expect("bad strategy snapshot");
-                println!("strategies={}", batch.strategies.len());
+            StratEvent::SnapshotFull { .. } => {
+                println!("strategies={}", state.strategy_snapshot_vec().len());
+                for strategy in state.strategy_snapshots() {
+                    if let Some(FieldValue::String(name)) = strategy.fields.get("StrategyName") {
+                        println!("{}: {}", strategy.strategy_id, name);
+                    }
+                }
             }
             StratEvent::SellPriceUpdated { strategy_id, sell_price } => {
                 let info = state.strats().get(*strategy_id).expect("strategy state");
@@ -30,8 +42,8 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
                 println!("checked changed={changed} delta={is_delta}");
             }
             StratEvent::SnapshotRequested { .. } => {
-                // Reply with current application-owned strategies, or register
-                // a snapshot provider on the dispatcher to do this automatically.
+                // Already answered by the dispatcher from its owned strategy list.
+                // The event is emitted for UI/diagnostic awareness.
             }
             _ => {}
         }
@@ -39,8 +51,9 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 }));
 ```
 
-If you only need the full field map, parse `raw_data` through
-`commands::strategy_serializer::parse_strategy_batch`.
+`raw_data` is still present in snapshot events for diagnostics and custom
+decoders, but normal applications should read `state.strategy_snapshot(...)` or
+`state.strategy_snapshots()`.
 
 ## State
 
@@ -56,7 +69,20 @@ pub struct StrategyInfo {
 ```
 
 `StrategyInfo` is a lightweight UI/index state. Full `TStrategy` fields are not
-stored there; they are available in the decoded `StrategyBatch`.
+stored there; they are stored as `StrategySnapshot` values owned by the
+dispatcher.
+
+```rust
+use moonproto::commands::strategy_serializer::StrategySnapshot;
+
+// Before connect_and_init:
+let strategies: Vec<StrategySnapshot> = load_current_strategies();
+dispatcher.set_local_strategies(&strategies);
+
+// Later, read the current active-library view:
+let all: Vec<StrategySnapshot> = dispatcher.strategy_snapshot_vec();
+let one = dispatcher.strategy_snapshot(strategy_id);
+```
 
 ## Snapshot Decoder
 
@@ -98,21 +124,30 @@ client.strat_checked_sync(&items, true);
 client.strat_checked_echo(&items);
 ```
 
-To answer a snapshot request with application-owned strategy data, use the typed
-batch API. It serializes the `StrategySnapshot` values, computes
-`ClientMaxLastDate`, and sends the full CmdId=2 `TStratSnapshot` wire body:
+For normal active-library flow, set the local list before init and let the
+dispatcher answer server snapshot requests:
 
 ```rust
 use moonproto::commands::strategy_serializer::StrategySnapshot;
 
 let strategies: Vec<StrategySnapshot> = load_current_strategies();
+dispatcher.set_local_strategies(&strategies);
+connect_and_init(&mut client, &mut dispatcher, connect_cfg)?;
+```
+
+The lower-level typed batch API remains available for explicit strategy sends.
+It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
+sends the full CmdId=2 `TStratSnapshot` wire body:
+
+```rust
 client.strat_send_snapshot_batch(server_epoch, true, &strategies);
 ```
 
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
 
-For automatic replies, register a fresh snapshot provider on the dispatcher:
+For advanced override replies, register a fresh snapshot provider on the
+dispatcher:
 
 ```rust
 use moonproto::StrategySnapshotReply;
@@ -126,5 +161,5 @@ dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
 ```
 
 The provider must return current application-owned strategies. The dispatcher
-does not echo the last server snapshot, because Delphi rebuilds the answer from
-the live `Strats` object on every request.
+falls back to its owned strategy list when the provider is absent or returns
+`None`.
