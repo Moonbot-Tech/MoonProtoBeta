@@ -24,6 +24,7 @@
 | 15a | 347-351 | DoSendPacket: `Package Size Too Big` не рвёт соединение | client.rs send_raw_packet ignores datagram-too-large errors | ✅ |
 | 16 | 594-617 | MPC_ProbeMTU → ProbeMTUAck (DontFragment!), `ReceivedSize := TestSize` без upper clamp | client.rs: handle_probe_mtu echoes `test_size` verbatim for valid record size | ✅ |
 | 17 | 620-625 | MPC_Sliced → OnNewSliced | client.rs handle Sliced | ✅ |
+| 17a | MoonProtoIntStruct.pas: `OnNewSliced` / `TMoonProtoSlicedData.Create` | `MaxBlockNum` — полный byte range, до 256 блоков; дополнительного входящего cap нет | protocol/slicing.rs: `SlicingReceiver::on_new_sliced` принимает `max_block_num=255` | ✅ |
 | 18 | 627-629 | MPC_SlicedACK → OnNewSlicedACK | client.rs: match arm (no-op, client doesn't send Sliced yet) | ✅ |
 | 19 | 632-661 | MPC_Ping → update RTT/PMTU/OverHeat/RS + rate control | client.rs: handle_ping reads fields; `actual_pmtu = pmtu_raw` без clamp | ✅ |
 | 20 | 663 | DataRead(cmd, data, client) | client.rs → on_data callback | ✅ |

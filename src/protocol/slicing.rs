@@ -154,18 +154,6 @@ const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
 /// отправляет пакеты с distinct datagram_num чтобы наполнить HashMap.
 const MAX_RECEIVING_DATAGRAMS: usize = 256;
 
-/// DoS guard: верхний потолок `max_block_num` принимаемого Sliced пакета.
-///
-/// Реалистичный MoonProto-payload: даже большой StratSnapshot укладывается в
-/// несколько десятков блоков (PMTU ~1400 байт × 64 блока = 90KB). Adversary
-/// мог бы заслать `max_block_num=255` (256 блоков) и шлёт по 1 блоку в каждый
-/// uniqued datagram_num — heap-spike `256 × (6KB metadata + N × 8KB filled
-/// payload)` × `MAX_RECEIVING_DATAGRAMS=256` атак-вектор амплификации.
-///
-/// 128 — щедрый потолок (~180KB при PMTU=1400) превышающий любой legitimate
-/// MoonProto-payload. См. `audit_robustness` C-4.
-const MAX_BLOCK_NUM_INCOMING: u8 = 128;
-
 impl SlicingReceiver {
     pub fn new() -> Self {
         Self {
@@ -200,17 +188,10 @@ impl SlicingReceiver {
             None => return (None, [0u8; ACK256_WIRE_SIZE]),
         };
 
-        // DoS guard (audit_robustness C-4): отвергаем Sliced пакеты с явно
-        // неreasonable `max_block_num`. Legitimate MoonProto-payload не достигает
-        // 128 блоков (см. const MAX_BLOCK_NUM_INCOMING). Adversary с 255 →
-        // heap amplification ×256 datagrams = >500MB. Reject + warn.
-        if hdr.max_block_num > MAX_BLOCK_NUM_INCOMING {
-            log::warn!(target: "moonproto::slicing",
-                "Sliced dgram={} max_block_num={} exceeds MAX_BLOCK_NUM_INCOMING={} — rejecting",
-                hdr.datagram_num, hdr.max_block_num, MAX_BLOCK_NUM_INCOMING);
-            return (None, [0u8; ACK256_WIRE_SIZE]);
-        }
-        // Также reject block_num за пределами max_block_num (явная corruption / atack).
+        // Delphi accepts the full byte range: MaxBlockNum is u8, and
+        // MaxSlicedDataSize is computed as PTMU * 256 minus headers. Large
+        // chunked-candles responses legitimately use close to 256 blocks.
+        // Также reject block_num за пределами max_block_num (явная corruption / attack).
         if hdr.block_num > hdr.max_block_num {
             log::warn!(target: "moonproto::slicing",
                 "Sliced dgram={} block_num={} > max_block_num={} — rejecting",
@@ -344,5 +325,46 @@ mod tests {
         let (cmd, data, _, _) = assembled.unwrap();
         assert_eq!(cmd, 0x1C);
         assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn accepts_full_256_block_datagram() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let datagram = 0x1234u16;
+        for block_num in 1u8..=255 {
+            let payload = vec![
+                (datagram & 0xFF) as u8,
+                (datagram >> 8) as u8,
+                block_num,
+                255,
+                block_num,
+            ];
+            let (assembled, ack) = recv.on_new_sliced(&payload);
+            assert!(assembled.is_none());
+            if block_num == 255 {
+                assert_eq!(ack[31] & 0x80, 0x80);
+            }
+        }
+
+        let block0 = vec![
+            (datagram & 0xFF) as u8,
+            (datagram >> 8) as u8,
+            0,
+            255,
+            0x1C,
+            0,
+        ];
+        let (assembled, ack) = recv.on_new_sliced(&block0);
+        let (cmd, data, _dup_count, blocks_count) = assembled.unwrap();
+
+        assert_eq!(cmd, 0x1C);
+        assert_eq!(blocks_count, 256);
+        assert_eq!(data.len(), 256);
+        assert_eq!(data[0], 0);
+        assert_eq!(data[255], 255);
+        assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
+        assert_eq!(&ack[32..34], &datagram.to_le_bytes());
     }
 }
