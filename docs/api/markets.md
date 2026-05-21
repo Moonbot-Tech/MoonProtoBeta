@@ -12,7 +12,12 @@ When using `Client::run_with_dispatcher`, relevant responses are applied to
 
 `CheckBinanceTags` follows the Delphi client: it updates only known markets that
 are present in the response. Markets absent from the response keep their previous
-token tags.
+token tags. A full `GetMarketsList` replacement prunes token tags for markets
+that no longer exist.
+
+`UpdateMarketsList` carries server `mIndex` values. Price updates and
+`price_by_index` resolve those indexes through the current `GetMarketsIndexes`
+mapping, so stale mappings after a server restart are not used.
 
 ## Reading State
 
@@ -73,6 +78,8 @@ pub enum MarketsEvent {
 `MarketsState.indexes_synchronized` is a critical invariant. After server restart
 the client sets it to `false`, refetches indexes, and `EventDispatcher` drops
 orderbook/trades packets until fresh indexes are applied.
+Price updates keyed by server `mIndex` are also skipped while a previously known
+mapping is stale.
 
 ## Public State
 

@@ -86,6 +86,8 @@ impl MarketsState {
             self.by_name.insert(m.bn_market_name.clone(), i);
         }
 
+        self.token_tags.retain(|name, _| self.by_name.contains_key(name));
+
         // Initialize prices from market fields (funding_rate/funding_time доступны прямо в Market).
         self.prices = resp.markets.iter().map(|m| MarketPrice {
             bid: 0.0,
@@ -108,13 +110,12 @@ impl MarketsState {
     }
 
     /// Применить ответ `emk_UpdateMarketsList`.
-    /// Обновляет `self.prices[mIndex]` для каждой записи.
-    /// Если `mIndex` выходит за рамки текущего списка — запись пропускается (out-of-order race).
+    /// Обновляет цену рынка, резолвя server `mIndex` через `emk_GetMarketsIndexes`.
+    /// Если mapping неизвестен или stale после server restart — запись пропускается.
     pub fn apply_markets_prices(&mut self, resp: MarketsPricesResponse) -> MarketsEvent {
         let count = resp.prices.len();
         for p in &resp.prices {
-            let idx = p.m_index as usize;
-            if idx < self.prices.len() {
+            if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
                 let slot = &mut self.prices[idx];
                 slot.bid = p.bid;
                 slot.ask = p.ask;
@@ -218,10 +219,14 @@ impl MarketsState {
 
     /// Получить цену маркета по `mIndex`.
     pub fn price_by_index(&self, m_index: u16) -> Option<&MarketPrice> {
-        self.prices.get(m_index as usize)
+        let idx = self.local_pos_for_server_index(m_index)?;
+        self.prices.get(idx)
     }
 
     pub(crate) fn has_server_market_index(&self, m_index: u16) -> bool {
+        if !self.indexes_synchronized {
+            return false;
+        }
         self.market_indexes
             .get(m_index as usize)
             .is_some_and(|name| self.by_name.contains_key(name))
@@ -239,6 +244,23 @@ impl MarketsState {
 
     pub fn market_count(&self) -> usize { self.markets.len() }
     pub fn corr_count(&self) -> usize { self.corr_markets.len() }
+
+    fn local_pos_for_server_index(&self, m_index: u16) -> Option<usize> {
+        let server_pos = m_index as usize;
+        if self.indexes_synchronized {
+            let market_name = self.market_indexes.get(server_pos)?;
+            return self.by_name.get(market_name).copied();
+        }
+
+        // Cold-start compatibility: before the first explicit indexes response,
+        // `GetMarketsList` arrives in server order. Once a mapping exists but is
+        // marked stale, direct fallback would silently apply prices to old names.
+        if self.market_indexes.is_empty() && server_pos < self.prices.len() {
+            Some(server_pos)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +315,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_markets_list_prunes_tags_for_removed_markets() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("DOGEUSDT", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_token_tags(vec![
+            MarketTokenTags { market_name: "BTCUSDT".to_string(), tags: TokenTags::MONITORING },
+            MarketTokenTags { market_name: "DOGEUSDT".to_string(), tags: TokenTags::GAMING },
+        ]);
+
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+
+        assert!(st.tags("BTCUSDT").contains(TokenTags::MONITORING));
+        assert!(st.tags("DOGEUSDT").is_empty(), "removed markets must not leak stale tags");
+    }
+
+    #[test]
     fn apply_prices_updates_by_index() {
         let mut st = MarketsState::new();
         st.apply_markets_list(MarketsListResponse {
@@ -324,6 +367,60 @@ mod tests {
         assert_eq!(st.price("BTC").unwrap().bid, 50000.0);
         assert_eq!(st.price("BTC").unwrap().ask, 50001.0);
         assert_eq!(st.price("ETH").unwrap().mark_price, 3000.25);
+    }
+
+    #[test]
+    fn apply_prices_uses_server_index_mapping() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
+
+        let prices = MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 3000.0, ask: 3001.0,
+                funding_rate: 0.0, funding_time_utc: 0.0,
+                mark_price: 3000.5, mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        };
+        st.apply_markets_prices(prices);
+
+        assert_eq!(st.price("ETHUSDT").unwrap().bid, 3000.0);
+        assert_eq!(st.price("BTCUSDT").unwrap().bid, 0.0);
+        assert_eq!(st.price_by_index(0).unwrap().bid, 3000.0);
+    }
+
+    #[test]
+    fn apply_prices_skips_stale_server_index_mapping() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
+        st.mark_indexes_stale();
+
+        let prices = MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 3000.0, ask: 3001.0,
+                funding_rate: 0.0, funding_time_utc: 0.0,
+                mark_price: 3000.5, mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        };
+        st.apply_markets_prices(prices);
+
+        assert_eq!(st.price("ETHUSDT").unwrap().bid, 0.0);
+        assert!(st.price_by_index(0).is_none());
     }
 
     #[test]
