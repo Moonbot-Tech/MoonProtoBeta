@@ -1,9 +1,9 @@
 //! Accumulating live stress client for MoonProto.
 //!
 //! Run two independent client instances against one server and keep several
-//! subscriptions plus Engine API, API-key expiration checks, and chunked candles
-//! requests in flight at the same time. If order state is present, the client
-//! also keeps safe tracked-order status refreshes in flight:
+//! subscriptions plus Engine API, Binance tags checks, API-key expiration checks,
+//! and chunked candles requests in flight at the same time. If order state is
+//! present, the client also keeps safe tracked-order status refreshes in flight:
 //!
 //!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0
 //!
@@ -28,6 +28,7 @@ use moonproto::commands::candles::{parse_coin_card_candles_response, DeepHistory
 use moonproto::commands::engine_api::{
     parse_api_expiration_time_response, EngineMethod, EngineResponse, ServerInfo,
 };
+use moonproto::commands::market::parse_token_tags_response;
 use moonproto::commands::{
     parse_get_balance_response, parse_query_hedge_mode_response,
 };
@@ -103,6 +104,11 @@ struct SharedStats {
     tracked_status_rounds: AtomicU64,
     tracked_status_sent: AtomicU64,
     tracked_status_empty: AtomicU64,
+    binance_tags_sent: AtomicU64,
+    binance_tags_ok: AtomicU64,
+    binance_tags_empty: AtomicU64,
+    binance_tags_malformed: AtomicU64,
+    binance_tags_max_items: AtomicU64,
     settings_requests: AtomicU64,
     balance_refresh_requests: AtomicU64,
     strat_snapshot_requests: AtomicU64,
@@ -216,6 +222,9 @@ fn push_pending(
     rx: std::sync::mpsc::Receiver<EngineResponse>,
 ) {
     stats.api_sent.fetch_add(1, Ordering::Relaxed);
+    if matches!(method, EngineMethod::CheckBinanceTags) {
+        stats.binance_tags_sent.fetch_add(1, Ordering::Relaxed);
+    }
     pending.push_back(PendingApi {
         method,
         sent_at: Instant::now(),
@@ -278,6 +287,12 @@ fn schedule_safe_burst(
         stats,
         EngineMethod::CheckAPIExpirationTime,
         client.api_check_expiration_time(),
+    );
+    push_pending(
+        pending,
+        stats,
+        EngineMethod::CheckBinanceTags,
+        client.api_check_binance_tags(),
     );
 
     if burst_no % 3 == 0 {
@@ -422,6 +437,34 @@ fn validate_response(label: &str, resp: &EngineResponse, stats: &SharedStats) {
                 stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
                 println!(
                     "[{label}] malformed CheckAPIExpirationTime response: {} bytes",
+                    resp.data.len()
+                );
+            }
+        }
+        EngineMethod::CheckBinanceTags => {
+            if let Some(items) = parse_token_tags_response(&resp.data) {
+                stats.binance_tags_ok.fetch_add(1, Ordering::Relaxed);
+                record_max(&stats.binance_tags_max_items, items.len() as u64);
+                if items.is_empty() {
+                    stats.binance_tags_empty.fetch_add(1, Ordering::Relaxed);
+                }
+                for item in items {
+                    if item.market_name.is_empty() || item.tags.is_empty() {
+                        stats.binance_tags_malformed.fetch_add(1, Ordering::Relaxed);
+                        stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                        println!(
+                            "[{label}] malformed CheckBinanceTags item market='{}' tags={:#x}",
+                            item.market_name,
+                            item.tags.bits()
+                        );
+                        break;
+                    }
+                }
+            } else if resp.success {
+                stats.binance_tags_malformed.fetch_add(1, Ordering::Relaxed);
+                stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                println!(
+                    "[{label}] malformed CheckBinanceTags response: {} bytes",
                     resp.data.len()
                 );
             }
@@ -1238,6 +1281,14 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             stats.tracked_status_rounds.load(Ordering::Relaxed),
             stats.tracked_status_sent.load(Ordering::Relaxed),
             stats.tracked_status_empty.load(Ordering::Relaxed),
+        );
+        println!(
+            "[{label}] binance_tags sent={} ok={} empty={} malformed={} max_items={}",
+            stats.binance_tags_sent.load(Ordering::Relaxed),
+            stats.binance_tags_ok.load(Ordering::Relaxed),
+            stats.binance_tags_empty.load(Ordering::Relaxed),
+            stats.binance_tags_malformed.load(Ordering::Relaxed),
+            stats.binance_tags_max_items.load(Ordering::Relaxed),
         );
         println!(
             "[{label}] server_info bot_id={:?} name={:?} exchange={:?} base={:?} version={:?}",
