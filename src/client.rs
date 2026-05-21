@@ -3918,7 +3918,9 @@ impl Client {
         let path_delay = (self.round_trip_delay as f64 * self.trip_delay_k + 10.0).round() as i64;
         let cycle_time_ms = 5.0f64.max(self.actual_sleep_time).min(15.0);
         // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
-        let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001) as usize;
+        // Delphi uses `round(Client.CanSendRate * CycleTimeMS / 1000.0)`,
+        // so keep rounding instead of truncating on the hot retry boundary.
+        let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
         let mut bytes_sent_at_once: usize = 0;
 
         // Аудит #2 (audit_delphi_deviation): индексы вместо clone. Раньше каждый
@@ -3977,7 +3979,8 @@ impl Client {
         }
 
         // UsedSlicedLimit flag (matches :1009-1011)
-        if bytes_sent_at_once >= (client_limit * 80 / 100) {
+        let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
+        if bytes_sent_at_once >= used_limit_threshold {
             self.used_sliced_limit = true;
         }
 
@@ -5522,6 +5525,21 @@ mod pmtu_tests {
         payload
     }
 
+    fn sent_sliced_with_lengths(lengths: &[usize], last_checked: i64) -> SentSliced {
+        SentSliced {
+            datagram_num: 1,
+            slices: lengths.iter().map(|len| vec![0xA5; *len]).collect(),
+            piece_last_checked: vec![last_checked; lengths.len()],
+            ack_flags: [0; 32],
+            blocks_count: lengths.len(),
+            sent_count: lengths.len(),
+            last_checked,
+            retry_count: 0,
+            max_retry_count: 6,
+            u_key: UniqueKey::none(),
+        }
+    }
+
     #[test]
     fn ping_pmtu_above_8192_is_preserved() {
         let mut client = Client::new(dummy_cfg());
@@ -5629,6 +5647,34 @@ mod pmtu_tests {
         assert_eq!(client.tmp_send_buf[0], Command::Crypted as u8 | COMPRESSED_FLAG);
         assert_eq!(client.pending_h.len(), 1);
         assert_eq!(client.pending_h[0].cmd, Command::UI as u8 | COMPRESSED_FLAG);
+    }
+
+    #[test]
+    fn sliced_retry_client_limit_is_rounded_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        client.round_trip_delay = 100;
+        client.trip_delay_k = 1.1;
+        client.actual_sleep_time = 5.0;
+        client.can_send_rate = 262_120; // 262120 * 5ms / 1000 = 1310.6 -> 1311
+        client.sending.push(sent_sliced_with_lengths(&[1310, 1], 0));
+
+        client.retry_sliced(1000);
+
+        assert_eq!(client.sending[0].sent_count, 4);
+    }
+
+    #[test]
+    fn sliced_retry_used_limit_threshold_is_rounded_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        client.round_trip_delay = 100;
+        client.trip_delay_k = 1.1;
+        client.actual_sleep_time = 5.0;
+        client.can_send_rate = 262_120; // ClientLimit = 1311, 80% threshold = round(1048.8) = 1049
+        client.sending.push(sent_sliced_with_lengths(&[1048], 0));
+
+        client.retry_sliced(1000);
+
+        assert!(!client.used_sliced_limit);
     }
 }
 

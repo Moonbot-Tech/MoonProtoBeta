@@ -138,9 +138,15 @@
 |---|---|---|---|---|
 | 58 | 1070-1075 | `PTMU := ActualPMTU - HeaderSize - SliceHeader`; если `data.ms.Size >= MaxSlicedDataSize(ActualPMTU)` → drop | client.rs: create_sliced_and_send computes payload PMTU with low-PMTU guard and uses `>= max_sliced_data_size` | ✅ |
 
+## Sliced retry / adaptive send limit (MoonProtoCommon.pas:970-1011) → client.rs retry_sliced
+
+| # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
+|---|---|---|---|---|
+| 59 | 983-1011 | `ClientLimit := round(CanSendRate * CycleTimeMS / 1000.0)`; `BytesSentAtOnce` ограничивает Sliced retry за цикл; `UsedSlicedLimit` ставится при `>= round(ClientLimit * 0.8)` | client.rs: retry_sliced rounds client limit and 80% threshold before applying per-cycle retry cap | ✅ |
+
 ---
 
-## Итого Stage 1: 58 пунктов
+## Итого Stage 1: 59 пунктов
 
 - Все пункты закрыты или имеют подтверждённое описание поведения.
 - AAD в handshake актуализирован: текущий Delphi `MakeCorrectAAD = true`, Rust
