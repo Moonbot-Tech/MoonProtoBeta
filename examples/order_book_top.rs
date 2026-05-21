@@ -58,9 +58,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dispatcher = EventDispatcher::new();
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
         subscribe_orderbooks: vec![market.clone()],
         step_timeout: None,
         ..Default::default()
@@ -73,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
     )?;
     for err in &init_result.errors {
-        eprintln!("[init] non-critical error: {err}");
+        eprintln!("[init] note: {err}");
     }
 
     if let Some(name) = client.server_info().server_name.as_deref() {

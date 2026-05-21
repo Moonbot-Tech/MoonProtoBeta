@@ -50,8 +50,6 @@ fn main() {
     }
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
         step_timeout: None,
         ..Default::default()
     };

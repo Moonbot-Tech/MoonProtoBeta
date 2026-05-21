@@ -80,11 +80,6 @@ fn run_client(
 
     // Phase 2: init sequence (chunked main loop pump внутри).
     let init_cfg = moonproto::client::InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
-        fetch_indexes: true,
-        fetch_balance: false,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec![],

@@ -56,9 +56,6 @@ fn main() {
 
     println!("[connect] waiting for authorization and init...");
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
         step_timeout: None,
         ..Default::default()
     };
@@ -74,7 +71,7 @@ fn main() {
         }
     };
     for err in &init_result.errors {
-        eprintln!("[init] non-critical error: {err}");
+        eprintln!("[init] note: {err}");
     }
 
     if let Some(name) = client.server_info().server_name.as_deref() {

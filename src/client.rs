@@ -608,8 +608,9 @@ impl std::error::Error for TradeContextError {}
 /// **Session invariant**: пользовательский init выполняется один раз за жизнь
 /// `Client`. До этого `Fine` не запускает Engine API. После успешного init
 /// reconnect внутри той же сессии сам восстанавливает сохранённый intent:
-/// свежие indexes для indexed streams и registry-подписки. Initial post-init
-/// resync не повторяется клиентом на reconnect.
+/// fresh indexes, `UpdateMarketsList` и registry-подписки. Initial post-init
+/// resync (orders/settings/balance/client strategy snapshot) не повторяется
+/// клиентом на reconnect.
 ///
 /// Потребитель красит UI по событию; повторный `run_init_sequence` после
 /// reconnect не нужен для продолжения заказанных потоков.
@@ -622,12 +623,12 @@ pub enum LifecycleEvent {
     /// Fine получен — канал авторизован и готов принимать/отправлять команды.
     ///
     /// `fresh = true` — это **первый** Connected с момента `Client::new`. App может
-    /// одноразово показать "Welcome" / выполнить init-шаги (`subscribe_orderbook`,
-    /// `subscribe_all_trades`, `api_get_markets_list` и т.п.).
+    /// одноразово показать "Welcome" / выполнить `run_init_sequence` или
+    /// `connect_and_init`.
     ///
-/// `fresh = false` — это re-connect после потери связи / server restart / etc.
-/// Если init уже был выполнен, либа сама восстанавливает заказанные
-/// indexes/subscriptions; app не повторяет Init.
+    /// `fresh = false` — это re-connect после потери связи / server restart / etc.
+    /// Если init уже был выполнен, либа сама восстанавливает indexes,
+    /// `UpdateMarketsList` и заказанные subscriptions; app не повторяет Init.
     Connected { fresh: bool },
     /// Канал закрыт явным `client.disconnect()` от потребителя. Финальное
     /// состояние — для возобновления связи нужен новый `Client::new`.
@@ -658,8 +659,9 @@ pub enum LifecycleEvent {
     /// сессиями (см. SPEC §3 detection mechanism). Либа отмечает
     /// `MarketsState.indexes_synchronized = false` и блокирует применение
     /// indexed TradesStream/OrderBook пакетов до новой синхронизации.
-    /// До первого Init `GetMarketsIndexes` и подписки не отправляются. После Init
-    /// restore выполняется самой либой на успешном reconnect `Fine`.
+    /// До первого Init `GetMarketsIndexes` / `UpdateMarketsList` / подписки не
+    /// отправляются. После Init restore выполняется самой либой на успешном
+    /// reconnect `Fine`.
     ///
     /// Потребитель может показать UI tooltip; повторный Init для восстановления
     /// заказанных потоков не нужен.
@@ -1173,6 +1175,12 @@ pub struct Client {
     /// Защита от шторма повторных явных запросов до получения ответа.
     indexes_fetch_in_flight: bool,
 
+    /// После reconnect restore: как только fresh `GetMarketsIndexes` успешно пришёл,
+    /// сразу запросить `UpdateMarketsList`. Это повторяет Delphi-смысл
+    /// `TMoonProtoEngine.UpdateMarketsList`: при новом `PeerAppToken` он сначала
+    /// синхронизирует индексы, затем обновляет prices/funding.
+    update_markets_after_indexes: bool,
+
     /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
     /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
     /// сбрасываем `indexes_fetch_in_flight = false`. Сам timeout handler запрос
@@ -1359,6 +1367,7 @@ impl Client {
             pending_candles: HashMap::new(),
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
+            update_markets_after_indexes: false,
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
@@ -1403,8 +1412,7 @@ impl Client {
     /// [`Self::new_order`], [`Self::move_all_sells`], or position close/split
     /// commands. It uses `ServerInfo::base_currency_code` and
     /// `ServerInfo::exchange_code`, which are filled by `connect_and_init` /
-    /// `run_init_sequence` when `InitConfig::base_check` is enabled, or by
-    /// [`Self::request_base_check`].
+    /// `run_init_sequence`, or by [`Self::request_base_check`].
     ///
     /// Existing-order actions should usually use the `*_tracked_order` wrappers
     /// instead, because they derive the route and current status from
@@ -2190,6 +2198,15 @@ impl Client {
     }
 
     fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
+        if self.domain_ready
+            && self.domain_restore_needs_indexes()
+            && self.peer_app_token != 0
+            && !self.market_indexes_current_for_peer()
+            && !self.indexes_fetch_in_flight
+        {
+            self.send_markets_indexes_restore_request(cur_tm);
+        }
+
         if let Some(interval) = self.cfg.refresh.update_markets_every {
             let interval_ms = interval.as_millis() as i64;
             if (cur_tm - self.last_update_markets_ms) >= interval_ms {
@@ -2310,6 +2327,7 @@ impl Client {
     }
 
     fn send_markets_indexes_restore_request(&mut self, now_ms: i64) {
+        self.update_markets_after_indexes = true;
         if self.indexes_fetch_in_flight {
             return;
         }
@@ -3994,6 +4012,12 @@ impl Client {
                     if resp.success {
                         // Запоминаем что для текущего PeerAppToken индексы получены.
                         self.tracked_indexes_peer_app_token = self.peer_app_token;
+                        if self.update_markets_after_indexes {
+                            self.update_markets_after_indexes = false;
+                            self.send_api_request(
+                                &crate::commands::engine_request::update_markets_list(),
+                            );
+                        }
                     }
                 }
 
@@ -5345,7 +5369,8 @@ impl Client {
 //  Init sequence helper — free function (НЕ метод Client)
 //
 //  Логически единственный init-проход после `Connected{fresh:true}`:
-//  `BaseCheck → AuthCheck → GetMarketsList → GetMarketsIndexes → GetMarketsBalanceFull → подписки`.
+//  `BaseCheck → AuthCheck → GetMarketsList → GetMarketsIndexes → UpdateMarketsList
+//   → GetMarketsBalanceFull → Delphi post-init resync → optional subscriptions`.
 //  Аналог Delphi `TCryptoPumpTool.InitInt` (`Unit1.pas:4987-5150`).
 //
 //  Почему free function, а не `Client::run_init_sequence`:
@@ -5363,27 +5388,14 @@ impl Client {
 //  См. audit_responsibility F1, audit_responsibility_hints Q13.
 // =============================================================================
 
-/// Конфигурация init pipeline для `run_init_sequence`. Все шаги опциональны —
-/// flag = `true` включает шаг. Дефолт = всё отключено.
+/// Конфигурация init pipeline для `run_init_sequence`.
+///
+/// Delphi-critical init steps are not configurable: BaseCheck, AuthCheck,
+/// GetMarketsList, GetMarketsIndexes, UpdateMarketsList, balance refresh, orders,
+/// strategy snapshot, and settings sync are the init contract itself. This config
+/// only carries optional stream subscriptions and timing.
 #[derive(Debug, Clone, Default)]
 pub struct InitConfig {
-    /// Выполнить `api_base_check` (минимальная проверка соединения).
-    pub base_check: bool,
-    /// Выполнить `api_auth_check` (валидация ключей биржи на сервере).
-    pub auth_check: bool,
-    /// Выполнить `api_get_markets_list` (полный snapshot маркетов).
-    pub fetch_markets: bool,
-    /// Fetch `api_get_markets_indexes` during init.
-    ///
-    /// This is also forced automatically when init subscribes to trades or
-    /// orderbooks, because indexed streams stay gated until the current
-    /// `PeerAppToken` has a fresh market-index map.
-    pub fetch_indexes: bool,
-    /// Выполнить `api_get_markets_balance_full`.
-    ///
-    /// В текущем Delphi-эталоне это триггер server-side refresh без serialized
-    /// payload; `balances_response_bytes` обычно равен 0.
-    pub fetch_balance: bool,
     /// Value for the post-init `TMMOrdersSubscribeCommand`.
     ///
     /// Delphi always sends this UI command after `InitDone` with
@@ -5414,13 +5426,15 @@ pub struct InitResult {
     /// `EventDispatcher` асинхронно в `MarketsState`.
     pub markets_response_bytes: usize,
     pub indexes_response_bytes: usize,
+    pub update_markets_response_bytes: usize,
     pub balances_response_bytes: usize,
     pub post_init_resync_sent: bool,
     pub strategy_snapshot_sent: bool,
     pub trades_subscribed: bool,
     pub orderbooks_subscribed: usize,
-    /// Список текстовых ошибок шагов, которые не остановили init (например
-    /// `fetch_markets` / `fetch_indexes` timeout — критическим не считается, init продолжается).
+    /// Список текстовых ошибок BaseCheck retry attempts before the final
+    /// successful retry, plus any future non-fatal init notes. Mandatory init
+    /// step errors return [`InitError`] and leave `domain_ready` closed.
     pub errors: Vec<String>,
 }
 
@@ -5553,8 +5567,8 @@ pub fn connect_and_init(
 }
 
 /// Run the full init sequence: BaseCheck → AuthCheck → GetMarketsList →
-/// GetMarketsIndexes → GetMarketsBalanceFull → Delphi post-init resync →
-/// subscriptions.
+/// GetMarketsIndexes → UpdateMarketsList → GetMarketsBalanceFull →
+/// Delphi post-init resync → optional subscriptions.
 ///
 /// Until this function completes successfully,
 /// `EventDispatcher::dispatch_into_active` drops domain pushes
@@ -5582,7 +5596,9 @@ pub fn connect_and_init(
 /// loop while it waits for each Engine API response. If a UI command marked
 /// `ServerUpdateSent`, `run_init_sequence` also mirrors Delphi `BaseCheck`:
 /// wait up to 34 * 300 ms for `AuthDone`, clear the marker, send BaseCheck once,
-/// and if it still fails retry it 10 times with 2000 ms pauses.
+/// and if it still fails retry it 10 times with 2000 ms pauses. All init steps
+/// above are mandatory: a timeout/error means Init failed and `domain_ready`
+/// stays closed.
 ///
 /// Pattern:
 /// ```ignore
@@ -5718,12 +5734,35 @@ fn run_auth_check_once(
     }
 }
 
+fn run_required_engine_step(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    result: &mut InitResult,
+    step: &'static str,
+    req: Vec<u8>,
+    timeout: Duration,
+) -> Result<EngineResponse, InitError> {
+    match client.request_engine_response(dispatcher, &req, timeout) {
+        Ok(resp) if resp.success => Ok(resp),
+        Ok(resp) => {
+            let message = response_error_message(&resp);
+            result.errors.push(format!("{step} error: {message}"));
+            Err(InitError::CriticalStepFailed { step, message })
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            result.errors.push(format!("{step}: timeout"));
+            Err(InitError::CriticalStepTimedOut(step))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(InitError::SendChannelClosed),
+    }
+}
+
 pub fn run_init_sequence(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     cfg: InitConfig,
 ) -> Result<InitResult, InitError> {
-    let waiting_update = cfg.base_check && client.take_server_update_sent();
+    let waiting_update = client.take_server_update_sent();
     if waiting_update {
         wait_auth_done_after_server_update(client, dispatcher);
     }
@@ -5740,23 +5779,21 @@ pub fn run_init_sequence(
     // === 1. BaseCheck === критический шаг.
     // При успехе — парсим server identity и сохраняем в Client.server_info
     // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
-    let mut base_status = CriticalInitStatus::Skipped;
-    if cfg.base_check {
-        base_status = run_base_check_delphi(
-            client,
-            dispatcher,
-            &mut result,
-            timeout,
-            waiting_update,
-            Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS),
-        )?;
-    }
+    let base_status = run_base_check_delphi(
+        client,
+        dispatcher,
+        &mut result,
+        timeout,
+        waiting_update,
+        Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS),
+    )?;
 
     // === 2. AuthCheck === критический шаг
-    let mut auth_status = CriticalInitStatus::Skipped;
-    if cfg.auth_check && (!cfg.base_check || base_status.is_ok()) {
-        auth_status = run_auth_check_once(client, dispatcher, &mut result, timeout)?;
-    }
+    let auth_status = if base_status.is_ok() {
+        run_auth_check_once(client, dispatcher, &mut result, timeout)?
+    } else {
+        CriticalInitStatus::Skipped
+    };
 
     if let Some(err) = base_status.final_error("BaseCheck") {
         return Err(err);
@@ -5765,73 +5802,64 @@ pub fn run_init_sequence(
         return Err(err);
     }
 
-    // === 3. GetMarketsList === не критический (timeout → продолжить).
+    // === 3. GetMarketsList === критический Delphi init step.
     // Markets state в dispatcher обновляется автоматически через
     // `EventDispatcher::dispatch_into` ветка Command::API → GetMarketsList.
-    if cfg.fetch_markets {
-        let req = crate::commands::engine_request::get_markets_list();
-        match client.request_engine_response(dispatcher, &req, timeout) {
-            Ok(resp) if resp.success => {
-                result.markets_response_bytes = resp.data.len();
-            }
-            Ok(resp) => result.errors.push(format!(
-                "GetMarketsList error: code={} msg={}",
-                resp.error_code, resp.error_msg
-            )),
-            Err(mpsc::RecvTimeoutError::Timeout) => result
-                .errors
-                .push("GetMarketsList: timeout (continuing)".to_string()),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(InitError::SendChannelClosed),
-        }
-    }
+    let resp = run_required_engine_step(
+        client,
+        dispatcher,
+        &mut result,
+        "GetMarketsList",
+        crate::commands::engine_request::get_markets_list(),
+        timeout,
+    )?;
+    result.markets_response_bytes = resp.data.len();
 
-    // === 4. GetMarketsIndexes === needed before indexed streams can be applied.
-    let needs_indexes =
-        cfg.fetch_indexes || cfg.subscribe_trades.is_some() || !cfg.subscribe_orderbooks.is_empty();
-    if needs_indexes {
-        let req = crate::commands::engine_request::get_markets_indexes();
-        match client.request_engine_response(dispatcher, &req, timeout) {
-            Ok(resp) if resp.success => {
-                result.indexes_response_bytes = resp.data.len();
-            }
-            Ok(resp) => result.errors.push(format!(
-                "GetMarketsIndexes error: code={} msg={}",
-                resp.error_code, resp.error_msg
-            )),
-            Err(mpsc::RecvTimeoutError::Timeout) => result
-                .errors
-                .push("GetMarketsIndexes: timeout (continuing)".to_string()),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(InitError::SendChannelClosed),
-        }
-    }
+    // === 4. GetMarketsIndexes === критический: indexed streams stay gated
+    // until this map is current for the active PeerAppToken.
+    let resp = run_required_engine_step(
+        client,
+        dispatcher,
+        &mut result,
+        "GetMarketsIndexes",
+        crate::commands::engine_request::get_markets_indexes(),
+        timeout,
+    )?;
+    result.indexes_response_bytes = resp.data.len();
 
-    // === 5. GetMarketsBalanceFull === non-critical.
-    // Delphi currently refreshes balances server-side but does not serialize a
-    // balance snapshot in the response (`WriteBalancesToStream` is TODO).
-    if cfg.fetch_balance {
-        let req = crate::commands::engine_request::get_markets_balance_full();
-        match client.request_engine_response(dispatcher, &req, timeout) {
-            Ok(resp) if resp.success => {
-                result.balances_response_bytes = resp.data.len();
-            }
-            Ok(resp) => result.errors.push(format!(
-                "GetMarketsBalanceFull error: code={} msg={}",
-                resp.error_code, resp.error_msg
-            )),
-            Err(mpsc::RecvTimeoutError::Timeout) => result
-                .errors
-                .push("GetMarketsBalanceFull: timeout (continuing)".to_string()),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(InitError::SendChannelClosed),
-        }
-    }
+    // === 5. UpdateMarketsList === критический: Delphi InitInt does
+    // `GetMarketsList and UpdateMarketsList`, and UpdateMarketsList also owns the
+    // PeerAppToken/index synchronization path in TMoonProtoEngine.
+    let resp = run_required_engine_step(
+        client,
+        dispatcher,
+        &mut result,
+        "UpdateMarketsList",
+        crate::commands::engine_request::update_markets_list(),
+        timeout,
+    )?;
+    result.update_markets_response_bytes = resp.data.len();
+
+    // === 6. GetMarketsBalanceFull === критический full-balance refresh.
+    // Delphi server currently refreshes balances server-side but does not serialize a
+    // balance snapshot in the EngineResponse (`WriteBalancesToStream` is TODO).
+    let resp = run_required_engine_step(
+        client,
+        dispatcher,
+        &mut result,
+        "GetMarketsBalanceFull",
+        crate::commands::engine_request::get_markets_balance_full(),
+        timeout,
+    )?;
+    result.balances_response_bytes = resp.data.len();
 
     client.domain_restore = DomainRestoreIntent {
-        fetch_indexes: needs_indexes,
+        fetch_indexes: true,
     };
     client.domain_ready = true;
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
 
-    // === 6. SubscribeAllTrades === идёт через subscription_registry (fire-and-forget).
+    // === 7. SubscribeAllTrades === optional; идёт через subscription_registry (fire-and-forget).
     // Subscribe events идут в event channel; main loop их применит на следующем тике
     // (либо здесь же если ниже идёт wait, либо в основном run_with_dispatcher после init).
     if let Some(want_mm) = cfg.subscribe_trades {
@@ -5839,13 +5867,13 @@ pub fn run_init_sequence(
         result.trades_subscribed = true;
     }
 
-    // === 7. Subscribe orderbooks === fire-and-forget через registry
+    // === 8. Subscribe orderbooks === optional; fire-and-forget через registry
     for name in &cfg.subscribe_orderbooks {
         client.subscribe_orderbook(name);
         result.orderbooks_subscribed += 1;
     }
 
-    // === 8. Drain fire-and-forget subscribe events ===
+    // === 9. Drain fire-and-forget subscribe events ===
     // subscribe_* пушит ClientEvent::Subscribe* в channel. Без тика main loop
     // events лежат в channel и wire-команды не уходят. Прогоняем короткий тик
     // чтобы обработка подписки реально стартовала к моменту выхода из init.
@@ -8187,6 +8215,7 @@ mod reconnect_timing_tests {
                 item.cmd != Command::Order as u8
                     && item.cmd != Command::UI as u8
                     && item.cmd != Command::Balance as u8
+                    && item.cmd != Command::Strat as u8
             }),
             "Delphi post-init resync is not repeated by the client on reconnect"
         );
@@ -8201,6 +8230,12 @@ mod reconnect_timing_tests {
         }
         assert!(!client.indexes_fetch_in_flight);
         assert!(client.market_indexes_current_for_peer());
+        let after_indexes_sent = drain_send_items(&client);
+        let after_indexes_methods = api_methods(&after_indexes_sent);
+        assert!(
+            after_indexes_methods.contains(&(EngineMethod::UpdateMarketsList as u8)),
+            "after reconnect index sync, library must refresh market prices like Delphi UpdateMarketsList"
+        );
 
         let mut dispatcher = EventDispatcher::new();
         let mut out = Vec::new();

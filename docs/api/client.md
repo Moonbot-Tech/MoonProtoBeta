@@ -127,19 +127,16 @@ logs.
 
 ## Connection Setup
 
-For the common setup path, call `connect_and_init` with the init steps your
-application needs:
+For the common setup path, call `connect_and_init`. The Delphi init contract is
+mandatory: BaseCheck, AuthCheck, markets list, market indexes, price refresh,
+balance refresh, order snapshot, strategy sync, and settings sync. `InitConfig`
+only adds optional stream subscriptions and timing:
 
 ```rust
 use std::time::Duration;
 use moonproto::{connect_and_init, ConnectConfig, InitConfig};
 
 let init = InitConfig {
-    base_check: true,
-    auth_check: true,
-    fetch_markets: true,
-    fetch_indexes: true,
-    fetch_balance: true,
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
@@ -161,14 +158,14 @@ Init is a one-time step for a `Client` session. After it succeeds, do not call
 `run_init_sequence` again just because the UDP transport reconnected; the library
 maintains the user-requested active-lib state for that `Client` session.
 
-`InitConfig::fetch_indexes` sends `GetMarketsIndexes` and records the payload
-size in `InitResult::indexes_response_bytes`. It is also forced automatically
-when `subscribe_trades` or `subscribe_orderbooks` is set, because trades and
-orderbook packets are gated until indexes match the current server app token.
+Init always sends `GetMarketsIndexes` and records the payload size in
+`InitResult::indexes_response_bytes`, because trades, orderbooks, and
+`UpdateMarketsList` price rows depend on the current server `mIndex` mapping.
 Periodic market refresh starts only after init opens the domain gate, so
 BaseCheck/AuthCheck are not delayed by early background refresh traffic.
 Critical BaseCheck/AuthCheck waits use the same default as Delphi
-`TMoonProtoEngine.FTimeout`: 12 seconds per Engine API request.
+`TMoonProtoEngine.FTimeout`: 12 seconds per Engine API request. Mandatory init
+step timeouts/errors fail init and leave the domain gate closed.
 
 `BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
 request. If `client.mark_server_update_sent()` was called before init, the next
@@ -195,7 +192,7 @@ requests.
 
 Market-level trade commands need the active server route in their wire header:
 `base_currency_code` and `exchange_code` from `server_info()`. After
-`connect_and_init` with `base_check=true`, build that route with:
+`connect_and_init`, build that route with:
 
 ```rust
 let ctx = client.random_trade_ctx()?;
@@ -393,9 +390,9 @@ client.peer_app_token();
 client.server_info();
 ```
 
-`server_info()` is populated by `connect_and_init` or `run_init_sequence` when
-`base_check` is enabled.
-For multi-server details, see [`multi_server.md`](multi_server.md).
+`server_info()` is populated by `connect_and_init` or `run_init_sequence`.
+For multiple independent server connections, create one `Client` and one
+`EventDispatcher` per server.
 
 ## Shutdown
 

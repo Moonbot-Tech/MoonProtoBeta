@@ -15,7 +15,7 @@ moonproto
   Client              UDP, handshake, retry, reconnect, NTP, pending API
   EventDispatcher     typed events + read-only state models
   connect_and_init    ready connection + initial requests in one call
-  run_init_sequence   BaseCheck/AuthCheck/markets/balances/subscriptions
+  run_init_sequence   BaseCheck/AuthCheck/markets/indexes/balances/post-init sync
   commands::*         byte-level parsers/builders
   state::*            orders, orderbooks, trades, balances, strategies, markets
         |
@@ -41,11 +41,6 @@ let mut client = Client::new(cfg);
 let mut dispatcher = EventDispatcher::new();
 
 let init = InitConfig {
-    base_check: true,
-    auth_check: true,
-    fetch_markets: true,
-    fetch_indexes: true,
-    fetch_balance: true,
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
@@ -69,8 +64,9 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 ## What the Library Does Automatically
 
 - Reconnects and re-handshakes.
-- Fetches market indexes during init when requested or required by subscriptions.
-- After init, restores market indexes required by indexed streams and registry
+- Fetches markets, market indexes, prices, and balances during the mandatory
+  one-time init.
+- After init, restores market indexes, refreshes prices, and replays registry
   subscriptions after reconnect without requiring a second Init.
 - Blocks indexed streams while market indexes are stale.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
@@ -89,19 +85,19 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 | API | Purpose |
 |---|---|
-| [`client.md`](client.md) | `Client`, config, run loop, init helper, subscriptions |
-| [`events.md`](events.md) | `EventDispatcher`, typed events, read-only state |
-| [`lifecycle.md`](lifecycle.md) | Connection and critical status events |
-| [`engine_api.md`](engine_api.md) | Engine RPC wrappers and response parsing |
-| [`trade_actions.md`](trade_actions.md) | High-level trading commands |
-| [`orders.md`](orders.md) | Order state and order events |
-| [`balances.md`](balances.md) | Account and market balance snapshots |
-| [`order_books.md`](order_books.md) | Orderbook updates and recovery |
-| [`trades.md`](trades.md) | Trades stream and gap recovery |
-| [`markets.md`](markets.md) | Markets list, prices, indexes, tags |
-| [`strats.md`](strats.md) | Strategy snapshots and updates |
-| [`candles.md`](candles.md) | Historical candles APIs |
-| [`multi_server.md`](multi_server.md) | Multiple independent connections |
+| `client.md` | `Client`, config, run loop, init helper, subscriptions |
+| `events.md` | `EventDispatcher`, typed events, read-only state |
+| `lifecycle.md` | Connection and critical status events |
+| `engine_api.md` | Engine RPC wrappers and response parsing |
+| `trade_actions.md` | High-level trading commands |
+| `orders.md` | Order state and order events |
+| `balances.md` | Account and market balance snapshots |
+| `order_books.md` | Orderbook updates and recovery |
+| `trades.md` | Trades stream and gap recovery |
+| `markets.md` | Markets list, prices, indexes, tags |
+| `strats.md` | Strategy snapshots and updates |
+| `candles.md` | Historical candles APIs |
+| `multi_server.md` | Multiple independent connections |
 
 ## Low-Level Modules
 

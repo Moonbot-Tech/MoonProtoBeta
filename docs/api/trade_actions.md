@@ -15,8 +15,7 @@ Trade command headers include the server's base-currency and exchange ordinals.
 For market-level commands, derive them from the active session with
 `Client::trade_ctx(uid)` or `Client::random_trade_ctx()`. These methods return
 `TradeContextError` until `emk_BaseCheck` has filled `client.server_info()`;
-`connect_and_init` does that automatically when `InitConfig::base_check` is
-enabled.
+`connect_and_init` does that automatically during mandatory init.
 
 For order-keyed commands, `ctx.uid` must be the server task id from `Order.uid`;
 that id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.

@@ -53,9 +53,6 @@ fn main() {
     }
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
         subscribe_trades: Some(false),
         step_timeout: None,
         ..Default::default()
@@ -68,7 +65,7 @@ fn main() {
         }
     };
     for err in &init_result.errors {
-        eprintln!("[init] non-critical error: {err}");
+        eprintln!("[init] note: {err}");
     }
 
     if !dispatcher.markets().indexes_synchronized {

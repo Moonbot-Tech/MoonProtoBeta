@@ -172,9 +172,9 @@ stored row with the decoded item, except `max_value`: Delphi only updates
 previous `max_value` when the decoded value is zero or otherwise not greater than
 `1e-8`.
 
-## See Also
+## Related API Surface
 
-- [arb.md](arb.md): `TArbPricesCommand` also uses the MPC_Balance channel (CmdId=6)
-- [markets.md](markets.md): balance_usdt calculation needs prices from `MarketsState`
-- [client.md](client.md): `request_balance_snapshot` high-level helper
-- [engine_api.md](engine_api.md): one-currency `request_balance`
+`TArbPricesCommand` also uses the MPC_Balance channel (`CmdId=6`).
+`balance_usdt` calculation needs prices from `MarketsState`.
+`request_balance_snapshot` is the high-level full-snapshot helper.
+`request_balance` requests one-currency balance through Engine API.

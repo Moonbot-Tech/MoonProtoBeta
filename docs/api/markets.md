@@ -48,10 +48,6 @@ Initial fetch:
 use moonproto::{connect_and_init, ConnectConfig, InitConfig};
 
 let init = InitConfig {
-    base_check: true,
-    auth_check: true,
-    fetch_markets: true,
-    fetch_indexes: true,
     ..Default::default()
 };
 connect_and_init(&mut client, &mut dispatcher, ConnectConfig::new(init))?;
@@ -77,13 +73,11 @@ pub enum MarketsEvent {
 ```
 
 `MarketsState.indexes_synchronized` is a critical invariant.
-`InitConfig::fetch_indexes` fetches the initial map during init; subscriptions
-to trades or orderbooks force that step even when the flag is false. After
-server restart the dispatcher can mark it stale. If the one-time Init already
-completed and indexes were requested or required by subscriptions, reconnect
-restore sends `GetMarketsIndexes` again automatically. Until the fresh response
-arrives, `EventDispatcher` drops orderbook/trades packets that depend on server
-indexes.
+The one-time Init always fetches the initial map. After server restart the
+dispatcher can mark it stale. If the one-time Init already completed, reconnect
+restore sends `GetMarketsIndexes` again automatically and then refreshes prices
+with `UpdateMarketsList`. Until the fresh response arrives, `EventDispatcher`
+drops orderbook/trades packets that depend on server indexes.
 Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
 

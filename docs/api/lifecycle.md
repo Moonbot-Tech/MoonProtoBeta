@@ -2,8 +2,9 @@
 
 `LifecycleEvent` reports connection state and critical transport conditions.
 Init is run once per `Client` session. Before that Init, transport handshakes do
-not emit Engine API. After Init, the library performs reconnect restore for the
-market indexes required by indexed streams and for registry subscriptions.
+not emit Engine API. After Init, reconnect restore refreshes market indexes,
+then sends `UpdateMarketsList`, and replays only the registry subscriptions the
+application requested.
 
 ## Enum
 
@@ -42,9 +43,9 @@ client.on_lifecycle(Box::new(|event| match event {
 |---|---|---|
 | `Connecting` | A handshake attempt has started. | Update connection indicator. |
 | `Connected { fresh: true }` | First successful authorization for this `Client`. | Run the one-time init if not already done. |
-| `Connected { fresh: false }` | Re-handshake after reconnect. | UI only; the library restores saved Init/subscription intent. |
+| `Connected { fresh: false }` | Re-handshake after reconnect. | UI only; the library restores indexes/market refresh and saved subscriptions. |
 | `Reconnecting` | Traffic was silent long enough to trigger soft reconnect. | UI only. |
-| `ServerRestart` | Server app token changed. | UI only; after reconnect the library refetches required indexes and replays subscriptions from saved intent. |
+| `ServerRestart` | Server app token changed. | UI only; after reconnect the library refetches indexes, refreshes markets, and replays saved subscriptions. |
 | `Disconnected` | Explicit shutdown through `client.disconnect()`. | Treat the client as finished. |
 | `BindFailed` | UDP bind failed across the full port-rotation range for at least 15 seconds; repeat events are throttled to about 50 seconds. | Show OS/network permission or port exhaustion alert. The library keeps retrying. |
 

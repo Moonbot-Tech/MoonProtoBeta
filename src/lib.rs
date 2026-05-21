@@ -37,11 +37,6 @@
 //! }));
 //!
 //! let init = InitConfig {
-//!     base_check: true,
-//!     auth_check: true,
-//!     fetch_markets: true,
-//!     fetch_indexes: true,
-//!     fetch_balance: true,
 //!     subscribe_trades: Some(false),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()

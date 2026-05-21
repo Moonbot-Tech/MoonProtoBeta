@@ -210,12 +210,9 @@ fn main() {
     log_line(
         &mut log,
         t0,
-        "[INIT] BaseCheck/AuthCheck/GetMarketsList + trades subscription",
+        "[INIT] BaseCheck/AuthCheck/markets/indexes/balance + optional trades subscription",
     );
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
         subscribe_trades: Some(false),
         ..Default::default()
     };

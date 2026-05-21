@@ -152,8 +152,7 @@ these responses.
 ## ServerInfo
 
 `BaseCheck` may return server identity fields used by multi-server applications.
-`connect_and_init` and `run_init_sequence` parse and store this automatically
-when `base_check` is enabled:
+`connect_and_init` and `run_init_sequence` parse and store this automatically:
 
 ```rust
 let info = client.server_info();

@@ -80,9 +80,6 @@ fn main() {
     }
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
         step_timeout: None,
         ..Default::default()
     };

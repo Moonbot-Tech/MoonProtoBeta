@@ -34,9 +34,6 @@ Run `BaseCheck` during init to fill `client.server_info()`:
 use moonproto::{connect_and_init, ConnectConfig, InitConfig};
 
 let init = InitConfig {
-    base_check: true,
-    auth_check: true,
-    fetch_markets: true,
     ..Default::default()
 };
 connect_and_init(

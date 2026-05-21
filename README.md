@@ -47,11 +47,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
-        fetch_indexes: true,
-        fetch_balance: true,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         ..Default::default()
@@ -102,9 +97,11 @@ completes, reconnect restore is owned by the library.
 `run_with_dispatcher` is the main high-level entry point. It dispatches incoming
 payloads into typed events and performs library-owned transport/read-model work:
 
-- fetching market indexes during init when requested or required by subscriptions;
-- restoring saved markets/index/subscription intent after reconnect without a
-  second Init;
+- running mandatory init through `connect_and_init` / `run_init_sequence`:
+  BaseCheck, AuthCheck, markets, indexes, market prices, balance refresh, orders,
+  strategies, and settings;
+- restoring market indexes, refreshing prices, and replaying saved subscriptions
+  after reconnect without a second Init;
 - blocking orderbook/trades packets until indexes are synchronized;
 - sending `RequestOrderBookFull` when a gap requires a full snapshot;
 - ticking trades gap recovery and sending resend requests;
@@ -184,8 +181,8 @@ client.new_order(ctx, "BTCUSDT", false, 50_000.0, 0, 0.001);
 ```
 
 `random_trade_ctx` returns `TradeContextError` until `BaseCheck` has filled
-`client.server_info()`. `connect_and_init` does this when `base_check` is
-enabled. For actions on existing orders, use tracked-order wrappers such as
+`client.server_info()`. `connect_and_init` always does this during the mandatory
+init sequence. For actions on existing orders, use tracked-order wrappers such as
 `cancel_tracked_order` and `replace_tracked_order`.
 
 ## Subscriptions
@@ -207,13 +204,11 @@ thread, clone `client.sender()` and call the same typed methods on `ClientSender
 Create one `Client` and one `EventDispatcher` per server. State, sockets,
 pending API responses, subscriptions, and server-time delta are per client.
 
-After `connect_and_init` with `base_check` enabled, `client.server_info()`
-contains the optional server identity returned by `BaseCheck`: bot id, server
+After `connect_and_init`, `client.server_info()` contains the optional server
+identity returned by `BaseCheck`: bot id, server
 name, exchange name, base currency, and version fields.
 
 See `docs/api/multi_server.md`.
-
-See also `docs/api/library_decisions.md` for the session/init contract.
 
 ## Transport Modes
 

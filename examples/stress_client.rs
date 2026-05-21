@@ -1130,11 +1130,6 @@ fn run_one_client(
     }
 
     let init = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
-        fetch_indexes: true,
-        fetch_balance: true,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec![args.market.clone()],
@@ -1144,7 +1139,7 @@ fn run_one_client(
         Ok(result) => {
             stats.init_ok.store(true, Ordering::Relaxed);
             for err in &result.errors {
-                println!("[{label}] init non-critical error: {err}");
+                println!("[{label}] init note: {err}");
             }
             println!(
                 "[{label}] init ok base={} auth={} markets={}B",
