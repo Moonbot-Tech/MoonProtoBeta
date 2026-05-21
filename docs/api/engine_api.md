@@ -19,6 +19,9 @@ let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(
 The one-shot helpers keep pumping the UDP loop through short
 `run_with_dispatcher` ticks, validate `EngineResponse::success`, and parse the
 method-specific payload. They return `EngineRequestError`.
+Any other events produced during that wait are queued in
+`EventDispatcher::queued_events()`; call `take_queued_events()` after the helper
+when the application has live subscriptions and needs the notifications.
 
 For custom flows, use the lower-level receiver path:
 

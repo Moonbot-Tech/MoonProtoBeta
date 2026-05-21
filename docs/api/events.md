@@ -93,6 +93,27 @@ println!("markets={}", dispatcher.markets().market_count());
 
 The dispatcher updates these states automatically when relevant packets arrive.
 
+## Queued One-Shot Events
+
+One-shot helpers such as `Client::request_balance`,
+`Client::request_client_settings`, `Client::request_order_snapshot`,
+`Client::request_balance_snapshot`, and `Client::run_until_response` keep the
+UDP loop running while they wait. If unrelated packets arrive during that wait,
+their state changes are applied immediately and the produced `Event` values are
+stored in the dispatcher:
+
+```rust
+let settings = client.request_client_settings(&mut dispatcher, timeout)?;
+for event in dispatcher.take_queued_events() {
+    handle_event(event);
+}
+```
+
+Use `queued_events()` for a borrowed view, `queued_event_count()` for metrics,
+`take_queued_events()` to drain, and `clear_queued_events()` to discard.
+`Client::run_with_dispatcher` does not use this queue because it delivers events
+directly to its callback.
+
 ## Channel Behavior
 
 | Command | Dispatcher behavior |

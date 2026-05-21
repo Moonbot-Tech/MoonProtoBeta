@@ -72,7 +72,9 @@
 //! For common one-shot Engine API operations, use typed helpers such as
 //! [`Client::request_balance`], [`Client::request_hedge_mode`], and
 //! [`Client::request_coin_card_candles`]. They keep the client loop running,
-//! check the server status, and parse the response payload.
+//! check the server status, and parse the response payload. Events observed
+//! during the wait are queued in [`EventDispatcher::queued_events`] and can be
+//! drained with [`EventDispatcher::take_queued_events`].
 //!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.
 //! In a single-threaded caller, wait for those receivers through

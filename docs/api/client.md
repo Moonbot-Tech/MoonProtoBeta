@@ -134,6 +134,18 @@ These helpers send the request, keep the UDP loop running through
 return `EngineRequestError` for timeout, disconnect, server error, or malformed
 payload.
 
+If packets from active subscriptions arrive while a one-shot helper is waiting,
+the helper still applies them to `EventDispatcher` and stores the produced
+notifications in `dispatcher.queued_events()`. Drain them after the helper when
+the UI needs every event:
+
+```rust
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+for event in dispatcher.take_queued_events() {
+    handle_event(event);
+}
+```
+
 Lower-level `Client::api_*` methods still return
 `std::sync::mpsc::Receiver<EngineResponse>` for custom async flows:
 
@@ -146,6 +158,8 @@ Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
 The response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the
 client.
+`run_until_response` uses the same queued-event behavior as typed one-shot
+helpers.
 
 Use `request_engine_response` when a custom Engine API payload needs
 caller-scoped timeout cleanup. Raw `api_*` receivers keep their pending slot

@@ -133,6 +133,17 @@ and removes it on timeout. The lower-level receiver path keeps the slot until a
 matching response arrives, a reconnect clears the session, or the same UID is
 registered again.
 
+Events produced while a one-shot helper is waiting are stored in
+`EventDispatcher::queued_events()`. Drain them after the helper if the
+application has active subscriptions and needs every notification:
+
+```rust
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+for event in dispatcher.take_queued_events() {
+    handle_event(event);
+}
+```
+
 UI settings use the UI channel rather than Engine API pending responses:
 
 ```rust

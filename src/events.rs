@@ -176,6 +176,13 @@ pub struct EventDispatcher {
     /// `CreateFromStrats(Strats)` response.
     strategy_snapshot_provider:
         Option<Box<dyn FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static>>,
+    /// Events produced while a one-shot helper is pumping the client loop.
+    ///
+    /// Long-running `Client::run_with_dispatcher` delivers events directly to its
+    /// callback. One-shot helpers (`run_until_response`, `request_*`) have no
+    /// callback argument, so they store produced events here for the application
+    /// to drain after the helper returns.
+    queued_events: Vec<Event>,
 }
 
 impl EventDispatcher {
@@ -205,6 +212,35 @@ impl EventDispatcher {
     /// `markets().indexes_synchronized` — ключевой инвариант active library
     /// (gating флаг для TradesStream/OrderBook парсинга).
     pub fn markets(&self) -> &MarketsState { &self.markets }
+
+    /// Events produced by one-shot helpers and not yet drained by the
+    /// application.
+    ///
+    /// `Client::run_with_dispatcher` delivers events to its callback immediately
+    /// and does not use this queue. The queue is only for helper-driven waits
+    /// such as `Client::run_until_response`, `request_client_settings`,
+    /// `request_order_snapshot`, and typed `request_*` Engine API helpers.
+    pub fn queued_events(&self) -> &[Event] { &self.queued_events }
+
+    /// Number of currently queued one-shot events.
+    pub fn queued_event_count(&self) -> usize { self.queued_events.len() }
+
+    /// Remove and return events accumulated during one-shot waits.
+    pub fn take_queued_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.queued_events)
+    }
+
+    /// Drop queued one-shot events without processing them.
+    pub fn clear_queued_events(&mut self) {
+        self.queued_events.clear();
+    }
+
+    pub(crate) fn queue_events<I>(&mut self, events: I)
+    where
+        I: IntoIterator<Item = Event>,
+    {
+        self.queued_events.extend(events);
+    }
 
     /// Periodic tick для `TradesState` gap recovery — генерирует `TradesResend`
     /// payload'ы для пропущенных packet num'ов, закрывает старые buckets.

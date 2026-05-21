@@ -737,17 +737,31 @@ pub(crate) enum RunMode<'a> {
 pub(crate) enum DispatcherEventFn {
     EventOnly(EventFn),
     EventWithState(EventWithStateFn),
+    Queue,
 }
 
 impl DispatcherEventFn {
-    fn call(
+    fn drain_events(
         &mut self,
-        event: &crate::events::Event,
-        dispatcher: &crate::events::EventDispatcher,
+        events: &mut Vec<crate::events::Event>,
+        dispatcher: &mut crate::events::EventDispatcher,
     ) {
         match self {
-            Self::EventOnly(cb) => cb(event),
-            Self::EventWithState(cb) => cb(event, dispatcher),
+            Self::EventOnly(cb) => {
+                for event in events.iter() {
+                    cb(event);
+                }
+                events.clear();
+            }
+            Self::EventWithState(cb) => {
+                for event in events.iter() {
+                    cb(event, dispatcher);
+                }
+                events.clear();
+            }
+            Self::Queue => {
+                dispatcher.queue_events(events.drain(..));
+            }
         }
     }
 }
@@ -2049,7 +2063,7 @@ impl Client {
             };
 
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+            self.run_with_dispatcher_queued(tick, dispatcher);
         }
     }
 
@@ -2230,7 +2244,7 @@ impl Client {
             };
 
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+            self.run_with_dispatcher_queued(tick, dispatcher);
         }
     }
 
@@ -2445,29 +2459,26 @@ impl Client {
 
         let previous_epoch = dispatcher.balances().last_epoch;
         let start = Instant::now();
-        let snapshot_seen = Arc::new(AtomicBool::new(false));
         self.balance_request_refresh();
 
         loop {
-            if snapshot_seen.load(Ordering::Relaxed) {
-                return Ok(dispatcher.balances().clone());
-            }
-
             let Some(remaining) = timeout_remaining(start, timeout) else {
                 return Err(mpsc::RecvTimeoutError::Timeout);
             };
 
-            let seen = Arc::clone(&snapshot_seen);
+            let first_new_event = dispatcher.queued_event_count();
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher(tick, dispatcher, Box::new(move |event| {
-                if let crate::events::Event::Balance(
-                    crate::state::BalanceEvent::SnapshotApplied { epoch, .. }
-                ) = event {
-                    if *epoch != previous_epoch {
-                        seen.store(true, Ordering::Relaxed);
-                    }
-                }
-            }));
+            self.run_with_dispatcher_queued(tick, dispatcher);
+            if dispatcher.queued_events()[first_new_event..].iter().any(|event| {
+                matches!(
+                    event,
+                    crate::events::Event::Balance(
+                        crate::state::BalanceEvent::SnapshotApplied { epoch, .. }
+                    ) if *epoch != previous_epoch
+                )
+            }) {
+                return Ok(dispatcher.balances().clone());
+            }
         }
     }
 
@@ -2607,6 +2618,20 @@ impl Client {
         self.run_inner(duration, mode);
     }
 
+    fn run_with_dispatcher_queued(
+        &mut self,
+        duration: Duration,
+        dispatcher: &mut crate::events::EventDispatcher,
+    ) {
+        let mode = RunMode::Dispatcher {
+            dispatcher,
+            on_event: DispatcherEventFn::Queue,
+            event_buf: Vec::with_capacity(8),
+            payload_buf: Vec::with_capacity(4),
+        };
+        self.run_inner(duration, mode);
+    }
+
     /// Ждать ответ из `Receiver<T>` пока крутит UDP main loop тиками.
     ///
     /// `Client::api_*` методы возвращают `mpsc::Receiver<T>`, но response
@@ -2614,10 +2639,14 @@ impl Client {
     /// в том же thread'е что владеет Client'ом обычно timeout'ит — main loop
     /// стоит во время блокирующего wait, UDP пакеты не парсятся.
     ///
-    /// Этот helper решает проблему: крутит короткие `run_with_dispatcher` тики
-    /// (~50мс) до получения значения, disconnect'а или общего timeout.
-    /// Работает с любым `Receiver<T>` — Engine API responses, candles aggregator,
-    /// custom registry slots.
+    /// Этот helper решает проблему: крутит короткие dispatcher тики (~50мс)
+    /// до получения значения, disconnect'а или общего timeout. События,
+    /// возникшие пока helper ждёт, складываются в
+    /// [`EventDispatcher::queued_events`](crate::events::EventDispatcher::queued_events)
+    /// и могут быть забраны через
+    /// [`EventDispatcher::take_queued_events`](crate::events::EventDispatcher::take_queued_events).
+    /// Работает с любым `Receiver<T>` — Engine API responses, candles
+    /// aggregator, custom registry slots.
     ///
     /// **Pattern**:
     /// ```ignore
@@ -2644,7 +2673,7 @@ impl Client {
                 return Err(mpsc::RecvTimeoutError::Timeout);
             };
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher(tick, dispatcher, Box::new(|_| {}));
+            self.run_with_dispatcher_queued(tick, dispatcher);
         }
     }
 
@@ -2899,9 +2928,7 @@ impl Client {
                 for (c, p) in payload_buf.drain(..) {
                     event_buf.clear();
                     dispatcher.dispatch_into_active(c, &p, cur_tm, event_buf, self);
-                    for ev in event_buf.iter() {
-                        on_event.call(ev, dispatcher);
-                    }
+                    on_event.drain_events(event_buf, dispatcher);
                 }
             }
         }
@@ -2922,9 +2949,7 @@ impl Client {
                 }
                 event_buf.clear();
                 event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
-                for ev in event_buf.iter() {
-                    on_event.call(ev, dispatcher);
-                }
+                on_event.drain_events(event_buf, dispatcher);
             }
         }
     }
@@ -4563,11 +4588,7 @@ pub fn connect_and_init(
     cfg: ConnectConfig,
 ) -> Result<InitResult, ConnectError> {
     if !client.is_authorized() {
-        client.run_with_dispatcher(
-            cfg.connect_timeout,
-            dispatcher,
-            Box::new(|_| {}),
-        );
+        client.run_with_dispatcher_queued(cfg.connect_timeout, dispatcher);
     }
 
     if !client.is_authorized() {
@@ -5031,6 +5052,44 @@ mod api_pending_dispatch_tests {
             .expect("ready response should be returned without touching timeout arithmetic");
 
         assert_eq!(value, 123);
+    }
+
+    #[test]
+    fn run_until_response_queues_events_seen_while_waiting() {
+        let mut client = Client::new(dummy_cfg());
+        client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+        client.need_connect = false;
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+
+        let request_uid = 0x55AA;
+        let rx = client.api_pending.register(request_uid);
+        let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+        client.event_tx.send(ClientEvent::Recv(RecvMsg {
+            cmd: Command::API as u8,
+            payload,
+            recv_bytes: 64,
+            timestamp_ms: client.now_ms(),
+            epoch: client.current_reader_epoch,
+        })).unwrap();
+
+        let mut dispatcher = EventDispatcher::new();
+        let resp = client
+            .run_until_response(&mut dispatcher, &rx, Duration::from_millis(200))
+            .expect("pending response should be delivered while the loop is pumped");
+
+        assert_eq!(resp.request_uid, request_uid);
+        assert_eq!(dispatcher.queued_event_count(), 1);
+
+        let queued = dispatcher.take_queued_events();
+        assert_eq!(dispatcher.queued_event_count(), 0);
+        match &queued[0] {
+            crate::events::Event::EngineResponse(event_resp) => {
+                assert_eq!(event_resp.request_uid, request_uid);
+                assert_eq!(event_resp.method, EngineMethod::AuthCheck);
+            }
+            other => panic!("expected queued EngineResponse, got {other:?}"),
+        }
     }
 }
 

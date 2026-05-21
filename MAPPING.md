@@ -412,6 +412,7 @@
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 | E-W9 | Однопоточный SendAndWait-style Engine API flow без ручного `Receiver` wait/parsing | client.rs:`request_engine_response` + typed `request_*` helpers | ✅ |
 | E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence` | ✅ |
+| E-W11 | Rust active API: one-shot ожидания не теряют typed events, пришедшие пока helper крутит loop | events.rs:`EventDispatcher::queued_events`/`take_queued_events`; client.rs:`run_with_dispatcher_queued` используется `run_until_response` и one-shot helpers | ✅ |
 
 ---
 

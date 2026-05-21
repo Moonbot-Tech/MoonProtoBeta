@@ -69,6 +69,8 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 - Detects trades gaps and sends `TradesResend` requests on periodic ticks.
 - Routes Engine API responses into one-shot `request_*` helpers or the
   `Receiver` returned by lower-level `api_*` calls.
+- Queues events produced during one-shot waits in `EventDispatcher` so
+  notifications are not lost while the helper owns the run loop.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the optional NTP sync thread when `ClientConfig::ntp_host` is set.
 - Aggregates chunked candle responses through `api_request_candles_data_async`.
