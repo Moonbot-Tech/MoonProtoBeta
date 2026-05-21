@@ -223,6 +223,7 @@
 | OB11 | MoonProtoEngine.pas:ProcessOrderBookPacket normal gap | Add gap packet; if cache expired OR count > 64 then Corrupted=true + TryRequestFull; cache is not cleared | state/order_books.rs:gap branch | ✅ |
 | OB12 | MoonProtoOrderBook.pas:MoonProto_TryApplyCached | Drop stale cached packets, apply exact ExpectedSeq chain, stop at next gap | state/order_books.rs:drain_cache | ✅ |
 | OB13 | MoonProtoEngine.pas:ProcessOrderBookPacket | `SrvMarkets.FindByServerIndex(marketIndex) = nil` → drop packet before cache/apply | events.rs:OrderBook dispatch checks `MarketsState::has_server_market_index` | ✅ |
+| OB14 | MoonProtoOrderBook.pas:MoonProto_ReadAndApplyFull/MoonProto_ReadAndApplyDiff + EngineBase.pas:ApplyOrderBookDiffKeepZero | Full replaces applied book; Diff merges sorted levels, `Quantity=0` deletes, opposite-side shrink truncates crossed levels; applied state uses double precision | state/order_books.rs:OrderBookSnapshot + apply_full_book/apply_diff_book | ✅ |
 
 ---
 

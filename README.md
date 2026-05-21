@@ -221,6 +221,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/balance_snapshot.rs` — request the current full balance snapshot.
 - `examples/trades_stream.rs` — subscribe to the trades stream and resolve market names.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.
+- `examples/order_book_top.rs` — subscribe to one orderbook and print best bid/ask from the applied read model.
 - `examples/market_refresh.rs` — observe automatic market refresh events.
 - `examples/multi_client_test.rs` — two independent clients in one process.
 

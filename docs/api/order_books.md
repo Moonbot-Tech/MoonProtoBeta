@@ -2,7 +2,7 @@
 
 The orderbook channel delivers full snapshots and diffs for subscribed markets.
 Use the high-level subscription API and `EventDispatcher`; the library handles
-cache ordering and full-snapshot recovery.
+cache ordering, full-snapshot recovery, and the applied current-book read model.
 
 ## Subscribe
 
@@ -50,6 +50,23 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 `run_with_dispatcher`, the actual `emk_RequestOrderBookFull` request is already
 sent by the library.
 
+The dispatcher applies each `Apply` event before invoking the callback. If the
+UI needs the current book, prefer `run_with_dispatcher_state` and read it from
+`state.order_books()`:
+
+```rust
+use moonproto::{Event, EventDispatcher};
+use moonproto::state::{OrderBookEvent, OrderBookKind};
+
+client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+    if let Event::OrderBook(OrderBookEvent::Apply { market_index, book_kind, .. }) = event {
+        let Some(kind) = OrderBookKind::from_u8(*book_kind) else { return; };
+        let Some(top) = state.order_books().top_of_book(*market_index, kind) else { return; };
+        println!("bid={:?} ask={:?}", top.bid, top.ask);
+    }
+}));
+```
+
 ## Public Types
 
 ```rust
@@ -72,6 +89,24 @@ pub struct OrderLevel {
     pub quantity: f32,
 }
 
+pub struct OrderBookLevel {
+    pub rate: f64,
+    pub quantity: f64,
+}
+
+pub struct OrderBookSnapshot {
+    pub market_index: u16,
+    pub book_kind: u8,
+    pub seq: u16,
+    pub buys: Vec<OrderBookLevel>,
+    pub sells: Vec<OrderBookLevel>,
+}
+
+pub struct TopOfBook {
+    pub bid: Option<OrderBookLevel>,
+    pub ask: Option<OrderBookLevel>,
+}
+
 pub enum OrderBookEvent {
     Apply {
         market_index: u16,
@@ -85,6 +120,10 @@ pub enum OrderBookEvent {
     Ignored { market_index: u16, book_kind: u8, seq: u16, reason: ApplyResult },
 }
 ```
+
+Wire updates use `OrderLevel` (`f32`) because the protocol writes Delphi
+`Single` values. `OrderBookSnapshot` stores applied levels as `f64`, matching
+Delphi `TOrderGlass` state.
 
 ## Recovery Behavior
 

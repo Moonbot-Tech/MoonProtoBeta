@@ -21,7 +21,10 @@ pub mod settings;
 pub mod markets;
 
 pub use orders::{Orders, Order, OrderEvent, ApplyResult, SellReason};
-pub use order_books::{OrderBooks, OrderBookEvent, ApplyResult as OrderBookApplyResult, OrderBookKind};
+pub use order_books::{
+    OrderBooks, OrderBookEvent, ApplyResult as OrderBookApplyResult, OrderBookKind,
+    OrderBookLevel, OrderBookSnapshot, TopOfBook,
+};
 pub use trades::{TradesState, TradesEvent, parse_trades_resend_response};
 pub use balances::{BalancesState, BalanceEvent, GlobalBalance};
 pub use strats::{StratsState, StratEvent, StrategyInfo};
