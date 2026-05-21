@@ -29,10 +29,8 @@ use moonproto::commands::engine_api::{
     parse_api_expiration_time_response, EngineMethod, EngineResponse, ServerInfo,
 };
 use moonproto::commands::market::parse_token_tags_response;
-use moonproto::commands::{
-    parse_get_balance_response, parse_query_hedge_mode_response,
-};
 use moonproto::commands::ui::ClientSettingsCommand;
+use moonproto::commands::{parse_get_balance_response, parse_query_hedge_mode_response};
 use moonproto::events::{Event, EventDispatcher};
 use moonproto::key_import;
 use moonproto::state::{OrderBookEvent, TradesEvent};
@@ -295,7 +293,7 @@ fn schedule_safe_burst(
         client.api_check_binance_tags(),
     );
 
-    if burst_no % 3 == 0 {
+    if burst_no.is_multiple_of(3) {
         push_pending(
             pending,
             stats,
@@ -329,11 +327,15 @@ fn schedule_safe_burst(
     client.ui_settings_request();
     stats.settings_requests.fetch_add(1, Ordering::Relaxed);
     client.balance_request_refresh();
-    stats.balance_refresh_requests.fetch_add(1, Ordering::Relaxed);
+    stats
+        .balance_refresh_requests
+        .fetch_add(1, Ordering::Relaxed);
 
-    if burst_no % 4 == 0 {
+    if burst_no.is_multiple_of(4) {
         client.strat_snapshot_request();
-        stats.strat_snapshot_requests.fetch_add(1, Ordering::Relaxed);
+        stats
+            .strat_snapshot_requests
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -373,11 +375,7 @@ fn drain_pending(label: &str, pending: &mut VecDeque<PendingApi>, stats: &Shared
     *pending = kept;
 }
 
-fn drain_pending_candles(
-    label: &str,
-    pending: &mut VecDeque<PendingCandles>,
-    stats: &SharedStats,
-) {
+fn drain_pending_candles(label: &str, pending: &mut VecDeque<PendingCandles>, stats: &SharedStats) {
     let now = Instant::now();
     let mut kept = VecDeque::with_capacity(pending.len());
 
@@ -389,7 +387,9 @@ fn drain_pending_candles(
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 if now.duration_since(item.sent_at) >= CANDLES_TIMEOUT {
-                    stats.candles_chunked_timeout.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .candles_chunked_timeout
+                        .fetch_add(1, Ordering::Relaxed);
                     println!("[{label}] chunked candles timeout");
                 } else {
                     kept.push_back(item);
@@ -417,14 +417,20 @@ fn validate_response(label: &str, resp: &EngineResponse, stats: &SharedStats) {
                 }
             } else if resp.success {
                 stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
-                println!("[{label}] malformed GetBalance response: {} bytes", resp.data.len());
+                println!(
+                    "[{label}] malformed GetBalance response: {} bytes",
+                    resp.data.len()
+                );
             }
         }
-        EngineMethod::QueryHedgeMode => {
-            if parse_query_hedge_mode_response(&resp.data).is_none() && resp.success {
-                stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
-                println!("[{label}] malformed QueryHedgeMode response: {} bytes", resp.data.len());
-            }
+        EngineMethod::QueryHedgeMode
+            if parse_query_hedge_mode_response(&resp.data).is_none() && resp.success =>
+        {
+            stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+            println!(
+                "[{label}] malformed QueryHedgeMode response: {} bytes",
+                resp.data.len()
+            );
         }
         EngineMethod::CheckAPIExpirationTime => {
             if let Some(expiration) = parse_api_expiration_time_response(&resp.data) {
@@ -552,11 +558,7 @@ fn validate_chunked_candles(label: &str, merged: &MergedCandles, stats: &SharedS
     }
 }
 
-fn validate_settings_snapshot(
-    label: &str,
-    settings: &ClientSettingsCommand,
-    stats: &SharedStats,
-) {
+fn validate_settings_snapshot(label: &str, settings: &ClientSettingsCommand, stats: &SharedStats) {
     let floats64 = [settings.fixed_sell_price, settings.g_take_profit];
     let floats32 = [
         settings.price_drop_level,
@@ -687,21 +689,12 @@ fn validate_order_compact(
         stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
         println!(
             "[{label}] invalid order uid={} side={} qty={} remain={} actual={} mean={}",
-            uid,
-            side,
-            quantity,
-            quantity_remaining,
-            actual_price,
-            mean_price
+            uid, side, quantity, quantity_remaining, actual_price, mean_price
         );
     }
 }
 
-fn validate_order_snapshot(
-    label: &str,
-    orders: &[moonproto::state::Order],
-    stats: &SharedStats,
-) {
+fn validate_order_snapshot(label: &str, orders: &[moonproto::state::Order], stats: &SharedStats) {
     for order in orders {
         if order.market_name.is_empty()
             || !order.vstop_level.is_finite()
@@ -740,18 +733,16 @@ fn record_helper_error(
     }
 }
 
-fn drain_helper_queued_events(
-    label: &str,
-    dispatcher: &mut EventDispatcher,
-    stats: &SharedStats,
-) {
+fn drain_helper_queued_events(label: &str, dispatcher: &mut EventDispatcher, stats: &SharedStats) {
     let events = dispatcher.take_queued_events();
     if events.is_empty() {
         return;
     }
 
     let count = events.len() as u64;
-    stats.helper_queued_events.fetch_add(count, Ordering::Relaxed);
+    stats
+        .helper_queued_events
+        .fetch_add(count, Ordering::Relaxed);
     record_max(&stats.helper_max_queued_events, count);
     for event in &events {
         handle_event(label, event, stats);
@@ -899,36 +890,34 @@ fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
             }
             _ => {}
         },
-        Event::OrderBook(book) => match book {
-            OrderBookEvent::Apply {
-                is_full,
-                buys,
-                sells,
-                market_index,
-                seq,
-                ..
-            } => {
-                stats.orderbook_apply.fetch_add(1, Ordering::Relaxed);
-                if *is_full {
-                    stats.orderbook_full.fetch_add(1, Ordering::Relaxed);
-                }
-                for level in buys.iter().chain(sells.iter()) {
-                    if !level.rate.is_finite()
-                        || !level.quantity.is_finite()
-                        || level.rate <= 0.0
-                        || level.quantity < 0.0
-                    {
-                        stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
-                        println!(
-                            "[{label}] invalid orderbook idx={} seq={} price={} qty={}",
-                            market_index, seq, level.rate, level.quantity
-                        );
-                        return;
-                    }
+        Event::OrderBook(OrderBookEvent::Apply {
+            is_full,
+            buys,
+            sells,
+            market_index,
+            seq,
+            ..
+        }) => {
+            stats.orderbook_apply.fetch_add(1, Ordering::Relaxed);
+            if *is_full {
+                stats.orderbook_full.fetch_add(1, Ordering::Relaxed);
+            }
+            for level in buys.iter().chain(sells.iter()) {
+                if !level.rate.is_finite()
+                    || !level.quantity.is_finite()
+                    || level.rate <= 0.0
+                    || level.quantity < 0.0
+                {
+                    stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                    println!(
+                        "[{label}] invalid orderbook idx={} seq={} price={} qty={}",
+                        market_index, seq, level.rate, level.quantity
+                    );
+                    return;
                 }
             }
-            _ => {}
-        },
+        }
+        Event::OrderBook(_) => {}
         Event::Balance(_) => {
             stats.balance_events.fetch_add(1, Ordering::Relaxed);
         }
@@ -998,17 +987,23 @@ fn run_one_client(
         client.on_lifecycle(Box::new(move |event| match event {
             LifecycleEvent::Connected { fresh: true } => {
                 stats.authorized.store(true, Ordering::Relaxed);
-                stats.lifecycle_connected_fresh.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .lifecycle_connected_fresh
+                    .fetch_add(1, Ordering::Relaxed);
             }
             LifecycleEvent::Connected { fresh: false } => {
                 stats.authorized.store(true, Ordering::Relaxed);
-                stats.lifecycle_connected_again.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .lifecycle_connected_again
+                    .fetch_add(1, Ordering::Relaxed);
             }
             LifecycleEvent::Reconnecting => {
                 stats.lifecycle_reconnecting.fetch_add(1, Ordering::Relaxed);
             }
             LifecycleEvent::ServerRestart => {
-                stats.lifecycle_server_restart.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .lifecycle_server_restart
+                    .fetch_add(1, Ordering::Relaxed);
             }
             LifecycleEvent::BindFailed { .. } => {
                 stats.lifecycle_bind_failed.fetch_add(1, Ordering::Relaxed);
@@ -1036,6 +1031,7 @@ fn run_one_client(
         base_check: true,
         auth_check: true,
         fetch_markets: true,
+        fetch_indexes: true,
         fetch_balance: true,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
@@ -1167,13 +1163,19 @@ fn run_one_client(
     }
     for _ in pending_candles {
         println!("[{label}] chunked candles pending at shutdown");
-        stats.candles_chunked_timeout.fetch_add(1, Ordering::Relaxed);
+        stats
+            .candles_chunked_timeout
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     stop_churn.store(true, Ordering::Relaxed);
     let _ = churn.join();
     client.disconnect();
-    client.run_with_dispatcher(Duration::from_millis(200), &mut dispatcher, Box::new(|_| {}));
+    client.run_with_dispatcher(
+        Duration::from_millis(200),
+        &mut dispatcher,
+        Box::new(|_| {}),
+    );
     println!(
         "[{label}] done status={:?} ping={} sent={} recv={}",
         client.auth_status(),
@@ -1342,7 +1344,9 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
 
     println!("========== VERDICT ==========");
     if ok {
-        println!("PASS: two clients stayed authorized, streamed data, and completed queued API load.");
+        println!(
+            "PASS: two clients stayed authorized, streamed data, and completed queued API load."
+        );
     } else {
         println!("FAIL: see counters above.");
     }
@@ -1369,7 +1373,7 @@ fn main() {
     let stats_b = Arc::new(SharedStats::default());
     let args_a = args.clone();
     let args_b = args;
-    let keys_a = keys.clone();
+    let keys_a = keys;
     let keys_b = keys;
     let stats_a_thread = Arc::clone(&stats_a);
     let stats_b_thread = Arc::clone(&stats_b);

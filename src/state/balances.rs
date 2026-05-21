@@ -17,8 +17,8 @@
 //! В Delphi epoch для incremental проверяется на уровне отдельного рынка
 //! (`m.LastBalanceEpoch`), а full snapshot не проходит через общий epoch-gate.
 
-use std::collections::HashMap;
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
+use std::collections::HashMap;
 
 const BALANCE_EPS: f64 = 0.00000001;
 
@@ -62,7 +62,11 @@ pub enum BalanceEvent {
     /// Применён full snapshot (cmd_id=3): N маркетов получили данные, остальные сброшены в default.
     SnapshotApplied { count: usize, epoch: u16 },
     /// Применён incremental update: N маркетов изменилось, globals обновлены если global_changed=true.
-    IncrementalApplied { count: usize, epoch: u16, global_changed: bool },
+    IncrementalApplied {
+        count: usize,
+        epoch: u16,
+        global_changed: bool,
+    },
     /// Команда распознана, но Delphi-клиент не применяет её к balance state.
     Ignored { cmd_id: u8, epoch: u16 },
     /// Epoch не прошёл (старее last_epoch wrap-safe).
@@ -102,14 +106,17 @@ impl BalancesState {
     }
 
     fn preserve_max_value(mut item: BalanceItem, previous_max_value: Option<f64>) -> BalanceItem {
-        if !(item.max_value > BALANCE_EPS) {
+        if item.max_value.partial_cmp(&BALANCE_EPS) != Some(std::cmp::Ordering::Greater) {
             item.max_value = previous_max_value.unwrap_or(0.0);
         }
         item
     }
 
     fn prepare_item_for_apply(&self, item: BalanceItem) -> BalanceItem {
-        let previous_max_value = self.by_market.get(&item.market_name).map(|prev| prev.max_value);
+        let previous_max_value = self
+            .by_market
+            .get(&item.market_name)
+            .map(|prev| prev.max_value);
         Self::preserve_max_value(item, previous_max_value)
     }
 
@@ -138,10 +145,16 @@ impl BalancesState {
     /// `MoonProtoFunc.pas:188-203`, применяется per-market как в Delphi.
     pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
         match upd.cmd_id {
-            2 => BalanceEvent::Ignored { cmd_id: upd.cmd_id, epoch: upd.epoch },
+            2 => BalanceEvent::Ignored {
+                cmd_id: upd.cmd_id,
+                epoch: upd.epoch,
+            },
             3 => self.apply_full_snapshot(upd),
             4 => self.apply_incremental(upd),
-            _ => BalanceEvent::Ignored { cmd_id: upd.cmd_id, epoch: upd.epoch },
+            _ => BalanceEvent::Ignored {
+                cmd_id: upd.cmd_id,
+                epoch: upd.epoch,
+            },
         }
     }
 
@@ -159,16 +172,25 @@ impl BalancesState {
         let mut new_map: HashMap<String, BalanceItem> = HashMap::new();
         let count = upd.items.len();
         for it in upd.items {
-            let previous_max_value = new_map.get(&it.market_name)
+            let previous_max_value = new_map
+                .get(&it.market_name)
                 .map(|prev| prev.max_value)
-                .or_else(|| self.by_market.get(&it.market_name).map(|prev| prev.max_value));
+                .or_else(|| {
+                    self.by_market
+                        .get(&it.market_name)
+                        .map(|prev| prev.max_value)
+                });
             let it = Self::preserve_max_value(it, previous_max_value);
-            self.last_epoch_by_market.insert(it.market_name.clone(), upd.epoch);
+            self.last_epoch_by_market
+                .insert(it.market_name.clone(), upd.epoch);
             new_map.insert(it.market_name.clone(), it);
         }
         self.by_market = new_map;
         self.last_epoch = upd.epoch;
-        BalanceEvent::SnapshotApplied { count, epoch: upd.epoch }
+        BalanceEvent::SnapshotApplied {
+            count,
+            epoch: upd.epoch,
+        }
     }
 
     fn apply_incremental(&mut self, upd: BalanceUpdate) -> BalanceEvent {
@@ -183,12 +205,18 @@ impl BalancesState {
         }
         let mut count = 0;
         for it in upd.items {
-            if self.apply_incremental_item(it, upd.epoch) { count += 1; }
+            if self.apply_incremental_item(it, upd.epoch) {
+                count += 1;
+            }
         }
         if global_changed || count > 0 {
             self.last_epoch = upd.epoch;
         }
-        BalanceEvent::IncrementalApplied { count, epoch: upd.epoch, global_changed }
+        BalanceEvent::IncrementalApplied {
+            count,
+            epoch: upd.epoch,
+            global_changed,
+        }
     }
 
     pub fn get(&self, market_name: &str) -> Option<&BalanceItem> {
@@ -249,7 +277,11 @@ mod tests {
     #[test]
     fn full_snapshot_resets_missing_markets() {
         let mut s = BalancesState::new();
-        s.apply(upd(3, 1, vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)]));
+        s.apply(upd(
+            3,
+            1,
+            vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)],
+        ));
         assert_eq!(s.len(), 2);
         // Новый snapshot — только BTC. ETH должен пропасть.
         s.apply(upd(3, 2, vec![make_item("BTCUSDT", 200.0)]));
@@ -272,13 +304,23 @@ mod tests {
     #[test]
     fn exact_balance_command_is_ignored_like_delphi() {
         let mut s = BalancesState::new();
-        s.apply(upd(3, 1, vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)]));
+        s.apply(upd(
+            3,
+            1,
+            vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)],
+        ));
         let mut exact_base = upd(2, 2, vec![make_item("BTCUSDT", 200.0)]);
         exact_base.btc_balance_total = 99.0;
 
         let ev = s.apply(exact_base);
 
-        assert!(matches!(ev, BalanceEvent::Ignored { cmd_id: 2, epoch: 2 }));
+        assert!(matches!(
+            ev,
+            BalanceEvent::Ignored {
+                cmd_id: 2,
+                epoch: 2
+            }
+        ));
         assert_eq!(s.len(), 2);
         assert_eq!(s.global.btc_balance_total, 1.0);
         assert_eq!(s.last_epoch, 1);
@@ -339,7 +381,10 @@ mod tests {
             vec![make_item("BTCUSDT", 150.0), make_item("ETHUSDT", 250.0)],
         ));
 
-        assert!(matches!(ev, BalanceEvent::IncrementalApplied { count: 1, .. }));
+        assert!(matches!(
+            ev,
+            BalanceEvent::IncrementalApplied { count: 1, .. }
+        ));
         assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 150.0);
         assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 200.0);
     }
@@ -351,7 +396,10 @@ mod tests {
 
         let ev = s.apply(upd(4, 90, vec![make_item("ETHUSDT", 90.0)]));
 
-        assert!(matches!(ev, BalanceEvent::IncrementalApplied { count: 1, .. }));
+        assert!(matches!(
+            ev,
+            BalanceEvent::IncrementalApplied { count: 1, .. }
+        ));
         assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 90.0);
     }
 

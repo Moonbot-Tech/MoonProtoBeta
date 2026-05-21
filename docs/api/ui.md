@@ -44,7 +44,7 @@ For a one-shot fetch, use `request_client_settings`. It sends
 ```rust
 let settings = client.request_client_settings(
     &mut dispatcher,
-    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(12),
 )?;
 println!("xSell={}", settings.x_sell);
 ```
@@ -76,8 +76,27 @@ client.ui_switch_spot(0);
 After a reconnect, the library replays that flag; if an all-trades subscription
 is active, the replay folds the flag into `SubscribeAllTrades(want_mm)`.
 
+`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` also mark the
+Delphi `ServerUpdateSent` state inside `Client`. The next `run_init_sequence`
+will consume that marker and use the Delphi BaseCheck update retry path:
+`34 * 300ms` auth wait, then one BaseCheck plus up to 10 retries with `2000ms`
+pauses and the normal 12s `SendAndWait` timeout per attempt. If a tool sends the
+same raw UI payload through lower-level APIs, call
+`client.mark_server_update_sent()` manually.
+
 Low-level builders in `commands::ui` remain available for tools that need raw
 payloads, but normal applications should not call `send_cmd` directly.
+
+Low-level `UICommand::ClientSettings` stores the settings snapshot as
+`Box<ClientSettingsCommand>`. This keeps the common `UICommand` envelope small
+when events move through queues; application code can still use normal deref
+access in matches:
+
+```rust
+if let moonproto::commands::ui::UICommand::ClientSettings(settings) = cmd {
+    println!("xSell={}", settings.x_sell);
+}
+```
 
 ## ClientSettings
 

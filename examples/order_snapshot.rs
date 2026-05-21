@@ -44,10 +44,7 @@ fn main() {
     }
 
     println!("[request] order snapshot");
-    let mut orders = match client.request_order_snapshot(
-        &mut dispatcher,
-        Duration::from_secs(15),
-    ) {
+    let mut orders = match client.request_order_snapshot(&mut dispatcher, Duration::from_secs(15)) {
         Ok(orders) => orders,
         Err(err) => {
             eprintln!("[request] timeout/disconnected: {err:?}");

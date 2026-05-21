@@ -11,22 +11,22 @@
 //!
 //! Каждый модуль документирован в `moonproto/docs/api/<channel>.md`.
 
-pub mod epoch;
-pub mod orders;
-pub mod order_books;
-pub mod trades;
 pub mod balances;
-pub mod strats;
-pub mod settings;
+pub mod epoch;
 pub mod markets;
+pub mod order_books;
+pub mod orders;
+pub mod settings;
+pub mod strats;
+pub mod trades;
 
-pub use orders::{Orders, Order, OrderEvent, ApplyResult, SellReason};
+pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
+pub use markets::{MarketPrice, MarketsEvent, MarketsState};
 pub use order_books::{
-    OrderBooks, OrderBookEvent, ApplyResult as OrderBookApplyResult, OrderBookKind,
-    OrderBookLevel, OrderBookSnapshot, TopOfBook,
+    ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
+    OrderBookSnapshot, OrderBooks, TopOfBook,
 };
-pub use trades::{TradesState, TradesEvent, parse_trades_resend_response};
-pub use balances::{BalancesState, BalanceEvent, GlobalBalance};
-pub use strats::{StratsState, StratEvent, StrategyInfo};
-pub use settings::{SettingsState, SettingsEvent};
-pub use markets::{MarketsState, MarketsEvent, MarketPrice};
+pub use orders::{ApplyResult, Order, OrderEvent, Orders, SellReason};
+pub use settings::{SettingsEvent, SettingsState};
+pub use strats::{StratEvent, StrategyInfo, StratsState};
+pub use trades::{parse_trades_resend_response, TradesEvent, TradesState};

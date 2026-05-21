@@ -54,16 +54,16 @@ use flate2::Compression;
 //  TypeID constants
 // =============================================================================
 
-pub const TID_BOOL:      u8 = 1;
-pub const TID_INT32:     u8 = 2;
-pub const TID_INT64:     u8 = 3;
-pub const TID_DOUBLE:    u8 = 4;
-pub const TID_STRING:    u8 = 5;
-pub const TID_BYTE:      u8 = 6;
-pub const TID_WORD:      u8 = 7;
-pub const TID_UINT32:    u8 = 8;
-pub const TID_UINT64:    u8 = 9;
-pub const TID_SINGLE:    u8 = 10;
+pub const TID_BOOL: u8 = 1;
+pub const TID_INT32: u8 = 2;
+pub const TID_INT64: u8 = 3;
+pub const TID_DOUBLE: u8 = 4;
+pub const TID_STRING: u8 = 5;
+pub const TID_BYTE: u8 = 6;
+pub const TID_WORD: u8 = 7;
+pub const TID_UINT32: u8 = 8;
+pub const TID_UINT64: u8 = 9;
+pub const TID_SINGLE: u8 = 10;
 pub const TID_ZERO_FLAG: u8 = 0x80;
 
 // =============================================================================
@@ -89,13 +89,13 @@ impl FieldValue {
     /// Zero значение для указанного TypeID. Используется когда установлен `TID_ZERO_FLAG`.
     pub fn zero(type_id: u8) -> Option<Self> {
         Some(match type_id & 0x7F {
-            TID_BOOL   => FieldValue::Bool(false),
-            TID_INT32  => FieldValue::Int32(0),
-            TID_INT64  => FieldValue::Int64(0),
+            TID_BOOL => FieldValue::Bool(false),
+            TID_INT32 => FieldValue::Int32(0),
+            TID_INT64 => FieldValue::Int64(0),
             TID_DOUBLE => FieldValue::Double(0.0),
             TID_STRING => FieldValue::String(String::new()),
-            TID_BYTE   => FieldValue::Byte(0),
-            TID_WORD   => FieldValue::Word(0),
+            TID_BYTE => FieldValue::Byte(0),
+            TID_WORD => FieldValue::Word(0),
             TID_UINT32 => FieldValue::UInt32(0),
             TID_UINT64 => FieldValue::UInt64(0),
             TID_SINGLE => FieldValue::Single(0.0),
@@ -105,13 +105,13 @@ impl FieldValue {
 
     pub fn type_id(&self) -> u8 {
         match self {
-            FieldValue::Bool(_)   => TID_BOOL,
-            FieldValue::Int32(_)  => TID_INT32,
-            FieldValue::Int64(_)  => TID_INT64,
+            FieldValue::Bool(_) => TID_BOOL,
+            FieldValue::Int32(_) => TID_INT32,
+            FieldValue::Int64(_) => TID_INT64,
             FieldValue::Double(_) => TID_DOUBLE,
             FieldValue::String(_) => TID_STRING,
-            FieldValue::Byte(_)   => TID_BYTE,
-            FieldValue::Word(_)   => TID_WORD,
+            FieldValue::Byte(_) => TID_BYTE,
+            FieldValue::Word(_) => TID_WORD,
             FieldValue::UInt32(_) => TID_UINT32,
             FieldValue::UInt64(_) => TID_UINT64,
             FieldValue::Single(_) => TID_SINGLE,
@@ -122,13 +122,13 @@ impl FieldValue {
     /// Соответствует `IsZeroValue` (StrategySerializer.pas:337-355).
     pub fn is_zero(&self) -> bool {
         match self {
-            FieldValue::Bool(b)   => !*b,
-            FieldValue::Int32(v)  => *v == 0,
-            FieldValue::Int64(v)  => *v == 0,
+            FieldValue::Bool(b) => !*b,
+            FieldValue::Int32(v) => *v == 0,
+            FieldValue::Int64(v) => *v == 0,
             FieldValue::Double(v) => v.abs() < 1e-10,
             FieldValue::String(s) => s.is_empty(),
-            FieldValue::Byte(v)   => *v == 0,
-            FieldValue::Word(v)   => *v == 0,
+            FieldValue::Byte(v) => *v == 0,
+            FieldValue::Word(v) => *v == 0,
             FieldValue::UInt32(v) => *v == 0,
             FieldValue::UInt64(v) => *v == 0,
             FieldValue::Single(v) => v.abs() < 1e-10,
@@ -144,21 +144,21 @@ impl FieldValue {
 /// потребитель использует `FieldValue::*` extractors для строгой типизации.
 #[derive(Debug, Clone)]
 pub struct StrategySnapshot {
-    pub strategy_id:  u64,
+    pub strategy_id: u64,
     pub strategy_ver: i32,
     /// Unix epoch ms (TDateTime → UnixTimeToDelphi на стороне сервера, см. pas:671).
-    pub last_date:    u64,
-    pub checked:      bool,
-    pub kind:         u8,
+    pub last_date: u64,
+    pub checked: bool,
+    pub kind: u8,
     /// Folder path (из PathDict по PathID; пустая строка если PathID out-of-range).
-    pub path:         String,
-    pub fields:       HashMap<String, FieldValue>,
+    pub path: String,
+    pub fields: HashMap<String, FieldValue>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StrategyBatch {
-    pub names:      Vec<String>,
-    pub paths:      Vec<String>,
+    pub names: Vec<String>,
+    pub paths: Vec<String>,
     pub strategies: Vec<StrategySnapshot>,
 }
 
@@ -184,7 +184,11 @@ pub fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
     for _ in 0..strat_count {
         strategies.push(read_strategy(data, &mut pos, &names, &paths)?);
     }
-    Some(StrategyBatch { names, paths, strategies })
+    Some(StrategyBatch {
+        names,
+        paths,
+        strategies,
+    })
 }
 
 fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
@@ -192,7 +196,9 @@ fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let len = read_u8(data, pos)? as usize;
-        if *pos + len > data.len() { return None; }
+        if *pos + len > data.len() {
+            return None;
+        }
         let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
         *pos += len;
         out.push(s);
@@ -200,15 +206,18 @@ fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn read_strategy(data: &[u8], pos: &mut usize, names: &[String], paths: &[String])
-    -> Option<StrategySnapshot>
-{
-    let strategy_id  = read_u64(data, pos)?;
+fn read_strategy(
+    data: &[u8],
+    pos: &mut usize,
+    names: &[String],
+    paths: &[String],
+) -> Option<StrategySnapshot> {
+    let strategy_id = read_u64(data, pos)?;
     let strategy_ver = read_i32(data, pos)?;
-    let last_date    = read_u64(data, pos)?;
-    let checked      = read_u8(data, pos)? != 0;
-    let kind         = read_u8(data, pos)?;
-    let path_id      = read_u16(data, pos)? as usize;
+    let last_date = read_u64(data, pos)?;
+    let checked = read_u8(data, pos)? != 0;
+    let kind = read_u8(data, pos)?;
+    let path_id = read_u16(data, pos)? as usize;
     let path = paths.get(path_id).cloned().unwrap_or_default();
 
     let field_count = read_u16(data, pos)? as usize;
@@ -240,7 +249,13 @@ fn read_strategy(data: &[u8], pos: &mut usize, names: &[String], paths: &[String
     }
 
     Some(StrategySnapshot {
-        strategy_id, strategy_ver, last_date, checked, kind, path, fields,
+        strategy_id,
+        strategy_ver,
+        last_date,
+        checked,
+        kind,
+        path,
+        fields,
     })
 }
 
@@ -248,18 +263,20 @@ fn read_strategy(data: &[u8], pos: &mut usize, names: &[String], paths: &[String
 /// (как `SkipFieldByTypeID` pas:373: `Stream.Position := Stream.Position + 8`).
 fn try_read_field_value(data: &[u8], pos: &mut usize, type_id: u8) -> Option<FieldValue> {
     match type_id {
-        TID_BOOL   => Some(FieldValue::Bool(read_u8(data, pos)? != 0)),
-        TID_BYTE   => Some(FieldValue::Byte(read_u8(data, pos)?)),
-        TID_WORD   => Some(FieldValue::Word(read_u16(data, pos)?)),
-        TID_INT32  => Some(FieldValue::Int32(read_i32(data, pos)?)),
+        TID_BOOL => Some(FieldValue::Bool(read_u8(data, pos)? != 0)),
+        TID_BYTE => Some(FieldValue::Byte(read_u8(data, pos)?)),
+        TID_WORD => Some(FieldValue::Word(read_u16(data, pos)?)),
+        TID_INT32 => Some(FieldValue::Int32(read_i32(data, pos)?)),
         TID_UINT32 => Some(FieldValue::UInt32(read_u32(data, pos)?)),
-        TID_INT64  => Some(FieldValue::Int64(read_i64(data, pos)?)),
+        TID_INT64 => Some(FieldValue::Int64(read_i64(data, pos)?)),
         TID_UINT64 => Some(FieldValue::UInt64(read_u64(data, pos)?)),
         TID_SINGLE => Some(FieldValue::Single(read_f32(data, pos)?)),
         TID_DOUBLE => Some(FieldValue::Double(read_f64(data, pos)?)),
         TID_STRING => {
             let len = read_u16(data, pos)? as usize;
-            if *pos + len > data.len() { return None; }
+            if *pos + len > data.len() {
+                return None;
+            }
             let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
             *pos += len;
             Some(FieldValue::String(s))
@@ -274,36 +291,68 @@ fn try_read_field_value(data: &[u8], pos: &mut usize, type_id: u8) -> Option<Fie
 
 // --- Primitive readers ---
 fn read_u8(d: &[u8], p: &mut usize) -> Option<u8> {
-    if *p + 1 > d.len() { return None; }
-    let v = d[*p]; *p += 1; Some(v)
+    if *p + 1 > d.len() {
+        return None;
+    }
+    let v = d[*p];
+    *p += 1;
+    Some(v)
 }
 fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
-    if *p + 2 > d.len() { return None; }
-    let v = u16::from_le_bytes(d[*p..*p + 2].try_into().unwrap()); *p += 2; Some(v)
+    if *p + 2 > d.len() {
+        return None;
+    }
+    let v = u16::from_le_bytes(d[*p..*p + 2].try_into().unwrap());
+    *p += 2;
+    Some(v)
 }
 fn read_i32(d: &[u8], p: &mut usize) -> Option<i32> {
-    if *p + 4 > d.len() { return None; }
-    let v = i32::from_le_bytes(d[*p..*p + 4].try_into().unwrap()); *p += 4; Some(v)
+    if *p + 4 > d.len() {
+        return None;
+    }
+    let v = i32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
+    *p += 4;
+    Some(v)
 }
 fn read_u32(d: &[u8], p: &mut usize) -> Option<u32> {
-    if *p + 4 > d.len() { return None; }
-    let v = u32::from_le_bytes(d[*p..*p + 4].try_into().unwrap()); *p += 4; Some(v)
+    if *p + 4 > d.len() {
+        return None;
+    }
+    let v = u32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
+    *p += 4;
+    Some(v)
 }
 fn read_i64(d: &[u8], p: &mut usize) -> Option<i64> {
-    if *p + 8 > d.len() { return None; }
-    let v = i64::from_le_bytes(d[*p..*p + 8].try_into().unwrap()); *p += 8; Some(v)
+    if *p + 8 > d.len() {
+        return None;
+    }
+    let v = i64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
+    *p += 8;
+    Some(v)
 }
 fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
-    if *p + 8 > d.len() { return None; }
-    let v = u64::from_le_bytes(d[*p..*p + 8].try_into().unwrap()); *p += 8; Some(v)
+    if *p + 8 > d.len() {
+        return None;
+    }
+    let v = u64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
+    *p += 8;
+    Some(v)
 }
 fn read_f32(d: &[u8], p: &mut usize) -> Option<f32> {
-    if *p + 4 > d.len() { return None; }
-    let v = f32::from_le_bytes(d[*p..*p + 4].try_into().unwrap()); *p += 4; Some(v)
+    if *p + 4 > d.len() {
+        return None;
+    }
+    let v = f32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
+    *p += 4;
+    Some(v)
 }
 fn read_f64(d: &[u8], p: &mut usize) -> Option<f64> {
-    if *p + 8 > d.len() { return None; }
-    let v = f64::from_le_bytes(d[*p..*p + 8].try_into().unwrap()); *p += 8; Some(v)
+    if *p + 8 > d.len() {
+        return None;
+    }
+    let v = f64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
+    *p += 8;
+    Some(v)
 }
 
 // =============================================================================
@@ -315,18 +364,22 @@ fn read_f64(d: &[u8], p: &mut usize) -> Option<f64> {
 #[derive(Debug, Default)]
 pub struct StrategyBatchBuilder {
     name_dict: Vec<String>,
-    name_idx:  HashMap<String, u16>,
+    name_idx: HashMap<String, u16>,
     path_dict: Vec<String>,
-    path_idx:  HashMap<String, u16>,
-    body:      Vec<u8>,
-    count:     u16,
+    path_idx: HashMap<String, u16>,
+    body: Vec<u8>,
+    count: u16,
 }
 
 impl StrategyBatchBuilder {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     fn name_index(&mut self, name: &str) -> u16 {
-        if let Some(&i) = self.name_idx.get(name) { return i; }
+        if let Some(&i) = self.name_idx.get(name) {
+            return i;
+        }
         let i = self.name_dict.len() as u16;
         self.name_dict.push(name.to_string());
         self.name_idx.insert(name.to_string(), i);
@@ -334,7 +387,9 @@ impl StrategyBatchBuilder {
     }
 
     fn path_index(&mut self, path: &str) -> u16 {
-        if let Some(&i) = self.path_idx.get(path) { return i; }
+        if let Some(&i) = self.path_idx.get(path) {
+            return i;
+        }
         let i = self.path_dict.len() as u16;
         self.path_dict.push(path.to_string());
         self.path_idx.insert(path.to_string(), i);
@@ -411,12 +466,12 @@ fn write_field(out: &mut Vec<u8>, v: &FieldValue) {
     }
     out.push(type_id);
     match v {
-        FieldValue::Bool(b)   => out.push(*b as u8),
-        FieldValue::Byte(b)   => out.push(*b),
-        FieldValue::Word(w)   => out.extend_from_slice(&w.to_le_bytes()),
-        FieldValue::Int32(i)  => out.extend_from_slice(&i.to_le_bytes()),
+        FieldValue::Bool(b) => out.push(*b as u8),
+        FieldValue::Byte(b) => out.push(*b),
+        FieldValue::Word(w) => out.extend_from_slice(&w.to_le_bytes()),
+        FieldValue::Int32(i) => out.extend_from_slice(&i.to_le_bytes()),
         FieldValue::UInt32(u) => out.extend_from_slice(&u.to_le_bytes()),
-        FieldValue::Int64(i)  => out.extend_from_slice(&i.to_le_bytes()),
+        FieldValue::Int64(i) => out.extend_from_slice(&i.to_le_bytes()),
         FieldValue::UInt64(u) => out.extend_from_slice(&u.to_le_bytes()),
         FieldValue::Single(f) => out.extend_from_slice(&f.to_le_bytes()),
         FieldValue::Double(d) => out.extend_from_slice(&d.to_le_bytes()),
@@ -438,11 +493,17 @@ mod tests {
 
     fn sample_strategy(id: u64, name: &str, path: &str) -> StrategySnapshot {
         let mut fields = HashMap::new();
-        fields.insert("StrategyName".to_string(), FieldValue::String(name.to_string()));
+        fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String(name.to_string()),
+        );
         fields.insert("OrderSize".to_string(), FieldValue::Double(123.45));
         fields.insert("KeepAlert".to_string(), FieldValue::Int32(60));
         fields.insert("AcceptCommands".to_string(), FieldValue::Bool(true));
-        fields.insert("Comment".to_string(), FieldValue::String("Test strategy".to_string()));
+        fields.insert(
+            "Comment".to_string(),
+            FieldValue::String("Test strategy".to_string()),
+        );
         StrategySnapshot {
             strategy_id: id,
             strategy_ver: 1,
@@ -476,13 +537,22 @@ mod tests {
         let ps = &parsed.strategies[0];
         assert_eq!(ps.strategy_id, 100);
         assert_eq!(ps.strategy_ver, 1);
-        assert_eq!(ps.checked, true);
+        assert!(ps.checked);
         assert_eq!(ps.kind, 5);
         assert_eq!(ps.path, "Folder/A");
-        assert_eq!(ps.fields.get("StrategyName"), Some(&FieldValue::String("Strat-1".to_string())));
-        assert_eq!(ps.fields.get("OrderSize"), Some(&FieldValue::Double(123.45)));
+        assert_eq!(
+            ps.fields.get("StrategyName"),
+            Some(&FieldValue::String("Strat-1".to_string()))
+        );
+        assert_eq!(
+            ps.fields.get("OrderSize"),
+            Some(&FieldValue::Double(123.45))
+        );
         assert_eq!(ps.fields.get("KeepAlert"), Some(&FieldValue::Int32(60)));
-        assert_eq!(ps.fields.get("AcceptCommands"), Some(&FieldValue::Bool(true)));
+        assert_eq!(
+            ps.fields.get("AcceptCommands"),
+            Some(&FieldValue::Bool(true))
+        );
     }
 
     #[test]
@@ -510,8 +580,13 @@ mod tests {
         fields.insert("NonZeroInt".to_string(), FieldValue::Int32(42));
 
         let s = StrategySnapshot {
-            strategy_id: 1, strategy_ver: 1, last_date: 0,
-            checked: false, kind: 0, path: String::new(), fields,
+            strategy_id: 1,
+            strategy_ver: 1,
+            last_date: 0,
+            checked: false,
+            kind: 0,
+            path: String::new(),
+            fields,
         };
 
         let mut b = StrategyBatchBuilder::new();
@@ -522,27 +597,41 @@ mod tests {
         let ps = &parsed.strategies[0];
         assert_eq!(ps.fields.get("ZeroInt"), Some(&FieldValue::Int32(0)));
         assert_eq!(ps.fields.get("ZeroBool"), Some(&FieldValue::Bool(false)));
-        assert_eq!(ps.fields.get("ZeroStr"), Some(&FieldValue::String(String::new())));
+        assert_eq!(
+            ps.fields.get("ZeroStr"),
+            Some(&FieldValue::String(String::new()))
+        );
         assert_eq!(ps.fields.get("NonZeroInt"), Some(&FieldValue::Int32(42)));
     }
 
     #[test]
     fn all_primitive_types_roundtrip() {
         let mut fields = HashMap::new();
-        fields.insert("F_Bool".to_string(),   FieldValue::Bool(true));
-        fields.insert("F_Byte".to_string(),   FieldValue::Byte(200));
-        fields.insert("F_Word".to_string(),   FieldValue::Word(60000));
-        fields.insert("F_Int32".to_string(),  FieldValue::Int32(-12345));
+        fields.insert("F_Bool".to_string(), FieldValue::Bool(true));
+        fields.insert("F_Byte".to_string(), FieldValue::Byte(200));
+        fields.insert("F_Word".to_string(), FieldValue::Word(60000));
+        fields.insert("F_Int32".to_string(), FieldValue::Int32(-12345));
         fields.insert("F_UInt32".to_string(), FieldValue::UInt32(3_000_000_000));
-        fields.insert("F_Int64".to_string(),  FieldValue::Int64(-9_876_543_210));
-        fields.insert("F_UInt64".to_string(), FieldValue::UInt64(12_345_678_901_234));
-        fields.insert("F_Single".to_string(), FieldValue::Single(3.14));
-        fields.insert("F_Double".to_string(), FieldValue::Double(2.7182818));
-        fields.insert("F_String".to_string(), FieldValue::String("Hello 世界 🚀".to_string()));
+        fields.insert("F_Int64".to_string(), FieldValue::Int64(-9_876_543_210));
+        fields.insert(
+            "F_UInt64".to_string(),
+            FieldValue::UInt64(12_345_678_901_234),
+        );
+        fields.insert("F_Single".to_string(), FieldValue::Single(3.125));
+        fields.insert("F_Double".to_string(), FieldValue::Double(2.75));
+        fields.insert(
+            "F_String".to_string(),
+            FieldValue::String("Hello 世界 🚀".to_string()),
+        );
 
         let s = StrategySnapshot {
-            strategy_id: 999, strategy_ver: 7, last_date: 1737000000000,
-            checked: true, kind: 1, path: "P".to_string(), fields: fields.clone(),
+            strategy_id: 999,
+            strategy_ver: 7,
+            last_date: 1737000000000,
+            checked: true,
+            kind: 1,
+            path: "P".to_string(),
+            fields: fields.clone(),
         };
 
         let mut b = StrategyBatchBuilder::new();
@@ -562,19 +651,20 @@ mod tests {
         let mut plain = Vec::new();
         // NameDict: 1 name "X"
         plain.extend_from_slice(&1u16.to_le_bytes());
-        plain.push(1); plain.push(b'X');
+        plain.push(1);
+        plain.push(b'X');
         // PathDict: empty
         plain.extend_from_slice(&0u16.to_le_bytes());
         // StratCount: 1
         plain.extend_from_slice(&1u16.to_le_bytes());
         // Strategy
         plain.extend_from_slice(&42u64.to_le_bytes()); // id
-        plain.extend_from_slice(&1i32.to_le_bytes());  // ver
-        plain.extend_from_slice(&0u64.to_le_bytes());  // last_date
-        plain.push(0);                                  // checked
-        plain.push(0);                                  // kind
-        plain.extend_from_slice(&99u16.to_le_bytes());  // path_id (OOR)
-        plain.extend_from_slice(&0u16.to_le_bytes());   // field count
+        plain.extend_from_slice(&1i32.to_le_bytes()); // ver
+        plain.extend_from_slice(&0u64.to_le_bytes()); // last_date
+        plain.push(0); // checked
+        plain.push(0); // kind
+        plain.extend_from_slice(&99u16.to_le_bytes()); // path_id (OOR)
+        plain.extend_from_slice(&0u16.to_le_bytes()); // field count
 
         let parsed = parse_strategy_batch_plain(&plain).unwrap();
         assert_eq!(parsed.strategies.len(), 1);
@@ -588,8 +678,10 @@ mod tests {
         let mut plain = Vec::new();
         // NameDict: 2 names
         plain.extend_from_slice(&2u16.to_le_bytes());
-        plain.push(1); plain.push(b'A');
-        plain.push(1); plain.push(b'B');
+        plain.push(1);
+        plain.push(b'A');
+        plain.push(1);
+        plain.push(b'B');
         // PathDict
         plain.extend_from_slice(&0u16.to_le_bytes());
         // StratCount
@@ -598,7 +690,8 @@ mod tests {
         plain.extend_from_slice(&1u64.to_le_bytes());
         plain.extend_from_slice(&1i32.to_le_bytes());
         plain.extend_from_slice(&0u64.to_le_bytes());
-        plain.push(0); plain.push(0);
+        plain.push(0);
+        plain.push(0);
         plain.extend_from_slice(&0u16.to_le_bytes());
         // FieldCount=2
         plain.extend_from_slice(&2u16.to_le_bytes());
@@ -624,7 +717,7 @@ mod tests {
         let mut plain = Vec::new();
         // Только частичный NameDict header (нет данных)
         plain.extend_from_slice(&100u16.to_le_bytes()); // обещано 100 имён
-        // Но больше нет данных → должен вернуть None
+                                                        // Но больше нет данных → должен вернуть None
         let parsed = parse_strategy_batch_plain(&plain);
         assert!(parsed.is_none());
     }
@@ -645,9 +738,12 @@ mod tests {
 
     #[test]
     fn field_value_zero_for_each_type() {
-        assert_eq!(FieldValue::zero(TID_BOOL),   Some(FieldValue::Bool(false)));
-        assert_eq!(FieldValue::zero(TID_INT32),  Some(FieldValue::Int32(0)));
-        assert_eq!(FieldValue::zero(TID_STRING), Some(FieldValue::String(String::new())));
+        assert_eq!(FieldValue::zero(TID_BOOL), Some(FieldValue::Bool(false)));
+        assert_eq!(FieldValue::zero(TID_INT32), Some(FieldValue::Int32(0)));
+        assert_eq!(
+            FieldValue::zero(TID_STRING),
+            Some(FieldValue::String(String::new()))
+        );
         assert_eq!(FieldValue::zero(TID_DOUBLE), Some(FieldValue::Double(0.0)));
         assert_eq!(FieldValue::zero(99), None);
     }

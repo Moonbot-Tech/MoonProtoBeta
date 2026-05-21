@@ -9,11 +9,11 @@
 use std::env;
 use std::time::Duration;
 
+use moonproto::state::OrderEvent;
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event, EventDispatcher,
     InitConfig,
 };
-use moonproto::state::OrderEvent;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -29,7 +29,10 @@ fn parse_uid(value: &str) -> Option<u64> {
     value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
-        .map_or_else(|| value.parse().ok(), |hex| u64::from_str_radix(hex, 16).ok())
+        .map_or_else(
+            || value.parse().ok(),
+            |hex| u64::from_str_radix(hex, 16).ok(),
+        )
 }
 
 fn main() {
@@ -58,7 +61,7 @@ fn main() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
 
@@ -111,18 +114,22 @@ fn main() {
     client.cancel_tracked_order(&order);
     println!("[send] cancel queued; listening briefly for order updates...");
 
-    client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|event| {
-        if let Event::Order(order_event) = event {
-            match order_event {
-                OrderEvent::Updated(uid) => println!("[order] updated uid={uid}"),
-                OrderEvent::Removed(uid) => println!("[order] removed uid={uid}"),
-                OrderEvent::Ignored { uid, reason } => {
-                    println!("[order] ignored uid={uid} reason={reason:?}");
+    client.run_with_dispatcher(
+        Duration::from_secs(5),
+        &mut dispatcher,
+        Box::new(|event| {
+            if let Event::Order(order_event) = event {
+                match order_event {
+                    OrderEvent::Updated(uid) => println!("[order] updated uid={uid}"),
+                    OrderEvent::Removed(uid) => println!("[order] removed uid={uid}"),
+                    OrderEvent::Ignored { uid, reason } => {
+                        println!("[order] ignored uid={uid} reason={reason:?}");
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-    }));
+        }),
+    );
 
     client.disconnect();
 }

@@ -18,7 +18,7 @@
 //! 1. UDP socket bind + reader thread spawn.
 //! 2. Handshake (Hello → WhoAreYou → ImFriend → Fine).
 //! 3. `LifecycleEvent::Connected { fresh: true }` дошёл до callback'а.
-//! 4. `run_init_sequence` (BaseCheck + AuthCheck + GetMarketsList) успешен.
+//! 4. `run_init_sequence` (BaseCheck + AuthCheck + GetMarketsList + GetMarketsIndexes) успешен.
 //! 5. `ServerInfo` корректно заполнен (multi-server identity).
 //! 6. `MarketsState.indexes_synchronized = true` после GetMarketsIndexes.
 //! 7. SubscribeAllTrades — реально получили хотя бы 1 TradesStream пакет.
@@ -35,10 +35,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonproto::client::{
-    Client, ClientConfig, InitConfig, LifecycleEvent, run_init_sequence,
-};
-use moonproto::events::{EventDispatcher, Event};
+use moonproto::client::{run_init_sequence, Client, ClientConfig, InitConfig, LifecycleEvent};
+use moonproto::events::{Event, EventDispatcher};
 use moonproto::key_import;
 
 const STREAM_DURATION_SECS: u64 = 15;
@@ -74,9 +72,9 @@ fn runtime_smoke_full_happy_path() {
     println!("OK: client_new");
 
     // === Phase 1: lifecycle capture ===
-    let fresh_seen      = Arc::new(AtomicBool::new(false));
-    let disconnected    = Arc::new(AtomicBool::new(false));
-    let lifecycle_log   = Arc::new(Mutex::new(Vec::<LifecycleEvent>::new()));
+    let fresh_seen = Arc::new(AtomicBool::new(false));
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let lifecycle_log = Arc::new(Mutex::new(Vec::<LifecycleEvent>::new()));
 
     {
         let f = Arc::clone(&fresh_seen);
@@ -85,7 +83,7 @@ fn runtime_smoke_full_happy_path() {
         client.on_lifecycle(Box::new(move |ev: LifecycleEvent| {
             match &ev {
                 LifecycleEvent::Connected { fresh: true } => f.store(true, Ordering::Relaxed),
-                LifecycleEvent::Disconnected               => d.store(true, Ordering::Relaxed),
+                LifecycleEvent::Disconnected => d.store(true, Ordering::Relaxed),
                 _ => {}
             }
             if let Ok(mut g) = l.lock() {
@@ -95,11 +93,7 @@ fn runtime_smoke_full_happy_path() {
     }
 
     // === Phase 2: handshake (~3с до Connected{fresh:true}) ===
-    client.run_with_dispatcher(
-        Duration::from_secs(5),
-        &mut dispatcher,
-        Box::new(|_| {}),
-    );
+    client.run_with_dispatcher(Duration::from_secs(5), &mut dispatcher, Box::new(|_| {}));
 
     assert!(
         fresh_seen.load(Ordering::Relaxed),
@@ -118,26 +112,38 @@ fn runtime_smoke_full_happy_path() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
+        fetch_indexes: true,
         fetch_balance: false,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
     };
     let init_result = run_init_sequence(&mut client, &mut dispatcher, init_cfg)
         .expect("FAIL: run_init_sequence returned Err");
 
-    assert!(init_result.base_check_ok, "FAIL: BaseCheck failed: {:?}", init_result.errors);
+    assert!(
+        init_result.base_check_ok,
+        "FAIL: BaseCheck failed: {:?}",
+        init_result.errors
+    );
     println!("OK: base_check");
 
-    assert!(init_result.auth_check_ok, "FAIL: AuthCheck failed: {:?}", init_result.errors);
+    assert!(
+        init_result.auth_check_ok,
+        "FAIL: AuthCheck failed: {:?}",
+        init_result.errors
+    );
     println!("OK: auth_check");
 
     assert!(
         init_result.markets_response_bytes > 0,
         "FAIL: GetMarketsList вернул 0 байт payload'а"
     );
-    println!("OK: get_markets_list ({} bytes)", init_result.markets_response_bytes);
+    println!(
+        "OK: get_markets_list ({} bytes)",
+        init_result.markets_response_bytes
+    );
 
     // === Phase 4: ServerInfo заполнен ===
     let info = client.server_info();
@@ -151,25 +157,12 @@ fn runtime_smoke_full_happy_path() {
     );
 
     // === Phase 5: MarketsState.indexes_synchronized (gate) ===
-    // GetMarketsList сам индексы не ставит — нужен GetMarketsIndexes. В run_init_sequence
-    // это не делается явно, но при ServerRestart auto-fetch триггерится либой. На fresh
-    // session состояние = false до явного запроса. Делаем запрос здесь:
-    let rx = client.api_get_markets_indexes();
-    // Pump main loop пока ждём ответ.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut got_indexes = false;
-    while std::time::Instant::now() < deadline {
-        client.run_with_dispatcher(
-            Duration::from_millis(50),
-            &mut dispatcher,
-            Box::new(|_| {}),
-        );
-        if let Ok(_resp) = rx.try_recv() {
-            got_indexes = true;
-            break;
-        }
-    }
-    assert!(got_indexes, "FAIL: GetMarketsIndexes timeout 10с");
+    // run_init_sequence теперь делает GetMarketsIndexes в init, когда он включен
+    // явно или нужен для подписок на indexed streams.
+    assert!(
+        init_result.indexes_response_bytes > 0,
+        "FAIL: GetMarketsIndexes вернул 0 байт payload'а"
+    );
     assert!(
         dispatcher.markets().indexes_synchronized,
         "FAIL: indexes_synchronized = false после GetMarketsIndexes (gate не снят)"
@@ -177,9 +170,9 @@ fn runtime_smoke_full_happy_path() {
     println!("OK: indexes_synchronized");
 
     // === Phase 6: streaming — реально получаем TradesStream + OrderBook ===
-    let trades_packets    = Arc::new(AtomicU32::new(0));
+    let trades_packets = Arc::new(AtomicU32::new(0));
     let orderbook_applied = Arc::new(AtomicU32::new(0));
-    let parse_failures    = Arc::new(AtomicU32::new(0));
+    let parse_failures = Arc::new(AtomicU32::new(0));
 
     {
         let t = Arc::clone(&trades_packets);
@@ -190,9 +183,13 @@ fn runtime_smoke_full_happy_path() {
             Duration::from_secs(STREAM_DURATION_SECS),
             &mut dispatcher,
             Box::new(move |ev| match ev {
-                Event::Trade(_)                                                     => { t.fetch_add(1, Ordering::Relaxed); }
-                Event::OrderBook(moonproto::state::OrderBookEvent::Apply { .. })    => { o.fetch_add(1, Ordering::Relaxed); }
-                Event::ParseFailed { cmd, len }                                     => {
+                Event::Trade(_) => {
+                    t.fetch_add(1, Ordering::Relaxed);
+                }
+                Event::OrderBook(moonproto::state::OrderBookEvent::Apply { .. }) => {
+                    o.fetch_add(1, Ordering::Relaxed);
+                }
+                Event::ParseFailed { cmd, len } => {
                     eprintln!("WARN: ParseFailed cmd={cmd:?} len={len}");
                     p.fetch_add(1, Ordering::Relaxed);
                 }
@@ -201,9 +198,9 @@ fn runtime_smoke_full_happy_path() {
         );
     }
 
-    let n_trades  = trades_packets.load(Ordering::Relaxed);
-    let n_books   = orderbook_applied.load(Ordering::Relaxed);
-    let n_failed  = parse_failures.load(Ordering::Relaxed);
+    let n_trades = trades_packets.load(Ordering::Relaxed);
+    let n_books = orderbook_applied.load(Ordering::Relaxed);
+    let n_failed = parse_failures.load(Ordering::Relaxed);
 
     println!("streaming stats: trades={n_trades} books={n_books} parse_failed={n_failed}");
 

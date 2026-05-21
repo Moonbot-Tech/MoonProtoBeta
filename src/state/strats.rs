@@ -12,9 +12,9 @@
 //! `TStrategySerializer` payload для потребителей, которым нужен полный набор
 //! полей через `HashMap<String, FieldValue>` для UI-рендеринга.
 
-use std::collections::HashMap;
-use crate::commands::strat::{StratCommand, StratCheckedItem};
+use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, StrategySnapshot};
+use std::collections::HashMap;
 
 /// Информация по одной стратегии — то что хранится клиентом.
 #[derive(Debug, Clone)]
@@ -49,9 +49,15 @@ impl StrategyInfo {
 #[derive(Debug, Clone)]
 pub enum StratEvent {
     /// Применён полный snapshot (`Full=true`).
-    SnapshotFull { server_epoch: u64, raw_data: Vec<u8> },
+    SnapshotFull {
+        server_epoch: u64,
+        raw_data: Vec<u8>,
+    },
     /// Применён частичный snapshot (`Full=false`).
-    SnapshotPartial { server_epoch: u64, raw_data: Vec<u8> },
+    SnapshotPartial {
+        server_epoch: u64,
+        raw_data: Vec<u8>,
+    },
     /// Стратегия удалена.
     Deleted { strategy_id: u64 },
     /// Цена продажи обновлена.
@@ -91,7 +97,9 @@ impl StratsState {
     }
 
     fn get_or_insert(&mut self, strategy_id: u64) -> &mut StrategyInfo {
-        self.by_id.entry(strategy_id).or_insert_with(|| StrategyInfo::new(strategy_id))
+        self.by_id
+            .entry(strategy_id)
+            .or_insert_with(|| StrategyInfo::new(strategy_id))
     }
 
     /// Применить распарсенную команду.
@@ -100,24 +108,33 @@ impl StratsState {
             StratCommand::Snapshot(snap) => {
                 self.last_server_epoch = snap.server_epoch;
                 if snap.full {
-                    StratEvent::SnapshotFull { server_epoch: snap.server_epoch, raw_data: snap.data }
+                    StratEvent::SnapshotFull {
+                        server_epoch: snap.server_epoch,
+                        raw_data: snap.data,
+                    }
                 } else {
-                    StratEvent::SnapshotPartial { server_epoch: snap.server_epoch, raw_data: snap.data }
+                    StratEvent::SnapshotPartial {
+                        server_epoch: snap.server_epoch,
+                        raw_data: snap.data,
+                    }
                 }
             }
             StratCommand::Delete(d) => {
                 self.by_id.remove(&d.strategy_id);
-                StratEvent::Deleted { strategy_id: d.strategy_id }
-            }
-            StratCommand::SellPriceUpdate(u) => {
-                match self.by_id.get_mut(&u.strategy_id) {
-                    Some(entry) => {
-                        entry.sell_price = u.sell_price;
-                        StratEvent::SellPriceUpdated { strategy_id: u.strategy_id, sell_price: u.sell_price }
-                    }
-                    None => StratEvent::Ignored,
+                StratEvent::Deleted {
+                    strategy_id: d.strategy_id,
                 }
             }
+            StratCommand::SellPriceUpdate(u) => match self.by_id.get_mut(&u.strategy_id) {
+                Some(entry) => {
+                    entry.sell_price = u.sell_price;
+                    StratEvent::SellPriceUpdated {
+                        strategy_id: u.strategy_id,
+                        sell_price: u.sell_price,
+                    }
+                }
+                None => StratEvent::Ignored,
+            },
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
                 if !s.is_delta {
@@ -134,9 +151,14 @@ impl StratsState {
                         }
                     }
                 }
-                StratEvent::CheckedSynced { changed, is_delta: s.is_delta }
+                StratEvent::CheckedSynced {
+                    changed,
+                    is_delta: s.is_delta,
+                }
             }
-            StratCommand::CheckedEcho(e) => StratEvent::CheckedEcho { count: e.items.len() },
+            StratCommand::CheckedEcho(e) => StratEvent::CheckedEcho {
+                count: e.items.len(),
+            },
             StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
             StratCommand::Unknown { .. } => StratEvent::Ignored,
         }
@@ -210,7 +232,7 @@ impl StratsState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::strat::{StratSellPriceUpdate, StratDelete, StratCheckedSync};
+    use crate::commands::strat::{StratCheckedSync, StratDelete, StratSellPriceUpdate};
 
     #[test]
     fn sell_price_update_ignores_unknown_strategy() {
@@ -232,7 +254,10 @@ mod tests {
             sell_price: 50.5,
         }));
         match ev {
-            StratEvent::SellPriceUpdated { strategy_id, sell_price } => {
+            StratEvent::SellPriceUpdated {
+                strategy_id,
+                sell_price,
+            } => {
                 assert_eq!(strategy_id, 100);
                 assert_eq!(sell_price, 50.5);
             }
@@ -245,7 +270,10 @@ mod tests {
     fn delete_removes_entry() {
         let mut s = StratsState::new();
         s.upsert(100, 0, "F".into());
-        s.apply(StratCommand::Delete(StratDelete { strategy_id: 100, folder_path: "".into() }));
+        s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "".into(),
+        }));
         assert!(s.get(100).is_none());
     }
 
@@ -256,11 +284,20 @@ mod tests {
         s.upsert(2, 0, "".into());
         // Дельта: только id=1 → checked.
         let cmd = StratCommand::CheckedSync(StratCheckedSync {
-            items: vec![StratCheckedItem { strategy_id: 1, checked: true }],
+            items: vec![StratCheckedItem {
+                strategy_id: 1,
+                checked: true,
+            }],
             is_delta: true,
         });
         let ev = s.apply(cmd);
-        assert!(matches!(ev, StratEvent::CheckedSynced { changed: 1, is_delta: true }));
+        assert!(matches!(
+            ev,
+            StratEvent::CheckedSynced {
+                changed: 1,
+                is_delta: true
+            }
+        ));
         assert!(s.get(1).unwrap().checked);
         // id=2 не трогался.
         assert!(!s.get(2).unwrap().checked);
@@ -270,7 +307,10 @@ mod tests {
     fn checked_sync_accepts_more_than_former_rust_cap() {
         let mut s = StratsState::new();
         for strategy_id in 1..=50_001u64 {
-            s.upsert_checked_items(&[StratCheckedItem { strategy_id, checked: true }]);
+            s.upsert_checked_items(&[StratCheckedItem {
+                strategy_id,
+                checked: true,
+            }]);
         }
 
         assert_eq!(s.len(), 50_001);
@@ -279,20 +319,36 @@ mod tests {
 
     #[test]
     fn apply_snapshot_decoded_upserts_strategies() {
-        use crate::commands::strategy_serializer::{StrategyBatchBuilder, FieldValue};
+        use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
         let mut b = StrategyBatchBuilder::new();
         let mut fields1 = HashMap::new();
-        fields1.insert("Name".to_string(), FieldValue::String("Strat-A".to_string()));
+        fields1.insert(
+            "Name".to_string(),
+            FieldValue::String("Strat-A".to_string()),
+        );
         b.write_strategy(&StrategySnapshot {
-            strategy_id: 100, strategy_ver: 1, last_date: 1737000000000,
-            checked: true, kind: 5, path: "F/A".to_string(), fields: fields1,
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1737000000000,
+            checked: true,
+            kind: 5,
+            path: "F/A".to_string(),
+            fields: fields1,
         });
         let mut fields2 = HashMap::new();
-        fields2.insert("Name".to_string(), FieldValue::String("Strat-B".to_string()));
+        fields2.insert(
+            "Name".to_string(),
+            FieldValue::String("Strat-B".to_string()),
+        );
         b.write_strategy(&StrategySnapshot {
-            strategy_id: 200, strategy_ver: 2, last_date: 1737000000001,
-            checked: false, kind: 6, path: "F/B".to_string(), fields: fields2,
+            strategy_id: 200,
+            strategy_ver: 2,
+            last_date: 1737000000001,
+            checked: false,
+            kind: 6,
+            path: "F/B".to_string(),
+            fields: fields2,
         });
 
         let payload = b.finalize();
@@ -336,11 +392,20 @@ mod tests {
         s.by_id.get_mut(&2).unwrap().checked = true;
         // Full sync — только id=1 checked. id=2 должен стать unchecked.
         let cmd = StratCommand::CheckedSync(StratCheckedSync {
-            items: vec![StratCheckedItem { strategy_id: 1, checked: true }],
+            items: vec![StratCheckedItem {
+                strategy_id: 1,
+                checked: true,
+            }],
             is_delta: false,
         });
         let ev = s.apply(cmd);
-        assert!(matches!(ev, StratEvent::CheckedSynced { changed: 1, is_delta: false }));
+        assert!(matches!(
+            ev,
+            StratEvent::CheckedSynced {
+                changed: 1,
+                is_delta: false
+            }
+        ));
         assert!(s.get(1).unwrap().checked);
         assert!(!s.get(2).unwrap().checked);
     }
@@ -351,14 +416,26 @@ mod tests {
         s.upsert(1, 0, "".into());
         let cmd = StratCommand::CheckedSync(StratCheckedSync {
             items: vec![
-                StratCheckedItem { strategy_id: 1, checked: true },
-                StratCheckedItem { strategy_id: 999, checked: true },
+                StratCheckedItem {
+                    strategy_id: 1,
+                    checked: true,
+                },
+                StratCheckedItem {
+                    strategy_id: 999,
+                    checked: true,
+                },
             ],
             is_delta: true,
         });
         let ev = s.apply(cmd);
 
-        assert!(matches!(ev, StratEvent::CheckedSynced { changed: 1, is_delta: true }));
+        assert!(matches!(
+            ev,
+            StratEvent::CheckedSynced {
+                changed: 1,
+                is_delta: true
+            }
+        ));
         assert!(s.get(1).unwrap().checked);
         assert!(s.get(999).is_none());
     }

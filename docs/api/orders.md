@@ -10,7 +10,7 @@ For a one-shot active-order snapshot, use `Client::request_order_snapshot`:
 ```rust
 let orders = client.request_order_snapshot(
     &mut dispatcher,
-    Duration::from_secs(10),
+    Duration::from_secs(12),
 )?;
 ```
 
@@ -146,5 +146,10 @@ let mut orders = Orders::new();
 let command = TradeCommand::parse(payload).expect("bad order payload");
 let (result, event) = orders.apply(command);
 ```
+
+`TradeCommand::OrderStatus` and `TradeCommand::OrderReplaceResponse` carry
+boxed payloads (`Box<OrderStatus>` / `Box<OrderReplaceResponse>`) because those
+records are much larger than the other variants. Deref access works normally in
+matches, and `Orders::apply` consumes the enum directly.
 
 Regular applications should use `EventDispatcher`.

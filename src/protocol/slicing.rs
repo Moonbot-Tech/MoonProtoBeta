@@ -7,7 +7,6 @@
 ///
 /// Block 0 additionally contains: cmd:u8 before the data.
 /// Reassembly: sort by BlockNum, strip SliceHeader from each, extract cmd from block 0.
-
 use std::collections::HashMap;
 
 pub const SLICE_HEADER_SIZE: usize = 4;
@@ -40,7 +39,7 @@ impl SliceHeader {
 #[derive(Debug)]
 pub struct SlicedData {
     pub datagram_num: u16,
-    pub blocks_count: usize, // MaxBlockNum + 1
+    pub blocks_count: usize,      // MaxBlockNum + 1
     blocks: Vec<Option<Vec<u8>>>, // indexed by BlockNum, payload after SliceHeader
     received_count: usize,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
@@ -81,7 +80,7 @@ impl SlicedData {
             self.blocks[idx] = Some(payload);
             self.received_count += 1;
         } else {
-            if self.dup_count < 255 { self.dup_count += 1; }
+            self.dup_count = self.dup_count.saturating_add(1);
         }
 
         self.received_count == self.blocks_count
@@ -101,7 +100,9 @@ impl SlicedData {
         // B-V2-09 fix: prealloc capacity по сумме block sizes — избегаем re-alloc'ов
         // в extend_from_slice. На больших Sliced сообщениях (~50KB) это экономит ~10
         // re-alloc'ов с растущей capacity до финального размера.
-        let total: usize = self.blocks.iter()
+        let total: usize = self
+            .blocks
+            .iter()
             .filter_map(|b| b.as_ref())
             .map(|b| b.len())
             .sum();
@@ -126,6 +127,8 @@ impl SlicedData {
 
 /// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum = 34 bytes
 pub const ACK256_WIRE_SIZE: usize = 34;
+pub type SlicedPayloadResult = Option<(u8, Vec<u8>, u8, usize)>;
+pub type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
 
 pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
     let mut buf = [0u8; ACK256_WIRE_SIZE];
@@ -147,6 +150,9 @@ pub struct SlicingReceiver {
 
 const LAST_RECVD_BUF_SIZE: usize = 2048;
 const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
+                                             // Client time is monotonic milliseconds since `Client::new`, so `0` is a valid
+                                             // early timestamp. A never-seen slot must sit outside the duplicate window.
+const NEVER_RECEIVED_MS: i64 = -TIME_WHEN_CAN_RECEIVE_RPT - 1;
 
 /// DoS guard: верхний лимит на число одновременно собираемых датаграмм.
 /// Реалистично клиент имеет 2-10 параллельных Sliced датаграмм одновременно.
@@ -154,11 +160,17 @@ const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
 /// отправляет пакеты с distinct datagram_num чтобы наполнить HashMap.
 const MAX_RECEIVING_DATAGRAMS: usize = 256;
 
+impl Default for SlicingReceiver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SlicingReceiver {
     pub fn new() -> Self {
         Self {
             receiving: HashMap::new(),
-            last_recvd_ts: Box::new([0i64; LAST_RECVD_BUF_SIZE]),
+            last_recvd_ts: Box::new([NEVER_RECEIVED_MS; LAST_RECVD_BUF_SIZE]),
             last_online: 0,
         }
     }
@@ -182,7 +194,7 @@ impl SlicingReceiver {
     /// Returns: (Option<(cmd, assembled_data)>, ack_to_send)
     /// Matches TMoonProtoClient.OnNewSliced byte-for-byte.
     /// Returns: (Option<(cmd, data, dup_count, blocks_count)>, ack_bytes)
-    pub fn on_new_sliced(&mut self, payload: &[u8]) -> (Option<(u8, Vec<u8>, u8, usize)>, [u8; ACK256_WIRE_SIZE]) {
+    pub fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
         let hdr = match SliceHeader::from_bytes(payload) {
             Some(h) => h,
             None => return (None, [0u8; ACK256_WIRE_SIZE]),
@@ -214,7 +226,9 @@ impl SlicingReceiver {
             // позволяла adversarial server'у заглушить legitimate sliced через 256 fake
             // datagram_num.
             if self.receiving.len() >= MAX_RECEIVING_DATAGRAMS {
-                let oldest = self.receiving.iter()
+                let oldest = self
+                    .receiving
+                    .iter()
                     .min_by_key(|(_, s)| s.first_seen_ms)
                     .map(|(k, _)| *k);
                 if let Some(evict_key) = oldest {
@@ -225,8 +239,10 @@ impl SlicingReceiver {
                 }
             }
             // Create new SlicedData
-            self.receiving.insert(datagram_num,
-                SlicedData::new(datagram_num, hdr.max_block_num, self.last_online));
+            self.receiving.insert(
+                datagram_num,
+                SlicedData::new(datagram_num, hdr.max_block_num, self.last_online),
+            );
         } else if !self.receiving.contains_key(&datagram_num) {
             // Not new, not in receiving → already completed, send full ACK
             let flags = [0xFFu8; 32]; // SetAllFlags
@@ -240,8 +256,10 @@ impl SlicingReceiver {
             // на случай code change ниже по стеку.
             if existing.blocks_count.saturating_sub(1) != hdr.max_block_num as usize {
                 self.receiving.remove(&datagram_num);
-                self.receiving.insert(datagram_num,
-                    SlicedData::new(datagram_num, hdr.max_block_num, self.last_online));
+                self.receiving.insert(
+                    datagram_num,
+                    SlicedData::new(datagram_num, hdr.max_block_num, self.last_online),
+                );
             }
         }
 
@@ -253,7 +271,9 @@ impl SlicingReceiver {
         if complete {
             let dup_count = sliced.dup_count;
             let blocks_count = sliced.blocks_count;
-            let assembled = sliced.assemble().map(|(cmd, data)| (cmd, data, dup_count, blocks_count));
+            let assembled = sliced
+                .assemble()
+                .map(|(cmd, data)| (cmd, data, dup_count, blocks_count));
             self.receiving.remove(&datagram_num);
             (assembled, ack)
         } else {
@@ -286,9 +306,9 @@ mod tests {
         // Single block: SliceHeader(dgram=1, block=0, max=0) + cmd(0x0A) + data
         let payload = vec![
             0x01, 0x00, // datagram_num = 1
-            0x00,       // block_num = 0
-            0x00,       // max_block_num = 0 (1 block total)
-            0x0A,       // cmd byte
+            0x00, // block_num = 0
+            0x00, // max_block_num = 0 (1 block total)
+            0x0A, // cmd byte
             0xDE, 0xAD, // data
         ];
 
@@ -306,8 +326,8 @@ mod tests {
         // Block 1 arrives first
         let block1 = vec![
             0x05, 0x00, // datagram_num = 5
-            0x01,       // block_num = 1
-            0x01,       // max_block_num = 1 (2 blocks total)
+            0x01, // block_num = 1
+            0x01, // max_block_num = 1 (2 blocks total)
             0xBB, 0xCC, // data
         ];
         let (assembled, _) = recv.on_new_sliced(&block1);
@@ -316,10 +336,10 @@ mod tests {
         // Block 0 arrives
         let block0 = vec![
             0x05, 0x00, // datagram_num = 5
-            0x00,       // block_num = 0
-            0x01,       // max_block_num = 1
-            0x1C,       // cmd byte
-            0xAA,       // data
+            0x00, // block_num = 0
+            0x01, // max_block_num = 1
+            0x1C, // cmd byte
+            0xAA, // data
         ];
         let (assembled, _) = recv.on_new_sliced(&block0);
         let (cmd, data, _, _) = assembled.unwrap();
@@ -366,5 +386,27 @@ mod tests {
         assert_eq!(data[255], 255);
         assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
         assert_eq!(&ack[32..34], &datagram.to_le_bytes());
+    }
+
+    #[test]
+    fn first_datagram_before_duplicate_window_is_new() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(5000);
+
+        let payload = vec![
+            0x04, 0x00, // datagram_num = 4
+            0x00, // block_num = 0
+            0x00, // max_block_num = 0
+            0x1F, // cmd byte
+            0xAA, 0xBB,
+        ];
+
+        let (assembled, _ack) = recv.on_new_sliced(&payload);
+        let (cmd, data, _dup_count, blocks_count) = assembled
+            .expect("first ever datagram must be accepted even during first 9s after Client::new");
+
+        assert_eq!(cmd, 0x1F);
+        assert_eq!(data, vec![0xAA, 0xBB]);
+        assert_eq!(blocks_count, 1);
     }
 }

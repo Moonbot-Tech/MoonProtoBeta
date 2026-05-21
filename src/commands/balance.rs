@@ -3,7 +3,6 @@
 ///
 /// Uses bitmask optimization: each field has a bit in Flags (u32).
 /// Only fields with bit set are present in wire data.
-
 use super::registry::read_string;
 
 /// One market's balance data
@@ -49,9 +48,9 @@ pub struct BalanceItem {
 /// client parses the object and then ignores it in `ProcessBalanceCommand`.
 #[derive(Debug, Clone)]
 pub struct BalanceUpdate {
-    pub cmd_id: u8,    // 002=base ignored by client, 003=full, 004=incremental
+    pub cmd_id: u8, // 002=base ignored by client, 003=full, 004=incremental
     pub epoch: u16,
-    pub global_changed: bool,  // only for incremental (004)
+    pub global_changed: bool, // only for incremental (004)
     pub btc_balance_total: f64,
     pub btc_balance_locked: f64,
     pub btc_balance_full: f64,
@@ -91,7 +90,9 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     let mut pos = 0usize;
 
     // Epoch (2 bytes)
-    if pos + 2 > data.len() { return None; }
+    if pos + 2 > data.len() {
+        return None;
+    }
     let epoch = u16::from_le_bytes([data[pos], data[pos + 1]]);
     pos += 2;
 
@@ -108,28 +109,45 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
 
     if cmd_id == 4 {
         // Incremental: GlobalChanged flag gates global fields
-        if pos >= data.len() { return Some(result); }
+        if pos >= data.len() {
+            return Some(result);
+        }
         result.global_changed = data[pos] != 0;
         pos += 1;
 
         if result.global_changed {
-            if pos + 32 > data.len() { return Some(result); }
-            result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-            result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-            result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-            result.special_coin_balance = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
+            if pos + 32 > data.len() {
+                return Some(result);
+            }
+            result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            result.special_coin_balance =
+                f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
         }
     } else {
         // Full: always has global fields
-        if pos + 32 > data.len() { return Some(result); }
-        result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-        result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-        result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
-        result.special_coin_balance = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()); pos += 8;
+        if pos + 32 > data.len() {
+            return Some(result);
+        }
+        result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        result.special_coin_balance = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
     }
 
     // Count
-    if pos + 4 > data.len() { return Some(result); }
+    if pos + 4 > data.len() {
+        return Some(result);
+    }
     let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
     // DoS guard: BalanceItem минимум ~14 байт (string-prefix u16 + hash 8 + flags 4).
@@ -157,7 +175,9 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
 fn read_balance_item(data: &[u8], pos: &mut usize) -> Option<BalanceItem> {
     let market_name = read_string(data, pos)?;
 
-    if *pos + 12 > data.len() { return None; } // hash(8) + flags(4)
+    if *pos + 12 > data.len() {
+        return None;
+    } // hash(8) + flags(4)
     let balance_hash = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
     *pos += 8;
     let flags = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());

@@ -37,13 +37,13 @@ use super::engine_request::build_engine_request_full;
 /// Packed `TDeepPrice` (28 bytes). Соответствует Delphi `MarketsU.pas:701-705`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
-    pub open_p:  f32,
+    pub open_p: f32,
     pub close_p: f32,
-    pub max_p:   f32,
-    pub min_p:   f32,
-    pub vol:     f32,
+    pub max_p: f32,
+    pub min_p: f32,
+    pub vol: f32,
     /// `TDateTime` (Delphi double, дни с 1899-12-30).
-    pub time:    f64,
+    pub time: f64,
 }
 
 pub const DEEP_PRICE_SIZE: usize = 28;
@@ -52,14 +52,29 @@ const MINS_IN_DAY: f64 = 1440.0;
 impl DeepPrice {
     /// Прочитать один record из bytes.
     pub fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
-        if *pos + DEEP_PRICE_SIZE > data.len() { return None; }
-        let open_p  = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-        let close_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-        let max_p   = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-        let min_p   = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-        let vol     = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-        let time    = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap()); *pos += 8;
-        Some(Self { open_p, close_p, max_p, min_p, vol, time })
+        if *pos + DEEP_PRICE_SIZE > data.len() {
+            return None;
+        }
+        let open_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        let close_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        let max_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        let min_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        let vol = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+        *pos += 4;
+        let time = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+        *pos += 8;
+        Some(Self {
+            open_p,
+            close_p,
+            max_p,
+            min_p,
+            vol,
+            time,
+        })
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
@@ -78,6 +93,8 @@ impl DeepPrice {
 /// `OpenP = MaxP`, `CloseP = MinP` on receive.
 pub const DEEP_PRICE_PACK_SIZE: usize = 20;
 pub const DEEP_PRICE_PACK_OLD_SIZE: usize = 32;
+const WALL_ITEM_SIZE: usize = 8;
+const REQUEST_CANDLES_MARKET_MIN_SIZE: usize = 2 + 4 + WALL_ITEM_SIZE * 8;
 
 /// Delphi `TWallItem = record vol: Single; count: Integer end`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -103,12 +120,12 @@ pub struct RequestCandlesMarket {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeepHistoryKind {
-    Min1   = 0, // hk_1m
-    Min5   = 1, // hk_5m
-    Min30  = 2, // hk_30m
-    Hour1  = 3, // hk_1h
-    Hour4  = 4, // hk_4h
-    Day1   = 5, // hk_1d
+    Min1 = 0,  // hk_1m
+    Min5 = 1,  // hk_5m
+    Min30 = 2, // hk_30m
+    Hour1 = 3, // hk_1h
+    Hour4 = 4, // hk_4h
+    Day1 = 5,  // hk_1d
 }
 
 // =============================================================================
@@ -131,7 +148,9 @@ pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u
 /// `data` — `EngineResponse.data` (уже распакованный DEFLATE).
 pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     let mut pos = 0usize;
-    if pos + 4 > data.len() { return None; }
+    if pos + 4 > data.len() {
+        return None;
+    }
     let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
     // DoS guard: отрицательный count или count*DEEP_PRICE_SIZE overflow.
@@ -171,7 +190,9 @@ pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
 ///   sell_wall: 4 * TWallItem
 /// ```
 ///
-pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<RequestCandlesMarket>> {
+pub fn parse_request_candles_data_response(
+    zipped_data: &[u8],
+) -> Option<Vec<RequestCandlesMarket>> {
     parse_request_candles_data_response_with_local_shift(
         zipped_data,
         current_local_time_shift_minutes(),
@@ -217,6 +238,14 @@ fn parse_request_candles_data_response_with_local_shift(
     let time_shift_days =
         (local_time_shift_minutes.round() - server_time_shift_minutes) / MINS_IN_DAY;
 
+    let min_required = count.saturating_mul(REQUEST_CANDLES_MARKET_MIN_SIZE);
+    let remaining = data.len().saturating_sub(pos);
+    if min_required > remaining {
+        log::warn!(target: "moonproto::candles",
+            "RequestCandlesData market count {count} requires at least {min_required} bytes, remaining {remaining}");
+        return None;
+    }
+
     let mut markets = Vec::with_capacity(count);
     for _ in 0..count {
         let market_name = read_delphi_utf16_string(&data, &mut pos)?;
@@ -227,7 +256,11 @@ fn parse_request_candles_data_response_with_local_shift(
             return None;
         }
         let candle_count = candle_count_raw as usize;
-        let record_size = if ver >= 2 { DEEP_PRICE_PACK_SIZE } else { DEEP_PRICE_PACK_OLD_SIZE };
+        let record_size = if ver >= 2 {
+            DEEP_PRICE_PACK_SIZE
+        } else {
+            DEEP_PRICE_PACK_OLD_SIZE
+        };
         let required = candle_count.checked_mul(record_size)?;
         if required > data.len().saturating_sub(pos) {
             log::warn!(target: "moonproto::candles",
@@ -339,39 +372,51 @@ fn current_local_time_shift_minutes() -> f64 {
 }
 
 fn read_u8(data: &[u8], pos: &mut usize) -> Option<u8> {
-    if *pos + 1 > data.len() { return None; }
+    if *pos + 1 > data.len() {
+        return None;
+    }
     let value = data[*pos];
     *pos += 1;
     Some(value)
 }
 
 fn read_i32(data: &[u8], pos: &mut usize) -> Option<i32> {
-    if *pos + 4 > data.len() { return None; }
+    if *pos + 4 > data.len() {
+        return None;
+    }
     let value = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
     *pos += 4;
     Some(value)
 }
 
 fn read_f32(data: &[u8], pos: &mut usize) -> Option<f32> {
-    if *pos + 4 > data.len() { return None; }
+    if *pos + 4 > data.len() {
+        return None;
+    }
     let value = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
     *pos += 4;
     Some(value)
 }
 
 fn read_f64(data: &[u8], pos: &mut usize) -> Option<f64> {
-    if *pos + 8 > data.len() { return None; }
+    if *pos + 8 > data.len() {
+        return None;
+    }
     let value = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
     *pos += 8;
     Some(value)
 }
 
 fn read_delphi_utf16_string(data: &[u8], pos: &mut usize) -> Option<String> {
-    if *pos + 2 > data.len() { return None; }
+    if *pos + 2 > data.len() {
+        return None;
+    }
     let chars = u16::from_le_bytes(data[*pos..*pos + 2].try_into().unwrap()) as usize;
     *pos += 2;
     let bytes = chars.checked_mul(2)?;
-    if *pos + bytes > data.len() { return None; }
+    if *pos + bytes > data.len() {
+        return None;
+    }
     let mut utf16 = Vec::with_capacity(chars);
     for chunk in data[*pos..*pos + bytes].chunks_exact(2) {
         utf16.push(u16::from_le_bytes([chunk[0], chunk[1]]));
@@ -447,9 +492,9 @@ fn read_wall_data(data: &[u8], pos: &mut usize) -> Option<[WallItem; 4]> {
 /// ```
 #[derive(Debug, Default)]
 pub struct CandlesAggregator {
-    chunks:   Vec<Option<Vec<u8>>>,
+    chunks: Vec<Option<Vec<u8>>>,
     received: usize,
-    total:    usize,
+    total: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -460,7 +505,9 @@ pub(crate) enum CandlesChunkResult {
 }
 
 impl CandlesAggregator {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Добавить chunk. Если все чанки собраны — вернуть склеенный буфер и сбросить state.
     /// Wire: `ChunkIndex:u16 + ChunkTotal:u16 + chunk_payload`.
@@ -477,7 +524,9 @@ impl CandlesAggregator {
     /// chunk'а в пустой слот. Caller использует `Stored`/`Complete`, чтобы не
     /// продлевать timeout дубликатами или невалидными chunk headers.
     pub(crate) fn on_chunk_result(&mut self, response_data: &[u8]) -> CandlesChunkResult {
-        if response_data.len() < 4 { return CandlesChunkResult::Ignored; }
+        if response_data.len() < 4 {
+            return CandlesChunkResult::Ignored;
+        }
         let chunk_index = u16::from_le_bytes([response_data[0], response_data[1]]) as usize;
         let chunk_total = u16::from_le_bytes([response_data[2], response_data[3]]) as usize;
         let payload = &response_data[4..];
@@ -506,8 +555,12 @@ impl CandlesAggregator {
 
         // Все ли собраны?
         if self.received == self.total && self.total > 0 {
-            let mut merged = Vec::with_capacity(self.chunks.iter()
-                .filter_map(|c| c.as_ref().map(|v| v.len())).sum());
+            let mut merged = Vec::with_capacity(
+                self.chunks
+                    .iter()
+                    .filter_map(|c| c.as_ref().map(|v| v.len()))
+                    .sum(),
+            );
             for chunk in self.chunks.drain(..).flatten() {
                 merged.extend_from_slice(&chunk);
             }
@@ -533,7 +586,7 @@ impl CandlesAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::{Compression, write::ZlibEncoder};
+    use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
 
     #[test]
@@ -544,8 +597,12 @@ mod tests {
     #[test]
     fn deep_price_roundtrip() {
         let dp = DeepPrice {
-            open_p: 100.0, close_p: 101.5, max_p: 102.0, min_p: 99.5,
-            vol: 1234.5, time: 45123.5,
+            open_p: 100.0,
+            close_p: 101.5,
+            max_p: 102.0,
+            min_p: 99.5,
+            vol: 1234.5,
+            time: 45123.5,
         };
         let mut buf = Vec::new();
         dp.write_to(&mut buf);
@@ -559,14 +616,37 @@ mod tests {
     #[test]
     fn coin_card_candles_response_roundtrip() {
         let candles = vec![
-            DeepPrice { open_p: 100.0, close_p: 105.0, max_p: 110.0, min_p: 95.0,  vol: 500.0,  time: 45000.0 },
-            DeepPrice { open_p: 105.0, close_p: 102.0, max_p: 107.0, min_p: 100.0, vol: 750.0,  time: 45000.04 },
-            DeepPrice { open_p: 102.0, close_p: 108.0, max_p: 109.0, min_p: 101.0, vol: 1200.0, time: 45000.08 },
+            DeepPrice {
+                open_p: 100.0,
+                close_p: 105.0,
+                max_p: 110.0,
+                min_p: 95.0,
+                vol: 500.0,
+                time: 45000.0,
+            },
+            DeepPrice {
+                open_p: 105.0,
+                close_p: 102.0,
+                max_p: 107.0,
+                min_p: 100.0,
+                vol: 750.0,
+                time: 45000.04,
+            },
+            DeepPrice {
+                open_p: 102.0,
+                close_p: 108.0,
+                max_p: 109.0,
+                min_p: 101.0,
+                vol: 1200.0,
+                time: 45000.08,
+            },
         ];
         // Build response
         let mut buf = Vec::new();
         buf.extend_from_slice(&(candles.len() as i32).to_le_bytes());
-        for c in &candles { c.write_to(&mut buf); }
+        for c in &candles {
+            c.write_to(&mut buf);
+        }
         // Parse
         let parsed = parse_coin_card_candles_response(&buf).unwrap();
         assert_eq!(parsed, candles);
@@ -663,13 +743,13 @@ mod tests {
         plain.extend_from_slice(&2i32.to_le_bytes());
         write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, 45_000.0);
         write_deep_price_pack(&mut plain, 102.0, 100.0, 13.5, 45_000.5);
-        for i in 0..4 {
+        for i in 0i32..4 {
             plain.extend_from_slice(&(10.0 + i as f32).to_le_bytes());
-            plain.extend_from_slice(&(i as i32).to_le_bytes());
+            plain.extend_from_slice(&i.to_le_bytes());
         }
-        for i in 0..4 {
+        for i in 0i32..4 {
             plain.extend_from_slice(&(20.0 + i as f32).to_le_bytes());
-            plain.extend_from_slice(&((10 + i) as i32).to_le_bytes());
+            plain.extend_from_slice(&(10 + i).to_le_bytes());
         }
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -706,10 +786,24 @@ mod tests {
         encoder.write_all(&plain).unwrap();
         let zipped = encoder.finish().unwrap();
 
-        let markets =
-            parse_request_candles_data_response_with_local_shift(&zipped, 180.0).unwrap();
+        let markets = parse_request_candles_data_response_with_local_shift(&zipped, 180.0).unwrap();
         let expected = 45_000.0 + (180.0 - 60.0) / MINS_IN_DAY;
         assert!((markets[0].candles_5m[0].time - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn request_candles_data_rejects_impossible_market_count_before_alloc() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        plain.push(2);
+        plain.extend_from_slice(&i32::MAX.to_le_bytes());
+        plain.extend_from_slice(&0f64.to_le_bytes());
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let zipped = encoder.finish().unwrap();
+
+        assert!(parse_request_candles_data_response(&zipped).is_none());
     }
 
     fn write_delphi_utf16_string(out: &mut Vec<u8>, value: &str) {

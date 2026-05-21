@@ -5,7 +5,6 @@
 ///   cargo run --example loss_logger --release -- <key_b64> [ip:port] [logfile.txt]
 ///
 /// Лог: каждое событие с timestamp в `logfile.txt` (по умолчанию `loss_logger.log`).
-
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -16,10 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use moonproto::client::{Client, ClientConfig, LifecycleEvent};
 use moonproto::events::Event;
 use moonproto::key_import;
-use moonproto::state::{
-    BalanceEvent, MarketsEvent, OrderBookEvent, SettingsEvent, TradesEvent,
-};
 use moonproto::state::order_books::ApplyResult as OBApplyResult;
+use moonproto::state::{BalanceEvent, MarketsEvent, OrderBookEvent, SettingsEvent, TradesEvent};
 use moonproto::{run_init_sequence, EventDispatcher, InitConfig};
 
 fn now_ms() -> i64 {
@@ -107,11 +104,11 @@ fn main() {
     } else {
         ("207.148.91.186".to_string(), 3000u16)
     };
-    let logfile = args.get(3).cloned().unwrap_or_else(|| "loss_logger.log".to_string());
-    let err_emu_pct: u8 = args
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0u8);
+    let logfile = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "loss_logger.log".to_string());
+    let err_emu_pct: u8 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0u8);
 
     if err_emu_pct > 0 {
         moonproto::client::set_err_emu(err_emu_pct);
@@ -121,7 +118,11 @@ fn main() {
     let mut log = BufWriter::new(file);
     let t0 = now_ms();
 
-    log_line(&mut log, t0, &format!("=== Loss Logger started → {}:{} ===", ip, port));
+    log_line(
+        &mut log,
+        t0,
+        &format!("=== Loss Logger started → {}:{} ===", ip, port),
+    );
     log_line(&mut log, t0, &format!("Log file: {}", logfile));
     if err_emu_pct > 0 {
         log_line(
@@ -186,11 +187,7 @@ fn main() {
     log_line(&mut log, t0, "[PHASE-1] connecting + handshake (10s)...");
     flush_log(&mut log);
 
-    client.run_with_dispatcher(
-        Duration::from_secs(10),
-        &mut dispatcher,
-        Box::new(|_| {}),
-    );
+    client.run_with_dispatcher(Duration::from_secs(10), &mut dispatcher, Box::new(|_| {}));
 
     if !client.is_authorized() {
         log_line(&mut log, t0, "[FAIL] not authorized after 10s, exiting");
@@ -210,7 +207,11 @@ fn main() {
         }
     }
 
-    log_line(&mut log, t0, "[INIT] BaseCheck/AuthCheck/GetMarketsList + trades subscription");
+    log_line(
+        &mut log,
+        t0,
+        "[INIT] BaseCheck/AuthCheck/GetMarketsList + trades subscription",
+    );
     let init = InitConfig {
         base_check: true,
         auth_check: true,
@@ -244,7 +245,11 @@ fn main() {
     flush_log(&mut log);
 
     // Phase 2: long-running logger
-    log_line(&mut log, t0, "[PHASE-2] logging started (running until killed)...");
+    log_line(
+        &mut log,
+        t0,
+        "[PHASE-2] logging started (running until killed)...",
+    );
     flush_log(&mut log);
 
     let last_stats_ms = Arc::new(AtomicI64::new(0));
@@ -282,174 +287,184 @@ fn main() {
 
             let mut events_to_log: Vec<String> = Vec::new();
             match event {
-                        // audit_rust_quality #11: Event::Trades(Vec) → Event::Trade(single).
-                        // Каждое TradesEvent теперь приходит отдельным events. trades_pkts
-                        // counter переименован семантически — теперь это сумма всех TradesEvent
-                        // (включая Duplicate/GapDetected), а не количество пакетов с сервера.
-                        Event::Trade(tev) => {
-                            counters_cb.trades_pkts.fetch_add(1, Ordering::Relaxed);
-                            {
-                                match tev {
-                                    TradesEvent::Apply(pkt) => {
-                                        counters_cb.trades_apply.fetch_add(1, Ordering::Relaxed);
-                                        let _ = pkt;
-                                    }
-                                    TradesEvent::GapDetected { start, end } => {
-                                        counters_cb.gap_detected.fetch_add(1, Ordering::Relaxed);
-                                        let n = end.wrapping_sub(*start).wrapping_add(1);
-                                        events_to_log.push(format!(
-                                            "[GAP-DETECTED] [{}..{}] missing {} packets",
-                                            start, end, n
-                                        ));
-                                    }
-                                    TradesEvent::GapFilled { packet_num, bucket_seq_range } => {
-                                        counters_cb.gap_filled.fetch_add(1, Ordering::Relaxed);
-                                        events_to_log.push(format!(
-                                            "[GAP-FILLED] pkt={} (in bucket [{}..{}])",
-                                            packet_num, bucket_seq_range.0, bucket_seq_range.1
-                                        ));
-                                    }
-                                    TradesEvent::BucketClosed { start, end, all_received, retry_count } => {
-                                        if *all_received {
-                                            counters_cb.bucket_recovered.fetch_add(1, Ordering::Relaxed);
-                                            events_to_log.push(format!(
-                                                "[BUCKET-RECOVERED] [{}..{}] retry={} ALL recovered",
-                                                start, end, retry_count
-                                            ));
-                                        } else {
-                                            counters_cb.bucket_lost.fetch_add(1, Ordering::Relaxed);
-                                            events_to_log.push(format!(
-                                                "[BUCKET-LOST] [{}..{}] retry={}/3 PACKETS LOST",
-                                                start, end, retry_count
-                                            ));
-                                        }
-                                    }
-                                    TradesEvent::Duplicate => {
-                                        counters_cb.trades_dup.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    TradesEvent::OutOfOrder { packet_num } => {
-                                        counters_cb.trades_ooo.fetch_add(1, Ordering::Relaxed);
-                                        events_to_log.push(format!(
-                                            "[TRADES-OOO] pkt={} (stale/no bucket)",
-                                            packet_num
-                                        ));
-                                    }
-                                }
+                // audit_rust_quality #11: Event::Trades(Vec) → Event::Trade(single).
+                // Каждое TradesEvent теперь приходит отдельным events. trades_pkts
+                // counter переименован семантически — теперь это сумма всех TradesEvent
+                // (включая Duplicate/GapDetected), а не количество пакетов с сервера.
+                Event::Trade(tev) => {
+                    counters_cb.trades_pkts.fetch_add(1, Ordering::Relaxed);
+                    {
+                        match tev {
+                            TradesEvent::Apply(pkt) => {
+                                counters_cb.trades_apply.fetch_add(1, Ordering::Relaxed);
+                                let _ = pkt;
                             }
-
-                        }
-                        Event::OrderBook(obev) => {
-                            counters_cb.ob_pkts.fetch_add(1, Ordering::Relaxed);
-                            match obev {
-                                OrderBookEvent::Apply { market_index, book_kind, is_full, seq, .. } => {
-                                    if *is_full {
-                                        counters_cb.ob_full.fetch_add(1, Ordering::Relaxed);
-                                        events_to_log.push(format!(
-                                            "[OB-FULL] mkt={} bk={} seq={}",
-                                            market_index, book_kind, seq
-                                        ));
-                                    } else {
-                                        counters_cb.ob_diff.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                                OrderBookEvent::Ignored { market_index, book_kind, seq, reason } => {
-                                    match reason {
-                                        OBApplyResult::Stale => {
-                                            counters_cb.ob_stale.fetch_add(1, Ordering::Relaxed);
-                                            // Не логируем каждый stale — может быть шум
-                                        }
-                                        OBApplyResult::Cached => {
-                                            counters_cb.ob_cached.fetch_add(1, Ordering::Relaxed);
-                                            events_to_log.push(format!(
-                                                "[OB-CACHED] mkt={} bk={} seq={} (gap, awaiting)",
-                                                market_index, book_kind, seq
-                                            ));
-                                        }
-                                        OBApplyResult::NoFullYet => {
-                                            counters_cb.ob_no_full_yet.fetch_add(1, Ordering::Relaxed);
-                                            events_to_log.push(format!(
-                                                "[OB-NO-FULL] mkt={} bk={} seq={} (diff before first full)",
-                                                market_index, book_kind, seq
-                                            ));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                OrderBookEvent::RequestFullNeeded { .. } => {}
-                            }
-                        }
-                        Event::Balance(bev) => match bev {
-                            BalanceEvent::SnapshotApplied { count, epoch } => {
+                            TradesEvent::GapDetected { start, end } => {
+                                counters_cb.gap_detected.fetch_add(1, Ordering::Relaxed);
+                                let n = end.wrapping_sub(*start).wrapping_add(1);
                                 events_to_log.push(format!(
-                                    "[BAL-SNAPSHOT] {} items, epoch={}",
-                                    count, epoch
+                                    "[GAP-DETECTED] [{}..{}] missing {} packets",
+                                    start, end, n
                                 ));
                             }
-                            BalanceEvent::IncrementalApplied { count, epoch, global_changed } => {
-                                if *count > 0 || *global_changed {
+                            TradesEvent::GapFilled {
+                                packet_num,
+                                bucket_seq_range,
+                            } => {
+                                counters_cb.gap_filled.fetch_add(1, Ordering::Relaxed);
+                                events_to_log.push(format!(
+                                    "[GAP-FILLED] pkt={} (in bucket [{}..{}])",
+                                    packet_num, bucket_seq_range.0, bucket_seq_range.1
+                                ));
+                            }
+                            TradesEvent::BucketClosed {
+                                start,
+                                end,
+                                all_received,
+                                retry_count,
+                            } => {
+                                if *all_received {
+                                    counters_cb.bucket_recovered.fetch_add(1, Ordering::Relaxed);
                                     events_to_log.push(format!(
-                                        "[BAL-INC] {} items, epoch={}, global_changed={}",
-                                        count, epoch, global_changed
+                                        "[BUCKET-RECOVERED] [{}..{}] retry={} ALL recovered",
+                                        start, end, retry_count
+                                    ));
+                                } else {
+                                    counters_cb.bucket_lost.fetch_add(1, Ordering::Relaxed);
+                                    events_to_log.push(format!(
+                                        "[BUCKET-LOST] [{}..{}] retry={}/3 PACKETS LOST",
+                                        start, end, retry_count
                                     ));
                                 }
                             }
-                            BalanceEvent::EpochStale { incoming, last } => {
-                                events_to_log.push(format!(
-                                    "[BAL-STALE] incoming={} last={} (REJECTED)",
-                                    incoming, last
-                                ));
+                            TradesEvent::Duplicate => {
+                                counters_cb.trades_dup.fetch_add(1, Ordering::Relaxed);
                             }
-                            _ => {}
-                        },
-                        Event::Strat(sev) => {
-                            events_to_log.push(format!("[STRAT] {:?}", sev));
-                        }
-                        Event::Settings(sev) => match sev {
-                            SettingsEvent::ClientSettingsUpdated => {
-                                events_to_log.push("[SETTINGS] ClientSettings updated".to_string());
-                            }
-                            other => events_to_log.push(format!("[SETTINGS] {:?}", other)),
-                        },
-                        Event::Markets(mev) => match mev {
-                            MarketsEvent::MarketsListReplaced { count, corr_count } => {
+                            TradesEvent::OutOfOrder { packet_num } => {
+                                counters_cb.trades_ooo.fetch_add(1, Ordering::Relaxed);
                                 events_to_log.push(format!(
-                                    "[MARKETS] list applied: {} + {} corr",
-                                    count, corr_count
-                                ));
-                            }
-                            MarketsEvent::IndexesUpdated { count } => {
-                                events_to_log.push(format!(
-                                    "[MARKETS] indexes applied: {}",
-                                    count
-                                ));
-                            }
-                            _ => {}
-                        },
-                        Event::EngineResponse(resp) => {
-                            if !resp.success {
-                                events_to_log.push(format!(
-                                    "[API-ERR] uid={} method={:?} code={} msg={}",
-                                    resp.request_uid, resp.method, resp.error_code, resp.error_msg
+                                    "[TRADES-OOO] pkt={} (stale/no bucket)",
+                                    packet_num
                                 ));
                             }
                         }
-                        Event::ServerLog { msg, .. } => {
-                            counters_cb.server_logs.fetch_add(1, Ordering::Relaxed);
-                            let trimmed = msg.trim();
-                            // Heuristic — log only "interesting" server messages
-                            if trimmed.len() < 200 && !trimmed.is_empty() {
-                                events_to_log.push(format!("[SRV] {}", trimmed));
-                            }
-                        }
-                        Event::ParseFailed { cmd, len } => {
-                            counters_cb.parse_failed.fetch_add(1, Ordering::Relaxed);
-                            events_to_log.push(format!(
-                                "[PARSE-FAIL] cmd={:?} len={}",
-                                cmd, len
-                            ));
-                        }
-                        _ => {}
                     }
+                }
+                Event::OrderBook(obev) => {
+                    counters_cb.ob_pkts.fetch_add(1, Ordering::Relaxed);
+                    match obev {
+                        OrderBookEvent::Apply {
+                            market_index,
+                            book_kind,
+                            is_full,
+                            seq,
+                            ..
+                        } => {
+                            if *is_full {
+                                counters_cb.ob_full.fetch_add(1, Ordering::Relaxed);
+                                events_to_log.push(format!(
+                                    "[OB-FULL] mkt={} bk={} seq={}",
+                                    market_index, book_kind, seq
+                                ));
+                            } else {
+                                counters_cb.ob_diff.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        OrderBookEvent::Ignored {
+                            market_index,
+                            book_kind,
+                            seq,
+                            reason,
+                        } => {
+                            match reason {
+                                OBApplyResult::Stale => {
+                                    counters_cb.ob_stale.fetch_add(1, Ordering::Relaxed);
+                                    // Не логируем каждый stale — может быть шум
+                                }
+                                OBApplyResult::Cached => {
+                                    counters_cb.ob_cached.fetch_add(1, Ordering::Relaxed);
+                                    events_to_log.push(format!(
+                                        "[OB-CACHED] mkt={} bk={} seq={} (gap, awaiting)",
+                                        market_index, book_kind, seq
+                                    ));
+                                }
+                                OBApplyResult::NoFullYet => {
+                                    counters_cb.ob_no_full_yet.fetch_add(1, Ordering::Relaxed);
+                                    events_to_log.push(format!(
+                                        "[OB-NO-FULL] mkt={} bk={} seq={} (diff before first full)",
+                                        market_index, book_kind, seq
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                        OrderBookEvent::RequestFullNeeded { .. } => {}
+                    }
+                }
+                Event::Balance(bev) => match bev {
+                    BalanceEvent::SnapshotApplied { count, epoch } => {
+                        events_to_log
+                            .push(format!("[BAL-SNAPSHOT] {} items, epoch={}", count, epoch));
+                    }
+                    BalanceEvent::IncrementalApplied {
+                        count,
+                        epoch,
+                        global_changed,
+                    } if (*count > 0 || *global_changed) => {
+                        events_to_log.push(format!(
+                            "[BAL-INC] {} items, epoch={}, global_changed={}",
+                            count, epoch, global_changed
+                        ));
+                    }
+                    BalanceEvent::EpochStale { incoming, last } => {
+                        events_to_log.push(format!(
+                            "[BAL-STALE] incoming={} last={} (REJECTED)",
+                            incoming, last
+                        ));
+                    }
+                    _ => {}
+                },
+                Event::Strat(sev) => {
+                    events_to_log.push(format!("[STRAT] {:?}", sev));
+                }
+                Event::Settings(sev) => match sev {
+                    SettingsEvent::ClientSettingsUpdated => {
+                        events_to_log.push("[SETTINGS] ClientSettings updated".to_string());
+                    }
+                    other => events_to_log.push(format!("[SETTINGS] {:?}", other)),
+                },
+                Event::Markets(mev) => match mev {
+                    MarketsEvent::MarketsListReplaced { count, corr_count } => {
+                        events_to_log.push(format!(
+                            "[MARKETS] list applied: {} + {} corr",
+                            count, corr_count
+                        ));
+                    }
+                    MarketsEvent::IndexesUpdated { count } => {
+                        events_to_log.push(format!("[MARKETS] indexes applied: {}", count));
+                    }
+                    _ => {}
+                },
+                Event::EngineResponse(resp) if !resp.success => {
+                    events_to_log.push(format!(
+                        "[API-ERR] uid={} method={:?} code={} msg={}",
+                        resp.request_uid, resp.method, resp.error_code, resp.error_msg
+                    ));
+                }
+                Event::ServerLog { msg, .. } => {
+                    counters_cb.server_logs.fetch_add(1, Ordering::Relaxed);
+                    let trimmed = msg.trim();
+                    // Heuristic — log only "interesting" server messages
+                    if trimmed.len() < 200 && !trimmed.is_empty() {
+                        events_to_log.push(format!("[SRV] {}", trimmed));
+                    }
+                }
+                Event::ParseFailed { cmd, len } => {
+                    counters_cb.parse_failed.fetch_add(1, Ordering::Relaxed);
+                    events_to_log.push(format!("[PARSE-FAIL] cmd={:?} len={}", cmd, len));
+                }
+                _ => {}
+            }
 
             // Write all collected log lines
             for line in &events_to_log {

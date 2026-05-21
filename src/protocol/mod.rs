@@ -1,7 +1,7 @@
-pub mod handshake;
-pub mod slider;
-pub mod slicing;
 pub mod crypted;
+pub mod handshake;
+pub mod slicing;
+pub mod slider;
 
 /// MoonProto command enum (matches Delphi TMoonProtoCommand ordinals)
 #[repr(u8)]

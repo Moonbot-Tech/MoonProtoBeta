@@ -15,8 +15,10 @@
 //! `Data: bytes(Size)` — это сериализованный bin-формат `TStrategySerializer` (RTTI-driven,
 //! ~1118 строк). Декодер и writer находятся в `commands::strategy_serializer`.
 
-use super::registry::{CURRENT_PROTO_CMD_VER, read_string, write_string};
-use super::strategy_serializer::{StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot};
+use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
+use super::strategy_serializer::{
+    StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot,
+};
 
 const BASE_STRAT_CLASS_CMD_ID_BASE: u8 = 0; // TBaseStratCommand
 const CMD_SNAPSHOT_REQUEST: u8 = 1;
@@ -108,38 +110,54 @@ impl StratCommand {
                 if pos + 8 + 8 + 4 + 1 > payload.len() {
                     return None;
                 }
-                let server_epoch = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
-                let client_max_last_date = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
-                let size = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize; pos += 4;
-                let full = payload[pos] != 0; pos += 1;
+                let server_epoch = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                let client_max_last_date =
+                    u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                let size = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                let full = payload[pos] != 0;
+                pos += 1;
                 if pos + size > payload.len() {
                     return None;
                 }
                 let data = payload[pos..pos + size].to_vec();
                 Some(StratCommand::Snapshot(StratSnapshot {
-                    server_epoch, client_max_last_date, full, data,
+                    server_epoch,
+                    client_max_last_date,
+                    full,
+                    data,
                 }))
             }
             CMD_DELETE => {
                 if pos + 8 > payload.len() {
                     return None;
                 }
-                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
+                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                pos += 8;
                 // Soft-read folder_path
                 let folder_path = if pos < payload.len() {
                     read_string(payload, &mut pos).unwrap_or_default()
                 } else {
                     String::new()
                 };
-                Some(StratCommand::Delete(StratDelete { strategy_id, folder_path }))
+                Some(StratCommand::Delete(StratDelete {
+                    strategy_id,
+                    folder_path,
+                }))
             }
             CMD_SELL_PRICE_UPDATE => {
                 if pos + 16 > payload.len() {
                     return None;
                 }
-                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
+                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                pos += 8;
                 let sell_price = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                Some(StratCommand::SellPriceUpdate(StratSellPriceUpdate { strategy_id, sell_price }))
+                Some(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
+                    strategy_id,
+                    sell_price,
+                }))
             }
             CMD_CHECKED_SYNC => {
                 let (items, end_pos) = read_checked_items(payload, pos)?;
@@ -149,7 +167,10 @@ impl StratCommand {
                 } else {
                     true // default для старых пакетов
                 };
-                Some(StratCommand::CheckedSync(StratCheckedSync { items, is_delta }))
+                Some(StratCommand::CheckedSync(StratCheckedSync {
+                    items,
+                    is_delta,
+                }))
             }
             CMD_CHECKED_ECHO => {
                 let (items, _) = read_checked_items(payload, pos)?;
@@ -171,9 +192,14 @@ fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratChecke
         if pos + 9 > payload.len() {
             return None;
         }
-        let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
-        let checked = payload[pos] != 0; pos += 1;
-        items.push(StratCheckedItem { strategy_id, checked });
+        let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let checked = payload[pos] != 0;
+        pos += 1;
+        items.push(StratCheckedItem {
+            strategy_id,
+            checked,
+        });
     }
     Some((items, pos))
 }
@@ -282,7 +308,9 @@ pub fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8> {
 }
 
 #[allow(dead_code)]
-fn _silence_unused_const() { let _ = BASE_STRAT_CLASS_CMD_ID_BASE; }
+fn _silence_unused_const() {
+    let _ = BASE_STRAT_CLASS_CMD_ID_BASE;
+}
 
 #[cfg(test)]
 mod tests {
@@ -320,8 +348,14 @@ mod tests {
     #[test]
     fn parse_checked_sync_with_items() {
         let items = vec![
-            StratCheckedItem { strategy_id: 100, checked: true },
-            StratCheckedItem { strategy_id: 200, checked: false },
+            StratCheckedItem {
+                strategy_id: 100,
+                checked: true,
+            },
+            StratCheckedItem {
+                strategy_id: 200,
+                checked: false,
+            },
         ];
         let payload = build_checked_sync(7, &items, true);
         let cmd = StratCommand::parse(&payload).unwrap();

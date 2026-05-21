@@ -12,7 +12,7 @@
 //! прокачивать UDP main loop пока ждёт response:
 //! ```ignore
 //! let rx = client.api_get_markets_list();
-//! let response = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+//! let response = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 //! ```
 //!
 //! Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже крутит
@@ -25,8 +25,8 @@
 //! session.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use crate::commands::engine_api::EngineResponse;
 
@@ -117,7 +117,9 @@ impl ApiPending {
 
 impl Default for ApiPending {
     fn default() -> Self {
-        Self { map: Mutex::new(HashMap::new()) }
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
     }
 }
 

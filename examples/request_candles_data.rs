@@ -48,7 +48,7 @@ fn main() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
-        step_timeout: Some(Duration::from_secs(20)),
+        step_timeout: None,
         ..Default::default()
     };
 

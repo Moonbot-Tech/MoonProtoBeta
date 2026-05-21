@@ -23,11 +23,14 @@
 //! (комментарий `/* uncomment to send */`).
 
 use std::env;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
-use moonproto::client::{Client, ClientConfig, LifecycleEvent, set_ntp_offset};
-use moonproto::events::{EventDispatcher, Event};
+use moonproto::client::{set_ntp_offset, Client, ClientConfig, LifecycleEvent};
+use moonproto::events::{Event, EventDispatcher};
 use moonproto::key_import;
 use moonproto::ntp;
 use moonproto::state::OrderEvent;
@@ -43,8 +46,13 @@ fn main() {
     let key_b64 = &args[1];
     let (ip, port) = if args.len() >= 3 {
         let parts: Vec<&str> = args[2].splitn(2, ':').collect();
-        (parts[0].to_string(), parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3000u16))
-    } else { ("127.0.0.1".to_string(), 3000u16) };
+        (
+            parts[0].to_string(),
+            parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3000u16),
+        )
+    } else {
+        ("127.0.0.1".to_string(), 3000u16)
+    };
 
     // ---- 1. Импорт ключа ----
     let keys = key_import::import_key(key_b64).expect("invalid key");
@@ -54,8 +62,11 @@ fn main() {
     let ntp_result = ntp::get_best_ntp("pool.ntp.org", 4);
     if ntp_result.synced {
         set_ntp_offset(ntp_result.time_offset);
-        println!("[setup] NTP offset={:.1}ms rtt={}ms",
-                 ntp_result.time_offset * 1000.0, ntp_result.round_trip_ms);
+        println!(
+            "[setup] NTP offset={:.1}ms rtt={}ms",
+            ntp_result.time_offset * 1000.0,
+            ntp_result.round_trip_ms
+        );
     } else {
         println!("[setup] NTP failed, continuing with system clock");
     }
@@ -114,7 +125,10 @@ fn main() {
         eprintln!("[phase 1] FAILED: not authenticated after 15s. Check key/host.");
         std::process::exit(1);
     }
-    println!("[phase 1] OK, order events seen: {}", phase1_orders.load(Ordering::Relaxed));
+    println!(
+        "[phase 1] OK, order events seen: {}",
+        phase1_orders.load(Ordering::Relaxed)
+    );
 
     // ---- 7. Phase 2: initial subscriptions ----
     //
@@ -142,7 +156,8 @@ fn main() {
 
     // UI команды.
     client.ui_mm_subscribe(true);
-    /* client.ui_switch_dex("Binance"); */    // uncomment если нужно сменить DEX
+    /* client.ui_switch_dex("Binance"); */
+    // uncomment если нужно сменить DEX
     /* client.ui_strat_start_stop(true); */   // uncomment если нужно запустить все стратегии
 
     // Подписка на orderbook через registry-aware API. Resolve `market_name →
@@ -165,7 +180,10 @@ fn main() {
     );
     match markets_rx.try_recv() {
         Ok(resp) if resp.success => {
-            println!("[phase 3] got markets list ({} bytes payload)", resp.data.len());
+            println!(
+                "[phase 3] got markets list ({} bytes payload)",
+                resp.data.len()
+            );
         }
         Ok(resp) => {
             println!("[phase 3] markets list error: {}", resp.error_msg);
@@ -225,7 +243,10 @@ fn main() {
                 Event::Balance(_) => println!("[event] Balance update"),
                 Event::Strat(_) => println!("[event] Strat update"),
                 Event::EngineResponse(r) => {
-                    println!("[event] EngineResponse method={:?} success={}", r.method, r.success);
+                    println!(
+                        "[event] EngineResponse method={:?} success={}",
+                        r.method, r.success
+                    );
                 }
                 Event::ServerLog { time: _, msg } => println!("[server log] {}", msg),
                 _ => {} // Trades / OrderBook / Ping — слишком частые
@@ -233,7 +254,10 @@ fn main() {
         }),
     );
 
-    println!("\n[done] total dispatched events: {}", total_events.load(Ordering::Relaxed));
+    println!(
+        "\n[done] total dispatched events: {}",
+        total_events.load(Ordering::Relaxed)
+    );
 
     // ---- 11. Disconnect ----
     println!("[done] disconnecting...");
@@ -247,17 +271,17 @@ trait OrderEventName {
 impl OrderEventName for OrderEvent {
     fn variant_name(&self) -> &'static str {
         match self {
-            OrderEvent::Created(_)            => "Created",
-            OrderEvent::Updated(_)            => "Updated",
-            OrderEvent::Removed(_)            => "Removed",
-            OrderEvent::BulkReplaced { .. }   => "BulkReplaced",
-            OrderEvent::TracePoint { .. }     => "TracePoint",
-            OrderEvent::CorridorChanged(_)    => "CorridorChanged",
-            OrderEvent::VStopChanged(_)       => "VStopChanged",
-            OrderEvent::StopsChanged(_)       => "StopsChanged",
-            OrderEvent::PanicSellChanged(_)   => "PanicSellChanged",
-            OrderEvent::Snapshot              => "Snapshot",
-            OrderEvent::Ignored { .. }        => "Ignored",
+            OrderEvent::Created(_) => "Created",
+            OrderEvent::Updated(_) => "Updated",
+            OrderEvent::Removed(_) => "Removed",
+            OrderEvent::BulkReplaced { .. } => "BulkReplaced",
+            OrderEvent::TracePoint { .. } => "TracePoint",
+            OrderEvent::CorridorChanged(_) => "CorridorChanged",
+            OrderEvent::VStopChanged(_) => "VStopChanged",
+            OrderEvent::StopsChanged(_) => "StopsChanged",
+            OrderEvent::PanicSellChanged(_) => "PanicSellChanged",
+            OrderEvent::Snapshot => "Snapshot",
+            OrderEvent::Ignored { .. } => "Ignored",
         }
     }
 }

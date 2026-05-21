@@ -10,9 +10,7 @@
 use std::env;
 use std::time::Duration;
 
-use moonproto::{
-    import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig,
-};
+use moonproto::{import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig};
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -42,14 +40,17 @@ fn main() {
     println!("[connect] waiting for authorization...");
     client.run_with_dispatcher(Duration::from_secs(15), &mut dispatcher, Box::new(|_| {}));
     if !client.is_authorized() {
-        eprintln!("[connect] authorization timeout, status={:?}", client.auth_status());
+        eprintln!(
+            "[connect] authorization timeout, status={:?}",
+            client.auth_status()
+        );
         std::process::exit(2);
     }
 
     let init = InitConfig {
         base_check: true,
         auth_check: true,
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     if let Err(err) = run_init_sequence(&mut client, &mut dispatcher, init) {

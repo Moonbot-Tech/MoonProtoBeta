@@ -20,8 +20,8 @@
 //! - Auto-removal на терминальном статусе.
 //! - ServerTimeDelta correction для всех TDateTime полей.
 
-use std::collections::{HashMap, VecDeque};
 use crate::commands::trade::*;
+use std::collections::{HashMap, VecDeque};
 
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
@@ -33,77 +33,77 @@ use crate::commands::trade::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SellReason {
     /// Неизвестная / не выставлена.
-    Unknown        = 0,
+    Unknown = 0,
     /// Продажа по установленной цене (дефолт).
-    SellPrice      = 1,
+    SellPrice = 1,
     /// Auto Price Down — автоматический спуск цены.
-    AutoPriceDown  = 2,
+    AutoPriceDown = 2,
     /// Sell Level — продажа по уровню.
-    SellLevel      = 3,
+    SellLevel = 3,
     /// SellSpread — продажа по спреду.
-    SellSpread     = 4,
+    SellSpread = 4,
     /// SellShot — снайперская продажа.
-    SellShot       = 5,
+    SellShot = 5,
     /// Global / Manual PanicSell.
-    PanicSell      = 6,
+    PanicSell = 6,
     /// StopLoss активирован.
-    StopLoss       = 7,
+    StopLoss = 7,
     /// Trailing Stop сработал.
-    Trailing       = 8,
+    Trailing = 8,
     /// Market Stop.
-    MarketStop     = 9,
+    MarketStop = 9,
     /// Manual Sell (price < 95% от ожидания).
-    ManualSell     = 10,
+    ManualSell = 10,
     /// JoinedSell — объединённая продажа.
-    JoinedSell     = 11,
+    JoinedSell = 11,
     /// SellFromAssets — продажа из активов.
     SellFromAssets = 12,
     /// BV/SV Stop.
-    BvSvStop       = 13,
+    BvSvStop = 13,
     /// TakeProfit достигнут.
-    TakeProfit     = 14,
+    TakeProfit = 14,
 }
 
 impl SellReason {
     /// Преобразовать byte в enum. Неизвестные коды (>14) → `Unknown`.
     pub fn from_u8(b: u8) -> Self {
         match b {
-            1  => Self::SellPrice,
-            2  => Self::AutoPriceDown,
-            3  => Self::SellLevel,
-            4  => Self::SellSpread,
-            5  => Self::SellShot,
-            6  => Self::PanicSell,
-            7  => Self::StopLoss,
-            8  => Self::Trailing,
-            9  => Self::MarketStop,
+            1 => Self::SellPrice,
+            2 => Self::AutoPriceDown,
+            3 => Self::SellLevel,
+            4 => Self::SellSpread,
+            5 => Self::SellShot,
+            6 => Self::PanicSell,
+            7 => Self::StopLoss,
+            8 => Self::Trailing,
+            9 => Self::MarketStop,
             10 => Self::ManualSell,
             11 => Self::JoinedSell,
             12 => Self::SellFromAssets,
             13 => Self::BvSvStop,
             14 => Self::TakeProfit,
-            _  => Self::Unknown,
+            _ => Self::Unknown,
         }
     }
 
     /// Человекочитаемое название (для UI отображения).
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Unknown        => "Unknown",
-            Self::SellPrice      => "Sell Price",
-            Self::AutoPriceDown  => "Auto Price Down",
-            Self::SellLevel      => "Sell Level",
-            Self::SellSpread     => "Sell Spread",
-            Self::SellShot       => "Sell Shot",
-            Self::PanicSell      => "Panic Sell",
-            Self::StopLoss       => "Stop Loss",
-            Self::Trailing       => "Trailing Stop",
-            Self::MarketStop     => "Market Stop",
-            Self::ManualSell     => "Manual Sell",
-            Self::JoinedSell     => "Joined Sell",
+            Self::Unknown => "Unknown",
+            Self::SellPrice => "Sell Price",
+            Self::AutoPriceDown => "Auto Price Down",
+            Self::SellLevel => "Sell Level",
+            Self::SellSpread => "Sell Spread",
+            Self::SellShot => "Sell Shot",
+            Self::PanicSell => "Panic Sell",
+            Self::StopLoss => "Stop Loss",
+            Self::Trailing => "Trailing Stop",
+            Self::MarketStop => "Market Stop",
+            Self::ManualSell => "Manual Sell",
+            Self::JoinedSell => "Joined Sell",
             Self::SellFromAssets => "Sell From Assets",
-            Self::BvSvStop       => "BV/SV Stop",
-            Self::TakeProfit     => "Take Profit",
+            Self::BvSvStop => "BV/SV Stop",
+            Self::TakeProfit => "Take Profit",
         }
     }
 }
@@ -289,7 +289,10 @@ pub enum OrderEvent {
     /// Ордер удалён — terminal status, TOrderNotFound или server_forced_remove.
     Removed(u64),
     /// Bulk replace notification.
-    BulkReplaced { order_type: OrderType, uids: Vec<u64> },
+    BulkReplaced {
+        order_type: OrderType,
+        uids: Vec<u64>,
+    },
     /// Trace point добавлен.
     TracePoint { uid: u64 },
     /// Корридор обновлён.
@@ -319,6 +322,7 @@ impl From<&Order> for TradeCtx {
 ///     уникальными uid'ами (35 MB/sec при 50K msg/sec);
 ///   - сервер забыл прислать терминальный статус и ордера накапливаются;
 ///   - очень долгая сессия с десятками тысяч ордеров.
+///
 /// Реальный бот держит сотни-единицы тысяч активных ордеров; 50_000 — щедрый
 /// запас. См. `audit_robustness` C-1.
 pub const MAX_ORDERS: usize = 50_000;
@@ -401,7 +405,10 @@ impl Orders {
                             "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting snapshot uid={order_uid}");
                         continue;
                     }
-                    let entry = self.map.entry(order_uid).or_insert_with(|| Order::from_status(st));
+                    let entry = self
+                        .map
+                        .entry(order_uid)
+                        .or_insert_with(|| Order::from_status(st));
                     Self::apply_status_inner(entry, st, self.server_time_delta);
                     entry.snapshot_flag = new_flag;
                 }
@@ -419,9 +426,18 @@ impl Orders {
                 if new_order && self.map.len() >= MAX_ORDERS {
                     log::warn!(target: "moonproto::orders",
                         "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting new uid={uid}");
-                    return (ApplyResult::Rejected, OrderEvent::Ignored { uid, reason: ApplyResult::Rejected });
+                    return (
+                        ApplyResult::Rejected,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::Rejected,
+                        },
+                    );
                 }
-                let entry = self.map.entry(uid).or_insert_with(|| Order::from_status(&st));
+                let entry = self
+                    .map
+                    .entry(uid)
+                    .or_insert_with(|| Order::from_status(&st));
 
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
                     return (reason, OrderEvent::Ignored { uid, reason });
@@ -443,7 +459,13 @@ impl Orders {
             // --- Delta-update ---
             TradeCommand::OrderStatusUpdate(up) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
 
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
@@ -455,7 +477,14 @@ impl Orders {
                 data.adjust_time(self.server_time_delta);
 
                 // Routing по status — какой ордер обновлять.
-                let target = if matches!(up.epoch_header.status, OrderWorkerStatus::SellSet | OrderWorkerStatus::SelLAlmostDone | OrderWorkerStatus::SelLDone | OrderWorkerStatus::SellCancel | OrderWorkerStatus::SellFail) {
+                let target = if matches!(
+                    up.epoch_header.status,
+                    OrderWorkerStatus::SellSet
+                        | OrderWorkerStatus::SelLAlmostDone
+                        | OrderWorkerStatus::SelLDone
+                        | OrderWorkerStatus::SellCancel
+                        | OrderWorkerStatus::SellFail
+                ) {
                     &mut entry.sell_order
                 } else {
                     &mut entry.buy_order
@@ -486,8 +515,15 @@ impl Orders {
 
             // --- Replace response ---
             TradeCommand::OrderReplaceResponse(rr) => {
+                let rr = *rr;
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
 
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &rr.epoch_header) {
@@ -528,7 +564,13 @@ impl Orders {
             // --- Stops update ---
             TradeCommand::OrderStopsUpdate(su) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &su.epoch_header) {
                     return (reason, OrderEvent::Ignored { uid, reason });
@@ -540,7 +582,13 @@ impl Orders {
             // --- VStop update ---
             TradeCommand::VStopUpdate(vs) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &vs.epoch_header) {
                     return (reason, OrderEvent::Ignored { uid, reason });
@@ -555,7 +603,13 @@ impl Orders {
             // --- Corridor update ---
             TradeCommand::CorridorUpdate(cu) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
                 entry.corridor_price_down = cu.price_down;
                 entry.corridor_price_up = cu.price_up;
@@ -565,7 +619,13 @@ impl Orders {
             // --- Trace point ---
             TradeCommand::OrderTracePoint(mut tp) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
                 tp.adjust_time(self.server_time_delta);
                 entry.trace_points.push_back(tp);
@@ -586,7 +646,13 @@ impl Orders {
                         }
                     }
                 }
-                (ApplyResult::Applied, OrderEvent::BulkReplaced { order_type: brn.order_type, uids: brn.uids.clone() })
+                (
+                    ApplyResult::Applied,
+                    OrderEvent::BulkReplaced {
+                        order_type: brn.order_type,
+                        uids: brn.uids.clone(),
+                    },
+                )
             }
 
             // --- Order not found (server forced remove) ---
@@ -597,14 +663,26 @@ impl Orders {
                     entry.job_is_done = true;
                     (ApplyResult::Applied, OrderEvent::Removed(uid))
                 } else {
-                    (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound })
+                    (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    )
                 }
             }
 
             // --- Panic sell turn on/off ---
             TradeCommand::TurnPanicSell(ts) => {
                 let Some(entry) = self.map.get_mut(&uid) else {
-                    return (ApplyResult::OrderNotFound, OrderEvent::Ignored { uid, reason: ApplyResult::OrderNotFound });
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 };
                 if let Err(reason) = Self::accept_epoch_and_phase(entry, &ts.epoch_header) {
                     return (reason, OrderEvent::Ignored { uid, reason });
@@ -640,25 +718,40 @@ impl Orders {
             | TradeCommand::DoSplitPosition(_)
             | TradeCommand::DoMarketSplitPosition(_)
             | TradeCommand::DoSellOrder(_)
-            | TradeCommand::NewOrder(_) => {
-                (ApplyResult::NotApplicable, OrderEvent::Ignored { uid, reason: ApplyResult::NotApplicable })
-            }
+            | TradeCommand::NewOrder(_) => (
+                ApplyResult::NotApplicable,
+                OrderEvent::Ignored {
+                    uid,
+                    reason: ApplyResult::NotApplicable,
+                },
+            ),
 
             // --- Прочие ---
             TradeCommand::Penalty(_)
             | TradeCommand::TradeVisual(_)
             | TradeCommand::BaseMarket(_)
-            | TradeCommand::TradeEpoch(_) => {
-                (ApplyResult::NotApplicable, OrderEvent::Ignored { uid, reason: ApplyResult::NotApplicable })
-            }
+            | TradeCommand::TradeEpoch(_) => (
+                ApplyResult::NotApplicable,
+                OrderEvent::Ignored {
+                    uid,
+                    reason: ApplyResult::NotApplicable,
+                },
+            ),
 
-            TradeCommand::Unknown { uid, .. } => {
-                (ApplyResult::NotApplicable, OrderEvent::Ignored { uid, reason: ApplyResult::NotApplicable })
-            }
+            TradeCommand::Unknown { uid, .. } => (
+                ApplyResult::NotApplicable,
+                OrderEvent::Ignored {
+                    uid,
+                    reason: ApplyResult::NotApplicable,
+                },
+            ),
         }
     }
 
-    fn accept_epoch_and_phase(entry: &mut Order, header: &TradeEpochHeader) -> Result<(), ApplyResult> {
+    fn accept_epoch_and_phase(
+        entry: &mut Order,
+        header: &TradeEpochHeader,
+    ) -> Result<(), ApplyResult> {
         let phase_idx = header.status as usize;
         if phase_idx < entry.server_latest_epoch.len() {
             if !epoch_is_ok(entry.server_latest_epoch[phase_idx], header.epoch) {
@@ -703,7 +796,8 @@ impl Orders {
     /// Соответствует `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
     pub fn missing_after_snapshot(&self) -> Vec<u64> {
         let flag = self.current_snapshot_flag;
-        self.map.values()
+        self.map
+            .values()
             .filter(|o| o.snapshot_flag != flag && !o.job_is_done)
             .map(|o| o.uid)
             .collect()
@@ -732,7 +826,11 @@ mod tests {
     use super::*;
 
     fn make_base(uid: u64, ver: u16) -> BaseCommandHeader {
-        BaseCommandHeader { cmd_id: 4, ver, uid }
+        BaseCommandHeader {
+            cmd_id: 4,
+            ver,
+            uid,
+        }
     }
 
     fn make_market(uid: u64, ver: u16, market_name: &str) -> MarketCommandHeader {
@@ -744,7 +842,13 @@ mod tests {
         }
     }
 
-    fn make_epoch(uid: u64, ver: u16, market: &str, epoch: u16, status: OrderWorkerStatus) -> TradeEpochHeader {
+    fn make_epoch(
+        uid: u64,
+        ver: u16,
+        market: &str,
+        epoch: u16,
+        status: OrderWorkerStatus,
+    ) -> TradeEpochHeader {
         TradeEpochHeader {
             market: make_market(uid, ver, market),
             epoch,
@@ -767,17 +871,25 @@ mod tests {
         }
     }
 
+    fn order_status_cmd(status: OrderStatus) -> TradeCommand {
+        TradeCommand::OrderStatus(Box::new(status))
+    }
+
+    fn order_replace_response_cmd(response: OrderReplaceResponse) -> TradeCommand {
+        TradeCommand::OrderReplaceResponse(Box::new(response))
+    }
+
     #[test]
     fn create_then_remove_on_terminal() {
         let mut orders = Orders::new();
         let s1 = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-        let (res, ev) = orders.apply(TradeCommand::OrderStatus(s1));
+        let (res, ev) = orders.apply(order_status_cmd(s1));
         assert_eq!(res, ApplyResult::Applied);
         assert!(matches!(ev, OrderEvent::Created(42)));
         assert!(orders.get(42).is_some());
 
         let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLDone, 1);
-        let (_, ev) = orders.apply(TradeCommand::OrderStatus(s2));
+        let (_, ev) = orders.apply(order_status_cmd(s2));
         assert!(matches!(ev, OrderEvent::Removed(42)));
         assert!(orders.get(42).is_none());
     }
@@ -785,10 +897,15 @@ mod tests {
     #[test]
     fn sell_almost_done_is_terminal() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1)));
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
 
         let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLAlmostDone, 2);
-        let (res, ev) = orders.apply(TradeCommand::OrderStatus(s2));
+        let (res, ev) = orders.apply(order_status_cmd(s2));
         assert_eq!(res, ApplyResult::Applied);
         assert!(matches!(ev, OrderEvent::Removed(42)));
         assert!(orders.get(42).is_none());
@@ -798,8 +915,18 @@ mod tests {
     fn phase_rollback_rejected() {
         let mut orders = Orders::new();
         // SellSet (phase 3) → потом BuySet (phase 1) → rollback
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::SellSet, 5)));
-        let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 6)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            5,
+        )));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            6,
+        )));
         assert_eq!(res, ApplyResult::PhaseRollback);
     }
 
@@ -807,8 +934,18 @@ mod tests {
     fn phase_rollback_not_applied_for_terminal() {
         // BuySet (phase 1) → BuyCancel (phase 0): NOT rollback потому что новая phase = 0
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 5)));
-        let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuyCancel, 6)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            5,
+        )));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuyCancel,
+            6,
+        )));
         // BuyCancel terminal → removed
         assert_eq!(res, ApplyResult::Applied);
     }
@@ -816,34 +953,69 @@ mod tests {
     #[test]
     fn epoch_out_of_order_rejected() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
         // epoch 5 после 10: backDist=10-5=5 <= 100 → stale
-        let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 5)));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            5,
+        )));
         assert_eq!(res, ApplyResult::OutOfOrder);
     }
 
     #[test]
     fn epoch_duplicate_rejected() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
         // Тот же epoch — дубликат, отвергается (Delphi EpochIsOK: LastEpoch=NewEpoch → false)
-        let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
         assert_eq!(res, ApplyResult::OutOfOrder);
     }
 
     #[test]
     fn epoch_wrap_around_accepted() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 65500)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            65500,
+        )));
         // wrap: 65500 → 200, backDist = 65500-200 = 65300 > 100 → accept (новое сообщение)
-        let (res, _) = orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 200)));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            200,
+        )));
         assert_eq!(res, ApplyResult::Applied);
     }
 
     #[test]
     fn replace_response_updates_epoch_slot() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
 
         let rr = OrderReplaceResponse {
             epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
@@ -853,20 +1025,27 @@ mod tests {
             quantity_base: 0.0,
         };
 
-        let (res, _) = orders.apply(TradeCommand::OrderReplaceResponse(rr.clone()));
+        let (res, _) = orders.apply(order_replace_response_cmd(rr.clone()));
         assert_eq!(res, ApplyResult::Applied);
 
-        let (res, _) = orders.apply(TradeCommand::OrderReplaceResponse(rr));
+        let (res, _) = orders.apply(order_replace_response_cmd(rr));
         assert_eq!(res, ApplyResult::OutOfOrder);
     }
 
     #[test]
     fn stops_update_uses_epoch_guard() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 10)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
 
-        let mut stops = StopSettings::default();
-        stops.stop_loss_on = 1;
+        let stops = StopSettings {
+            stop_loss_on: 1,
+            ..Default::default()
+        };
         let stale = OrderStopsUpdate {
             epoch_header: make_epoch(1, 3, "X", 5, OrderWorkerStatus::BuySet),
             stops,
@@ -880,7 +1059,12 @@ mod tests {
     #[test]
     fn vstop_update_uses_phase_guard() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::SellSet, 10)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            10,
+        )));
 
         let rollback = VStopUpdate {
             epoch_header: make_epoch(1, 3, "X", 200, OrderWorkerStatus::BuySet),
@@ -900,28 +1084,38 @@ mod tests {
         // Delphi: backDist := last - new (Word wrapping); accept = backDist > 100.
 
         // duplicate
-        assert_eq!(epoch_is_ok(10, 10), false);
+        assert!(!epoch_is_ok(10, 10));
         // stale близко: backDist = 100-50 = 50 <= 100 → reject.
-        assert_eq!(epoch_is_ok(100, 50), false);
+        assert!(!epoch_is_ok(100, 50));
         // accept forward через wrap: backDist = 100-250 = 65386 > 100 → accept.
-        assert_eq!(epoch_is_ok(100, 250), true);
+        assert!(epoch_is_ok(100, 250));
         // wrap-around forward далеко: last=65500, new=200. backDist = 65300 > 100 → accept.
-        assert_eq!(epoch_is_ok(65500, 200), true);
+        assert!(epoch_is_ok(65500, 200));
         // last=200, new=65500. backDist = 200-65500 (wrap) = 236 > 100 → accept.
-        assert_eq!(epoch_is_ok(200, 65500), true);
+        assert!(epoch_is_ok(200, 65500));
         // Ближний stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 <= 100 → reject.
-        assert_eq!(epoch_is_ok(10, 65500), false);
+        assert!(!epoch_is_ok(10, 65500));
         // Граница окна: backDist = 100 → НЕ accept (требуется СТРОГО > 100).
-        assert_eq!(epoch_is_ok(500, 400), false);
+        assert!(!epoch_is_ok(500, 400));
         // На один больше границы → accept.
-        assert_eq!(epoch_is_ok(500, 399), true);
+        assert!(epoch_is_ok(500, 399));
     }
 
     #[test]
     fn missing_after_snapshot_returns_old_orders() {
         let mut orders = Orders::new();
-        orders.apply(TradeCommand::OrderStatus(make_status(1, "X", OrderWorkerStatus::BuySet, 1)));
-        orders.apply(TradeCommand::OrderStatus(make_status(2, "Y", OrderWorkerStatus::BuySet, 1)));
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            2,
+            "Y",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
 
         let snap = AllStatuses {
             header: make_base(0, 3),

@@ -17,9 +17,8 @@
 //! без фиксации в state.
 
 use crate::commands::ui::{
-    UICommand, ClientSettingsCommand, LevManage,
-    StratStartStop, StratStartStopV2, UpdateVersion,
-    EmuTrades, TriggerManage, ResetProfit, ArbActivateNotify, SwitchDex, SwitchSpot,
+    ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, StratStartStop,
+    StratStartStopV2, SwitchDex, SwitchSpot, TriggerManage, UICommand, UpdateVersion,
 };
 
 /// Sync state клиентских настроек — обновляется через `apply(UICommand)`.
@@ -31,13 +30,13 @@ pub struct SettingsState {
     /// Последний полученный snapshot настроек клиента (None до первого `SettingsRequest` ответа).
     pub client_settings: Option<ClientSettingsCommand>,
     /// Текущие настройки leverage management (None если ни одного `TLevManageCommand` не получено).
-    pub lev_manage:      Option<LevManage>,
+    pub lev_manage: Option<LevManage>,
     /// Активна ли подписка на market-maker ордера (изменяется через `ui_mm_subscribe`).
     pub mm_orders_subscribed: bool,
     /// Имя текущего выбранного DEX (None если не выбран / не futures-режим).
-    pub current_dex:     Option<String>,
+    pub current_dex: Option<String>,
     /// Индекс текущего spot (None если не выбран). Конкретные значения биржа-specific.
-    pub current_spot:    Option<u8>,
+    pub current_spot: Option<u8>,
     /// `TDateTime` (Delphi double): момент когда истекает Arb лицензия.
     pub arb_valid_until: Option<f64>,
 }
@@ -77,18 +76,20 @@ pub enum SettingsEvent {
 }
 
 impl SettingsState {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Применить входящую UI-команду к state. Возвращает event для прикладного слоя.
     pub fn apply(&mut self, cmd: UICommand) -> SettingsEvent {
         match cmd {
             UICommand::ClientSettings(c) => {
-                self.client_settings = Some(c);
+                self.client_settings = Some(*c);
                 SettingsEvent::ClientSettingsUpdated
             }
             UICommand::SettingsRequest { uid } => SettingsEvent::SettingsRequested { uid },
 
-            UICommand::StratStartStop(s)   => SettingsEvent::StratStartStopRequested(s),
+            UICommand::StratStartStop(s) => SettingsEvent::StratStartStopRequested(s),
             UICommand::StratStartStopV2(s) => SettingsEvent::StratStartStopV2Requested(s),
 
             UICommand::MMOrdersSubscribe(m) => {
@@ -165,14 +166,14 @@ mod tests {
             free_position_check: false,
             vol_drop_level: 0,
             use_stop_market: false,
-            as_cfg:  vec![0; AS_CFG_SIZE],
+            as_cfg: vec![0; AS_CFG_SIZE],
             as_cfg2: vec![0; AS_CFG2_SIZE],
             s_price: [0.0; 6],
             sb_num: 0,
             join_sell_kind: 0,
             arb_config: ArbConfigCompact::default(),
         };
-        let ev = st.apply(UICommand::ClientSettings(cmd));
+        let ev = st.apply(UICommand::ClientSettings(Box::new(cmd)));
         assert!(matches!(ev, SettingsEvent::ClientSettingsUpdated));
         assert_eq!(st.client_settings.as_ref().unwrap().x_sell, 50);
     }
@@ -181,11 +182,17 @@ mod tests {
     fn mm_orders_subscribe_changes_state() {
         let mut st = SettingsState::new();
         assert!(!st.mm_orders_subscribed);
-        let ev = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe { uid: 1, subscribe: true }));
+        let ev = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
+            uid: 1,
+            subscribe: true,
+        }));
         assert!(matches!(ev, SettingsEvent::MMSubscribeChanged(true)));
         assert!(st.mm_orders_subscribed);
 
-        let _ = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe { uid: 2, subscribe: false }));
+        let _ = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
+            uid: 2,
+            subscribe: false,
+        }));
         assert!(!st.mm_orders_subscribed);
     }
 
@@ -193,7 +200,10 @@ mod tests {
     fn dex_switch_updates_current() {
         let mut st = SettingsState::new();
         assert!(st.current_dex.is_none());
-        let ev = st.apply(UICommand::SwitchDex(SwitchDex { uid: 1, dex_name: "Uni".to_string() }));
+        let ev = st.apply(UICommand::SwitchDex(SwitchDex {
+            uid: 1,
+            dex_name: "Uni".to_string(),
+        }));
         match ev {
             SettingsEvent::DexSwitched(s) => assert_eq!(s.dex_name, "Uni"),
             _ => panic!("wrong event"),
@@ -204,14 +214,20 @@ mod tests {
     #[test]
     fn spot_switch_updates_index() {
         let mut st = SettingsState::new();
-        let _ = st.apply(UICommand::SwitchSpot(SwitchSpot { uid: 1, spot_index: 1 }));
+        let _ = st.apply(UICommand::SwitchSpot(SwitchSpot {
+            uid: 1,
+            spot_index: 1,
+        }));
         assert_eq!(st.current_spot, Some(1));
     }
 
     #[test]
     fn arb_activate_stores_valid_until() {
         let mut st = SettingsState::new();
-        let _ = st.apply(UICommand::ArbActivateNotify(ArbActivateNotify { uid: 1, arb_valid: 45000.5 }));
+        let _ = st.apply(UICommand::ArbActivateNotify(ArbActivateNotify {
+            uid: 1,
+            arb_valid: 45000.5,
+        }));
         assert_eq!(st.arb_valid_until, Some(45000.5));
     }
 
@@ -219,10 +235,15 @@ mod tests {
     fn lev_manage_stores_snapshot() {
         let mut st = SettingsState::new();
         let lm = LevManage {
-            uid: 1, cmd_ver: 1,
-            auto_max_order: true, auto_lev_up: false,
-            auto_isolated: true, auto_cross: false, auto_fix_lev: true,
-            fix_lev: 10, tlg_report: false,
+            uid: 1,
+            cmd_ver: 1,
+            auto_max_order: true,
+            auto_lev_up: false,
+            auto_isolated: true,
+            auto_cross: false,
+            auto_fix_lev: true,
+            fix_lev: 10,
+            tlg_report: false,
             lev_control: "BTC".to_string(),
         };
         let _ = st.apply(UICommand::LevManage(lm));
@@ -233,7 +254,10 @@ mod tests {
     #[test]
     fn action_commands_pass_through_without_state() {
         let mut st = SettingsState::new();
-        let ev = st.apply(UICommand::StratStartStop(StratStartStop { uid: 1, is_start: true }));
+        let ev = st.apply(UICommand::StratStartStop(StratStartStop {
+            uid: 1,
+            is_start: true,
+        }));
         assert!(matches!(ev, SettingsEvent::StratStartStopRequested(_)));
         // state не меняется
         assert!(st.client_settings.is_none());

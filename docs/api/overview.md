@@ -44,6 +44,7 @@ let init = InitConfig {
     base_check: true,
     auth_check: true,
     fetch_markets: true,
+    fetch_indexes: true,
     fetch_balance: true,
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -68,6 +69,7 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 
 - Reconnects and re-handshakes.
 - Replays registered trade/orderbook subscriptions after hard reconnect.
+- Fetches market indexes during init when requested or required by subscriptions.
 - Refetches market indexes after server restart and blocks indexed streams until they are synchronized.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
 - Detects trades gaps and sends `TradesResend` requests on periodic ticks.

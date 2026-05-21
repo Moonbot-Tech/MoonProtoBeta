@@ -11,8 +11,7 @@ use std::env;
 use std::time::Duration;
 
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
-    InitConfig,
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher, InitConfig,
 };
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
@@ -44,7 +43,7 @@ fn main() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
-        step_timeout: Some(Duration::from_secs(15)),
+        step_timeout: None,
         ..Default::default()
     };
 

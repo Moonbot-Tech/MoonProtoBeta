@@ -104,6 +104,7 @@ let init = InitConfig {
     base_check: true,
     auth_check: true,
     fetch_markets: true,
+    fetch_indexes: true,
     fetch_balance: true,
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -121,6 +122,23 @@ println!("orderbooks subscribed: {}", result.orderbooks_subscribed);
 The helper keeps the client loop running while it waits for the connection and
 for each Engine API response. It also fills `client.server_info()` after
 `BaseCheck`.
+
+`InitConfig::fetch_indexes` sends `GetMarketsIndexes` and records the payload
+size in `InitResult::indexes_response_bytes`. It is also forced automatically
+when `subscribe_trades` or `subscribe_orderbooks` is set, because trades and
+orderbook packets are gated until indexes match the current server app token.
+Periodic market refresh starts only after init opens the domain gate, so
+BaseCheck/AuthCheck are not delayed by early background refresh traffic.
+Critical BaseCheck/AuthCheck waits use the same default as Delphi
+`TMoonProtoEngine.FTimeout`: 12 seconds per Engine API request.
+
+`BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
+request. If `client.mark_server_update_sent()` was called before init, the next
+`run_init_sequence` consumes that marker, waits up to `34 * 300ms` for
+`AuthDone`, sends BaseCheck once, and if it still fails retries it 10 times with
+`2000ms` pauses. The high-level UI wrappers that match Delphi
+`ServerUpdateSent` behavior call the marker automatically:
+`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot`.
 
 Domain pushes received before init completion are ignored, matching the Delphi
 `InitDone` gate. Once init succeeds, the helper sends the Delphi post-init
@@ -156,9 +174,9 @@ tracked order state.
 For common one-shot reads, prefer typed request helpers:
 
 ```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
-let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
+let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
@@ -173,7 +191,7 @@ notifications in `dispatcher.queued_events()`. Drain them after the helper when
 the UI needs every event:
 
 ```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
 for event in dispatcher.take_queued_events() {
     handle_event(event);
 }
@@ -184,7 +202,7 @@ Lower-level `Client::api_*` methods still return
 
 ```rust
 let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 ```
 
 Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
@@ -218,7 +236,7 @@ The UI settings channel is not an Engine API request, so it has no pending
 ```rust
 let settings = client.request_client_settings(
     &mut dispatcher,
-    Duration::from_secs(10),
+    Duration::from_secs(12),
 )?;
 println!("xSell={}", settings.x_sell);
 ```
@@ -231,7 +249,7 @@ orders as a one-shot operation:
 ```rust
 let orders = client.request_order_snapshot(
     &mut dispatcher,
-    Duration::from_secs(10),
+    Duration::from_secs(12),
 )?;
 println!("active orders={}", orders.len());
 ```
@@ -323,6 +341,10 @@ client.bytes_per_sec_sent();
 client.bytes_per_sec_recv();
 client.round_trip_delay_ms();
 client.actual_pmtu();
+client.sliced_in_flight_count();
+client.sliced_in_flight_blocks();
+client.pending_high_count();
+client.avg_over_heat();
 client.rs();
 client.server_time_delta_days();
 client.server_token();

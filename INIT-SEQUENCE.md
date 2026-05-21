@@ -16,10 +16,12 @@ let init = InitConfig {
     base_check: true,
     auth_check: true,
     fetch_markets: true,
+    fetch_indexes: true,
     fetch_balance: true,
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     step_timeout: Some(Duration::from_secs(15)),
+    ..Default::default()
 };
 
 let result = connect_and_init(
@@ -62,6 +64,13 @@ and MoonProto version. `run_init_sequence` parses those fields into
 
 In the Rust init helper this is a critical step: a timeout stops the init
 sequence with `InitError::CriticalStepTimedOut("BaseCheck")`.
+
+Timing follows `TMoonProtoEngine.BaseCheck`/`SendAndWait`: each attempt uses the
+12s Engine API timeout. A normal init sends one BaseCheck. If a previous UI
+command marked Delphi `ServerUpdateSent` (`ui_update_version`, `ui_switch_dex`,
+`ui_switch_spot`, or manual `client.mark_server_update_sent()`), init first
+waits up to `34 * 300ms` for `AuthDone`, clears the marker, then sends
+BaseCheck once and retries it up to 10 more times with `2000ms` pauses.
 
 ## Phase 2: AuthCheck
 
@@ -108,7 +117,22 @@ sixty seconds by default.
 Market fetch failures are non-critical in `run_init_sequence`: the error is
 recorded in `InitResult::errors`, and init continues.
 
-## Phase 4: Balance Refresh
+## Phase 4: Market Indexes
+
+```text
+Client -> Server: TEngineRequest(emk_GetMarketsIndexes) [MPC_API, Sliced, encrypted]
+Server -> Client: TEngineResponse(success=true, data=market names by server index)
+```
+
+`InitConfig::fetch_indexes` requests the initial server index map. The helper
+also forces this step when `subscribe_trades` or `subscribe_orderbooks` is set,
+because trades and orderbook packets are gated until indexes are synchronized
+for the current `PeerAppToken`.
+
+Index fetch failures are non-critical in `run_init_sequence`; the error is
+recorded in `InitResult::errors`, and init continues.
+
+## Phase 5: Balance Refresh
 
 ```text
 Client -> Server: TEngineRequest(emk_GetMarketsBalanceFull) [MPC_API, Sliced, encrypted]
@@ -124,7 +148,7 @@ Balance channel, and one-shot balance reads should use helpers such as
 Balance refresh failures are non-critical in `run_init_sequence` and are added
 to `InitResult::errors`.
 
-## Phase 5: Stream Subscriptions
+## Phase 6: Stream Subscriptions
 
 ```text
 Client -> Server: TEngineRequest(emk_SubscribeAllTrades, params=want_mm)

@@ -14,7 +14,6 @@
 ///   FKey: THash128 (16 bytes) ← MasterKey
 ///   FMacKey: THash128 (16 bytes) ← MacKey
 ///   hash: int64 (8 bytes)
-
 use crate::MoonKey;
 
 /// Decoded key pair from MoonBot export.
@@ -33,8 +32,12 @@ pub struct ImportedKeys {
 /// Returns (MasterKey, MacKey) or None if parsing fails.
 pub fn import_key(base64_str: &str) -> Option<ImportedKeys> {
     use base64::Engine;
-    let raw = base64::engine::general_purpose::STANDARD.decode(base64_str.trim()).ok()?;
-    if raw.len() < 16 { return None; }
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(base64_str.trim())
+        .ok()?;
+    if raw.len() < 16 {
+        return None;
+    }
 
     // Extract ts (first 8 bytes, SIGNED i64) and checksum (next 8 bytes)
     let ts = i64::from_le_bytes(raw[0..8].try_into().unwrap());
@@ -50,14 +53,18 @@ pub fn import_key(base64_str: &str) -> Option<ImportedKeys> {
     decode_buffer(&mut encrypted, &password);
 
     // After decryption: ts2(8) + TMoonProtoKeyContainer(72)
-    if encrypted.len() < 80 { return None; }
+    if encrypted.len() < 80 {
+        return None;
+    }
 
     let container_offset = 8;
 
     // TMoonProtoKeyContainer fields:
     // rnd: string[16] at +0 (1 byte len + 16 bytes chars)
     let rnd_len = encrypted[container_offset] as usize;
-    if rnd_len > 16 { return None; }
+    if rnd_len > 16 {
+        return None;
+    }
 
     let filled = encrypted[container_offset + 17];
     // Date at +18 (8 bytes, f64)
@@ -80,7 +87,7 @@ pub fn import_key(base64_str: &str) -> Option<ImportedKeys> {
 
     // Verify rnd is readable ASCII
     let rnd_bytes = &encrypted[container_offset + 1..container_offset + 1 + rnd_len];
-    if !rnd_bytes.iter().all(|&b| b >= 32 && b < 127) {
+    if !rnd_bytes.iter().all(|&b| (32..127).contains(&b)) {
         return None;
     }
 
@@ -96,7 +103,9 @@ pub fn import_key(base64_str: &str) -> Option<ImportedKeys> {
 /// Decrypts in-place using password bytes.
 fn decode_buffer(buf: &mut [u8], code: &[u8]) {
     let code_len = code.len();
-    if code_len == 0 || buf.is_empty() { return; }
+    if code_len == 0 || buf.is_empty() {
+        return;
+    }
 
     for (counter, byte) in buf.iter_mut().enumerate() {
         let al = (counter & 0xFF) as u8;
@@ -128,12 +137,20 @@ fn decode_buffer(buf: &mut [u8], code: &[u8]) {
         b = b.wrapping_sub(c3);
 
         // step 10-13 (nibble = counter & 0xF)
-        let nibble = (counter & 0xF) as usize;
-        let cn2 = if code_len > nibble + 2 { code[nibble + 2] } else { 0 };
+        let nibble = counter & 0xF;
+        let cn2 = if code_len > nibble + 2 {
+            code[nibble + 2]
+        } else {
+            0
+        };
         let cl_val = cn2.wrapping_add(nibble as u8);
         b ^= cl_val;
 
-        let cn1 = if code_len > nibble + 1 { code[nibble + 1] } else { 0 };
+        let cn1 = if code_len > nibble + 1 {
+            code[nibble + 1]
+        } else {
+            0
+        };
         let cn1_mod = cn1 & 7;
         b = b.rotate_right(cn1_mod as u32);
         b = b.wrapping_sub(nibble as u8);
@@ -160,9 +177,19 @@ mod tests {
         let keys = import_key(key_b64).expect("Failed to import key");
         assert!(keys.filled);
         assert_eq!(keys.ver, 1);
-        assert_eq!(keys.master_key, [0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5,
-                                      0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25, 0xcb, 0xd6]);
-        assert_eq!(keys.mac_key, [0x29, 0x05, 0xa9, 0xc4, 0x13, 0x10, 0xe4, 0x3f,
-                                   0x07, 0x04, 0x93, 0x63, 0x40, 0xfa, 0x45, 0xa5]);
+        assert_eq!(
+            keys.master_key,
+            [
+                0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5, 0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25,
+                0xcb, 0xd6
+            ]
+        );
+        assert_eq!(
+            keys.mac_key,
+            [
+                0x29, 0x05, 0xa9, 0xc4, 0x13, 0x10, 0xe4, 0x3f, 0x07, 0x04, 0x93, 0x63, 0x40, 0xfa,
+                0x45, 0xa5
+            ]
+        );
     }
 }

@@ -23,27 +23,28 @@
 //! Состояния (`Orders`, `OrderBooks`, `TradesState`, etc.) живут внутри dispatcher —
 //! доступны как поля `dispatcher.orders`, `dispatcher.order_books`, etc.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use crate::protocol::Command;
-use crate::state::{
-    Orders, OrderBooks, TradesState, BalancesState, StratsState, SettingsState, MarketsState,
-    OrderEvent, OrderBookEvent, TradesEvent, BalanceEvent, StratEvent, SettingsEvent, MarketsEvent,
-};
-use crate::commands::trade::TradeCommand;
-use crate::commands::strat::StratCommand;
-use crate::commands::ui::UICommand;
-use crate::commands::order_book::parse_order_book_packet;
-use crate::commands::trades_stream::parse_trades_packet;
-use crate::commands::engine_api::{EngineResponse, EngineMethod, parse_engine_response};
+use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
 use crate::commands::balance::parse_balance;
-use crate::commands::arb::{ArbPayload, parse_arb_payload_compact, parse_arb_prices};
+use crate::commands::engine_api::{parse_engine_response, EngineMethod, EngineResponse};
 use crate::commands::market::{
-    parse_markets_list_response, parse_markets_prices_response,
-    parse_markets_indexes_response, parse_token_tags_response,
+    parse_markets_indexes_response, parse_markets_list_response, parse_markets_prices_response,
+    parse_token_tags_response,
 };
+use crate::commands::order_book::parse_order_book_packet;
+use crate::commands::strat::StratCommand;
+use crate::commands::trade::TradeCommand;
+use crate::commands::trades_stream::parse_trades_packet;
+use crate::commands::ui::UICommand;
+use crate::protocol::Command;
 use crate::state::parse_trades_resend_response;
+use crate::state::{
+    BalanceEvent, BalancesState, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks,
+    OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent, StratsState, TradesEvent,
+    TradesState,
+};
 
 /// Fresh strategy snapshot returned by the application for a server
 /// `TStratSnapshotRequest`.
@@ -67,7 +68,12 @@ impl StrategySnapshotReply {
         full: bool,
         data: Vec<u8>,
     ) -> Self {
-        Self { server_epoch, client_max_last_date, full, data }
+        Self {
+            server_epoch,
+            client_max_last_date,
+            full,
+            data,
+        }
     }
 
     /// Build a reply from decoded strategy snapshots.
@@ -145,13 +151,13 @@ pub enum Event {
 /// [`Self::dispatch`] / [`Self::dispatch_into`] / [`Self::dispatch_into_active`].
 #[derive(Default)]
 pub struct EventDispatcher {
-    pub(crate) orders:      Orders,
+    pub(crate) orders: Orders,
     pub(crate) order_books: OrderBooks,
-    pub(crate) trades:      TradesState,
-    pub(crate) balances:    BalancesState,
-    pub(crate) strats:      StratsState,
-    pub(crate) settings:    SettingsState,
-    pub(crate) markets:     MarketsState,
+    pub(crate) trades: TradesState,
+    pub(crate) balances: BalancesState,
+    pub(crate) strats: StratsState,
+    pub(crate) settings: SettingsState,
+    pub(crate) markets: MarketsState,
     /// Последний известный `ServerToken` — для детектирования hard reconnect.
     /// При смене токена `dispatch_into_active` сбрасывает per-token state
     /// (`trades.full_reset()`, `order_books.clear()`) до применения нового пакета.
@@ -188,32 +194,48 @@ pub struct EventDispatcher {
 }
 
 impl EventDispatcher {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Read-only доступ к `Orders` state (sync-state ордеров — uid → Order map).
     /// Состояние обновляется автоматически при dispatch'е `Command::Order` пакетов.
-    pub fn orders(&self) -> &Orders { &self.orders }
+    pub fn orders(&self) -> &Orders {
+        &self.orders
+    }
 
     /// Read-only доступ к `OrderBooks` state (per-market kind sliding каше).
     /// Состояние обновляется при dispatch'е `Command::OrderBook` пакетов.
-    pub fn order_books(&self) -> &OrderBooks { &self.order_books }
+    pub fn order_books(&self) -> &OrderBooks {
+        &self.order_books
+    }
 
     /// Read-only доступ к `TradesState` (gap detection + bucket tracking).
-    pub fn trades(&self) -> &TradesState { &self.trades }
+    pub fn trades(&self) -> &TradesState {
+        &self.trades
+    }
 
     /// Read-only доступ к `BalancesState` (балансы валют + locked).
-    pub fn balances(&self) -> &BalancesState { &self.balances }
+    pub fn balances(&self) -> &BalancesState {
+        &self.balances
+    }
 
     /// Read-only доступ к `StratsState` (стратегии: uid → StratSnapshot).
-    pub fn strats(&self) -> &StratsState { &self.strats }
+    pub fn strats(&self) -> &StratsState {
+        &self.strats
+    }
 
     /// Read-only доступ к `SettingsState` (`TClientSettingsCommand` snapshot).
-    pub fn settings(&self) -> &SettingsState { &self.settings }
+    pub fn settings(&self) -> &SettingsState {
+        &self.settings
+    }
 
     /// Read-only доступ к `MarketsState` (markets list + indexes + token tags).
     /// `markets().indexes_synchronized` — ключевой инвариант active library
     /// (gating флаг для TradesStream/OrderBook парсинга).
-    pub fn markets(&self) -> &MarketsState { &self.markets }
+    pub fn markets(&self) -> &MarketsState {
+        &self.markets
+    }
 
     /// Events produced by one-shot helpers and not yet drained by the
     /// application.
@@ -222,10 +244,14 @@ impl EventDispatcher {
     /// and does not use this queue. The queue is only for helper-driven waits
     /// such as `Client::run_until_response`, `request_client_settings`,
     /// `request_order_snapshot`, and typed `request_*` Engine API helpers.
-    pub fn queued_events(&self) -> &[Event] { &self.queued_events }
+    pub fn queued_events(&self) -> &[Event] {
+        &self.queued_events
+    }
 
     /// Number of currently queued one-shot events.
-    pub fn queued_event_count(&self) -> usize { self.queued_events.len() }
+    pub fn queued_event_count(&self) -> usize {
+        self.queued_events.len()
+    }
 
     /// Remove and return events accumulated during one-shot waits.
     pub fn take_queued_events(&mut self) -> Vec<Event> {
@@ -344,9 +370,10 @@ impl EventDispatcher {
         if self.send_strategy_snapshot_reply(request_uid, client) {
             return true;
         }
-        self.queued_events.push(Event::Strat(
-            crate::state::StratEvent::SnapshotRequested { uid: request_uid },
-        ));
+        self.queued_events
+            .push(Event::Strat(crate::state::StratEvent::SnapshotRequested {
+                uid: request_uid,
+            }));
         false
     }
 
@@ -385,6 +412,7 @@ impl EventDispatcher {
     ///      consumed internally and is not delivered to the application callback;
     ///   3. automatically sends `TOrderStatusRequest` for orders missing from a
     ///      fresh `TAllStatuses` snapshot, matching Delphi `CleanupMissingWorkers`.
+    ///
     /// `dispatch_into` (без Client) — backwards compat, потребитель должен сам
     /// использовать `dispatch_into_active`, чтобы recovery-actions оставались
     /// внутри библиотеки.
@@ -398,7 +426,13 @@ impl EventDispatcher {
     ///     for ev in &buf { /* handle */ }
     /// }
     /// ```
-    pub fn dispatch_into(&mut self, cmd: Command, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
+    pub fn dispatch_into(
+        &mut self,
+        cmd: Command,
+        payload: &[u8],
+        now_ms: i64,
+        out: &mut Vec<Event>,
+    ) {
         match cmd {
             Command::Order => {
                 match TradeCommand::parse(payload) {
@@ -409,11 +443,15 @@ impl EventDispatcher {
                         // back-compat). Без этого Orders::apply применяет AdjustTime со старым
                         // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
                         // См. DEVIATION #23.
-                        self.orders.set_server_time_delta(self.current_server_time_delta());
+                        self.orders
+                            .set_server_time_delta(self.current_server_time_delta());
                         let (_apply_result, ev) = self.orders.apply(tc);
                         out.push(Event::Order(ev));
                     }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                    None => out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    }),
                 }
             }
 
@@ -435,7 +473,10 @@ impl EventDispatcher {
                             out.push(Event::OrderBook(ev));
                         }
                     }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                    None => out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    }),
                 }
             }
 
@@ -451,7 +492,10 @@ impl EventDispatcher {
                             out.push(Event::Trade(ev));
                         }
                     }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                    None => out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    }),
                 }
             }
 
@@ -464,14 +508,20 @@ impl EventDispatcher {
                                 out.push(Event::Trade(ev));
                             }
                         }
-                        None => out.push(Event::ParseFailed { cmd, len: inner.len() }),
+                        None => out.push(Event::ParseFailed {
+                            cmd,
+                            len: inner.len(),
+                        }),
                     }
                 }
             }
 
             Command::Balance => {
                 if payload.len() < 11 {
-                    out.push(Event::ParseFailed { cmd, len: payload.len() });
+                    out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    });
                     return;
                 }
                 let sub_cmd_id = payload[0];
@@ -479,7 +529,10 @@ impl EventDispatcher {
                 match sub_cmd_id {
                     2 => {
                         if parse_balance(sub_cmd_id, body).is_none() {
-                            out.push(Event::ParseFailed { cmd, len: payload.len() });
+                            out.push(Event::ParseFailed {
+                                cmd,
+                                len: payload.len(),
+                            });
                         }
                     }
                     3 | 4 => match parse_balance(sub_cmd_id, body) {
@@ -487,7 +540,10 @@ impl EventDispatcher {
                             let ev = self.balances.apply(upd);
                             out.push(Event::Balance(ev));
                         }
-                        None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                        None => out.push(Event::ParseFailed {
+                            cmd,
+                            len: payload.len(),
+                        }),
                     },
                     6 => match parse_arb_prices(payload) {
                         Some(arb) => {
@@ -498,9 +554,15 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                        None => out.push(Event::ParseFailed {
+                            cmd,
+                            len: payload.len(),
+                        }),
                     },
-                    _ => out.push(Event::Raw { cmd, payload: payload.to_vec() }),
+                    _ => out.push(Event::Raw {
+                        cmd,
+                        payload: payload.to_vec(),
+                    }),
                 }
             }
 
@@ -514,76 +576,100 @@ impl EventDispatcher {
                         // делает это сама на SnapshotFull/Partial event'ах.
                         match &ev {
                             crate::state::StratEvent::SnapshotFull { raw_data, .. }
-                            | crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
-                                if self.strats.apply_snapshot_decoded(raw_data).is_none() {
-                                    log::warn!(
-                                        target: "moonproto::events",
-                                        "failed to decode strategy snapshot payload ({} bytes)",
-                                        raw_data.len()
-                                    );
-                                }
+                            | crate::state::StratEvent::SnapshotPartial { raw_data, .. }
+                                if self.strats.apply_snapshot_decoded(raw_data).is_none() =>
+                            {
+                                log::warn!(
+                                    target: "moonproto::events",
+                                    "failed to decode strategy snapshot payload ({} bytes)",
+                                    raw_data.len()
+                                );
                             }
                             _ => {}
                         }
                         out.push(Event::Strat(ev));
                     }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                    None => out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    }),
                 }
             }
 
-            Command::UI => {
-                match UICommand::parse(payload) {
-                    Some(cmd_v) => {
-                        let ev = self.settings.apply(cmd_v);
-                        out.push(Event::Settings(ev));
-                    }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+            Command::UI => match UICommand::parse(payload) {
+                Some(cmd_v) => {
+                    let ev = self.settings.apply(cmd_v);
+                    out.push(Event::Settings(ev));
                 }
-            }
+                None => out.push(Event::ParseFailed {
+                    cmd,
+                    len: payload.len(),
+                }),
+            },
 
-            Command::API => {
-                match parse_engine_response(payload) {
-                    Some(resp) => {
-                        const ASSUMED_VER: u16 = 2;
-                        let extra_event: Option<Event> = if resp.success {
-                            match resp.method {
-                                EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
-                                    if resp.method == EngineMethod::GetMarketsList {
-                                        if let Some(list) = parse_markets_list_response(&resp.data, ASSUMED_VER) {
-                                            let ev = self.markets.apply_markets_list(list);
-                                            Some(Event::Markets(ev))
-                                        } else { None }
-                                    } else if let Some(prices) = parse_markets_prices_response(&resp.data) {
-                                        let ev = self.markets.apply_markets_prices(prices);
+            Command::API => match parse_engine_response(payload) {
+                Some(resp) => {
+                    const ASSUMED_VER: u16 = 2;
+                    let extra_event: Option<Event> = if resp.success {
+                        match resp.method {
+                            EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
+                                if resp.method == EngineMethod::GetMarketsList {
+                                    if let Some(list) =
+                                        parse_markets_list_response(&resp.data, ASSUMED_VER)
+                                    {
+                                        let ev = self.markets.apply_markets_list(list);
                                         Some(Event::Markets(ev))
-                                    } else { None }
+                                    } else {
+                                        None
+                                    }
+                                } else if let Some(prices) =
+                                    parse_markets_prices_response(&resp.data)
+                                {
+                                    let ev = self.markets.apply_markets_prices(prices);
+                                    Some(Event::Markets(ev))
+                                } else {
+                                    None
                                 }
-                                EngineMethod::GetMarketsIndexes => {
-                                    if let Some(names) = parse_markets_indexes_response(&resp.data) {
-                                        let ev = self.markets.apply_markets_indexes(names);
-                                        Some(Event::Markets(ev))
-                                    } else { None }
-                                }
-                                EngineMethod::CheckBinanceTags => {
-                                    if let Some(items) = parse_token_tags_response(&resp.data) {
-                                        let ev = self.markets.apply_token_tags(items);
-                                        Some(Event::Markets(ev))
-                                    } else { None }
-                                }
-                                _ => None,
                             }
-                        } else { None };
+                            EngineMethod::GetMarketsIndexes => {
+                                if let Some(names) = parse_markets_indexes_response(&resp.data) {
+                                    let ev = self.markets.apply_markets_indexes(names);
+                                    Some(Event::Markets(ev))
+                                } else {
+                                    None
+                                }
+                            }
+                            EngineMethod::CheckBinanceTags => {
+                                if let Some(items) = parse_token_tags_response(&resp.data) {
+                                    let ev = self.markets.apply_token_tags(items);
+                                    Some(Event::Markets(ev))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
 
-                        if let Some(ev) = extra_event { out.push(ev); }
-                        out.push(Event::EngineResponse(resp));
+                    if let Some(ev) = extra_event {
+                        out.push(ev);
                     }
-                    None => out.push(Event::ParseFailed { cmd, len: payload.len() }),
+                    out.push(Event::EngineResponse(resp));
                 }
-            }
+                None => out.push(Event::ParseFailed {
+                    cmd,
+                    len: payload.len(),
+                }),
+            },
 
             Command::LogMsg => {
                 if payload.len() < 8 {
-                    out.push(Event::ParseFailed { cmd, len: payload.len() });
+                    out.push(Event::ParseFailed {
+                        cmd,
+                        len: payload.len(),
+                    });
                     return;
                 }
                 let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
@@ -591,7 +677,10 @@ impl EventDispatcher {
                 out.push(Event::ServerLog { time, msg });
             }
 
-            _ => out.push(Event::Raw { cmd, payload: payload.to_vec() }),
+            _ => out.push(Event::Raw {
+                cmd,
+                payload: payload.to_vec(),
+            }),
         }
     }
 
@@ -689,7 +778,10 @@ impl EventDispatcher {
         let mut idx = start_len;
         while idx < out.len() {
             let remove_event = match &out[idx] {
-                Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) => {
+                Event::OrderBook(OrderBookEvent::RequestFullNeeded {
+                    market_index,
+                    book_kind,
+                }) => {
                     to_request_full.insert((*market_index, *book_kind));
                     true
                 }
@@ -712,9 +804,9 @@ impl EventDispatcher {
         for (mi, bk) in to_request_full {
             // Fire-and-forget — response придёт обычным OrderBook-пакетом (is_full=true)
             // через тот же dispatcher. Регистрировать pending API receiver не нужно.
-            client.send_api_request(
-                &crate::commands::engine_request::request_order_book_full(mi, bk),
-            );
+            client.send_api_request(&crate::commands::engine_request::request_order_book_full(
+                mi, bk,
+            ));
         }
         if let Some(uid) = snapshot_requested_uid {
             self.send_strategy_snapshot_reply(uid, client);
@@ -750,16 +842,18 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
-    use crate::commands::trade::{
-        BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, OrderWorkerStatus,
-        StopSettings, TradeCommand, TradeCtx, TradeEpochHeader, build_all_statuses_request,
-    };
     use crate::commands::strat::build_snapshot_request;
+    use crate::commands::trade::{
+        build_all_statuses_request, BaseCommandHeader, MarketCommandHeader, OrderCompact,
+        OrderStatus, OrderWorkerStatus, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
+    };
 
     static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn server_time_delta_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        SERVER_TIME_DELTA_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        SERVER_TIME_DELTA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn order_book_payload_with(market_index: u16, seq: u16, is_full: bool) -> Vec<u8> {
@@ -808,7 +902,11 @@ mod tests {
         OrderStatus {
             epoch_header: TradeEpochHeader {
                 market: MarketCommandHeader {
-                    base: BaseCommandHeader { cmd_id: 4, ver: 3, uid },
+                    base: BaseCommandHeader {
+                        cmd_id: 4,
+                        ver: 3,
+                        uid,
+                    },
                     currency,
                     platform,
                     market_name: market_name.to_string(),
@@ -836,7 +934,7 @@ mod tests {
         let events = d.dispatch(Command::Order, &payload, 1000);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Event::Order(_) => {},
+            Event::Order(_) => {}
             other => panic!("expected Order event, got {:?}", other),
         }
     }
@@ -849,7 +947,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             Event::Strat(StratEvent::Ignored) => {} // SnapshotRequest from server is unusual; state ignores
-            Event::Strat(_) => {},
+            Event::Strat(_) => {}
             other => panic!("expected Strat event, got {:?}", other),
         }
     }
@@ -953,7 +1051,10 @@ mod tests {
         // главное что мы ВООБЩЕ не доходим до parse, потому что блокировка раньше).
         let dummy_payload = vec![0u8; 32];
         let events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
-        assert!(events.is_empty(), "OrderBook event должен быть дропнут до indexes_synchronized");
+        assert!(
+            events.is_empty(),
+            "OrderBook event должен быть дропнут до indexes_synchronized"
+        );
 
         // После apply_markets_indexes — должен начать парсить.
         d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
@@ -970,14 +1071,26 @@ mod tests {
         d.markets.by_name.insert("BTCUSDT".to_string(), 0);
 
         let events = d.dispatch(Command::OrderBook, &order_book_payload(1), 1000);
-        assert!(events.is_empty(), "unknown server market index must be dropped");
-        assert!(d.order_books.is_empty(), "unknown index must not create OrderBooks cache");
+        assert!(
+            events.is_empty(),
+            "unknown server market index must be dropped"
+        );
+        assert!(
+            d.order_books.is_empty(),
+            "unknown index must not create OrderBooks cache"
+        );
 
         d.markets.market_indexes = vec!["UNKNOWNUSDT".to_string()];
         d.markets.by_name.clear();
         let events = d.dispatch(Command::OrderBook, &order_book_payload(0), 1000);
-        assert!(events.is_empty(), "index mapped to unknown local market must be dropped");
-        assert!(d.order_books.is_empty(), "unknown local market must not create cache");
+        assert!(
+            events.is_empty(),
+            "index mapped to unknown local market must be dropped"
+        );
+        assert!(
+            d.order_books.is_empty(),
+            "unknown local market must not create cache"
+        );
     }
 
     #[test]
@@ -985,7 +1098,10 @@ mod tests {
         let mut d = EventDispatcher::new();
         let dummy_payload = vec![0u8; 16];
         let events = d.dispatch(Command::TradesStream, &dummy_payload, 1000);
-        assert!(events.is_empty(), "TradesStream должен быть дропнут до indexes_synchronized");
+        assert!(
+            events.is_empty(),
+            "TradesStream должен быть дропнут до indexes_synchronized"
+        );
     }
 
     #[test]
@@ -994,7 +1110,10 @@ mod tests {
         let mut d = EventDispatcher::new();
         let payload = build_all_statuses_request(123);
         let events = d.dispatch(Command::Order, &payload, 1000);
-        assert!(!events.is_empty(), "Order должен обрабатываться даже без indexes_synchronized");
+        assert!(
+            !events.is_empty(),
+            "Order должен обрабатываться даже без indexes_synchronized"
+        );
     }
 
     #[test]
@@ -1009,26 +1128,30 @@ mod tests {
 
         let mut out = Vec::new();
         let dummy_payload = vec![0u8; 32];
-        d.dispatch_into_active(Command::OrderBook, &dummy_payload, 1000, &mut out, &mut client);
+        d.dispatch_into_active(
+            Command::OrderBook,
+            &dummy_payload,
+            1000,
+            &mut out,
+            &mut client,
+        );
 
-        assert!(!d.markets.indexes_synchronized,
-            "PeerAppToken mismatch must close stream gate until fresh GetMarketsIndexes");
-        assert!(out.is_empty(),
-            "OrderBook packet from a new server process must be dropped with stale indexes");
+        assert!(
+            !d.markets.indexes_synchronized,
+            "PeerAppToken mismatch must close stream gate until fresh GetMarketsIndexes"
+        );
+        assert!(
+            out.is_empty(),
+            "OrderBook packet from a new server process must be dropped with stale indexes"
+        );
     }
 
     #[test]
     fn dispatch_into_active_requests_missing_order_status_after_snapshot() {
         let mut d = EventDispatcher::new();
         let stale_uid = 0xAABB_CCDD_0011_2233;
-        let status = order_status_for_test(
-            stale_uid,
-            "BTCUSDT",
-            7,
-            9,
-            OrderWorkerStatus::BuySet,
-        );
-        let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(status));
+        let status = order_status_for_test(stale_uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+        let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(Box::new(status)));
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
@@ -1041,7 +1164,9 @@ mod tests {
             &mut client,
         );
 
-        assert!(out.iter().any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
+        assert!(out
+            .iter()
+            .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
 
         let mut found = false;
         while let Ok(ev) = client.event_rx.try_recv() {
@@ -1051,8 +1176,7 @@ mod tests {
             if msg.item.cmd != Command::Order as u8 {
                 continue;
             }
-            let Some(TradeCommand::OrderStatusRequest(req)) =
-                TradeCommand::parse(&msg.item.data)
+            let Some(TradeCommand::OrderStatusRequest(req)) = TradeCommand::parse(&msg.item.data)
             else {
                 continue;
             };
@@ -1139,7 +1263,10 @@ mod tests {
             &mut client,
         );
 
-        assert!(out.is_empty(), "pre-init Order must be dropped like Delphi InitDone gate");
+        assert!(
+            out.is_empty(),
+            "pre-init Order must be dropped like Delphi InitDone gate"
+        );
         assert_eq!(d.orders().current_snapshot_flag(), 0);
     }
 
@@ -1178,8 +1305,10 @@ mod tests {
         d.set_server_time_delta_source(Arc::clone(&handle));
         // Global при этом стоит другое значение — dispatcher должен игнорировать.
         crate::client::set_server_time_delta_global(99.0 / 86400.0);
-        assert!((delta_seconds(&d) - 7.0).abs() < 1e-9,
-            "dispatcher должен читать handle, а не global");
+        assert!(
+            (delta_seconds(&d) - 7.0).abs() < 1e-9,
+            "dispatcher должен читать handle, а не global"
+        );
         crate::client::set_server_time_delta_global(0.0);
     }
 
@@ -1218,7 +1347,10 @@ mod tests {
         // Изменение одного handle не аффектит другой.
         h_a.store((10.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
         assert!((delta_seconds(&d_a) - 10.0).abs() < 1e-9);
-        assert!((delta_seconds(&d_b) - (-0.2)).abs() < 1e-9, "dispatcher B не должен видеть изменения handle A");
+        assert!(
+            (delta_seconds(&d_b) - (-0.2)).abs() < 1e-9,
+            "dispatcher B не должен видеть изменения handle A"
+        );
     }
 
     // =========================================================================
@@ -1252,8 +1384,10 @@ mod tests {
         assert_eq!(d.last_known_server_token, 0);
         let mut out = Vec::new();
         d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
-        assert_eq!(d.last_known_server_token, 42,
-            "первый dispatch_into_active должен запомнить server_token");
+        assert_eq!(
+            d.last_known_server_token, 42,
+            "первый dispatch_into_active должен запомнить server_token"
+        );
     }
 
     #[test]
@@ -1270,8 +1404,11 @@ mod tests {
         let mut out = Vec::new();
         d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
         // markets state НЕ должны быть сброшен (full_reset не вызывался).
-        assert_eq!(d.markets.by_name.len(), snapshot_count_before,
-            "первый non-zero token — не triggers reset");
+        assert_eq!(
+            d.markets.by_name.len(),
+            snapshot_count_before,
+            "первый non-zero token — не triggers reset"
+        );
     }
 
     #[test]
@@ -1286,8 +1423,10 @@ mod tests {
         client.testing_set_server_token(0xBBB);
         let mut out = Vec::new();
         d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
-        assert_eq!(d.last_known_server_token, 0xBBB,
-            "после смены токена — last_known обновлён");
+        assert_eq!(
+            d.last_known_server_token, 0xBBB,
+            "после смены токена — last_known обновлён"
+        );
         // Поведение TradesState.full_reset() и OrderBooks.clear() покрыто
         // unit-тестами в соответствующих модулях (state::trades, state::order_books).
     }
@@ -1302,15 +1441,19 @@ mod tests {
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
-        assert!(d.server_time_delta_source.is_some(),
-            "после первого dispatch_into_active — source привязан к Client'у");
+        assert!(
+            d.server_time_delta_source.is_some(),
+            "после первого dispatch_into_active — source привязан к Client'у"
+        );
 
         // Повторный вызов — source не меняется (already linked).
         let handle_after_first = Arc::clone(d.server_time_delta_source.as_ref().unwrap());
         d.dispatch_into_active(Command::Reserved1, b"y", 0, &mut out, &mut client);
         let handle_after_second = d.server_time_delta_source.as_ref().unwrap();
-        assert!(Arc::ptr_eq(&handle_after_first, handle_after_second),
-            "повторный вызов — source остаётся тем же handle");
+        assert!(
+            Arc::ptr_eq(&handle_after_first, handle_after_second),
+            "повторный вызов — source остаётся тем же handle"
+        );
     }
 
     #[test]
@@ -1350,7 +1493,8 @@ mod tests {
                     if data.len() == 11 + 8 + 8 + 4 + 1 + fresh_snapshot.len() {
                         let cmd_subcode = data[0];
                         let server_epoch = u64::from_le_bytes(data[11..19].try_into().unwrap());
-                        let client_max_last_date = u64::from_le_bytes(data[19..27].try_into().unwrap());
+                        let client_max_last_date =
+                            u64::from_le_bytes(data[19..27].try_into().unwrap());
                         let size = u32::from_le_bytes(data[27..31].try_into().unwrap());
                         let full = data[31] != 0;
                         let tail = &data[32..];
@@ -1367,15 +1511,22 @@ mod tests {
                 }
             }
         }
-        assert!(found_snapshot_send,
-            "после SnapshotRequest с provider — должна быть fresh отправка");
+        assert!(
+            found_snapshot_send,
+            "после SnapshotRequest с provider — должна быть fresh отправка"
+        );
 
         // out содержит event SnapshotRequested (app тоже видит, для UI awareness).
-        let has_snapshot_event = out.iter().any(|ev| matches!(
-            ev, Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 42 })
-        ));
-        assert!(has_snapshot_event,
-            "event SnapshotRequested должен быть в out (для app awareness)");
+        let has_snapshot_event = out.iter().any(|ev| {
+            matches!(
+                ev,
+                Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 42 })
+            )
+        });
+        assert!(
+            has_snapshot_event,
+            "event SnapshotRequested должен быть в out (для app awareness)"
+        );
     }
 
     #[test]
@@ -1399,12 +1550,18 @@ mod tests {
                 }
             }
         }
-        assert_eq!(strat_sends, 0, "без provider — auto-echo не должен сработать");
+        assert_eq!(
+            strat_sends, 0,
+            "без provider — auto-echo не должен сработать"
+        );
 
         // Но event SnapshotRequested всё равно прилетает app'у.
-        let has_event = out.iter().any(|ev| matches!(
-            ev, Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
-        ));
+        let has_event = out.iter().any(|ev| {
+            matches!(
+                ev,
+                Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
+            )
+        });
         assert!(has_event);
     }
 
@@ -1427,8 +1584,11 @@ mod tests {
         // Делаем round-trip days → seconds для сравнения с 1.25.
         let applied_days = d.orders.server_time_delta;
         let applied_seconds = applied_days * 86400.0;
-        assert!((applied_seconds - 1.25).abs() < 1e-9,
+        assert!(
+            (applied_seconds - 1.25).abs() < 1e-9,
             "Orders.server_time_delta должен получить значение из handle ({}s, got {}s)",
-            1.25, applied_seconds);
+            1.25,
+            applied_seconds
+        );
     }
 }

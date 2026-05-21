@@ -1,6 +1,6 @@
-use aes_gcm::{Aes128Gcm, KeyInit, Nonce, Tag};
-use aes_gcm::aead::AeadInPlace;
 use crate::MoonKey;
+use aes_gcm::aead::AeadInPlace;
+use aes_gcm::{Aes128Gcm, KeyInit, Nonce, Tag};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -13,7 +13,7 @@ static IV_MASK: OnceLock<u64> = OnceLock::new();
 
 #[inline(always)]
 fn iv_mask() -> u64 {
-    *IV_MASK.get_or_init(|| rand::random::<u64>())
+    *IV_MASK.get_or_init(rand::random::<u64>)
 }
 
 /// Pseudo-RDTSC: 64-bit timestamp counter с ~ns-резолюцией.
@@ -139,8 +139,10 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let key: MoonKey = [0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5,
-                            0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25, 0xcb, 0xd6];
+        let key: MoonKey = [
+            0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5, 0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25,
+            0xcb, 0xd6,
+        ];
         let plaintext = b"Hello MoonProto!";
         let aad = 12345u64.to_le_bytes();
 

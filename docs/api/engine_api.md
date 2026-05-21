@@ -7,14 +7,19 @@ Use typed `Client::request_*` helpers for common one-shot reads. Use
 `Client::api_*` wrappers when you need the raw `EngineResponse` receiver for a
 custom asynchronous flow.
 
+The source-matched default wait is 12 seconds per Engine API response:
+Delphi `TMoonProtoEngine.FTimeout = 12000` and `SendAndWait` sleeps in 10 ms
+ticks until that timeout expires. `run_init_sequence` uses this default when
+`InitConfig::step_timeout` is `None`.
+
 ## Waiting for a Response
 
 ```rust
 use std::time::Duration;
 
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
-let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
+let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
@@ -29,7 +34,7 @@ For custom flows, use the lower-level receiver path:
 
 ```rust
 let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 ```
 
 Calling `rx.recv_timeout(...)` directly on the same thread usually times out
@@ -70,7 +75,7 @@ calls are useful for custom tools but do not update the subscription registry.
 `request_balance(currency)` returns the current quantity for one currency:
 
 ```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
+let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
 println!("USDT balance={qty}");
 ```
 
@@ -79,7 +84,7 @@ println!("USDT balance={qty}");
 `request_hedge_mode()` returns the current hedge-mode flag:
 
 ```rust
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
 println!("hedge_mode={hedge_mode}");
 ```
 
@@ -88,7 +93,7 @@ the server's Delphi `TDateTime` value and exposes `system_time()`,
 `unix_seconds()`, and `days_until(...)` helpers:
 
 ```rust
-let expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
 if let Some(unix) = expiration.unix_seconds() {
     println!("API key expires at unix_seconds={unix}");
 }
@@ -161,7 +166,7 @@ Manual parsing:
 use moonproto::commands::engine_api::{exchange_type_flags, parse_base_check_response};
 
 let rx = client.api_base_check();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 let info = parse_base_check_response(&resp.data);
 
 if info.supports(exchange_type_flags::FUTURES) {
@@ -172,7 +177,7 @@ if info.supports(exchange_type_flags::FUTURES) {
 One-shot parsing and storage:
 
 ```rust
-let info = client.request_base_check(&mut dispatcher, Duration::from_secs(10))?;
+let info = client.request_base_check(&mut dispatcher, Duration::from_secs(12))?;
 ```
 
 Fields:
@@ -209,7 +214,7 @@ exchange_type_flags::PREDICT;
 `parse_auth_check_response` parses the payload returned by `api_auth_check`:
 
 ```rust
-let auth = client.request_auth_check(&mut dispatcher, Duration::from_secs(10))?;
+let auth = client.request_auth_check(&mut dispatcher, Duration::from_secs(12))?;
 println!("account={}", auth.account_id);
 ```
 

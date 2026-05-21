@@ -10,10 +10,10 @@
 use std::env;
 use std::time::Duration;
 
+use moonproto::commands::balance::BalanceItem;
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher, InitConfig,
 };
-use moonproto::commands::balance::BalanceItem;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -59,7 +59,7 @@ fn main() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     let init_result = match connect_and_init(

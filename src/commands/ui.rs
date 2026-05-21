@@ -28,27 +28,27 @@
 //! Не raw record! На проводе: `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte
 //! + colorCount*5 bytes`. `wantedSet` — Delphi `set of byte` (32 байта = 256 битовая маска).
 
-use super::registry::{CURRENT_PROTO_CMD_VER, read_string, write_string};
+use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
 
 // --- CmdId constants ---
-const CMD_CLIENT_SETTINGS:     u8 = 1;
-const CMD_SETTINGS_REQUEST:    u8 = 2;
-const CMD_STRAT_START_STOP:    u8 = 3;
+const CMD_CLIENT_SETTINGS: u8 = 1;
+const CMD_SETTINGS_REQUEST: u8 = 2;
+const CMD_STRAT_START_STOP: u8 = 3;
 const CMD_STRAT_START_STOP_V2: u8 = 4;
 const CMD_MM_ORDERS_SUBSCRIBE: u8 = 5;
-const CMD_UPDATE_VERSION:      u8 = 6;
-const CMD_EMU_TRADES:          u8 = 7;
-const CMD_NEW_MARKET_NOTIFY:   u8 = 8;
-const CMD_LEV_MANAGE:          u8 = 9;
-const CMD_TRIGGER_MANAGE:      u8 = 10;
-const CMD_RESET_PROFIT:        u8 = 11;
+const CMD_UPDATE_VERSION: u8 = 6;
+const CMD_EMU_TRADES: u8 = 7;
+const CMD_NEW_MARKET_NOTIFY: u8 = 8;
+const CMD_LEV_MANAGE: u8 = 9;
+const CMD_TRIGGER_MANAGE: u8 = 10;
+const CMD_RESET_PROFIT: u8 = 11;
 const CMD_ARB_ACTIVATE_NOTIFY: u8 = 12;
-const CMD_SWITCH_DEX:          u8 = 13;
-const CMD_SWITCH_SPOT:         u8 = 14;
+const CMD_SWITCH_DEX: u8 = 13;
+const CMD_SWITCH_SPOT: u8 = 14;
 
 /// `TAutoStartConfig` packed record size in bytes (Config.pas:344).
-pub const AS_CFG_SIZE:  usize = 104;
+pub const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
 pub const AS_CFG2_SIZE: usize = 168;
 
@@ -66,10 +66,10 @@ pub struct ArbConfigCompact {
     /// 256-битная маска "wanted" платформ (Delphi `set of byte`).
     pub wanted: [bool; 256],
     pub show_absolute: bool,
-    pub show_numbers:  bool,
-    pub show_lines:    bool,
-    pub show_percent:  bool,
-    pub show_right:    bool,
+    pub show_numbers: bool,
+    pub show_lines: bool,
+    pub show_percent: bool,
+    pub show_right: bool,
 }
 
 impl Default for ArbConfigCompact {
@@ -78,10 +78,10 @@ impl Default for ArbConfigCompact {
         Self {
             wanted: [false; 256],
             show_absolute: false,
-            show_numbers:  false,
-            show_lines:    true,
-            show_percent:  true,
-            show_right:    false,
+            show_numbers: false,
+            show_lines: true,
+            show_percent: true,
+            show_right: false,
         }
     }
 }
@@ -129,38 +129,38 @@ pub struct ClientSettingsCommand {
     /// с конкретным UKey.
     pub uid: u64,
     // --- always present (v1+) ---
-    pub x_sell:             i32,
-    pub x_sell_scalp:       i32,
-    pub x_tmode:            bool,
-    pub fixed_sell_mode:    bool,
-    pub fixed_sell_price:   f64,
-    pub price_drop_level:   f32,
-    pub trailing_drop:      f32,
-    pub g_take_profit:      f64,
-    pub use_g_take_profit:  bool,
-    pub unused_spread:      i32,
+    pub x_sell: i32,
+    pub x_sell_scalp: i32,
+    pub x_tmode: bool,
+    pub fixed_sell_mode: bool,
+    pub fixed_sell_price: f64,
+    pub price_drop_level: f32,
+    pub trailing_drop: f32,
+    pub g_take_profit: f64,
+    pub use_g_take_profit: bool,
+    pub unused_spread: i32,
     pub panic_if_price_drop: bool,
-    pub emu_mode:           bool,
+    pub emu_mode: bool,
     // --- v2+ ---
-    pub buy_iceberg:        bool,
-    pub sell_iceberg:       bool,
+    pub buy_iceberg: bool,
+    pub sell_iceberg: bool,
     /// Из `cfg.OrdersControl.SignOrders` (Config.pas:682). Заливается ВНУТРЬ глобальной конфигурации
     /// в Delphi, потому полей класса под него нет — храним в команде явно.
-    pub sign_orders:        bool,
+    pub sign_orders: bool,
     // --- always present (v1+) ---
     pub coins_black_list_text: String,
-    pub use_coins_black_list:  bool,
+    pub use_coins_black_list: bool,
     pub temp_bl_symbols: Vec<String>,
     /// `TempBLTimes[i]: TDateTime` — дельта (в днях) оставшегося времени блокировки.
     pub temp_bl_times: Vec<f64>,
     // --- soft-read (опциональны, могут отсутствовать в старых пакетах) ---
     pub use_manual_strategy: bool,
-    pub manual_strategy_id:  u64,
+    pub manual_strategy_id: u64,
     pub free_position_check: bool,
-    pub vol_drop_level:      i32,
-    pub use_stop_market:     bool,
+    pub vol_drop_level: i32,
+    pub use_stop_market: bool,
     /// `TAutoStartConfig` blob (size 104 в текущей версии Delphi). Хранится как raw.
-    pub as_cfg:  Vec<u8>,
+    pub as_cfg: Vec<u8>,
     /// `TAutoStartConfig2` blob (size 168 в текущей версии Delphi).
     pub as_cfg2: Vec<u8>,
     /// HotkeysConfig.SPrice[1..6].
@@ -226,13 +226,13 @@ pub struct LevManage {
     /// Версия внутри команды (`LevCmdVer = 1` в Delphi).
     pub cmd_ver: u8,
     pub auto_max_order: bool,
-    pub auto_lev_up:    bool,
-    pub auto_isolated:  bool,
-    pub auto_cross:     bool,
-    pub auto_fix_lev:   bool,
-    pub fix_lev:        i32,
-    pub tlg_report:     bool,
-    pub lev_control:    String,
+    pub auto_lev_up: bool,
+    pub auto_isolated: bool,
+    pub auto_cross: bool,
+    pub auto_fix_lev: bool,
+    pub fix_lev: i32,
+    pub tlg_report: bool,
+    pub lev_control: String,
 }
 
 /// CmdId=10 `TTriggerManageCommand`.
@@ -284,8 +284,12 @@ pub struct SwitchSpot {
 
 #[derive(Debug, Clone)]
 pub enum UICommand {
-    ClientSettings(ClientSettingsCommand),
-    SettingsRequest { uid: u64 },
+    /// Full client settings snapshot. Boxed to keep the common `UICommand`
+    /// envelope small when it is moved through event queues.
+    ClientSettings(Box<ClientSettingsCommand>),
+    SettingsRequest {
+        uid: u64,
+    },
     StratStartStop(StratStartStop),
     StratStartStopV2(StratStartStopV2),
     MMOrdersSubscribe(MMOrdersSubscribe),
@@ -298,7 +302,10 @@ pub enum UICommand {
     ArbActivateNotify(ArbActivateNotify),
     SwitchDex(SwitchDex),
     SwitchSpot(SwitchSpot),
-    Unknown { cmd_id: u8, uid: u64 },
+    Unknown {
+        cmd_id: u8,
+        uid: u64,
+    },
 }
 
 impl UICommand {
@@ -319,7 +326,7 @@ impl UICommand {
 
         match cmd_id {
             CMD_CLIENT_SETTINGS => parse_client_settings(payload, &mut pos, uid, ver)
-                .map(UICommand::ClientSettings),
+                .map(|settings| UICommand::ClientSettings(Box::new(settings))),
 
             CMD_SETTINGS_REQUEST => Some(UICommand::SettingsRequest { uid }),
 
@@ -330,103 +337,183 @@ impl UICommand {
 
             CMD_STRAT_START_STOP_V2 => {
                 let is_start = read_bool(payload, &mut pos)?;
-                if pos + 2 > payload.len() { return None; }
+                if pos + 2 > payload.len() {
+                    return None;
+                }
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    if pos + 9 > payload.len() { return None; }
+                    if pos + 9 > payload.len() {
+                        return None;
+                    }
                     let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
                     pos += 8;
                     let checked = payload[pos] != 0;
                     pos += 1;
-                    items.push(StratCheckedItem { strategy_id, checked });
+                    items.push(StratCheckedItem {
+                        strategy_id,
+                        checked,
+                    });
                 }
-                Some(UICommand::StratStartStopV2(StratStartStopV2 { uid, is_start, items }))
+                Some(UICommand::StratStartStopV2(StratStartStopV2 {
+                    uid,
+                    is_start,
+                    items,
+                }))
             }
 
             CMD_MM_ORDERS_SUBSCRIBE => {
                 let subscribe = read_bool(payload, &mut pos)?;
-                Some(UICommand::MMOrdersSubscribe(MMOrdersSubscribe { uid, subscribe }))
+                Some(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
+                    uid,
+                    subscribe,
+                }))
             }
 
             CMD_UPDATE_VERSION => {
                 let version_name = read_string(payload, &mut pos)?;
                 let is_release = read_bool(payload, &mut pos)?;
-                Some(UICommand::UpdateVersion(UpdateVersion { uid, version_name, is_release }))
+                Some(UICommand::UpdateVersion(UpdateVersion {
+                    uid,
+                    version_name,
+                    is_release,
+                }))
             }
 
             CMD_EMU_TRADES => {
-                if pos + 2 + 8 + 2 > payload.len() { return None; }
-                let m_index = u16::from_le_bytes([payload[pos], payload[pos + 1]]); pos += 2;
-                let base_time = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap()); pos += 8;
-                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize; pos += 2;
-                if pos + count * 6 > payload.len() { return None; }
+                if pos + 2 + 8 + 2 > payload.len() {
+                    return None;
+                }
+                let m_index = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+                pos += 2;
+                let base_time = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+                pos += 2;
+                if pos + count * 6 > payload.len() {
+                    return None;
+                }
                 let mut points = Vec::with_capacity(count);
                 for _ in 0..count {
-                    let time_delta_ms = u16::from_le_bytes([payload[pos], payload[pos + 1]]); pos += 2;
-                    let price = f32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()); pos += 4;
-                    points.push(EmuTradePoint { time_delta_ms, price });
+                    let time_delta_ms = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+                    pos += 2;
+                    let price = f32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    points.push(EmuTradePoint {
+                        time_delta_ms,
+                        price,
+                    });
                 }
-                Some(UICommand::EmuTrades(EmuTrades { uid, m_index, base_time, points }))
+                Some(UICommand::EmuTrades(EmuTrades {
+                    uid,
+                    m_index,
+                    base_time,
+                    points,
+                }))
             }
 
             CMD_NEW_MARKET_NOTIFY => Some(UICommand::NewMarketNotify(NewMarketNotify { uid })),
 
             CMD_LEV_MANAGE => {
-                if pos + 1 + 5 + 4 + 1 > payload.len() { return None; }
-                let cmd_ver = payload[pos]; pos += 1;
-                let auto_max_order = payload[pos] != 0; pos += 1;
-                let auto_lev_up    = payload[pos] != 0; pos += 1;
-                let auto_isolated  = payload[pos] != 0; pos += 1;
-                let auto_cross     = payload[pos] != 0; pos += 1;
-                let auto_fix_lev   = payload[pos] != 0; pos += 1;
-                let fix_lev = i32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()); pos += 4;
-                let tlg_report = payload[pos] != 0; pos += 1;
+                if pos + 1 + 5 + 4 + 1 > payload.len() {
+                    return None;
+                }
+                let cmd_ver = payload[pos];
+                pos += 1;
+                let auto_max_order = payload[pos] != 0;
+                pos += 1;
+                let auto_lev_up = payload[pos] != 0;
+                pos += 1;
+                let auto_isolated = payload[pos] != 0;
+                pos += 1;
+                let auto_cross = payload[pos] != 0;
+                pos += 1;
+                let auto_fix_lev = payload[pos] != 0;
+                pos += 1;
+                let fix_lev = i32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                let tlg_report = payload[pos] != 0;
+                pos += 1;
                 let lev_control = read_string(payload, &mut pos)?;
                 Some(UICommand::LevManage(LevManage {
-                    uid, cmd_ver, auto_max_order, auto_lev_up, auto_isolated,
-                    auto_cross, auto_fix_lev, fix_lev, tlg_report, lev_control,
+                    uid,
+                    cmd_ver,
+                    auto_max_order,
+                    auto_lev_up,
+                    auto_isolated,
+                    auto_cross,
+                    auto_fix_lev,
+                    fix_lev,
+                    tlg_report,
+                    lev_control,
                 }))
             }
 
             CMD_TRIGGER_MANAGE => {
-                if pos + 1 + 1 + 2 > payload.len() { return None; }
-                let action = payload[pos]; pos += 1;
-                let all_markets = payload[pos] != 0; pos += 1;
-                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize; pos += 2;
-                if pos + count * 2 > payload.len() { return None; }
+                if pos + 1 + 1 + 2 > payload.len() {
+                    return None;
+                }
+                let action = payload[pos];
+                pos += 1;
+                let all_markets = payload[pos] != 0;
+                pos += 1;
+                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+                pos += 2;
+                if pos + count * 2 > payload.len() {
+                    return None;
+                }
                 let mut markets = Vec::with_capacity(count);
                 for _ in 0..count {
                     markets.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
                     pos += 2;
                 }
-                if pos + 2 > payload.len() { return None; }
-                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize; pos += 2;
-                if pos + count * 2 > payload.len() { return None; }
+                if pos + 2 > payload.len() {
+                    return None;
+                }
+                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+                pos += 2;
+                if pos + count * 2 > payload.len() {
+                    return None;
+                }
                 let mut keys = Vec::with_capacity(count);
                 for _ in 0..count {
                     keys.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
                     pos += 2;
                 }
-                Some(UICommand::TriggerManage(TriggerManage { uid, action, all_markets, markets, keys }))
+                Some(UICommand::TriggerManage(TriggerManage {
+                    uid,
+                    action,
+                    all_markets,
+                    markets,
+                    keys,
+                }))
             }
 
             CMD_RESET_PROFIT => {
-                if pos + 1 > payload.len() { return None; }
+                if pos + 1 > payload.len() {
+                    return None;
+                }
                 let reset_kind = payload[pos];
                 Some(UICommand::ResetProfit(ResetProfit { uid, reset_kind }))
             }
 
             CMD_ARB_ACTIVATE_NOTIFY => {
-                if pos + 8 > payload.len() { return None; }
+                if pos + 8 > payload.len() {
+                    return None;
+                }
                 let arb_valid = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                Some(UICommand::ArbActivateNotify(ArbActivateNotify { uid, arb_valid }))
+                Some(UICommand::ArbActivateNotify(ArbActivateNotify {
+                    uid,
+                    arb_valid,
+                }))
             }
 
             CMD_SWITCH_DEX => {
                 // ShortString[15]: byte length + up to 15 bytes content. Total wire = 16 bytes.
-                if pos + 16 > payload.len() { return None; }
+                if pos + 16 > payload.len() {
+                    return None;
+                }
                 let len = payload[pos] as usize;
                 let len = len.min(15);
                 let name_bytes = &payload[pos + 1..pos + 1 + len];
@@ -435,7 +522,9 @@ impl UICommand {
             }
 
             CMD_SWITCH_SPOT => {
-                if pos + 1 > payload.len() { return None; }
+                if pos + 1 > payload.len() {
+                    return None;
+                }
                 let spot_index = payload[pos];
                 Some(UICommand::SwitchSpot(SwitchSpot { uid, spot_index }))
             }
@@ -449,40 +538,67 @@ impl UICommand {
 //  TClientSettingsCommand parsing helpers
 // =============================================================================
 
-fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
-    -> Option<ClientSettingsCommand>
-{
+fn parse_client_settings(
+    data: &[u8],
+    pos: &mut usize,
+    uid: u64,
+    ver: u16,
+) -> Option<ClientSettingsCommand> {
     // Fixed mandatory block: 4+4+1+1+8+4+4+8+1+4+1+1 = 41 bytes
-    if *pos + 41 > data.len() { return None; }
-    let x_sell           = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-    let x_sell_scalp     = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-    let x_tmode          = data[*pos] != 0; *pos += 1;
-    let fixed_sell_mode  = data[*pos] != 0; *pos += 1;
-    let fixed_sell_price = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap()); *pos += 8;
-    let price_drop_level = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-    let trailing_drop    = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-    let g_take_profit    = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap()); *pos += 8;
-    let use_g_take_profit = data[*pos] != 0; *pos += 1;
-    let unused_spread    = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()); *pos += 4;
-    let panic_if_price_drop = data[*pos] != 0; *pos += 1;
-    let emu_mode         = data[*pos] != 0; *pos += 1;
+    if *pos + 41 > data.len() {
+        return None;
+    }
+    let x_sell = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    let x_sell_scalp = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    let x_tmode = data[*pos] != 0;
+    *pos += 1;
+    let fixed_sell_mode = data[*pos] != 0;
+    *pos += 1;
+    let fixed_sell_price = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    let price_drop_level = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    let trailing_drop = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    let g_take_profit = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    let use_g_take_profit = data[*pos] != 0;
+    *pos += 1;
+    let unused_spread = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    let panic_if_price_drop = data[*pos] != 0;
+    *pos += 1;
+    let emu_mode = data[*pos] != 0;
+    *pos += 1;
 
     // v2+ fields
     let (buy_iceberg, sell_iceberg, sign_orders) = if ver >= 2 {
-        if *pos + 3 > data.len() { return None; }
-        let b = data[*pos] != 0; *pos += 1;
-        let s = data[*pos] != 0; *pos += 1;
-        let so = data[*pos] != 0; *pos += 1;
+        if *pos + 3 > data.len() {
+            return None;
+        }
+        let b = data[*pos] != 0;
+        *pos += 1;
+        let s = data[*pos] != 0;
+        *pos += 1;
+        let so = data[*pos] != 0;
+        *pos += 1;
         (b, s, so)
     } else {
         (false, false, true) // дефолт SignOrders=true (Config.pas:6230, 7567)
     };
 
     let coins_black_list_text = read_string(data, pos)?;
-    if *pos + 1 > data.len() { return None; }
-    let use_coins_black_list = data[*pos] != 0; *pos += 1;
+    if *pos + 1 > data.len() {
+        return None;
+    }
+    let use_coins_black_list = data[*pos] != 0;
+    *pos += 1;
 
-    if *pos + 4 > data.len() { return None; }
+    if *pos + 4 > data.len() {
+        return None;
+    }
     let temp_bl_count_raw = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
     *pos += 4;
     // Sanity check: каждый item занимает минимум 2 (string length prefix) + 8 (TDateTime)
@@ -492,10 +608,12 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
     let max_items_by_payload = (data.len() - *pos) / 10;
     let temp_bl_count = (temp_bl_count_raw.max(0) as usize).min(max_items_by_payload);
     let mut temp_bl_symbols = Vec::with_capacity(temp_bl_count);
-    let mut temp_bl_times   = Vec::with_capacity(temp_bl_count);
+    let mut temp_bl_times = Vec::with_capacity(temp_bl_count);
     for _ in 0..temp_bl_count {
         let sym = read_string(data, pos)?;
-        if *pos + 8 > data.len() { return None; }
+        if *pos + 8 > data.len() {
+            return None;
+        }
         let t = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
         *pos += 8;
         temp_bl_symbols.push(sym);
@@ -504,29 +622,49 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
 
     // Soft-read tail. Каждая проверка: `pos < len` (поле есть).
     let mut use_manual_strategy = false;
-    let mut manual_strategy_id  = 0u64;
+    let mut manual_strategy_id = 0u64;
     if *pos < data.len() {
-        if *pos + 9 > data.len() { return None; }
-        use_manual_strategy = data[*pos] != 0; *pos += 1;
+        if *pos + 9 > data.len() {
+            return None;
+        }
+        use_manual_strategy = data[*pos] != 0;
+        *pos += 1;
         manual_strategy_id = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
         *pos += 8;
     }
 
     let free_position_check = if *pos < data.len() {
-        if *pos + 1 > data.len() { return None; }
-        let b = data[*pos] != 0; *pos += 1; b
-    } else { false };
+        if *pos + 1 > data.len() {
+            return None;
+        }
+        let b = data[*pos] != 0;
+        *pos += 1;
+        b
+    } else {
+        false
+    };
 
     let vol_drop_level = if *pos < data.len() {
-        if *pos + 4 > data.len() { return None; }
+        if *pos + 4 > data.len() {
+            return None;
+        }
         let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4; v
-    } else { 0 };
+        *pos += 4;
+        v
+    } else {
+        0
+    };
 
     let use_stop_market = if *pos < data.len() {
-        if *pos + 1 > data.len() { return None; }
-        let b = data[*pos] != 0; *pos += 1; b
-    } else { false };
+        if *pos + 1 > data.len() {
+            return None;
+        }
+        let b = data[*pos] != 0;
+        *pos += 1;
+        b
+    } else {
+        false
+    };
 
     // ASCfg: `if pos + sizeof(Word) < size`  → Delphi `<`, не `<=`, чтобы было что-то ЗА размером.
     let as_cfg = read_sized_blob(data, pos);
@@ -540,27 +678,33 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
             *slot = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
             *pos += 4;
         }
-        sb_num = data[*pos]; *pos += 1;
+        sb_num = data[*pos];
+        *pos += 1;
     }
 
-    let join_sell_kind = if *pos + 1 <= data.len() {
-        let v = data[*pos]; *pos += 1; v
-    } else { 0 };
+    let join_sell_kind = if *pos < data.len() {
+        let v = data[*pos];
+        *pos += 1;
+        v
+    } else {
+        0
+    };
 
     // ArbConfig compact (defaults out of InitArbConfigDefaults if absent or arbVer < 1).
     let mut arb_config = ArbConfigCompact::default();
     if *pos < data.len() {
-        let arb_ver = data[*pos]; *pos += 1;
+        let arb_ver = data[*pos];
+        *pos += 1;
         // Delphi: `if (arbVer >= 1) and (ms.Position + SizeOf(wantedSet) <= ms.Size)` → `<= size`.
         if arb_ver >= 1 && *pos + 32 <= data.len() {
             // Reset to all-false before reading bits (override default).
             arb_config = ArbConfigCompact {
                 wanted: [false; 256],
                 show_absolute: false,
-                show_numbers:  false,
-                show_lines:    false,
-                show_percent:  false,
-                show_right:    false,
+                show_numbers: false,
+                show_lines: false,
+                show_percent: false,
+                show_right: false,
             };
             let wanted_bytes = &data[*pos..*pos + 32];
             *pos += 32;
@@ -568,15 +712,17 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
                 arb_config.wanted[i] = (wanted_bytes[i / 8] >> (i % 8)) & 1 != 0;
             }
             if *pos < data.len() {
-                let flags = data[*pos]; *pos += 1;
+                let flags = data[*pos];
+                *pos += 1;
                 arb_config.show_absolute = (flags & 0b00001) != 0;
-                arb_config.show_numbers  = (flags & 0b00010) != 0;
-                arb_config.show_lines    = (flags & 0b00100) != 0;
-                arb_config.show_percent  = (flags & 0b01000) != 0;
-                arb_config.show_right    = (flags & 0b10000) != 0;
+                arb_config.show_numbers = (flags & 0b00010) != 0;
+                arb_config.show_lines = (flags & 0b00100) != 0;
+                arb_config.show_percent = (flags & 0b01000) != 0;
+                arb_config.show_right = (flags & 0b10000) != 0;
             }
             if *pos < data.len() {
-                let color_count = data[*pos] as usize; *pos += 1;
+                let color_count = data[*pos] as usize;
+                *pos += 1;
                 // skip colorCount * 5 bytes (legacy)
                 let skip = color_count * 5;
                 *pos = (*pos + skip).min(data.len());
@@ -586,16 +732,35 @@ fn parse_client_settings(data: &[u8], pos: &mut usize, uid: u64, ver: u16)
 
     Some(ClientSettingsCommand {
         uid,
-        x_sell, x_sell_scalp, x_tmode, fixed_sell_mode, fixed_sell_price,
-        price_drop_level, trailing_drop, g_take_profit, use_g_take_profit,
-        unused_spread, panic_if_price_drop, emu_mode,
-        buy_iceberg, sell_iceberg, sign_orders,
-        coins_black_list_text, use_coins_black_list,
-        temp_bl_symbols, temp_bl_times,
-        use_manual_strategy, manual_strategy_id,
-        free_position_check, vol_drop_level, use_stop_market,
-        as_cfg, as_cfg2,
-        s_price, sb_num, join_sell_kind,
+        x_sell,
+        x_sell_scalp,
+        x_tmode,
+        fixed_sell_mode,
+        fixed_sell_price,
+        price_drop_level,
+        trailing_drop,
+        g_take_profit,
+        use_g_take_profit,
+        unused_spread,
+        panic_if_price_drop,
+        emu_mode,
+        buy_iceberg,
+        sell_iceberg,
+        sign_orders,
+        coins_black_list_text,
+        use_coins_black_list,
+        temp_bl_symbols,
+        temp_bl_times,
+        use_manual_strategy,
+        manual_strategy_id,
+        free_position_check,
+        vol_drop_level,
+        use_stop_market,
+        as_cfg,
+        as_cfg2,
+        s_price,
+        sb_num,
+        join_sell_kind,
         arb_config,
     })
 }
@@ -616,7 +781,9 @@ fn read_sized_blob(data: &[u8], pos: &mut usize) -> Vec<u8> {
 }
 
 fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
-    if *pos + 1 > data.len() { return None; }
+    if *pos + 1 > data.len() {
+        return None;
+    }
     let v = data[*pos] != 0;
     *pos += 1;
     Some(v)
@@ -697,11 +864,21 @@ pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     }
     out.extend_from_slice(&wanted_bytes);
     let mut flags = 0u8;
-    if cmd.arb_config.show_absolute { flags |= 0b00001; }
-    if cmd.arb_config.show_numbers  { flags |= 0b00010; }
-    if cmd.arb_config.show_lines    { flags |= 0b00100; }
-    if cmd.arb_config.show_percent  { flags |= 0b01000; }
-    if cmd.arb_config.show_right    { flags |= 0b10000; }
+    if cmd.arb_config.show_absolute {
+        flags |= 0b00001;
+    }
+    if cmd.arb_config.show_numbers {
+        flags |= 0b00010;
+    }
+    if cmd.arb_config.show_lines {
+        flags |= 0b00100;
+    }
+    if cmd.arb_config.show_percent {
+        flags |= 0b01000;
+    }
+    if cmd.arb_config.show_right {
+        flags |= 0b10000;
+    }
     out.push(flags);
     out.push(0); // colorCount = 0 (legacy slot, не используется)
 
@@ -713,7 +890,7 @@ fn write_blob_fixed(out: &mut Vec<u8>, blob: &[u8], target_size: usize) {
         out.extend_from_slice(&blob[..target_size]);
     } else {
         out.extend_from_slice(blob);
-        out.extend(std::iter::repeat(0u8).take(target_size - blob.len()));
+        out.extend(std::iter::repeat_n(0u8, target_size - blob.len()));
     }
 }
 
@@ -763,7 +940,12 @@ pub fn build_update_version(uid: u64, version_name: &str, is_release: bool) -> V
 }
 
 /// CmdId=7 `TEmuTradesCommand`.
-pub fn build_emu_trades(uid: u64, m_index: u16, base_time: f64, points: &[EmuTradePoint]) -> Vec<u8> {
+pub fn build_emu_trades(
+    uid: u64,
+    m_index: u16,
+    base_time: f64,
+    points: &[EmuTradePoint],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + 2 + 8 + 2 + points.len() * 6);
     write_header(&mut out, CMD_EMU_TRADES, uid);
     out.extend_from_slice(&m_index.to_le_bytes());
@@ -800,15 +982,25 @@ pub fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
 }
 
 /// CmdId=10 `TTriggerManageCommand`.
-pub fn build_trigger_manage(uid: u64, action: u8, all_markets: bool, markets: &[u16], keys: &[u16]) -> Vec<u8> {
+pub fn build_trigger_manage(
+    uid: u64,
+    action: u8,
+    all_markets: bool,
+    markets: &[u16],
+    keys: &[u16],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + 1 + 1 + 2 + markets.len() * 2 + 2 + keys.len() * 2);
     write_header(&mut out, CMD_TRIGGER_MANAGE, uid);
     out.push(action);
     out.push(all_markets as u8);
     out.extend_from_slice(&(markets.len() as u16).to_le_bytes());
-    for m in markets { out.extend_from_slice(&m.to_le_bytes()); }
+    for m in markets {
+        out.extend_from_slice(&m.to_le_bytes());
+    }
     out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
-    for k in keys { out.extend_from_slice(&k.to_le_bytes()); }
+    for k in keys {
+        out.extend_from_slice(&k.to_le_bytes());
+    }
     out
 }
 
@@ -836,7 +1028,7 @@ pub fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
     let len = bytes.len().min(15) as u8;
     out.push(len);
     out.extend_from_slice(&bytes[..len as usize]);
-    out.extend(std::iter::repeat(0u8).take(15 - len as usize));
+    out.extend(std::iter::repeat_n(0u8, 15 - len as usize));
     out
 }
 
@@ -887,9 +1079,18 @@ mod tests {
     #[test]
     fn strat_start_stop_v2_roundtrip() {
         let items = vec![
-            StratCheckedItem { strategy_id: 10, checked: true },
-            StratCheckedItem { strategy_id: 20, checked: false },
-            StratCheckedItem { strategy_id: 30, checked: true },
+            StratCheckedItem {
+                strategy_id: 10,
+                checked: true,
+            },
+            StratCheckedItem {
+                strategy_id: 20,
+                checked: false,
+            },
+            StratCheckedItem {
+                strategy_id: 30,
+                checked: true,
+            },
         ];
         let raw = build_strat_start_stop_v2(42, false, &items);
         match UICommand::parse(&raw).unwrap() {
@@ -926,9 +1127,18 @@ mod tests {
     #[test]
     fn emu_trades_roundtrip() {
         let points = vec![
-            EmuTradePoint { time_delta_ms: 0, price: 100.5 },
-            EmuTradePoint { time_delta_ms: 1500, price: -101.2 }, // sell
-            EmuTradePoint { time_delta_ms: 3000, price: 99.8 },
+            EmuTradePoint {
+                time_delta_ms: 0,
+                price: 100.5,
+            },
+            EmuTradePoint {
+                time_delta_ms: 1500,
+                price: -101.2,
+            }, // sell
+            EmuTradePoint {
+                time_delta_ms: 3000,
+                price: 99.8,
+            },
         ];
         let raw = build_emu_trades(3, 42, 45123.5, &points);
         match UICommand::parse(&raw).unwrap() {
@@ -1077,7 +1287,7 @@ mod tests {
             free_position_check: true,
             vol_drop_level: 50,
             use_stop_market: true,
-            as_cfg:  vec![0xAAu8; AS_CFG_SIZE],
+            as_cfg: vec![0xAAu8; AS_CFG_SIZE],
             as_cfg2: vec![0xBBu8; AS_CFG2_SIZE],
             s_price: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             sb_num: 7,
@@ -1085,10 +1295,10 @@ mod tests {
             arb_config: ArbConfigCompact {
                 wanted,
                 show_absolute: true,
-                show_numbers:  false,
-                show_lines:    true,
-                show_percent:  false,
-                show_right:    true,
+                show_numbers: false,
+                show_lines: true,
+                show_percent: false,
+                show_right: true,
             },
         };
         let raw = build_client_settings(&cmd);
@@ -1101,13 +1311,16 @@ mod tests {
                 assert!(!p.sell_iceberg);
                 assert!(p.sign_orders);
                 assert_eq!(p.coins_black_list_text, "BTC,ETH");
-                assert_eq!(p.temp_bl_symbols, vec!["DOGE".to_string(), "SHIB".to_string()]);
+                assert_eq!(
+                    p.temp_bl_symbols,
+                    vec!["DOGE".to_string(), "SHIB".to_string()]
+                );
                 assert_eq!(p.temp_bl_times, vec![0.001, 0.002]);
                 assert_eq!(p.manual_strategy_id, 9999);
                 assert_eq!(p.s_price, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
                 assert_eq!(p.sb_num, 7);
                 assert_eq!(p.join_sell_kind, 2);
-                assert_eq!(p.as_cfg.len(),  AS_CFG_SIZE);
+                assert_eq!(p.as_cfg.len(), AS_CFG_SIZE);
                 assert_eq!(p.as_cfg2.len(), AS_CFG2_SIZE);
                 assert!(p.arb_config.wanted[0]);
                 assert!(p.arb_config.wanted[1]);

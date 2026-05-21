@@ -1,9 +1,9 @@
-/// TMoonProtoSlider — 4096-bit sliding window for replay protection.
-/// Byte-exact port of MoonProtoIntStruct.pas:1379-1500.
-///
-/// BitField: 64 x u64 = 4096 bits. Each bit = one message number.
-/// StartNum: base message number (aligned to 64).
-/// Window slides forward when a message beyond the current window arrives.
+//! TMoonProtoSlider — 4096-bit sliding window for replay protection.
+//! Byte-exact port of MoonProtoIntStruct.pas:1379-1500.
+//!
+//! BitField: 64 x u64 = 4096 bits. Each bit = one message number.
+//! StartNum: base message number (aligned to 64).
+//! Window slides forward when a message beyond the current window arrives.
 
 const SLIDER_LEN: usize = 64; // MPSliderLen = 64 words
 const SLIDER_LEN_BITS: u64 = (SLIDER_LEN as u64) * 64; // 4096 bits
@@ -15,6 +15,12 @@ pub struct Slider {
     pub epoch: u8,
     pub has_new_data: bool,
     pub r_count: i32,
+}
+
+impl Default for Slider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Slider {
@@ -60,7 +66,7 @@ impl Slider {
                 self.bit_field.copy_within(diff_u.., 0);
             }
             // Zero the new tail
-            let zero_start = if diff_u >= SLIDER_LEN { 0 } else { SLIDER_LEN - diff_u };
+            let zero_start = SLIDER_LEN.saturating_sub(diff_u);
             for i in zero_start..SLIDER_LEN {
                 self.bit_field[i] = 0;
             }

@@ -1,5 +1,5 @@
-use crate::MoonKey;
 use crate::crypto;
+use crate::MoonKey;
 use rand::Rng;
 
 // Hello timestamp is set by caller (client.rs::delphi_now adds NTP offset).
@@ -66,7 +66,14 @@ impl Hello {
         let peer_mix = u64::from_le_bytes(data[40..48].try_into().unwrap());
         let app_token = u64::from_le_bytes(data[48..56].try_into().unwrap());
 
-        Some(Self { rnd, mix_ts, timestamp, server_token, peer_mix, app_token })
+        Some(Self {
+            rnd,
+            mix_ts,
+            timestamp,
+            server_token,
+            peer_mix,
+            app_token,
+        })
     }
 }
 

@@ -8,9 +8,7 @@
 use std::env;
 use std::time::Duration;
 
-use moonproto::client::{
-    run_init_sequence, Client, ClientConfig, InitConfig,
-};
+use moonproto::client::{run_init_sequence, Client, ClientConfig, InitConfig};
 use moonproto::commands::candles::{DeepHistoryKind, DeepPrice};
 use moonproto::events::EventDispatcher;
 use moonproto::key_import;
@@ -82,7 +80,7 @@ fn main() {
     let init = InitConfig {
         base_check: true,
         auth_check: true,
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     if let Err(err) = run_init_sequence(&mut client, &mut dispatcher, init) {

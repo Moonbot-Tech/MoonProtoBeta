@@ -1,3 +1,6 @@
+use super::slider::Slider;
+use crate::crypto;
+use crate::crypto::Aes128Gcm;
 /// MPC_Crypted envelope — decryption of encrypted commands.
 /// Byte-exact port of TMoonProtoClient.DeCrypt from MoonProtoIntStruct.pas:1127-1150.
 ///
@@ -9,11 +12,7 @@
 ///     cmd: u8 (1 byte, real command)
 ///     WantACK: u8 (1 byte, boolean)
 ///   Followed by the actual command payload.
-
 use log::warn;
-use crate::crypto;
-use crate::crypto::Aes128Gcm;
-use super::slider::Slider;
 
 pub const CRYPTO_HEADER_SIZE: usize = 12;
 

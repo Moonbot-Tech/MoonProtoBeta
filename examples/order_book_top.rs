@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use moonproto::state::{OrderBookEvent, OrderBookKind};
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event,
-    EventDispatcher, InitConfig,
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event, EventDispatcher,
+    InitConfig,
 };
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
@@ -47,7 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let keys = import_key(&args[1]).expect("invalid key");
     let (server_ip, server_port) = parse_host(args.get(2));
-    let market = args.get(3).cloned().unwrap_or_else(|| "BTCUSDT".to_string());
+    let market = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "BTCUSDT".to_string());
     let watch_secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key);
@@ -59,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_check: true,
         fetch_markets: true,
         subscribe_orderbooks: vec![market.clone()],
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
 
@@ -88,8 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.run_with_dispatcher_state(
             tick,
             &mut dispatcher,
-            Box::new(move |event, state| match event {
-                Event::OrderBook(OrderBookEvent::Apply { market_index, book_kind, seq, .. }) => {
+            Box::new(move |event, state| {
+                if let Event::OrderBook(OrderBookEvent::Apply {
+                    market_index,
+                    book_kind,
+                    seq,
+                    ..
+                }) = event
+                {
                     let Some(name) = state.markets().market_name_by_index(*market_index) else {
                         return;
                     };
@@ -111,17 +120,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ask
                         .map(|level| format!("{} @ {}", level.quantity, level.rate))
                         .unwrap_or_else(|| "none".to_string());
-                    println!("[top] {name} {} seq={} bid={} ask={}", kind_name(kind), seq, bid, ask);
+                    println!(
+                        "[top] {name} {} seq={} bid={} ask={}",
+                        kind_name(kind),
+                        seq,
+                        bid,
+                        ask
+                    );
                 }
-                _ => {}
             }),
         );
     }
 
-    println!(
-        "[done] top-updates={}",
-        updates.load(Ordering::Relaxed)
-    );
+    println!("[done] top-updates={}", updates.load(Ordering::Relaxed));
     client.disconnect();
     Ok(())
 }

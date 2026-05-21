@@ -1,5 +1,8 @@
-use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
 use crate::MoonKey;
+use sha3::{
+    digest::{ExtendableOutput, Update, XofReader},
+    Shake128,
+};
 
 const KEY_LEN: usize = 16;
 const XOR_CONST_ENCODE: u64 = 0xE59DA7C3B8D49E25;
@@ -112,8 +115,10 @@ mod tests {
 
     #[test]
     fn sub_keys_deterministic() {
-        let key: MoonKey = [0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5,
-                            0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25, 0xcb, 0xd6];
+        let key: MoonKey = [
+            0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5, 0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25,
+            0xcb, 0xd6,
+        ];
         let (enc1, dec1) = generate_sub_keys(&key, 12345);
         let (enc2, dec2) = generate_sub_keys(&key, 12345);
         assert_eq!(enc1, enc2);

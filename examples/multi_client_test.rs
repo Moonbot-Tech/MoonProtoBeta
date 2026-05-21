@@ -15,8 +15,8 @@
 //! Default IP:PORT = 207.148.91.186:3000 (тестовый MoonBot сервер).
 
 use std::env;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -50,8 +50,7 @@ fn run_client(
     *stats.label.lock().unwrap() = label.to_string();
     *stats.client_id.lock().unwrap() = client_id;
 
-    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key)
-        .with_client_id(client_id);
+    let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key).with_client_id(client_id);
 
     let mut client = Client::new(cfg);
     let mut dispatcher = EventDispatcher::new();
@@ -77,27 +76,26 @@ fn run_client(
     // run_with_dispatcher с тем же dispatcher что будет использован в init —
     // так Markets state будет применяться единым flow.
     println!("[{label}] phase 1: connecting (client_id={client_id:#x})...");
-    client.run_with_dispatcher(
-        Duration::from_secs(3),
-        &mut dispatcher,
-        Box::new(|_| {}),
-    );
+    client.run_with_dispatcher(Duration::from_secs(3), &mut dispatcher, Box::new(|_| {}));
 
     // Phase 2: init sequence (chunked main loop pump внутри).
     let init_cfg = moonproto::client::InitConfig {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
+        fetch_indexes: true,
         fetch_balance: false,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec![],
-        step_timeout: Some(Duration::from_secs(5)),
+        step_timeout: None,
     };
     println!("[{label}] phase 2: init sequence...");
     match moonproto::client::run_init_sequence(&mut client, &mut dispatcher, init_cfg) {
-        Ok(r) => println!("[{label}]   init ok: base={} auth={} markets={}B",
-            r.base_check_ok, r.auth_check_ok, r.markets_response_bytes),
+        Ok(r) => println!(
+            "[{label}]   init ok: base={} auth={} markets={}B",
+            r.base_check_ok, r.auth_check_ok, r.markets_response_bytes
+        ),
         Err(e) => println!("[{label}]   init FAILED: {:?}", e),
     }
 
@@ -112,11 +110,8 @@ fn run_client(
         &mut dispatcher,
         Box::new(move |ev| {
             count_stats.raw_packets.fetch_add(1, Ordering::Relaxed);
-            match ev {
-                moonproto::events::Event::Trade(_) => {
-                    count_stats.trades_packets.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
+            if let moonproto::events::Event::Trade(_) = ev {
+                count_stats.trades_packets.fetch_add(1, Ordering::Relaxed);
             }
         }),
     );
@@ -151,16 +146,18 @@ fn main() {
 
     let ip_a = ip.clone();
     let ip_b = ip.clone();
-    let keys_a = keys.clone();
-    let keys_b = keys.clone();
+    let keys_a = keys;
+    let keys_b = keys;
     let stats_a_thread = Arc::clone(&stats_a);
     let stats_b_thread = Arc::clone(&stats_b);
 
-    let t_a = thread::spawn(move || run_client("A", ip_a, port, keys_a, DURATION_SECS, stats_a_thread));
+    let t_a =
+        thread::spawn(move || run_client("A", ip_a, port, keys_a, DURATION_SECS, stats_a_thread));
     // Слегка раздвинуть starts чтобы handshake'и не наложились на одни и те же мс
     // (просто для красоты логов; функционально и параллельный старт работает).
     thread::sleep(Duration::from_millis(200));
-    let t_b = thread::spawn(move || run_client("B", ip_b, port, keys_b, DURATION_SECS, stats_b_thread));
+    let t_b =
+        thread::spawn(move || run_client("B", ip_b, port, keys_b, DURATION_SECS, stats_b_thread));
 
     let _ = t_a.join();
     let _ = t_b.join();
@@ -183,9 +180,14 @@ fn main() {
         println!("[{label}]   handshake auth_done={auth} (fresh seen={fresh}, again seen={again})");
         println!("[{label}]   packets: trades={trades}, raw_events={raw}");
         println!("[{label}]   lifecycle events seen: {lc_count}");
-        println!("[{label}]   server_info: bot_id={:?} name={:?} exchange={:?} base={:?} ver={:?}",
-            info.bot_id, info.server_name, info.exchange_name,
-            info.base_currency_name, info.server_version);
+        println!(
+            "[{label}]   server_info: bot_id={:?} name={:?} exchange={:?} base={:?} ver={:?}",
+            info.bot_id,
+            info.server_name,
+            info.exchange_name,
+            info.base_currency_name,
+            info.server_version
+        );
     }
 
     // Assertions for smoke-test "pass":
@@ -215,8 +217,10 @@ fn main() {
         println!("WARN: bot_id отличается между Client'ами (A={:?} B={:?}) — это странно для одного сервера",
             a_info.bot_id, b_info.bot_id);
     } else if a_info.bot_id.is_some() {
-        println!("OK: оба Client'а видят одинаковый bot_id={:?} (одна и та же серверная identity)",
-            a_info.bot_id);
+        println!(
+            "OK: оба Client'а видят одинаковый bot_id={:?} (одна и та же серверная identity)",
+            a_info.bot_id
+        );
     }
     if all_ok {
         println!("PASS: оба Client'а независимо подключились, handshake'нулись, получают трафик.");

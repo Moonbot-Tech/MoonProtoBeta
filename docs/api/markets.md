@@ -51,6 +51,7 @@ let init = InitConfig {
     base_check: true,
     auth_check: true,
     fetch_markets: true,
+    fetch_indexes: true,
     ..Default::default()
 };
 connect_and_init(&mut client, &mut dispatcher, ConnectConfig::new(init))?;
@@ -75,9 +76,12 @@ pub enum MarketsEvent {
 }
 ```
 
-`MarketsState.indexes_synchronized` is a critical invariant. After server restart
-the client sets it to `false`, refetches indexes, and `EventDispatcher` drops
-orderbook/trades packets until fresh indexes are applied.
+`MarketsState.indexes_synchronized` is a critical invariant.
+`InitConfig::fetch_indexes` fetches the initial map during init; subscriptions
+to trades or orderbooks force that step even when the flag is false. After
+server restart the client sets it to `false`, refetches indexes, and
+`EventDispatcher` drops orderbook/trades packets until fresh indexes are
+applied.
 Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
 

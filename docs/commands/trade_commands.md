@@ -7,6 +7,11 @@ the server sends updates such as order status, full order snapshots, and
 not-found notifications.
 
 `CmdId` values map to variants of the `commands::trade::TradeCommand` enum.
+The large server-to-client variants are boxed in the public enum:
+`TradeCommand::OrderStatus(Box<OrderStatus>)` and
+`TradeCommand::OrderReplaceResponse(Box<OrderReplaceResponse>)`. This keeps
+`TradeCommand` cheap to move through event/state queues without changing the
+wire format or the inner structs.
 
 ## Wire format
 

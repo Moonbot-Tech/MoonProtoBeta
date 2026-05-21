@@ -38,6 +38,7 @@
 //!     base_check: true,
 //!     auth_check: true,
 //!     fetch_markets: true,
+//!     fetch_indexes: true,
 //!     fetch_balance: true,
 //!     subscribe_trades: Some(false),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -119,22 +120,22 @@
 //! обфускация, headers, опциональная загрузка `moonext` для extended transport
 //! mode 1/2).
 
-pub mod crypto;
-pub mod protocol;
+mod api_pending;
 pub mod client;
-pub mod compression;
 pub mod commands;
-pub mod state;
+pub mod compression;
+pub mod crypto;
+pub mod events;
 pub mod key_import;
 pub mod ntp;
-mod api_pending;
-pub mod events;
+pub mod protocol;
+pub mod state;
 
-pub use moonproto_transport::{MoonKey, ServerMsgHeader};
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
-    EventFn, EventWithStateFn, InitConfig, InitError, InitResult, LifecycleEvent,
-    RefreshConfig, EngineRequestError, TradeContextError,
+    EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
+    LifecycleEvent, RefreshConfig, TradeContextError,
 };
 pub use events::{Event, EventDispatcher, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};
+pub use moonproto_transport::{MoonKey, ServerMsgHeader};

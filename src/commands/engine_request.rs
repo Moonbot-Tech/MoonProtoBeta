@@ -1,3 +1,4 @@
+use super::engine_api::EngineMethod;
 /// Engine API Request builder — для отправки RPC-вызовов на сервер.
 /// Byte-exact порт `TEngineRequest.StoreToStream` (MoonProtoEngineStruct.pas:326-349).
 ///
@@ -12,9 +13,7 @@
 ///
 /// Params собирается через хелперы `params::write_*` (см. ниже) и обычно содержит:
 ///   `req.WriteInt(NewLev)`, `req.WriteByte(...)`, `req.WriteBool(...)`, `req.WriteWord(...)`.
-
-use super::registry::{CURRENT_PROTO_CMD_VER, write_string};
-use super::engine_api::EngineMethod;
+use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
 
 const ENGINE_REQUEST_CMD_ID: u8 = 2; // TEngineRequest CmdId
 
@@ -89,7 +88,11 @@ pub fn build_engine_request_full(
 }
 
 /// Backward-compat обёртка — для команд БЕЗ параметров (params_size = 0).
-pub fn build_engine_request(method: EngineMethod, market_name: &str, market_names: &[&str]) -> Vec<u8> {
+pub fn build_engine_request(
+    method: EngineMethod,
+    market_name: &str,
+    market_names: &[&str],
+) -> Vec<u8> {
     build_engine_request_full(method, market_name, market_names, &[])
 }
 
@@ -250,7 +253,12 @@ pub fn trades_resend_batches(packet_nums: &[u16]) -> Vec<Vec<u8>> {
         for &n in &packet_nums[i..i + cnt] {
             params::write_word(&mut params, n);
         }
-        out.push(build_engine_request_full(EngineMethod::TradesResend, "", &[], &params));
+        out.push(build_engine_request_full(
+            EngineMethod::TradesResend,
+            "",
+            &[],
+            &params,
+        ));
         i += cnt;
     }
     out

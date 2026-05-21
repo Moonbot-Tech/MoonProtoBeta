@@ -14,10 +14,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use moonproto::state::MarketsEvent;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig,
 };
-use moonproto::state::MarketsEvent;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -78,7 +78,7 @@ fn main() {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     if let Err(err) = run_init_sequence(&mut client, &mut dispatcher, init) {

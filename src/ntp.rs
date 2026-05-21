@@ -7,11 +7,10 @@
 ///
 /// Offset = ((T2 - T1) + (T3 - T4)) / 2  (in seconds as f64)
 /// RoundTrip = (T4 - T1) - (T3 - T2)
-
 use log::{debug, warn};
 use std::net::UdpSocket;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NTP_PORT: u16 = 123;
@@ -20,8 +19,8 @@ const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds between 1900-01-01 and 1
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NtpSyncResult {
-    pub time_offset: f64,    // seconds (add to SystemTime to get corrected time)
-    pub round_trip_ms: i64,  // milliseconds
+    pub time_offset: f64,   // seconds (add to SystemTime to get corrected time)
+    pub round_trip_ms: i64, // milliseconds
     pub synced: bool,
 }
 
@@ -29,8 +28,10 @@ pub struct NtpSyncResult {
 fn sntp_request(host: &str, timeout_ms: u64) -> Option<(f64, f64)> {
     let addr = format!("{}:{}", host, NTP_PORT);
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.set_read_timeout(Some(Duration::from_millis(timeout_ms))).ok()?;
-    sock.set_write_timeout(Some(Duration::from_millis(1000))).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(timeout_ms)))
+        .ok()?;
+    sock.set_write_timeout(Some(Duration::from_millis(1000)))
+        .ok()?;
 
     // Build NTP request: LI=0, VN=4, Mode=3 → first byte = 0b00_100_011 = 0x23
     let mut request = [0u8; NTP_PACKET_SIZE];
@@ -47,7 +48,9 @@ fn sntp_request(host: &str, timeout_ms: u64) -> Option<(f64, f64)> {
 
     let mut response = [0u8; NTP_PACKET_SIZE];
     let (n, _) = sock.recv_from(&mut response).ok()?;
-    if n < NTP_PACKET_SIZE { return None; }
+    if n < NTP_PACKET_SIZE {
+        return None;
+    }
 
     let t4_ntp = system_time_to_ntp();
     let t4 = ntp_to_seconds(t4_ntp.0, t4_ntp.1);
@@ -286,8 +289,12 @@ fn release_process_sync() {
 /// - mobile suspend (iOS Background App Refresh — экономия батареи)
 /// - graceful shutdown Client (через Drop)
 /// - переподключение к другому серверу (создаётся новый Client → старый NTP не нужен)
-pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sync::atomic::AtomicBool>
-    where F: Fn(f64) + Send + 'static
+pub fn spawn_sync_thread<F>(
+    host: String,
+    apply_fn: F,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool>
+where
+    F: Fn(f64) + Send + 'static,
 {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
@@ -302,7 +309,9 @@ pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sy
             let mut ntp_state = NtpState::default();
 
             // Initial sync (try_count=4) — пропускаем если уже shutdown
-            if shutdown_thread.load(Ordering::Relaxed) { return; }
+            if shutdown_thread.load(Ordering::Relaxed) {
+                return;
+            }
             let first = get_best_ntp_with_state(&mut ntp_state, 4, |timeout_ms| {
                 sntp_request(&host, timeout_ms)
             });
@@ -318,7 +327,9 @@ pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sy
                 // Sleep 5 × 100ms = 500ms (как Delphi pas:1273-1275) с проверкой shutdown
                 // каждые 100ms — выход в течение ~100ms после `store(true)`.
                 for _ in 0..5 {
-                    if shutdown_thread.load(Ordering::Relaxed) { return; }
+                    if shutdown_thread.load(Ordering::Relaxed) {
+                        return;
+                    }
                     std::thread::sleep(Duration::from_millis(100));
                 }
 
@@ -360,7 +371,11 @@ mod tests {
     fn ntp_sync_works() {
         let result = get_best_ntp("pool.ntp.org", 3);
         if result.synced {
-            println!("NTP offset: {:.3}ms, RTT: {}ms", result.time_offset * 1000.0, result.round_trip_ms);
+            println!(
+                "NTP offset: {:.3}ms, RTT: {}ms",
+                result.time_offset * 1000.0,
+                result.round_trip_ms
+            );
             assert!(result.time_offset.abs() < 60.0); // offset < 60 seconds = sane
             assert!(result.round_trip_ms < 5000); // RTT < 5 seconds
         } else {
@@ -380,9 +395,7 @@ mod tests {
     #[test]
     fn first_sync_accepts_large_offset_like_delphi() {
         let mut state = NtpState::default();
-        let result = get_best_ntp_with_state(&mut state, 1, |_| {
-            Some((31_536_000.0, 0.120))
-        });
+        let result = get_best_ntp_with_state(&mut state, 1, |_| Some((31_536_000.0, 0.120)));
 
         assert!(result.synced);
         assert_eq!(result.time_offset, 31_536_000.0);
@@ -471,12 +484,9 @@ mod tests {
         let _lock = lock_process_tests();
         reset_process_sync_for_test();
 
-        let first = acquire_process_sync_with(
-            "pool.ntp.org".to_string(),
-            noop_apply,
-            fake_process_spawn,
-        )
-        .expect("first client should start process NTP");
+        let first =
+            acquire_process_sync_with("pool.ntp.org".to_string(), noop_apply, fake_process_spawn)
+                .expect("first client should start process NTP");
         assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
         assert_eq!(
             process_sync_snapshot(),
@@ -489,12 +499,9 @@ mod tests {
             .as_ref()
             .cloned()
             .unwrap();
-        let second = acquire_process_sync_with(
-            "pool.ntp.org".to_string(),
-            noop_apply,
-            fake_process_spawn,
-        )
-        .expect("second client should share process NTP");
+        let second =
+            acquire_process_sync_with("pool.ntp.org".to_string(), noop_apply, fake_process_spawn)
+                .expect("second client should share process NTP");
 
         assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -521,18 +528,12 @@ mod tests {
         let _lock = lock_process_tests();
         reset_process_sync_for_test();
 
-        let first = acquire_process_sync_with(
-            "ntp-a.example".to_string(),
-            noop_apply,
-            fake_process_spawn,
-        )
-        .unwrap();
-        let second = acquire_process_sync_with(
-            "ntp-b.example".to_string(),
-            noop_apply,
-            fake_process_spawn,
-        )
-        .unwrap();
+        let first =
+            acquire_process_sync_with("ntp-a.example".to_string(), noop_apply, fake_process_spawn)
+                .unwrap();
+        let second =
+            acquire_process_sync_with("ntp-b.example".to_string(), noop_apply, fake_process_spawn)
+                .unwrap();
 
         assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -550,11 +551,8 @@ mod tests {
         let _lock = lock_process_tests();
         reset_process_sync_for_test();
 
-        let guard = acquire_process_sync_with(
-            "pool.ntp.org".to_string(),
-            noop_apply,
-            failed_process_spawn,
-        );
+        let guard =
+            acquire_process_sync_with("pool.ntp.org".to_string(), noop_apply, failed_process_spawn);
 
         assert!(guard.is_none());
         assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);

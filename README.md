@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         base_check: true,
         auth_check: true,
         fetch_markets: true,
+        fetch_indexes: true,
         fetch_balance: true,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -101,6 +102,7 @@ the init requests.
 payloads into typed events and performs library-owned recovery work:
 
 - replaying registered subscriptions after reconnect;
+- fetching market indexes during init when requested or required by subscriptions;
 - resynchronizing market indexes after server restart;
 - blocking orderbook/trades packets until indexes are synchronized;
 - sending `RequestOrderBookFull` when a gap requires a full snapshot;

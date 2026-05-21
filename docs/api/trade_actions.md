@@ -44,7 +44,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `join_orders(ctx, market, is_short)` | Join open orders. |
 | `split_order(ctx, market, split_parts, split_small, split_small_sell)` | Split an order. |
 | `split_tracked_order(order, split_parts, split_small, split_small_sell)` | Split a tracked order. |
-| `move_all_sells(ctx, market, cmd_type, move_kind, price, zone, side)` | Move sell orders in bulk. |
+| `move_all_sells(ctx, market, params)` | Move sell orders in bulk. `params` is `MoveAllSellsParams`. |
 | `do_close_position(ctx, market, market_sell)` | Close a position. |
 | `do_limit_close_position(ctx, market, is_short)` | Close through a limit order. |
 | `do_split_position(ctx, market, is_short)` | Split a position. |
@@ -58,7 +58,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `set_immune(uid, items)` | Mark orders immune to clicks. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk. |
-| `update_vstop(ctx, market, status, on, fixed, level, vol)` | Update volume stop. |
+| `update_vstop(ctx, market, params)` | Update volume stop. `params` is `VStopUpdateParams`; the wrapper writes `epoch = 0`. |
 | `update_tracked_order_vstop(order, on, fixed, level, vol)` | Update volume stop for a tracked order. |
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
 
@@ -66,11 +66,24 @@ Epoch is intentionally not part of the public outgoing wrappers. For replace and
 panic-sell commands, status is not public either: the Delphi client writes
 `epoch = 0` and `status = OS_None` for those commands.
 
+`move_all_sells` and `update_vstop` intentionally take parameter structs instead
+of long positional argument lists. This is part of the public API:
+
+- `MoveAllSellsParams` groups `cmd_type`, `move_kind`, `price`, `price_zone`,
+  and `side`;
+- `VStopUpdateParams` groups `status`, `vstop_on`, `vstop_fixed`,
+  `vstop_level`, and `vstop_vol`.
+
+Low-level builders follow the same shape:
+`build_move_all_sells(ctx, market, params)` and
+`build_vstop_update(ctx, market, epoch, params)`.
+
 ## Example
 
 ```rust
 use moonproto::commands::trade::{
-    FixedPosition, ImmuneItem, MoveAllCmdType, OrderType, PriceZone, ReplaceMultiKind,
+    FixedPosition, ImmuneItem, MoveAllCmdType, MoveAllSellsParams, OrderType, PriceZone,
+    ReplaceMultiKind,
 };
 
 let order = dispatcher.orders().get(order_uid).expect("known order");
@@ -84,11 +97,13 @@ let ctx = client.random_trade_ctx()
 client.move_all_sells(
     ctx,
     "BTCUSDT",
-    MoveAllCmdType::PriceZone,
-    ReplaceMultiKind::All,
-    50100.0,
-    PriceZone { min_p: 49500.0, max_p: 50500.0 },
-    FixedPosition::Long,
+    MoveAllSellsParams {
+        cmd_type: MoveAllCmdType::PriceZone,
+        move_kind: ReplaceMultiKind::All,
+        price: 50100.0,
+        price_zone: PriceZone { min_p: 49500.0, max_p: 50500.0 },
+        side: FixedPosition::Long,
+    },
 );
 
 let items = [

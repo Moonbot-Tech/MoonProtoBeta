@@ -4,12 +4,17 @@
 //!   cargo run --example trades_stream --release -- "<key_base64>" "host:port" [market|all] [watch_seconds]
 
 use std::env;
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use moonproto::commands::TradeSection;
 use moonproto::state::TradesEvent;
-use moonproto::{import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig};
+use moonproto::{
+    import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig,
+};
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -52,7 +57,7 @@ fn main() {
         auth_check: true,
         fetch_markets: true,
         subscribe_trades: Some(false),
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     let init_result = match run_init_sequence(&mut client, &mut dispatcher, init) {

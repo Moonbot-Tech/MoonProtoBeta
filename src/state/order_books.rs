@@ -46,13 +46,15 @@ pub enum OrderBookKind {
     /// Фьючерсный orderbook (`bk_Futures = 0`).
     Futures = 0,
     /// Spot orderbook (`bk_Spot = 1`).
-    Spot    = 1,
+    Spot = 1,
 }
 
 impl OrderBookKind {
     /// Конвертация в wire-байт (для engine_request / state cache key).
     #[inline]
-    pub fn as_u8(self) -> u8 { self as u8 }
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
 
     /// Распарсить из wire-байт. Неизвестное значение → None (вызывающая логика
     /// должна решить — дропать пакет или fallback'нуть).
@@ -165,7 +167,10 @@ impl OrderBookCache {
         // в один slice (O(1) если ring не wrapped, O(N) только при reset wrapped state).
         // Для нашего N≤64 — пренебрежимо.
         self.packets.make_contiguous();
-        self.packets.as_slices().0.partition_point(|p| compare_seq(p.seq, seq) < 0)
+        self.packets
+            .as_slices()
+            .0
+            .partition_point(|p| compare_seq(p.seq, seq) < 0)
     }
 
     fn add(&mut self, seq: u16, pkt: OrderBookUpdate, now_ms: i64) {
@@ -248,10 +253,7 @@ pub enum OrderBookEvent {
     /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
     /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
     /// before invoking application callbacks.
-    RequestFullNeeded {
-        market_index: u16,
-        book_kind: u8,
-    },
+    RequestFullNeeded { market_index: u16, book_kind: u8 },
     /// Пакет проигнорирован (stale / no full yet / cache).
     Ignored {
         market_index: u16,
@@ -270,7 +272,10 @@ pub struct OrderBooks {
 
 impl OrderBooks {
     pub fn new() -> Self {
-        Self { caches: HashMap::new(), books: HashMap::new() }
+        Self {
+            caches: HashMap::new(),
+            books: HashMap::new(),
+        }
     }
 
     /// Обработать один распарсенный `MPC_OrderBook` пакет.
@@ -290,7 +295,9 @@ impl OrderBooks {
             cache.last_applied_seq = pkt.seq;
             cache.expected_seq = pkt.seq.wrapping_add(1);
             // Чистим cache от старых seq < expected_seq.
-            cache.packets.retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
+            cache
+                .packets
+                .retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
             cache.check_cache_empty();
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
@@ -399,31 +406,29 @@ impl OrderBooks {
         };
 
         // Удалить мусор (seq < expected).
-        cache.packets.retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
+        cache
+            .packets
+            .retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
 
-        loop {
-            let head_seq = match cache.packets.front() {
-                Some(p) => p.seq,
-                None => break,
-            };
-            if head_seq == cache.expected_seq {
-                // O(1) pop_front вместо O(N) remove(0).
-                let entry = cache.packets.pop_front().unwrap();
-                apply_cached_packet(&mut self.books, key, &entry.pkt);
-                cache.expected_seq = entry.seq.wrapping_add(1);
-                cache.last_applied_seq = entry.seq;
-                events.push(OrderBookEvent::Apply {
-                    market_index: entry.pkt.market_index,
-                    book_kind: entry.pkt.book_kind,
-                    is_full: entry.pkt.is_full,
-                    seq: entry.seq,
-                    buys: entry.pkt.buys,
-                    sells: entry.pkt.sells,
-                });
-            } else {
+        while let Some(p) = cache.packets.front() {
+            if p.seq != cache.expected_seq {
                 // Gap остался — остановиться.
                 break;
             }
+
+            // O(1) pop_front вместо O(N) remove(0).
+            let entry = cache.packets.pop_front().unwrap();
+            apply_cached_packet(&mut self.books, key, &entry.pkt);
+            cache.expected_seq = entry.seq.wrapping_add(1);
+            cache.last_applied_seq = entry.seq;
+            events.push(OrderBookEvent::Apply {
+                market_index: entry.pkt.market_index,
+                book_kind: entry.pkt.book_kind,
+                is_full: entry.pkt.is_full,
+                seq: entry.seq,
+                buys: entry.pkt.buys,
+                sells: entry.pkt.sells,
+            });
         }
         cache.check_cache_empty();
     }
@@ -461,7 +466,8 @@ impl OrderBooks {
 
     /// Get best bid/ask from the applied current book.
     pub fn top_of_book(&self, market_index: u16, book_kind: OrderBookKind) -> Option<TopOfBook> {
-        self.book(market_index, book_kind).map(OrderBookSnapshot::top)
+        self.book(market_index, book_kind)
+            .map(OrderBookSnapshot::top)
     }
 
     /// Iterate over applied current books.
@@ -498,9 +504,11 @@ fn apply_full_book(
     });
     book.seq = seq;
     book.buys.clear();
-    book.buys.extend(buys.iter().copied().map(OrderBookLevel::from));
+    book.buys
+        .extend(buys.iter().copied().map(OrderBookLevel::from));
     book.sells.clear();
-    book.sells.extend(sells.iter().copied().map(OrderBookLevel::from));
+    book.sells
+        .extend(sells.iter().copied().map(OrderBookLevel::from));
 }
 
 fn apply_diff_book(
@@ -616,13 +624,34 @@ mod tests {
     fn full_then_inorder_diffs() {
         let mut ob = OrderBooks::new();
         let events = ob.on_packet(make_pkt(1, 0, 10, true), 1000);
-        assert!(matches!(events[0], OrderBookEvent::Apply { is_full: true, seq: 10, .. }));
+        assert!(matches!(
+            events[0],
+            OrderBookEvent::Apply {
+                is_full: true,
+                seq: 10,
+                ..
+            }
+        ));
 
         let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
-        assert!(matches!(events[0], OrderBookEvent::Apply { is_full: false, seq: 11, .. }));
+        assert!(matches!(
+            events[0],
+            OrderBookEvent::Apply {
+                is_full: false,
+                seq: 11,
+                ..
+            }
+        ));
 
         let events = ob.on_packet(make_pkt(1, 0, 12, false), 1020);
-        assert!(matches!(events[0], OrderBookEvent::Apply { is_full: false, seq: 12, .. }));
+        assert!(matches!(
+            events[0],
+            OrderBookEvent::Apply {
+                is_full: false,
+                seq: 12,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -633,11 +662,20 @@ mod tests {
         let mut ob = OrderBooks::new();
         let events = ob.on_packet(make_pkt(2, 0, 5, false), 1000);
         assert!(
-            events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 5, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                OrderBookEvent::Apply {
+                    is_full: false,
+                    seq: 5,
+                    ..
+                }
+            )),
             "первый Diff с last_applied_seq=0 должен примениться (Delphi normal-mode)"
         );
         assert!(
-            !events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
             "RequestFullNeeded не нужен — Delphi не запрашивает Full в этом сценарии"
         );
     }
@@ -648,13 +686,23 @@ mod tests {
         let _ = ob.on_packet(make_pkt(3, 0, 10, true), 1000);
         // Получен seq 12 — gap. Положить в cache.
         let events = ob.on_packet(make_pkt(3, 0, 12, false), 1010);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Ignored { reason: ApplyResult::Cached, seq: 12, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrderBookEvent::Ignored {
+                reason: ApplyResult::Cached,
+                seq: 12,
+                ..
+            }
+        )));
         // Получен seq 11 — применить + drain seq 12.
         let events = ob.on_packet(make_pkt(3, 0, 11, false), 1020);
-        let applied_seqs: Vec<u16> = events.iter().filter_map(|e| match e {
-            OrderBookEvent::Apply { seq, .. } => Some(*seq),
-            _ => None,
-        }).collect();
+        let applied_seqs: Vec<u16> = events
+            .iter()
+            .filter_map(|e| match e {
+                OrderBookEvent::Apply { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect();
         assert_eq!(applied_seqs, vec![11, 12]);
     }
 
@@ -663,7 +711,13 @@ mod tests {
         let mut ob = OrderBooks::new();
         let _ = ob.on_packet(make_pkt(4, 0, 20, true), 1000); // Full, expected_seq = 21
         let events = ob.on_packet(make_pkt(4, 0, 19, false), 1010); // seq 19 < 21
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Ignored { reason: ApplyResult::Stale, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrderBookEvent::Ignored {
+                reason: ApplyResult::Stale,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -673,18 +727,30 @@ mod tests {
         // Full + gap → cache.add, не corrupted ещё.
         let _ = ob.on_packet(make_pkt(5, 0, 1, true), 1000);
         let _ = ob.on_packet(make_pkt(5, 0, 10, false), 1010); // cache_not_empty_since=1010
-        // 990ms прошло — is_expired (>800ms) → corrupted=true → первый RequestFullNeeded.
+                                                               // 990ms прошло — is_expired (>800ms) → corrupted=true → первый RequestFullNeeded.
         let events = ob.on_packet(make_pkt(5, 0, 11, false), 2000);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-            "is_expired (990>800ms) → corrupted=true → первый RequestFullNeeded");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            "is_expired (990>800ms) → corrupted=true → первый RequestFullNeeded"
+        );
         // Через 100мс в corrupted ветке — НЕ должен отправить (throttle 5000мс).
         let events = ob.on_packet(make_pkt(5, 0, 12, false), 2100);
-        assert!(!events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-            "throttle 5000ms блокирует второй RequestFullNeeded");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            "throttle 5000ms блокирует второй RequestFullNeeded"
+        );
         // Через >5000ms с момента первого запроса — throttle снимается.
         let events = ob.on_packet(make_pkt(5, 0, 13, false), 7200);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-            "через 5000ms throttle снимается");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            "через 5000ms throttle снимается"
+        );
     }
 
     #[test]
@@ -695,14 +761,23 @@ mod tests {
         // Full + Diff в order, потом gap → corrupted.
         let _ = ob.on_packet(make_pkt(6, 0, 10, true), 1000);
         let _ = ob.on_packet(make_pkt(6, 0, 12, false), 1010); // gap [11]
-        // Через 990ms is_expired → corrupted.
+                                                               // Через 990ms is_expired → corrupted.
         let events = ob.on_packet(make_pkt(6, 0, 13, false), 1900);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })));
 
         // Следующий Diff в corrupted — должен примениться (degraded view).
         let events = ob.on_packet(make_pkt(6, 0, 14, false), 1910);
         assert!(
-            events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 14, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                OrderBookEvent::Apply {
+                    is_full: false,
+                    seq: 14,
+                    ..
+                }
+            )),
             "corrupted mode должен продолжать показывать degraded live view"
         );
     }
@@ -712,12 +787,28 @@ mod tests {
         let mut ob = OrderBooks::new();
         let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000); // Futures
         let _ = ob.on_packet(make_pkt(1, 1, 20, true), 1000); // Spot
-        // Diff for spot at seq 21 — должен примениться.
+                                                              // Diff for spot at seq 21 — должен примениться.
         let events = ob.on_packet(make_pkt(1, 1, 21, false), 1010);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 21, book_kind: 1, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrderBookEvent::Apply {
+                is_full: false,
+                seq: 21,
+                book_kind: 1,
+                ..
+            }
+        )));
         // Diff для futures at seq 11 — должен примениться независимо.
         let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
-        assert!(events.iter().any(|e| matches!(e, OrderBookEvent::Apply { is_full: false, seq: 11, book_kind: 0, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            OrderBookEvent::Apply {
+                is_full: false,
+                seq: 11,
+                book_kind: 0,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -728,7 +819,9 @@ mod tests {
         let mut ob = OrderBooks::new();
         let events = ob.on_packet(make_pkt(9, 0, u16::MAX, false), 1000);
         assert!(
-            events.iter().any(|e| matches!(e, OrderBookEvent::Apply { seq: u16::MAX, .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::Apply { seq: u16::MAX, .. })),
             "MoonProtoBookSeq=0 должен применить Diff до stale-check"
         );
     }
@@ -756,12 +849,20 @@ mod tests {
         let mut request_full_seen = false;
         for seq in 3..=67 {
             let events = ob.on_packet(make_pkt(11, 0, seq, false), 1000 + seq as i64);
-            request_full_seen |= events.iter().any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. }));
+            request_full_seen |= events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. }));
         }
 
         let cache = ob.caches.get(&(11, 0)).unwrap();
-        assert!(cache.corrupted, "Count > BOOK_CACHE_MAX_PACKETS переводит cache в corrupted");
-        assert!(request_full_seen, "TryRequestFull должен сработать при входе в corrupted");
+        assert!(
+            cache.corrupted,
+            "Count > BOOK_CACHE_MAX_PACKETS переводит cache в corrupted"
+        );
+        assert!(
+            request_full_seen,
+            "TryRequestFull должен сработать при входе в corrupted"
+        );
         assert_eq!(
             cache.packets.len(),
             65,
@@ -802,8 +903,20 @@ mod tests {
 
         let book = ob.book(1, OrderBookKind::Futures).unwrap();
         assert_eq!(book.seq, 10);
-        assert_eq!(book.top().bid, Some(OrderBookLevel { rate: 100.0, quantity: 1.5 }));
-        assert_eq!(book.top().ask, Some(OrderBookLevel { rate: 101.0, quantity: 1.25 }));
+        assert_eq!(
+            book.top().bid,
+            Some(OrderBookLevel {
+                rate: 100.0,
+                quantity: 1.5
+            })
+        );
+        assert_eq!(
+            book.top().ask,
+            Some(OrderBookLevel {
+                rate: 101.0,
+                quantity: 1.25
+            })
+        );
         assert_eq!(book.buys.len(), 2);
         assert_eq!(book.sells.len(), 2);
     }
@@ -811,38 +924,59 @@ mod tests {
     #[test]
     fn diff_updates_inserts_and_deletes_applied_levels() {
         let mut ob = OrderBooks::new();
-        let _ = ob.on_packet(OrderBookUpdate {
-            market_index: 2,
-            seq: 1,
-            is_full: true,
-            book_kind: 0,
-            buys: vec![level(100.0, 1.0), level(99.0, 1.0)],
-            sells: vec![level(101.0, 1.0), level(102.0, 1.0)],
-        }, 1000);
+        let _ = ob.on_packet(
+            OrderBookUpdate {
+                market_index: 2,
+                seq: 1,
+                is_full: true,
+                book_kind: 0,
+                buys: vec![level(100.0, 1.0), level(99.0, 1.0)],
+                sells: vec![level(101.0, 1.0), level(102.0, 1.0)],
+            },
+            1000,
+        );
 
-        let _ = ob.on_packet(OrderBookUpdate {
-            market_index: 2,
-            seq: 2,
-            is_full: false,
-            book_kind: 0,
-            buys: vec![level(100.0, 2.0), level(98.0, 4.0)],
-            sells: vec![level(101.0, 0.0), level(103.0, 3.0)],
-        }, 1010);
+        let _ = ob.on_packet(
+            OrderBookUpdate {
+                market_index: 2,
+                seq: 2,
+                is_full: false,
+                book_kind: 0,
+                buys: vec![level(100.0, 2.0), level(98.0, 4.0)],
+                sells: vec![level(101.0, 0.0), level(103.0, 3.0)],
+            },
+            1010,
+        );
 
         let book = ob.book(2, OrderBookKind::Futures).unwrap();
         assert_eq!(
             book.buys,
             vec![
-                OrderBookLevel { rate: 100.0, quantity: 2.0 },
-                OrderBookLevel { rate: 99.0, quantity: 1.0 },
-                OrderBookLevel { rate: 98.0, quantity: 4.0 },
+                OrderBookLevel {
+                    rate: 100.0,
+                    quantity: 2.0
+                },
+                OrderBookLevel {
+                    rate: 99.0,
+                    quantity: 1.0
+                },
+                OrderBookLevel {
+                    rate: 98.0,
+                    quantity: 4.0
+                },
             ]
         );
         assert_eq!(
             book.sells,
             vec![
-                OrderBookLevel { rate: 102.0, quantity: 1.0 },
-                OrderBookLevel { rate: 103.0, quantity: 3.0 },
+                OrderBookLevel {
+                    rate: 102.0,
+                    quantity: 1.0
+                },
+                OrderBookLevel {
+                    rate: 103.0,
+                    quantity: 3.0
+                },
             ]
         );
     }
@@ -850,37 +984,55 @@ mod tests {
     #[test]
     fn diff_uses_opposite_side_shrink_like_delphi() {
         let mut ob = OrderBooks::new();
-        let _ = ob.on_packet(OrderBookUpdate {
-            market_index: 3,
-            seq: 1,
-            is_full: true,
-            book_kind: 0,
-            buys: vec![level(101.0, 1.0), level(99.0, 1.0)],
-            sells: vec![level(102.0, 1.0)],
-        }, 1000);
+        let _ = ob.on_packet(
+            OrderBookUpdate {
+                market_index: 3,
+                seq: 1,
+                is_full: true,
+                book_kind: 0,
+                buys: vec![level(101.0, 1.0), level(99.0, 1.0)],
+                sells: vec![level(102.0, 1.0)],
+            },
+            1000,
+        );
 
-        let _ = ob.on_packet(OrderBookUpdate {
-            market_index: 3,
-            seq: 2,
-            is_full: false,
-            book_kind: 0,
-            buys: vec![level(99.5, 2.0)],
-            sells: vec![level(100.0, 3.0)],
-        }, 1010);
+        let _ = ob.on_packet(
+            OrderBookUpdate {
+                market_index: 3,
+                seq: 2,
+                is_full: false,
+                book_kind: 0,
+                buys: vec![level(99.5, 2.0)],
+                sells: vec![level(100.0, 3.0)],
+            },
+            1010,
+        );
 
         let book = ob.book(3, OrderBookKind::Futures).unwrap();
         assert_eq!(
             book.buys,
             vec![
-                OrderBookLevel { rate: 99.5, quantity: 2.0 },
-                OrderBookLevel { rate: 99.0, quantity: 1.0 },
+                OrderBookLevel {
+                    rate: 99.5,
+                    quantity: 2.0
+                },
+                OrderBookLevel {
+                    rate: 99.0,
+                    quantity: 1.0
+                },
             ]
         );
         assert_eq!(
             book.sells,
             vec![
-                OrderBookLevel { rate: 100.0, quantity: 3.0 },
-                OrderBookLevel { rate: 102.0, quantity: 1.0 },
+                OrderBookLevel {
+                    rate: 100.0,
+                    quantity: 3.0
+                },
+                OrderBookLevel {
+                    rate: 102.0,
+                    quantity: 1.0
+                },
             ]
         );
     }

@@ -49,7 +49,7 @@ match client.request_coin_card_candles(
     &mut dispatcher,
     "BTCUSDT",
     DeepHistoryKind::Hour1,
-    Duration::from_secs(10),
+    Duration::from_secs(12),
 ) {
     Ok(candles) => {
         for c in &candles {

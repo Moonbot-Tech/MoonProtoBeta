@@ -15,10 +15,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use moonproto::state::OrderBookEvent;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig,
 };
-use moonproto::state::OrderBookEvent;
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
     let Some(value) = value else {
@@ -47,7 +47,10 @@ fn main() {
 
     let keys = import_key(&args[1]).expect("invalid key");
     let (server_ip, server_port) = parse_host(args.get(2));
-    let market = args.get(3).cloned().unwrap_or_else(|| "BTCUSDT".to_string());
+    let market = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "BTCUSDT".to_string());
     let watch_secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key);
@@ -66,7 +69,7 @@ fn main() {
         auth_check: true,
         fetch_markets: true,
         subscribe_orderbooks: vec![market.clone()],
-        step_timeout: Some(Duration::from_secs(10)),
+        step_timeout: None,
         ..Default::default()
     };
     let init_result = match run_init_sequence(&mut client, &mut dispatcher, init) {
@@ -120,7 +123,12 @@ fn main() {
                                 sells.len()
                             );
                         }
-                        OrderBookEvent::Ignored { market_index, book_kind, seq, reason } => {
+                        OrderBookEvent::Ignored {
+                            market_index,
+                            book_kind,
+                            seq,
+                            reason,
+                        } => {
                             println!(
                                 "[book] ignored idx={} kind={} seq={} reason={reason:?}",
                                 market_index,

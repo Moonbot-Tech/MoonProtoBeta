@@ -1,17 +1,17 @@
-/// SynLZ decompression — byte-exact port of mORMot SynLZdecompress1pas.
-/// Source: mormot.core.base.pas:10493-10735 (C:\files\dcomp12\mormot\core\mormot.core.base.pas)
-///
-/// Header format VERIFIED against mORMot source (SynLZdecompressdestlen, line 10493):
-///   result := PWord(in_p)^;
-///   if result and $8000 <> 0 then
-///     result := (result and $7fff) or (integer(PWord(in_p + 2)^) shl 15);
-///
-/// Wire format:
-///   [0..1] output_size: u16. If bit 15 set: real_size = (word & 0x7FFF) | (next_word << 15)
-///   [2..] or [4..] compressed data (control words + literals + back-refs)
-///
-/// Note: TAlgoSynLZ.AlgoCompress/AlgoDecompress call SynLZcompress1/SynLZdecompress1 directly.
-/// NO additional 4-byte header — the u16 size prefix IS the only header.
+//! SynLZ decompression — byte-exact port of mORMot SynLZdecompress1pas.
+//! Source: mormot.core.base.pas:10493-10735 (C:\files\dcomp12\mormot\core\mormot.core.base.pas)
+//!
+//! Header format VERIFIED against mORMot source (SynLZdecompressdestlen, line 10493):
+//!   result := PWord(in_p)^;
+//!   if result and $8000 <> 0 then
+//!     result := (result and $7fff) or (integer(PWord(in_p + 2)^) shl 15);
+//!
+//! Wire format:
+//!   [0..1] output_size: u16. If bit 15 set: real_size = (word & 0x7FFF) | (next_word << 15)
+//!   [2..] or [4..] compressed data (control words + literals + back-refs)
+//!
+//! Note: TAlgoSynLZ.AlgoCompress/AlgoDecompress call SynLZcompress1/SynLZdecompress1 directly.
+//! NO additional 4-byte header — the u16 size prefix IS the only header.
 
 type Offsets = [usize; 4096];
 
@@ -79,7 +79,9 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         return Some(Vec::new());
     }
     let out_size = if first_word & 0x8000 != 0 {
-        if src.len() < 4 { return None; }
+        if src.len() < 4 {
+            return None;
+        }
         let second_word = u16::from_le_bytes([src[2], src[3]]);
         pos = 4;
         ((first_word & 0x7FFF) as usize) | ((second_word as usize) << 15)
@@ -105,14 +107,16 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     let result = DECOMPRESS_OFFSETS.with(|cell| {
         match cell.try_borrow_mut() {
             Ok(mut guard) => {
-                for v in guard.iter_mut() { *v = 0; }
-                synlz_decompress_inner(src, &mut dst, &mut **guard, pos, out_size)
+                for v in guard.iter_mut() {
+                    *v = 0;
+                }
+                synlz_decompress_inner(src, &mut dst, &mut guard, pos, out_size)
             }
             Err(_) => {
                 // Recursion — невозможно по invariant, но если кто-то нарушит контракт —
                 // fallback на свой alloc.
                 let mut fallback: Box<Offsets> = Box::new([0usize; 4096]);
-                synlz_decompress_inner(src, &mut dst, &mut *fallback, pos, out_size)
+                synlz_decompress_inner(src, &mut dst, &mut fallback, pos, out_size)
             }
         }
     });
@@ -127,7 +131,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
 }
 
 enum DecompressResult {
-    Ok(usize),    // final dst_pos
+    Ok(usize), // final dst_pos
     Corrupt,
 }
 
@@ -148,7 +152,7 @@ fn synlz_decompress_inner(
 
     // Outer loop: read control words.
     'outer: while pos + 4 <= src_end {
-        let cw = u32::from_le_bytes([src[pos], src[pos+1], src[pos+2], src[pos+3]]);
+        let cw = u32::from_le_bytes([src[pos], src[pos + 1], src[pos + 2], src[pos + 3]]);
         pos += 4;
         let mut cwbit: u32 = 1;
 
@@ -156,11 +160,15 @@ fn synlz_decompress_inner(
         while pos < src_end {
             if cw & cwbit == 0 {
                 // === LITERAL ===
-                if dst_pos >= out_size { return DecompressResult::Ok(dst_pos); }
+                if dst_pos >= out_size {
+                    return DecompressResult::Ok(dst_pos);
+                }
                 dst[dst_pos] = src[pos];
                 pos += 1;
                 dst_pos += 1;
-                if pos >= src_end { break 'outer; }
+                if pos >= src_end {
+                    break 'outer;
+                }
 
                 // Update hash table (SINGLE update, not loop).
                 // Delphi: `if last_hashed < dst - 3 then begin inc(last_hashed); update; end`
@@ -170,7 +178,8 @@ fn synlz_decompress_inner(
                     last_hashed += 1;
                     let lh = last_hashed as usize;
                     if lh + 4 <= dst.len() {
-                        let v = u32::from_le_bytes([dst[lh], dst[lh+1], dst[lh+2], dst[lh+3]]);
+                        let v =
+                            u32::from_le_bytes([dst[lh], dst[lh + 1], dst[lh + 2], dst[lh + 3]]);
                         let h = ((v >> 12) ^ v) as usize & 4095;
                         offset[h] = lh;
                     }
@@ -182,13 +191,17 @@ fn synlz_decompress_inner(
                 }
             } else {
                 // === BACK-REFERENCE ===
-                if pos + 2 > src_end { return DecompressResult::Ok(dst_pos); }
-                let h_word = u16::from_le_bytes([src[pos], src[pos+1]]);
+                if pos + 2 > src_end {
+                    return DecompressResult::Ok(dst_pos);
+                }
+                let h_word = u16::from_le_bytes([src[pos], src[pos + 1]]);
                 pos += 2;
 
                 let mut t = (h_word & 15) as usize + 2;
                 if t == 2 {
-                    if pos >= src_end { return DecompressResult::Ok(dst_pos); }
+                    if pos >= src_end {
+                        return DecompressResult::Ok(dst_pos);
+                    }
                     t = src[pos] as usize + 18;
                     pos += 1;
                 }
@@ -218,7 +231,9 @@ fn synlz_decompress_inner(
                     dst.copy_within(copy_from..copy_from + t, dst_pos);
                 }
 
-                if pos >= src_end { break 'outer; }
+                if pos >= src_end {
+                    break 'outer;
+                }
 
                 // Update hash table: хэшируем позиции **до** copying-target (до `dst_pos`).
                 // Delphi: `if last_hashed < dst then repeat inc(last_hashed); hash; until last_hashed >= dst`.
@@ -227,7 +242,8 @@ fn synlz_decompress_inner(
                     last_hashed += 1;
                     let lh = last_hashed as usize;
                     if lh + 4 <= dst.len() {
-                        let v = u32::from_le_bytes([dst[lh], dst[lh+1], dst[lh+2], dst[lh+3]]);
+                        let v =
+                            u32::from_le_bytes([dst[lh], dst[lh + 1], dst[lh + 2], dst[lh + 3]]);
                         let h = ((v >> 12) ^ v) as usize & 4095;
                         offset[h] = lh;
                     }
@@ -273,7 +289,9 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
         dst.extend_from_slice(&((size >> 15) as u16).to_le_bytes());
     } else {
         dst.extend_from_slice(&(size as u16).to_le_bytes());
-        if size == 0 { return; }
+        if size == 0 {
+            return;
+        }
     }
 
     // Thread-local scratch — 32 KB offset + 16 KB cache. **cache требует reset**
@@ -282,10 +300,8 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
     // Без reset результат был бы wire-несовместимый со свежим compress.
     COMPRESS_OFFSETS.with(|off_cell| {
         COMPRESS_CACHE.with(|cache_cell| {
-            let mut offset = off_cell.try_borrow_mut()
-                .map(|g| Some(g)).unwrap_or(None);
-            let mut cache  = cache_cell.try_borrow_mut()
-                .map(|g| Some(g)).unwrap_or(None);
+            let mut offset = off_cell.try_borrow_mut().map(Some).unwrap_or(None);
+            let mut cache = cache_cell.try_borrow_mut().map(Some).unwrap_or(None);
 
             // Fallback на свой alloc если try_borrow_mut не сработал (рекурсия — не должно случаться).
             let mut fallback_off: Box<[usize; 4096]> = Box::new([usize::MAX; 4096]);
@@ -294,17 +310,21 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
             let off_ref: &mut [usize; 4096] = match offset.as_mut() {
                 Some(g) => {
                     // Reset thread-local к начальному состоянию.
-                    for v in g.iter_mut() { *v = usize::MAX; }
-                    &mut **g
+                    for v in g.iter_mut() {
+                        *v = usize::MAX;
+                    }
+                    g
                 }
-                None => &mut *fallback_off,
+                None => &mut fallback_off,
             };
             let cache_ref: &mut [u32; 4096] = match cache.as_mut() {
                 Some(g) => {
-                    for v in g.iter_mut() { *v = 0; }
-                    &mut **g
+                    for v in g.iter_mut() {
+                        *v = 0;
+                    }
+                    g
                 }
-                None => &mut *fallback_cache,
+                None => &mut fallback_cache,
             };
 
             synlz_compress_inner(src, dst, off_ref, cache_ref);
@@ -321,7 +341,7 @@ fn synlz_compress_inner(
 ) {
     let size = src.len();
     let srcend = size;
-    let srcendmatch = if size > 11 { size - 11 } else { 0 };
+    let srcendmatch = size.saturating_sub(11);
     let mut src_pos: usize = 0;
     let mut cwbit: u8 = 0;
 
@@ -331,7 +351,12 @@ fn synlz_compress_inner(
 
     // Main loop
     while src_pos <= srcendmatch {
-        let v = u32::from_le_bytes([src[src_pos], src[src_pos+1], src[src_pos+2], src[src_pos+3]]);
+        let v = u32::from_le_bytes([
+            src[src_pos],
+            src[src_pos + 1],
+            src[src_pos + 2],
+            src[src_pos + 3],
+        ]);
         let h = ((v >> 12) ^ v) as usize & 4095;
         let o = offset[h];
         offset[h] = src_pos;
@@ -340,15 +365,17 @@ fn synlz_compress_inner(
 
         if (cached & 0x00FFFFFF == 0) && o != usize::MAX && src_pos > o + 2 {
             // Back-reference: set bit in control word
-            let cw = u32::from_le_bytes(dst[cw_pos..cw_pos+4].try_into().unwrap());
-            dst[cw_pos..cw_pos+4].copy_from_slice(&(cw | (1u32 << cwbit)).to_le_bytes());
+            let cw = u32::from_le_bytes(dst[cw_pos..cw_pos + 4].try_into().unwrap());
+            dst[cw_pos..cw_pos + 4].copy_from_slice(&(cw | (1u32 << cwbit)).to_le_bytes());
 
             src_pos += 2;
             let o_pos = o + 2;
             let mut t: usize = 1;
             // mORMot SynLZcompress1pas: `while (...) and (t < 270) and ...` — потолок 269.
             let tmax = (srcend - src_pos - 1).min(269);
-            while t < tmax && o_pos + t < srcend && src[o_pos + t] == src[src_pos + t] { t += 1; }
+            while t < tmax && o_pos + t < srcend && src[o_pos + t] == src[src_pos + t] {
+                t += 1;
+            }
             src_pos += t;
 
             let h_shifted = (h as u16) << 4;
@@ -366,13 +393,17 @@ fn synlz_compress_inner(
 
         if cwbit < 31 {
             cwbit += 1;
-            if src_pos > srcendmatch { break; }
+            if src_pos > srcendmatch {
+                break;
+            }
         } else {
             // New control word
             cw_pos = dst.len();
             dst.extend_from_slice(&0u32.to_le_bytes());
             cwbit = 0;
-            if src_pos > srcendmatch { break; }
+            if src_pos > srcendmatch {
+                break;
+            }
         }
     }
 
@@ -393,7 +424,9 @@ fn synlz_compress_inner(
 /// Returns compressed data and size, or None if compression doesn't help (< 5% savings).
 /// Matches MoonProtoDataStruct.pas:283-316 (MPCompressionAlgo=1 = SynLZ).
 pub fn mp_compress(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() <= 64 { return None; }
+    if data.len() <= 64 {
+        return None;
+    }
     let compressed = synlz_compress(data);
     // Only use if saves > 5%
     if compressed.len() < data.len() * 95 / 100 {
@@ -408,7 +441,7 @@ mod tests {
     use super::*;
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {
-        assert!(s.len() % 2 == 0);
+        assert!(s.len().is_multiple_of(2));
         let mut out = Vec::with_capacity(s.len() / 2);
         let bytes = s.as_bytes();
         for i in (0..bytes.len()).step_by(2) {

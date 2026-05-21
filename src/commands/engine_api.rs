@@ -3,10 +3,9 @@
 ///
 /// Request: client → server (CmdId=002)
 /// Response: server → client (CmdId=001)
-
 use std::time::{Duration, SystemTime};
 
-use super::registry::{read_string};
+use super::registry::read_string;
 use flate2::read::DeflateDecoder;
 
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
@@ -193,7 +192,10 @@ mod tests {
     #[test]
     fn engine_method_known_bytes() {
         assert_eq!(EngineMethod::from_byte(1), EngineMethod::BaseCheck);
-        assert_eq!(EngineMethod::from_byte(31), EngineMethod::GetCoinCardCandles);
+        assert_eq!(
+            EngineMethod::from_byte(31),
+            EngineMethod::GetCoinCardCandles
+        );
         assert_eq!(EngineMethod::from_byte(0), EngineMethod::None);
     }
 
@@ -214,7 +216,7 @@ pub struct EngineResponse {
     pub success: bool,
     pub error_code: i32,
     pub error_msg: String,
-    pub data: Vec<u8>,  // decompressed response payload
+    pub data: Vec<u8>, // decompressed response payload
 }
 
 /// Parse TEngineResponse from command payload.
@@ -240,30 +242,56 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     // Skip Engine TBaseCommand header: CmdId(1) + ver(2) + own_UID(8) = 11 bytes.
     let mut pos = 11usize;
 
-    if pos + 8 > data.len() { return None; }
+    if pos + 8 > data.len() {
+        return None;
+    }
     let request_uid = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
     pos += 8;
 
-    if pos + 1 > data.len() { return None; }
+    if pos + 1 > data.len() {
+        return None;
+    }
     let method = EngineMethod::from_byte(data[pos]);
     pos += 1;
 
-    if pos + 1 > data.len() { return None; }
+    if pos + 1 > data.len() {
+        return None;
+    }
     let success = data[pos] != 0;
     pos += 1;
 
-    if pos + 4 > data.len() { return None; }
+    if pos + 4 > data.len() {
+        return None;
+    }
     let error_code = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
 
     let error_msg = read_string(data, &mut pos).unwrap_or_default();
 
     // IsCompressed + data size
-    if pos + 1 > data.len() { return Some(EngineResponse { request_uid, method, success, error_code, error_msg, data: Vec::new() }); }
+    if pos + 1 > data.len() {
+        return Some(EngineResponse {
+            request_uid,
+            method,
+            success,
+            error_code,
+            error_msg,
+            data: Vec::new(),
+        });
+    }
     let is_compressed = data[pos] != 0;
     pos += 1;
 
-    if pos + 4 > data.len() { return Some(EngineResponse { request_uid, method, success, error_code, error_msg, data: Vec::new() }); }
+    if pos + 4 > data.len() {
+        return Some(EngineResponse {
+            request_uid,
+            method,
+            success,
+            error_code,
+            error_msg,
+            data: Vec::new(),
+        });
+    }
     let sz = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
 
@@ -434,7 +462,7 @@ pub struct DexInfo {
 /// Используется потребителем после `Client::api_auth_check()`:
 /// ```ignore
 /// let rx = client.api_auth_check();
-/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 /// if let Some(auth) = parse_auth_check_response(&resp.data) {
 ///     println!("Account: {}, BTC addr: {}", auth.account_id, auth.btc_address);
 ///     for dex in &auth.known_dexes {
@@ -478,17 +506,23 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let mut pos = 0usize;
 
     // Required fields.
-    if data.len() < 8 { return None; }
+    if data.len() < 8 {
+        return None;
+    }
     let binance_account_id = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
     pos += 8;
 
     let btc_address = read_string(data, &mut pos)?;
 
-    if pos + 4 > data.len() { return None; }
+    if pos + 4 > data.len() {
+        return None;
+    }
     let spot_ref = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
 
-    if pos + 1 > data.len() { return None; }
+    if pos + 1 > data.len() {
+        return None;
+    }
     let is_sub_account = data[pos] != 0;
     pos += 1;
 
@@ -507,7 +541,7 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let mut hl_dex_market: Option<u8> = None;
     let mut hl_spot_market: Option<u8> = None;
 
-    if recvd_max_payload.is_some() && pos + 1 <= data.len() {
+    if recvd_max_payload.is_some() && pos < data.len() {
         let cnt = data[pos] as usize;
         pos += 1;
         // DoS guard: каждый DEX = 18 байт, cnt * 18 не должно превышать remaining.
@@ -528,13 +562,16 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
             let name = String::from_utf8_lossy(name_bytes).into_owned();
             let collateral_token = u16::from_le_bytes([data[pos + 16], data[pos + 17]]);
             pos += DEX_INFO_SIZE;
-            known_dexes.push(DexInfo { name, collateral_token });
+            known_dexes.push(DexInfo {
+                name,
+                collateral_token,
+            });
         }
         // hl_dex_market и hl_spot_market следуют сразу после массива.
-        if pos + 1 <= data.len() {
+        if pos < data.len() {
             hl_dex_market = Some(data[pos]);
             pos += 1;
-            if pos + 1 <= data.len() {
+            if pos < data.len() {
                 hl_spot_market = Some(data[pos]);
                 // pos += 1;  // больше не используется
             }
@@ -603,7 +640,7 @@ pub mod exchange_type_flags {
 /// ```ignore
 /// use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_flags};
 /// let rx = client.api_base_check();
-/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(10))?;
+/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
 /// if resp.success {
 ///     let info = parse_base_check_response(&resp.data);
 ///     if let (Some(name), Some(mask)) = (&info.exchange_name, info.exchange_type_mask) {
@@ -680,7 +717,9 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     let mut pos = 0usize;
 
     // 1. bot_id (i64 LE) — Delphi WriteInt64(cfg.UniqueBotID)
-    if pos + 8 > data.len() { return info; }
+    if pos + 8 > data.len() {
+        return info;
+    }
     info.bot_id = Some(i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
     pos += 8;
 
@@ -691,7 +730,9 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     }
 
     // 3. exchange_code (u8) — Ord(cfg.Header.Current)
-    if pos + 1 > data.len() { return info; }
+    if pos + 1 > data.len() {
+        return info;
+    }
     info.exchange_code = Some(data[pos]);
     pos += 1;
 
@@ -702,7 +743,9 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     }
 
     // 5. exchange_type_mask (u8)
-    if pos + 1 > data.len() { return info; }
+    if pos + 1 > data.len() {
+        return info;
+    }
     info.exchange_type_mask = Some(data[pos]);
     pos += 1;
 
@@ -719,20 +762,27 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     }
 
     // 8. base_currency_code (u8) — Ord(cfg.BaseCurrency)
-    if pos + 1 > data.len() { return info; }
+    if pos + 1 > data.len() {
+        return info;
+    }
     info.base_currency_code = Some(data[pos]);
     pos += 1;
 
     // 9. server_version (i32 LE → u32) — Delphi WriteInt(Current_Version_Num_X).
     // Trust серверу: значения версий монотонно растут с малых положительных
     // чисел (например 763 для v7.63), поэтому signed/unsigned различие не влияет.
-    if pos + 4 > data.len() { return info; }
+    if pos + 4 > data.len() {
+        return info;
+    }
     info.server_version = Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
     pos += 4;
 
     // 10. moonproto_version (i32 LE → u32)
-    if pos + 4 > data.len() { return info; }
-    info.moonproto_version = Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
+    if pos + 4 > data.len() {
+        return info;
+    }
+    info.moonproto_version =
+        Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
     // pos += 4;  // больше не используется
 
     info
@@ -756,17 +806,17 @@ mod parse_engine_response_tests {
         data: &[u8],
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.push(1u8);                                              // CmdId = 1
-        buf.extend_from_slice(&3u16.to_le_bytes());                 // ver = 3
-        buf.extend_from_slice(&own_uid.to_le_bytes());              // own_UID
-        buf.extend_from_slice(&request_uid.to_le_bytes());          // RequestUID (echo)
-        buf.push(method as u8);                                     // Method
-        buf.push(success as u8);                                    // Success
-        buf.extend_from_slice(&error_code.to_le_bytes());           // ErrorCode
+        buf.push(1u8); // CmdId = 1
+        buf.extend_from_slice(&3u16.to_le_bytes()); // ver = 3
+        buf.extend_from_slice(&own_uid.to_le_bytes()); // own_UID
+        buf.extend_from_slice(&request_uid.to_le_bytes()); // RequestUID (echo)
+        buf.push(method as u8); // Method
+        buf.push(success as u8); // Success
+        buf.extend_from_slice(&error_code.to_le_bytes()); // ErrorCode
         buf.extend_from_slice(&(error_msg.len() as u16).to_le_bytes()); // ErrorMsg len
         buf.extend_from_slice(error_msg.as_bytes());
-        buf.push(0u8);                                              // IsCompressed = false
-        buf.extend_from_slice(&(data.len() as i32).to_le_bytes());  // DataSize
+        buf.push(0u8); // IsCompressed = false
+        buf.extend_from_slice(&(data.len() as i32).to_le_bytes()); // DataSize
         buf.extend_from_slice(data);
         buf
     }
@@ -777,8 +827,8 @@ mod parse_engine_response_tests {
         // и читал request_uid из `[CmdId][ver][own_UID 5 bytes]` — garbage.
         let request_uid = 0x12_34_56_78_9A_BC_DE_F0u64;
         let payload = build_wire_response(
-            0xAAAA_BBBB_CCCC_DDDD,         // own_UID (random)
-            request_uid,                    // RequestUID (echo)
+            0xAAAA_BBBB_CCCC_DDDD, // own_UID (random)
+            request_uid,           // RequestUID (echo)
             EngineMethod::BaseCheck,
             true,
             0,
@@ -814,7 +864,8 @@ mod parse_engine_response_tests {
     #[test]
     fn parse_carries_error_payload() {
         let payload = build_wire_response(
-            1, 42,
+            1,
+            42,
             EngineMethod::AuthCheck,
             false, // success = false
             -123,  // error_code
@@ -840,7 +891,8 @@ mod parse_engine_response_tests {
     #[test]
     fn parse_handles_negative_data_size_without_panic() {
         let blob = [0xAA, 0xBB, 0xCC];
-        let mut payload = build_wire_response(0, 100, EngineMethod::GetMarketsList, true, 0, "", &blob);
+        let mut payload =
+            build_wire_response(0, 100, EngineMethod::GetMarketsList, true, 0, "", &blob);
         let size_pos = payload.len() - blob.len() - 4;
         payload[size_pos..size_pos + 4].copy_from_slice(&(-1i32).to_le_bytes());
         payload.truncate(size_pos + 4);
@@ -949,27 +1001,45 @@ mod base_check_tests {
         let mut buf = Vec::new();
         let Some(id) = info.bot_id else { return buf };
         buf.extend_from_slice(&id.to_le_bytes());
-        let Some(name) = &info.server_name else { return buf };
+        let Some(name) = &info.server_name else {
+            return buf;
+        };
         buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
         buf.extend_from_slice(name.as_bytes());
-        let Some(ex_code) = info.exchange_code else { return buf };
+        let Some(ex_code) = info.exchange_code else {
+            return buf;
+        };
         buf.push(ex_code);
-        let Some(ex_name) = &info.exchange_name else { return buf };
+        let Some(ex_name) = &info.exchange_name else {
+            return buf;
+        };
         buf.extend_from_slice(&(ex_name.len() as u16).to_le_bytes());
         buf.extend_from_slice(ex_name.as_bytes());
-        let Some(mask) = info.exchange_type_mask else { return buf };
+        let Some(mask) = info.exchange_type_mask else {
+            return buf;
+        };
         buf.push(mask);
-        let Some(dex) = &info.dex_name else { return buf };
+        let Some(dex) = &info.dex_name else {
+            return buf;
+        };
         buf.extend_from_slice(&(dex.len() as u16).to_le_bytes());
         buf.extend_from_slice(dex.as_bytes());
-        let Some(bc_name) = &info.base_currency_name else { return buf };
+        let Some(bc_name) = &info.base_currency_name else {
+            return buf;
+        };
         buf.extend_from_slice(&(bc_name.len() as u16).to_le_bytes());
         buf.extend_from_slice(bc_name.as_bytes());
-        let Some(bc_code) = info.base_currency_code else { return buf };
+        let Some(bc_code) = info.base_currency_code else {
+            return buf;
+        };
         buf.push(bc_code);
-        let Some(sv) = info.server_version else { return buf };
+        let Some(sv) = info.server_version else {
+            return buf;
+        };
         buf.extend_from_slice(&(sv as i32).to_le_bytes());
-        let Some(mp) = info.moonproto_version else { return buf };
+        let Some(mp) = info.moonproto_version else {
+            return buf;
+        };
         buf.extend_from_slice(&(mp as i32).to_le_bytes());
         buf
     }
@@ -996,7 +1066,7 @@ mod base_check_tests {
             dex_name: Some(String::new()), // не HL futures → пусто
             base_currency_name: Some("USDT".to_string()),
             base_currency_code: Some(1), // BC_USDT
-            server_version: Some(763),    // v7.63
+            server_version: Some(763),   // v7.63
             moonproto_version: Some(3),
         };
         let payload = encode_full(&original);
@@ -1015,9 +1085,7 @@ mod base_check_tests {
             server_name: Some("Hyper Test".to_string()),
             exchange_code: Some(7),
             exchange_name: Some("Hyper".to_string()),
-            exchange_type_mask: Some(
-                exchange_type_flags::FUTURES | exchange_type_flags::DEX,
-            ),
+            exchange_type_mask: Some(exchange_type_flags::FUTURES | exchange_type_flags::DEX),
             dex_name: Some("HIP3-PERPS".to_string()),
             base_currency_name: Some("USDC".to_string()),
             base_currency_code: Some(5),
@@ -1093,9 +1161,7 @@ mod base_check_tests {
             server_name: Some("Test".to_string()),
             exchange_code: Some(4),
             exchange_name: Some("Hyper".to_string()),
-            exchange_type_mask: Some(
-                exchange_type_flags::DEX | exchange_type_flags::FUTURES,
-            ),
+            exchange_type_mask: Some(exchange_type_flags::DEX | exchange_type_flags::FUTURES),
             dex_name: Some("DEX-NAME".to_string()),
             base_currency_name: Some("USDC".to_string()),
             base_currency_code: Some(5),
@@ -1116,9 +1182,7 @@ mod base_check_tests {
             server_name: Some("HL Predict".to_string()),
             exchange_code: Some(7),
             exchange_name: Some("Hyper".to_string()),
-            exchange_type_mask: Some(
-                exchange_type_flags::DEX | exchange_type_flags::PREDICT,
-            ),
+            exchange_type_mask: Some(exchange_type_flags::DEX | exchange_type_flags::PREDICT),
             dex_name: Some(String::new()),
             base_currency_name: Some("USDC".to_string()),
             base_currency_code: Some(5),
@@ -1157,7 +1221,7 @@ mod base_check_tests {
     fn parse_does_not_panic_on_random_garbage() {
         // Стресс: рандом-байты не должны вызвать panic.
         // (utf8_lossy подменит невалидные байты на U+FFFD — это OK для UI.)
-        let garbage: Vec<u8> = (0..200).map(|i| (i * 7 ^ 0xA5) as u8).collect();
+        let garbage: Vec<u8> = (0..200).map(|i| ((i * 7) ^ 0xA5) as u8).collect();
         let _info = parse_base_check_response(&garbage);
         // Парсер выживает; конкретные значения зависят от random pattern.
     }
@@ -1172,16 +1236,16 @@ mod auth_check_tests {
         // BinanceAccountID(8) + BTCAddress("")(2) + spot_ref(4) + is_sub_account(1) + AccountID("acc")(2+3)
         let mut data = Vec::new();
         data.extend_from_slice(&(123i64).to_le_bytes());
-        data.extend_from_slice(&(0u16).to_le_bytes());           // empty BTCAddress
-        data.extend_from_slice(&(7i32).to_le_bytes());           // spot_ref
-        data.push(1);                                            // is_sub_account=true
-        data.extend_from_slice(&(3u16).to_le_bytes());           // AccountID length
+        data.extend_from_slice(&(0u16).to_le_bytes()); // empty BTCAddress
+        data.extend_from_slice(&(7i32).to_le_bytes()); // spot_ref
+        data.push(1); // is_sub_account=true
+        data.extend_from_slice(&(3u16).to_le_bytes()); // AccountID length
         data.extend_from_slice(b"acc");
         let resp = parse_auth_check_response(&data).unwrap();
         assert_eq!(resp.binance_account_id, 123);
         assert_eq!(resp.btc_address, "");
         assert_eq!(resp.spot_ref, 7);
-        assert_eq!(resp.is_sub_account, true);
+        assert!(resp.is_sub_account);
         assert_eq!(resp.account_id, "acc");
         assert!(resp.recvd_max_payload.is_none());
         assert!(resp.known_dexes.is_empty());
@@ -1196,21 +1260,21 @@ mod auth_check_tests {
         data.push(0);
         data.extend_from_slice(&(0u16).to_le_bytes());
         // Phase 2:
-        data.extend_from_slice(&(1024i32).to_le_bytes());        // recvd_max_payload
-        data.push(2);                                            // cnt=2 dexes
-        // Dex 0: name="" + collateral=0 (USDC)
+        data.extend_from_slice(&(1024i32).to_le_bytes()); // recvd_max_payload
+        data.push(2); // cnt=2 dexes
+                      // Dex 0: name="" + collateral=0 (USDC)
         let mut dex0 = vec![0u8; 18];
-        dex0[0] = 0;                                              // name length=0
-        // collateral_token (offset 16..18) = 0 LE → already zero
+        dex0[0] = 0; // name length=0
+                     // collateral_token (offset 16..18) = 0 LE → already zero
         data.extend_from_slice(&dex0);
         // Dex 1: name="usdh", collateral=360 (USDH)
         let mut dex1 = vec![0u8; 18];
-        dex1[0] = 4;                                              // name length=4
+        dex1[0] = 4; // name length=4
         dex1[1..5].copy_from_slice(b"usdh");
         dex1[16..18].copy_from_slice(&(360u16).to_le_bytes());
         data.extend_from_slice(&dex1);
-        data.push(7);                                            // hl_dex_market=7
-        data.push(3);                                            // hl_spot_market=3
+        data.push(7); // hl_dex_market=7
+        data.push(3); // hl_spot_market=3
 
         let resp = parse_auth_check_response(&data).unwrap();
         assert_eq!(resp.recvd_max_payload, Some(1024));

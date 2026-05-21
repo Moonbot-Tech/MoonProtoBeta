@@ -168,7 +168,12 @@ pub enum MoveAllCmdType {
 impl MoveAllCmdType {
     /// Возвращает `None` если байт неизвестен (A-02).
     pub fn from_byte(b: u8) -> Option<Self> {
-        match b { 0 => Some(Self::MoveKind), 1 => Some(Self::PriceZone), 2 => Some(Self::Pers), _ => None }
+        match b {
+            0 => Some(Self::MoveKind),
+            1 => Some(Self::PriceZone),
+            2 => Some(Self::Pers),
+            _ => None,
+        }
     }
 }
 
@@ -211,6 +216,34 @@ pub struct PriceZone {
     pub max_p: f64,
 }
 
+/// Parameters for `TMoveAllSellsCommand`.
+///
+/// Keeping the option set in a named struct makes `Client::move_all_sells` and
+/// `build_move_all_sells` harder to call with swapped `price` / `zone` / `side`
+/// arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct MoveAllSellsParams {
+    pub cmd_type: MoveAllCmdType,
+    pub move_kind: ReplaceMultiKind,
+    pub price: f64,
+    pub price_zone: PriceZone,
+    pub side: FixedPosition,
+}
+
+/// Parameters for `TVStopUpdate`.
+///
+/// `Client::update_vstop` writes `epoch = 0`, matching Delphi client-originated
+/// order-move commands. Low-level builders keep `epoch` as a separate argument
+/// for protocol tests and replay tools.
+#[derive(Debug, Clone, Copy)]
+pub struct VStopUpdateParams {
+    pub status: OrderWorkerStatus,
+    pub vstop_on: bool,
+    pub vstop_fixed: bool,
+    pub vstop_level: f64,
+    pub vstop_vol: f64,
+}
+
 /// TOrderCompact (MarketsU.pas:180, 117 байт packed).
 /// Этот тип сериализуется через `ms.Read/Write(BuyOrder, SizeOf(BuyOrder))` —
 /// то есть **прямой memcpy** packed struct. В Rust используем `#[repr(C, packed)]`
@@ -218,64 +251,88 @@ pub struct PriceZone {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderCompact {
-    pub int_id: i64,                  // 8
-    pub quantity: f64,                // 8
-    pub quantity_remaining: f64,      // 8
-    pub total_btc: f64,               // 8
-    pub spent_btc: f64,               // 8
-    pub open_time: f64,               // 8  TDateTime
-    pub close_time: f64,              // 8  TDateTime
-    pub actual_price: f64,            // 8
-    pub mean_price: f64,              // 8
-    pub quantity_base: f64,           // 8
-    pub actual_q: f64,                // 8
-    pub tmp_btc: f64,                 // 8
-    pub create_time: f64,             // 8  TDateTime
-    pub panic_sell_down: f32,         // 4
-    pub order_type: u8,               // 1  TOrderType
-    pub sub_type: u8,                 // 1  TOrderSubType
-    pub stop_flag: u8,                // 1
-    pub partial_done: u8,             // 1
-    pub leverage: u8,                 // 1
-    pub is_opened: u8,                // 1  boolean
-    pub is_closed: u8,                // 1
-    pub canceled: u8,                 // 1
-    pub is_short: u8,                 // 1
+    pub int_id: i64,             // 8
+    pub quantity: f64,           // 8
+    pub quantity_remaining: f64, // 8
+    pub total_btc: f64,          // 8
+    pub spent_btc: f64,          // 8
+    pub open_time: f64,          // 8  TDateTime
+    pub close_time: f64,         // 8  TDateTime
+    pub actual_price: f64,       // 8
+    pub mean_price: f64,         // 8
+    pub quantity_base: f64,      // 8
+    pub actual_q: f64,           // 8
+    pub tmp_btc: f64,            // 8
+    pub create_time: f64,        // 8  TDateTime
+    pub panic_sell_down: f32,    // 4
+    pub order_type: u8,          // 1  TOrderType
+    pub sub_type: u8,            // 1  TOrderSubType
+    pub stop_flag: u8,           // 1
+    pub partial_done: u8,        // 1
+    pub leverage: u8,            // 1
+    pub is_opened: u8,           // 1  boolean
+    pub is_closed: u8,           // 1
+    pub canceled: u8,            // 1
+    pub is_short: u8,            // 1
 }
 
 /// Размер `TOrderCompact` в байтах wire-format'а.
 /// 13×8 + 4 + 9×1 = 117 байт (matches Delphi комментарий "~117 байт").
-pub const ORDER_COMPACT_SIZE: usize = 13 * 8 + 4 + 9 * 1;
+pub const ORDER_COMPACT_SIZE: usize = 13 * 8 + 4 + 9;
 
 impl OrderCompact {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < ORDER_COMPACT_SIZE { return None; }
+        if data.len() < ORDER_COMPACT_SIZE {
+            return None;
+        }
         // Делаем побайтовую распаковку, потому что packed struct в Rust имеет
         // ограничения на reference-based доступ к полям.
         let mut o = OrderCompact::default();
         let mut p = 0usize;
-        o.int_id = i64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.quantity = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.quantity_remaining = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.total_btc = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.spent_btc = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.open_time = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.close_time = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.actual_price = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.mean_price = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.quantity_base = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.actual_q = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.tmp_btc = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.create_time = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        o.panic_sell_down = f32::from_le_bytes(data[p..p+4].try_into().unwrap()); p += 4;
-        o.order_type = data[p]; p += 1;
-        o.sub_type = data[p]; p += 1;
-        o.stop_flag = data[p]; p += 1;
-        o.partial_done = data[p]; p += 1;
-        o.leverage = data[p]; p += 1;
-        o.is_opened = data[p]; p += 1;
-        o.is_closed = data[p]; p += 1;
-        o.canceled = data[p]; p += 1;
+        o.int_id = i64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.quantity = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.quantity_remaining = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.total_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.spent_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.open_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.close_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.actual_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.mean_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.quantity_base = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.actual_q = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.tmp_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.create_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        o.panic_sell_down = f32::from_le_bytes(data[p..p + 4].try_into().unwrap());
+        p += 4;
+        o.order_type = data[p];
+        p += 1;
+        o.sub_type = data[p];
+        p += 1;
+        o.stop_flag = data[p];
+        p += 1;
+        o.partial_done = data[p];
+        p += 1;
+        o.leverage = data[p];
+        p += 1;
+        o.is_opened = data[p];
+        p += 1;
+        o.is_closed = data[p];
+        p += 1;
+        o.canceled = data[p];
+        p += 1;
         o.is_short = data[p];
         Some(o)
     }
@@ -319,17 +376,17 @@ impl OrderCompact {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StopSettings {
-    pub stop_loss_on: u8,             // 1
-    pub sl_fixed: u8,                 // 1
-    pub sl_level: f64,                // 8
-    pub sl_spread: f64,               // 8
-    pub trailing_on: u8,              // 1
-    pub trailing_fixed: u8,           // 1
-    pub trailing_level: f64,          // 8
-    pub ts_spread: f64,               // 8
-    pub use_take_profit: u8,          // 1
-    pub take_profit: f64,             // 8
-    pub take_profit_changed: u8,      // 1
+    pub stop_loss_on: u8,        // 1
+    pub sl_fixed: u8,            // 1
+    pub sl_level: f64,           // 8
+    pub sl_spread: f64,          // 8
+    pub trailing_on: u8,         // 1
+    pub trailing_fixed: u8,      // 1
+    pub trailing_level: f64,     // 8
+    pub ts_spread: f64,          // 8
+    pub use_take_profit: u8,     // 1
+    pub take_profit: f64,        // 8
+    pub take_profit_changed: u8, // 1
 }
 
 /// Wire-size TStopSettings: 6 + 5*8 = 46 байт.
@@ -337,19 +394,31 @@ pub const STOP_SETTINGS_SIZE: usize = 6 + 5 * 8;
 
 impl StopSettings {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < STOP_SETTINGS_SIZE { return None; }
+        if data.len() < STOP_SETTINGS_SIZE {
+            return None;
+        }
         let mut s = StopSettings::default();
         let mut p = 0usize;
-        s.stop_loss_on = data[p]; p += 1;
-        s.sl_fixed = data[p]; p += 1;
-        s.sl_level = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        s.sl_spread = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        s.trailing_on = data[p]; p += 1;
-        s.trailing_fixed = data[p]; p += 1;
-        s.trailing_level = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        s.ts_spread = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        s.use_take_profit = data[p]; p += 1;
-        s.take_profit = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
+        s.stop_loss_on = data[p];
+        p += 1;
+        s.sl_fixed = data[p];
+        p += 1;
+        s.sl_level = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        s.sl_spread = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        s.trailing_on = data[p];
+        p += 1;
+        s.trailing_fixed = data[p];
+        p += 1;
+        s.trailing_level = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        s.ts_spread = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        s.use_take_profit = data[p];
+        p += 1;
+        s.take_profit = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
         s.take_profit_changed = data[p];
         Some(s)
     }
@@ -373,34 +442,45 @@ impl StopSettings {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderUpdateData {
-    pub int_id: i64,                  // 8
-    pub actual_price: f64,            // 8
-    pub open_time: f64,               // 8  TDateTime
-    pub quantity: f64,                // 8
-    pub quantity_remaining: f64,      // 8
-    pub actual_q: f64,                // 8
-    pub total_btc: f64,               // 8
-    pub mean_price: f64,              // 8
-    pub partial_done: u8,             // 1
-    pub stop_flag: u8,                // 1
+    pub int_id: i64,             // 8
+    pub actual_price: f64,       // 8
+    pub open_time: f64,          // 8  TDateTime
+    pub quantity: f64,           // 8
+    pub quantity_remaining: f64, // 8
+    pub actual_q: f64,           // 8
+    pub total_btc: f64,          // 8
+    pub mean_price: f64,         // 8
+    pub partial_done: u8,        // 1
+    pub stop_flag: u8,           // 1
 }
 
 pub const ORDER_UPDATE_DATA_SIZE: usize = 8 * 8 + 2;
 
 impl OrderUpdateData {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < ORDER_UPDATE_DATA_SIZE { return None; }
+        if data.len() < ORDER_UPDATE_DATA_SIZE {
+            return None;
+        }
         let mut d = OrderUpdateData::default();
         let mut p = 0usize;
-        d.int_id = i64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.actual_price = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.open_time = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.quantity = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.quantity_remaining = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.actual_q = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.total_btc = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.mean_price = f64::from_le_bytes(data[p..p+8].try_into().unwrap()); p += 8;
-        d.partial_done = data[p]; p += 1;
+        d.int_id = i64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.actual_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.open_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.quantity = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.quantity_remaining = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.actual_q = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.total_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.mean_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
+        p += 8;
+        d.partial_done = data[p];
+        p += 1;
         d.stop_flag = data[p];
         Some(d)
     }
@@ -444,7 +524,9 @@ pub struct BaseCommandHeader {
 
 impl BaseCommandHeader {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
-        if r.len() < 11 { return None; }
+        if r.len() < 11 {
+            return None;
+        }
         let cmd_id = r[0];
         let ver = u16::from_le_bytes([r[1], r[2]]);
         let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
@@ -472,12 +554,19 @@ pub struct MarketCommandHeader {
 impl MarketCommandHeader {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let base = BaseCommandHeader::read(r)?;
-        if r.len() < 2 { return None; }
+        if r.len() < 2 {
+            return None;
+        }
         let currency = r[0];
         let platform = r[1];
         *r = &r[2..];
         let market_name = read_str(r)?;
-        Some(Self { base, currency, platform, market_name })
+        Some(Self {
+            base,
+            currency,
+            platform,
+            market_name,
+        })
     }
 
     pub fn write(&self, out: &mut Vec<u8>, base_currency: u8, base_platform: u8) {
@@ -499,11 +588,17 @@ pub struct TradeEpochHeader {
 impl TradeEpochHeader {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 3 { return None; }
+        if r.len() < 3 {
+            return None;
+        }
         let epoch = u16::from_le_bytes([r[0], r[1]]);
         let status = OrderWorkerStatus::from_byte(r[2])?;
         *r = &r[3..];
-        Some(Self { market, epoch, status })
+        Some(Self {
+            market,
+            epoch,
+            status,
+        })
     }
 
     pub fn write(&self, out: &mut Vec<u8>, base_currency: u8, base_platform: u8) {
@@ -514,11 +609,15 @@ impl TradeEpochHeader {
 }
 
 fn read_str(r: &mut &[u8]) -> Option<String> {
-    if r.len() < 2 { return None; }
+    if r.len() < 2 {
+        return None;
+    }
     let len = u16::from_le_bytes([r[0], r[1]]) as usize;
-    if r.len() < 2 + len { return None; }
-    let s = String::from_utf8_lossy(&r[2..2+len]).to_string();
-    *r = &r[2+len..];
+    if r.len() < 2 + len {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&r[2..2 + len]).to_string();
+    *r = &r[2 + len..];
     Some(s)
 }
 
@@ -531,13 +630,13 @@ fn read_str(r: &mut &[u8]) -> Option<String> {
 #[derive(Debug, Clone)]
 pub enum TradeCommand {
     /// CmdId=4: TOrderStatus — полный snapshot ордера.
-    OrderStatus(OrderStatus),
+    OrderStatus(Box<OrderStatus>),
     /// CmdId=5: TOrderStatusUpdate — delta-update полей.
     OrderStatusUpdate(OrderStatusUpdate),
     /// CmdId=6: TOrderReplaceCommand — запрос на перемещение цены.
     OrderReplace(OrderReplaceCommand),
     /// CmdId=7: TOrderReplaceResponse — подтверждение перемещения.
-    OrderReplaceResponse(OrderReplaceResponse),
+    OrderReplaceResponse(Box<OrderReplaceResponse>),
     /// CmdId=8: TAllStatuses — снапшот всех ордеров (для CleanupMissing).
     AllStatuses(AllStatuses),
     /// CmdId=9: TAllStatusesReq — запрос на получение всех ордеров (client→server).
@@ -603,23 +702,40 @@ impl TradeCommand {
     /// Version gate: если ver > 3 — возвращаем Unknown (forward-compatible skip).
     pub fn parse(payload: &[u8]) -> Option<Self> {
         let mut r = payload;
-        let peek_cmd_id = if !r.is_empty() { r[0] } else { return None; };
+        let peek_cmd_id = if !r.is_empty() {
+            r[0]
+        } else {
+            return None;
+        };
         // Peek ver без consume.
-        if r.len() < 11 { return None; }
+        if r.len() < 11 {
+            return None;
+        }
         let ver = u16::from_le_bytes([r[1], r[2]]);
         if ver > CURRENT_PROTO_CMD_VER {
             let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
-            return Some(TradeCommand::Unknown { cmd_id: peek_cmd_id, uid });
+            return Some(TradeCommand::Unknown {
+                cmd_id: peek_cmd_id,
+                uid,
+            });
         }
 
         match peek_cmd_id {
             1 => Some(TradeCommand::BaseMarket(MarketCommandHeader::read(&mut r)?)),
             2 => Some(TradeCommand::TradeEpoch(TradeEpochHeader::read(&mut r)?)),
             3 => Some(TradeCommand::NewOrder(NewOrderCommand::read(&mut r)?)),
-            4 => Some(TradeCommand::OrderStatus(OrderStatus::read(&mut r)?)),
-            5 => Some(TradeCommand::OrderStatusUpdate(OrderStatusUpdate::read(&mut r)?)),
-            6 => Some(TradeCommand::OrderReplace(OrderReplaceCommand::read(&mut r)?)),
-            7 => Some(TradeCommand::OrderReplaceResponse(OrderReplaceResponse::read(&mut r)?)),
+            4 => Some(TradeCommand::OrderStatus(Box::new(OrderStatus::read(
+                &mut r,
+            )?))),
+            5 => Some(TradeCommand::OrderStatusUpdate(OrderStatusUpdate::read(
+                &mut r,
+            )?)),
+            6 => Some(TradeCommand::OrderReplace(OrderReplaceCommand::read(
+                &mut r,
+            )?)),
+            7 => Some(TradeCommand::OrderReplaceResponse(Box::new(
+                OrderReplaceResponse::read(&mut r)?,
+            ))),
             8 => Some(TradeCommand::AllStatuses(AllStatuses::read(&mut r)?)),
             9 => {
                 let h = BaseCommandHeader::read(&mut r)?;
@@ -628,27 +744,52 @@ impl TradeCommand {
             10 => Some(TradeCommand::OrderCancel(OrderCancelCommand::read(&mut r)?)),
             11 => Some(TradeCommand::JoinOrders(JoinOrdersCommand::read(&mut r)?)),
             12 => Some(TradeCommand::SplitOrder(SplitOrderCommand::read(&mut r)?)),
-            13 => Some(TradeCommand::MoveAllSells(MoveAllSellsCommand::read(&mut r)?)),
-            14 => Some(TradeCommand::DoClosePosition(DoClosePositionCommand::read(&mut r)?)),
-            15 => Some(TradeCommand::DoLimitClosePosition(JoinOrdersCommand::read(&mut r)?)),
-            16 => Some(TradeCommand::DoSplitPosition(JoinOrdersCommand::read(&mut r)?)),
+            13 => Some(TradeCommand::MoveAllSells(MoveAllSellsCommand::read(
+                &mut r,
+            )?)),
+            14 => Some(TradeCommand::DoClosePosition(DoClosePositionCommand::read(
+                &mut r,
+            )?)),
+            15 => Some(TradeCommand::DoLimitClosePosition(JoinOrdersCommand::read(
+                &mut r,
+            )?)),
+            16 => Some(TradeCommand::DoSplitPosition(JoinOrdersCommand::read(
+                &mut r,
+            )?)),
             17 => Some(TradeCommand::DoSellOrder(DoSellOrderCommand::read(&mut r)?)),
-            18 => Some(TradeCommand::OrderStatusRequest(TradeEpochHeader::read(&mut r)?)),
+            18 => Some(TradeCommand::OrderStatusRequest(TradeEpochHeader::read(
+                &mut r,
+            )?)),
             19 => Some(TradeCommand::OrderNotFound(TradeEpochHeader::read(&mut r)?)),
-            20 => Some(TradeCommand::OrderStopsUpdate(OrderStopsUpdate::read(&mut r)?)),
-            21 => Some(TradeCommand::TurnPanicSell(TurnPanicSellCommand::read(&mut r)?)),
+            20 => Some(TradeCommand::OrderStopsUpdate(OrderStopsUpdate::read(
+                &mut r,
+            )?)),
+            21 => Some(TradeCommand::TurnPanicSell(TurnPanicSellCommand::read(
+                &mut r,
+            )?)),
             22 => Some(TradeCommand::SetImmune(SetImmuneCommand::read(&mut r)?)),
             23 => Some(TradeCommand::Penalty(MarketCommandHeader::read(&mut r)?)),
-            24 => Some(TradeCommand::TradeVisual(MarketCommandHeader::read(&mut r)?)),
-            25 => Some(TradeCommand::OrderTracePoint(OrderTracePoint::read(&mut r)?)),
+            24 => Some(TradeCommand::TradeVisual(MarketCommandHeader::read(
+                &mut r,
+            )?)),
+            25 => Some(TradeCommand::OrderTracePoint(OrderTracePoint::read(
+                &mut r,
+            )?)),
             26 => Some(TradeCommand::CorridorUpdate(CorridorUpdate::read(&mut r)?)),
             27 => Some(TradeCommand::MoveAllBuys(MoveAllBuysCommand::read(&mut r)?)),
-            28 => Some(TradeCommand::BulkReplaceNotify(BulkReplaceNotify::read(&mut r)?)),
+            28 => Some(TradeCommand::BulkReplaceNotify(BulkReplaceNotify::read(
+                &mut r,
+            )?)),
             29 => Some(TradeCommand::VStopUpdate(VStopUpdate::read(&mut r)?)),
-            30 => Some(TradeCommand::DoMarketSplitPosition(JoinOrdersCommand::read(&mut r)?)),
+            30 => Some(TradeCommand::DoMarketSplitPosition(
+                JoinOrdersCommand::read(&mut r)?,
+            )),
             _ => {
                 let uid = u64::from_le_bytes(r[3..11].try_into().unwrap());
-                Some(TradeCommand::Unknown { cmd_id: peek_cmd_id, uid })
+                Some(TradeCommand::Unknown {
+                    cmd_id: peek_cmd_id,
+                    uid,
+                })
             }
         }
     }
@@ -709,12 +850,24 @@ pub struct NewOrderCommand {
 impl NewOrderCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 8 + 8 + 8 { return None; }
-        let is_short = r[0] != 0; *r = &r[1..];
-        let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let strat_id = u64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let order_size = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        Some(Self { market, is_short, price, strat_id, order_size })
+        if r.len() < 1 + 8 + 8 + 8 {
+            return None;
+        }
+        let is_short = r[0] != 0;
+        *r = &r[1..];
+        let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let strat_id = u64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let order_size = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        Some(Self {
+            market,
+            is_short,
+            price,
+            strat_id,
+            order_size,
+        })
     }
 }
 
@@ -743,34 +896,54 @@ pub struct OrderStatus {
 impl OrderStatus {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < 2 * ORDER_COMPACT_SIZE + STOP_SETTINGS_SIZE + 8 + 1 + 4 + 1 { return None; }
+        if r.len() < 2 * ORDER_COMPACT_SIZE + STOP_SETTINGS_SIZE + 8 + 1 + 4 + 1 {
+            return None;
+        }
         let buy_order = OrderCompact::from_bytes(&r[..ORDER_COMPACT_SIZE])?;
         *r = &r[ORDER_COMPACT_SIZE..];
         let sell_order = OrderCompact::from_bytes(&r[..ORDER_COMPACT_SIZE])?;
         *r = &r[ORDER_COMPACT_SIZE..];
         let stops = StopSettings::from_bytes(&r[..STOP_SETTINGS_SIZE])?;
         *r = &r[STOP_SETTINGS_SIZE..];
-        let strat_id = u64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let is_short = r[0] != 0; *r = &r[1..];
-        let db_id = i32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let from_cache = r[0] != 0; *r = &r[1..];
+        let strat_id = u64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let is_short = r[0] != 0;
+        *r = &r[1..];
+        let db_id = i32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let from_cache = r[0] != 0;
+        *r = &r[1..];
 
         let ver = epoch_header.market.base.ver;
         let mut emulator_mode = false;
         let mut immune_for_clicks = false;
 
         if ver >= 2 {
-            if r.is_empty() { return None; }
-            emulator_mode = r[0] != 0; *r = &r[1..];
+            if r.is_empty() {
+                return None;
+            }
+            emulator_mode = r[0] != 0;
+            *r = &r[1..];
         }
         if ver >= 3 {
-            if r.is_empty() { return None; }
-            immune_for_clicks = r[0] != 0; *r = &r[1..];
+            if r.is_empty() {
+                return None;
+            }
+            immune_for_clicks = r[0] != 0;
+            *r = &r[1..];
         }
 
         Some(Self {
-            epoch_header, buy_order, sell_order, stops,
-            strat_id, is_short, db_id, from_cache, emulator_mode, immune_for_clicks,
+            epoch_header,
+            buy_order,
+            sell_order,
+            stops,
+            strat_id,
+            is_short,
+            db_id,
+            from_cache,
+            emulator_mode,
+            immune_for_clicks,
         })
     }
 }
@@ -792,13 +965,23 @@ pub struct OrderStatusUpdate {
 impl OrderStatusUpdate {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < ORDER_UPDATE_DATA_SIZE { return None; }
+        if r.len() < ORDER_UPDATE_DATA_SIZE {
+            return None;
+        }
         let update_data = OrderUpdateData::from_bytes(&r[..ORDER_UPDATE_DATA_SIZE])?;
         *r = &r[ORDER_UPDATE_DATA_SIZE..];
         let sell_reason_code = if !r.is_empty() {
-            let v = r[0]; *r = &r[1..]; v
-        } else { 0 };
-        Some(Self { epoch_header, update_data, sell_reason_code })
+            let v = r[0];
+            *r = &r[1..];
+            v
+        } else {
+            0
+        };
+        Some(Self {
+            epoch_header,
+            update_data,
+            sell_reason_code,
+        })
     }
 }
 
@@ -818,10 +1001,18 @@ pub struct OrderReplaceCommand {
 impl OrderReplaceCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < 1 + 8 { return None; }
-        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
-        let new_price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        Some(Self { epoch_header, order_type, new_price })
+        if r.len() < 1 + 8 {
+            return None;
+        }
+        let order_type = OrderType::from_byte(r[0])?;
+        *r = &r[1..];
+        let new_price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        Some(Self {
+            epoch_header,
+            order_type,
+            new_price,
+        })
     }
 }
 
@@ -842,13 +1033,24 @@ pub struct OrderReplaceResponse {
 impl OrderReplaceResponse {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < 1 + 8 + ORDER_UPDATE_DATA_SIZE + 8 { return None; }
-        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
-        let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
+        if r.len() < 1 + 8 + ORDER_UPDATE_DATA_SIZE + 8 {
+            return None;
+        }
+        let order_type = OrderType::from_byte(r[0])?;
+        *r = &r[1..];
+        let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
         let update_data = OrderUpdateData::from_bytes(&r[..ORDER_UPDATE_DATA_SIZE])?;
         *r = &r[ORDER_UPDATE_DATA_SIZE..];
-        let quantity_base = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        Some(Self { epoch_header, order_type, price, update_data, quantity_base })
+        let quantity_base = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        Some(Self {
+            epoch_header,
+            order_type,
+            price,
+            update_data,
+            quantity_base,
+        })
     }
 }
 
@@ -867,7 +1069,9 @@ pub struct AllStatuses {
 impl AllStatuses {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let header = BaseCommandHeader::read(r)?;
-        if r.len() < 4 { return None; }
+        if r.len() < 4 {
+            return None;
+        }
         let count_raw = i32::from_le_bytes(r[0..4].try_into().unwrap());
         *r = &r[4..];
         // DoS guard: отрицательный count или явно нереалистичный → reject.
@@ -905,7 +1109,9 @@ pub struct TradeEpochHeaderTyped {
 
 impl TradeEpochHeaderTyped {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
-        Some(Self { epoch_header: TradeEpochHeader::read(r)? })
+        Some(Self {
+            epoch_header: TradeEpochHeader::read(r)?,
+        })
     }
 }
 
@@ -924,8 +1130,11 @@ pub struct JoinOrdersCommand {
 impl JoinOrdersCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.is_empty() { return None; }
-        let is_short = r[0] != 0; *r = &r[1..];
+        if r.is_empty() {
+            return None;
+        }
+        let is_short = r[0] != 0;
+        *r = &r[1..];
         Some(Self { market, is_short })
     }
 }
@@ -946,11 +1155,21 @@ pub struct SplitOrderCommand {
 impl SplitOrderCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 4 + 1 + 1 { return None; }
-        let split_parts = i32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let split_small = r[0] != 0; *r = &r[1..];
-        let split_small_sell = r[0] != 0; *r = &r[1..];
-        Some(Self { market, split_parts, split_small, split_small_sell })
+        if r.len() < 4 + 1 + 1 {
+            return None;
+        }
+        let split_parts = i32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let split_small = r[0] != 0;
+        *r = &r[1..];
+        let split_small_sell = r[0] != 0;
+        *r = &r[1..];
+        Some(Self {
+            market,
+            split_parts,
+            split_small,
+            split_small_sell,
+        })
     }
 }
 
@@ -972,18 +1191,36 @@ pub struct MoveAllSellsCommand {
 impl MoveAllSellsCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 1 + 8 + 16 { return None; }
-        let cmd_type = r[0]; *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0])?; *r = &r[1..];
-        let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let min_p = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let max_p = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
+        if r.len() < 1 + 1 + 8 + 16 {
+            return None;
+        }
+        let cmd_type = r[0];
+        *r = &r[1..];
+        let move_kind = ReplaceMultiKind::from_byte(r[0])?;
+        *r = &r[1..];
+        let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let min_p = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let max_p = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
         let price_zone = PriceZone { min_p, max_p };
         // Soft-read: side появилось позже. На отсутствии — Both (legacy default).
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0])?; *r = &r[1..]; v
-        } else { FixedPosition::Both };
-        Some(Self { market, cmd_type, move_kind, price, price_zone, side })
+            let v = FixedPosition::from_byte(r[0])?;
+            *r = &r[1..];
+            v
+        } else {
+            FixedPosition::Both
+        };
+        Some(Self {
+            market,
+            cmd_type,
+            move_kind,
+            price,
+            price_zone,
+            side,
+        })
     }
 }
 
@@ -1000,9 +1237,15 @@ pub struct DoClosePositionCommand {
 impl DoClosePositionCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.is_empty() { return None; }
-        let market_sell = r[0] != 0; *r = &r[1..];
-        Some(Self { market, market_sell })
+        if r.is_empty() {
+            return None;
+        }
+        let market_sell = r[0] != 0;
+        *r = &r[1..];
+        Some(Self {
+            market,
+            market_sell,
+        })
     }
 }
 
@@ -1020,10 +1263,18 @@ pub struct DoSellOrderCommand {
 impl DoSellOrderCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 16 { return None; }
-        let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let size = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        Some(Self { market, price, size })
+        if r.len() < 16 {
+            return None;
+        }
+        let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let size = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        Some(Self {
+            market,
+            price,
+            size,
+        })
     }
 }
 
@@ -1041,10 +1292,15 @@ pub struct OrderStopsUpdate {
 impl OrderStopsUpdate {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < STOP_SETTINGS_SIZE { return None; }
+        if r.len() < STOP_SETTINGS_SIZE {
+            return None;
+        }
         let stops = StopSettings::from_bytes(&r[..STOP_SETTINGS_SIZE])?;
         *r = &r[STOP_SETTINGS_SIZE..];
-        Some(Self { epoch_header, stops })
+        Some(Self {
+            epoch_header,
+            stops,
+        })
     }
 }
 
@@ -1061,9 +1317,15 @@ pub struct TurnPanicSellCommand {
 impl TurnPanicSellCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.is_empty() { return None; }
-        let turn_on = r[0] != 0; *r = &r[1..];
-        Some(Self { epoch_header, turn_on })
+        if r.is_empty() {
+            return None;
+        }
+        let turn_on = r[0] != 0;
+        *r = &r[1..];
+        Some(Self {
+            epoch_header,
+            turn_on,
+        })
     }
 }
 
@@ -1082,13 +1344,20 @@ pub struct SetImmuneCommand {
 impl SetImmuneCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let header = BaseCommandHeader::read(r)?;
-        if r.is_empty() { return None; }
-        let n = r[0] as usize; *r = &r[1..];
-        if r.len() < n * 9 { return None; }
+        if r.is_empty() {
+            return None;
+        }
+        let n = r[0] as usize;
+        *r = &r[1..];
+        if r.len() < n * 9 {
+            return None;
+        }
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
-            let uid = u64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-            let value = r[0] != 0; *r = &r[1..];
+            let uid = u64::from_le_bytes(r[0..8].try_into().unwrap());
+            *r = &r[8..];
+            let value = r[0] != 0;
+            *r = &r[1..];
             items.push(ImmuneItem { uid, value });
         }
         Some(Self { header, items })
@@ -1110,7 +1379,7 @@ pub mod trace_flags {
 #[derive(Debug, Clone)]
 pub struct OrderTracePoint {
     pub market: MarketCommandHeader,
-    pub trace_time: f64,       // TDateTime
+    pub trace_time: f64, // TDateTime
     pub trace_price: f32,
     pub base_price: f32,
     pub stop_price: f32,
@@ -1121,19 +1390,41 @@ pub struct OrderTracePoint {
 impl OrderTracePoint {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 8 + 4 * 3 + 1 + 1 { return None; }
-        let trace_time = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let trace_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let base_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let stop_price = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let ord_type = OrderType::from_byte(r[0])?; *r = &r[1..];
-        let flags = r[0]; *r = &r[1..];
-        Some(Self { market, trace_time, trace_price, base_price, stop_price, ord_type, flags })
+        if r.len() < 8 + 4 * 3 + 1 + 1 {
+            return None;
+        }
+        let trace_time = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let trace_price = f32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let base_price = f32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let stop_price = f32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let ord_type = OrderType::from_byte(r[0])?;
+        *r = &r[1..];
+        let flags = r[0];
+        *r = &r[1..];
+        Some(Self {
+            market,
+            trace_time,
+            trace_price,
+            base_price,
+            stop_price,
+            ord_type,
+            flags,
+        })
     }
 
-    pub fn is_temp(&self) -> bool { (self.flags & trace_flags::IS_TEMP) != 0 }
-    pub fn is_finish(&self) -> bool { (self.flags & trace_flags::IS_FINISH) != 0 }
-    pub fn is_initial(&self) -> bool { (self.flags & trace_flags::IS_INITIAL) != 0 }
+    pub fn is_temp(&self) -> bool {
+        (self.flags & trace_flags::IS_TEMP) != 0
+    }
+    pub fn is_finish(&self) -> bool {
+        (self.flags & trace_flags::IS_FINISH) != 0
+    }
+    pub fn is_initial(&self) -> bool {
+        (self.flags & trace_flags::IS_INITIAL) != 0
+    }
 
     pub fn adjust_time(&mut self, delta: f64) {
         self.trace_time -= delta;
@@ -1155,10 +1446,18 @@ pub struct CorridorUpdate {
 impl CorridorUpdate {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 8 { return None; }
-        let price_down = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        let price_up = f32::from_le_bytes(r[0..4].try_into().unwrap()); *r = &r[4..];
-        Some(Self { market, price_down, price_up })
+        if r.len() < 8 {
+            return None;
+        }
+        let price_down = f32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        let price_up = f32::from_le_bytes(r[0..4].try_into().unwrap());
+        *r = &r[4..];
+        Some(Self {
+            market,
+            price_down,
+            price_up,
+        })
     }
 }
 
@@ -1180,14 +1479,29 @@ pub struct MoveAllBuysCommand {
 impl MoveAllBuysCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 1 + 8 { return None; }
-        let cmd_type = r[0]; *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0])?; *r = &r[1..];
-        let price = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
+        if r.len() < 1 + 1 + 8 {
+            return None;
+        }
+        let cmd_type = r[0];
+        *r = &r[1..];
+        let move_kind = ReplaceMultiKind::from_byte(r[0])?;
+        *r = &r[1..];
+        let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0])?; *r = &r[1..]; v
-        } else { FixedPosition::Both };
-        Some(Self { market, cmd_type, move_kind, price, side })
+            let v = FixedPosition::from_byte(r[0])?;
+            *r = &r[1..];
+            v
+        } else {
+            FixedPosition::Both
+        };
+        Some(Self {
+            market,
+            cmd_type,
+            move_kind,
+            price,
+            side,
+        })
     }
 }
 
@@ -1207,16 +1521,26 @@ pub struct BulkReplaceNotify {
 impl BulkReplaceNotify {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 2 { return None; }
-        let order_type = OrderType::from_byte(r[0])?; *r = &r[1..];
-        let count = u16::from_le_bytes([r[0], r[1]]) as usize; *r = &r[2..];
-        if r.len() < count * 8 { return None; }
+        if r.len() < 1 + 2 {
+            return None;
+        }
+        let order_type = OrderType::from_byte(r[0])?;
+        *r = &r[1..];
+        let count = u16::from_le_bytes([r[0], r[1]]) as usize;
+        *r = &r[2..];
+        if r.len() < count * 8 {
+            return None;
+        }
         let mut uids = Vec::with_capacity(count);
         for _ in 0..count {
             uids.push(u64::from_le_bytes(r[0..8].try_into().unwrap()));
             *r = &r[8..];
         }
-        Some(Self { market, order_type, uids })
+        Some(Self {
+            market,
+            order_type,
+            uids,
+        })
     }
 }
 
@@ -1237,12 +1561,24 @@ pub struct VStopUpdate {
 impl VStopUpdate {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let epoch_header = TradeEpochHeader::read(r)?;
-        if r.len() < 2 + 16 { return None; }
-        let vstop_on = r[0] != 0; *r = &r[1..];
-        let vstop_fixed = r[0] != 0; *r = &r[1..];
-        let vstop_level = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        let vstop_vol = f64::from_le_bytes(r[0..8].try_into().unwrap()); *r = &r[8..];
-        Some(Self { epoch_header, vstop_on, vstop_fixed, vstop_level, vstop_vol })
+        if r.len() < 2 + 16 {
+            return None;
+        }
+        let vstop_on = r[0] != 0;
+        *r = &r[1..];
+        let vstop_fixed = r[0] != 0;
+        *r = &r[1..];
+        let vstop_level = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        let vstop_vol = f64::from_le_bytes(r[0..8].try_into().unwrap());
+        *r = &r[8..];
+        Some(Self {
+            epoch_header,
+            vstop_on,
+            vstop_fixed,
+            vstop_level,
+            vstop_vol,
+        })
     }
 }
 
@@ -1259,16 +1595,36 @@ fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.extend_from_slice(&uid.to_le_bytes());
 }
 
-fn write_market_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64, market_name: &str, currency: u8, platform: u8) {
+fn write_market_header(
+    out: &mut Vec<u8>,
+    cmd_id: u8,
+    uid: u64,
+    market_name: &str,
+    currency: u8,
+    platform: u8,
+) {
     write_base_command_header(out, cmd_id, uid);
     out.push(currency);
     out.push(platform);
     write_string(out, market_name);
 }
 
-fn write_trade_epoch_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64, market_name: &str,
-                            currency: u8, platform: u8, epoch: u16, status: OrderWorkerStatus) {
-    write_market_header(out, cmd_id, uid, market_name, currency, platform);
+fn write_trade_epoch_header(
+    out: &mut Vec<u8>,
+    cmd_id: u8,
+    ctx: TradeCtx,
+    market_name: &str,
+    epoch: u16,
+    status: OrderWorkerStatus,
+) {
+    write_market_header(
+        out,
+        cmd_id,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.extend_from_slice(&epoch.to_le_bytes());
     out.push(status as u8);
 }
@@ -1294,7 +1650,11 @@ impl TradeCtx {
     /// `Ord(cfg.Header.Current)` on the server. Prefer the higher-level helpers
     /// on [`crate::Client`] unless you are writing a protocol tool.
     pub fn with_route(uid: u64, currency: u8, platform: u8) -> Self {
-        Self { uid, currency, platform }
+        Self {
+            uid,
+            currency,
+            platform,
+        }
     }
 
     /// Legacy Binance-USDT route shortcut.
@@ -1322,16 +1682,7 @@ pub fn build_order_replace(
     new_price: f64,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    write_trade_epoch_header(
-        &mut out,
-        6,
-        ctx.uid,
-        market_name,
-        ctx.currency,
-        ctx.platform,
-        0,
-        OrderWorkerStatus::None,
-    );
+    write_trade_epoch_header(&mut out, 6, ctx, market_name, 0, OrderWorkerStatus::None);
     out.push(order_type as u8);
     out.extend_from_slice(&new_price.to_le_bytes());
     out
@@ -1345,25 +1696,49 @@ pub fn build_all_statuses_request(uid: u64) -> Vec<u8> {
 }
 
 /// CmdId=10: TOrderCancelCommand — отмена ордера.
-pub fn build_order_cancel(ctx: TradeCtx, market_name: &str, epoch: u16, status: OrderWorkerStatus) -> Vec<u8> {
+pub fn build_order_cancel(
+    ctx: TradeCtx,
+    market_name: &str,
+    epoch: u16,
+    status: OrderWorkerStatus,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_trade_epoch_header(&mut out, 10, ctx.uid, market_name, ctx.currency, ctx.platform, epoch, status);
+    write_trade_epoch_header(&mut out, 10, ctx, market_name, epoch, status);
     out
 }
 
 /// CmdId=11: TJoinOrdersCommand.
 pub fn build_join_orders(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 11, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        11,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(is_short as u8);
     out
 }
 
 /// CmdId=12: TSplitOrderCommand.
-pub fn build_split_order(ctx: TradeCtx, market_name: &str, split_parts: i32,
-                         split_small: bool, split_small_sell: bool) -> Vec<u8> {
+pub fn build_split_order(
+    ctx: TradeCtx,
+    market_name: &str,
+    split_parts: i32,
+    split_small: bool,
+    split_small_sell: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 12, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        12,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.extend_from_slice(&split_parts.to_le_bytes());
     out.push(split_small as u8);
     out.push(split_small_sell as u8);
@@ -1371,24 +1746,40 @@ pub fn build_split_order(ctx: TradeCtx, market_name: &str, split_parts: i32,
 }
 
 /// CmdId=13: TMoveAllSellsCommand.
-pub fn build_move_all_sells(ctx: TradeCtx, market_name: &str, cmd_type: u8,
-                             move_kind: ReplaceMultiKind, price: f64,
-                             price_zone: PriceZone, side: FixedPosition) -> Vec<u8> {
+pub fn build_move_all_sells(
+    ctx: TradeCtx,
+    market_name: &str,
+    params: MoveAllSellsParams,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
-    write_market_header(&mut out, 13, ctx.uid, market_name, ctx.currency, ctx.platform);
-    out.push(cmd_type);
-    out.push(move_kind as u8);
-    out.extend_from_slice(&price.to_le_bytes());
-    out.extend_from_slice(&price_zone.min_p.to_le_bytes());
-    out.extend_from_slice(&price_zone.max_p.to_le_bytes());
-    out.push(side as u8);
+    write_market_header(
+        &mut out,
+        13,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
+    out.push(params.cmd_type as u8);
+    out.push(params.move_kind as u8);
+    out.extend_from_slice(&params.price.to_le_bytes());
+    out.extend_from_slice(&params.price_zone.min_p.to_le_bytes());
+    out.extend_from_slice(&params.price_zone.max_p.to_le_bytes());
+    out.push(params.side as u8);
     out
 }
 
 /// CmdId=14: TDoClosePositionCommand.
 pub fn build_do_close_position(ctx: TradeCtx, market_name: &str, market_sell: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 14, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        14,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(market_sell as u8);
     out
 }
@@ -1396,7 +1787,14 @@ pub fn build_do_close_position(ctx: TradeCtx, market_name: &str, market_sell: bo
 /// CmdId=15: TDoLimitClosePositionCommand (= JoinOrdersCommand format).
 pub fn build_do_limit_close_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 15, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        15,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(is_short as u8);
     out
 }
@@ -1404,7 +1802,14 @@ pub fn build_do_limit_close_position(ctx: TradeCtx, market_name: &str, is_short:
 /// CmdId=16: TDoSplitPositionCommand (= JoinOrdersCommand format).
 pub fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 16, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        16,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(is_short as u8);
     out
 }
@@ -1412,7 +1817,14 @@ pub fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool)
 /// CmdId=17: TDoSellOrderCommand.
 pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
-    write_market_header(&mut out, 17, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        17,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.extend_from_slice(&price.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
     out
@@ -1421,16 +1833,20 @@ pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f
 /// CmdId=18: TOrderStatusRequest — запрос статуса конкретного ордера.
 pub fn build_order_status_request(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_trade_epoch_header(&mut out, 18, ctx.uid, market_name, ctx.currency, ctx.platform,
-                              0, OrderWorkerStatus::None);
+    write_trade_epoch_header(&mut out, 18, ctx, market_name, 0, OrderWorkerStatus::None);
     out
 }
 
 /// CmdId=20: TOrderStopsUpdate.
-pub fn build_order_stops_update(ctx: TradeCtx, market_name: &str, epoch: u16,
-                                  status: OrderWorkerStatus, stops: &StopSettings) -> Vec<u8> {
+pub fn build_order_stops_update(
+    ctx: TradeCtx,
+    market_name: &str,
+    epoch: u16,
+    status: OrderWorkerStatus,
+    stops: &StopSettings,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    write_trade_epoch_header(&mut out, 20, ctx.uid, market_name, ctx.currency, ctx.platform, epoch, status);
+    write_trade_epoch_header(&mut out, 20, ctx, market_name, epoch, status);
     stops.write_to(&mut out);
     out
 }
@@ -1440,22 +1856,9 @@ pub fn build_order_stops_update(ctx: TradeCtx, market_name: &str, epoch: u16,
 /// Delphi `TTurnPanicSellCommand.Create` does not set inherited
 /// `TTradeEpochCommand` fields on the client path, so object zero-init gives
 /// `Epoch=0` and `Status=OS_None`.
-pub fn build_turn_panic_sell(
-    ctx: TradeCtx,
-    market_name: &str,
-    turn_on: bool,
-) -> Vec<u8> {
+pub fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, turn_on: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_trade_epoch_header(
-        &mut out,
-        21,
-        ctx.uid,
-        market_name,
-        ctx.currency,
-        ctx.platform,
-        0,
-        OrderWorkerStatus::None,
-    );
+    write_trade_epoch_header(&mut out, 21, ctx, market_name, 0, OrderWorkerStatus::None);
     out.push(turn_on as u8);
     out
 }
@@ -1475,10 +1878,23 @@ pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
 }
 
 /// CmdId=27: TMoveAllBuysCommand.
-pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, cmd_type: u8,
-                            move_kind: ReplaceMultiKind, price: f64, side: FixedPosition) -> Vec<u8> {
+pub fn build_move_all_buys(
+    ctx: TradeCtx,
+    market_name: &str,
+    cmd_type: u8,
+    move_kind: ReplaceMultiKind,
+    price: f64,
+    side: FixedPosition,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
-    write_market_header(&mut out, 27, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        27,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(cmd_type);
     out.push(move_kind as u8);
     out.extend_from_slice(&price.to_le_bytes());
@@ -1487,21 +1903,32 @@ pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, cmd_type: u8,
 }
 
 /// CmdId=29: TVStopUpdate.
-pub fn build_vstop_update(ctx: TradeCtx, market_name: &str, epoch: u16, status: OrderWorkerStatus,
-                          vstop_on: bool, vstop_fixed: bool, vstop_level: f64, vstop_vol: f64) -> Vec<u8> {
+pub fn build_vstop_update(
+    ctx: TradeCtx,
+    market_name: &str,
+    epoch: u16,
+    params: VStopUpdateParams,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
-    write_trade_epoch_header(&mut out, 29, ctx.uid, market_name, ctx.currency, ctx.platform, epoch, status);
-    out.push(vstop_on as u8);
-    out.push(vstop_fixed as u8);
-    out.extend_from_slice(&vstop_level.to_le_bytes());
-    out.extend_from_slice(&vstop_vol.to_le_bytes());
+    write_trade_epoch_header(&mut out, 29, ctx, market_name, epoch, params.status);
+    out.push(params.vstop_on as u8);
+    out.push(params.vstop_fixed as u8);
+    out.extend_from_slice(&params.vstop_level.to_le_bytes());
+    out.extend_from_slice(&params.vstop_vol.to_le_bytes());
     out
 }
 
 /// CmdId=30: TDoMarketSplitPositionCommand (= JoinOrdersCommand format).
 pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 30, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        30,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(is_short as u8);
     out
 }
@@ -1510,15 +1937,35 @@ pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short
 /// Аудит docs_api B-04: команда вызывается в TaskWorkers.pas:8361, Unit1.pas:11859/23750.
 pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
-    write_market_header(&mut out, 23, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        23,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out
 }
 
 /// CmdId=3: TNewOrderCommand — запрос на создание нового ордера.
-pub fn build_new_order(ctx: TradeCtx, market_name: &str, is_short: bool,
-                       price: f64, strat_id: u64, order_size: f64) -> Vec<u8> {
+pub fn build_new_order(
+    ctx: TradeCtx,
+    market_name: &str,
+    is_short: bool,
+    price: f64,
+    strat_id: u64,
+    order_size: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
-    write_market_header(&mut out, 3, ctx.uid, market_name, ctx.currency, ctx.platform);
+    write_market_header(
+        &mut out,
+        3,
+        ctx.uid,
+        market_name,
+        ctx.currency,
+        ctx.platform,
+    );
     out.push(is_short as u8);
     out.extend_from_slice(&price.to_le_bytes());
     out.extend_from_slice(&strat_id.to_le_bytes());
@@ -1575,7 +2022,10 @@ mod tests {
     fn set_immune_wire_layout_matches_delphi_record() {
         let payload = build_set_immune(
             0x0102_0304_0506_0708,
-            &[ImmuneItem { uid: 0x1112_1314_1516_1718, value: true }],
+            &[ImmuneItem {
+                uid: 0x1112_1314_1516_1718,
+                value: true,
+            }],
         );
 
         let mut expected = Vec::new();
@@ -1601,7 +2051,10 @@ mod tests {
     #[test]
     fn set_immune_count_is_written_as_byte_without_clamp() {
         let items: Vec<_> = (0..260u64)
-            .map(|uid| ImmuneItem { uid, value: uid % 2 == 0 })
+            .map(|uid| ImmuneItem {
+                uid,
+                value: uid % 2 == 0,
+            })
             .collect();
 
         let payload = build_set_immune(0xAA, &items);

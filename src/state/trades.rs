@@ -106,9 +106,17 @@ pub enum TradesEvent {
     /// Пакет пришёл вне диапазона — может быть после reset, отображает packet_num.
     OutOfOrder { packet_num: u16 },
     /// Принят out-of-order пакет, который был помечен в одном из gap-bucket'ов (recvd[i]=true).
-    GapFilled { packet_num: u16, bucket_seq_range: (u16, u16) },
+    GapFilled {
+        packet_num: u16,
+        bucket_seq_range: (u16, u16),
+    },
     /// Bucket закрыт: получены все trades или исчерпан retry лимит.
-    BucketClosed { start: u16, end: u16, all_received: bool, retry_count: u8 },
+    BucketClosed {
+        start: u16,
+        end: u16,
+        all_received: bool,
+        retry_count: u8,
+    },
 }
 
 /// Главный sync state для TradesStream.
@@ -182,9 +190,13 @@ impl TradesState {
         }
 
         // Все заняты — вытесняем самый старый.
-        let oldest_idx = self.buckets.iter().enumerate()
+        let oldest_idx = self
+            .buckets
+            .iter()
+            .enumerate()
             .min_by_key(|(_, b)| b.created_ms)
-            .map(|(i, _)| i).unwrap_or(0);
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         let b = &mut self.buckets[oldest_idx];
         b.start_num = start_num;
         b.end_num = end_num;
@@ -274,7 +286,10 @@ impl TradesState {
             }
             let bucket_range = (b.start_num, b.end_num);
             self.last_packet_time_ms = now_ms;
-            events.push(TradesEvent::GapFilled { packet_num, bucket_seq_range: bucket_range });
+            events.push(TradesEvent::GapFilled {
+                packet_num,
+                bucket_seq_range: bucket_range,
+            });
             events.push(TradesEvent::Apply(pkt));
             return events;
         }
@@ -292,10 +307,16 @@ impl TradesState {
         let target_end = new_gap_start.wrapping_sub(2); // = last.wrapping_sub(1)
         let mut extended = false;
         for b in self.buckets.iter_mut() {
-            if !b.active { continue; }
-            if b.end_num != target_end { continue; }
+            if !b.active {
+                continue;
+            }
+            if b.end_num != target_end {
+                continue;
+            }
             let new_size = new_gap_end.wrapping_sub(b.start_num) as usize + 1;
-            if new_size > MAX_RECVD_SIZE { continue; }
+            if new_size > MAX_RECVD_SIZE {
+                continue;
+            }
             let old_size = b.end_num.wrapping_sub(b.start_num) as usize + 1;
             if b.recvd.len() < new_size {
                 b.recvd.resize(new_size, false);
@@ -313,7 +334,10 @@ impl TradesState {
             }
             b.end_num = new_gap_end;
             extended = true;
-            events.push(TradesEvent::GapDetected { start: new_gap_start, end: new_gap_end });
+            events.push(TradesEvent::GapDetected {
+                start: new_gap_start,
+                end: new_gap_end,
+            });
             break;
         }
 
@@ -339,7 +363,10 @@ impl TradesState {
             }
 
             self.create_bucket(new_gap_start, new_gap_end, now_ms);
-            events.push(TradesEvent::GapDetected { start: new_gap_start, end: new_gap_end });
+            events.push(TradesEvent::GapDetected {
+                start: new_gap_start,
+                end: new_gap_end,
+            });
         }
 
         self.last_packet_num = packet_num;
@@ -360,12 +387,17 @@ impl TradesState {
                 b.recvd[recvd_idx] = true;
             }
             let bucket_range = (b.start_num, b.end_num);
-            events.push(TradesEvent::GapFilled { packet_num: pkt.packet_num, bucket_seq_range: bucket_range });
+            events.push(TradesEvent::GapFilled {
+                packet_num: pkt.packet_num,
+                bucket_seq_range: bucket_range,
+            });
         } else {
             // Resend пришёл для давно закрытого bucket'а. Delphi TrackPackets=False
             // не помечает bucket, но всё равно ниже разбирает секции и применяет
             // trades; поэтому отдаём diagnostic OutOfOrder + Apply.
-            events.push(TradesEvent::OutOfOrder { packet_num: pkt.packet_num });
+            events.push(TradesEvent::OutOfOrder {
+                packet_num: pkt.packet_num,
+            });
         }
         events.push(TradesEvent::Apply(pkt));
         events
@@ -374,7 +406,11 @@ impl TradesState {
     /// Аналог `tick` но возвращает дополнительно `BucketClosed`-события (recovered/lost).
     /// Используется для прикладного слоя который хочет логировать закрытие bucket'ов.
     /// Стандартный `tick` остаётся обратно-совместимым (возвращает только resend payload'ы).
-    pub fn tick_with_events(&mut self, rtt_ms: i64, now_ms: i64) -> (Vec<Vec<u8>>, Vec<TradesEvent>) {
+    pub fn tick_with_events(
+        &mut self,
+        rtt_ms: i64,
+        now_ms: i64,
+    ) -> (Vec<Vec<u8>>, Vec<TradesEvent>) {
         let mut events: Vec<TradesEvent> = Vec::new();
         let payloads = self.tick_impl(rtt_ms, now_ms, &mut events);
         (payloads, events)
@@ -389,7 +425,12 @@ impl TradesState {
         self.tick_impl(rtt_ms, now_ms, &mut events)
     }
 
-    fn tick_impl(&mut self, rtt_ms: i64, now_ms: i64, events: &mut Vec<TradesEvent>) -> Vec<Vec<u8>> {
+    fn tick_impl(
+        &mut self,
+        rtt_ms: i64,
+        now_ms: i64,
+        events: &mut Vec<TradesEvent>,
+    ) -> Vec<Vec<u8>> {
         // Early-exit без throttle (соответствует Delphi MoonProtoEngine.pas:1494-1495 —
         // `If UsedBuckets = 0 then exit;` СНАЧАЛА, throttle на стороне caller'а).
         if self.used_buckets == 0 {
@@ -521,9 +562,15 @@ mod tests {
         let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(100), 1010);
         assert!(matches!(evs[0], TradesEvent::Duplicate));
-        assert!(matches!(evs[1], TradesEvent::Apply(_)),
-            "Delphi logs duplicate but still applies the packet payload");
-        assert_eq!(s.last_packet_num(), 100, "duplicate must not advance tracking state");
+        assert!(
+            matches!(evs[1], TradesEvent::Apply(_)),
+            "Delphi logs duplicate but still applies the packet payload"
+        );
+        assert_eq!(
+            s.last_packet_num(),
+            100,
+            "duplicate must not advance tracking state"
+        );
     }
 
     #[test]
@@ -543,7 +590,15 @@ mod tests {
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(103), 1010); // gap: 101, 102
-        let has_gap = evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { start: 101, end: 102 }));
+        let has_gap = evs.iter().any(|e| {
+            matches!(
+                e,
+                TradesEvent::GapDetected {
+                    start: 101,
+                    end: 102
+                }
+            )
+        });
         let has_apply = evs.iter().any(|e| matches!(e, TradesEvent::Apply(_)));
         assert!(has_gap && has_apply);
         assert_eq!(s.used_buckets(), 1);
@@ -555,7 +610,15 @@ mod tests {
         let _ = s.on_packet(make_pkt(100), 1000);
         let _ = s.on_packet(make_pkt(103), 1010); // creates bucket [101, 102]
         let evs = s.on_packet(make_pkt(101), 1020); // fills bucket
-        let has_filled = evs.iter().any(|e| matches!(e, TradesEvent::GapFilled { packet_num: 101, .. }));
+        let has_filled = evs.iter().any(|e| {
+            matches!(
+                e,
+                TradesEvent::GapFilled {
+                    packet_num: 101,
+                    ..
+                }
+            )
+        });
         assert!(has_filled);
     }
 
@@ -582,10 +645,19 @@ mod tests {
     fn late_resend_outside_bucket_is_still_applied_like_delphi() {
         let mut s = TradesState::new();
         let evs = s.on_packet_resend(make_pkt(777));
-        assert!(matches!(evs[0], TradesEvent::OutOfOrder { packet_num: 777 }));
-        assert!(matches!(evs[1], TradesEvent::Apply(_)),
-            "Delphi TrackPackets=False applies resend payload even when no bucket matches");
-        assert_eq!(s.last_packet_num(), 0, "resend packets must not advance live tracking");
+        assert!(matches!(
+            evs[0],
+            TradesEvent::OutOfOrder { packet_num: 777 }
+        ));
+        assert!(
+            matches!(evs[1], TradesEvent::Apply(_)),
+            "Delphi TrackPackets=False applies resend payload even when no bucket matches"
+        );
+        assert_eq!(
+            s.last_packet_num(),
+            0,
+            "resend packets must not advance live tracking"
+        );
     }
 
     #[test]
@@ -594,10 +666,20 @@ mod tests {
         let _ = s.on_packet(make_pkt(100), 1000);
         let _ = s.on_packet(make_pkt(103), 1010);
         let evs = s.on_packet_resend(make_pkt(101));
-        assert!(matches!(evs[0], TradesEvent::GapFilled { packet_num: 101, .. }));
+        assert!(matches!(
+            evs[0],
+            TradesEvent::GapFilled {
+                packet_num: 101,
+                ..
+            }
+        ));
         assert!(matches!(evs[1], TradesEvent::Apply(_)));
         assert_eq!(evs.len(), 2);
-        assert_eq!(s.last_packet_num(), 103, "resend packets must not advance live tracking");
+        assert_eq!(
+            s.last_packet_num(),
+            103,
+            "resend packets must not advance live tracking"
+        );
     }
 
     #[test]
@@ -605,7 +687,7 @@ mod tests {
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(100), 1000);
         let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104]
-        // Через 500мс с RTT 250 — PathDelay = 250 * 1.2 = 300мс → 500 > 300 → resend.
+                                                  // Через 500мс с RTT 250 — PathDelay = 250 * 1.2 = 300мс → 500 > 300 → resend.
         let payloads = s.tick(250, 1500);
         assert_eq!(payloads.len(), 1, "должен быть один батч resend");
         // payload должен содержать 4 packet_nums (101, 102, 103, 104).
@@ -639,11 +721,9 @@ mod tests {
     fn parse_resend_response_simple() {
         // count=2, 2 пакета по 3 байта.
         let payload: Vec<u8> = vec![
-            2,             // count
-            3, 0,          // sz=3
-            0xAA, 0xBB, 0xCC,
-            3, 0,
-            0x11, 0x22, 0x33,
+            2, // count
+            3, 0, // sz=3
+            0xAA, 0xBB, 0xCC, 3, 0, 0x11, 0x22, 0x33,
         ];
         let packets = parse_trades_resend_response(&payload);
         assert_eq!(packets.len(), 2);
@@ -668,13 +748,20 @@ mod tests {
         let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104] → bucket1
         assert_eq!(s.used_buckets(), 1);
         let _ = s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 до [101..109]
-        // Bucket должен расшириться, а не создать второй.
-        assert_eq!(s.used_buckets(), 1, "extend должен переиспользовать существующий bucket");
+                                                  // Bucket должен расшириться, а не создать второй.
+        assert_eq!(
+            s.used_buckets(),
+            1,
+            "extend должен переиспользовать существующий bucket"
+        );
         // Найдём bucket и проверим что end_num = 109, и Recvd[4] (= packet 105) = true.
         let bucket = s.buckets.iter().find(|b| b.active).unwrap();
         assert_eq!(bucket.start_num, 101);
         assert_eq!(bucket.end_num, 109);
-        assert!(bucket.recvd[4], "packet 105 (sequential между gap'ами) должен быть помечен как received");
+        assert!(
+            bucket.recvd[4],
+            "packet 105 (sequential между gap'ами) должен быть помечен как received"
+        );
         // Запросы resend пойдут только за [101..104, 106..109] (8 packets).
     }
 
@@ -690,13 +777,19 @@ mod tests {
         // Теперь новый gap [2901..N] больше MAX_RECVD_SIZE → reset + Apply.
         let evs = s.on_packet(make_pkt(7000), 1020);
         assert_eq!(s.used_buckets(), 0);
-        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7000)));
-        assert!(!evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7000)));
+        assert!(!evs
+            .iter()
+            .any(|e| matches!(e, TradesEvent::GapDetected { .. })));
 
         // Следующий пакет стартует tracking заново, потому что reset оставил
         // trades_started=false как в Delphi ResetGapBuckets.
         let evs = s.on_packet(make_pkt(7001), 1030);
-        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7001)));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7001)));
         assert_eq!(s.last_packet_num(), 7001);
     }
 
@@ -712,7 +805,8 @@ mod tests {
         let evs = s.on_packet(make_pkt(next), 1010);
 
         assert!(
-            evs.iter().any(|e| matches!(e, TradesEvent::GapDetected { start, end }
+            evs.iter()
+                .any(|e| matches!(e, TradesEvent::GapDetected { start, end }
                 if *start == first.wrapping_add(1) && *end == next.wrapping_sub(1))),
             "gap with exactly MAX_RECVD_SIZE missing packets must create a bucket"
         );
