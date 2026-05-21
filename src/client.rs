@@ -133,6 +133,7 @@ const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
 const CLEANUP_INTERVAL_MS: i64 = 5000;     // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80;          // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64;    // MoonProtoDataStruct.pas:31
+const IMFRIEND_DUPLICATE_DELAY_MS: u64 = 32; // MoonProtoUDPClient.pas:433-436
 const NEVER_SENT_MS: i64 = i64::MIN / 2;   // Эквивалент Delphi LastSentHello=0 при uptime-clock
 const NEVER_TIME_MS: i64 = i64::MIN / 2;
 const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
@@ -980,16 +981,6 @@ pub struct Client {
     /// повторно резолвится.
     cached_server_addr: Option<SocketAddr>,
 
-    /// D-02: state-machine для двойной отправки ImFriend (требование Delphi handshake протокола
-    /// — финальный пакет шлётся дважды с короткой паузой для надёжности).
-    /// Раньше использовался `thread::sleep(32ms)` прямо в `handle_handshake`, что блокировало main loop
-    /// на 32мс — за это время накапливались UDP-пакеты в reader channel, heartbeat не отправлялся,
-    /// pending API timeouts не срабатывали.
-    /// Теперь: первый ImFriend уходит сразу, второй планируется в `pending_second_imfriend = Some((due_ms, payload))`,
-    /// main loop каждый тик проверяет и отправляет когда `cur_tm >= due_ms`.
-    /// Сбрасывается при `full_reset` и при отправке.
-    pending_second_imfriend: Option<(i64, Vec<u8>)>,
-
     /// **Active library — subscription registry**: что app просил подписать. После
     /// любого ServerToken change `replay_subscriptions` берёт отсюда → отправляет
     /// заново через текущие keys / market_idx. App ничего делать не должен.
@@ -1198,7 +1189,6 @@ impl Client {
             reader_shutdown: Arc::new(AtomicBool::new(false)),
             current_reader_epoch: 0,
             cached_server_addr: None,
-            pending_second_imfriend: None,
             subscription_registry: SubscriptionRegistry::default(),
             was_ever_connected: false,
             pending_candles: HashMap::new(),
@@ -2923,9 +2913,6 @@ impl Client {
                     self.last_cleanup = cur_tm;
                 }
 
-                // D-02: проверка отложенного второго ImFriend (state machine вместо thread::sleep).
-                self.check_pending_second_imfriend(cur_tm);
-
                 // Active library: timeout protection для auto-refetch indexes.
                 self.check_indexes_fetch_timeout(cur_tm);
 
@@ -3519,11 +3506,12 @@ impl Client {
             // B-V2-03: cipher только что установлен выше — invariant выполняется.
             let cipher = self.encode_cipher.as_ref().expect("encode_cipher set 3 lines above");
             let encrypted = crypto::encrypt_with_cipher(cipher, &packed, &aad);
-            // D-02: первый ImFriend — сразу. Второй планируется через 32мс state-machine'ой
-            // (раньше: thread::sleep блокировал main loop). Reschedule если в очереди уже
-            // висит старая (соответствует Delphi семантике — последняя попытка вытесняет).
+            // Delphi sends ImFriend twice with a blocking Sleep(32) between sends
+            // before it returns to the UDP read loop. Keep that ordering: post-Fine
+            // active work must not overtake the duplicate ImFriend.
             self.send_raw_packet(Command::ImFriend, &encrypted);
-            self.pending_second_imfriend = Some((self.now_ms() + 32, encrypted));
+            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
+            self.send_raw_packet(Command::ImFriend, &encrypted);
         }
         if cmd == Command::Fine {
             self.need_connect = false;
@@ -4241,17 +4229,6 @@ impl Client {
         }
     }
 
-    /// D-02: state-machine для отложенного второго ImFriend.
-    /// Если due ≤ cur_tm — отправляем и очищаем slot. Не блокирует main loop.
-    /// Защита от старого слота при reconnect: full_reset() сбрасывает.
-    fn check_pending_second_imfriend(&mut self, cur_tm: i64) {
-        if second_imfriend_due(&self.pending_second_imfriend, cur_tm) {
-            // take() очищает slot перед отправкой → safe при ошибке send_raw_packet.
-            let payload = self.pending_second_imfriend.take().unwrap().1;
-            self.send_raw_packet(Command::ImFriend, &payload);
-        }
-    }
-
     fn check_dead_zone(&mut self, cur_tm: i64) {
         let authorized = self.authorized;
         let last_online = self.last_online;
@@ -4290,8 +4267,6 @@ impl Client {
         self.slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
-        // D-02: при full reset (новый handshake) — старый отложенный second ImFriend больше не нужен.
-        self.pending_second_imfriend = None;
         // Аудит #9 (audit_delphi_deviation): очистка stale Sliced состояния при hard
         // reconnect. После полного reset crypt_msg_counter=0 и ключи **поменяются** в
         // следующем handshake. Старые `sending` зашифрованы прежними ключами / прежними
@@ -4979,65 +4954,6 @@ mod bps_tests {
         // bytes_per_sec возвращает ema/10 = ~1000.
         let bps = c.bytes_per_sec();
         assert!(bps > 850 && bps < 1100, "bps={}, expected ~1000", bps);
-    }
-}
-
-/// D-02 helper (testable): pure timing-check для отложенного второго ImFriend.
-/// `true` если слот занят И время пришло.
-#[inline]
-fn second_imfriend_due(pending: &Option<(i64, Vec<u8>)>, cur_tm: i64) -> bool {
-    matches!(pending, Some((due, _)) if cur_tm >= *due)
-}
-
-#[cfg(test)]
-mod d02_tests {
-    use super::*;
-
-    #[test]
-    fn second_imfriend_none_never_due() {
-        let p: Option<(i64, Vec<u8>)> = None;
-        assert!(!second_imfriend_due(&p, 0));
-        assert!(!second_imfriend_due(&p, i64::MAX));
-    }
-
-    #[test]
-    fn second_imfriend_not_due_when_before_deadline() {
-        let p: Option<(i64, Vec<u8>)> = Some((100, vec![1, 2, 3]));
-        assert!(!second_imfriend_due(&p, 0));
-        assert!(!second_imfriend_due(&p, 50));
-        assert!(!second_imfriend_due(&p, 99));
-    }
-
-    #[test]
-    fn second_imfriend_due_at_or_after_deadline() {
-        let p: Option<(i64, Vec<u8>)> = Some((100, vec![1, 2, 3]));
-        assert!(second_imfriend_due(&p, 100));
-        assert!(second_imfriend_due(&p, 101));
-        assert!(second_imfriend_due(&p, 1_000_000));
-    }
-
-    #[test]
-    fn second_imfriend_default_pause_is_32ms() {
-        // Семантический тест: на типичной задержке (32мс — wire-compat константа из Delphi)
-        // после планирования в момент T, due срабатывает в T+32, не раньше.
-        let scheduled_at = 1000;
-        let due = scheduled_at + 32;
-        let p: Option<(i64, Vec<u8>)> = Some((due, vec![0xAA]));
-        assert!(!second_imfriend_due(&p, scheduled_at + 31));
-        assert!(second_imfriend_due(&p, scheduled_at + 32));
-    }
-
-    /// Verify что full_reset очищает pending_second_imfriend slot.
-    /// Это критично — иначе при reconnect старый payload отправлен бы повторно.
-    /// Тестируем take() семантику изолированно — без реального socket.
-    #[test]
-    fn take_clears_pending_slot() {
-        let mut pending: Option<(i64, Vec<u8>)> = Some((100, vec![0xDE, 0xAD]));
-        assert!(second_imfriend_due(&pending, i64::MAX));
-        // take() очищает slot — то же что делает check_pending_second_imfriend и full_reset.
-        let taken = pending.take();
-        assert!(taken.is_some());
-        assert!(!second_imfriend_due(&pending, i64::MAX));
     }
 }
 
