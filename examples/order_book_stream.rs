@@ -87,13 +87,11 @@ fn main() {
 
     let applies = Arc::new(AtomicU64::new(0));
     let fulls = Arc::new(AtomicU64::new(0));
-    let full_requests = Arc::new(AtomicU64::new(0));
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
         let applies_seen = Arc::clone(&applies);
         let fulls_seen = Arc::clone(&fulls);
-        let full_requests_seen = Arc::clone(&full_requests);
         client.run_with_dispatcher(
             Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
             &mut dispatcher,
@@ -122,14 +120,6 @@ fn main() {
                                 sells.len()
                             );
                         }
-                        OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
-                            full_requests_seen.fetch_add(1, Ordering::Relaxed);
-                            println!(
-                                "[book] request-full idx={} kind={}",
-                                market_index,
-                                book_kind_name(*book_kind)
-                            );
-                        }
                         OrderBookEvent::Ignored { market_index, book_kind, seq, reason } => {
                             println!(
                                 "[book] ignored idx={} kind={} seq={} reason={reason:?}",
@@ -138,6 +128,7 @@ fn main() {
                                 seq
                             );
                         }
+                        OrderBookEvent::RequestFullNeeded { .. } => {}
                     }
                 }
             }),
@@ -145,10 +136,9 @@ fn main() {
     }
 
     println!(
-        "[done] applies={} fulls={} full-requests={}",
+        "[done] applies={} fulls={}",
         applies.load(Ordering::Relaxed),
-        fulls.load(Ordering::Relaxed),
-        full_requests.load(Ordering::Relaxed)
+        fulls.load(Ordering::Relaxed)
     );
     client.disconnect();
 }

@@ -51,7 +51,6 @@ struct Counters {
     ob_pkts: AtomicU64,
     ob_full: AtomicU64,
     ob_diff: AtomicU64,
-    ob_req_full: AtomicU64,
     ob_stale: AtomicU64,
     ob_cached: AtomicU64,
     ob_no_full_yet: AtomicU64,
@@ -73,7 +72,6 @@ impl Counters {
             ob_pkts: AtomicU64::new(0),
             ob_full: AtomicU64::new(0),
             ob_diff: AtomicU64::new(0),
-            ob_req_full: AtomicU64::new(0),
             ob_stale: AtomicU64::new(0),
             ob_cached: AtomicU64::new(0),
             ob_no_full_yet: AtomicU64::new(0),
@@ -354,13 +352,6 @@ fn main() {
                                         counters_cb.ob_diff.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
-                                OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
-                                    counters_cb.ob_req_full.fetch_add(1, Ordering::Relaxed);
-                                    events_to_log.push(format!(
-                                        "[OB-REQ-FULL] mkt={} bk={} (corrupted/gap)",
-                                        market_index, book_kind
-                                    ));
-                                }
                                 OrderBookEvent::Ignored { market_index, book_kind, seq, reason } => {
                                     match reason {
                                         OBApplyResult::Stale => {
@@ -384,6 +375,7 @@ fn main() {
                                         _ => {}
                                     }
                                 }
+                                OrderBookEvent::RequestFullNeeded { .. } => {}
                             }
                         }
                         Event::Balance(bev) => match bev {
@@ -473,7 +465,7 @@ fn main() {
                     t0,
                     &format!(
                         "[STATS] trades_apply={} gap_det={} gap_fill={} bkt_rec={} bkt_lost={} | \
-                         ob_full={} ob_diff={} ob_req_full={} ob_cached={} | \
+                         ob_full={} ob_diff={} ob_cached={} | \
                          parse_fail={}",
                         counters_cb.trades_apply.load(Ordering::Relaxed),
                         counters_cb.gap_detected.load(Ordering::Relaxed),
@@ -482,7 +474,6 @@ fn main() {
                         counters_cb.bucket_lost.load(Ordering::Relaxed),
                         counters_cb.ob_full.load(Ordering::Relaxed),
                         counters_cb.ob_diff.load(Ordering::Relaxed),
-                        counters_cb.ob_req_full.load(Ordering::Relaxed),
                         counters_cb.ob_cached.load(Ordering::Relaxed),
                         counters_cb.parse_failed.load(Ordering::Relaxed),
                     ),
@@ -520,7 +511,7 @@ fn main() {
         t0,
         &format!(
             "[FINAL] trades_apply={} gap_det={} gap_fill={} bkt_rec={} bkt_lost={} | \
-             ob_full={} ob_diff={} ob_req_full={} ob_cached={} ob_no_full_yet={} | \
+             ob_full={} ob_diff={} ob_cached={} ob_no_full_yet={} | \
              parse_fail={} srv_logs={}",
             counters.trades_apply.load(Ordering::Relaxed),
             counters.gap_detected.load(Ordering::Relaxed),
@@ -529,7 +520,6 @@ fn main() {
             counters.bucket_lost.load(Ordering::Relaxed),
             counters.ob_full.load(Ordering::Relaxed),
             counters.ob_diff.load(Ordering::Relaxed),
-            counters.ob_req_full.load(Ordering::Relaxed),
             counters.ob_cached.load(Ordering::Relaxed),
             counters.ob_no_full_yet.load(Ordering::Relaxed),
             counters.parse_failed.load(Ordering::Relaxed),

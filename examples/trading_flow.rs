@@ -5,8 +5,8 @@
 //! - auto-replay подписок при reconnect / ServerToken change (через `SubscriptionRegistry`)
 //! - auto-fetch markets indexes при `PeerAppToken change` + блокировка
 //!   `TradesStream`/`OrderBook` пакетов до завершения синхронизации
-//! - auto-send `emk_RequestOrderBookFull` при `RequestFullNeeded` (corruption /
-//!   missing Full snapshot) — потребитель НЕ должен это вызывать сам
+//! - auto-send `emk_RequestOrderBookFull` при corrupted orderbook cache /
+//!   missing Full snapshot — потребитель НЕ должен это вызывать сам
 //! - periodic `trades.tick()` каждые ~100мс для resend missing TradesStream пакетов
 //! - timeout protection для auto-fetch indexes (UDP-loss recovery, см.
 //!   `check_indexes_fetch_timeout`)
@@ -200,7 +200,7 @@ fn main() {
     //
     // В этом цикле:
     //   - dispatch_into_active авто-отправит emk_RequestOrderBookFull при
-    //     RequestFullNeeded (corruption detection)
+    //     corrupted orderbook cache
     //   - periodic trades.tick() каждые 100мс автоматически восстановит
     //     потерянные TradesStream пакеты через emk_TradesResend
     //   - check_indexes_fetch_timeout раз за тик защитит от UDP-потери ответа

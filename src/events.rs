@@ -101,7 +101,7 @@ impl StrategySnapshotReply {
 pub enum Event {
     /// Order channel: создание/обновление/удаление ордера.
     Order(OrderEvent),
-    /// OrderBook channel: применение/запрос Full snapshot.
+    /// OrderBook channel: applied updates/low-level cache control events.
     OrderBook(OrderBookEvent),
     /// TradesStream channel: одно событие (Apply/Duplicate/GapDetected/...).
     /// audit_rust_quality #11: variant изменён с `Trades(Vec<TradesEvent>)` на
@@ -380,12 +380,14 @@ impl EventDispatcher {
     /// [`Self::dispatch_into_active`]. Этот вариант:
     ///   1. блокирует обработку TradesStream/OrderBook пакетов когда
     ///      `MarketsState.indexes_synchronized = false` (event drop'ается тихо);
-    ///   2. автоматически шлёт `api_request_order_book_full` на
-    ///      `OrderBookEvent::RequestFullNeeded` — потребитель не должен делать это сам;
+    ///   2. automatically sends `api_request_order_book_full` when orderbook
+    ///      cache recovery needs a fresh Full snapshot; this control event is
+    ///      consumed internally and is not delivered to the application callback;
     ///   3. automatically sends `TOrderStatusRequest` for orders missing from a
     ///      fresh `TAllStatuses` snapshot, matching Delphi `CleanupMissingWorkers`.
     /// `dispatch_into` (без Client) — backwards compat, потребитель должен сам
-    /// обрабатывать RequestFullNeeded events.
+    /// использовать `dispatch_into_active`, чтобы recovery-actions оставались
+    /// внутри библиотеки.
     ///
     /// Pattern для performance-sensitive потребителей:
     /// ```ignore
@@ -599,8 +601,9 @@ impl EventDispatcher {
     /// Auto-action: `OrderBookEvent::RequestFullNeeded` → автоматически отправляется
     /// `emk_RequestOrderBookFull` через `send_api_request` (fire-and-forget — без
     /// регистрации в pending API registry, т.к. response придёт обычным OrderBook-пакетом
-    /// который сам разберёт диспетчер). Event всё равно эмиттится в `out` — для UI
-    /// индикатора «загружаем стакан» — но **потребитель не должен слать запрос сам**.
+    /// который сам разберёт диспетчер). Control-event потребляется здесь и не
+    /// эмиттится в `out`: в Delphi `ProcessOrderBookPacket` вызывает
+    /// `RequestOrderBookFull` внутри engine и наружу не отдаёт отдельный callback.
     ///
     /// Дедупликация: за один `dispatch_into_active` вызов на одну `(market_idx, kind)`
     /// пару отправляется максимум один запрос, даже если Grouped-payload содержит
@@ -664,8 +667,7 @@ impl EventDispatcher {
         let start_len = out.len();
         self.dispatch_into(cmd, payload, now_ms, out);
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms); auto-actions
-        // ниже не зависят от времени (события OrderBookEvent::RequestFullNeeded и
-        // TradesEvent::GapDetected уже содержат всё нужное).
+        // ниже не зависят от времени.
 
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
@@ -684,18 +686,27 @@ impl EventDispatcher {
         // statuses, then requests exact status for workers absent from the fresh
         // snapshot. The application must not know about snapshot flags.
         let mut order_snapshot_applied = false;
-        for ev in &out[start_len..] {
-            match ev {
+        let mut idx = start_len;
+        while idx < out.len() {
+            let remove_event = match &out[idx] {
                 Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) => {
                     to_request_full.insert((*market_index, *book_kind));
+                    true
                 }
                 Event::Order(OrderEvent::Snapshot) => {
                     order_snapshot_applied = true;
+                    false
                 }
                 Event::Strat(crate::state::StratEvent::SnapshotRequested { uid }) => {
                     snapshot_requested_uid = Some(*uid);
+                    false
                 }
-                _ => {}
+                _ => false,
+            };
+            if remove_event {
+                out.remove(idx);
+            } else {
+                idx += 1;
             }
         }
         for (mi, bk) in to_request_full {
@@ -755,13 +766,17 @@ mod tests {
         SERVER_TIME_DELTA_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn order_book_payload(market_index: u16) -> Vec<u8> {
+    fn order_book_payload_with(market_index: u16, seq: u16, is_full: bool) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.extend_from_slice(&market_index.to_le_bytes());
-        raw.extend_from_slice(&1u16.to_le_bytes());
-        raw.push(1); // Full, Futures.
+        raw.extend_from_slice(&seq.to_le_bytes());
+        raw.push(if is_full { 1 } else { 0 }); // Futures.
         raw.extend_from_slice(&0u16.to_le_bytes()); // buy_count=0, sell_count=0.
         crate::compression::synlz_compress(&raw)
+    }
+
+    fn order_book_payload(market_index: u16) -> Vec<u8> {
+        order_book_payload_with(market_index, 1, true)
     }
 
     fn empty_all_statuses_payload(uid: u64) -> Vec<u8> {
@@ -1053,6 +1068,65 @@ mod tests {
         }
 
         assert!(found, "missing order must trigger TOrderStatusRequest");
+    }
+
+    #[test]
+    fn dispatch_into_active_consumes_orderbook_full_request_event() {
+        let mut d = EventDispatcher::new();
+        d.markets.indexes_synchronized = true;
+        d.markets.market_indexes = vec!["BTCUSDT".to_string()];
+        d.markets.by_name.insert("BTCUSDT".to_string(), 0);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+
+        d.dispatch_into_active(
+            Command::OrderBook,
+            &order_book_payload_with(0, 1, true),
+            1000,
+            &mut out,
+            &mut client,
+        );
+        out.clear();
+        d.dispatch_into_active(
+            Command::OrderBook,
+            &order_book_payload_with(0, 10, false),
+            1010,
+            &mut out,
+            &mut client,
+        );
+        out.clear();
+        d.dispatch_into_active(
+            Command::OrderBook,
+            &order_book_payload_with(0, 11, false),
+            2000,
+            &mut out,
+            &mut client,
+        );
+
+        assert!(
+            !out.iter().any(|ev| matches!(
+                ev,
+                Event::OrderBook(OrderBookEvent::RequestFullNeeded { .. })
+            )),
+            "active dispatcher должен потреблять RequestFullNeeded как внутренний control-event"
+        );
+
+        let mut found = false;
+        while let Ok(ev) = client.event_rx.try_recv() {
+            let crate::client::ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            if msg.item.cmd == Command::API as u8
+                && msg.item.data.get(11).copied()
+                    == Some(crate::commands::engine_api::EngineMethod::RequestOrderBookFull as u8)
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "RequestOrderBookFull must still be sent internally");
     }
 
     #[test]

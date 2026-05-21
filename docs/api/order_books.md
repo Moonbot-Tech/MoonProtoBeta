@@ -37,18 +37,18 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
             } => {
                 redraw_book(*market_index, *book_kind, *is_full, *seq, buys, sells);
             }
-            OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
-                show_loading_book(*market_index, *book_kind);
-            }
             OrderBookEvent::Ignored { .. } => {}
+            OrderBookEvent::RequestFullNeeded { .. } => {}
         }
     }
 }));
 ```
 
-`RequestFullNeeded` is emitted for UI awareness. When using
-`run_with_dispatcher`, the actual `emk_RequestOrderBookFull` request is already
-sent by the library.
+When using `run_with_dispatcher` or `run_with_dispatcher_state`, corrupted-cache
+recovery is fully internal: the library sends `emk_RequestOrderBookFull` and does
+not surface a separate callback event for that request. The low-level
+`RequestFullNeeded` variant exists for manual `dispatch_into` / `OrderBooks`
+users that do not pass a `Client` to the dispatcher.
 
 The dispatcher applies each `Apply` event before invoking the callback. If the
 UI needs the current book, prefer `run_with_dispatcher_state` and read it from
@@ -120,6 +120,9 @@ pub enum OrderBookEvent {
     Ignored { market_index: u16, book_kind: u8, seq: u16, reason: ApplyResult },
 }
 ```
+
+`RequestFullNeeded` is a low-level control event. The active dispatcher consumes
+it internally before invoking the application callback.
 
 Wire updates use `OrderLevel` (`f32`) because the protocol writes Delphi
 `Single` values. `OrderBookSnapshot` stores applied levels as `f64`, matching

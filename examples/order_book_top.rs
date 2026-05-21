@@ -78,13 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let updates = Arc::new(AtomicU64::new(0));
-    let full_requests = Arc::new(AtomicU64::new(0));
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
         let target_market = market.clone();
         let updates_seen = Arc::clone(&updates);
-        let full_requests_seen = Arc::clone(&full_requests);
         let tick = Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now()));
 
         client.run_with_dispatcher_state(
@@ -115,19 +113,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(|| "none".to_string());
                     println!("[top] {name} {} seq={} bid={} ask={}", kind_name(kind), seq, bid, ask);
                 }
-                Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, book_kind }) => {
-                    full_requests_seen.fetch_add(1, Ordering::Relaxed);
-                    println!("[recover] request-full market_idx={market_index} kind={book_kind}");
-                }
                 _ => {}
             }),
         );
     }
 
     println!(
-        "[done] top-updates={} full-requests={}",
-        updates.load(Ordering::Relaxed),
-        full_requests.load(Ordering::Relaxed)
+        "[done] top-updates={}",
+        updates.load(Ordering::Relaxed)
     );
     client.disconnect();
     Ok(())

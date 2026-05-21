@@ -19,7 +19,8 @@
 //!     match ev {
 //!         OrderBookEvent::Apply { .. } => /* read state.book_by_kind(...) */,
 //!         OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
-//!             // отправить emk_RequestOrderBookFull через client.send_api_request
+//!             // Low-level mode only: send emk_RequestOrderBookFull yourself.
+//!             // EventDispatcher::dispatch_into_active consumes this internally.
 //!             let req = commands::engine_request::request_order_book_full(market_index, book_kind);
 //!             client.send_api_request(&req);
 //!         }
@@ -244,8 +245,9 @@ pub enum OrderBookEvent {
         buys: Vec<crate::commands::order_book::OrderLevel>,
         sells: Vec<crate::commands::order_book::OrderLevel>,
     },
-    /// Клиент должен отправить `emk_RequestOrderBookFull` (throttle уже учтён).
-    /// Используй `commands::engine_request::request_order_book_full(market_index, book_kind)`.
+    /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
+    /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
+    /// before invoking application callbacks.
     RequestFullNeeded {
         market_index: u16,
         book_kind: u8,
@@ -274,7 +276,7 @@ impl OrderBooks {
     /// Обработать один распарсенный `MPC_OrderBook` пакет.
     /// `now_ms` — текущее время в миллисекундах (из `client.now_ms()`).
     /// Возвращает список событий: Apply (может быть несколько при разгребании cache), RequestFullNeeded, Ignored.
-    #[must_use = "OrderBookEvent's must be processed — пропуск RequestFullNeeded ведёт к persistent corrupted orderbook"]
+    #[must_use = "OrderBookEvent's must be processed — low-level пропуск RequestFullNeeded ведёт к persistent corrupted orderbook"]
     pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
         let mut events = Vec::new();

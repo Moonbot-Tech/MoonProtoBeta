@@ -66,7 +66,6 @@ struct SharedStats {
     trades_dup: AtomicU64,
     orderbook_apply: AtomicU64,
     orderbook_full: AtomicU64,
-    orderbook_req_full: AtomicU64,
     balance_events: AtomicU64,
     order_events: AtomicU64,
     settings_events: AtomicU64,
@@ -848,13 +847,6 @@ fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
                     }
                 }
             }
-            OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
-                stats.orderbook_req_full.fetch_add(1, Ordering::Relaxed);
-                println!(
-                    "[{label}] orderbook full requested idx={} kind={}",
-                    market_index, book_kind
-                );
-            }
             _ => {}
         },
         Event::Balance(_) => {
@@ -1143,14 +1135,13 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             stats.lifecycle_bind_failed.load(Ordering::Relaxed),
         );
         println!(
-            "[{label}] events={} trades={} trades_gap={} dup={} ob={} ob_full={} ob_req_full={} balance={} order={} settings={} markets={} engine={} logs={} parse_failed={}",
+            "[{label}] events={} trades={} trades_gap={} dup={} ob={} ob_full={} balance={} order={} settings={} markets={} engine={} logs={} parse_failed={}",
             stats.events_total.load(Ordering::Relaxed),
             trades,
             stats.trades_gap.load(Ordering::Relaxed),
             stats.trades_dup.load(Ordering::Relaxed),
             ob,
             stats.orderbook_full.load(Ordering::Relaxed),
-            stats.orderbook_req_full.load(Ordering::Relaxed),
             stats.balance_events.load(Ordering::Relaxed),
             stats.order_events.load(Ordering::Relaxed),
             stats.settings_events.load(Ordering::Relaxed),

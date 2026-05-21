@@ -2607,7 +2607,8 @@ impl Client {
     /// В отличие от `run()` который требует `on_data: FnMut(Command, &[u8])`, этот
     /// метод сам прогоняет входящий payload через `dispatcher.dispatch_into_active`
     /// и выполняет **auto-actions**:
-    ///   - `OrderBookEvent::RequestFullNeeded` → auto-send `api_request_order_book_full`;
+    ///   - orderbook corrupted-cache recovery → auto-send `api_request_order_book_full`
+    ///     without surfacing a separate callback event;
     ///   - `TradesEvent::GapDetected` → auto-tick + send `api_trades_resend` batches;
     ///   - Auto-tick `trades_state.tick()` каждые 100 мс из main loop (соответствует
     ///     Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`);
