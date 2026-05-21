@@ -8,8 +8,10 @@
 //! Этот модуль применяет полученные `BalanceUpdate` к локальной модели.
 //!
 //! `cmd_id`:
-//! - **2** = `TBalanceCommand` (legacy snapshot) — обновить globals + items.
-//! - **3** = `TBalanceSnapshotFull` — то же что 2 + маркеты не в Items сбрасываются в default.
+//! - **2** = exact `TBalanceCommand` — parsed by the registry, but ignored by
+//!   Delphi `ProcessBalanceCommand`.
+//! - **3** = `TBalanceSnapshotFull` — globals + items; маркеты не в Items
+//!   сбрасываются в default.
 //! - **4** = `TBalanceIncrUpdate` — incremental: GlobalChanged-gated globals + merge items.
 //!
 //! В Delphi epoch для incremental проверяется на уровне отдельного рынка
@@ -37,7 +39,7 @@ pub struct GlobalBalance {
 /// получении `MPC_Balance` пакетов от сервера. Используется в [`crate::events::EventDispatcher`].
 ///
 /// **Семантика snapshot vs incremental**:
-/// - `cmd_id=2` (legacy snapshot): обновляются полученные маркеты, остальные не трогаются.
+/// - `cmd_id=2` (exact `TBalanceCommand`): не применяется к state, как в Delphi.
 /// - `cmd_id=3` (full snapshot): обновляются полученные, **остальные сбрасываются**.
 /// - `cmd_id=4` (incremental): обновление дельты + опциональный обнов globals.
 #[derive(Debug, Clone, Default)]
@@ -59,10 +61,10 @@ pub struct BalancesState {
 pub enum BalanceEvent {
     /// Применён full snapshot (cmd_id=3): N маркетов получили данные, остальные сброшены в default.
     SnapshotApplied { count: usize, epoch: u16 },
-    /// Применён legacy snapshot (cmd_id=2): N маркетов обновлены, остальные не трогаются.
-    LegacySnapshotApplied { count: usize, epoch: u16 },
     /// Применён incremental update: N маркетов изменилось, globals обновлены если global_changed=true.
     IncrementalApplied { count: usize, epoch: u16, global_changed: bool },
+    /// Команда распознана, но Delphi-клиент не применяет её к balance state.
+    Ignored { cmd_id: u8, epoch: u16 },
     /// Epoch не прошёл (старее last_epoch wrap-safe).
     EpochStale { incoming: u16, last: u16 },
 }
@@ -72,8 +74,8 @@ pub enum BalanceEvent {
 /// мог бы accumulate'ить unique market_names через incremental updates (cmd_id=4)
 /// → unbounded HashMap. См. `audit_robustness` C-3.
 ///
-/// Cap применяется в `apply_legacy_snapshot` (cmd_id=2) и `apply_incremental`
-/// (cmd_id=4). `apply_full_snapshot` (cmd_id=3) не нуждается в cap — full snapshot
+/// Cap применяется в `apply_incremental` (cmd_id=4). `apply_full_snapshot`
+/// (cmd_id=3) не нуждается в cap — full snapshot
 /// заменяет map целиком (любой DoS-flood сервера ограничен размером **одного**
 /// snapshot'а).
 pub const MAX_BALANCE_MARKETS: usize = 20_000;
@@ -136,26 +138,11 @@ impl BalancesState {
     /// `MoonProtoFunc.pas:188-203`, применяется per-market как в Delphi.
     pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
         match upd.cmd_id {
-            2 => self.apply_legacy_snapshot(upd),
+            2 => BalanceEvent::Ignored { cmd_id: upd.cmd_id, epoch: upd.epoch },
             3 => self.apply_full_snapshot(upd),
             4 => self.apply_incremental(upd),
-            _ => BalanceEvent::EpochStale { incoming: upd.epoch, last: self.last_epoch }, // unknown cmd → no-op
+            _ => BalanceEvent::Ignored { cmd_id: upd.cmd_id, epoch: upd.epoch },
         }
-    }
-
-    fn apply_legacy_snapshot(&mut self, upd: BalanceUpdate) -> BalanceEvent {
-        self.global = GlobalBalance {
-            btc_balance_total: upd.btc_balance_total,
-            btc_balance_locked: upd.btc_balance_locked,
-            btc_balance_full: upd.btc_balance_full,
-            special_coin_balance: upd.special_coin_balance,
-        };
-        let mut count = 0;
-        for it in upd.items {
-            if self.insert_balance_mark_epoch(it, upd.epoch) { count += 1; }
-        }
-        self.last_epoch = upd.epoch;
-        BalanceEvent::LegacySnapshotApplied { count, epoch: upd.epoch }
     }
 
     /// Full snapshot (cmd_id=3): маркеты не в Items получают default (Delphi:1253-1275).
@@ -283,13 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_does_not_reset() {
+    fn exact_balance_command_is_ignored_like_delphi() {
         let mut s = BalancesState::new();
         s.apply(upd(3, 1, vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)]));
-        // cmd_id=2 = legacy — не сбрасывает отсутствующие.
-        s.apply(upd(2, 2, vec![make_item("BTCUSDT", 200.0)]));
+        let mut exact_base = upd(2, 2, vec![make_item("BTCUSDT", 200.0)]);
+        exact_base.btc_balance_total = 99.0;
+
+        let ev = s.apply(exact_base);
+
+        assert!(matches!(ev, BalanceEvent::Ignored { cmd_id: 2, epoch: 2 }));
         assert_eq!(s.len(), 2);
-        assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 200.0);
+        assert_eq!(s.global.btc_balance_total, 1.0);
+        assert_eq!(s.last_epoch, 1);
+        assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 100.0);
         assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 50.0);
     }
 

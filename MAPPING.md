@@ -252,12 +252,12 @@
 | # | Delphi | Что | Rust | ✅ |
 |---|---|---|---|---|
 | B1 | TBalanceCommand header: CmdId(1) + ver(2) + UID(8) | base | balance.rs:parse_balance_update | ✅ |
-| B2 | cmd_id_sub: 2=legacy, 3=full, 4=incremental | mode dispatch | BalanceUpdate.cmd_id | ✅ |
+| B2 | cmd_id_sub: 2=base `TBalanceCommand` parsed but not applied by `ProcessBalanceCommand`, 3=full, 4=incremental | mode dispatch | BalanceUpdate.cmd_id + events.rs skip cmd_id=2 | ✅ |
 | B3 | epoch:u16 + global_changed:bool + (if global) global_data | global block | BalanceUpdate.global + epoch | ✅ |
 | B4 | count:integer + items[]: market_name:utf8 + balance_hash:uint64 + flags:cardinal + masked_fields | per-market | BalanceItem.parse | ✅ |
 | B5 | 22 fields with bitmask flags | optional fields | BalanceItem 22 поля | ✅ |
 | B6 | cmd_id=3 full: missing markets → reset to default | snapshot semantics | state/balances.rs:apply cmd_id=3 | ✅ |
-| B7 | cmd_id=2 legacy: missing not reset | merge semantics | state/balances.rs:apply cmd_id=2 | ✅ |
+| B7 | cmd_id=2 exact `TBalanceCommand`: Delphi parses object, then exact ClassType checks skip both snapshot/increment branches | no state change / no balance event | state/balances.rs:Ignored + events.rs skip cmd_id=2 | ✅ |
 | B8 | cmd_id=4 incremental: merge + global_changed gate | partial update | state/balances.rs:apply cmd_id=4 | ✅ |
 | B9 | Incremental `EpochIsOK(m.LastBalanceEpoch, cmd.Epoch)` per market; full snapshot has no global epoch gate | out-of-order reject | state/balances.rs:last_epoch_by_market | ✅ |
 | B10 | `ApplyBalanceItem`: `bnMaxValue` updates only when `item.bnMaxValue > _eps` | preserve previous max position value | state/balances.rs:preserve_max_value | ✅ |
@@ -440,7 +440,7 @@
 | EV2 | MoonProtoClient.pas:OrderBook handler | dispatch(Command::OrderBook) → parse_order_book_packet → order_books.on_packet → Vec<Event::OrderBook> | ✅ |
 | EV3 | MoonProtoClient.pas:394-407 ProcessTradesStreamCommand | dispatch(Command::TradesStream) → parse_trades_packet → trades.on_packet → Event::Trades | ✅ |
 | EV4 | MoonProtoClient.pas:396-402 ProcessTradesResendBatch | dispatch(Command::TradesResendResponse) → parse_trades_resend_response → on_packet_resend for each | ✅ |
-| EV5 | MoonProtoClient.pas:374-378 Balance/Arb split | dispatch(Command::Balance) → sub_cmd_id=2/3/4 → balances.apply; sub_cmd_id=6 → Arb passthrough | ✅ |
+| EV5 | MoonProtoClient.pas:374-378 Balance/Arb split | dispatch(Command::Balance) → sub_cmd_id=2 parsed/ignored, sub_cmd_id=3/4 → balances.apply; sub_cmd_id=6 → Arb passthrough | ✅ |
 | EV6 | MoonProtoClient.pas:689-800 ProcessStratCommand | dispatch(Command::Strat) → StratCommand::parse → strats.apply | ✅ |
 | EV7 | MoonProtoClient.pas:UI handler | dispatch(Command::UI) → UICommand::parse → settings.apply | ✅ |
 | EV8 | MoonProtoClient.pas:802-876 ProcessApiCommand | dispatch(Command::API) → parse_engine_response → Event::EngineResponse | ✅ |

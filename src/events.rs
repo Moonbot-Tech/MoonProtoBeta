@@ -109,7 +109,9 @@ pub enum Event {
     /// nested Vec allocation на каждом TradesStream пакете. На пике 50K pps это
     /// экономит ~50K Vec alloc/sec + matching dealloc.
     Trade(TradesEvent),
-    /// Balance channel: одно событие на пакет (только для cmd_id_sub 2/3/4).
+    /// Balance channel: one event for full/incremental updates (cmd_id_sub 3/4).
+    /// The exact base `TBalanceCommand` (cmd_id_sub 2) is parsed but ignored,
+    /// matching Delphi `ProcessBalanceCommand`.
     Balance(BalanceEvent),
     /// Arb channel (CmdId=6 внутри MPC_Balance): compact kernel→client payload.
     Arb { uid: u64, payload: ArbPayload },
@@ -473,7 +475,12 @@ impl EventDispatcher {
                 let sub_cmd_id = payload[0];
                 let body = &payload[11..];
                 match sub_cmd_id {
-                    2 | 3 | 4 => match parse_balance(sub_cmd_id, body) {
+                    2 => {
+                        if parse_balance(sub_cmd_id, body).is_none() {
+                            out.push(Event::ParseFailed { cmd, len: payload.len() });
+                        }
+                    }
+                    3 | 4 => match parse_balance(sub_cmd_id, body) {
                         Some(upd) => {
                             let ev = self.balances.apply(upd);
                             out.push(Event::Balance(ev));
@@ -766,6 +773,20 @@ mod tests {
         out
     }
 
+    fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(49);
+        out.push(cmd_id);
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&uid.to_le_bytes());
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(&btc_total.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out
+    }
+
     fn order_status_for_test(
         uid: u64,
         market_name: &str,
@@ -879,6 +900,24 @@ mod tests {
             },
             other => panic!("expected typed Arb event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn dispatcher_ignores_exact_balance_command_id_2_like_delphi() {
+        let mut d = EventDispatcher::new();
+
+        let full = balance_payload(3, 10, 1, 1.0);
+        let events = d.dispatch(Command::Balance, &full, 1000);
+        assert_eq!(events.len(), 1);
+        assert_eq!(d.balances.global.btc_balance_total, 1.0);
+        assert_eq!(d.balances.last_epoch, 1);
+
+        let exact_base = balance_payload(2, 11, 2, 99.0);
+        let events = d.dispatch(Command::Balance, &exact_base, 1001);
+
+        assert!(events.is_empty());
+        assert_eq!(d.balances.global.btc_balance_total, 1.0);
+        assert_eq!(d.balances.last_epoch, 1);
     }
 
     #[test]

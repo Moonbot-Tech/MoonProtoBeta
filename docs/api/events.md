@@ -59,7 +59,7 @@ pub enum Event {
     /// `TradesEvent`s (e.g. `Apply` + `GapFilled`), each is pushed as its own
     /// `Event::Trade(...)` — no nested `Vec` allocation (audit_rust_quality #11).
     Trade(TradesEvent),
-    Balance(BalanceEvent),
+    Balance(BalanceEvent), // full/incremental balance updates (cmd_id 3/4)
     Arb { uid: u64, payload: ArbPayload },
     Strat(StratEvent),
     Settings(SettingsEvent),

@@ -43,10 +43,13 @@ pub struct BalanceItem {
     pub position_type: u8,
 }
 
-/// Full balance update (snapshot or incremental)
+/// Balance update payload.
+///
+/// `cmd_id=2` has the same item layout as a full snapshot, but the Delphi
+/// client parses the object and then ignores it in `ProcessBalanceCommand`.
 #[derive(Debug, Clone)]
 pub struct BalanceUpdate {
-    pub cmd_id: u8,    // 002=legacy, 003=full, 004=incremental
+    pub cmd_id: u8,    // 002=base ignored by client, 003=full, 004=incremental
     pub epoch: u16,
     pub global_changed: bool,  // only for incremental (004)
     pub btc_balance_total: f64,
@@ -82,7 +85,8 @@ pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
 // =============================================================================
 
 /// Parse balance command payload (after command header CmdId+ver+UID stripped).
-/// cmd_id determines the format (002/003 vs 004).
+/// cmd_id determines the wire format (002/003 vs 004); state application is
+/// only defined by Delphi for 003/004.
 pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     let mut pos = 0usize;
 

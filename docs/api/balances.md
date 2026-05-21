@@ -4,8 +4,8 @@ Account and market balances: full snapshots plus incremental updates.
 
 ## Overview
 
-`TBalanceCommand` sends balance updates in three modes:
-- **cmd_id=2 (legacy snapshot)**: updates the markets present in the packet; all other markets are **not reset** (merge update).
+The balance channel uses three related command IDs:
+- **cmd_id=2 (`TBalanceCommand`)**: the Delphi registry can parse it, but the reference client does not apply it to balance state.
 - **cmd_id=3 (full snapshot)**: markets missing from the snapshot are **reset** to default values; global totals are updated.
 - **cmd_id=4 (incremental)**: merges market rows and optionally updates global totals (gated by `global_changed: bool`).
 
@@ -35,11 +35,11 @@ if let Some(update) = parse_balance(cmd_id, &payload) {
         BalanceEvent::SnapshotApplied { count, epoch } => {
             println!("Full snapshot: {} markets, epoch={}", count, epoch);
         }
-        BalanceEvent::LegacySnapshotApplied { count, epoch } => {
-            println!("Legacy merge snapshot: {} markets", count);
-        }
         BalanceEvent::IncrementalApplied { count, epoch, global_changed } => {
             println!("Incremental: {} markets changed, global={}", count, global_changed);
+        }
+        BalanceEvent::Ignored { cmd_id, epoch } => {
+            println!("Ignored balance command id={} epoch={}", cmd_id, epoch);
         }
         BalanceEvent::EpochStale { incoming, last } => {
             // Unknown or explicitly rejected update.
@@ -136,8 +136,8 @@ impl BalancesState {
 ```rust
 pub enum BalanceEvent {
     SnapshotApplied        { count: usize, epoch: u16 },
-    LegacySnapshotApplied  { count: usize, epoch: u16 },
     IncrementalApplied     { count: usize, epoch: u16, global_changed: bool },
+    Ignored                { cmd_id: u8, epoch: u16 },
     EpochStale             { incoming: u16, last: u16 },
 }
 ```
@@ -145,7 +145,7 @@ pub enum BalanceEvent {
 ## Wire format
 
 ```
-TBalanceCommand (CmdId 2/3/4):
+TBalanceCommand family:
   Header: CmdId(1) + ver(2) + UID(8) = 11 bytes
   epoch:                u16
   global_changed:       bool (1)  [cmd_id=4 only]
@@ -160,6 +160,10 @@ TBalanceCommand (CmdId 2/3/4):
     flags:              u32       [bitmask of fields present in this item]
     [field values selected by flags bits]
 ```
+
+`cmd_id=2` shares the full-snapshot wire layout, but `EventDispatcher` ignores
+it after parsing because Delphi `ProcessBalanceCommand` only applies exact
+`TBalanceSnapshotFull` and `TBalanceIncrUpdate` objects.
 
 The `flags` bitmask defines which `BalanceItem` fields are present in the payload.
 Omitted fields decode to their command defaults. Applying an item replaces the
