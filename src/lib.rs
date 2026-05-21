@@ -79,6 +79,11 @@
 //! [`EventDispatcher::queued_events`] and can be drained with
 //! [`EventDispatcher::take_queued_events`].
 //!
+//! For market-level trade commands, build [`commands::trade::TradeCtx`] from the
+//! connected session with [`Client::trade_ctx`] or [`Client::random_trade_ctx`].
+//! Existing-order actions should usually use tracked-order helpers such as
+//! [`Client::cancel_tracked_order`] and [`Client::replace_tracked_order`].
+//!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.
 //! In a single-threaded caller, wait for those receivers through
 //! [`Client::run_until_response`], not direct `rx.recv_timeout(...)`; otherwise
@@ -129,7 +134,7 @@ pub use moonproto_transport::{MoonKey, ServerMsgHeader};
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
     EventFn, EventWithStateFn, InitConfig, InitError, InitResult, LifecycleEvent,
-    RefreshConfig, EngineRequestError,
+    RefreshConfig, EngineRequestError, TradeContextError,
 };
 pub use events::{Event, EventDispatcher, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};

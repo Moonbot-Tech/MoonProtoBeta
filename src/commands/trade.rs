@@ -1250,8 +1250,8 @@ impl VStopUpdate {
 //  Builders для исходящих команд (client → server)
 // ============================================================================
 
-const TRADE_BASE_CURRENCY: u8 = 1; // BC_USDT по умолчанию — клиент должен передавать своё значение
-const TRADE_BASE_PLATFORM: u8 = 4; // Platform_FBinance — клиент должен передавать своё значение
+const TRADE_BASE_CURRENCY: u8 = 1; // Legacy BC_USDT fallback for low-level builders.
+const TRADE_BASE_PLATFORM: u8 = 4; // Legacy Platform_FBinance fallback for low-level builders.
 
 fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.push(cmd_id);
@@ -1273,7 +1273,13 @@ fn write_trade_epoch_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64, market_name
     out.push(status as u8);
 }
 
-/// Параметры билдера, общие для большинства trade команд.
+/// Route fields shared by client-originated trade command builders.
+///
+/// Regular applications should obtain this from [`crate::Client::trade_ctx`],
+/// [`crate::Client::random_trade_ctx`], or from tracked order state via
+/// [`crate::state::Order::trade_ctx`]. Low-level protocol tools can use
+/// [`TradeCtx::with_route`] when they intentionally provide raw Delphi enum
+/// ordinals themselves.
 #[derive(Debug, Clone, Copy)]
 pub struct TradeCtx {
     pub uid: u64,
@@ -1282,8 +1288,26 @@ pub struct TradeCtx {
 }
 
 impl TradeCtx {
+    /// Build a context with explicit Delphi route ordinals.
+    ///
+    /// `currency` is `Ord(cfg.BaseCurrency)` and `platform` is
+    /// `Ord(cfg.Header.Current)` on the server. Prefer the higher-level helpers
+    /// on [`crate::Client`] unless you are writing a protocol tool.
+    pub fn with_route(uid: u64, currency: u8, platform: u8) -> Self {
+        Self { uid, currency, platform }
+    }
+
+    /// Legacy Binance-USDT route shortcut.
+    ///
+    /// This keeps old low-level callers compiling, but it is not a safe default
+    /// for multi-server or non-Binance sessions. Use [`crate::Client::trade_ctx`]
+    /// after `BaseCheck`, [`crate::Client::random_trade_ctx`], or
+    /// [`TradeCtx::with_route`] with explicit route bytes.
+    #[deprecated(
+        note = "use Client::trade_ctx/random_trade_ctx after BaseCheck, or TradeCtx::with_route for explicit low-level route"
+    )]
     pub fn new(uid: u64) -> Self {
-        Self { uid, currency: TRADE_BASE_CURRENCY, platform: TRADE_BASE_PLATFORM }
+        Self::with_route(uid, TRADE_BASE_CURRENCY, TRADE_BASE_PLATFORM)
     }
 }
 
@@ -1598,7 +1622,7 @@ mod tests {
 
     #[test]
     fn order_replace_builder_uses_delphi_client_epoch_header() {
-        let ctx = TradeCtx::new(0x0102_0304_0506_0708);
+        let ctx = TradeCtx::with_route(0x0102_0304_0506_0708, 1, 4);
         let payload = build_order_replace(ctx, "BTCUSDT", OrderType::Sell, 50100.25);
 
         match TradeCommand::parse(&payload).expect("valid OrderReplace") {
@@ -1615,7 +1639,7 @@ mod tests {
 
     #[test]
     fn turn_panic_sell_builder_uses_delphi_client_epoch_header() {
-        let ctx = TradeCtx::new(0x1112_1314_1516_1718);
+        let ctx = TradeCtx::with_route(0x1112_1314_1516_1718, 1, 4);
         let payload = build_turn_panic_sell(ctx, "ETHUSDT", true);
 
         match TradeCommand::parse(&payload).expect("valid TurnPanicSell") {

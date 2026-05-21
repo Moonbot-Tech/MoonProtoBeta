@@ -134,6 +134,23 @@ subscription value independent from `subscribe_trades`.
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
 needs custom progress UI between connection readiness and the init requests.
 
+## Trade Context
+
+Market-level trade commands need the active server route in their wire header:
+`base_currency_code` and `exchange_code` from `server_info()`. After
+`connect_and_init` with `base_check=true`, build that route with:
+
+```rust
+let ctx = client.random_trade_ctx()?;
+client.new_order(ctx, "BTCUSDT", false, 50_000.0, 0, 0.001);
+```
+
+If the application uses a custom init flow, call `request_base_check` first or
+set `server_info` manually from a parsed BaseCheck response. For actions on an
+order already present in `EventDispatcher::orders()`, prefer the
+`*_tracked_order` wrappers; they derive UID, market, route, and status from the
+tracked order state.
+
 ## Engine API Requests
 
 For common one-shot reads, prefer typed request helpers:

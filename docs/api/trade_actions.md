@@ -7,21 +7,33 @@ correct command class, encryption, priority, retry count, and UKey dedup.
 ## Trade Context
 
 ```rust
-use moonproto::commands::trade::TradeCtx;
-
-let ctx = TradeCtx::new(order_uid);
+let ctx = client.random_trade_ctx()
+    .expect("run BaseCheck before market trade commands");
 ```
 
-For order-keyed commands, `ctx.uid` must be the server task id from `Order.uid`.
-That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
+Trade command headers include the server's base-currency and exchange ordinals.
+For market-level commands, derive them from the active session with
+`Client::trade_ctx(uid)` or `Client::random_trade_ctx()`. These methods return
+`TradeContextError` until `emk_BaseCheck` has filled `client.server_info()`;
+`connect_and_init` does that automatically when `InitConfig::base_check` is
+enabled.
+
+For order-keyed commands, `ctx.uid` must be the server task id from `Order.uid`;
+that id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
 If the command targets an order already present in `EventDispatcher::orders()`,
 prefer `order.trade_ctx()` or the `*_tracked_order` wrappers below. They also
 preserve the currency/platform bytes carried by the server-side order state.
+
+`TradeCtx::with_route(uid, currency, platform)` is available for low-level tools
+that intentionally provide raw Delphi enum ordinals. `TradeCtx::new(uid)` is a
+legacy Binance-USDT shortcut and should not be used by regular applications.
 
 ## Wrappers
 
 | Method | What it sends |
 |---|---|
+| `trade_ctx(uid)` | Build a `TradeCtx` from `server_info()` route fields. |
+| `random_trade_ctx()` | Build a session-derived `TradeCtx` with a random command UID. |
 | `new_order(ctx, market, is_short, price, strat_id, order_size)` | Open a new order. |
 | `replace_order(ctx, market, order_type, new_price)` | Move an order price. |
 | `replace_tracked_order(order, order_type, new_price)` | Move a tracked order price without rebuilding `TradeCtx`. |
@@ -66,7 +78,8 @@ let order = dispatcher.orders().get(order_uid).expect("known order");
 client.replace_tracked_order(order, OrderType::Sell, 50100.0);
 client.cancel_tracked_order(order);
 
-let ctx = order.trade_ctx();
+let ctx = client.random_trade_ctx()
+    .expect("run BaseCheck before market trade commands");
 
 client.move_all_sells(
     ctx,

@@ -215,11 +215,7 @@ impl Order {
     /// server-side order state. This avoids hard-coding the current exchange
     /// configuration in consumers.
     pub fn trade_ctx(&self) -> TradeCtx {
-        TradeCtx {
-            uid: self.uid,
-            currency: self.currency,
-            platform: self.platform,
-        }
+        TradeCtx::with_route(self.uid, self.currency, self.platform)
     }
 
     /// Причина закрытия как enum. Удобный getter для UI.

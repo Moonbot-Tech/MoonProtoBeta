@@ -31,7 +31,6 @@ use moonproto::events::{EventDispatcher, Event};
 use moonproto::key_import;
 use moonproto::ntp;
 use moonproto::state::OrderEvent;
-use moonproto::commands::trade::TradeCtx;
 
 fn main() {
     // env_logger опционально — раскомментируй если нужны log message'и:
@@ -178,12 +177,18 @@ fn main() {
 
     // ---- 9. Phase 4: пример торговой операции (закомментировано) ----
     println!("\n[phase 4] example trade operations (commented out, uncomment to send) ...");
-    let _example_ctx = TradeCtx { uid: rand::random(), currency: 0u8, platform: 0u8 };
+    let _example_ctx = client.random_trade_ctx();
+    if let Err(err) = &_example_ctx {
+        println!("[phase 4] trade route unavailable: {err}");
+    }
 
     // Новый ордер (запрещено на чужом сервере — uncomment только для теста).
     /*
+    let ctx = client
+        .random_trade_ctx()
+        .expect("run BaseCheck before sending market trade commands");
     client.new_order(
-        _example_ctx,
+        ctx,
         "BTCUSDT",       // market
         false,           // is_short
         50_000.0,        // price

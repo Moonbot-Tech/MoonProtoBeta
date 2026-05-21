@@ -170,6 +170,21 @@ let orders = client.request_order_snapshot(&mut dispatcher, Duration::from_secs(
 println!("active orders={}", orders.len());
 ```
 
+## Trade Actions
+
+For market-level trade commands, build `TradeCtx` from the connected session so
+the wire header uses the server's exchange and base-currency ordinals:
+
+```rust
+let ctx = client.random_trade_ctx()?;
+client.new_order(ctx, "BTCUSDT", false, 50_000.0, 0, 0.001);
+```
+
+`random_trade_ctx` returns `TradeContextError` until `BaseCheck` has filled
+`client.server_info()`. `connect_and_init` does this when `base_check` is
+enabled. For actions on existing orders, use tracked-order wrappers such as
+`cancel_tracked_order` and `replace_tracked_order`.
+
 ## Subscriptions
 
 Use the registry-aware subscription API:

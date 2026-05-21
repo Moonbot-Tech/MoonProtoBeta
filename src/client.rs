@@ -438,6 +438,57 @@ impl std::fmt::Display for EngineRequestError {
 
 impl std::error::Error for EngineRequestError {}
 
+/// Error returned when a session-derived [`crate::commands::trade::TradeCtx`]
+/// cannot be built yet.
+///
+/// Trade command wire headers carry two Delphi enum ordinals from the active
+/// server session: `cfg.BaseCurrency` and `cfg.Header.Current`. They are learned
+/// from `emk_BaseCheck`, so applications that skipped BaseCheck must either run
+/// it or use the explicit low-level [`crate::commands::trade::TradeCtx::with_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TradeContextError {
+    /// `ServerInfo::exchange_code` is missing.
+    pub missing_exchange_code: bool,
+    /// `ServerInfo::base_currency_code` is missing.
+    pub missing_base_currency_code: bool,
+}
+
+impl TradeContextError {
+    fn from_server_info(info: &ServerInfo) -> Option<Self> {
+        let err = Self {
+            missing_exchange_code: info.exchange_code.is_none(),
+            missing_base_currency_code: info.base_currency_code.is_none(),
+        };
+        if err.missing_exchange_code || err.missing_base_currency_code {
+            Some(err)
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for TradeContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.missing_exchange_code, self.missing_base_currency_code) {
+            (true, true) => write!(
+                f,
+                "trade route is unavailable: run BaseCheck first (missing exchange_code and base_currency_code)"
+            ),
+            (true, false) => write!(
+                f,
+                "trade route is unavailable: run BaseCheck first (missing exchange_code)"
+            ),
+            (false, true) => write!(
+                f,
+                "trade route is unavailable: run BaseCheck first (missing base_currency_code)"
+            ),
+            (false, false) => write!(f, "trade route is available"),
+        }
+    }
+}
+
+impl std::error::Error for TradeContextError {}
+
 /// Lifecycle event — уведомления о смене состояния канала связи с сервером.
 ///
 /// Подключай callback через [`Client::on_lifecycle`]. Callback выполняется в
@@ -1230,6 +1281,46 @@ impl Client {
     /// (минуя `run_init_sequence`) и хочет вручную распарсить ответ `api_base_check`.
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
         self.server_info = info;
+    }
+
+    /// Build a trade command context from the active server route.
+    ///
+    /// This is the recommended path for market-level trade commands such as
+    /// [`Self::new_order`], [`Self::move_all_sells`], or position close/split
+    /// commands. It uses `ServerInfo::base_currency_code` and
+    /// `ServerInfo::exchange_code`, which are filled by `connect_and_init` /
+    /// `run_init_sequence` when `InitConfig::base_check` is enabled, or by
+    /// [`Self::request_base_check`].
+    ///
+    /// Existing-order actions should usually use the `*_tracked_order` wrappers
+    /// instead, because they derive the route and current status from
+    /// `EventDispatcher::orders()` state.
+    pub fn trade_ctx(
+        &self,
+        uid: u64,
+    ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
+        match (
+            self.server_info.base_currency_code,
+            self.server_info.exchange_code,
+        ) {
+            (Some(currency), Some(platform)) => {
+                Ok(crate::commands::trade::TradeCtx::with_route(uid, currency, platform))
+            }
+            _ => Err(TradeContextError::from_server_info(&self.server_info)
+                .expect("route fields are missing")),
+        }
+    }
+
+    /// Build a session-derived trade context with a random command UID.
+    ///
+    /// Use this for client-originated market commands where the UID only needs to
+    /// be unique for the outgoing command. For actions on an existing order,
+    /// prefer tracked-order wrappers because their UID must be the server order
+    /// task id.
+    pub fn random_trade_ctx(
+        &self,
+    ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
+        self.trade_ctx(rand::random())
     }
 
     /// Test-only setter для `server_token` — позволяет имитировать состояние после
@@ -6566,6 +6657,35 @@ mod server_info_tests {
         assert_eq!(client_b.server_info().bot_id, Some(200));
         assert_eq!(client_a.server_info().exchange_name.as_deref(), Some("Binance"));
         assert_eq!(client_b.server_info().exchange_name.as_deref(), Some("Bybit"));
+    }
+
+    #[test]
+    fn trade_ctx_requires_base_check_route_fields() {
+        let client = Client::new(dummy_cfg());
+
+        let err = client
+            .trade_ctx(0x0102_0304_0506_0708)
+            .expect_err("new client has no BaseCheck route");
+        assert!(err.missing_exchange_code);
+        assert!(err.missing_base_currency_code);
+    }
+
+    #[test]
+    fn trade_ctx_uses_server_info_route_fields() {
+        let mut client = Client::new(dummy_cfg());
+        client.set_server_info(ServerInfo {
+            exchange_code: Some(9),
+            base_currency_code: Some(17),
+            ..Default::default()
+        });
+
+        let ctx = client
+            .trade_ctx(0x0102_0304_0506_0708)
+            .expect("route fields are present");
+
+        assert_eq!(ctx.uid, 0x0102_0304_0506_0708);
+        assert_eq!(ctx.currency, 17);
+        assert_eq!(ctx.platform, 9);
     }
 }
 

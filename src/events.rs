@@ -725,11 +725,7 @@ impl EventDispatcher {
             let missing = self.orders.missing_after_snapshot();
             for uid in missing {
                 if let Some(order) = self.orders.get(uid) {
-                    let ctx = crate::commands::trade::TradeCtx {
-                        uid,
-                        currency: order.currency,
-                        platform: order.platform,
-                    };
+                    let ctx = order.trade_ctx();
                     client.request_order_status(ctx, &order.market_name);
                 }
             }
@@ -946,7 +942,7 @@ mod tests {
     #[test]
     fn dispatcher_ctx_unused_warning_silenced() {
         // Suppress dead_code warning for TradeCtx if not used elsewhere
-        let _ = TradeCtx::new(1);
+        let _ = TradeCtx::with_route(1, 1, 4);
     }
 
     #[test]
