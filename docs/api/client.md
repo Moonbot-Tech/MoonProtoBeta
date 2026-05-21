@@ -1,8 +1,8 @@
 # Client
 
 `Client` is the main handle for one MoonProto connection. It owns the UDP socket,
-handshake state, retry queues, pending Engine API registry, subscriptions, NTP
-thread handle, per-client server-time delta, and server identity.
+handshake state, retry queues, pending Engine API registry, subscriptions, a
+process-level NTP guard, per-client server-time delta, and server identity.
 
 Create one `Client` per server.
 
@@ -25,7 +25,7 @@ let mut client = moonproto::Client::new(cfg);
 
 - `mask_ver = 0`;
 - random `client_id`;
-- `ntp_host = Some("pool.ntp.org")`;
+- `ntp_host = Some("pool.ntp.org")` and uses one shared NTP syncer per process;
 - `refresh = RefreshConfig::default()`.
 
 Override only what you need:
@@ -45,6 +45,11 @@ let cfg = ClientConfig::new(host, port, master_key, mac_key)
 ```
 
 Struct literals are still supported for full control.
+
+NTP follows Delphi's process-global model: all clients share one corrected time
+offset and one background syncer. Use the same `ntp_host` for every client in a
+process; if a different host is requested while the syncer is already running,
+the existing worker is reused.
 
 ## Running
 

@@ -2,7 +2,8 @@
 //! `Client` объектами одновременно. Доказывает что multi-server архитектура
 //! работает на практике — каждый Client держит независимое состояние, имеет
 //! свой UDP socket, свой reader thread, свою subscription registry,
-//! свой NTP thread, свой `server_time_delta_handle`.
+//! свой `server_time_delta_handle`. NTP syncer общий на процесс, как Delphi
+//! `TMoonProtoTymeSyncer`.
 //!
 //! Сервер видит каждый Client как отдельную сессию (разные `client_id`, разные
 //! `ServerToken`'ы после handshake), хотя key используется один и тот же. Это

@@ -10,6 +10,8 @@
 
 use log::{debug, warn};
 use std::net::UdpSocket;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NTP_PORT: u16 = 123;
@@ -177,6 +179,91 @@ pub fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
     offset_seconds / 86400.0
 }
 
+struct ProcessNtpState {
+    host: String,
+    shutdown: Arc<AtomicBool>,
+    refs: usize,
+}
+
+static PROCESS_NTP: OnceLock<Mutex<Option<ProcessNtpState>>> = OnceLock::new();
+
+fn process_ntp_state() -> &'static Mutex<Option<ProcessNtpState>> {
+    PROCESS_NTP.get_or_init(|| Mutex::new(None))
+}
+
+/// Process-level guard for the Delphi-style global MoonProto SNTP syncer.
+///
+/// Delphi stores `GlobalMPTimeOffset` in process-global state and starts a
+/// single `TMoonProtoTymeSyncer` thread from the application bootstrap. Rust
+/// keeps the same global offset, so clients in the same process must share the
+/// worker instead of racing several per-client workers against the same value.
+pub(crate) struct ProcessNtpGuard;
+
+impl Drop for ProcessNtpGuard {
+    fn drop(&mut self) {
+        release_process_sync();
+    }
+}
+
+/// Acquire the shared process-level NTP syncer.
+///
+/// While at least one guard is alive, the same background worker is reused by
+/// every `Client`. If a later client asks for another host, the existing worker
+/// is kept: Delphi has only one process-wide SNTP host/offset, so mixing hosts
+/// inside one process would reintroduce last-writer-wins timing.
+pub(crate) fn acquire_process_sync(host: String, apply_fn: fn(f64)) -> Option<ProcessNtpGuard> {
+    acquire_process_sync_with(host, apply_fn, |host, apply_fn| {
+        spawn_sync_thread(host, apply_fn)
+    })
+}
+
+fn acquire_process_sync_with<S>(
+    host: String,
+    apply_fn: fn(f64),
+    spawn: S,
+) -> Option<ProcessNtpGuard>
+where
+    S: FnOnce(String, fn(f64)) -> Arc<AtomicBool>,
+{
+    let mut state = process_ntp_state().lock().ok()?;
+    if let Some(active) = state.as_mut() {
+        if active.host != host {
+            warn!(
+                target: "moonproto::ntp",
+                "NTP sync already runs for host {}; requested {}; sharing the existing process-level syncer",
+                active.host,
+                host
+            );
+        }
+        active.refs = active.refs.saturating_add(1);
+        return Some(ProcessNtpGuard);
+    }
+
+    let shutdown = spawn(host.clone(), apply_fn);
+    if shutdown.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    *state = Some(ProcessNtpState {
+        host,
+        shutdown,
+        refs: 1,
+    });
+    Some(ProcessNtpGuard)
+}
+
+fn release_process_sync() {
+    if let Ok(mut state) = process_ntp_state().lock() {
+        if let Some(active) = state.as_mut() {
+            active.refs = active.refs.saturating_sub(1);
+            if active.refs == 0 {
+                active.shutdown.store(true, Ordering::Relaxed);
+                *state = None;
+            }
+        }
+    }
+}
+
 /// Background NTP sync thread — byte-exact port of `TMoonProtoTymeSyncer.Execute`
 /// (MoonProtoIntStruct.pas:1246-1303).
 ///
@@ -202,9 +289,6 @@ pub fn offset_to_delphi_days(offset_seconds: f64) -> f64 {
 pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sync::atomic::AtomicBool>
     where F: Fn(f64) + Send + 'static
 {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
 
@@ -269,6 +353,8 @@ pub fn spawn_sync_thread<F>(host: String, apply_fn: F) -> std::sync::Arc<std::sy
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
     fn ntp_sync_works() {
@@ -330,5 +416,150 @@ mod tests {
 
         assert!(!result.synced);
         assert_eq!(state.receive_timeout_ms, 600);
+    }
+
+    static PROCESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static PROCESS_SPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PROCESS_LAST_SHUTDOWN: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+
+    fn lock_process_tests() -> MutexGuard<'static, ()> {
+        PROCESS_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
+
+    fn process_last_shutdown() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+        PROCESS_LAST_SHUTDOWN.get_or_init(|| Mutex::new(None))
+    }
+
+    fn reset_process_sync_for_test() {
+        let mut state = process_ntp_state().lock().unwrap();
+        if let Some(active) = state.take() {
+            active.shutdown.store(true, Ordering::Relaxed);
+        }
+        PROCESS_SPAWN_COUNT.store(0, Ordering::Relaxed);
+        *process_last_shutdown().lock().unwrap() = None;
+    }
+
+    fn process_sync_snapshot() -> Option<(String, usize, bool)> {
+        process_ntp_state().lock().unwrap().as_ref().map(|active| {
+            (
+                active.host.clone(),
+                active.refs,
+                active.shutdown.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    fn noop_apply(_: f64) {}
+
+    fn fake_process_spawn(_: String, _: fn(f64)) -> Arc<AtomicBool> {
+        PROCESS_SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        *process_last_shutdown().lock().unwrap() = Some(Arc::clone(&shutdown));
+        shutdown
+    }
+
+    fn failed_process_spawn(_: String, _: fn(f64)) -> Arc<AtomicBool> {
+        PROCESS_SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+        Arc::new(AtomicBool::new(true))
+    }
+
+    #[test]
+    fn process_sync_is_shared_by_clients() {
+        let _lock = lock_process_tests();
+        reset_process_sync_for_test();
+
+        let first = acquire_process_sync_with(
+            "pool.ntp.org".to_string(),
+            noop_apply,
+            fake_process_spawn,
+        )
+        .expect("first client should start process NTP");
+        assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            process_sync_snapshot(),
+            Some(("pool.ntp.org".to_string(), 1, false))
+        );
+
+        let shutdown = process_last_shutdown()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .unwrap();
+        let second = acquire_process_sync_with(
+            "pool.ntp.org".to_string(),
+            noop_apply,
+            fake_process_spawn,
+        )
+        .expect("second client should share process NTP");
+
+        assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            process_sync_snapshot(),
+            Some(("pool.ntp.org".to_string(), 2, false))
+        );
+
+        drop(first);
+        assert_eq!(
+            process_sync_snapshot(),
+            Some(("pool.ntp.org".to_string(), 1, false))
+        );
+        assert!(!shutdown.load(Ordering::Relaxed));
+
+        drop(second);
+        assert_eq!(process_sync_snapshot(), None);
+        assert!(shutdown.load(Ordering::Relaxed));
+
+        reset_process_sync_for_test();
+    }
+
+    #[test]
+    fn process_sync_keeps_first_host_until_last_guard_drops() {
+        let _lock = lock_process_tests();
+        reset_process_sync_for_test();
+
+        let first = acquire_process_sync_with(
+            "ntp-a.example".to_string(),
+            noop_apply,
+            fake_process_spawn,
+        )
+        .unwrap();
+        let second = acquire_process_sync_with(
+            "ntp-b.example".to_string(),
+            noop_apply,
+            fake_process_spawn,
+        )
+        .unwrap();
+
+        assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            process_sync_snapshot(),
+            Some(("ntp-a.example".to_string(), 2, false))
+        );
+
+        drop(first);
+        drop(second);
+        reset_process_sync_for_test();
+    }
+
+    #[test]
+    fn process_sync_spawn_failure_does_not_register_global_worker() {
+        let _lock = lock_process_tests();
+        reset_process_sync_for_test();
+
+        let guard = acquire_process_sync_with(
+            "pool.ntp.org".to_string(),
+            noop_apply,
+            failed_process_spawn,
+        );
+
+        assert!(guard.is_none());
+        assert_eq!(PROCESS_SPAWN_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(process_sync_snapshot(), None);
+
+        reset_process_sync_for_test();
     }
 }

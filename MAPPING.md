@@ -105,6 +105,7 @@
 | NTP2 | IndyUDPHelper.pas:489-496 | После `SyncedOnce` offset больше 1 минуты не принимается первые 2 раза, `TryCount` расширяется до 6 | ntp.rs: `large_offset_retry_count < 2`, `effective_try_count = min(6, +1)` | ✅ |
 | NTP3 | IndyUDPHelper.pas:489-503 | Нет верхнего absolute cap на NTP offset; принятый sample записывается как `TimeOffset` | ntp.rs: удалён Rust-only `|offset| > 1 day` reject | ✅ |
 | NTP4 | MoonProtoIntStruct.pas:1246-1302 | `TMoonProtoTymeSyncer.Execute`: initial sync, 5×100ms sleep, попытки при `GetTimeTryCount < 4`, reset после 1000 циклов | ntp.rs: `spawn_sync_thread` хранит `NtpState` и повторяет цикл | ✅ |
+| NTP5 | MoonProtoIntStruct.pas:323-325 + Unit1.pas:6933 | `GlobalMPTimeOffset` и `MoonProtoTymeSyncer` — process-global singleton, один syncer на процесс | ntp.rs: `acquire_process_sync` + `ProcessNtpGuard`; client.rs: `_ntp_process_guard` разделяет общий worker между `Client` | ✅ |
 
 ## UpdateChannelRDown (MoonProtoIntStruct.pas:1003-1055) → ???
 

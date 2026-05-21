@@ -562,18 +562,18 @@ pub struct ClientConfig {
     pub mac_key: MoonKey,
     pub mask_ver: u8,
     pub client_id: u64,
-    /// Если `Some(host)` — `Client::new` сам spawn'ит NTP-thread который синхронизирует
-    /// `GlobalMPTimeOffset` каждые ~500ms в фоне. Thread автоматически завершается в
-    /// `Drop for Client`. **Это рекомендуемый вариант** — без NTP-sync timestamps в
-    /// торговых командах будут с системным временем (потенциально сдвинуты на десятки
-    /// мс при clock drift), что вызовет AdjustTime неточность на стороне сервера.
+    /// If `Some(host)`, `Client::new` acquires the process-level NTP syncer that
+    /// updates `GlobalMPTimeOffset` about every 500 ms in the background. All
+    /// clients in one process share the same worker, matching Delphi
+    /// `TMoonProtoTymeSyncer` and its global offset.
     ///
-    /// `None` — отключить NTP. Подходит для тестов и для случаев когда потребитель
-    /// сам управляет NTP (через `ntp::spawn_sync_thread` напрямую).
+    /// `None` disables managed NTP. This is useful for tests and tools that
+    /// manage NTP explicitly through `ntp::spawn_sync_thread`.
     ///
-    /// Соответствует Delphi `TMoonProtoTymeSyncer` (`MoonProtoIntStruct.pas:1224-1302`)
-    /// который в Delphi был singleton-thread'ом созданным `Unit1.InitInt`. См.
-    /// responsibility audit F8.
+    /// Use the same `ntp_host` for all clients in the process. If another host
+    /// is requested while the process-level syncer is already running, the
+    /// existing worker remains active because the corrected time offset is
+    /// process-global, not per-client.
     pub ntp_host: Option<String>,
     /// Periodic refresh настройки. По умолчанию: `update_markets_every: Some(2s)`,
     /// `check_tags_every: Some(60s)`. Передай `RefreshConfig::default()` для дефолта,
@@ -582,15 +582,15 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    /// Создать конфиг с продакшен-дефолтами для V0 (open base transport):
+    /// Create config with production defaults for V0 (open base transport):
     /// - `mask_ver = 0`;
     /// - `client_id = rand::random()`;
-    /// - `ntp_host = Some("pool.ntp.org")`;
+    /// - `ntp_host = Some("pool.ntp.org")` (shared process-level syncer);
     /// - `refresh = RefreshConfig::default()` (UpdateMarketsList каждые 2с,
-    ///   CheckBinanceTags каждые 60с).
+    ///   CheckBinanceTags every 60s).
     ///
-    /// Тесты и оффлайн-инструменты могут вызвать [`Self::without_ntp`].
-    /// Приложения с extended transport — [`Self::with_transport_mode`].
+    /// Tests and offline tools can call [`Self::without_ntp`].
+    /// Applications with extended transport can use [`Self::with_transport_mode`].
     pub fn new(
         server_ip: impl Into<String>,
         server_port: u16,
@@ -621,13 +621,13 @@ impl ClientConfig {
         self
     }
 
-    /// Override NTP host для self-managed NTP thread'а.
+    /// Override the host used by the process-level NTP syncer.
     pub fn with_ntp_host(mut self, host: impl Into<String>) -> Self {
         self.ntp_host = Some(host.into());
         self
     }
 
-    /// Отключить self-managed NTP thread.
+    /// Disable managed NTP for this client.
     pub fn without_ntp(mut self) -> Self {
         self.ntp_host = None;
         self
@@ -1045,11 +1045,10 @@ pub struct Client {
     /// соединению, поэтому глобальный сигнал нельзя consume'ить через AtomicBool.
     seen_clock_jump_generation: u64,
 
-    /// Shutdown handle для self-managed NTP-thread'а (если `cfg.ntp_host = Some`).
-    /// При `Drop for Client` → `store(true)` — NTP-thread завершится в течение
-    /// ~100мс (см. `ntp::spawn_sync_thread`). `None` если NTP отключен в cfg.
-    /// См. responsibility audit F8.
-    ntp_thread_shutdown: Option<Arc<AtomicBool>>,
+    /// Guard for the shared process-level NTP syncer (if `cfg.ntp_host = Some`).
+    /// Dropping the last guard stops the worker. This matches Delphi's single
+    /// `TMoonProtoTymeSyncer` for the process instead of a worker per client.
+    _ntp_process_guard: Option<crate::ntp::ProcessNtpGuard>,
 
     /// F6/F7: timestamps последних periodic refresh-команд. `i64::MIN/2` =
     /// "никогда" → первый tick срабатывает мгновенно после Connected (если в
@@ -1116,12 +1115,13 @@ impl Client {
         const EVENT_CHANNEL_CAPACITY: usize = 1024;
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
 
-        // Active library F8: spawn self-managed NTP thread если cfg.ntp_host задан.
-        // Thread будет периодически обновлять GlobalMPTimeOffset через set_ntp_offset.
-        // Shutdown handle сохраняется в Client.ntp_thread_shutdown → Drop останавливает.
-        let ntp_thread_shutdown = cfg.ntp_host.as_ref().map(|host| {
-            crate::ntp::spawn_sync_thread(host.clone(), set_ntp_offset)
-        });
+        // Active library F8: acquire the Delphi-style process-level NTP syncer
+        // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
+        // through set_ntp_offset and is shared by all clients in this process.
+        let ntp_process_guard = cfg
+            .ntp_host
+            .as_ref()
+            .and_then(|host| crate::ntp::acquire_process_sync(host.clone(), set_ntp_offset));
 
         // Кэшированный MacContext для cfg.mac_key — фиксирован на всю life Client'а.
         // Создание делает 128 XOR + crc32c(ipad_block) единожды; затем `mac()` вызовы
@@ -1210,7 +1210,7 @@ impl Client {
             first_bind_failure_ms: NEVER_TIME_MS,
             last_bind_failed_event_ms: NEVER_TIME_MS,
             seen_clock_jump_generation: CLOCK_JUMP_GENERATION.load(Ordering::Relaxed),
-            ntp_thread_shutdown,
+            _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
             domain_ready: false,
@@ -4826,15 +4826,13 @@ fn send_post_init_resync(
     result.post_init_resync_sent = true;
 }
 
-/// Drop: гарантированно сигналим reader thread'у И self-managed NTP-thread'у
-/// завершиться, даже если потребитель не вызвал `disconnect()`. Reader выйдет
-/// из loop макс через 1 сек (read_timeout), NTP-thread — через ~100мс.
+/// Drop: сигналим reader thread'у завершиться даже если потребитель не вызвал
+/// `disconnect()`. Reader выйдет из loop макс через 1 сек (read_timeout).
+/// Process-level NTP guard освобождается автоматически после тела `drop`; если
+/// это был последний клиент, общий NTP worker остановится.
 impl Drop for Client {
     fn drop(&mut self) {
         self.reader_shutdown.store(true, Ordering::Relaxed);
-        if let Some(ntp_shutdown) = self.ntp_thread_shutdown.as_ref() {
-            ntp_shutdown.store(true, Ordering::Relaxed);
-        }
     }
 }
 
@@ -6284,7 +6282,7 @@ mod server_info_tests {
             mac_key: [0; 16],
             mask_ver: 0,
             client_id: 0,
-            ntp_host: None, // отключаем NTP thread — не нужен для unit-теста
+            ntp_host: None, // no NTP worker needed for this unit test
             refresh: RefreshConfig { update_markets_every: None, check_tags_every: None },
         }
     }

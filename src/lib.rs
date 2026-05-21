@@ -102,7 +102,7 @@
 //! - [`state`] — sync-state модели: Orders / OrderBooks / Trades / Balances /
 //!   Strats / Settings / Markets.
 //! - [`key_import`] — парсер base64 MoonBot exported key.
-//! - [`ntp`] — SNTP клиент для self-managed NTP thread.
+//! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
 //! - [`compression`] — SynLZ/DEFLATE helpers для wire-format.
 //!
 //! Зависит от [`moonproto_transport`] — низкоуровневый wire-layer (MAC,
