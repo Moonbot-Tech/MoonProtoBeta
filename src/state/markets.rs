@@ -162,14 +162,17 @@ impl MarketsState {
     }
 
     /// Применить ответ `emk_CheckBinanceTags`.
-    /// **Полная замена**: маркеты не в списке → теги удаляются (соответствует серверной
-    /// семантике "сервер шлёт только маркеты с не-пустыми тегами, остальные = пусто").
+    ///
+    /// Delphi `TMoonProtoEngine.CheckBinanceTags` обновляет только рынки,
+    /// перечисленные в response и найденные в текущем `Markets`; отсутствующие
+    /// в response рынки сохраняют прежние tags.
     pub fn apply_token_tags(&mut self, items: Vec<MarketTokenTags>) -> MarketsEvent {
-        let count = items.len();
-        self.token_tags.clear();
-        self.token_tags.reserve(count);
+        let mut count = 0usize;
         for it in items {
-            self.token_tags.insert(it.market_name, it.tags);
+            if self.by_name.contains_key(&it.market_name) {
+                self.token_tags.insert(it.market_name, it.tags);
+                count += 1;
+            }
         }
         MarketsEvent::TokenTagsUpdated { count }
     }
@@ -426,8 +429,17 @@ mod tests {
     }
 
     #[test]
-    fn apply_token_tags_replaces() {
+    fn apply_token_tags_merges_known_markets_only() {
         let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![
+                mk_market("BTCUSDT", 0),
+                mk_market("DOGEUSDT", 1),
+                mk_market("ETHUSDT", 2),
+            ],
+            corr_markets: vec![],
+        });
+
         let ev = st.apply_token_tags(vec![
             MarketTokenTags { market_name: "BTCUSDT".to_string(), tags: TokenTags::MONITORING },
             MarketTokenTags { market_name: "DOGEUSDT".to_string(), tags: TokenTags::GAMING | TokenTags::NEW },
@@ -437,13 +449,14 @@ mod tests {
         assert!(st.tags("DOGEUSDT").contains(TokenTags::GAMING));
         assert!(st.tags("NOPE").is_empty());
 
-        // Replace
-        st.apply_token_tags(vec![
+        let ev = st.apply_token_tags(vec![
             MarketTokenTags { market_name: "ETHUSDT".to_string(), tags: TokenTags::ALPHA },
+            MarketTokenTags { market_name: "UNKNOWN".to_string(), tags: TokenTags::FAN },
         ]);
-        // BTCUSDT убрался полностью (replace semantics)
-        assert!(st.tags("BTCUSDT").is_empty());
+        assert!(matches!(ev, MarketsEvent::TokenTagsUpdated { count: 1 }));
+        assert!(st.tags("BTCUSDT").contains(TokenTags::MONITORING));
         assert!(st.tags("ETHUSDT").contains(TokenTags::ALPHA));
+        assert!(st.tags("UNKNOWN").is_empty());
     }
 
     #[test]

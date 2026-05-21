@@ -375,7 +375,7 @@
 | M-A1 | apply GetMarketsList → полная замена + by_name + init prices из Market.funding_rate/funding_time | apply_markets_list | ✅ |
 | M-A2 | apply UpdateMarketsList → per-index update, bounds check, send_funding gate | apply_markets_prices | ✅ |
 | M-A3 | apply GetMarketsIndexes → полная замена market_indexes | apply_markets_indexes | ✅ |
-| M-A4 | apply CheckBinanceTags → полная замена (replace semantics) | apply_token_tags | ✅ |
+| M-A4 | apply CheckBinanceTags → обновить только перечисленные и известные рынки; отсутствующие в response tags не очищаются | apply_token_tags | ✅ |
 | M-A5 | BMarketsDetailsWorker.Execute вызывает `Engine.UpdateMarketsList` в цикле примерно каждые 2с при `FullProxy` (`CreateEngine` → `TMoonProtoEngine`) | `RefreshConfig::default().update_markets_every = Some(2s)` + `tick_periodic_refresh` | ✅ |
 | M-A6 | BHeavyApiWorker.Execute вызывает `Engine.CheckBinanceTags` при старте, далее примерно каждые 60с, и после смены часа делает до 4 быстрых вызовов через 200-мс цикл (`TagsBurst < 4`) | `RefreshConfig::default().check_tags_every = Some(60s)` + `tick_periodic_refresh_at`: стартовый/60с tick и hourly burst 4× с шагом 200мс | ✅ |
 | M-A7 | `TMoonProtoEngine.GetMarketsIndexes` строит server `mIndex` → `TMarket` через `SrvMarkets.Rebuild(IndexMap)`, `ProcessTradesStream` затем резолвит `MarketIdx` через `SrvMarkets.FindByServerIndex` | `MarketsState::market_name_by_index` / `market_by_index` / `market_index_by_name` поверх `market_indexes`, с `indexes_synchronized` gate для stale mapping | ✅ |

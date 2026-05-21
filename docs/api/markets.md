@@ -10,6 +10,10 @@ Markets state is maintained from Engine API responses:
 When using `Client::run_with_dispatcher`, relevant responses are applied to
 `EventDispatcher::markets()` automatically.
 
+`CheckBinanceTags` follows the Delphi client: it updates only known markets that
+are present in the response. Markets absent from the response keep their previous
+token tags.
+
 ## Reading State
 
 ```rust
