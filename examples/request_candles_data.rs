@@ -1,0 +1,117 @@
+//! Request the full chunked candles stream and print the first result.
+//!
+//! Run:
+//!   cargo run --example request_candles_data --release -- "<key_base64>" "host:port" 30
+
+use std::env;
+use std::time::{Duration, Instant};
+
+use moonproto::{
+    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event, EventDispatcher,
+    InitConfig, RefreshConfig,
+};
+
+fn parse_host(value: Option<&String>) -> (String, u16) {
+    let Some(value) = value else {
+        return ("127.0.0.1".to_string(), 3000);
+    };
+    let Some((host, port)) = value.split_once(':') else {
+        return (value.clone(), 3000);
+    };
+    (host.to_string(), port.parse().unwrap_or(3000))
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: request_candles_data <key_base64> [host:port] [timeout_secs]");
+        std::process::exit(1);
+    }
+
+    let keys = import_key(&args[1]).expect("invalid key");
+    let (server_ip, server_port) = parse_host(args.get(2));
+    let timeout = args
+        .get(3)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30));
+
+    let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key)
+        .with_refresh(RefreshConfig {
+            update_markets_every: None,
+            check_tags_every: None,
+        });
+    let mut client = Client::new(cfg);
+    let mut dispatcher = EventDispatcher::new();
+
+    let init = InitConfig {
+        base_check: true,
+        auth_check: true,
+        fetch_markets: true,
+        step_timeout: Some(Duration::from_secs(20)),
+        ..Default::default()
+    };
+
+    if let Err(err) = connect_and_init(
+        &mut client,
+        &mut dispatcher,
+        ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(30)),
+    ) {
+        eprintln!("connect/init failed: {err}");
+        std::process::exit(2);
+    }
+
+    let rx = client.api_request_candles_data_async();
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(merged) => {
+                let candles: usize = merged.markets.iter().map(|m| m.candles_5m.len()).sum();
+                println!(
+                    "ok uid={} zipped={} markets={} candles={}",
+                    merged.uid,
+                    merged.zipped_data.len(),
+                    merged.markets.len(),
+                    candles
+                );
+                client.disconnect();
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                eprintln!("disconnected");
+                client.disconnect();
+                std::process::exit(3);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
+        client.run_with_dispatcher(
+            Duration::from_millis(100),
+            &mut dispatcher,
+            Box::new(|event| {
+                match event {
+                    Event::EngineResponse(resp) => {
+                        println!(
+                            "raw response method={:?} success={} code={} msg={} data={}",
+                            resp.method,
+                            resp.success,
+                            resp.error_code,
+                            resp.error_msg,
+                            resp.data.len()
+                        );
+                    }
+                    Event::ServerLog { msg, .. } => {
+                        if msg.contains("Candles") || msg.contains("candles") {
+                            println!("server log: {msg}");
+                        }
+                    }
+                    _ => {}
+                }
+            }),
+        );
+    }
+
+    eprintln!("timeout");
+    client.disconnect();
+    std::process::exit(4);
+}

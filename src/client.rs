@@ -24,7 +24,10 @@ use crate::commands::engine_api::{
     parse_base_check_response, parse_engine_response, parse_get_balance_response,
     parse_query_hedge_mode_response,
 };
-use crate::commands::candles::{CandlesAggregator, DeepPrice, parse_coin_card_candles_response};
+use crate::commands::candles::{
+    CandlesAggregator, DeepPrice, RequestCandlesMarket, parse_coin_card_candles_response,
+    parse_request_candles_data_response,
+};
 
 // =============================================================================
 //  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
@@ -810,17 +813,20 @@ pub(crate) struct SubscriptionRegistry {
 //  CandlesAggregator async API
 // =============================================================================
 
-/// Результат `api_request_candles_data_async` — собранный набор свечей от сервера.
+/// Результат `api_request_candles_data_async` — собранный Delphi candles stream.
 ///
 /// Сервер отвечает на `RequestCandlesData` несколькими `EngineResponse`-пакетами с
 /// одинаковым `request_uid`, каждый — chunk вида `ChunkIndex:u16 + ChunkTotal:u16 + payload`.
-/// Liба сама агрегирует чанки через [`CandlesAggregator`] и возвращает merged result.
+/// Liба сама агрегирует чанки через [`CandlesAggregator`] и возвращает склеенный
+/// zlib stream плюс parsed market entries.
 #[derive(Debug, Clone)]
 pub struct MergedCandles {
     /// `request_uid` запроса (для соотнесения с downstream-обработчиком).
     pub uid: u64,
-    /// Распарсенные `TDeepPrice`-свечи (count:i32 + N × 28 bytes wire-format).
-    pub candles: Vec<DeepPrice>,
+    /// Склеенный zlib stream от Delphi `TMarkets.StoreCandlesToZip`.
+    pub zipped_data: Vec<u8>,
+    /// Parsed market entries from the zipped stream.
+    pub markets: Vec<RequestCandlesMarket>,
 }
 
 /// Внутреннее состояние частично собранного набора свечей.
@@ -828,13 +834,13 @@ struct PartialCandles {
     aggregator: CandlesAggregator,
     /// Sender который будет уведомлён когда aggregator вернёт merged.
     sender: mpsc::Sender<MergedCandles>,
-    /// Timestamp регистрации — для cleanup устаревших pending (timeout 30s).
-    registered_at_ms: i64,
+    /// Timestamp регистрации / последнего принятого chunk.
+    last_activity_ms: i64,
 }
 
-/// Дефолтный timeout pending candles слотов. Сервер обычно отвечает в течение 1-3с;
-/// 30с — щедрый верхний предел перед auto-cleanup.
-pub const DEFAULT_PENDING_CANDLES_TIMEOUT_MS: i64 = 30_000;
+/// Timeout pending candles слотов от последнего принятого chunk.
+/// Delphi `DataUpdaters.pas → CheckGlass` ждёт 15s от `Markets.LastChunkTime`.
+pub const DEFAULT_PENDING_CANDLES_TIMEOUT_MS: i64 = 15_000;
 
 /// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
 struct SentSliced {
@@ -1736,16 +1742,17 @@ impl Client {
 
     /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
     /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель ждёт
-    /// его через [`Client::run_until_response`] и получает уже собранный набор свечей.
+    /// его пока main loop продолжает крутиться и получает уже собранный zlib stream
+    /// от Delphi `TMarkets.StoreCandlesToZip` плюс parsed market entries.
     ///
     /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
     /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
-    /// через `CandlesAggregator`, парсит через `parse_coin_card_candles_response`,
-    /// уведомляет sender → потребитель получает `MergedCandles { uid, candles }`.
+    /// через `CandlesAggregator`, парсит через `parse_request_candles_data_response`,
+    /// уведомляет sender → потребитель получает `MergedCandles`.
     ///
-    /// Auto-cleanup: pending slot удаляется автоматически если не пришёл финальный chunk
-    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` (30 секунд) — sender дропается,
-    /// receiver получает `Err(Disconnected)`.
+    /// Auto-cleanup: pending slot удаляется автоматически если финальный chunk не пришёл
+    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` от последнего принятого chunk —
+    /// sender дропается, receiver получает `Err(Disconnected)`.
     pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
         let raw = crate::commands::engine_request::request_candles_data();
         // UID извлекается из BaseCommand header offset 3..11 (тот же что в send_api_request_async).
@@ -1757,7 +1764,7 @@ impl Client {
         let partial = PartialCandles {
             aggregator: CandlesAggregator::new(),
             sender: tx,
-            registered_at_ms: self.now_ms(),
+            last_activity_ms: self.now_ms(),
         };
         // Замещение существующего slot'а допустимо — старый sender дропнется, его
         // receiver получит Err(Disconnected) (что корректно при двойном вызове).
@@ -2862,7 +2869,7 @@ impl Client {
                     self.slicer.clear_old();
                     let candles_before = self.pending_candles.len();
                     self.pending_candles.retain(|_uid, partial| {
-                        (cur_tm - partial.registered_at_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
+                        (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
                     });
                     let candles_removed = candles_before - self.pending_candles.len();
                     if candles_removed > 0 {
@@ -3294,21 +3301,38 @@ impl Client {
     /// удаляется (semantic = "fire-and-forget с финализацией").
     fn handle_candles_chunk(&mut self, resp: &EngineResponse) -> bool {
         // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
+        let now_ms = self.now_ms();
+        if !resp.success {
+            if let Some(partial) = self.pending_candles.remove(&resp.request_uid) {
+                log::warn!(target: "moonproto::client",
+                    "candles request uid={} failed code={} msg={}",
+                    resp.request_uid, resp.error_code, resp.error_msg);
+                drop(partial);
+                return true;
+            }
+            return false;
+        }
+
         let Some(partial) = self.pending_candles.get_mut(&resp.request_uid) else {
             return false;
         };
+        if resp.data.len() >= 4 {
+            partial.last_activity_ms = now_ms;
+        }
         let merged_bytes = partial.aggregator.on_chunk(&resp.data);
         let uid = resp.request_uid;
-        if let Some(merged) = merged_bytes {
-            // Парсим в DeepPrice list — если не получилось, всё равно отвечаем (но
-            // пустым списком + лог), чтобы потребитель не висел.
-            let candles = parse_coin_card_candles_response(&merged).unwrap_or_else(|| {
+        if let Some(zipped_data) = merged_bytes {
+            let markets = parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
                 log::warn!(target: "moonproto::client",
-                    "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, merged.len());
+                    "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, zipped_data.len());
                 Vec::new()
             });
             if let Some(partial) = self.pending_candles.remove(&uid) {
-                let _ = partial.sender.send(MergedCandles { uid, candles });
+                let _ = partial.sender.send(MergedCandles {
+                    uid,
+                    zipped_data,
+                    markets,
+                });
                 // Sender дропается → receiver получает Ok(...) / уже получил.
             }
         }

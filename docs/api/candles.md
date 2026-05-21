@@ -72,7 +72,7 @@ candles: N × TDeepPrice (28 bytes each)
 The server replies with multiple `EngineResponse` packets carrying the same
 `request_uid`. Each packet is a chunk of the form `ChunkIndex:u16 +
 ChunkTotal:u16 + payload`. The library aggregates them through
-`CandlesAggregator` and returns the merged result.
+`CandlesAggregator` and returns the merged Delphi candles stream.
 
 ### Async API (recommended)
 
@@ -82,10 +82,11 @@ use std::time::Duration;
 let rx = client.api_request_candles_data_async();
 match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
     Ok(merged) => {
-        // merged.uid     — request_uid
-        // merged.candles — already-parsed Vec<DeepPrice>
-        for c in &merged.candles {
-            println!("{}: o={} c={}", c.time, c.open_p, c.close_p);
+        // merged.uid         — request_uid
+        // merged.zipped_data — raw zlib stream from Delphi StoreCandlesToZip
+        // merged.markets     — parsed per-market 5m candles and wall data
+        for market in &merged.markets {
+            println!("{}: {} candles", market.market_name, market.candles_5m.len());
         }
     }
     Err(_) => eprintln!("candles timeout"),
@@ -95,14 +96,23 @@ match client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(30)) {
 `MergedCandles`:
 ```rust
 pub struct MergedCandles {
-    pub uid:     u64,
-    pub candles: Vec<DeepPrice>,
+    pub uid:         u64,
+    pub zipped_data: Vec<u8>,
+    pub markets:     Vec<RequestCandlesMarket>,
+}
+
+pub struct RequestCandlesMarket {
+    pub market_name: String,
+    pub candles_5m: Vec<DeepPrice>,
+    pub buy_wall: [WallItem; 4],
+    pub sell_wall: [WallItem; 4],
 }
 ```
 
 Stale pending candles slots are auto-cleaned —
-`DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 30_000` (30 seconds). A slot is freed
-either when all chunks have arrived or on timeout.
+`DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 15_000` (15 seconds) from the last
+received chunk, matching Delphi `Markets.LastChunkTime`. A slot is freed either
+when all chunks have arrived or on timeout.
 
 ### Low-level CandlesAggregator
 
@@ -110,7 +120,10 @@ Use this only for custom flows that need fine-grained `request_uid` routing in
 a multi-request scenario:
 
 ```rust
-use moonproto::commands::candles::{CandlesAggregator, parse_coin_card_candles_response};
+use moonproto::commands::candles::{
+    CandlesAggregator,
+    parse_request_candles_data_response,
+};
 
 let mut agg = CandlesAggregator::new();
 
@@ -120,8 +133,8 @@ client.api_request_candles_data();
 // Inside an `on_data` callback (or through EventDispatcher::Event::EngineResponse):
 //   if resp.method == EngineMethod::RequestCandlesData {
 //       if let Some(merged) = agg.on_chunk(&resp.data) {
-//           let candles = parse_coin_card_candles_response(&merged).unwrap();
-//           // process candles ...
+//           let markets = parse_request_candles_data_response(&merged).unwrap();
+//           // process markets ...
 //       }
 //   }
 ```
@@ -136,8 +149,9 @@ chunk_payload: bytes (rest)
 ```
 
 After all `ChunkTotal` chunks have arrived (in any order, by `ChunkIndex`
-`0..ChunkTotal-1`), the `chunk_payload`s are concatenated into a final stream
-with the same `count + candles` layout as `GetCoinCardCandles`.
+`0..ChunkTotal-1`), the `chunk_payload`s are concatenated into the zlib stream
+written by Delphi `TMarkets.StoreCandlesToZip`. This is not the same layout as
+`GetCoinCardCandles`.
 
 ### CandlesAggregator API
 
@@ -155,6 +169,8 @@ impl CandlesAggregator {
 - **Duplicates**: a repeated chunk for the same `idx` is ignored.
 - **Resize**: on the first chunk the internal `chunks: Vec<Option<Vec<u8>>>` is
   sized to `ChunkTotal`.
+- **Chunk count**: Delphi uses a `u16` `ChunkTotal` and has no extra 1024-chunk
+  cap; the aggregator accepts the full wire range.
 - **Auto-reset**: when `on_chunk` returns `Some(merged)` the internal state is
   cleared and ready for the next request.
 

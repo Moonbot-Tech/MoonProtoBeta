@@ -1,4 +1,5 @@
-//! Candles channel — TDeepPrice records (28-byte packed) для CoinCard и chunked candles.
+//! Candles channel — TDeepPrice records (28-byte packed) for CoinCard and
+//! packed market candles stream for `RequestCandlesData`.
 //!
 //! Источник Delphi: `MarketsU.pas:701-705 TDeepPrice` + `MoonProtoEngineServer.pas:382-395` (`emk_GetCoinCardCandles`)
 //! + `MoonProtoClient.pas:795-876` (chunked candles aggregation для `emk_RequestCandlesData`).
@@ -18,11 +19,16 @@
 //! ## Запросы
 //!
 //! - **`emk_GetCoinCardCandles`** — простой response: `count:i32 + N × TDeepPrice`.
-//! - **`emk_RequestCandlesData`** — chunked: каждый response начинается с
-//!   `ChunkIndex:u16 + ChunkTotal:u16` + chunk_data. После сборки всех чанков —
-//!   слитый поток содержит final candles data.
+//! - **`emk_RequestCandlesData`** — chunked: each response starts with
+//!   `ChunkIndex:u16 + ChunkTotal:u16` + chunk_data. After all chunks are merged,
+//!   the resulting bytes are the zlib stream produced by Delphi
+//!   `TMarkets.StoreCandlesToZip`.
 //!
 //! Используй `CandlesAggregator` для сборки chunked responses.
+
+use std::io::Read;
+
+use flate2::read::ZlibDecoder;
 
 use super::engine_api::EngineMethod;
 use super::engine_request::build_engine_request_full;
@@ -62,6 +68,29 @@ impl DeepPrice {
         out.extend_from_slice(&self.vol.to_le_bytes());
         out.extend_from_slice(&self.time.to_le_bytes());
     }
+}
+
+/// Packed `TDeepPricePack` inside `RequestCandlesData` stream.
+///
+/// Delphi writes this compact 20-byte record for each 5m candle and reconstructs
+/// `OpenP = MaxP`, `CloseP = MinP` on receive.
+pub const DEEP_PRICE_PACK_SIZE: usize = 20;
+pub const DEEP_PRICE_PACK_OLD_SIZE: usize = 32;
+
+/// Delphi `TWallItem = record vol: Single; count: Integer end`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WallItem {
+    pub vol: f32,
+    pub count: i32,
+}
+
+/// One market entry from Delphi `TMarkets.StoreCandlesToZip`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestCandlesMarket {
+    pub market_name: String,
+    pub candles_5m: Vec<DeepPrice>,
+    pub buy_wall: [WallItem; 4],
+    pub sell_wall: [WallItem; 4],
 }
 
 /// `TMarketDeepHistoryKind` enum (EngineBase.pas:60).
@@ -122,6 +151,183 @@ pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     Some(out)
 }
 
+/// Parse merged `emk_RequestCandlesData` bytes.
+///
+/// Input is the concatenated chunk payload returned by [`CandlesAggregator`].
+/// Delphi stores a zlib-compressed stream:
+///
+/// ```text
+/// legacy_count:i32
+/// version:u8
+/// if version > 1 { count:i32 } else { count = legacy_count }
+/// server_timezone_shift_minutes:f64
+/// repeated count times:
+///   market_name: Delphi UTF-16 String (u16 char count + chars)
+///   candle_count:i32
+///   candle_count * TDeepPricePack(version >= 2) or TDeepPricePackOLD(version == 1)
+///   buy_wall:  4 * TWallItem
+///   sell_wall: 4 * TWallItem
+/// ```
+///
+/// The timezone-shift field is intentionally not applied here. Delphi applies it
+/// when mutating local `Markets` state; the public library returns the server
+/// stream content and parsed values without depending on process-local timezone.
+pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<RequestCandlesMarket>> {
+    let mut decoder = ZlibDecoder::new(zipped_data);
+    let mut data = Vec::new();
+    if let Err(e) = decoder.read_to_end(&mut data) {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+        return None;
+    }
+
+    let mut pos = 0usize;
+    let legacy_count = read_i32(&data, &mut pos)?;
+    if legacy_count < 0 {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData negative legacy count {legacy_count}");
+        return None;
+    }
+
+    let ver = read_u8(&data, &mut pos)?;
+    if ver > 2 {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData unsupported version {ver}");
+        return None;
+    }
+
+    let count_raw = if ver > 1 {
+        read_i32(&data, &mut pos)?
+    } else {
+        legacy_count
+    };
+    if count_raw < 0 {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData negative market count {count_raw}");
+        return None;
+    }
+    let count = count_raw as usize;
+
+    // TimeShift minutes. Delphi applies a local timezone correction later.
+    let _server_time_shift = read_f64(&data, &mut pos)?;
+
+    let mut markets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let market_name = read_delphi_utf16_string(&data, &mut pos)?;
+        let candle_count_raw = read_i32(&data, &mut pos)?;
+        if candle_count_raw < 0 {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData negative candle count for {market_name}: {candle_count_raw}");
+            return None;
+        }
+        let candle_count = candle_count_raw as usize;
+        let record_size = if ver >= 2 { DEEP_PRICE_PACK_SIZE } else { DEEP_PRICE_PACK_OLD_SIZE };
+        let required = candle_count.checked_mul(record_size)?;
+        if required > data.len().saturating_sub(pos) {
+            log::warn!(target: "moonproto::candles",
+                "RequestCandlesData market {market_name} requires {required} candle bytes, remaining {}",
+                data.len().saturating_sub(pos));
+            return None;
+        }
+
+        let mut candles_5m = Vec::with_capacity(candle_count);
+        for _ in 0..candle_count {
+            candles_5m.push(if ver >= 2 {
+                read_deep_price_pack(&data, &mut pos)?
+            } else {
+                read_deep_price_pack_old(&data, &mut pos)?
+            });
+        }
+        let buy_wall = read_wall_data(&data, &mut pos)?;
+        let sell_wall = read_wall_data(&data, &mut pos)?;
+        markets.push(RequestCandlesMarket {
+            market_name,
+            candles_5m,
+            buy_wall,
+            sell_wall,
+        });
+    }
+
+    Some(markets)
+}
+
+fn read_u8(data: &[u8], pos: &mut usize) -> Option<u8> {
+    if *pos + 1 > data.len() { return None; }
+    let value = data[*pos];
+    *pos += 1;
+    Some(value)
+}
+
+fn read_i32(data: &[u8], pos: &mut usize) -> Option<i32> {
+    if *pos + 4 > data.len() { return None; }
+    let value = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    Some(value)
+}
+
+fn read_f32(data: &[u8], pos: &mut usize) -> Option<f32> {
+    if *pos + 4 > data.len() { return None; }
+    let value = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    Some(value)
+}
+
+fn read_f64(data: &[u8], pos: &mut usize) -> Option<f64> {
+    if *pos + 8 > data.len() { return None; }
+    let value = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    Some(value)
+}
+
+fn read_delphi_utf16_string(data: &[u8], pos: &mut usize) -> Option<String> {
+    if *pos + 2 > data.len() { return None; }
+    let chars = u16::from_le_bytes(data[*pos..*pos + 2].try_into().unwrap()) as usize;
+    *pos += 2;
+    let bytes = chars.checked_mul(2)?;
+    if *pos + bytes > data.len() { return None; }
+    let mut utf16 = Vec::with_capacity(chars);
+    for chunk in data[*pos..*pos + bytes].chunks_exact(2) {
+        utf16.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    *pos += bytes;
+    Some(String::from_utf16_lossy(&utf16))
+}
+
+fn read_deep_price_pack(data: &[u8], pos: &mut usize) -> Option<DeepPrice> {
+    let max_p = read_f32(data, pos)?;
+    let min_p = read_f32(data, pos)?;
+    let vol = read_f32(data, pos)?;
+    let time = read_f64(data, pos)?;
+    Some(DeepPrice {
+        open_p: max_p,
+        close_p: min_p,
+        max_p,
+        min_p,
+        vol,
+        time,
+    })
+}
+
+fn read_deep_price_pack_old(data: &[u8], pos: &mut usize) -> Option<DeepPrice> {
+    let max_p = read_f64(data, pos)? as f32;
+    let min_p = read_f64(data, pos)? as f32;
+    let vol = read_f64(data, pos)? as f32;
+    let time = read_f64(data, pos)?;
+    Some(DeepPrice {
+        open_p: max_p,
+        close_p: min_p,
+        max_p,
+        min_p,
+        vol,
+        time,
+    })
+}
+
+fn read_wall_data(data: &[u8], pos: &mut usize) -> Option<[WallItem; 4]> {
+    let mut out = [WallItem::default(); 4];
+    for item in &mut out {
+        item.vol = read_f32(data, pos)?;
+        item.count = read_i32(data, pos)?;
+    }
+    Some(out)
+}
+
 // =============================================================================
 //  Chunked aggregator (для emk_RequestCandlesData)
 // =============================================================================
@@ -136,8 +342,7 @@ pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
 /// 2. Фильтровать chunks по `request_uid`: если запущено несколько параллельных
 ///    `RequestCandlesData`, нужно вести отдельный `CandlesAggregator` для каждого
 ///    `request_uid` либо сбрасывать `reset()` при смене запроса. В Delphi эта
-///    фильтрация делается через `resp.RequestUID == CandlesRequestUID`
-///    (MoonProtoClient.pas:814).
+///    фильтрация делается через `resp.RequestUID == CandlesRequestUID`.
 /// 3. Aggregator не валидирует payload — просто склеивает в порядке `ChunkIndex`.
 ///
 /// Используется так:
@@ -145,8 +350,8 @@ pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
 /// let mut agg = CandlesAggregator::new();
 /// // На каждый response с emk_RequestCandlesData:
 /// if let Some(merged) = agg.on_chunk(&response.data) {
-///     // Все чанки получены — merged готов к парсингу.
-///     let candles = parse_coin_card_candles_response(&merged)?;
+///     // Все чанки получены — merged содержит zlib stream from StoreCandlesToZip.
+///     let markets = parse_request_candles_data_response(&merged)?;
 /// }
 /// ```
 #[derive(Debug, Default)]
@@ -167,12 +372,9 @@ impl CandlesAggregator {
         let chunk_total = u16::from_le_bytes([response_data[2], response_data[3]]) as usize;
         let payload = &response_data[4..];
 
-        // DoS guard: разумный максимум чанков. Реальные responses умещаются в десятки чанков
-        // (~8KB payload каждый). 1024 — 8MB полного ответа, более чем достаточно.
-        const MAX_CHUNKS: usize = 1024;
-        if chunk_total > MAX_CHUNKS {
-            log::warn!(target: "moonproto::candles",
-                "chunk_total={} exceeds MAX_CHUNKS={}", chunk_total, MAX_CHUNKS);
+        // Delphi stores ChunkTotal as Word and has no additional capacity cap.
+        // `chunk_total` is already bounded by u16::MAX by wire format.
+        if chunk_total == 0 {
             return None;
         }
 
@@ -219,6 +421,8 @@ impl CandlesAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
 
     #[test]
     fn deep_price_size_is_28() {
@@ -306,6 +510,67 @@ mod tests {
         let chunk2 = vec![1u8, 0u8, 2u8, 0u8, 3, 4];
         let merged = agg.on_chunk(&chunk2).unwrap();
         assert_eq!(merged, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn aggregator_accepts_delphi_word_sized_chunk_total() {
+        let mut agg = CandlesAggregator::new();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&0u16.to_le_bytes());
+        chunk.extend_from_slice(&65_535u16.to_le_bytes());
+        chunk.extend_from_slice(&[1, 2, 3]);
+        assert!(agg.on_chunk(&chunk).is_none());
+        assert_eq!(agg.progress(), (1, 65_535));
+    }
+
+    #[test]
+    fn request_candles_data_parser_reads_delphi_zlib_stream() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes()); // legacy count for v1 readers
+        plain.push(2); // ServerCandlesVersion
+        plain.extend_from_slice(&1i32.to_le_bytes()); // market count
+        plain.extend_from_slice(&0f64.to_le_bytes()); // TimeShift minutes
+        write_delphi_utf16_string(&mut plain, "BTCUSDT");
+        plain.extend_from_slice(&2i32.to_le_bytes());
+        write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, 45_000.0);
+        write_deep_price_pack(&mut plain, 102.0, 100.0, 13.5, 45_000.5);
+        for i in 0..4 {
+            plain.extend_from_slice(&(10.0 + i as f32).to_le_bytes());
+            plain.extend_from_slice(&(i as i32).to_le_bytes());
+        }
+        for i in 0..4 {
+            plain.extend_from_slice(&(20.0 + i as f32).to_le_bytes());
+            plain.extend_from_slice(&((10 + i) as i32).to_le_bytes());
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let zipped = encoder.finish().unwrap();
+
+        let markets = parse_request_candles_data_response(&zipped).unwrap();
+        assert_eq!(markets.len(), 1);
+        assert_eq!(markets[0].market_name, "BTCUSDT");
+        assert_eq!(markets[0].candles_5m.len(), 2);
+        assert_eq!(markets[0].candles_5m[0].open_p, 101.0);
+        assert_eq!(markets[0].candles_5m[0].close_p, 99.0);
+        assert_eq!(markets[0].candles_5m[0].vol, 12.5);
+        assert_eq!(markets[0].buy_wall[3].vol, 13.0);
+        assert_eq!(markets[0].sell_wall[3].count, 13);
+    }
+
+    fn write_delphi_utf16_string(out: &mut Vec<u8>, value: &str) {
+        let utf16: Vec<u16> = value.encode_utf16().collect();
+        out.extend_from_slice(&(utf16.len() as u16).to_le_bytes());
+        for ch in utf16 {
+            out.extend_from_slice(&ch.to_le_bytes());
+        }
+    }
+
+    fn write_deep_price_pack(out: &mut Vec<u8>, max_p: f32, min_p: f32, vol: f32, time: f64) {
+        out.extend_from_slice(&max_p.to_le_bytes());
+        out.extend_from_slice(&min_p.to_le_bytes());
+        out.extend_from_slice(&vol.to_le_bytes());
+        out.extend_from_slice(&time.to_le_bytes());
     }
 
     #[test]

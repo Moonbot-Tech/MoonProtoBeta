@@ -434,32 +434,51 @@ fn validate_response(label: &str, resp: &EngineResponse, stats: &SharedStats) {
 }
 
 fn validate_chunked_candles(label: &str, merged: &MergedCandles, stats: &SharedStats) {
-    if merged.candles.is_empty() {
+    if merged.zipped_data.is_empty() || merged.markets.is_empty() {
         stats.candles_chunked_empty.fetch_add(1, Ordering::Relaxed);
-        println!("[{label}] chunked candles uid={} returned 0 candles", merged.uid);
+        println!(
+            "[{label}] chunked candles uid={} returned empty result zipped={} markets={}",
+            merged.uid,
+            merged.zipped_data.len(),
+            merged.markets.len()
+        );
         return;
     }
 
-    for candle in &merged.candles {
-        let prices = [candle.open_p, candle.max_p, candle.min_p, candle.close_p];
-        let bad = prices.iter().any(|v| !v.is_finite() || *v < 0.0)
-            || !candle.vol.is_finite()
-            || candle.vol < 0.0
-            || !candle.time.is_finite();
-        if bad {
-            stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
-            println!(
-                "[{label}] invalid chunked candle uid={} open={} high={} low={} close={} vol={} time={}",
-                merged.uid,
-                candle.open_p,
-                candle.max_p,
-                candle.min_p,
-                candle.close_p,
-                candle.vol,
-                candle.time
-            );
-            return;
+    let mut candle_count = 0usize;
+    for market in &merged.markets {
+        candle_count += market.candles_5m.len();
+        for candle in &market.candles_5m {
+            let prices = [candle.open_p, candle.max_p, candle.min_p, candle.close_p];
+            let bad = prices.iter().any(|v| !v.is_finite() || *v < 0.0)
+                || !candle.vol.is_finite()
+                || candle.vol < 0.0
+                || !candle.time.is_finite();
+            if bad {
+                stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                println!(
+                    "[{label}] invalid chunked candle uid={} market={} open={} high={} low={} close={} vol={} time={}",
+                    merged.uid,
+                    market.market_name,
+                    candle.open_p,
+                    candle.max_p,
+                    candle.min_p,
+                    candle.close_p,
+                    candle.vol,
+                    candle.time
+                );
+                return;
+            }
         }
+    }
+
+    if candle_count == 0 {
+        stats.candles_chunked_empty.fetch_add(1, Ordering::Relaxed);
+        println!(
+            "[{label}] chunked candles uid={} returned {} markets but 0 candles",
+            merged.uid,
+            merged.markets.len()
+        );
     }
 }
 

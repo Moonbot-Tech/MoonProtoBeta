@@ -103,7 +103,9 @@ the first response.
 
 Use the normal `on_data` callback path and feed each `resp.data` into
 `CandlesAggregator::on_chunk(&resp.data)`. It returns `Some(merged)` once all
-chunks for the request have arrived.
+chunks for the request have arrived. The merged bytes are the zlib stream from
+Delphi `TMarkets.StoreCandlesToZip`; parse them with
+`parse_request_candles_data_response`, not with the CoinCard candles parser.
 
 ## Client Wrappers
 
