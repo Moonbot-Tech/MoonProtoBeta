@@ -1,125 +1,174 @@
-# MoonProto Client Initialization Sequence (DRAFT)
+# MoonProto Client Initialization Sequence
 
-> ЧЕРНОВИК. Потом подумать над структурой документов.
+This document describes the startup sequence used by the Rust client and its
+Delphi reference points. The transport handshake is automatic. The application
+chooses which Engine API init steps and subscriptions to request.
 
-## Порядок инициализации (из TCryptoPumpTool.InitInt + TMoonProtoEngine)
+## Recommended Rust Entry Point
 
-MoonBot Delphi-клиент после подключения к серверу выполняет последовательность
-API-запросов через MoonProto Engine RPC (`SendAndWait` = send + poll for response):
+Use `connect_and_init` for the common setup path:
 
-### Фаза 0: Transport Handshake (автоматически)
+```rust
+use std::time::Duration;
+use moonproto::{connect_and_init, ConnectConfig, InitConfig};
 
-```
-Client → Server: MPC_Hello (encrypted with MasterKey, AAD=ClientID)
-Server → Client: MPC_WhoAreYou (encrypted with MasterKey, AAD=ClientID)
-Client → Server: MPC_ImFriend (encrypted with SessionKey, AAD=ClientID)
-Server → Client: MPC_Fine (encrypted with MasterKey, AAD=ClientID)
-```
+let init = InitConfig {
+    base_check: true,
+    auth_check: true,
+    fetch_markets: true,
+    fetch_balance: true,
+    subscribe_trades: Some(false),
+    subscribe_orderbooks: vec!["BTCUSDT".to_string()],
+    step_timeout: Some(Duration::from_secs(15)),
+};
 
-После Fine: `AuthStatus = AuthDone`, session keys active, Ping exchange starts.
-
-### Фаза 1: BaseCheck
-
-```
-Client → Server: TEngineRequest(emk_BaseCheck)  [MPC_API, Sliced, Encrypted]
-Server → Client: TEngineResponse(success=true)   [MPC_API, Sliced, Encrypted]
-```
-
-Проверяет что сервер жив и готов обрабатывать запросы. При ошибке — retry до 10 раз.
-
-### Фаза 2: AuthCheck
-
-```
-Client → Server: TEngineRequest(emk_AuthCheck)  [MPC_API, Sliced, Encrypted]
-Server → Client: TEngineResponse(success=true, data=[account info])
+let result = connect_and_init(
+    &mut client,
+    &mut dispatcher,
+    ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+)?;
 ```
 
-Response data:
-- BinanceAccountID: i64
-- BTCAddress: string
-- SpotRef: i32
-- IsSubAccount: bool
-- AccountID: string
-- RecvdMaxPayload: i32 (optional)
-- KnownDexes: array (optional)
-- HLDexMarket: byte (optional)
-- HLSpotMarket: byte (optional)
+`connect_and_init` first pumps `Client::run_with_dispatcher` until the transport
+is authenticated, then calls `run_init_sequence`. Applications that need their
+own progress UI can run the handshake phase themselves and call
+`run_init_sequence(&mut client, &mut dispatcher, init)` after authorization.
 
-### Фаза 3: GetMarketsList + UpdateMarketsList
+## Phase 0: Transport Handshake
 
-```
-Client → Server: TEngineRequest(emk_GetMarketsList)  [MPC_API, Sliced, Encrypted]
-Server → Client: TEngineResponse(success=true, data=[markets], compressed=deflate)
-
-Client → Server: TEngineRequest(emk_UpdateMarketsList) [MPC_API, Sliced, Encrypted]  
-Server → Client: TEngineResponse(success=true, data=[updates], compressed=deflate)
+```text
+Client -> Server: MPC_Hello     encrypted with MasterKey, AAD=ClientID
+Server -> Client: MPC_WhoAreYou encrypted with MasterKey, AAD=ClientID
+Client -> Server: MPC_ImFriend  encrypted with SessionKey, AAD=ClientID
+Server -> Client: MPC_Fine      encrypted with MasterKey, AAD=ClientID
 ```
 
-**ВАЖНО**: Эти responses сжаты deflate (`IsCompressed=true`, raw deflate windowBits=-15).
-Response data содержит полный список маркетов с параметрами (ReadMarketFromStream).
-При получении UpdateMarketsList сервер также ставит `BalancesSubscribed=true` и шлёт первый Full balance snapshot.
+After `MPC_Fine`, the client is authorized, session keys are active, and the
+Ping exchange starts. This phase is handled by `Client`; applications normally
+observe it through `LifecycleEvent::Connected { fresh: true }` or through
+`connect_and_init`.
 
-### Фаза 4: GetMarketsBalanceFull (или GetBalance)
+## Phase 1: BaseCheck
 
-```
-Client → Server: TEngineRequest(emk_GetMarketsBalanceFull) [MPC_API, Sliced, Encrypted]
-Server → Client: TEngineResponse(success=true, data=[balances])
-```
-
-### Фаза 5: SubscribeAllTrades
-
-```
-Client → Server: TEngineRequest(emk_SubscribeAllTrades, params=[bool MMOrders])
-Server → Client: TEngineResponse(success=true)
+```text
+Client -> Server: TEngineRequest(emk_BaseCheck) [MPC_API, Sliced, encrypted]
+Server -> Client: TEngineResponse(success=true)
 ```
 
-После этого сервер начинает стримить MPC_TradesStream каждые 5ms.
+`BaseCheck` verifies that the server engine is ready to answer requests. Newer
+servers can also return identity fields such as bot id, server name, exchange,
+and MoonProto version. `run_init_sequence` parses those fields into
+`client.server_info()` when `InitConfig::base_check` is enabled.
 
-### Фаза 6: (опционально) SubscribeOrderBook
+In the Rust init helper this is a critical step: a timeout stops the init
+sequence with `InitError::CriticalStepTimedOut("BaseCheck")`.
 
+## Phase 2: AuthCheck
+
+```text
+Client -> Server: TEngineRequest(emk_AuthCheck) [MPC_API, Sliced, encrypted]
+Server -> Client: TEngineResponse(success=true, data=account metadata)
 ```
-Client → Server: TEngineRequest(emk_SubscribeOrderBook, market_names=["BTCUSDT", ...])
-Server → Client: TEngineResponse(success=true)
+
+The response payload is parsed by `parse_auth_check_response` and can contain:
+
+| Field | Type | Notes |
+|---|---|---|
+| `binance_account_id` | `i64` | Binance account id when applicable. |
+| `btc_address` | string | Wallet or referral binding data. |
+| `spot_ref` | `i32` | Historical spot referral field. |
+| `is_sub_account` | bool | Whether the account is a sub-account. |
+| `account_id` | string | Exchange account id or wallet address. |
+| `recvd_max_payload` | `Option<i32>` | Present on newer servers. |
+| `known_dexes` | `Vec<DexInfo>` | Optional Hyperliquid DEX metadata. |
+| `hl_dex_market` | `Option<u8>` | Current futures DEX index. |
+| `hl_spot_market` | `Option<u8>` | Current spot DEX index. |
+
+In the Rust init helper this is also critical. A timeout stops the remaining
+init steps because later requests are not useful without a valid authenticated
+engine session.
+
+## Phase 3: Market Catalog
+
+```text
+Client -> Server: TEngineRequest(emk_GetMarketsList) [MPC_API, Sliced, encrypted]
+Server -> Client: TEngineResponse(success=true, data=markets, compressed=deflate)
 ```
 
----
+`GetMarketsList` returns the full market catalog. The Engine response parser
+DEFLATE-decompresses `Data` when the response has `IsCompressed=true`, and
+`EventDispatcher` applies the decoded payload to `MarketsState`.
 
-## SendAndWait механизм
+`UpdateMarketsList` is a separate Engine method for price, funding, mark price,
+and correlation updates. It is not one of the `run_init_sequence` steps. During
+the long-running client loop, `ClientConfig::refresh` sends
+`UpdateMarketsList` every two seconds by default and `CheckBinanceTags` every
+sixty seconds by default.
 
-Delphi-клиент:
-1. Создаёт TPendingRequest(UID, name)
-2. Добавляет в PendingRequests список
-3. SendAPICmd(req) → SendCmd → DataToSend (Sliced, encrypted)
-4. Поллит `pending.resp` каждые 10ms, timeout = 5000ms (default)
-5. Когда response приходит (ClientNewData → ProcessApiCommand → pending.resp = resp)
-6. Возвращает response
+Market fetch failures are non-critical in `run_init_sequence`: the error is
+recorded in `InitResult::errors`, and init continues.
 
-Rust-клиент:
-- Нет PendingRequests механизма (fire-and-forget в текущей реализации)
-- Ответ приходит в on_data callback как Command::API
-- Для эмуляции SendAndWait нужен channel/oneshot
+## Phase 4: Balance Refresh
 
----
+```text
+Client -> Server: TEngineRequest(emk_GetMarketsBalanceFull) [MPC_API, Sliced, encrypted]
+Server -> Client: TEngineResponse(success=true)
+```
 
-## Что уже работает в Rust:
+The current Delphi server refreshes balances server-side for this request but
+does not serialize a full balance payload into the response yet, so successful
+responses usually have empty `Data`. Balance state updates arrive through the
+Balance channel, and one-shot balance reads should use helpers such as
+`Client::request_balance`.
 
-- Transport handshake (Hello → Fine) ✅
-- Ping exchange ✅  
-- Прием данных (Order, UI, Strat, Balance, LogMsg) ✅
-- Отправка API requests (send_api_request) ✅ (пакет уходит)
+Balance refresh failures are non-critical in `run_init_sequence` and are added
+to `InitResult::errors`.
 
-## Что НЕ работает:
+## Phase 5: Stream Subscriptions
 
-- **API response не приходит** — request уходит, но response (inner_cmd=31) не виден.
-  Гипотеза: сервер шлёт response, но SynLZ decompression ломается
-  (response может приходить сжатым в MPC_Crypted|compressed обёртке).
+```text
+Client -> Server: TEngineRequest(emk_SubscribeAllTrades, params=want_mm)
+Client -> Server: TEngineRequest(emk_SubscribeOrderBook, market_names=[...])
+```
 
-## Ключевые файлы Delphi:
+`subscribe_all_trades` and `subscribe_orderbook` are fire-and-forget
+subscription intents. The client stores them in its subscription registry and
+replays them after a hard reconnect or server-token change.
 
-- `Unit1.pas:4987` — TCryptoPumpTool.InitInt (порядок вызовов)
-- `MoonProtoEngine.pas:514` — SendAndWait (poll loop)
-- `MoonProtoEngine.pas:563-922` — BaseCheck, AuthCheck, GetMarketsList, UpdateMarketsList, GetMarketsBalanceFull
-- `MoonProtoEngine.pas:267` — SubscribeAllTrades
-- `MoonProtoServer.pas:1043` — серверная обработка emk_SubscribeAllTrades
-- `MoonProtoClient.pas:256-411` — ClientNewData (dispatch по cmd)
-- `MoonProtoClient.pas:802` — ProcessApiCommand (matching response to pending)
+`run_init_sequence` drains the client loop briefly after registering
+subscriptions so that the queued subscription commands are sent before the
+helper returns. Applications should not resend these subscriptions manually on
+reconnect; the library owns that recovery work.
+
+## Engine Request Waiting
+
+The Delphi client implements `SendAndWait` by creating a `TPendingRequest`,
+sending the request as a sliced encrypted MoonProto command, and polling the
+pending response until timeout.
+
+The Rust client implements the same flow with a pending registry keyed by the
+request UID:
+
+- `Client::api_*` methods create the request and return a
+  `Receiver<EngineResponse>`.
+- `Client::run_until_response` keeps the UDP loop and `EventDispatcher` running
+  while it waits for that receiver.
+- `Client::request_engine_response` is the lower-level helper used by
+  `run_init_sequence`.
+- Typed helpers such as `request_base_check`, `request_auth_check`, and
+  `request_balance` wrap this path and parse the response payload.
+
+Do not block the same thread with `rx.recv_timeout(...)` while it owns the
+`Client`. The client loop must continue running so that UDP packets, sliced
+responses, decryption, and pending response routing can progress.
+
+## Delphi Reference Points
+
+- `Unit1.pas:4987` - `TCryptoPumpTool.InitInt` startup ordering.
+- `MoonProtoEngine.pas:514` - `SendAndWait` polling loop.
+- `MoonProtoEngine.pas:563-922` - BaseCheck, AuthCheck, GetMarketsList,
+  UpdateMarketsList, and GetMarketsBalanceFull.
+- `MoonProtoEngine.pas:267` - SubscribeAllTrades.
+- `MoonProtoServer.pas:1043` - server-side `emk_SubscribeAllTrades` handling.
+- `MoonProtoClient.pas:256-411` - client data dispatch.
+- `MoonProtoClient.pas:802` - API response matching to pending requests.
