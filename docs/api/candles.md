@@ -15,7 +15,7 @@ pub struct DeepPrice {
     pub max_p:   f32,    // 4 bytes
     pub min_p:   f32,    // 4 bytes
     pub vol:     f32,    // 4 bytes
-    pub time:    f64,    // 8 bytes — TDateTime (Delphi double, days since 1899-12-30 UTC)
+    pub time:    f64,    // 8 bytes — TDateTime (Delphi double, days since 1899-12-30)
 }
 ```
 
@@ -166,6 +166,10 @@ After all `ChunkTotal` chunks have arrived (in any order, by `ChunkIndex`
 written by Delphi `TMarkets.StoreCandlesToZip`. This is not the same layout as
 `GetCoinCardCandles`.
 
+The merged stream carries the server timezone shift in minutes. The parser applies
+the same correction as Delphi `TMarkets.ApplyRecvdStream`: each parsed 5m candle
+time is adjusted by `(local_timezone_minutes - server_timezone_minutes) / 1440`.
+
 ### CandlesAggregator API
 
 ```rust
@@ -199,8 +203,13 @@ impl CandlesAggregator {
 
 ## Candle time
 
-`DeepPrice.time` is a `TDateTime` (Delphi double, days since 1899-12-30 UTC).
-Convert to unix timestamp:
+`DeepPrice.time` is a `TDateTime` (Delphi double, days since 1899-12-30). For
+`RequestCandlesData`, the parsed 5m candle times are already shifted to the
+client's local timezone, matching Delphi `ApplyRecvdStream`. `GetCoinCardCandles`
+returns the raw `TDeepPrice` values from the response.
+
+If the `TDateTime` value you are handling represents UTC, convert to unix
+timestamp with:
 
 ```rust
 fn delphi_to_unix_secs(td: f64) -> f64 {

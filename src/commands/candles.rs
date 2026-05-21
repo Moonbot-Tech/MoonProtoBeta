@@ -22,7 +22,8 @@
 //! - **`emk_RequestCandlesData`** — chunked: each response starts with
 //!   `ChunkIndex:u16 + ChunkTotal:u16` + chunk_data. After all chunks are merged,
 //!   the resulting bytes are the zlib stream produced by Delphi
-//!   `TMarkets.StoreCandlesToZip`.
+//!   `TMarkets.StoreCandlesToZip`. Parsed `TDeepPricePack.Time` values are adjusted
+//!   with the same local-timezone correction as Delphi `TMarkets.ApplyRecvdStream`.
 //!
 //! Используй `CandlesAggregator` для сборки chunked responses.
 
@@ -46,6 +47,7 @@ pub struct DeepPrice {
 }
 
 pub const DEEP_PRICE_SIZE: usize = 28;
+const MINS_IN_DAY: f64 = 1440.0;
 
 impl DeepPrice {
     /// Прочитать один record из bytes.
@@ -169,10 +171,17 @@ pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
 ///   sell_wall: 4 * TWallItem
 /// ```
 ///
-/// The timezone-shift field is intentionally not applied here. Delphi applies it
-/// when mutating local `Markets` state; the public library returns the server
-/// stream content and parsed values without depending on process-local timezone.
 pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<RequestCandlesMarket>> {
+    parse_request_candles_data_response_with_local_shift(
+        zipped_data,
+        current_local_time_shift_minutes(),
+    )
+}
+
+fn parse_request_candles_data_response_with_local_shift(
+    zipped_data: &[u8],
+    local_time_shift_minutes: f64,
+) -> Option<Vec<RequestCandlesMarket>> {
     let mut decoder = ZlibDecoder::new(zipped_data);
     let mut data = Vec::new();
     if let Err(e) = decoder.read_to_end(&mut data) {
@@ -204,8 +213,9 @@ pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<Req
     }
     let count = count_raw as usize;
 
-    // TimeShift minutes. Delphi applies a local timezone correction later.
-    let _server_time_shift = read_f64(&data, &mut pos)?;
+    let server_time_shift_minutes = read_f64(&data, &mut pos)?;
+    let time_shift_days =
+        (local_time_shift_minutes.round() - server_time_shift_minutes) / MINS_IN_DAY;
 
     let mut markets = Vec::with_capacity(count);
     for _ in 0..count {
@@ -228,11 +238,13 @@ pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<Req
 
         let mut candles_5m = Vec::with_capacity(candle_count);
         for _ in 0..candle_count {
-            candles_5m.push(if ver >= 2 {
+            let mut candle = if ver >= 2 {
                 read_deep_price_pack(&data, &mut pos)?
             } else {
                 read_deep_price_pack_old(&data, &mut pos)?
-            });
+            };
+            candle.time += time_shift_days;
+            candles_5m.push(candle);
         }
         let buy_wall = read_wall_data(&data, &mut pos)?;
         let sell_wall = read_wall_data(&data, &mut pos)?;
@@ -245,6 +257,85 @@ pub fn parse_request_candles_data_response(zipped_data: &[u8]) -> Option<Vec<Req
     }
 
     Some(markets)
+}
+
+#[cfg(unix)]
+fn current_local_time_shift_minutes() -> f64 {
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        if now == -1 {
+            return 0.0;
+        }
+
+        let mut local_tm: libc::tm = std::mem::zeroed();
+        let mut utc_tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut local_tm).is_null()
+            || libc::gmtime_r(&now, &mut utc_tm).is_null()
+        {
+            return 0.0;
+        }
+
+        let local_secs = libc::mktime(&mut local_tm);
+        utc_tm.tm_isdst = -1;
+        let utc_as_local_secs = libc::mktime(&mut utc_tm);
+        if local_secs == -1 || utc_as_local_secs == -1 {
+            return 0.0;
+        }
+        ((local_secs - utc_as_local_secs) as f64 / 60.0).round()
+    }
+}
+
+#[cfg(windows)]
+fn current_local_time_shift_minutes() -> f64 {
+    #[repr(C)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: SystemTime,
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: SystemTime,
+        daylight_bias: i32,
+    }
+
+    extern "system" {
+        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+    }
+
+    const TIME_ZONE_ID_INVALID: u32 = u32::MAX;
+    const TIME_ZONE_ID_STANDARD: u32 = 1;
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+
+    unsafe {
+        let mut info: TimeZoneInformation = std::mem::zeroed();
+        let zone_id = GetTimeZoneInformation(&mut info);
+        if zone_id == TIME_ZONE_ID_INVALID {
+            return 0.0;
+        }
+        let extra_bias = match zone_id {
+            TIME_ZONE_ID_STANDARD => info.standard_bias,
+            TIME_ZONE_ID_DAYLIGHT => info.daylight_bias,
+            _ => 0,
+        };
+        (-(info.bias + extra_bias) as f64).round()
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn current_local_time_shift_minutes() -> f64 {
+    0.0
 }
 
 fn read_u8(data: &[u8], pos: &mut usize) -> Option<u8> {
@@ -594,6 +685,31 @@ mod tests {
         assert_eq!(markets[0].candles_5m[0].vol, 12.5);
         assert_eq!(markets[0].buy_wall[3].vol, 13.0);
         assert_eq!(markets[0].sell_wall[3].count, 13);
+    }
+
+    #[test]
+    fn request_candles_data_parser_applies_delphi_timezone_shift() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        plain.push(2);
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&60f64.to_le_bytes()); // server TimeShift minutes
+        write_delphi_utf16_string(&mut plain, "BTCUSDT");
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, 45_000.0);
+        for _ in 0..8 {
+            plain.extend_from_slice(&0f32.to_le_bytes());
+            plain.extend_from_slice(&0i32.to_le_bytes());
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let zipped = encoder.finish().unwrap();
+
+        let markets =
+            parse_request_candles_data_response_with_local_shift(&zipped, 180.0).unwrap();
+        let expected = 45_000.0 + (180.0 - 60.0) / MINS_IN_DAY;
+        assert!((markets[0].candles_5m[0].time - expected).abs() < f64::EPSILON);
     }
 
     fn write_delphi_utf16_string(out: &mut Vec<u8>, value: &str) {

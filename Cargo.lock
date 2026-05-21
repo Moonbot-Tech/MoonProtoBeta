@@ -229,6 +229,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "flate2",
+ "libc",
  "log",
  "moonproto-transport",
  "rand",
