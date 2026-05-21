@@ -1,8 +1,8 @@
 //! Accumulating live stress client for MoonProto.
 //!
 //! Run two independent client instances against one server and keep several
-//! subscriptions plus Engine API and chunked candles requests in flight at the
-//! same time:
+//! subscriptions plus Engine API, API-key expiration checks, and chunked candles
+//! requests in flight at the same time:
 //!
 //!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0
 //!
@@ -24,11 +24,13 @@ use std::time::{Duration, Instant};
 
 use moonproto::client::{Client, ClientConfig, ClientSender, LifecycleEvent, MergedCandles};
 use moonproto::commands::candles::{parse_coin_card_candles_response, DeepHistoryKind};
-use moonproto::commands::ui::ClientSettingsCommand;
+use moonproto::commands::engine_api::{
+    parse_api_expiration_time_response, EngineMethod, EngineResponse, ServerInfo,
+};
 use moonproto::commands::{
     parse_get_balance_response, parse_query_hedge_mode_response,
 };
-use moonproto::commands::engine_api::{EngineMethod, EngineResponse, ServerInfo};
+use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::{Event, EventDispatcher};
 use moonproto::key_import;
 use moonproto::state::{OrderBookEvent, TradesEvent};
@@ -267,6 +269,12 @@ fn schedule_safe_burst(
         EngineMethod::GetBalance,
         client.api_get_balance("USDT"),
     );
+    push_pending(
+        pending,
+        stats,
+        EngineMethod::CheckAPIExpirationTime,
+        client.api_check_expiration_time(),
+    );
 
     if burst_no % 3 == 0 {
         push_pending(
@@ -397,6 +405,21 @@ fn validate_response(label: &str, resp: &EngineResponse, stats: &SharedStats) {
             if parse_query_hedge_mode_response(&resp.data).is_none() && resp.success {
                 stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
                 println!("[{label}] malformed QueryHedgeMode response: {} bytes", resp.data.len());
+            }
+        }
+        EngineMethod::CheckAPIExpirationTime => {
+            if let Some(expiration) = parse_api_expiration_time_response(&resp.data) {
+                let raw = expiration.delphi_time();
+                if !raw.is_finite() || raw < 0.0 {
+                    stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                    println!("[{label}] invalid API expiration time raw_delphi_time={raw}");
+                }
+            } else if resp.success {
+                stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
+                println!(
+                    "[{label}] malformed CheckAPIExpirationTime response: {} bytes",
+                    resp.data.len()
+                );
             }
         }
         EngineMethod::GetCoinCardCandles => {
