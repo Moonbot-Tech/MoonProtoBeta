@@ -183,6 +183,23 @@ snapshot into `EventDispatcher::orders()`, and waits until the dispatcher has
 finished Delphi `CleanupMissingWorkers` follow-up requests for orders absent
 from the fresh snapshot.
 
+## Balance Snapshot Request
+
+Use `request_balance_snapshot` when the application needs a fresh full balance
+read model from the Balance channel:
+
+```rust
+let balances = client.request_balance_snapshot(
+    &mut dispatcher,
+    Duration::from_secs(15),
+)?;
+println!("balance markets={}", balances.len());
+println!("btc total={}", balances.global.btc_balance_total);
+```
+
+The helper sends `TRequestBalanceRefresh`, keeps the UDP loop running, waits for
+the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
+
 ## Subscriptions
 
 Use registry-aware methods:

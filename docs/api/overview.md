@@ -85,6 +85,7 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 | [`engine_api.md`](engine_api.md) | Engine RPC wrappers and response parsing |
 | [`trade_actions.md`](trade_actions.md) | High-level trading commands |
 | [`orders.md`](orders.md) | Order state and order events |
+| [`balances.md`](balances.md) | Account and market balance snapshots |
 | [`order_books.md`](order_books.md) | Orderbook updates and recovery |
 | [`trades.md`](trades.md) | Trades stream and gap recovery |
 | [`markets.md`](markets.md) | Markets list, prices, indexes, tags |

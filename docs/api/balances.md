@@ -11,6 +11,16 @@ Account and market balances: full snapshots plus incremental updates.
 
 The sync state is `BalancesState`. The key is `market_name: String`, for example `"BTCUSDT"`.
 
+For the common one-shot flow, use `Client::request_balance_snapshot`:
+
+```rust
+let balances = client.request_balance_snapshot(
+    &mut dispatcher,
+    std::time::Duration::from_secs(15),
+)?;
+println!("markets with balance rows={}", balances.len());
+```
+
 ## Usage
 
 ```rust
@@ -162,4 +172,5 @@ previous `max_value` when the decoded value is zero or otherwise not greater tha
 
 - [arb.md](arb.md): `TArbPricesCommand` also uses the MPC_Balance channel (CmdId=6)
 - [markets.md](markets.md): balance_usdt calculation needs prices from `MarketsState`
-- [engine_api.md](engine_api.md): `balance_request_refresh` (CmdId=5)
+- [client.md](client.md): `request_balance_snapshot` high-level helper
+- [engine_api.md](engine_api.md): one-currency `request_balance`

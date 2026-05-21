@@ -260,6 +260,7 @@
 | B8 | cmd_id=4 incremental: merge + global_changed gate | partial update | state/balances.rs:apply cmd_id=4 | ✅ |
 | B9 | Incremental `EpochIsOK(m.LastBalanceEpoch, cmd.Epoch)` per market; full snapshot has no global epoch gate | out-of-order reject | state/balances.rs:last_epoch_by_market | ✅ |
 | B10 | `ApplyBalanceItem`: `bnMaxValue` updates only when `item.bnMaxValue > _eps` | preserve previous max position value | state/balances.rs:preserve_max_value | ✅ |
+| B11 | TRequestBalanceRefresh CmdId=5 → server forces next full balance snapshot | refresh request + wait for broadcast | balance.rs:build_request_balance_refresh + client.rs:request_balance_snapshot | ✅ |
 
 ---
 

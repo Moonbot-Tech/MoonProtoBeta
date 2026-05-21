@@ -2428,6 +2428,49 @@ impl Client {
         self.send_cmd(raw, Command::Balance, SendPriority::High, true, 3);
     }
 
+    /// Request a fresh full balance snapshot and wait until it is applied to
+    /// `EventDispatcher::balances()`.
+    ///
+    /// `TRequestBalanceRefresh` is not an Engine API request and has no response
+    /// UID. Delphi handles it by forcing the next balance worker tick to
+    /// broadcast `TBalanceSnapshotFull`. This helper hides that fire-and-forget
+    /// shape: it sends the request, keeps the UDP loop running, waits for a new
+    /// full balance snapshot epoch, then returns a cloned read model.
+    pub fn request_balance_snapshot(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<crate::state::BalancesState, mpsc::RecvTimeoutError> {
+        const TICK: Duration = Duration::from_millis(50);
+
+        let previous_epoch = dispatcher.balances().last_epoch;
+        let start = Instant::now();
+        let snapshot_seen = Arc::new(AtomicBool::new(false));
+        self.balance_request_refresh();
+
+        loop {
+            if snapshot_seen.load(Ordering::Relaxed) {
+                return Ok(dispatcher.balances().clone());
+            }
+
+            let Some(remaining) = timeout_remaining(start, timeout) else {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            };
+
+            let seen = Arc::clone(&snapshot_seen);
+            let tick = remaining.min(TICK);
+            self.run_with_dispatcher(tick, dispatcher, Box::new(move |event| {
+                if let crate::events::Event::Balance(
+                    crate::state::BalanceEvent::SnapshotApplied { epoch, .. }
+                ) = event {
+                    if *epoch != previous_epoch {
+                        seen.store(true, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+    }
+
     /// GetTimeMS equivalent — монотонные миллисекунды с момента старта `Client` (matches
     /// Delphi GetTickCount64 семантикой "since some fixed past point").
     ///

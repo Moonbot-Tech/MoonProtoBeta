@@ -40,7 +40,7 @@ pub struct GlobalBalance {
 /// - `cmd_id=2` (legacy snapshot): обновляются полученные маркеты, остальные не трогаются.
 /// - `cmd_id=3` (full snapshot): обновляются полученные, **остальные сбрасываются**.
 /// - `cmd_id=4` (incremental): обновление дельты + опциональный обнов globals.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BalancesState {
     /// Глобальные суммы (BTC, special coin, locked).
     pub global: GlobalBalance,
