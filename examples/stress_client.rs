@@ -2,7 +2,8 @@
 //!
 //! Run two independent client instances against one server and keep several
 //! subscriptions plus Engine API, API-key expiration checks, and chunked candles
-//! requests in flight at the same time:
+//! requests in flight at the same time. If order state is present, the client
+//! also keeps safe tracked-order status refreshes in flight:
 //!
 //!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0
 //!
@@ -47,6 +48,7 @@ const CANDLES_TIMEOUT: Duration = Duration::from_secs(35);
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_API: usize = 48;
 const MAX_PENDING_CANDLES: usize = 4;
+const TRACKED_STATUS_BATCH: usize = 4;
 
 #[derive(Default)]
 struct SharedStats {
@@ -98,6 +100,9 @@ struct SharedStats {
     helper_orders_disconnected: AtomicU64,
     helper_queued_events: AtomicU64,
     helper_max_queued_events: AtomicU64,
+    tracked_status_rounds: AtomicU64,
+    tracked_status_sent: AtomicU64,
+    tracked_status_empty: AtomicU64,
     settings_requests: AtomicU64,
     balance_refresh_requests: AtomicU64,
     strat_snapshot_requests: AtomicU64,
@@ -710,6 +715,29 @@ fn drain_helper_queued_events(
     }
 }
 
+fn send_tracked_status_requests(
+    label: &str,
+    client: &Client,
+    dispatcher: &EventDispatcher,
+    stats: &SharedStats,
+) {
+    stats.tracked_status_rounds.fetch_add(1, Ordering::Relaxed);
+    let mut sent = 0u64;
+
+    for order in dispatcher.orders().iter().take(TRACKED_STATUS_BATCH) {
+        client.request_tracked_order_status(order);
+        sent += 1;
+    }
+
+    if sent == 0 {
+        stats.tracked_status_empty.fetch_add(1, Ordering::Relaxed);
+        println!("[{label}] tracked status refresh skipped: no tracked orders");
+    } else {
+        stats.tracked_status_sent.fetch_add(sent, Ordering::Relaxed);
+        println!("[{label}] tracked status refresh sent {sent} request(s)");
+    }
+}
+
 fn run_one_shot_helper_round(
     label: &str,
     client: &mut Client,
@@ -765,10 +793,19 @@ fn run_one_shot_helper_round(
                 Ok(orders) => {
                     stats.helper_orders_ok.fetch_add(1, Ordering::Relaxed);
                     validate_order_snapshot(label, &orders, stats);
+                    stats.tracked_status_rounds.fetch_add(1, Ordering::Relaxed);
+                    for order in orders.iter().take(TRACKED_STATUS_BATCH) {
+                        client.request_tracked_order_status(order);
+                        stats.tracked_status_sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if orders.is_empty() {
+                        stats.tracked_status_empty.fetch_add(1, Ordering::Relaxed);
+                    }
                     println!(
-                        "[{label}] helper orders ok count={} queued={}",
+                        "[{label}] helper orders ok count={} queued={} tracked_status_sent={}",
                         orders.len(),
-                        dispatcher.queued_event_count()
+                        dispatcher.queued_event_count(),
+                        orders.len().min(TRACKED_STATUS_BATCH)
                     );
                 }
                 Err(err) => record_helper_error(
@@ -1008,6 +1045,7 @@ fn run_one_client(
     let mut next_burst = Instant::now();
     let mut helper_round = 0u64;
     let mut next_helper = Instant::now() + Duration::from_secs(10);
+    let mut next_tracked_status = Instant::now() + Duration::from_secs(18);
     let mut next_report = Instant::now() + Duration::from_secs(15);
 
     println!(
@@ -1037,6 +1075,11 @@ fn run_one_client(
             run_one_shot_helper_round(label, &mut client, &mut dispatcher, &stats, helper_round);
             helper_round = helper_round.wrapping_add(1);
             next_helper = Instant::now() + Duration::from_secs(23);
+        }
+
+        if now >= next_tracked_status {
+            send_tracked_status_requests(label, &client, &dispatcher, &stats);
+            next_tracked_status = Instant::now() + Duration::from_secs(19);
         }
 
         drain_pending(label, &mut pending, &stats);
@@ -1189,6 +1232,12 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
             stats.helper_orders_disconnected.load(Ordering::Relaxed),
             stats.helper_queued_events.load(Ordering::Relaxed),
             stats.helper_max_queued_events.load(Ordering::Relaxed),
+        );
+        println!(
+            "[{label}] tracked_status rounds={} sent={} empty_rounds={}",
+            stats.tracked_status_rounds.load(Ordering::Relaxed),
+            stats.tracked_status_sent.load(Ordering::Relaxed),
+            stats.tracked_status_empty.load(Ordering::Relaxed),
         );
         println!(
             "[{label}] server_info bot_id={:?} name={:?} exchange={:?} base={:?} version={:?}",
