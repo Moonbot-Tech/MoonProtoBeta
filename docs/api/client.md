@@ -141,6 +141,7 @@ For common one-shot reads, prefer typed request helpers:
 ```rust
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
 ```
 
 These helpers send the request, keep the UDP loop running through

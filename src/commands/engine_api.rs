@@ -4,8 +4,13 @@
 /// Request: client → server (CmdId=002)
 /// Response: server → client (CmdId=001)
 
+use std::time::{Duration, SystemTime};
+
 use super::registry::{read_string};
 use flate2::read::DeflateDecoder;
+
+const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
+const SECONDS_PER_DAY: f64 = 86_400.0;
 
 /// Engine RPC method identifiers — 31 метод торгового API.
 ///
@@ -78,7 +83,8 @@ pub enum EngineMethod {
     /// Ответ: one Delphi `Boolean`, parse with [`parse_query_hedge_mode_response`].
     QueryHedgeMode = 14,
     /// `CheckAPIExpirationTime` — срок действия API ключа на бирже. Без параметров.
-    /// Ответ: timestamp + дни до истечения. Полезно для UI warning'а.
+    /// Ответ: one Delphi `TDateTime` double, parse with
+    /// [`parse_api_expiration_time_response`].
     CheckAPIExpirationTime = 15,
     /// `CheckBinanceTags` — verification Binance API tags (futures permissions, etc.).
     /// Specific Binance debug. Без параметров.
@@ -325,6 +331,81 @@ pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
 /// trailing bytes are ignored for forward compatibility.
 pub fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
     data.first().map(|&v| v != 0)
+}
+
+/// API-key expiration time returned by `emk_CheckAPIExpirationTime`.
+///
+/// The raw wire value is Delphi `TDateTime`: days since 1899-12-30 with a
+/// fractional day part. A value of `0.0` means that the server did not report
+/// an expiration time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ApiExpirationTime {
+    delphi_time: f64,
+}
+
+impl ApiExpirationTime {
+    /// Build from the raw Delphi `TDateTime` value.
+    pub fn from_delphi_time(delphi_time: f64) -> Self {
+        Self { delphi_time }
+    }
+
+    /// Raw Delphi `TDateTime` value retained for exact diagnostics.
+    pub fn delphi_time(&self) -> f64 {
+        self.delphi_time
+    }
+
+    /// Returns false when the server reported no known expiration time.
+    pub fn is_known(&self) -> bool {
+        self.delphi_time.is_finite() && self.delphi_time > 0.0
+    }
+
+    /// Convert to whole Unix seconds when the value is known and representable
+    /// by `SystemTime` on the Unix side of the epoch.
+    pub fn unix_seconds(&self) -> Option<i64> {
+        if !self.is_known() {
+            return None;
+        }
+        let seconds = ((self.delphi_time - DELPHI_UNIX_EPOCH_DAYS) * SECONDS_PER_DAY).round();
+        if !seconds.is_finite() || seconds < 0.0 || seconds > i64::MAX as f64 {
+            return None;
+        }
+        Some(seconds as i64)
+    }
+
+    /// Convert to `SystemTime` when the value is known and not before the Unix epoch.
+    pub fn system_time(&self) -> Option<SystemTime> {
+        let seconds = self.unix_seconds()?;
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds as u64))
+    }
+
+    /// Rounded signed number of days until expiration relative to `now`.
+    pub fn days_until(&self, now: SystemTime) -> Option<i64> {
+        let expiration = self.system_time()?;
+        match expiration.duration_since(now) {
+            Ok(duration) => Some((duration.as_secs_f64() / SECONDS_PER_DAY).round() as i64),
+            Err(err) => {
+                let days = (err.duration().as_secs_f64() / SECONDS_PER_DAY).round() as i64;
+                Some(-days)
+            }
+        }
+    }
+}
+
+/// Parse `EngineResponse.data` for `emk_CheckAPIExpirationTime`
+/// (`EngineMethod::CheckAPIExpirationTime`).
+///
+/// The Delphi server writes exactly one little-endian `Double` on success:
+/// `MoonProtoEngineServer.pas → TEngineWorker.ProcessRequest` branch
+/// `emk_CheckAPIExpirationTime` (`resp.WriteDouble(ExpTime)`). Extra trailing
+/// bytes are ignored so newer servers can append fields without breaking old
+/// consumers.
+pub fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTime> {
+    if data.len() < 8 {
+        return None;
+    }
+    Some(ApiExpirationTime::from_delphi_time(f64::from_le_bytes(
+        data[0..8].try_into().unwrap(),
+    )))
 }
 
 // =============================================================================
@@ -809,6 +890,32 @@ mod parse_engine_response_tests {
         assert_eq!(parse_query_hedge_mode_response(&[1]), Some(true));
         assert_eq!(parse_query_hedge_mode_response(&[2, 0xAA]), Some(true));
         assert_eq!(parse_query_hedge_mode_response(&[]), None);
+    }
+
+    #[test]
+    fn parse_api_expiration_time_response_reads_delphi_datetime() {
+        let mut data = 45_000.25f64.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0xAA, 0xBB]);
+
+        let parsed = parse_api_expiration_time_response(&data).unwrap();
+        assert_eq!(parsed.delphi_time(), 45_000.25);
+        assert_eq!(parse_api_expiration_time_response(&data[..7]), None);
+    }
+
+    #[test]
+    fn api_expiration_time_converts_unix_epoch() {
+        let parsed = ApiExpirationTime::from_delphi_time(DELPHI_UNIX_EPOCH_DAYS);
+        assert!(parsed.is_known());
+        assert_eq!(parsed.unix_seconds(), Some(0));
+        assert_eq!(parsed.system_time(), Some(SystemTime::UNIX_EPOCH));
+        assert_eq!(
+            parsed.days_until(SystemTime::UNIX_EPOCH + Duration::from_secs(2 * 86_400)),
+            Some(-2)
+        );
+
+        let unknown = ApiExpirationTime::from_delphi_time(0.0);
+        assert!(!unknown.is_known());
+        assert_eq!(unknown.system_time(), None);
     }
 
     #[test]

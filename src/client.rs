@@ -20,9 +20,9 @@ use crate::compression;
 use crate::protocol::{Command, handshake, slider::Slider, slicing, crypted};
 use crate::api_pending::ApiPending;
 use crate::commands::engine_api::{
-    AuthCheckResponse, EngineResponse, EngineMethod, ServerInfo, parse_auth_check_response,
-    parse_base_check_response, parse_engine_response, parse_get_balance_response,
-    parse_query_hedge_mode_response,
+    ApiExpirationTime, AuthCheckResponse, EngineResponse, EngineMethod, ServerInfo,
+    parse_api_expiration_time_response, parse_auth_check_response, parse_base_check_response,
+    parse_engine_response, parse_get_balance_response, parse_query_hedge_mode_response,
 };
 use crate::commands::candles::{
     CandlesAggregator, CandlesChunkResult, DeepPrice, RequestCandlesMarket,
@@ -1533,6 +1533,20 @@ impl Client {
             &crate::commands::engine_request::query_hedge_mode(),
             timeout,
             parse_query_hedge_mode_response,
+        )
+    }
+
+    /// Run `emk_CheckAPIExpirationTime` and parse the returned API-key expiration time.
+    pub fn request_api_expiration_time(
+        &mut self,
+        dispatcher: &mut crate::events::EventDispatcher,
+        timeout: Duration,
+    ) -> Result<ApiExpirationTime, EngineRequestError> {
+        self.request_engine_parsed(
+            dispatcher,
+            &crate::commands::engine_request::check_api_expiration_time(),
+            timeout,
+            parse_api_expiration_time_response,
         )
     }
 

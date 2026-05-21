@@ -399,6 +399,7 @@
 | E9 | MoonProtoServer.pas:1070-1128 emk_SubscribeOrderBook/emk_UnsubscribeOrderBook uses only `MarketNames`; MoonProtoOrderBook.pas:287-293 marks both `TOrderBookKind` books | high-level orderbook subscribe registry is per `market_name`; `OrderBookKind` remains event/full-request state only | client.rs:subscribe_orderbook/unsubscribe_orderbook + SubscriptionRegistry | ✅ |
 | E10 | MoonProtoEngineServer.pas:ProcessRequest `emk_GetMarketsBalanceFull` вызывает `Engine.GetMarketsBalanceFull`, но `WriteBalancesToStream` оставлен TODO и payload не пишется | raw wrapper kept; docs/comments state successful response data is empty | client.rs:api_get_markets_balance_full + docs | ✅ |
 | E11 | `TEngineMethodKind` содержит `emk_GetOrder`/`emk_GetOpenOrders`/`emk_GetActiveOrders`, но `MoonProtoEngineServer.pas:ProcessRequest` не имеет этих веток и возвращает `Unknown method` | raw wrappers kept only for enum/wire completeness; docs warn current reference server returns error 400 | client.rs:api_get_order/api_get_open_orders/api_get_active_orders + docs | ✅ |
+| E12 | MoonProtoEngineServer.pas:ProcessRequest `emk_CheckAPIExpirationTime` writes `resp.WriteDouble(ExpTime)`; MoonProtoEngine.pas:CheckAPIExpirationTime reads one `Double` | typed payload parser + one-shot helper hides Delphi `TDateTime` raw bytes from consumers | engine_api.rs:parse_api_expiration_time_response + client.rs:request_api_expiration_time | ✅ |
 
 ### High-level wrappers in client.rs (Stage 3)
 | # | Что | Rust | ✅ |

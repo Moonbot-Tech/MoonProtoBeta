@@ -128,6 +128,7 @@ server status, and parse the response payload:
 ```rust
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
 ```
 
 Lower-level `Client::api_*` methods still return
@@ -212,6 +213,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/list_markets.rs` — fetch the market catalog and print a summary.
 - `examples/get_balance.rs` — request and parse one currency balance.
 - `examples/query_hedge_mode.rs` — request and parse account hedge mode.
+- `examples/api_expiration_time.rs` — request and parse API-key expiration time.
 - `examples/request_client_settings.rs` — request the current UI settings snapshot.
 - `examples/order_snapshot.rs` — request the current order snapshot.
 - `examples/balance_snapshot.rs` — request the current full balance snapshot.

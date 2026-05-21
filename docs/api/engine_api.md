@@ -14,6 +14,7 @@ use std::time::Duration;
 
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
+let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
 ```
 
 The one-shot helpers keep pumping the UDP loop through short
@@ -42,7 +43,7 @@ UID is registered again.
 
 | Group | Methods |
 |---|---|
-| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_coin_card_candles` |
+| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_coin_card_candles` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
@@ -81,8 +82,20 @@ let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(
 println!("hedge_mode={hedge_mode}");
 ```
 
-For raw payload access, `api_get_balance` and `api_query_hedge_mode` remain
-available and return `Receiver<EngineResponse>`.
+`request_api_expiration_time()` returns an `ApiExpirationTime` wrapper around
+the server's Delphi `TDateTime` value and exposes `system_time()`,
+`unix_seconds()`, and `days_until(...)` helpers:
+
+```rust
+let expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+if let Some(unix) = expiration.unix_seconds() {
+    println!("API key expires at unix_seconds={unix}");
+}
+```
+
+For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
+`api_check_expiration_time` remain available and return
+`Receiver<EngineResponse>`.
 
 `api_get_markets_balance_full` is intentionally low-level. The current Delphi
 server calls `Engine.GetMarketsBalanceFull`, but does not serialize the balance

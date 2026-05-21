@@ -70,7 +70,8 @@
 //! ```
 //!
 //! For common one-shot Engine API operations, use typed helpers such as
-//! [`Client::request_balance`], [`Client::request_hedge_mode`], and
+//! [`Client::request_balance`], [`Client::request_hedge_mode`],
+//! [`Client::request_api_expiration_time`], and
 //! [`Client::request_coin_card_candles`]. They keep the client loop running,
 //! check the server status, and parse the response payload. Events observed
 //! during the wait are queued in [`EventDispatcher::queued_events`] and can be
@@ -84,6 +85,7 @@
 //! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
+//! `examples/api_expiration_time.rs`,
 //! `examples/request_client_settings.rs`,
 //! `examples/order_snapshot.rs`,
 //! `examples/balance_snapshot.rs`,
