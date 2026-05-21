@@ -109,11 +109,6 @@ fn runtime_smoke_full_happy_path() {
 
     // === Phase 3: init sequence ===
     let init_cfg = InitConfig {
-        base_check: true,
-        auth_check: true,
-        fetch_markets: true,
-        fetch_indexes: true,
-        fetch_balance: false,
         mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
