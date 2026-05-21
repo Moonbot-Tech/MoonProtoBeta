@@ -1067,6 +1067,12 @@ pub struct Client {
     /// `Vec<Client>` и различает их по `client.server_info().bot_id`.
     server_info: crate::commands::engine_api::ServerInfo,
 
+    /// Delphi `InitDone`: transport auth уже завершён, но domain-пуши
+    /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) можно применять
+    /// только после полного init bootstrap. До этого `dispatch_into_active`
+    /// дропает эти каналы, как `TMoonProtoNetClient.ClientNewData`.
+    domain_ready: bool,
+
     /// **Per-Client ServerTimeDelta handle** — shareable через `Arc::clone`.
     ///
     /// Хранит текущий `ServerTimeDelta` (в днях, TDateTime-формат, упакован в u64
@@ -1201,6 +1207,7 @@ impl Client {
             ntp_thread_shutdown,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
+            domain_ready: false,
             last_update_markets_ms: i64::MIN / 2,
             last_check_tags_ms: i64::MIN / 2,
             check_tags_hour_slot: i64::MIN,
@@ -1235,6 +1242,11 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn testing_set_server_token(&mut self, token: u64) {
         self.server_token = token;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing_set_domain_ready(&mut self, ready: bool) {
+        self.domain_ready = ready;
     }
 
     #[cfg(test)]
@@ -4311,6 +4323,8 @@ impl Client {
     }
 
     pub fn is_authorized(&self) -> bool { self.authorized }
+    /// Returns true after the MoonBot-compatible domain init has completed.
+    pub fn is_domain_ready(&self) -> bool { self.domain_ready }
     pub fn auth_status(&self) -> AuthStatus { self.auth_status }
     pub fn ping_count(&self) -> u32 { self.ping_count }
     pub fn total_sent(&self) -> u64 { self.total_sent }
@@ -4452,6 +4466,12 @@ pub struct InitConfig {
     /// В текущем Delphi-эталоне это триггер server-side refresh без serialized
     /// payload; `balances_response_bytes` обычно равен 0.
     pub fetch_balance: bool,
+    /// Value for the post-init `TMMOrdersSubscribeCommand`.
+    ///
+    /// Delphi always sends this UI command after `InitDone` with
+    /// `cfg.ShowHeatMap`. `None` uses `subscribe_trades` as a fallback, then
+    /// falls back to `false`.
+    pub mm_orders_subscribe: Option<bool>,
     /// Подписаться на all-trades с указанным `want_mm`. None = пропустить.
     pub subscribe_trades: Option<bool>,
     /// Подписаться на orderbook'и по имени рынка. Resolve по имени делает сервер —
@@ -4470,6 +4490,8 @@ pub struct InitResult {
     /// `EventDispatcher` асинхронно в `MarketsState`.
     pub markets_response_bytes: usize,
     pub balances_response_bytes: usize,
+    pub post_init_resync_sent: bool,
+    pub strategy_snapshot_sent: bool,
     pub trades_subscribed: bool,
     pub orderbooks_subscribed: usize,
     /// Список текстовых ошибок шагов, которые не остановили init (например
@@ -4600,8 +4622,16 @@ pub fn connect_and_init(
     run_init_sequence(client, dispatcher, cfg.init).map_err(ConnectError::from)
 }
 
-/// Полноценный init sequence: BaseCheck → AuthCheck → GetMarketsList →
-/// GetMarketsBalanceFull → подписки.
+/// Run the full init sequence: BaseCheck → AuthCheck → GetMarketsList →
+/// GetMarketsBalanceFull → Delphi post-init resync → subscriptions.
+///
+/// Until this function completes successfully,
+/// `EventDispatcher::dispatch_into_active` drops domain pushes
+/// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`), matching Delphi
+/// `ClientNewData` under `not InitDone`. After a successful bootstrap, the
+/// library sends `TAllStatusesReq`, a fresh `TStratSnapshot` through the
+/// registered strategy provider, `TSettingsRequest`, `TMMOrdersSubscribeCommand`,
+/// and `TRequestBalanceRefresh`.
 ///
 /// **Принимает `&mut EventDispatcher`** — это обязательно для работы chunked
 /// main loop pump (см. [`wait_for_api_response`]). Через dispatcher также
@@ -4716,6 +4746,9 @@ pub fn run_init_sequence(
         }
     }
 
+    client.domain_ready = true;
+    send_post_init_resync(client, dispatcher, &cfg, &mut result);
+
     // === 5. SubscribeAllTrades === идёт через subscription_registry (fire-and-forget).
     // Subscribe events идут в event channel; main loop их применит на следующем тике
     // (либо здесь же если ниже идёт wait, либо в основном run_with_dispatcher после init).
@@ -4734,15 +4767,33 @@ pub fn run_init_sequence(
     // subscribe_* пушит ClientEvent::Subscribe* в channel. Без тика main loop
     // events лежат в channel и wire-команды не уходят. Прогоняем короткий тик
     // чтобы обработка подписки реально стартовала к моменту выхода из init.
-    if cfg.subscribe_trades.is_some() || !cfg.subscribe_orderbooks.is_empty() {
-        client.run_with_dispatcher(
-            Duration::from_millis(100),
-            dispatcher,
-            Box::new(|_| {}),
-        );
+    if result.post_init_resync_sent
+        || cfg.subscribe_trades.is_some()
+        || !cfg.subscribe_orderbooks.is_empty()
+    {
+        client.run_with_dispatcher_queued(Duration::from_millis(100), dispatcher);
     }
 
     Ok(result)
+}
+
+fn send_post_init_resync(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cfg: &InitConfig,
+    result: &mut InitResult,
+) {
+    client.request_all_statuses(rand::random());
+    result.strategy_snapshot_sent =
+        dispatcher.send_or_queue_strategy_snapshot_request(rand::random(), client);
+    client.ui_settings_request();
+    let mm_orders = cfg.mm_orders_subscribe
+        .or(client.subscription_registry.mm_orders_sub)
+        .or(cfg.subscribe_trades)
+        .unwrap_or(false);
+    client.ui_mm_subscribe(mm_orders);
+    client.balance_request_refresh();
+    result.post_init_resync_sent = true;
 }
 
 /// Drop: гарантированно сигналим reader thread'у И self-managed NTP-thread'у
@@ -5090,6 +5141,98 @@ mod api_pending_dispatch_tests {
             }
             other => panic!("expected queued EngineResponse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn post_init_resync_enqueues_delphi_commands() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_strategy_snapshot_provider(|_| {
+            Some(crate::events::StrategySnapshotReply::from_payload(
+                7,
+                99,
+                true,
+                vec![0xAA, 0xBB],
+            ))
+        });
+        let cfg = InitConfig {
+            mm_orders_subscribe: Some(true),
+            ..Default::default()
+        };
+        let mut result = InitResult::default();
+
+        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
+
+        assert!(result.post_init_resync_sent);
+        assert!(result.strategy_snapshot_sent);
+
+        let mut seen_order_req = false;
+        let mut seen_strat_snapshot = false;
+        let mut seen_settings_req = false;
+        let mut seen_mm_orders_true = false;
+        let mut seen_balance_refresh = false;
+
+        while let Ok(ev) = client.event_rx.try_recv() {
+            let ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            let data = msg.item.data;
+            match Command::from_byte(msg.item.cmd) {
+                Command::Order if data.first().copied() == Some(9) => {
+                    seen_order_req = true;
+                }
+                Command::Strat if data.first().copied() == Some(2) => {
+                    seen_strat_snapshot = true;
+                }
+                Command::UI if data.first().copied() == Some(2) => {
+                    seen_settings_req = true;
+                }
+                Command::UI
+                    if data.first().copied() == Some(5)
+                        && data.last().copied() == Some(1) =>
+                {
+                    seen_mm_orders_true = true;
+                }
+                Command::Balance if data.first().copied() == Some(5) => {
+                    seen_balance_refresh = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(seen_order_req, "post-init must request TAllStatuses");
+        assert!(
+            seen_strat_snapshot,
+            "post-init must send fresh TStratSnapshot when provider exists"
+        );
+        assert!(seen_settings_req, "post-init must request settings");
+        assert!(seen_mm_orders_true, "post-init must send TMMOrdersSubscribeCommand");
+        assert!(seen_balance_refresh, "post-init must request balance refresh");
+    }
+
+    #[test]
+    fn post_init_resync_without_strategy_provider_queues_manual_request() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+        let cfg = InitConfig::default();
+        let mut result = InitResult::default();
+
+        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
+
+        assert!(result.post_init_resync_sent);
+        assert!(!result.strategy_snapshot_sent);
+        assert!(
+            dispatcher
+                .queued_events()
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    crate::events::Event::Strat(
+                        crate::state::StratEvent::SnapshotRequested { .. }
+                    )
+                )),
+            "without provider, init must surface a manual fresh strategy snapshot request"
+        );
     }
 }
 

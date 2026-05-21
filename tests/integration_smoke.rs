@@ -119,6 +119,7 @@ fn runtime_smoke_full_happy_path() {
         auth_check: true,
         fetch_markets: true,
         fetch_balance: false,
+        mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         step_timeout: Some(Duration::from_secs(10)),

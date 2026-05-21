@@ -117,6 +117,15 @@ The helper keeps the client loop running while it waits for the connection and
 for each Engine API response. It also fills `client.server_info()` after
 `BaseCheck`.
 
+Domain pushes received before init completion are ignored, matching the Delphi
+`InitDone` gate. Once init succeeds, the helper sends the Delphi post-init
+refresh set: order snapshot request, strategy snapshot reply if a provider is
+registered, settings request, MM-orders subscription state, and balance refresh
+request. If no strategy provider is registered, init queues a
+`SnapshotRequested` event for a manual fresh reply. Set
+`InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
+subscription value independent from `subscribe_trades`.
+
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
 needs custom progress UI between connection readiness and the init requests.
 

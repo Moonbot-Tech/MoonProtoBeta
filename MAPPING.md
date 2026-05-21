@@ -411,8 +411,9 @@
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 | E-W9 | Однопоточный SendAndWait-style Engine API flow без ручного `Receiver` wait/parsing | client.rs:`request_engine_response` + typed `request_*` helpers | ✅ |
-| E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence` | ✅ |
+| E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence`; init opens `domain_ready` only after bootstrap | ✅ |
 | E-W11 | Rust active API: one-shot ожидания не теряют typed events, пришедшие пока helper крутит loop | events.rs:`EventDispatcher::queued_events`/`take_queued_events`; client.rs:`run_with_dispatcher_queued` используется `run_until_response` и one-shot helpers | ✅ |
+| E-W12 | Unit1.pas:5946-5950 post-InitDone ActiveClient resync: TAllStatusesReq, TStratSnapshot.CreateFromStrats, TSettingsRequest, TMMOrdersSubscribeCommand, TRequestBalanceRefresh | client.rs:`run_init_sequence` после bootstrap вызывает `send_post_init_resync`; strategy snapshot берётся из fresh provider или ставит queued `SnapshotRequested`, затем отправляются пользовательские trades/orderbook подписки | ✅ |
 
 ---
 
@@ -444,6 +445,7 @@
 | EV9 | LogMsg / Service / прочие | dispatch(_) → Event::Raw { cmd, payload } | ✅ |
 | EV10 | ParseFailed handling | для каналов с обязательным парсингом — Event::ParseFailed | ✅ |
 | EV11 | MoonProtoEngine.pas:809-816 + 1577-1580 | PeerAppToken mismatch → GetMarketsIndexes, до успеха не обрабатывать market_idx streams | dispatch_into_active закрывает `indexes_synchronized`; GetMarketsIndexes response открывает через MarketsState | ✅ |
+| EV12 | MoonProtoClient.pas:310-415 ClientNewData `not InitDone` gate для Order/Strat/Balance/TradesStream/TradesResendResponse/OrderBook/UI | до успешного init domain-пуши дропаются, API/LogMsg не блокируются | client.rs:`Client.domain_ready` + events.rs:`dispatch_into_active` pre-init gate | ✅ |
 
 ## commands/candles.rs → MarketsU.pas + MoonProtoEngineServer.pas + MoonProtoClient.pas
 

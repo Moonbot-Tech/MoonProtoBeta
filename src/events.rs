@@ -314,6 +314,40 @@ impl EventDispatcher {
         self.strategy_snapshot_provider = None;
     }
 
+    pub(crate) fn send_strategy_snapshot_reply(
+        &mut self,
+        request_uid: u64,
+        client: &crate::client::Client,
+    ) -> bool {
+        let Some(provider) = self.strategy_snapshot_provider.as_mut() else {
+            return false;
+        };
+        let Some(snapshot) = provider(request_uid) else {
+            return false;
+        };
+        client.strat_send_snapshot_payload(
+            snapshot.server_epoch,
+            snapshot.client_max_last_date,
+            snapshot.full,
+            &snapshot.data,
+        );
+        true
+    }
+
+    pub(crate) fn send_or_queue_strategy_snapshot_request(
+        &mut self,
+        request_uid: u64,
+        client: &crate::client::Client,
+    ) -> bool {
+        if self.send_strategy_snapshot_reply(request_uid, client) {
+            return true;
+        }
+        self.queued_events.push(Event::Strat(
+            crate::state::StratEvent::SnapshotRequested { uid: request_uid },
+        ));
+        false
+    }
+
     /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
     /// source — берёт оттуда; иначе fallback на global.
     fn current_server_time_delta(&self) -> f64 {
@@ -614,6 +648,12 @@ impl EventDispatcher {
         }
         self.last_known_server_token = current_token;
 
+        if is_pre_init_domain_command(cmd) && !client.is_domain_ready() {
+            log::debug!(target: "moonproto::events",
+                "domain command {:?} skipped before init completion", cmd);
+            return;
+        }
+
         let start_len = out.len();
         self.dispatch_into(cmd, payload, now_ms, out);
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms); auto-actions
@@ -659,16 +699,7 @@ impl EventDispatcher {
             );
         }
         if let Some(uid) = snapshot_requested_uid {
-            if let Some(provider) = self.strategy_snapshot_provider.as_mut() {
-                if let Some(snapshot) = provider(uid) {
-                    client.strat_send_snapshot_payload(
-                        snapshot.server_epoch,
-                        snapshot.client_max_last_date,
-                        snapshot.full,
-                        &snapshot.data,
-                    );
-                }
-            }
+            self.send_strategy_snapshot_reply(uid, client);
             // Если provider не задан или вернул None — событие всё равно эмиттится
             // в `out`, потребитель может ответить вручную.
         }
@@ -686,6 +717,19 @@ impl EventDispatcher {
             }
         }
     }
+}
+
+fn is_pre_init_domain_command(cmd: Command) -> bool {
+    matches!(
+        cmd,
+        Command::Order
+            | Command::Strat
+            | Command::Balance
+            | Command::TradesStream
+            | Command::TradesResendResponse
+            | Command::OrderBook
+            | Command::UI
+    )
 }
 
 #[cfg(test)]
@@ -910,6 +954,7 @@ mod tests {
         assert!(d.markets.indexes_synchronized);
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
         client.testing_set_peer_app_tokens(0x2222, 0x1111);
 
         let mut out = Vec::new();
@@ -936,6 +981,7 @@ mod tests {
         let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(status));
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         d.dispatch_into_active(
             Command::Order,
@@ -968,6 +1014,24 @@ mod tests {
         }
 
         assert!(found, "missing order must trigger TOrderStatusRequest");
+    }
+
+    #[test]
+    fn dispatch_into_active_drops_domain_commands_before_init() {
+        let mut d = EventDispatcher::new();
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let mut out = Vec::new();
+
+        d.dispatch_into_active(
+            Command::Order,
+            &empty_all_statuses_payload(0x55),
+            1000,
+            &mut out,
+            &mut client,
+        );
+
+        assert!(out.is_empty(), "pre-init Order must be dropped like Delphi InitDone gate");
+        assert_eq!(d.orders().current_snapshot_flag(), 0);
     }
 
     // =========================================================================
@@ -1126,6 +1190,7 @@ mod tests {
         let mut d = EventDispatcher::new();
         assert!(d.server_time_delta_source.is_none());
         let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
         assert!(d.server_time_delta_source.is_some(),
@@ -1157,6 +1222,7 @@ mod tests {
         });
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
         let mut out = Vec::new();
 
         // Server prods клиента: "пришли свой snapshot стратегий" — это
@@ -1210,6 +1276,7 @@ mod tests {
         let mut d = EventDispatcher::new();
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         let payload = crate::commands::strat::build_snapshot_request(99);
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);

@@ -55,6 +55,10 @@ connect_and_init(
     ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
 )?;
 
+// Domain state is opened only after init succeeds. Initial server pushes that
+// arrive earlier are dropped; the helper then requests fresh orders, settings,
+// balance, and strategy state.
+
 client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
     let _ = event;
 }));

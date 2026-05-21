@@ -85,6 +85,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 4. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
 5. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
 
+Before init completes, `run_with_dispatcher` drops domain snapshots and streams
+that the server may push immediately after transport auth. After a successful
+init it sends the same refresh set as the Delphi client: order snapshot request,
+strategy snapshot reply when a strategy provider is registered, settings request,
+MM-orders subscription state, and balance refresh request. Without a strategy
+provider, init queues a `SnapshotRequested` event so the application can answer
+with its own fresh strategy state.
+
 Use the lower-level `run_with_dispatcher` plus `run_init_sequence` pair only
 when the UI needs to show custom progress between the transport connection and
 the init requests.

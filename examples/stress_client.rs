@@ -923,6 +923,7 @@ fn run_one_client(
         auth_check: true,
         fetch_markets: true,
         fetch_balance: true,
+        mm_orders_subscribe: None,
         subscribe_trades: Some(false),
         subscribe_orderbooks: vec![args.market.clone()],
         step_timeout: Some(INIT_TIMEOUT),
