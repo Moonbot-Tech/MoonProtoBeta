@@ -25,8 +25,8 @@ use crate::commands::engine_api::{
     parse_query_hedge_mode_response,
 };
 use crate::commands::candles::{
-    CandlesAggregator, DeepPrice, RequestCandlesMarket, parse_coin_card_candles_response,
-    parse_request_candles_data_response,
+    CandlesAggregator, CandlesChunkResult, DeepPrice, RequestCandlesMarket,
+    parse_coin_card_candles_response, parse_request_candles_data_response,
 };
 
 // =============================================================================
@@ -834,7 +834,7 @@ struct PartialCandles {
     aggregator: CandlesAggregator,
     /// Sender который будет уведомлён когда aggregator вернёт merged.
     sender: mpsc::Sender<MergedCandles>,
-    /// Timestamp регистрации / последнего принятого chunk.
+    /// Timestamp регистрации / последнего сохранённого нового chunk.
     last_activity_ms: i64,
 }
 
@@ -3313,15 +3313,21 @@ impl Client {
             return false;
         }
 
-        let Some(partial) = self.pending_candles.get_mut(&resp.request_uid) else {
-            return false;
-        };
-        if resp.data.len() >= 4 {
-            partial.last_activity_ms = now_ms;
-        }
-        let merged_bytes = partial.aggregator.on_chunk(&resp.data);
         let uid = resp.request_uid;
-        if let Some(zipped_data) = merged_bytes {
+        let chunk_result = {
+            let Some(partial) = self.pending_candles.get_mut(&uid) else {
+                return false;
+            };
+            let chunk_result = partial.aggregator.on_chunk_result(&resp.data);
+            if matches!(
+                chunk_result,
+                CandlesChunkResult::Stored | CandlesChunkResult::Complete(_)
+            ) {
+                partial.last_activity_ms = now_ms;
+            }
+            chunk_result
+        };
+        if let CandlesChunkResult::Complete(zipped_data) = chunk_result {
             let markets = parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
                 log::warn!(target: "moonproto::client",
                     "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, zipped_data.len());
@@ -4259,7 +4265,7 @@ impl Client {
         // audit_responsibility F9: pending candles aggregators — те же UID'ы старой сессии.
         // Симметрично с api_pending: senders drop'аются → receivers получают
         // `Err(Disconnected)` → потребитель делает re-request с новым UID. Иначе
-        // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS (30 sec).
+        // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS.
         self.pending_candles.clear();
     }
 

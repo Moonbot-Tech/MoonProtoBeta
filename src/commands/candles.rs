@@ -361,13 +361,32 @@ pub struct CandlesAggregator {
     total:    usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CandlesChunkResult {
+    Ignored,
+    Stored,
+    Complete(Vec<u8>),
+}
+
 impl CandlesAggregator {
     pub fn new() -> Self { Self::default() }
 
     /// Добавить chunk. Если все чанки собраны — вернуть склеенный буфер и сбросить state.
     /// Wire: `ChunkIndex:u16 + ChunkTotal:u16 + chunk_payload`.
     pub fn on_chunk(&mut self, response_data: &[u8]) -> Option<Vec<u8>> {
-        if response_data.len() < 4 { return None; }
+        match self.on_chunk_result(response_data) {
+            CandlesChunkResult::Complete(merged) => Some(merged),
+            CandlesChunkResult::Ignored | CandlesChunkResult::Stored => None,
+        }
+    }
+
+    /// Добавить chunk и вернуть точный статус обработки.
+    ///
+    /// Delphi обновляет `Markets.LastChunkTime` только после сохранения нового
+    /// chunk'а в пустой слот. Caller использует `Stored`/`Complete`, чтобы не
+    /// продлевать timeout дубликатами или невалидными chunk headers.
+    pub(crate) fn on_chunk_result(&mut self, response_data: &[u8]) -> CandlesChunkResult {
+        if response_data.len() < 4 { return CandlesChunkResult::Ignored; }
         let chunk_index = u16::from_le_bytes([response_data[0], response_data[1]]) as usize;
         let chunk_total = u16::from_le_bytes([response_data[2], response_data[3]]) as usize;
         let payload = &response_data[4..];
@@ -375,7 +394,7 @@ impl CandlesAggregator {
         // Delphi stores ChunkTotal as Word and has no additional capacity cap.
         // `chunk_total` is already bounded by u16::MAX by wire format.
         if chunk_total == 0 {
-            return None;
+            return CandlesChunkResult::Ignored;
         }
 
         // Resize если первый раз или total изменился
@@ -390,6 +409,8 @@ impl CandlesAggregator {
         if chunk_index < chunk_total && self.chunks[chunk_index].is_none() {
             self.chunks[chunk_index] = Some(payload.to_vec());
             self.received += 1;
+        } else {
+            return CandlesChunkResult::Ignored;
         }
 
         // Все ли собраны?
@@ -401,9 +422,9 @@ impl CandlesAggregator {
             }
             self.received = 0;
             self.total = 0;
-            return Some(merged);
+            return CandlesChunkResult::Complete(merged);
         }
-        None
+        CandlesChunkResult::Stored
     }
 
     /// Сбросить state (при новом запросе свечей).
@@ -510,6 +531,23 @@ mod tests {
         let chunk2 = vec![1u8, 0u8, 2u8, 0u8, 3, 4];
         let merged = agg.on_chunk(&chunk2).unwrap();
         assert_eq!(merged, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn aggregator_reports_stored_only_for_new_chunks() {
+        let mut agg = CandlesAggregator::new();
+        let first = vec![0u8, 0u8, 2u8, 0u8, 1, 2];
+        let duplicate = first.clone();
+        let bad_index = vec![4u8, 0u8, 2u8, 0u8, 9, 9];
+        let second = vec![1u8, 0u8, 2u8, 0u8, 3, 4];
+
+        assert_eq!(agg.on_chunk_result(&first), CandlesChunkResult::Stored);
+        assert_eq!(agg.on_chunk_result(&duplicate), CandlesChunkResult::Ignored);
+        assert_eq!(agg.on_chunk_result(&bad_index), CandlesChunkResult::Ignored);
+        assert_eq!(
+            agg.on_chunk_result(&second),
+            CandlesChunkResult::Complete(vec![1, 2, 3, 4])
+        );
     }
 
     #[test]

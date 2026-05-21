@@ -459,7 +459,7 @@
 | CD6 | MoonProtoClient.pas:832-840 resize on first chunk | CandlesAggregator resize_with(total, None) | ✅ |
 | CD7 | MoonProtoClient.pas:843-848 chunk[index] := payload, dedup | CandlesAggregator chunks[index] = Some(...) if is_none() | ✅ |
 | CD8 | MoonProtoClient.pas:856-872 merge всех chunks | CandlesAggregator drain merge при received == total | ✅ |
-| CD9 | MoonProtoClient.pas:847 + DataUpdaters.pas:376/394 timeout от LastChunkTime | pending_candles cleanup считает от last_activity_ms, обновляемого на chunk | ✅ |
+| CD9 | MoonProtoClient.pas:847 + DataUpdaters.pas:376/394 timeout от LastChunkTime | pending_candles cleanup считает от last_activity_ms, обновляемого только при сохранении нового chunk | ✅ |
 | CD10 | MarketsU.pas:14472-14527 StoreCandlesToZip | parse_request_candles_data_response читает zlib stream, UTF-16 market names, TDeepPricePack и wall data | ✅ |
 
 ## api_pending.rs (ApiPending registry) → Delphi-эквивалент = TPendingRequest list
