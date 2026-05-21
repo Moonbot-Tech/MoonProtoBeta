@@ -130,7 +130,7 @@
 
 | # | Delphi (строка) | Что делает | Rust (файл:строка) | ✅ |
 |---|---|---|---|---|
-| 57 | 795-833 | Для H/L item сначала делает `Client.Crypt(data)` если нужно, затем считает `sz := d.ms.Size + GetHeaderSize + 3`; при overflow PMTU flush'ит batch или отправляет одиночный пакет | client.rs: `send_h_item` / `batch_send_direct` считают batch-size по encrypted/plain wire payload после `encrypt_with_cipher` | ✅ |
+| 57 | 795-833 + MoonProtoIntStruct.pas → `TMoonProtoClient.Crypt` | Для H/L item сначала делает `Client.Crypt(data)` если нужно, затем считает `sz := d.ms.Size + GetHeaderSize + 3`; если inner command сжат, наружный `MPC_Crypted` тоже получает `COMPRESSED` bit; при overflow PMTU flush'ит batch или отправляет одиночный пакет | client.rs: `send_h_item` / `batch_send_direct` считают batch-size по encrypted/plain wire payload после `encrypt_with_cipher`; `crypted_wire_cmd` сохраняет наружный compressed bit | ✅ |
 
 ## CreateSlicedObject (MoonProtoIntStruct.pas:1058-1125) → client.rs create_sliced_and_send
 

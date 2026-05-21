@@ -3682,11 +3682,7 @@ impl Client {
             };
             let encrypted_data = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
             // Delphi: NewCmd := MPC_Crypted; if IsCompressed(d.Fcmd) then NewCmd := SetCompressed(NewCmd)
-            let wire_cmd = if send_cmd & 0x80 != 0 {
-                Command::Crypted as u8 | 0x80
-            } else {
-                Command::Crypted as u8
-            };
+            let wire_cmd = Self::crypted_wire_cmd(send_cmd);
             (wire_cmd, encrypted_data, msg_num)
         } else {
             (item.cmd, item.data.clone(), 0u64)
@@ -3785,8 +3781,9 @@ impl Client {
             };
             let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
 
-            // Wire (outer) cmd — всегда Crypted; COMPRESSED_FLAG переезжает на inner cmd.
-            let wire_cmd = Command::Crypted as u8;
+            // Delphi `Client.Crypt`: outer MPC_Crypted carries COMPRESSED_FLAG too
+            // when the encrypted inner command is compressed.
+            let wire_cmd = Self::crypted_wire_cmd(eff_cmd);
 
             // Buffer into batch (will be sent as Grouped or single on flush)
             let item_size = encrypted.len() + 3;
@@ -3860,6 +3857,14 @@ impl Client {
             }
         }
         (cmd, std::borrow::Cow::Borrowed(data))
+    }
+
+    fn crypted_wire_cmd(inner_cmd: u8) -> u8 {
+        if inner_cmd & COMPRESSED_FLAG != 0 {
+            Command::Crypted as u8 | COMPRESSED_FLAG
+        } else {
+            Command::Crypted as u8
+        }
     }
 
     /// Retry pending H-commands (matches CheckSeningData:944-954).
@@ -4027,7 +4032,7 @@ impl Client {
                 }
             };
             let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
-            (Command::Crypted as u8, std::borrow::Cow::Owned(encrypted))
+            (Self::crypted_wire_cmd(eff_cmd), std::borrow::Cow::Owned(encrypted))
         } else {
             (eff_cmd, eff_data)
         };
@@ -5574,9 +5579,56 @@ mod pmtu_tests {
         client.batch_send_direct(&item);
 
         let wire_len = u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
+        assert_eq!(client.tmp_send_buf[0], Command::Crypted as u8);
         assert_eq!(wire_len, 60);
         assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
         assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
+    }
+
+    #[test]
+    fn encrypted_low_batch_preserves_outer_compressed_flag() {
+        let mut client = Client::new(dummy_cfg());
+        client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+
+        let item = SendItem {
+            data: vec![0xA5; 10],
+            cmd: Command::UI as u8 | COMPRESSED_FLAG,
+            encrypted: true,
+            priority: SendPriority::Low,
+            retry_left: 0,
+            max_retries: 0,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+
+        client.batch_send_direct(&item);
+
+        assert_eq!(client.tmp_send_buf[0], Command::Crypted as u8 | COMPRESSED_FLAG);
+    }
+
+    #[test]
+    fn encrypted_high_send_preserves_outer_compressed_flag() {
+        let mut client = Client::new(dummy_cfg());
+        client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+
+        let mut item = SendItem {
+            data: vec![0xA5; 10],
+            cmd: Command::UI as u8 | COMPRESSED_FLAG,
+            encrypted: true,
+            priority: SendPriority::High,
+            retry_left: 1,
+            max_retries: 2,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::none(),
+        };
+
+        client.send_h_item(&mut item, 123);
+
+        assert_eq!(client.tmp_send_buf[0], Command::Crypted as u8 | COMPRESSED_FLAG);
+        assert_eq!(client.pending_h.len(), 1);
+        assert_eq!(client.pending_h[0].cmd, Command::UI as u8 | COMPRESSED_FLAG);
     }
 }
 
