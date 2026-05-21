@@ -2778,7 +2778,17 @@ impl Client {
         self.send_mm_orders_subscribe_cmd(subscribe);
     }
 
-    /// `TUpdateVersionCommand` (UI CmdId=6, High) — уведомить сервер о версии клиента.
+    /// `TUpdateVersionCommand` (UI CmdId=6, High) — request a MoonBot version update.
+    ///
+    /// Delphi uses this from the update UI:
+    /// - release button sends `VersionName=""`, `IsRelease=true`;
+    /// - beta/test install command sends the requested version name and release flag.
+    ///
+    /// The server handles the command and broadcasts the same UI command back to
+    /// clients. Delphi clients then run their local updater in
+    /// `HandleRemoteUpdateCommand`; this Rust wrapper only sends the protocol
+    /// command and marks Delphi `ServerUpdateSent` so the next init uses the
+    /// update-aware BaseCheck retry path.
     pub fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
             crate::commands::ui::build_update_version(rand::random(), version_name, is_release);

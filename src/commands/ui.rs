@@ -196,6 +196,11 @@ pub struct MMOrdersSubscribe {
 }
 
 /// CmdId=6 `TUpdateVersionCommand`.
+///
+/// This is the MoonBot remote-update command, not a passive client-version
+/// notification. Delphi writes `VersionName` as UTF-8 string and `IsRelease` as
+/// one byte. `VersionName=""` with `is_release=true` is the normal release
+/// update button; a non-empty name targets a test/beta build name.
 #[derive(Debug, Clone)]
 pub struct UpdateVersion {
     pub uid: u64,
@@ -931,6 +936,9 @@ pub fn build_mm_orders_subscribe(uid: u64, subscribe: bool) -> Vec<u8> {
 }
 
 /// CmdId=6 `TUpdateVersionCommand`.
+///
+/// Low-level wire builder. Prefer [`crate::Client::ui_update_version`] when a
+/// running client should mirror Delphi `ServerUpdateSent` behavior.
 pub fn build_update_version(uid: u64, version_name: &str, is_release: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_UPDATE_VERSION, uid);

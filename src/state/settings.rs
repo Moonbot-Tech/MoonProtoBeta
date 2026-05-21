@@ -55,7 +55,11 @@ pub enum SettingsEvent {
     StratStartStopRequested(StratStartStop),
     /// Запрос на старт/стоп с дельтой checked (v2).
     StratStartStopV2Requested(StratStartStopV2),
-    /// Уведомление об обновлении версии.
+    /// Remote update command (UI CmdId=6): version name + release/test flag.
+    ///
+    /// Delphi clients treat this as a request to run their local updater. The
+    /// Rust state layer only surfaces the wire command; application code decides
+    /// whether/how to update itself.
     VersionUpdate(UpdateVersion),
     /// Серия эмулированных тиков (Sliced).
     EmuTrades(EmuTrades),

@@ -2,7 +2,7 @@
 
 The UI channel carries bot settings and UI-originated control commands:
 settings snapshots, strategy start/stop, market-maker subscription, version
-notification, leverage management, trigger management, DEX/spot switching, and
+update control, leverage management, trigger management, DEX/spot switching, and
 arb activation notifications.
 
 Applications normally receive UI updates through `Event::Settings` and send UI
@@ -62,7 +62,8 @@ client.ui_send_settings(&settings);
 client.ui_strat_start_stop(true);
 client.ui_strat_start_stop_v2(true, &checked_items);
 client.ui_mm_subscribe(true);
-client.ui_update_version("1.2.3", true);
+client.ui_update_version("", true);            // release update button
+client.ui_update_version("MoonBot-7", false);  // test/beta version name
 client.ui_new_market_notify();
 client.ui_lev_manage(&lev_manage);
 client.ui_trigger_manage(action, all_markets, &markets, &keys);
@@ -75,6 +76,26 @@ client.ui_switch_spot(0);
 `ui_mm_subscribe` records the latest MM-orders intent in the client registry.
 After a reconnect, the library replays that flag; if an all-trades subscription
 is active, the replay folds the flag into `SubscribeAllTrades(want_mm)`.
+
+### Version Update
+
+`ui_update_version(version_name, is_release)` is the Rust wrapper for Delphi
+`TUpdateVersionCommand` (UI CmdId=6, High). It sends two fields:
+`VersionName: string` and `IsRelease: bool`.
+
+This is a remote-update command, not a passive "current client version"
+notification. Delphi uses it in two places:
+
+- update button: sends `VersionName=""`, `IsRelease=true`;
+- beta/test install command: sends a version name such as `MoonBot-7` with
+  `IsRelease=false` after Delphi-side validation/normalization.
+
+On the Delphi server, receiving this command calls `HandleRemoteUpdateCommand`
+and broadcasts the same `TUpdateVersionCommand` back to clients. On a Delphi
+client, receiving it queues `HandleRemoteUpdateCommand`, which starts the local
+updater flow. The Rust library does not download or restart the application; it
+only sends/parses the wire command and exposes the inbound command as a
+`SettingsEvent::VersionUpdate`.
 
 `ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` also mark the
 Delphi `ServerUpdateSent` state inside `Client`. The next `run_init_sequence`
