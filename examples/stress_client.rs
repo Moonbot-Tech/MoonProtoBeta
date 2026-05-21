@@ -5,20 +5,22 @@
 //! and chunked candles requests in flight at the same time. If order state is
 //! present, the client also keeps safe tracked-order status refreshes in flight:
 //!
-//!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0
+//!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0 post_init
 //!
 //! Arguments:
 //! - key_base64: exported MoonBot key.
 //! - host:port: server address, default 207.148.91.186:3000.
 //! - market: market used for orderbook/candles, default BTCUSDT.
 //! - duration_secs: load phase duration after init, default 180.
-//! - err_emu_pct: optional client-side packet drop percent, default 0.
+//! - err_emu_pct: optional client-side incoming packet drop percent, default 0.
+//! - err_emu_phase: `post_init` (default) enables loss after both clients finish init;
+//!   `pre_connect` enables loss before handshake to stress authorization/reconnect.
 
 use std::collections::VecDeque;
 use std::env;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,6 +138,100 @@ fn record_max(target: &AtomicU64, value: u64) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ErrEmuPhase {
+    PostInit,
+    PreConnect,
+}
+
+impl ErrEmuPhase {
+    fn parse(value: Option<&String>) -> Self {
+        let Some(value) = value else {
+            return Self::PostInit;
+        };
+        match value.trim().replace('-', "_").to_ascii_lowercase().as_str() {
+            "" | "post" | "post_init" | "after_init" => Self::PostInit,
+            "pre" | "pre_connect" | "preconnect" | "before_connect" => Self::PreConnect,
+            other => {
+                eprintln!("invalid err_emu_phase '{other}', expected post_init or pre_connect");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PostInit => "post_init",
+            Self::PreConnect => "pre_connect",
+        }
+    }
+}
+
+#[derive(Default)]
+struct LossGateState {
+    ready: usize,
+    enabled: bool,
+    aborted: bool,
+}
+
+struct LossGate {
+    expected: usize,
+    err_emu_pct: u8,
+    phase: ErrEmuPhase,
+    state: Mutex<LossGateState>,
+    changed: Condvar,
+}
+
+impl LossGate {
+    fn new(expected: usize, err_emu_pct: u8, phase: ErrEmuPhase) -> Self {
+        Self {
+            expected,
+            err_emu_pct,
+            phase,
+            state: Mutex::new(LossGateState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn wait_after_init(&self, label: &str) -> bool {
+        if self.err_emu_pct == 0 || self.phase != ErrEmuPhase::PostInit {
+            return true;
+        }
+
+        let mut state = self.state.lock().unwrap();
+        state.ready += 1;
+        println!(
+            "[{label}] waiting for post-init err_emu gate ({}/{})",
+            state.ready, self.expected
+        );
+
+        if state.ready >= self.expected && !state.enabled {
+            moonproto::client::set_err_emu(self.err_emu_pct);
+            state.enabled = true;
+            println!(
+                "[main] client-side err_emu={} enabled after all clients init",
+                self.err_emu_pct
+            );
+            self.changed.notify_all();
+            return true;
+        }
+
+        while !state.enabled && !state.aborted {
+            state = self.changed.wait(state).unwrap();
+        }
+        state.enabled
+    }
+
+    fn abort(&self) {
+        if self.err_emu_pct == 0 || self.phase != ErrEmuPhase::PostInit {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        state.aborted = true;
+        self.changed.notify_all();
+    }
+}
+
 #[derive(Clone)]
 struct Args {
     key_b64: String,
@@ -144,6 +240,7 @@ struct Args {
     market: String,
     duration: Duration,
     err_emu_pct: u8,
+    err_emu_phase: ErrEmuPhase,
 }
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
@@ -158,8 +255,9 @@ fn parse_args() -> Args {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: stress_client <key_base64> [host:port] [market] [duration_secs] [err_emu_pct]"
+            "Usage: stress_client <key_base64> [host:port] [market] [duration_secs] [err_emu_pct] [err_emu_phase]"
         );
+        eprintln!("  err_emu_phase: post_init (default) | pre_connect");
         std::process::exit(1);
     }
     let (host, port) = parse_host(args.get(2));
@@ -177,6 +275,7 @@ fn parse_args() -> Args {
         .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0)
         .min(100);
+    let err_emu_phase = ErrEmuPhase::parse(args.get(6));
     Args {
         key_b64: args[1].clone(),
         host,
@@ -184,6 +283,7 @@ fn parse_args() -> Args {
         market,
         duration,
         err_emu_pct,
+        err_emu_phase,
     }
 }
 
@@ -972,6 +1072,7 @@ fn run_one_client(
     args: Args,
     keys: key_import::ImportedKeys,
     stats: Arc<SharedStats>,
+    loss_gate: Arc<LossGate>,
 ) {
     *stats.label.lock().unwrap() = label.to_string();
     let client_id = rand::random::<u64>();
@@ -1024,6 +1125,7 @@ fn run_one_client(
             client.total_sent(),
             client.total_recv()
         );
+        loss_gate.abort();
         return;
     }
 
@@ -1056,10 +1158,16 @@ fn run_one_client(
                 client.total_sent(),
                 client.total_recv()
             );
+            loss_gate.abort();
             return;
         }
     }
     *stats.server_info.lock().unwrap() = client.server_info().clone();
+
+    if !loss_gate.wait_after_init(label) {
+        println!("[{label}] FAIL: post-init err_emu gate aborted");
+        return;
+    }
 
     client.subscribe_all_trades(false);
     client.subscribe_orderbook(&args.market);
@@ -1356,31 +1464,50 @@ fn print_report(stats_a: &SharedStats, stats_b: &SharedStats) -> bool {
 fn main() {
     let args = parse_args();
     if args.err_emu_pct > 0 {
-        moonproto::client::set_err_emu(args.err_emu_pct);
-        println!("[main] client-side err_emu={}%", args.err_emu_pct);
+        match args.err_emu_phase {
+            ErrEmuPhase::PreConnect => {
+                moonproto::client::set_err_emu(args.err_emu_pct);
+                println!(
+                    "[main] client-side err_emu={} enabled before connect",
+                    args.err_emu_pct
+                );
+            }
+            ErrEmuPhase::PostInit => {
+                moonproto::client::set_err_emu(0);
+                println!(
+                    "[main] client-side err_emu={} will be enabled after both clients init",
+                    args.err_emu_pct
+                );
+            }
+        }
     }
     let keys = key_import::import_key(&args.key_b64).expect("invalid key");
 
     println!(
-        "[main] stress target {}:{} market={} duration={}s",
+        "[main] stress target {}:{} market={} duration={}s err_emu={} phase={}",
         args.host,
         args.port,
         args.market,
-        args.duration.as_secs()
+        args.duration.as_secs(),
+        args.err_emu_pct,
+        args.err_emu_phase.as_str()
     );
 
     let stats_a = Arc::new(SharedStats::default());
     let stats_b = Arc::new(SharedStats::default());
+    let loss_gate = Arc::new(LossGate::new(2, args.err_emu_pct, args.err_emu_phase));
     let args_a = args.clone();
     let args_b = args;
     let keys_a = keys;
     let keys_b = keys;
     let stats_a_thread = Arc::clone(&stats_a);
     let stats_b_thread = Arc::clone(&stats_b);
+    let loss_gate_a = Arc::clone(&loss_gate);
+    let loss_gate_b = Arc::clone(&loss_gate);
 
-    let a = thread::spawn(move || run_one_client("A", args_a, keys_a, stats_a_thread));
+    let a = thread::spawn(move || run_one_client("A", args_a, keys_a, stats_a_thread, loss_gate_a));
     thread::sleep(Duration::from_millis(250));
-    let b = thread::spawn(move || run_one_client("B", args_b, keys_b, stats_b_thread));
+    let b = thread::spawn(move || run_one_client("B", args_b, keys_b, stats_b_thread, loss_gate_b));
 
     let a_result = a.join();
     let b_result = b.join();

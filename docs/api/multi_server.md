@@ -99,7 +99,9 @@ ui_thread.spawn(move || {
 });
 ```
 
-These subscriptions are per-client. Reconnect replay also happens per-client.
+These subscriptions are per-client. Before Init, reconnect is transport-only.
+After each client's one-time Init completes, reconnect replays that client's
+registry automatically.
 
 ## Exchange Type Flags
 

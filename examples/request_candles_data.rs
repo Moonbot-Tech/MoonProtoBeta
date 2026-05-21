@@ -1,7 +1,7 @@
 //! Request the full chunked candles stream and print the first result.
 //!
 //! Run:
-//!   cargo run --example request_candles_data --release -- "<key_base64>" "host:port" 30
+//!   cargo run --example request_candles_data --release -- "<key_base64>" "host:port" 30 0
 
 use std::env;
 use std::time::Duration;
@@ -24,7 +24,9 @@ fn parse_host(value: Option<&String>) -> (String, u16) {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: request_candles_data <key_base64> [host:port] [timeout_secs]");
+        eprintln!(
+            "Usage: request_candles_data <key_base64> [host:port] [timeout_secs] [err_emu_pct]"
+        );
         std::process::exit(1);
     }
 
@@ -35,6 +37,11 @@ fn main() {
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(30));
+    let err_emu_pct = args
+        .get(4)
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(100);
 
     let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key)
         .with_refresh(RefreshConfig {
@@ -59,6 +66,10 @@ fn main() {
     ) {
         eprintln!("connect/init failed: {err}");
         std::process::exit(2);
+    }
+    if err_emu_pct > 0 {
+        moonproto::client::set_err_emu(err_emu_pct);
+        eprintln!("client-side err_emu={err_emu_pct}% after init");
     }
 
     match client.request_candles_data(&mut dispatcher, timeout) {

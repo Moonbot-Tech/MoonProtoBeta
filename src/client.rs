@@ -24,6 +24,8 @@ use log::{debug, error, warn};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "diagnostic-trace")]
+use std::sync::OnceLock;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,6 +58,25 @@ pub static ERR_EMU_RATE: std::sync::atomic::AtomicU8 = std::sync::atomic::Atomic
 /// Соответствует Delphi `MoonProtoErrEmu`.
 pub fn set_err_emu(percent: u8) {
     ERR_EMU_RATE.store(percent.min(100), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "diagnostic-trace")]
+fn trace_io_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MOONPROTO_TRACE_IO")
+            .map(|v| {
+                let v = v.to_string_lossy();
+                !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(feature = "diagnostic-trace"))]
+#[inline(always)]
+fn trace_io_enabled() -> bool {
+    false
 }
 
 /// Команды, для которых dropRate делится пополам (служебные).
@@ -584,14 +605,14 @@ impl std::error::Error for TradeContextError {}
 /// `Connected` за всю жизнь Client'а; для всех последующих re-handshake'ей
 /// = `false`. Удобно для UI: показать "Welcome" один раз vs обычный re-connect indicator.
 ///
-/// **Active library principle**: на любое из этих событий потребитель **не должен**
-/// предпринимать никаких recovery-действий. Liба сама:
-/// - re-subscribe всех зарегистрированных streams (registry);
-/// - re-fetch markets indexes при ServerRestart;
-/// - применить ServerTimeDelta из Ping;
-/// - drain pending Engine API responses которые перестали быть валидны.
+/// **Session invariant**: пользовательский init выполняется один раз за жизнь
+/// `Client`. До этого `Fine` не запускает Engine API. После успешного init
+/// reconnect внутри той же сессии сам восстанавливает сохранённый intent:
+/// свежие indexes для indexed streams и registry-подписки. Initial post-init
+/// resync не повторяется клиентом на reconnect.
 ///
-/// Потребителю остаётся только покрасить UI индикатор по событию.
+/// Потребитель красит UI по событию; повторный `run_init_sequence` после
+/// reconnect не нужен для продолжения заказанных потоков.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LifecycleEvent {
     /// Handshake начат (Hello отправлен), Fine ещё не получен. Сетевой trip-time
@@ -604,8 +625,9 @@ pub enum LifecycleEvent {
     /// одноразово показать "Welcome" / выполнить init-шаги (`subscribe_orderbook`,
     /// `subscribe_all_trades`, `api_get_markets_list` и т.п.).
     ///
-    /// `fresh = false` — это re-connect после потери связи / server restart / etc.
-    /// **Никакие действия от app не нужны** — registry уже выполнил re-subscribe.
+/// `fresh = false` — это re-connect после потери связи / server restart / etc.
+/// Если init уже был выполнен, либа сама восстанавливает заказанные
+/// indexes/subscriptions; app не повторяет Init.
     Connected { fresh: bool },
     /// Канал закрыт явным `client.disconnect()` от потребителя. Финальное
     /// состояние — для возобновления связи нужен новый `Client::new`.
@@ -633,13 +655,14 @@ pub enum LifecycleEvent {
     /// См. robustness audit H9.
     BindFailed { consecutive_failures: u32 },
     /// Детектирован перезапуск сервера: `PeerAppToken` изменился между
-    /// сессиями (см. SPEC §3 detection mechanism). Liба сама:
-    /// - отметила `MarketsState.indexes_synchronized = false`;
-    /// - отправила `api_get_markets_indexes()`;
-    /// - блокирует обработку TradesStream/OrderBook пакетов до синхронизации;
-    /// - после ServerToken change auto-replays все subscriptions из registry.
+    /// сессиями (см. SPEC §3 detection mechanism). Либа отмечает
+    /// `MarketsState.indexes_synchronized = false` и блокирует применение
+    /// indexed TradesStream/OrderBook пакетов до новой синхронизации.
+    /// До первого Init `GetMarketsIndexes` и подписки не отправляются. После Init
+    /// restore выполняется самой либой на успешном reconnect `Fine`.
     ///
-    /// **Никаких actionable действий от потребителя** — только UI tooltip.
+    /// Потребитель может показать UI tooltip; повторный Init для восстановления
+    /// заказанных потоков не нужен.
     ServerRestart,
 }
 
@@ -652,25 +675,23 @@ pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 /// только если **запрашивает** `UpdateMarketsList`. В Delphi-боте это делается
 /// автоматически из `BMarketsDetailsWorker` примерно каждые 2с; `CheckBinanceTags`
 /// запрашивается из `BHeavyApiWorker` примерно каждые 60с и до 4 раз с шагом
-/// 200мс после смены часа. В Rust порте по умолчанию оба refresh'а включены
-/// через [`RefreshConfig::default`] — типично пользователю торгового приложения
-/// нужны актуальные prices/tags, не stale.
+/// 200мс после смены часа. Rust default повторяет этот active-lib режим, но
+/// refresh ticks открываются только после `run_init_sequence` (`domain_ready`).
 ///
-/// **Отключить.** Передай `RefreshConfig { update_markets_every: None, check_tags_every: None }`
-/// если приложение само управляет обновлениями (например через `client.api_update_markets_list()`
-/// на свой таймер).
+/// **Отключить.** Передай `RefreshConfig { update_markets_every: None,
+/// check_tags_every: None }`, если приложение само управляет этими Engine API.
 ///
 /// Refresh ticks start after domain init completes (`connect_and_init` /
 /// `run_init_sequence`). This keeps fresh BaseCheck/AuthCheck requests from
 /// being queued behind background `UpdateMarketsList` traffic on cold connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefreshConfig {
-    /// Периодически шлёт `emk_UpdateMarketsList` для свежих prices/funding. Дефолт
-    /// `Some(2s)` — parity с Delphi bot. `None` отключает.
+    /// Периодически шлёт `emk_UpdateMarketsList` для свежих prices/funding.
+    /// Дефолт `Some(2s)`, как Delphi full-proxy worker, но только после Init.
     pub update_markets_every: Option<Duration>,
     /// Периодически шлёт `emk_CheckBinanceTags` (Binance-специфичная проверка
-    /// futures permissions). Дефолт `Some(60s)` — parity с Delphi bot; hourly
-    /// burst из 4 запросов с шагом 200мс включён автоматически. `None` отключает.
+    /// futures permissions). Дефолт `Some(60s)`; hourly burst 4x200мс включён
+    /// автоматически, как в Delphi `BHeavyApiWorker`.
     pub check_tags_every: Option<Duration>,
 }
 
@@ -707,9 +728,8 @@ pub struct ClientConfig {
     /// existing worker remains active because the corrected time offset is
     /// process-global, not per-client.
     pub ntp_host: Option<String>,
-    /// Periodic refresh настройки. По умолчанию: `update_markets_every: Some(2s)`,
-    /// `check_tags_every: Some(60s)`. Передай `RefreshConfig::default()` для дефолта,
-    /// или явный конфиг с `None` чтобы отключить.
+    /// Periodic refresh настройки. По умолчанию включены Delphi-worker интервалы,
+    /// но они начинают слать Engine API только после успешного Init.
     pub refresh: RefreshConfig,
 }
 
@@ -718,8 +738,7 @@ impl ClientConfig {
     /// - `mask_ver = 0`;
     /// - `client_id = rand::random()`;
     /// - `ntp_host = Some("pool.ntp.org")` (shared process-level syncer);
-    /// - `refresh = RefreshConfig::default()` (UpdateMarketsList каждые 2с,
-    ///   CheckBinanceTags every 60s).
+    /// - `refresh = RefreshConfig::default()` (Delphi-worker refresh after Init).
     ///
     /// Tests and offline tools can call [`Self::without_ntp`].
     /// Applications with extended transport can use [`Self::with_transport_mode`].
@@ -905,17 +924,16 @@ impl DispatcherEventFn {
 //  Subscription Registry — active library principle
 //
 //  Хранит ВОЛЮ потребителя: какие streams подписаны и с какими параметрами.
-//  Liба сама воспроизводит эти подписки после:
-//   • ServerToken change (hard handshake);
-//   • PeerAppToken change (server restart) — после re-fetch markets indexes;
-//   • любого reset через `full_reset` если нужен новый Hello цикл.
+//  До первого Init transport handshake этот реестр не отправляет. После Init
+//  (`domain_ready=true`) reconnect внутри той же Client-сессии сам восстанавливает
+//  registry, чтобы пользователь НЕ запускал Init второй раз.
 //
 //  Ключ orderbook — `market_name` (стабилен через reindex), не `market_idx`
 //  (последний меняется при ServerRestart). Аналог Delphi
 //  `MoonProtoEngine.pas:305-360 BookSubbed: TSet<TMarket>`.
 // =============================================================================
 
-/// Подписка на all-trades поток. `want_mm` сохраняем чтобы re-subscribe воспроизвёл
+/// Подписка на all-trades поток. `want_mm` сохраняем чтобы init/API слой воспроизвёл
 /// в точности тот же параметр (без него сервер мог бы перестать слать MM-events).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradesSubscription {
@@ -924,9 +942,8 @@ pub struct TradesSubscription {
 
 /// Реестр подписок — что app просил, что либа обязана поддерживать на протяжении сессии.
 ///
-/// `last_subscribed_token` хранит `server_token` на момент последнего replay'я. Если
-/// в `handle_handshake` приходит новый `Fine` с другим `server_token` —
-/// `replay_subscriptions` отправит все подписки заново.
+/// Transport handshake сам подписки не шлет: registry применяется только из init/API
+/// слоя, чтобы `Fine` оставался Delphi-тождественным auth-блоком.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
     pub orderbook_subs: HashSet<String>,
@@ -936,9 +953,18 @@ pub(crate) struct SubscriptionRegistry {
     /// Delphi обновляет его двумя путями: `emk_SubscribeAllTrades` с bool-параметром
     /// и прямой `TMMOrdersSubscribeCommand` из UI/strategy state. После reconnect
     /// новый серверный client-state стартует с false, поэтому active library должна
-    /// воспроизвести последний известный intent.
+    /// воспроизвести последний известный intent в init/API слое.
     pub mm_orders_sub: Option<bool>,
-    pub last_subscribed_token: u64,
+}
+
+/// Что единственный пользовательский Init заказал у доменного слоя.
+///
+/// Инвариант: `run_init_sequence` вызывается один раз за жизнь `Client`-сессии.
+/// После этого reconnect не требует повторного Init: transport после нового
+/// `Fine` восстанавливает только эти сохранённые intent'ы и registry-подписки.
+#[derive(Debug, Clone, Copy, Default)]
+struct DomainRestoreIntent {
+    fetch_indexes: bool,
 }
 
 // =============================================================================
@@ -1115,10 +1141,14 @@ pub struct Client {
     /// повторно резолвится.
     cached_server_addr: Option<SocketAddr>,
 
-    /// **Active library — subscription registry**: что app просил подписать. После
-    /// любого ServerToken change `replay_subscriptions` берёт отсюда → отправляет
-    /// заново через текущие keys / market_idx. App ничего делать не должен.
+    /// **Active library — subscription registry**: что app просил подписать.
+    /// До Init transport handshake не отправляет этот реестр. После Init reconnect
+    /// сам восстанавливает registry через текущие keys / market mapping.
     pub(crate) subscription_registry: SubscriptionRegistry,
+
+    /// Сохранённый intent первого и единственного init-прохода. Нужен для
+    /// post-reconnect restore без повторного `run_init_sequence`.
+    domain_restore: DomainRestoreIntent,
 
     /// Был ли когда-нибудь успешный Connected (`Fine` получен ≥1 раз).
     /// Используется в `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
@@ -1135,19 +1165,18 @@ pub struct Client {
 
     /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
     /// Используется в `handle_handshake` и `handle_ping` для детекции server restart:
-    /// если incoming `peer_app_token != tracked_peer_app_token` — auto-fetch markets indexes.
+    /// если incoming `peer_app_token != tracked_peer_app_token` — помечаем индексы stale.
     /// 0 = ещё не было успешной синхронизации (init состояние).
     tracked_indexes_peer_app_token: u64,
 
-    /// `true` если auto-refetch markets indexes уже отправлен и ждёт ответа.
-    /// Защита от шторма повторных запросов при следующих Ping'ах до получения ответа.
+    /// `true` если init/API слой уже отправил markets indexes request и ждёт ответа.
+    /// Защита от шторма повторных явных запросов до получения ответа.
     indexes_fetch_in_flight: bool,
 
     /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
     /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
-    /// сбрасываем `indexes_fetch_in_flight = false` чтобы next handshake / periodic check
-    /// мог переотправить запрос. Без этого защита от шторма превратилась бы в deadlock
-    /// (TradesStream/OrderBook blocked forever).
+    /// сбрасываем `indexes_fetch_in_flight = false`. Сам timeout handler запрос
+    /// не переотправляет: новая отправка разрешена только init/API слою.
     indexes_fetch_started_ms: i64,
 
     /// Когда последний раз вызвали `trades_state.tick()` из main loop (в режиме
@@ -1325,6 +1354,7 @@ impl Client {
             current_reader_epoch: 0,
             cached_server_addr: None,
             subscription_registry: SubscriptionRegistry::default(),
+            domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
             pending_candles: HashMap::new(),
             tracked_indexes_peer_app_token: 0,
@@ -2076,7 +2106,7 @@ impl Client {
     //  публичный API** для подписок. В отличие от `api_subscribe_order_book`
     //  (low-level) они:
     //   1. Запоминают подписку в `subscription_registry`.
-    //   2. После любого ServerToken change auto-replay'ят подписку.
+    //   2. После единственного Init восстанавливаются самой либой при reconnect.
     //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
     //   4. Работают на `&self` — доступны во время `run_with_dispatcher`
     //      через `client.sender()` clone из любого thread'а.
@@ -2112,9 +2142,10 @@ impl Client {
     /// переполненном event channel логируется warning. Для обратной связи об
     /// ошибке используй `client.sender().try_subscribe_orderbook(...)`.
     ///
-    /// Подписка запоминается в registry — при reconnect / ServerToken change либа
-    /// автоматически переподписывается. Resolve `market_name → market_idx` делает
-    /// сервер, поэтому можно подписаться ДО получения `emk_GetMarketsList`.
+    /// Подписка запоминается в registry. До Init reconnect её не шлёт; после Init
+    /// либа сама восстанавливает её при reconnect без повторного Init.
+    /// Resolve `market_name → market_idx` делает сервер, поэтому можно подписаться
+    /// ДО получения `emk_GetMarketsList`.
     /// Идемпотентный. Delphi-сервер подписывает рынок целиком; Futures/Spot
     /// различаются уже в приходящих orderbook packets через `book_kind`.
     pub fn subscribe_orderbook(&self, market_name: &str) {
@@ -2129,7 +2160,7 @@ impl Client {
     /// Подписаться на all-trades поток. `want_mm` — нужны ли MM ордера (Delphi
     /// `MoonProtoEngine.pas:274 MMOrdersSubscribed`).
     ///
-    /// Подписка запоминается в registry; auto-replay после ServerToken change.
+    /// Подписка запоминается в registry; после Init reconnect восстановит её сам.
     /// Повторный вызов с другим `want_mm` обновляет registry — сервер получит
     /// fresh subscribe с актуальным параметром.
     pub fn subscribe_all_trades(&self, want_mm: bool) {
@@ -2272,12 +2303,42 @@ impl Client {
         );
     }
 
-    /// Re-play всех зарегистрированных подписок на новом ServerToken.
-    /// Вызывается из `handle_handshake` после `Fine` если token изменился.
+    fn domain_restore_needs_indexes(&self) -> bool {
+        self.domain_restore.fetch_indexes
+            || self.subscription_registry.trades_sub.is_some()
+            || !self.subscription_registry.orderbook_subs.is_empty()
+    }
+
+    fn send_markets_indexes_restore_request(&mut self, now_ms: i64) {
+        if self.indexes_fetch_in_flight {
+            return;
+        }
+        self.indexes_fetch_in_flight = true;
+        self.indexes_fetch_started_ms = now_ms;
+        self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
+    }
+
+    /// Restore domain intent after reconnect inside an already initialized Client session.
+    ///
+    /// This is deliberately gated by `domain_ready`: before the single init pass `Fine`
+    /// remains transport-only and must not emit Engine API traffic.
+    fn restore_domain_after_reconnect(&mut self) {
+        if !self.domain_ready {
+            return;
+        }
+
+        if self.domain_restore_needs_indexes() {
+            self.send_markets_indexes_restore_request(self.now_ms());
+        }
+
+        self.restore_registry_subscriptions();
+    }
+
+    /// Batch restore helper for the subscription registry.
     ///
     /// OrderBook подписки отправляются одним `emk_SubscribeOrderBook` batch'ем:
     /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
-    fn replay_subscriptions(&mut self) {
+    fn restore_registry_subscriptions(&mut self) {
         if let Some(sub) = self.subscription_registry.trades_sub {
             let want_mm = self
                 .subscription_registry
@@ -2300,7 +2361,6 @@ impl Client {
                 &refs,
             ));
         }
-        self.subscription_registry.last_subscribed_token = self.server_token;
     }
 
     // ====================================================================
@@ -3413,6 +3473,9 @@ impl Client {
                         continue;
                     }
                     self.connected = true;
+                    if self.auth_status == AuthStatus::Base {
+                        self.auth_status = AuthStatus::Connected;
+                    }
                     self.total_recv += msg.recv_bytes;
                     self.track_recv(msg.recv_bytes, msg.timestamp_ms);
                     self.last_online = msg.timestamp_ms;
@@ -3462,7 +3525,7 @@ impl Client {
                     self.last_cleanup = cur_tm;
                 }
 
-                // Active library: timeout protection для auto-refetch indexes.
+                // Timeout protection для init/API markets-index request marker.
                 self.check_indexes_fetch_timeout(cur_tm);
 
                 // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
@@ -3639,12 +3702,42 @@ impl Client {
                 let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
                     &mac_ctx, &mac_key, &buf[..n], mask_ver,
                 ) else { continue; };
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                        Command::from_byte(hdr.cmd),
+                        hdr.cmd,
+                        n,
+                        payload.len()
+                    );
+                }
 
                 // ErrEmu: симуляция packet loss на стороне клиента (зеркало Delphi
                 // MoonProtoUDPClient.pas:534-541). Дроп ПОСЛЕ checksum+ver checks,
                 // т.е. валидный пакет просто отбрасывается. Служебные команды дропаются
                 // с rate/2 (чтобы handshake/ping не отваливались полностью).
                 if err_emu_should_drop(hdr.cmd) {
+                    if trace_io_enabled() {
+                        eprintln!(
+                            "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
+                            Command::from_byte(hdr.cmd),
+                            hdr.cmd,
+                            payload.len()
+                        );
+                    }
+                    if slicing::trace_enabled() && Command::from_byte(hdr.cmd) == Command::Sliced {
+                        if let Some(sh) = slicing::SliceHeader::from_bytes(&payload) {
+                            eprintln!(
+                                "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
+                                sh.datagram_num,
+                                sh.block_num,
+                                sh.max_block_num,
+                                payload.len()
+                            );
+                        } else {
+                            eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
+                        }
+                    }
                     continue;
                 }
 
@@ -4081,23 +4174,24 @@ impl Client {
     }
 
     fn handle_handshake(&mut self, cmd: Command, payload: &[u8]) {
+        let aad = self.cfg.client_id.to_le_bytes();
+        let Some(decrypted) = crypto::decrypt(&self.cfg.master_key, payload, &aad) else {
+            return;
+        };
+        let Some(hello) = handshake::Hello::from_bytes(&decrypted) else {
+            return;
+        };
+
         if cmd == Command::WhoAreYou {
-            let aad = self.cfg.client_id.to_le_bytes();
-            let Some(decrypted) = crypto::decrypt(&self.cfg.master_key, payload, &aad) else {
-                return;
-            };
-            let Some(hello) = handshake::Hello::from_bytes(&decrypted) else {
-                return;
-            };
             self.server_token = hello.server_token;
             // Детекция перезапуска сервера: PeerAppToken изменился между сессиями.
             // Соответствует Delphi MoonProtoEngine.pas:694-698 FLastServerAppToken check.
             let prev_app_token = self.peer_app_token;
             self.peer_app_token = hello.app_token; // C7: save PeerAppToken
             if prev_app_token != 0 && prev_app_token != hello.app_token {
-                // Active library: либа сама инвалидирует indexes и просит свежие.
-                // App ловит ServerRestart event для UI tooltip — никаких actions от него.
-                self.indexes_fetch_in_flight = false; // следующий Ping/handshake-flow auto-fetch
+                // Transport only invalidates index freshness. Fresh GetMarketsIndexes
+                // is an init/API responsibility, not a handshake side effect.
+                self.indexes_fetch_in_flight = false;
                 self.tracked_indexes_peer_app_token = 0; // мы пока не знаем что индексы синхронны
                 self.fire_lifecycle(LifecycleEvent::ServerRestart);
             }
@@ -4116,7 +4210,6 @@ impl Client {
             im.app_token = self.app_token;
             im.timestamp = delphi_now();
             let packed = im.to_bytes_packed();
-            let aad = self.cfg.client_id.to_le_bytes();
             // B-V2-03: cipher только что установлен выше — invariant выполняется.
             let cipher = self
                 .encode_cipher
@@ -4131,38 +4224,17 @@ impl Client {
             self.send_raw_packet(Command::ImFriend, &encrypted);
         }
         if cmd == Command::Fine {
+            let restore_after_reconnect = self.domain_ready && self.was_ever_connected;
             self.need_connect = false;
             self.waiting_hello = false;
             self.auth_status = AuthStatus::AuthDone;
             self.authorized = true;
 
-            // Active library: auto-resubscribe если server_token изменился.
-            // last_subscribed_token = 0 при cold start → первый replay всё равно отправит
-            // существующий registry (если потребитель вызвал subscribe_* до Fine).
-            if self.subscription_registry.last_subscribed_token != self.server_token {
-                self.replay_subscriptions();
-            }
-
-            // Auto-refetch markets indexes если PeerAppToken изменился (server restart)
-            // ИЛИ если они ещё не были синхронизированы в этой жизни Client'а.
-            // Защита от штормов через indexes_fetch_in_flight + tracked_indexes_peer_app_token.
-            // Timeout управляется через check_indexes_fetch_timeout (periodic).
-            //
-            // F12: после смены PeerAppToken также шлём UpdateMarketsList — цены/funding_rate
-            // могут быть устаревшими на новой серверной сессии (Delphi `MoonProtoEngine.pas:809-816
-            // UpdateMarketsList` делает то же). GetMarketsIndexes даёт только маппинг
-            // имя→index, цены/атрибуты приходят через UpdateMarketsList. Шлём оба чтобы UI
-            // не показывал stale prices.
-            if self.domain_ready
-                && self.peer_app_token != self.tracked_indexes_peer_app_token
-                && !self.indexes_fetch_in_flight
-            {
-                self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
-                self.indexes_fetch_in_flight = true;
-                self.indexes_fetch_started_ms = self.now_ms();
-                // Refresh prices/funding (fire-and-forget — ответ приходит в MarketsState
-                // через EventDispatcher автоматически).
-                self.send_api_request(&crate::commands::engine_request::update_markets_list());
+            // Transport auth stops here. Delphi `TMoonProtoUDPClient.HandleHandShake`
+            // only flips auth flags on Fine. Before Init, Engine API work is forbidden.
+            // After Init, reconnect restore is library-owned so user does not repeat Init.
+            if restore_after_reconnect {
+                self.restore_domain_after_reconnect();
             }
         }
     }
@@ -4180,29 +4252,25 @@ impl Client {
         }
     }
 
-    /// Periodic timeout protection для auto-refetch markets indexes. UDP-ответ может
-    /// потеряться — без этой проверки `indexes_fetch_in_flight = true` остался бы
-    /// навсегда и блокировал бы TradesStream/OrderBook обработку в EventDispatcher.
+    /// Periodic timeout cleanup/retry for an in-flight markets-index restore marker.
+    /// UDP-ответ может потеряться — без этой проверки `indexes_fetch_in_flight = true`
+    /// остался бы навсегда. До Init запрос НЕ отправляется; после Init reconnect
+    /// restore имеет право повторить `GetMarketsIndexes`, потому что пользовательский
+    /// intent уже был задан единственным init-проходом.
     ///
-    /// Вызывается из main loop'ов `run` / `run_with_dispatcher` раз за тик. Если
-    /// запрос был отправлен `> INDEXES_FETCH_TIMEOUT_MS` назад и ответ не пришёл —
-    /// сбрасываем in_flight; следующий handshake/Ping увидит `peer != tracked` и
-    /// переотправит запрос. Cost: 3 сравнения когда in_flight=false (hot path).
+    /// Вызывается из main loop'ов `run` / `run_with_dispatcher` раз за тик.
     fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
         const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
         if self.indexes_fetch_in_flight
             && now_ms - self.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
         {
             self.indexes_fetch_in_flight = false;
-            // Если PeerAppToken всё ещё расходится — сразу переотправим запрос.
-            // Иначе ничего не делаем (синхронизация может уже не нужна).
             if self.domain_ready
-                && self.peer_app_token != self.tracked_indexes_peer_app_token
+                && self.domain_restore_needs_indexes()
                 && self.peer_app_token != 0
+                && !self.market_indexes_current_for_peer()
             {
-                self.send_api_request(&crate::commands::engine_request::get_markets_indexes());
-                self.indexes_fetch_in_flight = true;
-                self.indexes_fetch_started_ms = now_ms;
+                self.send_markets_indexes_restore_request(now_ms);
             }
         }
     }
@@ -4789,9 +4857,20 @@ impl Client {
 
     /// Реально отправляет пакет (плюс optional extra-пакет от moonext) с обработкой ошибок.
     /// Закрывает D-06: send errors больше не игнорируются через `.ok()`.
-    /// EWOULDBLOCK логируется как warn (нормальная буферизация ядра). Прочие ошибки → error + force_disconnect
-    /// (чтобы reconnect-цикл подобрал состояние).
+    /// EWOULDBLOCK логируется как warn (нормальная буферизация ядра). Прочие ошибки логируются,
+    /// но не меняют reconnect-state: Delphi `DoSendPacket` возвращает false и не ставит
+    /// `ForceDisconnect`.
     fn dispatch_send(&mut self, cmd: u8, packet: &[u8], extra: Option<&[u8]>, addr: SocketAddr) {
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-tx-attempt] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
+                Command::from_byte(cmd),
+                cmd,
+                packet.len(),
+                extra.map(|p| p.len()).unwrap_or(0),
+                addr
+            );
+        }
         // Сначала выполняем сетевые операции, собирая Result'ы в owned-переменные,
         // потом обрабатываем через self.should_log без conflicting borrow.
         let extra_result = match (extra, self.socket.as_ref()) {
@@ -4812,22 +4891,57 @@ impl Client {
             Ok(_) => {
                 self.total_sent += packet.len() as u64;
                 self.track_sent(packet.len() as u64, self.now_ms());
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-ok] cmd={:?} raw={} packet_len={} total_sent={}",
+                        Command::from_byte(cmd),
+                        cmd,
+                        packet.len(),
+                        self.total_sent
+                    );
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-wouldblock] cmd={:?} raw={} packet_len={} err={}",
+                        Command::from_byte(cmd),
+                        cmd,
+                        packet.len(),
+                        e
+                    );
+                }
                 if self.should_log("send_wouldblock", 1000) {
                     warn!("send_to(cmd={cmd}) would block (kernel send buffer full)");
                 }
             }
             Err(e) if is_datagram_too_large_error(&e) => {
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-too-large] cmd={:?} raw={} packet_len={} err={}",
+                        Command::from_byte(cmd),
+                        cmd,
+                        packet.len(),
+                        e
+                    );
+                }
                 if self.should_log("send_too_large", 1000) {
                     warn!("send_to(cmd={cmd}) packet too large for current path MTU: {e}");
                 }
             }
             Err(e) => {
-                if self.should_log("send_err", 1000) {
-                    error!("send_to(cmd={cmd}) failed: {e} — triggering force_disconnect");
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-error] cmd={:?} raw={} packet_len={} err={}",
+                        Command::from_byte(cmd),
+                        cmd,
+                        packet.len(),
+                        e
+                    );
                 }
-                self.force_disconnect = true;
+                if self.should_log("send_err", 1000) {
+                    error!("send_to(cmd={cmd}) failed: {e}");
+                }
             }
         }
     }
@@ -4843,20 +4957,25 @@ impl Client {
         self.send_raw_packet(Command::Hello, &payload);
     }
 
-    fn send_hello_again(&mut self) {
+    fn build_hello_again_packet(&mut self) -> Vec<u8> {
         self.client_token += 1;
         let mut hello = handshake::Hello::new(self.client_token, self.app_token);
         hello.timestamp = delphi_now();
         hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.server_token);
         let packed = hello.to_bytes_packed();
         let aad = self.cfg.client_id.to_le_bytes();
-        // B-V2-03: send_hello_again вызывается после первичного Fine (cipher установлен).
-        // Если по какой-то причине cipher = None — пропускаем (защита от panic).
-        let Some(cipher) = self.encode_cipher.as_ref() else {
-            error!(target: "moonproto::crypto", "HelloAgain called before initial handshake — skipping");
-            return;
-        };
-        let encrypted = crypto::encrypt_with_cipher(cipher, &packed, &aad);
+        if let Some(cipher) = self.encode_cipher.as_ref() {
+            crypto::encrypt_with_cipher(cipher, &packed, &aad)
+        } else {
+            // Delphi initializes TMoonProtoClient.MPKeys[true/false] with MasterKey.
+            // Early HelloAgain packets before WhoAreYou are real packets encrypted
+            // with MasterKey, not skipped.
+            crypto::encrypt(&self.cfg.master_key, &packed, &aad)
+        }
+    }
+
+    fn send_hello_again(&mut self) {
+        let encrypted = self.build_hello_again_packet();
         self.send_raw_packet(Command::HelloAgain, &encrypted);
     }
 
@@ -5001,7 +5120,6 @@ impl Client {
                     debug!("bound UDP socket on {}:{}", bind_family, self.next_port);
                     self.next_port += 1;
                     self.socket = Some(sock);
-                    self.auth_status = AuthStatus::Connected;
                     // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
                     self.cached_server_addr = None;
                     self.reset_bind_failure_tracking();
@@ -5157,14 +5275,14 @@ impl Client {
 
     /// Текущий `ServerToken` — меняется при каждом hard handshake (Hello→WhoAreYou→Fine).
     /// Soft reconnect (HelloAgain) НЕ меняет этот токен. **Внутри либы используется для
-    /// auto-resubscribe** subscription registry — внешнему потребителю обычно не нужен,
+    /// init/API subscription restore** — внешнему потребителю обычно не нужен,
     /// выставлен для diagnostic UI.
     pub fn server_token(&self) -> u64 {
         self.server_token
     }
 
     /// `PeerAppToken` — генерируется при старте серверного процесса. Меняется при перезапуске
-    /// сервера. **Внутри либы используется для auto-refetch markets indexes** — внешнему
+    /// сервера. **Внутри либы используется для проверки свежести markets indexes** — внешнему
     /// потребителю обычно не нужен, выставлен для diagnostic UI / event correlation.
     pub fn peer_app_token(&self) -> u64 {
         self.peer_app_token
@@ -5707,6 +5825,9 @@ pub fn run_init_sequence(
         }
     }
 
+    client.domain_restore = DomainRestoreIntent {
+        fetch_indexes: needs_indexes,
+    };
     client.domain_ready = true;
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
 
@@ -6856,6 +6977,7 @@ mod send_queue_dedup_tests {
 #[cfg(test)]
 mod active_library_helpers_tests {
     use super::*;
+    use crate::commands::engine_api::EngineMethod;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
@@ -7068,39 +7190,54 @@ mod active_library_helpers_tests {
     }
 
     #[test]
-    fn indexes_fetch_timeout_re_sends_when_peer_token_mismatch() {
+    fn indexes_fetch_timeout_does_not_retry_without_init_intent() {
         let mut client = Client::new(dummy_cfg());
         client.indexes_fetch_in_flight = true;
         client.indexes_fetch_started_ms = 0;
-        // PeerAppToken расходится → должен переотправить запрос.
+        // PeerAppToken расходится, но единственный Init ещё не заказывал индексы.
         client.peer_app_token = 0xABC;
         client.tracked_indexes_peer_app_token = 0xDEF;
         client.domain_ready = true;
         client.check_indexes_fetch_timeout(13_000);
         assert!(
-            client.indexes_fetch_in_flight,
-            "после re-send флаг снова true"
+            !client.indexes_fetch_in_flight,
+            "timeout cleanup только сбрасывает marker"
         );
         assert_eq!(
-            client.indexes_fetch_started_ms, 13_000,
-            "indexes_fetch_started_ms обновлён на текущее время"
+            client.indexes_fetch_started_ms, 0,
+            "no re-send means started timestamp is unchanged"
         );
-        // Drain event channel — должен быть один GetMarketsIndexes request.
-        let mut found_get_markets_indexes = false;
-        while let Ok(ev) = client.event_rx.try_recv() {
-            if let ClientEvent::Send(msg) = ev {
-                if msg.item.cmd == Command::API as u8
-                    && msg.item.data.len() > 11
-                    && msg.item.data[11]
-                        == crate::commands::engine_api::EngineMethod::GetMarketsIndexes as u8
-                {
-                    found_get_markets_indexes = true;
-                }
-            }
-        }
         assert!(
-            found_get_markets_indexes,
-            "после timeout c mismatch — отправлен GetMarketsIndexes"
+            client.event_rx.try_recv().is_err(),
+            "timeout cleanup must not enqueue GetMarketsIndexes without init intent"
+        );
+    }
+
+    #[test]
+    fn indexes_fetch_timeout_retries_after_init_intent() {
+        let mut client = Client::new(dummy_cfg());
+        client.indexes_fetch_in_flight = true;
+        client.indexes_fetch_started_ms = 0;
+        client.peer_app_token = 0xABC;
+        client.tracked_indexes_peer_app_token = 0xDEF;
+        client.domain_ready = true;
+        client.domain_restore.fetch_indexes = true;
+
+        client.check_indexes_fetch_timeout(13_000);
+
+        assert!(client.indexes_fetch_in_flight);
+        assert_eq!(client.indexes_fetch_started_ms, 13_000);
+        let ev = client
+            .event_rx
+            .try_recv()
+            .expect("post-init timeout must retry GetMarketsIndexes");
+        let ClientEvent::Send(msg) = ev else {
+            panic!("expected Send event");
+        };
+        assert_eq!(msg.item.cmd, Command::API as u8);
+        assert_eq!(
+            msg.item.data.get(11).copied(),
+            Some(EngineMethod::GetMarketsIndexes as u8)
         );
     }
 
@@ -7121,7 +7258,7 @@ mod active_library_helpers_tests {
 }
 
 #[cfg(test)]
-mod replay_subscriptions_tests {
+mod registry_subscription_restore_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
 
@@ -7181,21 +7318,20 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_with_empty_registry_sends_nothing_but_updates_token() {
+    fn restore_with_empty_registry_sends_nothing() {
         let mut client = Client::new(dummy_cfg());
         client.server_token = 0xCAFE;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         assert!(sent.is_empty(), "пустой registry → 0 wire-запросов");
-        assert_eq!(client.subscription_registry.last_subscribed_token, 0xCAFE);
     }
 
     #[test]
-    fn replay_trades_only_sends_single_subscribe_all_trades() {
+    fn restore_trades_only_sends_single_subscribe_all_trades() {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: true });
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 1, "только trades → 1 wire-запрос");
         assert_eq!(
@@ -7206,12 +7342,12 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_trades_uses_latest_mm_orders_flag() {
+    fn restore_trades_uses_latest_mm_orders_flag() {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
         client.subscription_registry.mm_orders_sub = Some(true);
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 1);
         assert_eq!(
@@ -7222,11 +7358,11 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_mm_orders_without_trades_sends_ui_subscription() {
+    fn restore_mm_orders_without_trades_sends_ui_subscription() {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.mm_orders_sub = Some(true);
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_send_items(&client);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].cmd, Command::UI as u8);
@@ -7237,7 +7373,7 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_orderbooks_are_batched_into_single_request() {
+    fn restore_orderbooks_are_batched_into_single_request() {
         let mut client = Client::new(dummy_cfg());
         client
             .subscription_registry
@@ -7252,7 +7388,7 @@ mod replay_subscriptions_tests {
             .orderbook_subs
             .insert("XRP".to_string());
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         // Все три подписки должны уйти ОДНИМ batch'ем, не тремя.
         assert_eq!(sent.len(), 1, "3 orderbook подписки → 1 batch wire-запрос");
@@ -7263,7 +7399,7 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_orderbooks_dedup_by_market_name() {
+    fn restore_orderbooks_dedup_by_market_name() {
         let mut client = Client::new(dummy_cfg());
         assert!(client
             .subscription_registry
@@ -7274,7 +7410,7 @@ mod replay_subscriptions_tests {
             .orderbook_subs
             .insert("BTC".to_string()));
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 1, "same market is one server-side subscription");
         assert_eq!(
@@ -7284,7 +7420,7 @@ mod replay_subscriptions_tests {
     }
 
     #[test]
-    fn replay_combined_sends_trades_plus_orderbook_batches() {
+    fn restore_combined_sends_trades_plus_orderbook_batches() {
         let mut client = Client::new(dummy_cfg());
         client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
         client
@@ -7296,7 +7432,7 @@ mod replay_subscriptions_tests {
             .orderbook_subs
             .insert("XRP".to_string());
         client.server_token = 1;
-        client.replay_subscriptions();
+        client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 2, "1 trades + 1 orderbook batch = 2 запроса");
         let methods: Vec<Option<u8>> = sent.iter().map(|p| method_id(p)).collect();
@@ -7308,18 +7444,6 @@ mod replay_subscriptions_tests {
             .filter(|m| **m == Some(EngineMethod::SubscribeOrderBook as u8))
             .count();
         assert_eq!(book_count, 1);
-    }
-
-    #[test]
-    fn replay_updates_last_subscribed_token() {
-        let mut client = Client::new(dummy_cfg());
-        client.server_token = 0xDEAD_BEEF;
-        assert_eq!(client.subscription_registry.last_subscribed_token, 0);
-        client.replay_subscriptions();
-        assert_eq!(
-            client.subscription_registry.last_subscribed_token,
-            0xDEAD_BEEF
-        );
     }
 }
 
@@ -7354,7 +7478,7 @@ mod refresh_tick_tests {
 
     #[test]
     fn refresh_config_defaults() {
-        // Документированные дефолты: update_markets = Some(2s), check_tags = Some(60s).
+        // Документированные дефолты: Delphi-worker cadence, gated by domain_ready.
         let cfg = RefreshConfig::default();
         assert_eq!(cfg.update_markets_every, Some(Duration::from_secs(2)));
         assert_eq!(cfg.check_tags_every, Some(Duration::from_secs(60)));
@@ -7401,6 +7525,25 @@ mod refresh_tick_tests {
             client.last_check_tags_ms, initial_tags_ms,
             "after domain init the same refresh config should become active"
         );
+    }
+
+    #[test]
+    fn default_refresh_starts_after_domain_init() {
+        let mut client = Client::new(dummy_cfg(RefreshConfig::default()));
+        client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+        client.need_connect = false;
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        client.testing_set_domain_ready(true);
+
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let initial_markets_ms = client.last_update_markets_ms;
+        let initial_tags_ms = client.last_check_tags_ms;
+
+        client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+
+        assert_ne!(client.last_update_markets_ms, initial_markets_ms);
+        assert_ne!(client.last_check_tags_ms, initial_tags_ms);
     }
 
     #[test]
@@ -7689,7 +7832,6 @@ mod subscription_registry_tests {
         let r = SubscriptionRegistry::default();
         assert!(r.orderbook_subs.is_empty());
         assert!(r.trades_sub.is_none());
-        assert_eq!(r.last_subscribed_token, 0);
     }
 
     #[test]
@@ -7785,11 +7927,38 @@ mod service_cmd_tests {
         let permission = std::io::Error::from_raw_os_error(13);
         assert!(!is_datagram_too_large_error(&permission));
     }
+
+    #[test]
+    fn generic_send_error_logs_without_force_disconnect() {
+        let mut client = Client::new(ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig::default(),
+        });
+        client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+        let incompatible_addr: SocketAddr = "[::1]:9".parse().unwrap();
+
+        client.dispatch_send(Command::Ping as u8, &[0xAA], None, incompatible_addr);
+
+        assert_eq!(client.total_sent, 0, "IPv4 socket → IPv6 addr must fail");
+        assert!(
+            !client.force_disconnect,
+            "Delphi send error only logs; it must not start reconnect"
+        );
+    }
 }
 
 #[cfg(test)]
 mod reconnect_timing_tests {
     use super::*;
+    use crate::commands::engine_api::EngineMethod;
+    use crate::commands::market::build_markets_indexes_response;
+    use crate::events::{Event, EventDispatcher};
 
     fn dummy_client() -> Client {
         Client::new(ClientConfig {
@@ -7809,6 +7978,63 @@ mod reconnect_timing_tests {
 
     fn callback_sink<'a>(cb: &'a mut OnDataFn) -> DispatchSink<'a> {
         DispatchSink::Callback(cb)
+    }
+
+    fn install_session_key(client: &mut Client) {
+        client.server_token = 1;
+        client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
+    }
+
+    fn encrypted_hello(client: &Client, server_token: u64, peer_app_token: u64) -> Vec<u8> {
+        let mut hello = handshake::Hello::new(client.client_token, client.app_token);
+        hello.server_token = server_token;
+        hello.app_token = peer_app_token;
+        hello.timestamp = delphi_now();
+        let aad = client.cfg.client_id.to_le_bytes();
+        crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
+    }
+
+    fn method_id(payload: &[u8]) -> Option<u8> {
+        payload.get(11).copied()
+    }
+
+    fn drain_send_items(client: &Client) -> Vec<SendItem> {
+        let mut out = Vec::new();
+        while let Ok(ev) = client.event_rx.try_recv() {
+            let ClientEvent::Send(msg) = ev else {
+                continue;
+            };
+            out.push(msg.item);
+        }
+        out
+    }
+
+    fn api_methods(items: &[SendItem]) -> Vec<u8> {
+        items
+            .iter()
+            .filter(|item| item.cmd == Command::API as u8)
+            .filter_map(|item| method_id(&item.data))
+            .collect()
+    }
+
+    fn build_engine_response_payload(
+        request_uid: u64,
+        method: EngineMethod,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(1u8);
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.extend_from_slice(&0xAABB_CCDD_u64.to_le_bytes());
+        buf.extend_from_slice(&request_uid.to_le_bytes());
+        buf.push(method as u8);
+        buf.push(1u8);
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.push(0u8);
+        buf.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
     }
 
     #[test]
@@ -7835,8 +8061,203 @@ mod reconnect_timing_tests {
     }
 
     #[test]
+    fn early_hello_again_uses_master_key_before_whoareyou() {
+        let mut client = dummy_client();
+        let token_before = client.client_token;
+        let payload = client.build_hello_again_packet();
+        let aad = client.cfg.client_id.to_le_bytes();
+        let decrypted = crypto::decrypt(&client.cfg.master_key, &payload, &aad)
+            .expect("early HelloAgain must be encrypted with MasterKey");
+        let hello = handshake::Hello::from_bytes(&decrypted).expect("valid HelloAgain payload");
+
+        assert_eq!(client.client_token, token_before + 1);
+        assert_eq!(hello.mix_ts, client.client_token);
+        assert_eq!(
+            hello.peer_mix,
+            crypto::mix_values(&hello.rnd, hello.mix_ts, 0),
+            "before WhoAreYou Delphi computes PeerMix with ServerToken=0",
+        );
+    }
+
+    #[test]
+    fn fine_requires_master_key_hello_payload_like_delphi() {
+        let mut client = dummy_client();
+
+        client.handle_handshake(Command::Fine, b"not an encrypted hello");
+
+        assert!(!client.authorized);
+        assert_ne!(client.auth_status, AuthStatus::AuthDone);
+
+        let mut hello = handshake::Hello::new(client.client_token, client.app_token);
+        hello.timestamp = delphi_now();
+        let aad = client.cfg.client_id.to_le_bytes();
+        let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
+
+        client.handle_handshake(Command::Fine, &payload);
+
+        assert!(client.authorized);
+        assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        assert!(!client.need_connect);
+    }
+
+    #[test]
+    fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
+        let mut client = dummy_client();
+        client.domain_ready = false;
+        client.peer_app_token = 0xABCD;
+        client.tracked_indexes_peer_app_token = 0;
+        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        client.subscription_registry.mm_orders_sub = Some(true);
+        client
+            .subscription_registry
+            .orderbook_subs
+            .insert("BTCUSDT".to_string());
+
+        let mut hello = handshake::Hello::new(client.client_token, client.app_token);
+        hello.timestamp = delphi_now();
+        let aad = client.cfg.client_id.to_le_bytes();
+        let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
+
+        client.handle_handshake(Command::Fine, &payload);
+
+        assert!(client.authorized);
+        assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        assert!(
+            client.event_rx.try_recv().is_err(),
+            "first Fine must not restore; restore starts only after a completed Init session",
+        );
+    }
+
+    #[test]
+    fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_gate() {
+        let mut client = dummy_client();
+
+        // Simulate a Client that already connected once and completed its single Init.
+        client.domain_ready = true;
+        client.was_ever_connected = true;
+        client.auth_status = AuthStatus::AuthDone;
+        client.prev_auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.peer_app_token = 0x1000;
+        client.tracked_indexes_peer_app_token = 0x1000;
+        client.domain_restore = DomainRestoreIntent {
+            fetch_indexes: true,
+        };
+        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
+        client
+            .subscription_registry
+            .orderbook_subs
+            .insert("BTCUSDT".to_string());
+
+        let who = encrypted_hello(&client, 0x2222, 0x2000);
+        client.handle_handshake(Command::WhoAreYou, &who);
+        let fine = encrypted_hello(&client, 0x2222, 0x2000);
+        client.handle_handshake(Command::Fine, &fine);
+
+        assert!(client.authorized);
+        assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        assert!(
+            client.indexes_fetch_in_flight,
+            "post-init reconnect must request fresh indexes without user re-running Init"
+        );
+
+        let sent = drain_send_items(&client);
+        let methods = api_methods(&sent);
+        assert!(
+            methods.contains(&(EngineMethod::GetMarketsIndexes as u8)),
+            "subscriptions need fresh indexes after reconnect"
+        );
+        assert!(
+            methods.contains(&(EngineMethod::SubscribeAllTrades as u8)),
+            "trades subscription must be replayed by the library"
+        );
+        assert!(
+            methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            "orderbook subscription must be replayed by the library"
+        );
+        assert!(
+            !methods.contains(&(EngineMethod::BaseCheck as u8))
+                && !methods.contains(&(EngineMethod::AuthCheck as u8))
+                && !methods.contains(&(EngineMethod::GetMarketsList as u8))
+                && !methods.contains(&(EngineMethod::GetMarketsBalanceFull as u8)),
+            "reconnect restore is not a second Init"
+        );
+        assert!(
+            sent.iter().all(|item| {
+                item.cmd != Command::Order as u8
+                    && item.cmd != Command::UI as u8
+                    && item.cmd != Command::Balance as u8
+            }),
+            "Delphi post-init resync is not repeated by the client on reconnect"
+        );
+
+        let response_data = build_markets_indexes_response(&["BTCUSDT".to_string()]);
+        let response_payload =
+            build_engine_response_payload(0x7777, EngineMethod::GetMarketsIndexes, &response_data);
+        let mut buffered = Vec::new();
+        {
+            let mut sink = DispatchSink::Buffer(&mut buffered);
+            client.data_read_int(Command::API as u8, &response_payload, &mut sink);
+        }
+        assert!(!client.indexes_fetch_in_flight);
+        assert!(client.market_indexes_current_for_peer());
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut out = Vec::new();
+        let (cmd, payload) = buffered.pop().expect("API response must reach dispatcher");
+        dispatcher.dispatch_into_active(cmd, &payload, client.now_ms(), &mut out, &mut client);
+        assert!(
+            dispatcher.markets().indexes_synchronized,
+            "fresh GetMarketsIndexes response reopens indexed stream gate"
+        );
+
+        out.clear();
+        dispatcher.dispatch_into_active(
+            Command::OrderBook,
+            &[],
+            client.now_ms(),
+            &mut out,
+            &mut client,
+        );
+        assert!(
+            out.iter().any(|ev| matches!(
+                ev,
+                Event::ParseFailed {
+                    cmd: Command::OrderBook,
+                    ..
+                }
+            )),
+            "after index restore, orderbook packets reach parser instead of being silently gated"
+        );
+    }
+
+    #[test]
+    fn initial_waiting_hello_sends_hello_again_like_delphi() {
+        let mut client = dummy_client();
+        let token_before = client.client_token;
+
+        client.check_hello_send(100);
+        assert_eq!(client.last_sent_hello, 100);
+        assert!(client.waiting_hello);
+
+        client.check_offline_reconnect(350);
+
+        assert_eq!(client.auth_status, AuthStatus::Offline);
+        assert_eq!(
+            client.last_sent_hello, 350,
+            "Delphi sends HelloAgain 200ms after the first waiting Hello even before WhoAreYou",
+        );
+        assert_eq!(
+            client.client_token,
+            token_before + 2,
+            "first Hello increments token once; early HelloAgain increments it again",
+        );
+    }
+
+    #[test]
     fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
         let mut client = dummy_client();
+        install_session_key(&mut client);
         let mut cb: OnDataFn = Box::new(|_, _| {});
         let mut sink = callback_sink(&mut cb);
 

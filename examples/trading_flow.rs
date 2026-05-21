@@ -1,19 +1,20 @@
 //! Полный пример торгового flow: подключение → подписка → ордер → cancel.
 //!
 //! Показывает **active library API** через `Client::run_with_dispatcher` —
-//! рекомендуемый главный entry-point. Liба сама делает:
-//! - auto-replay подписок при reconnect / ServerToken change (через `SubscriptionRegistry`)
-//! - auto-fetch markets indexes при `PeerAppToken change` + блокировка
-//!   `TradesStream`/`OrderBook` пакетов до завершения синхронизации
+//! рекомендуемый главный entry-point. Либа сама делает:
+//! - transport reconnect/handshake до `Fine`;
+//! - one-time init/API-driven подписки и `GetMarketsIndexes`;
+//! - post-init reconnect restore без повторного Init;
+//! - блокировку indexed `TradesStream`/`OrderBook` пакетов до синхронизации indexes;
 //! - auto-send `emk_RequestOrderBookFull` при corrupted orderbook cache /
 //!   missing Full snapshot — потребитель НЕ должен это вызывать сам
 //! - periodic `trades.tick()` каждые ~100мс для resend missing TradesStream пакетов
-//! - timeout protection для auto-fetch indexes (UDP-loss recovery, см.
+//! - timeout protection для init/API indexes request marker (UDP-loss recovery, см.
 //!   `check_indexes_fetch_timeout`)
 //! - ServerTimeDelta application через глобальный atomic
 //!
-//! App ловит lifecycle events только для UI индикатора + дёргает trade-команды
-//! по user actions. Никаких ручных recovery шагов от app не требуется.
+//! App запускает init/API шаги один раз после первого connect. После reconnect
+//! либа сама восстанавливает сохранённый intent.
 //!
 //! Запуск:
 //!   cargo run --example trading_flow --release -- "<key_base64>" "host:port"
@@ -71,7 +72,7 @@ fn main() {
         println!("[setup] NTP failed, continuing with system clock");
     }
 
-    // ---- 3. Client config (active library: NTP + UpdateMarketsList дефолтами) ----
+    // ---- 3. Client config (NTP default; background Engine API starts after Init) ----
     let cfg = ClientConfig::new(ip, port, keys.master_key, keys.mac_key);
     let mut client = Client::new(cfg);
 
@@ -86,12 +87,11 @@ fn main() {
                 if fresh {
                     println!("[lifecycle] >>> FIRST CONNECTED — app may now send init commands");
                 } else {
-                    println!("[lifecycle] >>> RE-CONNECTED — registry auto-replayed subscriptions, ничего делать не надо");
+                    println!("[lifecycle] >>> RE-CONNECTED — library restores post-init intent");
                 }
             }
             LifecycleEvent::ServerRestart => {
-                println!("[lifecycle] >>> SERVER RESTART — либа сама re-fetch'нет indexes и replay'нет subscriptions");
-                // App ничего не должен делать — это info-event для UI индикатора.
+                println!("[lifecycle] >>> SERVER RESTART — restore is handled after reconnect");
             }
             LifecycleEvent::Disconnected => {
                 println!("[lifecycle] >>> FINAL DISCONNECT");
@@ -101,8 +101,7 @@ fn main() {
     }));
 
     // ---- 5. EventDispatcher — переиспользуется между всеми phase'ами ----
-    // Один и тот же dispatcher держит state (markets, orders, ...) и подхватывает
-    // auto-action'ы либы через `run_with_dispatcher`.
+    // Один и тот же dispatcher держит state (markets, orders, ...) между фазами.
     let mut dispatcher = EventDispatcher::new();
 
     // ---- 6. Phase 1: подключение и авторизация (до 15 сек) ----
@@ -140,9 +139,8 @@ fn main() {
     // run-pause-issue-resume.
     println!("\n[phase 2] sending initial subscriptions...");
 
-    // Active library API: `subscribe_all_trades` запоминается в registry — при
-    // следующем reconnect / ServerToken change либа auto-replay'ит. App ничего
-    // не делает.
+    // Active library API: `subscribe_all_trades` запоминается в registry; после Init
+    // reconnect восстановит этот intent без повторного Init.
     client.subscribe_all_trades(false);
 
     // Engine API: получить список рынков (async response). Receiver можно

@@ -11,7 +11,8 @@ you run through `Client::run_with_dispatcher`.
 client.subscribe_all_trades(false); // false = trades only, true = include MM orders
 ```
 
-The subscription is registry-aware and is replayed after reconnect.
+The subscription is registry-aware. Before Init, reconnect does not replay it.
+After the one-time Init completes, reconnect replays it automatically.
 
 ## Events
 
@@ -52,9 +53,10 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 
 `qty` sign encodes direction: positive is buy-side, negative is sell-side.
 Use `MarketsState::market_name_by_index` / `market_by_index` to resolve the
-stream `market_index` into the canonical market name. The active dispatcher
-keeps that mapping fresh and suppresses stream events while indexes are stale
-after a server restart.
+stream `market_index` into the canonical market name. The dispatcher suppresses
+stream events while indexes are stale after a server restart; after the one-time
+Init, reconnect restore sends `GetMarketsIndexes` automatically when trades were
+requested.
 
 `Duplicate` and resend-side `OutOfOrder` are diagnostic events. The dispatcher
 still emits `Apply(packet)` for the same packet payload, matching the Delphi

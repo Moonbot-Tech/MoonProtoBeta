@@ -5,10 +5,12 @@
 //! slicing, ACK'и, PMTU discovery, и payload commands — byte-exact с Delphi
 //! референсом.
 //!
-//! `moonproto` — **active session manager**: subscription replay, recovery
-//! при reconnect, markets-index resync, orderbook full requests, trades gap
-//! recovery, pending API routing, NTP sync, candle chunk merging — всё внутри
-//! либы. Приложение решает только что подписать и какие команды отправить.
+//! `moonproto` — **active session manager**: transport reconnect, init-driven
+//! subscriptions/index fetch, orderbook full requests, trades gap recovery,
+//! pending API routing, NTP sync, candle chunk merging — всё внутри либы.
+//! До первого Init transport handshake (`Fine`) не шлёт Engine API. После
+//! единственного Init reconnect внутри той же `Client`-сессии сам восстанавливает
+//! свежие indexes для indexed streams и registry-подписки.
 //!
 //! ## Quick Start
 //!

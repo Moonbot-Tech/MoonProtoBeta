@@ -96,14 +96,15 @@ with its own fresh strategy state.
 
 Use the lower-level `run_with_dispatcher` plus `run_init_sequence` pair only
 when the UI needs to show custom progress between the transport connection and
-the init requests.
+the init requests. Init is a one-time step for a `Client` session; after it
+completes, reconnect restore is owned by the library.
 
 `run_with_dispatcher` is the main high-level entry point. It dispatches incoming
-payloads into typed events and performs library-owned recovery work:
+payloads into typed events and performs library-owned transport/read-model work:
 
-- replaying registered subscriptions after reconnect;
 - fetching market indexes during init when requested or required by subscriptions;
-- resynchronizing market indexes after server restart;
+- restoring saved markets/index/subscription intent after reconnect without a
+  second Init;
 - blocking orderbook/trades packets until indexes are synchronized;
 - sending `RequestOrderBookFull` when a gap requires a full snapshot;
 - ticking trades gap recovery and sending resend requests;
@@ -196,9 +197,10 @@ client.subscribe_all_trades(false);
 client.subscribe_orderbook("BTCUSDT");
 ```
 
-The library remembers these subscriptions and replays them automatically after a
-hard reconnect. From another thread, clone `client.sender()` and call the same
-typed methods on `ClientSender`.
+The library remembers these subscription intents. Before Init, reconnect does
+not emit subscription traffic; after the single Init completes, reconnect inside
+the same `Client` session replays the registry automatically. From another
+thread, clone `client.sender()` and call the same typed methods on `ClientSender`.
 
 ## Multi-Server
 
@@ -210,6 +212,8 @@ contains the optional server identity returned by `BaseCheck`: bot id, server
 name, exchange name, base currency, and version fields.
 
 See `docs/api/multi_server.md`.
+
+See also `docs/api/library_decisions.md` for the session/init contract.
 
 ## Transport Modes
 
@@ -240,8 +244,9 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/trades_stream.rs` — subscribe to the trades stream and resolve market names.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.
 - `examples/order_book_top.rs` — subscribe to one orderbook and print best bid/ask from the applied read model.
-- `examples/market_refresh.rs` — observe automatic market refresh events.
+- `examples/market_refresh.rs` — opt in to background market refresh and observe events.
 - `examples/multi_client_test.rs` — two independent clients in one process.
+- `examples/stress_client.rs` — two-client live stress with optional packet-loss emulation (`post_init` by default, `pre_connect` for handshake loss).
 
 ## API Documentation
 

@@ -3,6 +3,9 @@ name = "moonproto"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+diagnostic-trace = []
+
 [dependencies]
 moonproto-transport = { path = "../moonproto-transport" }
 aes-gcm = "0.10"

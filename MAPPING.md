@@ -342,7 +342,7 @@
 | U3 | :82 | 3 | TStratStartStopCommand — IsStart:bool | UICommand::StratStartStop | ✅ |
 | U4 | :93 | 4 | TStratStartStopCommandV2 — IsStart + Items[StratCheckedItem] | UICommand::StratStartStopV2 | ✅ |
 | U5 | :105 | 5 | TMMOrdersSubscribeCommand (UK_TurnMMDetection) — Subscribe:bool | UICommand::MMOrdersSubscribe | ✅ |
-| U5a | Unit1.pas/Strategies.pas + MoonProtoEngine.pas SubscribeAllTrades | MMOrders-флаг обновляется прямой UI-командой и bool-параметром `emk_SubscribeAllTrades`; после нового ServerToken должен быть восстановлен последний флаг | client.rs: `SubscriptionRegistry.mm_orders_sub`, распознавание исходящего `TMMOrdersSubscribeCommand`, `replay_subscriptions` | ✅ |
+| U5a | Unit1.pas/Strategies.pas + MoonProtoEngine.pas SubscribeAllTrades | MMOrders-флаг обновляется прямой UI-командой и bool-параметром `emk_SubscribeAllTrades`; после нового ServerToken восстанавливается самой либой, но только если единственный Init уже завершён | client.rs: `SubscriptionRegistry.mm_orders_sub`, распознавание исходящего `TMMOrdersSubscribeCommand`, `restore_domain_after_reconnect` | ✅ |
 | U6 | :120 | 6 | TUpdateVersionCommand — VersionName:utf8 + IsRelease:bool | UICommand::UpdateVersion | ✅ |
 | U7 | :131 | 7 | TEmuTradesCommand (Sliced) — mIndex + BaseTime + Points[6б each] | UICommand::EmuTrades + EmuTradePoint | ✅ |
 | U8 | :144 | 8 | TNewMarketNotifyCommand — empty (Priority=High) | UICommand::NewMarketNotify | ✅ |
@@ -388,8 +388,8 @@
 | M-A2 | apply UpdateMarketsList → `mIndex` resolves through `SrvMarkets.FindByServerIndex`, bounds/stale mapping miss is skipped, send_funding gate | apply_markets_prices via current `market_indexes` mapping | ✅ |
 | M-A3 | apply GetMarketsIndexes → полная замена market_indexes | apply_markets_indexes | ✅ |
 | M-A4 | apply CheckBinanceTags → обновить только перечисленные и известные рынки; отсутствующие в response tags не очищаются; при полном удалении рынка его tags исчезают вместе с market object | apply_token_tags + `apply_markets_list` tag prune | ✅ |
-| M-A5 | BMarketsDetailsWorker.Execute вызывает `Engine.UpdateMarketsList` в цикле примерно каждые 2с при `FullProxy` (`CreateEngine` → `TMoonProtoEngine`) | `RefreshConfig::default().update_markets_every = Some(2s)` + `tick_periodic_refresh` | ✅ |
-| M-A6 | BHeavyApiWorker.Execute вызывает `Engine.CheckBinanceTags` при старте, далее примерно каждые 60с, и после смены часа делает до 4 быстрых вызовов через 200-мс цикл (`TagsBurst < 4`) | `RefreshConfig::default().check_tags_every = Some(60s)` + `tick_periodic_refresh_at`: стартовый/60с tick и hourly burst 4× с шагом 200мс | ✅ |
+| M-A5 | BMarketsDetailsWorker.Execute вызывает `Engine.UpdateMarketsList` в цикле примерно каждые 2с при `FullProxy` (`CreateEngine` → `TMoonProtoEngine`) | `RefreshConfig::default().update_markets_every = Some(2s)` + `tick_periodic_refresh`, gated by `domain_ready` | ✅ |
+| M-A6 | BHeavyApiWorker.Execute вызывает `Engine.CheckBinanceTags` при старте, далее примерно каждые 60с, и после смены часа делает до 4 быстрых вызовов через 200-мс цикл (`TagsBurst < 4`) | `RefreshConfig::default().check_tags_every = Some(60s)` + `tick_periodic_refresh_at`: 60с tick и hourly burst 4× с шагом 200мс, gated by `domain_ready` | ✅ |
 | M-A7 | `TMoonProtoEngine.GetMarketsIndexes` строит server `mIndex` → `TMarket` через `SrvMarkets.Rebuild(IndexMap)`, `ProcessTradesStream` затем резолвит `MarketIdx` через `SrvMarkets.FindByServerIndex` | `MarketsState::market_name_by_index` / `market_by_index` / `market_index_by_name` поверх `market_indexes`, с `indexes_synchronized` gate для stale mapping | ✅ |
 
 ---
@@ -426,7 +426,8 @@
 | E-W10 | Active-library setup helper поверх Delphi connection + init flow | client.rs:`connect_and_init` waits for ready client, then delegates to `run_init_sequence`; init opens `domain_ready` only after bootstrap | ✅ |
 | E-W11 | Rust active API: one-shot ожидания не теряют typed events, пришедшие пока helper крутит loop | events.rs:`EventDispatcher::queued_events`/`take_queued_events`; client.rs:`run_with_dispatcher_queued` используется `run_until_response` и one-shot helpers | ✅ |
 | E-W12 | Unit1.pas:5946-5950 post-InitDone ActiveClient resync: TAllStatusesReq, TStratSnapshot.CreateFromStrats, TSettingsRequest, TMMOrdersSubscribeCommand, TRequestBalanceRefresh | client.rs:`run_init_sequence` после bootstrap вызывает `send_post_init_resync`; strategy snapshot берётся из fresh provider или ставит queued `SnapshotRequested`, затем отправляются пользовательские trades/orderbook подписки | ✅ |
-| E-W13 | MoonProtoClient.pas:ProcessApiCommand специальная сборка `emk_RequestCandlesData` chunks до финального stream | client.rs:`request_candles_data` one-shot helper регистрирует pending chunk aggregator, крутит dispatcher loop и чистит slot при caller timeout | ✅ |
+| E-W13 | Reconnect после Init: Delphi transport `Fine` только меняет auth state; domain state восстанавливается через server `SrvConnect`, `UpdateMarketsList → GetMarketsIndexes`, `NeedReconnectAllTrades`, `NeedResubscribeOrderBooks` | client.rs:`restore_domain_after_reconnect` после `Fine` не повторяет Init/post-init resync; шлёт fresh `GetMarketsIndexes` для indexed streams и replay registry subscriptions | ✅ |
+| E-W14 | MoonProtoClient.pas:ProcessApiCommand специальная сборка `emk_RequestCandlesData` chunks до финального stream | client.rs:`request_candles_data` one-shot helper регистрирует pending chunk aggregator, крутит dispatcher loop и чистит slot при caller timeout | ✅ |
 
 ---
 

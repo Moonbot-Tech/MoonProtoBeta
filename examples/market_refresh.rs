@@ -1,8 +1,8 @@
 //! Observe market prices and token tags through the public active-library API.
 //!
-//! The example intentionally does not call `api_update_markets_list` or
-//! `api_check_binance_tags` on a timer. `ClientConfig::default().refresh` owns
-//! that work; consumer code only reads `MarketsEvent` and `dispatcher.markets()`.
+//! The default client does not start background Engine API after `Fine`. This
+//! example opts in to Delphi-worker-style refresh through `RefreshConfig`; the
+//! consumer code still only reads `MarketsEvent` and `dispatcher.markets()`.
 //!
 //! Run:
 //!   cargo run --example market_refresh --release -- "<key_base64>" "host:port" BTCUSDT 75
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use moonproto::state::MarketsEvent;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig,
+    RefreshConfig,
 };
 
 fn parse_host(value: Option<&String>) -> (String, u16) {
@@ -63,7 +64,11 @@ fn main() {
     let market = args.get(3).map(String::as_str).unwrap_or("BTCUSDT");
     let watch_secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(75);
 
-    let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key);
+    let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key)
+        .with_refresh(RefreshConfig {
+            update_markets_every: Some(Duration::from_secs(2)),
+            check_tags_every: Some(Duration::from_secs(60)),
+        });
     let mut client = Client::new(cfg);
     let mut dispatcher = EventDispatcher::new();
 

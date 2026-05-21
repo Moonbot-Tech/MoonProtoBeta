@@ -8,8 +8,58 @@
 /// Block 0 additionally contains: cmd:u8 before the data.
 /// Reassembly: sort by BlockNum, strip SliceHeader from each, extract cmd from block 0.
 use std::collections::HashMap;
+#[cfg(feature = "diagnostic-trace")]
+use std::sync::OnceLock;
 
 pub const SLICE_HEADER_SIZE: usize = 4;
+
+#[cfg(feature = "diagnostic-trace")]
+pub(crate) fn trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MOONPROTO_TRACE_SLICES")
+            .map(|v| {
+                let v = v.to_string_lossy();
+                !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(feature = "diagnostic-trace"))]
+#[inline(always)]
+pub(crate) fn trace_enabled() -> bool {
+    false
+}
+
+fn acked_count(flags: &[u8; 32], blocks_count: usize) -> usize {
+    (0..blocks_count)
+        .filter(|block| flags[block / 8] & (1 << (block % 8)) != 0)
+        .count()
+}
+
+fn missing_preview(flags: &[u8; 32], blocks_count: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0usize;
+    for block in 0..blocks_count {
+        if flags[block / 8] & (1 << (block % 8)) == 0 {
+            if shown > 0 {
+                out.push(',');
+            }
+            if shown >= 24 {
+                out.push_str("...");
+                break;
+            }
+            out.push_str(&block.to_string());
+            shown += 1;
+        }
+    }
+    if out.is_empty() {
+        "none".to_string()
+    } else {
+        out
+    }
+}
 
 /// TMoonProtoSliceHeader — 4 bytes packed
 #[derive(Debug, Clone, Copy)]
@@ -195,9 +245,19 @@ impl SlicingReceiver {
     /// Matches TMoonProtoClient.OnNewSliced byte-for-byte.
     /// Returns: (Option<(cmd, data, dup_count, blocks_count)>, ack_bytes)
     pub fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
+        let trace = trace_enabled();
         let hdr = match SliceHeader::from_bytes(payload) {
             Some(h) => h,
-            None => return (None, [0u8; ACK256_WIRE_SIZE]),
+            None => {
+                if trace {
+                    eprintln!(
+                        "[slice-rx] t={} malformed len={} action=drop-no-header",
+                        self.last_online,
+                        payload.len()
+                    );
+                }
+                return (None, [0u8; ACK256_WIRE_SIZE]);
+            }
         };
 
         // Delphi accepts the full byte range: MaxBlockNum is u8, and
@@ -208,14 +268,26 @@ impl SlicingReceiver {
             log::warn!(target: "moonproto::slicing",
                 "Sliced dgram={} block_num={} > max_block_num={} — rejecting",
                 hdr.datagram_num, hdr.block_num, hdr.max_block_num);
+            if trace {
+                eprintln!(
+                    "[slice-rx] t={} d={} b={}/{} len={} action=drop-bad-block",
+                    self.last_online,
+                    hdr.datagram_num,
+                    hdr.block_num,
+                    hdr.max_block_num,
+                    payload.len()
+                );
+            }
             return (None, [0u8; ACK256_WIRE_SIZE]);
         }
 
         let block_data = payload[SLICE_HEADER_SIZE..].to_vec();
         let datagram_num = hdr.datagram_num;
+        let mut action = "existing";
 
         // Check if this is a new datagram number
         if self.is_new_datagram(datagram_num) {
+            action = "new";
             // Remove any old entry with same number
             self.receiving.remove(&datagram_num);
             // DoS guard: при штатной работе клиента в receiving одновременно <20 датаграмм.
@@ -247,6 +319,16 @@ impl SlicingReceiver {
             // Not new, not in receiving → already completed, send full ACK
             let flags = [0xFFu8; 32]; // SetAllFlags
             let ack = build_ack_bytes(&flags, datagram_num);
+            if trace {
+                eprintln!(
+                    "[slice-rx] t={} d={} b={}/{} len={} action=already-complete-full-ack",
+                    self.last_online,
+                    datagram_num,
+                    hdr.block_num,
+                    hdr.max_block_num,
+                    block_data.len()
+                );
+            }
             return (None, ack);
         } else {
             // Existing entry — check if MaxBlockNum matches (recreate if mismatch)
@@ -255,6 +337,7 @@ impl SlicingReceiver {
             // Логически blocks_count = max_block_num+1, минимум 1 — но защита defensive
             // на случай code change ниже по стеку.
             if existing.blocks_count.saturating_sub(1) != hdr.max_block_num as usize {
+                action = "recreate-maxblock-change";
                 self.receiving.remove(&datagram_num);
                 self.receiving.insert(
                     datagram_num,
@@ -267,6 +350,25 @@ impl SlicingReceiver {
         let sliced = self.receiving.get_mut(&datagram_num).unwrap();
         let complete = sliced.receive_piece(hdr.block_num, block_data);
         let ack = build_ack_bytes(&sliced.ack_flags, datagram_num);
+        if trace {
+            let got = sliced.received_count;
+            let total = sliced.blocks_count;
+            let acked = acked_count(&sliced.ack_flags, total);
+            eprintln!(
+                "[slice-rx] t={} d={} b={}/{} action={} got={}/{} acked={} dup={} complete={} missing={}",
+                self.last_online,
+                datagram_num,
+                hdr.block_num,
+                hdr.max_block_num,
+                action,
+                got,
+                total,
+                acked,
+                sliced.dup_count,
+                complete,
+                missing_preview(&sliced.ack_flags, total)
+            );
+        }
 
         if complete {
             let dup_count = sliced.dup_count;
@@ -274,6 +376,23 @@ impl SlicingReceiver {
             let assembled = sliced
                 .assemble()
                 .map(|(cmd, data)| (cmd, data, dup_count, blocks_count));
+            if trace {
+                match &assembled {
+                    Some((cmd, data, dup_count, blocks_count)) => eprintln!(
+                        "[slice-rx-complete] t={} d={} inner_cmd={} len={} dup={} blocks={}",
+                        self.last_online,
+                        datagram_num,
+                        cmd,
+                        data.len(),
+                        dup_count,
+                        blocks_count
+                    ),
+                    None => eprintln!(
+                        "[slice-rx-complete] t={} d={} assemble_failed=true blocks={}",
+                        self.last_online, datagram_num, blocks_count
+                    ),
+                }
+            }
             self.receiving.remove(&datagram_num);
             (assembled, ack)
         } else {

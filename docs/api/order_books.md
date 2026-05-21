@@ -11,8 +11,9 @@ client.subscribe_orderbook("BTCUSDT");
 client.subscribe_orderbook("ETHUSDT");
 ```
 
-Subscriptions are stored in the client registry and replayed automatically after
-hard reconnect. Do not resubscribe from `ServerRestart`.
+Subscriptions are stored in the client registry. Before Init, reconnect does not
+emit subscription traffic. After the one-time Init completes, reconnect replays
+the registry automatically and refetches indexes when needed.
 
 The server subscription is per market name. `OrderBookKind` is not part of the
 subscribe request; it is carried by incoming orderbook packets and by full-book

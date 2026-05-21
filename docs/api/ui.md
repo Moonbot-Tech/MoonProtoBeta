@@ -74,8 +74,8 @@ client.ui_switch_spot(0);
 ```
 
 `ui_mm_subscribe` records the latest MM-orders intent in the client registry.
-After a reconnect, the library replays that flag; if an all-trades subscription
-is active, the replay folds the flag into `SubscribeAllTrades(want_mm)`.
+Before Init, reconnect does not replay that flag. After the one-time Init
+completes, reconnect restores the latest MM-orders intent automatically.
 
 ### Version Update
 

@@ -59,6 +59,7 @@ connect_and_init(
 // Domain state is opened only after init succeeds. Initial server pushes that
 // arrive earlier are dropped; the helper then requests fresh orders, settings,
 // balance, and strategy state.
+// Init is one-time for this Client session; reconnect restore is automatic.
 
 client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
     let _ = event;
@@ -68,9 +69,10 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 ## What the Library Does Automatically
 
 - Reconnects and re-handshakes.
-- Replays registered trade/orderbook subscriptions after hard reconnect.
 - Fetches market indexes during init when requested or required by subscriptions.
-- Refetches market indexes after server restart and blocks indexed streams until they are synchronized.
+- After init, restores market indexes required by indexed streams and registry
+  subscriptions after reconnect without requiring a second Init.
+- Blocks indexed streams while market indexes are stale.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
 - Detects trades gaps and sends `TradesResend` requests on periodic ticks.
 - Routes Engine API responses into one-shot `request_*` helpers or the

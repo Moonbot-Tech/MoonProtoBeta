@@ -67,8 +67,10 @@ client.subscribe_all_trades(false);
 client.subscribe_orderbook("BTCUSDT");
 ```
 
-Those APIs are replayed automatically after reconnect. Raw `api_subscribe_*`
-calls are useful for custom tools but do not update the subscription registry.
+Those APIs update the subscription registry. Before Init, transport handshakes
+do not replay registry state. After the one-time Init completes, reconnect
+restores registry-aware subscriptions automatically. Raw `api_subscribe_*` calls
+are useful for custom tools but do not update the subscription registry.
 
 ## Balance
 

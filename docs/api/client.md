@@ -26,7 +26,8 @@ let mut client = moonproto::Client::new(cfg);
 - `mask_ver = 0`;
 - random `client_id`;
 - `ntp_host = Some("pool.ntp.org")` and uses one shared NTP syncer per process;
-- `refresh = RefreshConfig::default()`.
+- `refresh = RefreshConfig::default()` (`UpdateMarketsList` every 2 seconds and
+  `CheckBinanceTags` every 60 seconds after Init).
 
 Override only what you need:
 
@@ -73,7 +74,9 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 
 This path performs active-library work: state dispatch, per-client
 `ServerTimeDelta` linking, orderbook full requests, trades gap ticks, market-index
-gating, subscription replay, and Engine API pending routing.
+gating, reconnect restore, and Engine API pending routing. Before the first Init,
+transport reconnects do not emit background Engine API. After Init, reconnect
+inside the same `Client` session maintains the user-requested active-lib state.
 
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`:
@@ -90,6 +93,37 @@ client.run_with_dispatcher_state(Duration::from_secs(3600), &mut dispatcher, Box
 `Client::run(duration, on_data)` is the low-level raw callback path. Use it only
 for protocol tools that intentionally bypass `EventDispatcher`; otherwise you are
 responsible for the recovery actions that `run_with_dispatcher` normally performs.
+
+## Packet Loss Test Hook
+
+`moonproto::client::set_err_emu(percent)` enables Delphi-style client-side
+packet loss emulation for tests. It is process-global, affects every `Client` in
+the process, and drops only incoming packets after MoonProto transport
+verification succeeds. Outgoing packets are still sent normally.
+
+Service packets use half of the configured drop rate, matching Delphi
+`MoonProtoErrEmu`: `Ping`, handshake/reconnect commands, MTU probes, and
+`SlicedACK`.
+
+For stress tests that target Engine API, candles, and sliced response recovery,
+enable `set_err_emu` after `connect_and_init` / `run_init_sequence`. Enabling it
+before connection intentionally tests handshake/reconnect loss and can prevent
+the client from reaching the API phase at all.
+
+The `stress_client` example exposes this distinction explicitly:
+
+```text
+stress_client <key_base64> [host:port] [market] [duration_secs] [err_emu_pct] [err_emu_phase]
+```
+
+`err_emu_phase=post_init` is the default and enables loss after both stress
+clients finish init. Use `pre_connect` only when the test target is
+authorization/reconnect behavior.
+
+Low-level packet diagnostics are compile-gated behind the `diagnostic-trace`
+feature. Build with that feature and set `MOONPROTO_TRACE_IO=1` or
+`MOONPROTO_TRACE_SLICES=1` to print transport send/receive and sliced reassembly
+logs.
 
 ## Connection Setup
 
@@ -123,6 +157,10 @@ The helper keeps the client loop running while it waits for the connection and
 for each Engine API response. It also fills `client.server_info()` after
 `BaseCheck`.
 
+Init is a one-time step for a `Client` session. After it succeeds, do not call
+`run_init_sequence` again just because the UDP transport reconnected; the library
+maintains the user-requested active-lib state for that `Client` session.
+
 `InitConfig::fetch_indexes` sends `GetMarketsIndexes` and records the payload
 size in `InitResult::indexes_response_bytes`. It is also forced automatically
 when `subscribe_trades` or `subscribe_orderbooks` is set, because trades and
@@ -150,7 +188,8 @@ request. If no strategy provider is registered, init queues a
 subscription value independent from `subscribe_trades`.
 
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
-needs custom progress UI between connection readiness and the init requests.
+needs custom progress UI between connection readiness and the one-time init
+requests.
 
 ## Trade Context
 
@@ -287,8 +326,10 @@ client.unsubscribe_orderbook("BTCUSDT");
 client.unsubscribe_all_trades();
 ```
 
-The registry is replayed automatically after a hard reconnect. Do not repeat
-subscriptions from `LifecycleEvent::ServerRestart` or `Connected { fresh: false }`.
+The registry records the latest subscription intent. Before Init, transport
+`Fine` does not replay it. After the one-time Init completes, reconnect replays
+the registry automatically, so streams continue without the application running
+Init again.
 Orderbook subscriptions are per market name; incoming events carry `book_kind`
 so the application can render futures and spot books separately.
 
@@ -313,7 +354,10 @@ match client.sender().try_subscribe_orderbook("BTCUSDT") {
 
 ## Periodic Refresh
 
-`ClientConfig.refresh` controls automatic background Engine API requests:
+`ClientConfig.refresh` controls automatic background Engine API requests.
+The default matches the Delphi active client cadence, but refresh ticks are
+gated by Init: transport `Fine` alone never starts `UpdateMarketsList` or
+`CheckBinanceTags`.
 
 ```rust
 RefreshConfig {
@@ -322,12 +366,9 @@ RefreshConfig {
 }
 ```
 
-`update_markets_every` is enabled by default to keep prices and funding fresh in
-long sessions. The default 2 second cadence follows the Delphi full-proxy client
-market-details worker. `check_tags_every` is also enabled by default at 60 seconds
-to mirror the Delphi heavy API worker. After an hourly boundary the client also
-sends the Delphi-compatible four-request `CheckBinanceTags` burst with 200 ms
-spacing. Set `check_tags_every` to `None` to disable token-tag refresh entirely.
+Set either field to `None` if the application wants to own that refresh manually.
+When `check_tags_every` is enabled, the hourly four-request `CheckBinanceTags`
+burst uses 200 ms spacing.
 
 ## Observability
 

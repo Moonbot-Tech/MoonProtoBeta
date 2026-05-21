@@ -57,10 +57,10 @@ let init = InitConfig {
 connect_and_init(&mut client, &mut dispatcher, ConnectConfig::new(init))?;
 ```
 
-Long-running price refresh is controlled by `ClientConfig.refresh` and is enabled
-by default through `RefreshConfig::default()`. The default also refreshes token
-tags every 60 seconds and performs the Delphi-compatible hourly four-request
-`CheckBinanceTags` burst; applications do not need their own timer for this.
+Long-running price refresh is controlled by `ClientConfig.refresh`. The default
+uses the Delphi worker cadence, but ticks are gated by Init: transport `Fine`
+does not start background Engine API. Set `update_markets_every` /
+`check_tags_every` to `None` if the application owns those requests manually.
 
 See `examples/market_refresh.rs` for a compact consumer-side loop that reads
 prices and tags from `EventDispatcher`.
@@ -79,9 +79,11 @@ pub enum MarketsEvent {
 `MarketsState.indexes_synchronized` is a critical invariant.
 `InitConfig::fetch_indexes` fetches the initial map during init; subscriptions
 to trades or orderbooks force that step even when the flag is false. After
-server restart the client sets it to `false`, refetches indexes, and
-`EventDispatcher` drops orderbook/trades packets until fresh indexes are
-applied.
+server restart the dispatcher can mark it stale. If the one-time Init already
+completed and indexes were requested or required by subscriptions, reconnect
+restore sends `GetMarketsIndexes` again automatically. Until the fresh response
+arrives, `EventDispatcher` drops orderbook/trades packets that depend on server
+indexes.
 Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
 
@@ -116,7 +118,8 @@ dispatcher.markets().corr_count();
 
 The index helpers return `None` while the mapping is stale after a server
 restart. In the normal `run_with_dispatcher` path, trades and orderbook events
-are gated until fresh indexes are received.
+are gated until fresh indexes are received through init or an explicit
+`GetMarketsIndexes` request.
 
 ## TokenTags
 
