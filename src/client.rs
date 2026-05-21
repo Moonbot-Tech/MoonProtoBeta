@@ -2079,6 +2079,25 @@ impl Client {
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
+    /// Replace an order already tracked by `EventDispatcher::orders()`.
+    ///
+    /// This is the regular consumer path for UI actions on an existing order:
+    /// UID, market name, currency, and platform are derived from the tracked
+    /// order state.
+    pub fn replace_tracked_order(
+        &self,
+        order: &crate::state::Order,
+        order_type: crate::commands::trade::OrderType,
+        new_price: f64,
+    ) {
+        self.replace_order(
+            order.trade_ctx(),
+            &order.market_name,
+            order_type,
+            new_price,
+        );
+    }
+
     /// `TAllStatusesReq` (CmdId=9) — запросить все статусы ордеров.
     pub fn request_all_statuses(&self, uid: u64) {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
@@ -2128,6 +2147,15 @@ impl Client {
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
+    /// Cancel an order already tracked by `EventDispatcher::orders()`.
+    ///
+    /// The Delphi client creates `TOrderCancelCommand` from the live order
+    /// worker, so consumers should not have to remember the protocol context or
+    /// current status separately.
+    pub fn cancel_tracked_order(&self, order: &crate::state::Order) {
+        self.cancel_order(order.trade_ctx(), &order.market_name, order.status);
+    }
+
     /// `TJoinOrdersCommand` (CmdId=11) — join открытых ордеров в один.
     pub fn join_orders(&self, ctx: crate::commands::trade::TradeCtx, market: &str, is_short: bool) {
         let raw = crate::commands::trade::build_join_orders(ctx, market, is_short);
@@ -2139,6 +2167,23 @@ impl Client {
                         split_parts: i32, split_small: bool, split_small_sell: bool) {
         let raw = crate::commands::trade::build_split_order(ctx, market, split_parts, split_small, split_small_sell);
         self.send_trade(raw, 3);
+    }
+
+    /// Split an order already tracked by `EventDispatcher::orders()`.
+    pub fn split_tracked_order(
+        &self,
+        order: &crate::state::Order,
+        split_parts: i32,
+        split_small: bool,
+        split_small_sell: bool,
+    ) {
+        self.split_order(
+            order.trade_ctx(),
+            &order.market_name,
+            split_parts,
+            split_small,
+            split_small_sell,
+        );
     }
 
     /// `TMoveAllSellsCommand` (CmdId=13).
@@ -2181,6 +2226,12 @@ impl Client {
         self.send_trade(raw, 3);
     }
 
+    /// Request a fresh status for an order already tracked by
+    /// `EventDispatcher::orders()`.
+    pub fn request_tracked_order_status(&self, order: &crate::state::Order) {
+        self.request_order_status(order.trade_ctx(), &order.market_name);
+    }
+
     /// `TOrderStopsUpdate` (CmdId=20, UK_OrderMove). `ctx.uid` = task_id ордера.
     /// `Epoch=0` (внутри). См. `replace_order`.
     pub fn update_order_stops(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
@@ -2190,12 +2241,32 @@ impl Client {
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
     }
 
+    /// Update stops for an order already tracked by `EventDispatcher::orders()`.
+    pub fn update_tracked_order_stops(
+        &self,
+        order: &crate::state::Order,
+        stops: &crate::commands::trade::StopSettings,
+    ) {
+        self.update_order_stops(
+            order.trade_ctx(),
+            &order.market_name,
+            order.status,
+            stops,
+        );
+    }
+
     /// `TTurnPanicSellCommand` (CmdId=21, UK_OrderMove). `ctx.uid` = task_id ордера.
     /// `Epoch=0` и `Status=OS_None` устанавливаются внутри, как в Delphi client path.
     pub fn turn_panic_sell(&self, ctx: crate::commands::trade::TradeCtx, market: &str,
                             turn_on: bool) {
         let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, turn_on);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    }
+
+    /// Toggle panic sell for an order already tracked by
+    /// `EventDispatcher::orders()`.
+    pub fn turn_tracked_order_panic_sell(&self, order: &crate::state::Order, turn_on: bool) {
+        self.turn_panic_sell(order.trade_ctx(), &order.market_name, turn_on);
     }
 
     /// `TSetImmuneCommand` (CmdId=22, UK_ImmuneClicks) — пометить ордера как immune.
@@ -2223,6 +2294,26 @@ impl Client {
         let raw = crate::commands::trade::build_vstop_update(ctx, market, 0, status,
                                                               vstop_on, vstop_fixed, vstop_level, vstop_vol);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    }
+
+    /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
+    pub fn update_tracked_order_vstop(
+        &self,
+        order: &crate::state::Order,
+        vstop_on: bool,
+        vstop_fixed: bool,
+        vstop_level: f64,
+        vstop_vol: f64,
+    ) {
+        self.update_vstop(
+            order.trade_ctx(),
+            &order.market_name,
+            order.status,
+            vstop_on,
+            vstop_fixed,
+            vstop_level,
+            vstop_vol,
+        );
     }
 
     /// `TDoMarketSplitPositionCommand` (CmdId=30, MaxRetries=1).
@@ -5374,6 +5465,43 @@ mod client_subscribe_integration_tests {
         }
     }
 
+    fn tracked_order(
+        uid: u64,
+        currency: u8,
+        platform: u8,
+        status: crate::commands::trade::OrderWorkerStatus,
+    ) -> crate::state::Order {
+        use crate::commands::trade::{
+            BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
+            TradeCommand, TradeEpochHeader,
+        };
+
+        let mut orders = crate::state::Orders::new();
+        let status_cmd = OrderStatus {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader { cmd_id: 4, ver: 3, uid },
+                    currency,
+                    platform,
+                    market_name: "DOGEUSDT".to_string(),
+                },
+                epoch: 11,
+                status,
+            },
+            buy_order: OrderCompact::default(),
+            sell_order: OrderCompact::default(),
+            stops: StopSettings::default(),
+            strat_id: 0,
+            is_short: false,
+            db_id: 0,
+            from_cache: false,
+            emulator_mode: false,
+            immune_for_clicks: false,
+        };
+        let _ = orders.apply(TradeCommand::OrderStatus(status_cmd));
+        orders.get(uid).expect("order should be applied").clone()
+    }
+
     #[test]
     fn client_subscribe_orderbook_pushes_event_through_sender() {
         // Convenience-метод `Client::subscribe_orderbook(&self, ...)` должен пушить
@@ -5400,6 +5528,38 @@ mod client_subscribe_integration_tests {
         sender.subscribe_all_trades(true);
         let ev = client.event_rx.try_recv().expect("event queued via sender");
         assert!(matches!(ev, ClientEvent::SubscribeAllTrades { want_mm: true }));
+    }
+
+    #[test]
+    fn cancel_tracked_order_uses_order_state_context() {
+        use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+        let uid = 0x1122_3344_5566_7788;
+        let order = tracked_order(uid, 17, 9, OrderWorkerStatus::SellSet);
+        let client = Client::new(dummy_cfg());
+
+        client.cancel_tracked_order(&order);
+
+        let ev = client.event_rx.try_recv().expect("send event should be queued");
+        let ClientEvent::Send(msg) = ev else {
+            panic!("expected Send event");
+        };
+        assert_eq!(msg.item.cmd, Command::Order as u8);
+        assert_eq!(msg.item.priority, SendPriority::High);
+        assert_eq!(msg.item.max_retries, 3);
+        assert_eq!(msg.item.u_key, UniqueKey::order_move(uid));
+
+        match TradeCommand::parse(&msg.item.data).expect("valid cancel command") {
+            TradeCommand::OrderCancel(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.epoch, 0);
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
     }
 
     #[test]

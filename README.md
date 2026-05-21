@@ -218,6 +218,7 @@ let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
 - `examples/api_expiration_time.rs` — request and parse API-key expiration time.
 - `examples/request_client_settings.rs` — request the current UI settings snapshot.
 - `examples/order_snapshot.rs` — request the current order snapshot.
+- `examples/cancel_open_order.rs` — request open orders and optionally cancel one tracked order.
 - `examples/balance_snapshot.rs` — request the current full balance snapshot.
 - `examples/trades_stream.rs` — subscribe to the trades stream and resolve market names.
 - `examples/order_book_stream.rs` — subscribe to one orderbook stream.

@@ -208,6 +208,20 @@ pub struct Order {
 }
 
 impl Order {
+    /// Build the outgoing trade context for commands that target this tracked
+    /// order.
+    ///
+    /// The context preserves the currency/platform bytes received from the
+    /// server-side order state. This avoids hard-coding the current exchange
+    /// configuration in consumers.
+    pub fn trade_ctx(&self) -> TradeCtx {
+        TradeCtx {
+            uid: self.uid,
+            currency: self.currency,
+            platform: self.platform,
+        }
+    }
+
     /// Причина закрытия как enum. Удобный getter для UI.
     /// См. [`SellReason`] для описания всех значений.
     pub fn sell_reason(&self) -> SellReason {
@@ -294,6 +308,12 @@ pub enum OrderEvent {
     Snapshot,
     /// Команда проигнорирована (out-of-order / phase rollback / unknown).
     Ignored { uid: u64, reason: ApplyResult },
+}
+
+impl From<&Order> for TradeCtx {
+    fn from(order: &Order) -> Self {
+        order.trade_ctx()
+    }
 }
 
 /// Верхний лимит количества активных ордеров в state. При попытке вставить

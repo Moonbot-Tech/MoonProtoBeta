@@ -14,6 +14,9 @@ let ctx = TradeCtx::new(order_uid);
 
 For order-keyed commands, `ctx.uid` must be the server task id from `Order.uid`.
 That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
+If the command targets an order already present in `EventDispatcher::orders()`,
+prefer `order.trade_ctx()` or the `*_tracked_order` wrappers below. They also
+preserve the currency/platform bytes carried by the server-side order state.
 
 ## Wrappers
 
@@ -21,23 +24,30 @@ That id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
 |---|---|
 | `new_order(ctx, market, is_short, price, strat_id, order_size)` | Open a new order. |
 | `replace_order(ctx, market, order_type, new_price)` | Move an order price. |
+| `replace_tracked_order(order, order_type, new_price)` | Move a tracked order price without rebuilding `TradeCtx`. |
 | `request_order_snapshot(&mut dispatcher, timeout)` | Request and wait for the current order snapshot. |
 | `request_all_statuses(uid)` | Low-level `TAllStatusesReq`; regular consumers should use `request_order_snapshot`. |
 | `cancel_order(ctx, market, status)` | Cancel an order. |
+| `cancel_tracked_order(order)` | Cancel a tracked order. |
 | `join_orders(ctx, market, is_short)` | Join open orders. |
 | `split_order(ctx, market, split_parts, split_small, split_small_sell)` | Split an order. |
+| `split_tracked_order(order, split_parts, split_small, split_small_sell)` | Split a tracked order. |
 | `move_all_sells(ctx, market, cmd_type, move_kind, price, zone, side)` | Move sell orders in bulk. |
 | `do_close_position(ctx, market, market_sell)` | Close a position. |
 | `do_limit_close_position(ctx, market, is_short)` | Close through a limit order. |
 | `do_split_position(ctx, market, is_short)` | Split a position. |
 | `do_sell_order(ctx, market, price, size)` | Send immediate sell command. |
 | `request_order_status(ctx, market)` | Request one order status. |
+| `request_tracked_order_status(order)` | Request one tracked order status. |
 | `update_order_stops(ctx, market, status, &stops)` | Update stop settings. |
+| `update_tracked_order_stops(order, &stops)` | Update stop settings for a tracked order. |
 | `turn_panic_sell(ctx, market, turn_on)` | Toggle panic sell. |
+| `turn_tracked_order_panic_sell(order, turn_on)` | Toggle panic sell for a tracked order. |
 | `set_immune(uid, items)` | Mark orders immune to clicks. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk. |
 | `update_vstop(ctx, market, status, on, fixed, level, vol)` | Update volume stop. |
+| `update_tracked_order_vstop(order, on, fixed, level, vol)` | Update volume stop for a tracked order. |
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
 
 Epoch is intentionally not part of the public outgoing wrappers. For replace and
@@ -49,20 +59,14 @@ panic-sell commands, status is not public either: the Delphi client writes
 ```rust
 use moonproto::commands::trade::{
     FixedPosition, ImmuneItem, MoveAllCmdType, OrderType, PriceZone, ReplaceMultiKind,
-    TradeCtx,
 };
 
 let order = dispatcher.orders().get(order_uid).expect("known order");
-let ctx = TradeCtx::new(order.uid);
 
-client.replace_order(
-    ctx,
-    &order.market_name,
-    OrderType::Sell,
-    50100.0,
-);
+client.replace_tracked_order(order, OrderType::Sell, 50100.0);
+client.cancel_tracked_order(order);
 
-client.cancel_order(ctx, &order.market_name, order.status);
+let ctx = order.trade_ctx();
 
 client.move_all_sells(
     ctx,
@@ -95,6 +99,9 @@ Wrappers that use `UK_OrderMove(ctx.uid)`:
 - `update_order_stops`;
 - `turn_panic_sell`;
 - `update_vstop`.
+
+The matching tracked-order wrappers use the same UKey and wire format; they only
+derive `TradeCtx`, market name, and current status from `Order`.
 
 `set_immune` uses `UK_ImmuneClicks(sum(items[].uid))`.
 

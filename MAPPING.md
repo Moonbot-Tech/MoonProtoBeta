@@ -195,6 +195,7 @@
 | O28 | :809 | TBulkReplaceNotify (CmdId=28) — market_header + order_type + count:word + uids[u64]*count | TradeCommand::BulkReplaceNotify | ✅ |
 | O29 | :838 | TVStopUpdate (CmdId=29) — epoch_header + vstop_on/fixed:bool + vstop_level/vol:double | TradeCommand::VStopUpdate | ✅ |
 | O30 | :869 | TDoMarketSplitPositionCommand (CmdId=30, MaxRetries=1) — JoinOrders формат | TradeCommand::DoMarketSplitPosition | ✅ |
+| O31 | TaskWorkers.pas → BOrderWorker.SendOrderCmd helpers | UI-действия над существующим ордером строят команды из live worker (`Engine.Market`, `MServerTag`, текущий status) | `Order::trade_ctx` + `Client::*_tracked_order` wrappers выводят UID/market/status/currency/platform из `state::Order` | ✅ |
 
 ### state/orders.rs apply logic
 | # | Delphi src | Что | Rust orders.rs | ✅ |

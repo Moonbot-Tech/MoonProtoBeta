@@ -90,6 +90,7 @@
 //! `examples/api_expiration_time.rs`,
 //! `examples/request_client_settings.rs`,
 //! `examples/order_snapshot.rs`,
+//! `examples/cancel_open_order.rs`,
 //! `examples/balance_snapshot.rs`,
 //! `examples/trades_stream.rs`,
 //! `examples/order_book_stream.rs`,
