@@ -579,6 +579,69 @@ impl Orders {
         applied
     }
 
+    /// Delphi `BOrderWorker.SendStopsIfChanged` local machine effect.
+    ///
+    /// Returns the wire context only when a local worker exists and the stop
+    /// record differs from the last applied/sent value. The comparison uses
+    /// `StopSettings::eq`, which is bit-exact like Delphi `CompareMem`.
+    pub(crate) fn send_stops_if_changed(
+        &mut self,
+        uid: u64,
+        stops: &StopSettings,
+    ) -> Option<(TradeCtx, String, OrderWorkerStatus, StopSettings)> {
+        let order = self.map.get_mut(&uid)?;
+        if order.stops == *stops {
+            return None;
+        }
+        order.stops = *stops;
+        Some((
+            order.trade_ctx(),
+            order.market_name.clone(),
+            order.status,
+            *stops,
+        ))
+    }
+
+    /// Delphi `BOrderWorker.SendVStopIfChanged` local machine effect.
+    ///
+    /// The outgoing packet uses the current worker status, not a caller-provided
+    /// status. The local VStop state is updated before queueing, just as Delphi
+    /// updates `FPrevVStop*` before `MClient.SendOrderCmd`.
+    pub(crate) fn send_vstop_if_changed(
+        &mut self,
+        uid: u64,
+        vstop_on: bool,
+        vstop_fixed: bool,
+        vstop_level: f64,
+        vstop_vol: f64,
+    ) -> Option<(TradeCtx, String, VStopUpdateParams)> {
+        let order = self.map.get_mut(&uid)?;
+        if order.vstop_on == vstop_on
+            && order.vstop_fixed == vstop_fixed
+            && order.vstop_level == vstop_level
+            && order.vstop_vol == vstop_vol
+        {
+            return None;
+        }
+
+        order.vstop_on = vstop_on;
+        order.vstop_fixed = vstop_fixed;
+        order.vstop_level = vstop_level;
+        order.vstop_vol = vstop_vol;
+
+        Some((
+            order.trade_ctx(),
+            order.market_name.clone(),
+            VStopUpdateParams {
+                status: order.status,
+                vstop_on,
+                vstop_fixed,
+                vstop_level,
+                vstop_vol,
+            },
+        ))
+    }
+
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
@@ -1401,6 +1464,110 @@ mod tests {
         assert!(orders.get(42).unwrap().immune_for_clicks);
         assert!(!orders.get(43).unwrap().immune_for_clicks);
         assert!(orders.get(44).is_none());
+    }
+
+    #[test]
+    fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+
+        assert!(
+            orders
+                .send_stops_if_changed(404, &StopSettings::default())
+                .is_none(),
+            "Delphi exits when vOrder/local worker is absent"
+        );
+        assert!(
+            orders
+                .send_stops_if_changed(42, &StopSettings::default())
+                .is_none(),
+            "Delphi exits when Cur == FPrevStops"
+        );
+
+        let stops = StopSettings {
+            stop_loss_on: 1,
+            sl_level: 12.5,
+            trailing_on: 1,
+            trailing_level: -0.0,
+            ..StopSettings::default()
+        };
+        let (ctx, market, status, sent_stops) = orders
+            .send_stops_if_changed(42, &stops)
+            .expect("changed stops should be sent");
+
+        assert_eq!(ctx.uid, 42);
+        assert_eq!(ctx.currency, 1);
+        assert_eq!(ctx.platform, 4);
+        assert_eq!(market, "BTCUSDT");
+        assert_eq!(status, OrderWorkerStatus::BuySet);
+        assert_eq!(sent_stops, stops);
+        assert_eq!(orders.get(42).unwrap().stops, stops);
+        assert!(
+            orders.send_stops_if_changed(42, &stops).is_none(),
+            "FPrevStops was updated before sending"
+        );
+
+        let same_by_float_math = StopSettings {
+            trailing_level: 0.0,
+            ..stops
+        };
+        assert!(
+            orders
+                .send_stops_if_changed(42, &same_by_float_math)
+                .is_some(),
+            "Delphi TStopSettings.Equal is CompareMem, so -0.0 and +0.0 differ"
+        );
+    }
+
+    #[test]
+    fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        assert!(
+            orders
+                .send_vstop_if_changed(404, false, false, 0.0, 0.0)
+                .is_none(),
+            "Delphi exits when vOrder/local worker is absent"
+        );
+        assert!(
+            orders
+                .send_vstop_if_changed(42, false, false, 0.0, 0.0)
+                .is_none(),
+            "Delphi exits when VStop fields equal FPrevVStop*"
+        );
+
+        let (ctx, market, params) = orders
+            .send_vstop_if_changed(42, true, false, 12.5, 100.0)
+            .expect("changed VStop should be sent");
+
+        assert_eq!(ctx.uid, 42);
+        assert_eq!(ctx.currency, 1);
+        assert_eq!(ctx.platform, 4);
+        assert_eq!(market, "BTCUSDT");
+        assert_eq!(params.status, OrderWorkerStatus::SellSet);
+        assert!(params.vstop_on);
+        assert!(!params.vstop_fixed);
+        assert_eq!(params.vstop_level, 12.5);
+        assert_eq!(params.vstop_vol, 100.0);
+        assert!(orders.get(42).unwrap().vstop_on);
+        assert_eq!(orders.get(42).unwrap().vstop_level, 12.5);
+        assert!(
+            orders
+                .send_vstop_if_changed(42, true, false, 12.5, 100.0)
+                .is_none(),
+            "FPrevVStop* was updated before sending"
+        );
     }
 
     #[test]

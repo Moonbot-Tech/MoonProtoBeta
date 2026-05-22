@@ -50,15 +50,15 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `do_sell_order(ctx, market, price, size)` | Send immediate sell command. |
 | `request_order_status(ctx, market)` | Request one order status. |
 | `request_tracked_order_status(order)` | Request one tracked order status. |
-| `update_order_stops(ctx, market, status, &stops)` | Update stop settings. |
-| `update_tracked_order_stops(order, &stops)` | Update stop settings for a tracked order. |
+| `update_order_stops(&mut orders, uid, &stops)` | Apply Delphi `SendStopsIfChanged` and update stop settings if changed. Returns `true` when a command was queued. |
+| `update_tracked_order_stops(&mut orders, uid, &stops)` | Same stop update helper for tracked-order call sites. |
 | `turn_panic_sell(ctx, market, turn_on)` | Toggle panic sell. |
 | `turn_tracked_order_panic_sell(order, turn_on)` | Toggle panic sell for a tracked order. |
 | `set_immune(&mut orders, uid, items)` | Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand` for found active orders. Returns `true` when a command was queued. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(&orders, ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
-| `update_vstop(ctx, market, params)` | Update volume stop. `params` is `VStopUpdateParams`; the wrapper writes `epoch = 0`. |
-| `update_tracked_order_vstop(order, on, fixed, level, vol)` | Update volume stop for a tracked order. |
+| `update_vstop(&mut orders, uid, on, fixed, level, vol)` | Apply Delphi `SendVStopIfChanged` and update volume stop if changed. Returns `true` when a command was queued. |
+| `update_tracked_order_vstop(&mut orders, uid, on, fixed, level, vol)` | Same VStop update helper for tracked-order call sites. |
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
 
 Epoch is intentionally not part of the public outgoing wrappers. For replace and
@@ -71,6 +71,15 @@ wire command, and sends nothing if no local active worker is found. Rust repeats
 that: pass `&mut Orders`, and the wrapper mutates found active orders before
 queueing `TSetImmuneCommand`.
 
+`update_order_stops` and `update_vstop` are also state-aware outgoing actions.
+They require `&mut Orders` and a local order UID, because Delphi does not expose
+raw stop/VStop sends from UI code: `BOrderWorker.SendStopsIfChanged` and
+`SendVStopIfChanged` first require a local `vOrder`, compare the new values with
+`FPrevStops` / `FPrevVStop*`, update the local cache, then send. Rust returns
+`false` and queues nothing when the local order is absent or the values did not
+change. The wire `status`, market name, currency/platform route, and UKey are
+derived from the local order.
+
 `move_all_sells` and `move_all_buys` require the current `Orders` read model.
 This mirrors Delphi active-client UI code: bulk move commands are not put on the
 wire until the client has a matching local order worker. `MoveKind` modes reject
@@ -82,18 +91,18 @@ Buy bulk move uses `MoveAllBuysCmdType`, which has only `MoveKind = 0` and
 `Pers = 2`. Delphi has no buy-side `PriceZone` mode, and the server buy branch
 does not process `CmdType = 1`.
 
-`move_all_sells` and `update_vstop` intentionally take parameter structs instead
-of long positional argument lists. This is part of the public API:
+`move_all_sells` intentionally takes a parameter struct instead of a long
+positional argument list. This is part of the public API:
 
 - `MoveAllSellsParams` groups `cmd_type`, `move_kind`, `price`, `price_zone`,
-  and `side`;
-- `VStopUpdateParams` groups `status`, `vstop_on`, `vstop_fixed`,
-  `vstop_level`, and `vstop_vol`.
+  and `side`.
 
 Low-level builders follow the same shape:
 `build_move_all_sells(ctx, market, params)`,
 `build_move_all_buys(ctx, market, cmd_type, move_kind, price, side)`, and
-`build_vstop_update(ctx, market, epoch, params)`.
+`build_vstop_update(ctx, market, epoch, params)`. `VStopUpdateParams` remains
+the raw builder parameter type; high-level wrappers derive its `status` from
+`Orders`.
 
 ## Example
 
@@ -103,10 +112,11 @@ use moonproto::commands::trade::{
     OrderType, PriceZone, ReplaceMultiKind,
 };
 
-let order = dispatcher.orders().get(order_uid).expect("known order");
-
-client.replace_tracked_order(order, OrderType::Sell, 50100.0);
-client.cancel_tracked_order(order);
+{
+    let order = dispatcher.orders().get(order_uid).expect("known order");
+    client.replace_tracked_order(order, OrderType::Sell, 50100.0);
+    client.cancel_tracked_order(order);
+}
 
 let ctx = client.random_trade_ctx()
     .expect("run BaseCheck before market trade commands");
@@ -139,6 +149,17 @@ let items = [
     ImmuneItem { uid: 200, value: true },
 ];
 client.set_immune(dispatcher.orders_mut(), rand::random(), &items);
+
+let mut stops = dispatcher
+    .orders()
+    .get(order_uid)
+    .expect("known order")
+    .stops;
+stops.stop_loss_on = 1;
+stops.sl_level = 49500.0;
+client.update_order_stops(dispatcher.orders_mut(), order_uid, &stops);
+
+client.update_vstop(dispatcher.orders_mut(), order_uid, true, false, 50000.0, 12.0);
 ```
 
 ## Sending While The Client Is Running
@@ -158,13 +179,17 @@ let sender = client.sender();
 std::thread::spawn(move || {
     sender.replace_order(ctx, "BTCUSDT", OrderType::Sell, 50100.0);
     sender.cancel_tracked_order(&order);
-    sender.update_vstop(ctx, "BTCUSDT", vstop_params);
 });
 ```
 
 `ClientSender::move_all_sells` and `ClientSender::move_all_buys` take the same
-`&Orders` argument as `Client`; they return `false` and queue nothing when the
-Delphi active-client gate does not find a matching local order.
+`&Orders` argument as `Client`; stop/VStop/immune helpers take the same
+`&mut Orders` argument as `Client`. They return `false` and queue nothing when
+the Delphi active-client gate does not find a matching local order or when a
+send-if-changed check suppresses the packet. Because `Orders` is the local
+Delphi-equivalent order-state owner, call these state-aware helpers on the code
+path that owns mutable dispatcher state. If UI code runs on another thread,
+marshal the intent to that owner instead of sending raw stop/VStop packets.
 
 One-shot helpers that must wait for an applied state change, such as
 `request_order_snapshot`, still require mutable access to `Client` and an
@@ -190,8 +215,8 @@ Wrappers that use `UK_OrderMove(ctx.uid)`:
 - `turn_panic_sell`;
 - `update_vstop`.
 
-The matching tracked-order wrappers use the same UKey and wire format; they only
-derive `TradeCtx`, market name, and current status from `Order`.
+Stop/VStop wrappers derive `TradeCtx`, market name, and current status from
+`Orders` before queueing, matching Delphi active-client order workers.
 
 `set_immune` uses `UK_ImmuneClicks(sum(found_items[].uid))`; items whose local
 active order is not found are not sent.

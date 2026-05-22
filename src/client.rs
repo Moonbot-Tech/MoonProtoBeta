@@ -1672,25 +1672,29 @@ impl ClientSender {
         self.request_order_status(order.trade_ctx(), &order.market_name);
     }
 
-    /// Send `TOrderStopsUpdate` for one order.
+    /// Apply Delphi `SendStopsIfChanged` locally and send `TOrderStopsUpdate`.
     pub fn update_order_stops(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        status: crate::commands::trade::OrderWorkerStatus,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         stops: &crate::commands::trade::StopSettings,
-    ) {
-        let raw = crate::commands::trade::build_order_stops_update(ctx, market, 0, status, stops);
+    ) -> bool {
+        let Some((ctx, market, status, stops)) = orders.send_stops_if_changed(uid, stops) else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Update stops for an order already tracked by `EventDispatcher::orders()`.
     pub fn update_tracked_order_stops(
         &self,
-        order: &crate::state::Order,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         stops: &crate::commands::trade::StopSettings,
-    ) {
-        self.update_order_stops(order.trade_ctx(), &order.market_name, order.status, stops);
+    ) -> bool {
+        self.update_order_stops(orders, uid, stops)
     }
 
     /// Send `TTurnPanicSellCommand`.
@@ -1750,37 +1754,37 @@ impl ClientSender {
         true
     }
 
-    /// Send `TVStopUpdate` for one order.
+    /// Apply Delphi `SendVStopIfChanged` locally and send `TVStopUpdate`.
     pub fn update_vstop(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        params: crate::commands::trade::VStopUpdateParams,
-    ) {
-        let raw = crate::commands::trade::build_vstop_update(ctx, market, 0, params);
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        vstop_on: bool,
+        vstop_fixed: bool,
+        vstop_level: f64,
+        vstop_vol: f64,
+    ) -> bool {
+        let Some((ctx, market, params)) =
+            orders.send_vstop_if_changed(uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
+        else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
     pub fn update_tracked_order_vstop(
         &self,
-        order: &crate::state::Order,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         vstop_on: bool,
         vstop_fixed: bool,
         vstop_level: f64,
         vstop_vol: f64,
-    ) {
-        self.update_vstop(
-            order.trade_ctx(),
-            &order.market_name,
-            crate::commands::trade::VStopUpdateParams {
-                status: order.status,
-                vstop_on,
-                vstop_fixed,
-                vstop_level,
-                vstop_vol,
-            },
-        );
+    ) -> bool {
+        self.update_vstop(orders, uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
     }
 
     /// Send `TDoMarketSplitPositionCommand` (`MaxRetries=1`).
@@ -5962,26 +5966,33 @@ impl Client {
         self.request_order_status(order.trade_ctx(), &order.market_name);
     }
 
-    /// `TOrderStopsUpdate` (CmdId=20, UK_OrderMove). `ctx.uid` = task_id ордера.
-    /// `Epoch=0` (внутри). См. `replace_order`.
+    /// Delphi `SendStopsIfChanged` + `TOrderStopsUpdate` (CmdId=20,
+    /// UK_OrderMove).
+    ///
+    /// Requires the local `Orders` read model: if the UID is unknown or the
+    /// stop record did not change, Delphi would not put a packet on the wire.
     pub fn update_order_stops(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        status: crate::commands::trade::OrderWorkerStatus,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         stops: &crate::commands::trade::StopSettings,
-    ) {
-        let raw = crate::commands::trade::build_order_stops_update(ctx, market, 0, status, stops);
+    ) -> bool {
+        let Some((ctx, market, status, stops)) = orders.send_stops_if_changed(uid, stops) else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_order_stops_update(ctx, &market, 0, status, &stops);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Update stops for an order already tracked by `EventDispatcher::orders()`.
     pub fn update_tracked_order_stops(
         &self,
-        order: &crate::state::Order,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         stops: &crate::commands::trade::StopSettings,
-    ) {
-        self.update_order_stops(order.trade_ctx(), &order.market_name, order.status, stops);
+    ) -> bool {
+        self.update_order_stops(orders, uid, stops)
     }
 
     /// `TTurnPanicSellCommand` (CmdId=21, UK_OrderMove). `ctx.uid` = task_id ордера.
@@ -6046,41 +6057,41 @@ impl Client {
         true
     }
 
-    /// Send `TVStopUpdate` (CmdId=29, `UK_OrderMove`).
+    /// Delphi `SendVStopIfChanged` + `TVStopUpdate` (CmdId=29, `UK_OrderMove`).
     ///
-    /// This wrapper writes `Epoch=0`, matching Delphi client-originated order
-    /// moves. `ctx.uid` must be the order task id. Status and VStop values live
-    /// in [`crate::commands::trade::VStopUpdateParams`].
+    /// Requires the local `Orders` read model: the wrapper derives the current
+    /// worker status, mutates local VStop state, and queues nothing if the value
+    /// did not change.
     pub fn update_vstop(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        params: crate::commands::trade::VStopUpdateParams,
-    ) {
-        let raw = crate::commands::trade::build_vstop_update(ctx, market, 0, params);
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        vstop_on: bool,
+        vstop_fixed: bool,
+        vstop_level: f64,
+        vstop_vol: f64,
+    ) -> bool {
+        let Some((ctx, market, params)) =
+            orders.send_vstop_if_changed(uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
+        else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_vstop_update(ctx, &market, 0, params);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
     pub fn update_tracked_order_vstop(
         &self,
-        order: &crate::state::Order,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         vstop_on: bool,
         vstop_fixed: bool,
         vstop_level: f64,
         vstop_vol: f64,
-    ) {
-        self.update_vstop(
-            order.trade_ctx(),
-            &order.market_name,
-            crate::commands::trade::VStopUpdateParams {
-                status: order.status,
-                vstop_on,
-                vstop_fixed,
-                vstop_level,
-                vstop_vol,
-            },
-        );
+    ) -> bool {
+        self.update_vstop(orders, uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
     }
 
     /// `TDoMarketSplitPositionCommand` (CmdId=30, MaxRetries=1).
@@ -10059,6 +10070,119 @@ mod client_subscribe_integration_tests {
                 }],
             ),
             "Delphi does not send if no local worker was found"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+    }
+
+    #[test]
+    fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
+        use crate::commands::trade::{OrderWorkerStatus, StopSettings, TradeCommand};
+
+        let uid = 0x4444;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::BuySet,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+
+        assert!(
+            !client.update_order_stops(&mut orders, uid, &StopSettings::default()),
+            "Delphi SendStopsIfChanged exits when Cur == FPrevStops"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        let stops = StopSettings {
+            stop_loss_on: 1,
+            sl_level: 12.5,
+            use_take_profit: 1,
+            take_profit: 15.0,
+            ..StopSettings::default()
+        };
+        assert!(client.update_order_stops(&mut orders, uid, &stops));
+        assert_eq!(orders.get(uid).unwrap().stops, stops);
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+        match TradeCommand::parse(&high[0].data).expect("valid stops update") {
+            TradeCommand::OrderStopsUpdate(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.epoch, 0);
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::BuySet);
+                assert_eq!(cmd.stops, stops);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+
+        assert!(
+            !client.update_order_stops(&mut orders, uid, &stops),
+            "FPrevStops/current state was updated before queueing"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+    }
+
+    #[test]
+    fn client_update_vstop_uses_delphi_send_if_changed_gate() {
+        use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+        let uid = 0x5555;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+
+        assert!(
+            !client.update_vstop(&mut orders, uid, false, false, 0.0, 0.0),
+            "Delphi SendVStopIfChanged exits when fields equal FPrevVStop*"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        assert!(client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0));
+        let order = orders.get(uid).unwrap();
+        assert!(order.vstop_on);
+        assert_eq!(order.vstop_level, 12.5);
+        assert_eq!(order.vstop_vol, 100.0);
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+        match TradeCommand::parse(&high[0].data).expect("valid VStop update") {
+            TradeCommand::VStopUpdate(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.epoch, 0);
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
+                assert!(cmd.vstop_on);
+                assert!(!cmd.vstop_fixed);
+                assert_eq!(cmd.vstop_level, 12.5);
+                assert_eq!(cmd.vstop_vol, 100.0);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+
+        assert!(
+            !client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0),
+            "FPrevVStop* current state was updated before queueing"
         );
         let (_, high, _) = client.take_send_queues_for_test();
         assert!(high.is_empty());

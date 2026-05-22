@@ -253,11 +253,11 @@ pub struct MoveAllSellsParams {
     pub side: FixedPosition,
 }
 
-/// Parameters for `TVStopUpdate`.
+/// Parameters for raw `TVStopUpdate` builders.
 ///
-/// `Client::update_vstop` writes `epoch = 0`, matching Delphi client-originated
-/// order-move commands. Low-level builders keep `epoch` as a separate argument
-/// for protocol tests and replay tools.
+/// High-level client wrappers derive `status` from the local `Orders` state,
+/// matching Delphi `BOrderWorker.SendVStopIfChanged`. Low-level builders keep
+/// `epoch` and `status` explicit for protocol tests and replay tools.
 #[derive(Debug, Clone, Copy)]
 pub struct VStopUpdateParams {
     pub status: OrderWorkerStatus,
@@ -397,7 +397,7 @@ impl OrderCompact {
 
 /// TStopSettings (MarketsU.pas:215, packed record, 46 байт).
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
     pub stop_loss_on: u8,        // 1
     pub sl_fixed: u8,            // 1
@@ -414,6 +414,22 @@ pub struct StopSettings {
 
 /// Wire-size TStopSettings: 6 + 5*8 = 46 байт.
 pub const STOP_SETTINGS_SIZE: usize = 6 + 5 * 8;
+
+impl PartialEq for StopSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.stop_loss_on == other.stop_loss_on
+            && self.sl_fixed == other.sl_fixed
+            && self.sl_level.to_bits() == other.sl_level.to_bits()
+            && self.sl_spread.to_bits() == other.sl_spread.to_bits()
+            && self.trailing_on == other.trailing_on
+            && self.trailing_fixed == other.trailing_fixed
+            && self.trailing_level.to_bits() == other.trailing_level.to_bits()
+            && self.ts_spread.to_bits() == other.ts_spread.to_bits()
+            && self.use_take_profit == other.use_take_profit
+            && self.take_profit.to_bits() == other.take_profit.to_bits()
+            && self.take_profit_changed == other.take_profit_changed
+    }
+}
 
 impl StopSettings {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {

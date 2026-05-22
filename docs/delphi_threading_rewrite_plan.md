@@ -1848,3 +1848,32 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining outgoing order/UI
   actions: join/split/close/sell and per-order cancel/replace/stops/vstop/panic.
+
+### 2026-05-22 - Phase 1 partial: stop/VStop outgoing send-if-changed
+
+Done:
+
+- Fixed outgoing stop/VStop parity against Delphi
+  `BOrderWorker.SendStopsIfChanged` and `BOrderWorker.SendVStopIfChanged`.
+- Rust high-level `update_order_stops` / `update_vstop` wrappers are no longer
+  raw packet senders. They require `&mut Orders` and a local order UID, repeat
+  the Delphi local-order gate, compare against the last applied/sent local
+  state, mutate the local state before queueing, and return `false` when Delphi
+  would not create a wire packet.
+- `StopSettings` equality is now bit-exact, matching Delphi
+  `TStopSettings.Equal = CompareMem(@A, @B, SizeOf(TStopSettings))`; this keeps
+  raw double-bit differences such as `-0.0` vs `+0.0` significant for the send
+  gate.
+- Incoming `TOrderStopsUpdate` and `TVStopUpdate` still update the same local
+  fields, matching Delphi `ApplyStops` / `ApplyVStop`, so outgoing gates see the
+  last server-applied values.
+- API docs now describe stop/VStop as state-aware actions and tell UI-thread
+  callers to marshal these intents to the owner of mutable dispatcher/order
+  state instead of bypassing the local gate.
+- Added tests for the local send-if-changed predicates and queue-level wrapper
+  behavior.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining outgoing order/UI
+  actions: join/split/close/sell and per-order cancel/replace/panic.
