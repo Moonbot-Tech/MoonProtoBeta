@@ -103,11 +103,30 @@ pub struct Order {
     pub pending_buy_cond_price: Option<f64>,
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
+    pub buy_trace_line: Option<OrderTraceLine>,
+    pub sell_trace_line: Option<OrderTraceLine>,
     pub trace_points: VecDeque<OrderTracePoint>,
     pub job_is_done: bool,
     pub cancel_request: bool,
     pub server_forced_remove: bool,
     pub sell_reason_code: u8,
+}
+```
+
+```rust
+pub struct OrderTraceLine {
+    pub order_type: OrderType,
+    pub order_id: i64,
+    pub prevent_delete: bool,
+    pub points: Vec<OrderTraceChartPoint>,
+    pub tmp_point: Option<OrderTraceChartPoint>,
+    pub can_finish: bool,
+    pub stop_price: Option<f32>,
+}
+
+pub struct OrderTraceChartPoint {
+    pub time: f64,
+    pub price: f32,
 }
 ```
 
@@ -125,6 +144,12 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `TCorridorUpdate` mirrors Delphi `HandleServerCommand`: it sets
 `is_moon_shot = true` and stores `corridor_price_down` /
 `corridor_price_up` as Delphi `TestPriceDown` / `TestPriceUp`.
+`TOrderTracePoint` is exposed in two forms. `trace_points` is the raw inbound
+diagnostic log. `buy_trace_line` and `sell_trace_line` mirror Delphi
+`coBuy` / `coSell` `TOrderLine` state: only an initial trace creates a line,
+non-initial traces without an existing line do not create one, temporary points
+are stored as the line temp point, and finish traces mutate the last drawable
+point only when Delphi `CanFinish` would allow it.
 `pending_buy_cond_price` mirrors Delphi `vOrder.BuyCondPrice` for pending
 `OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
 `UpdateData.MeanPrice` without applying the rest of `UpdateData` to

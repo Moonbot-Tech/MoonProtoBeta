@@ -164,6 +164,83 @@ struct PendingRemoval {
     due_ms: i64,
 }
 
+/// One chart point in Delphi `TOrderLine.Points`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrderTraceChartPoint {
+    pub time: f64,
+    pub price: f32,
+}
+
+/// Read-model counterpart of Delphi `coBuy` / `coSell` `TOrderLine`.
+#[derive(Debug, Clone)]
+pub struct OrderTraceLine {
+    pub order_type: OrderType,
+    pub order_id: i64,
+    pub prevent_delete: bool,
+    pub points: Vec<OrderTraceChartPoint>,
+    pub tmp_point: Option<OrderTraceChartPoint>,
+    pub can_finish: bool,
+    pub stop_price: Option<f32>,
+}
+
+impl OrderTraceLine {
+    fn new(order_type: OrderType, order_id: i64) -> Self {
+        Self {
+            order_type,
+            order_id,
+            prevent_delete: true,
+            points: Vec::new(),
+            tmp_point: None,
+            can_finish: false,
+            stop_price: None,
+        }
+    }
+
+    fn set_point_trade(&mut self, time: f64, price: f32, is_temp: bool, is_finish: bool) {
+        if is_finish {
+            if self.points.len() > 1 && self.can_finish {
+                if let Some(last) = self.points.last_mut() {
+                    last.price = price;
+                }
+            }
+            self.can_finish = false;
+            return;
+        }
+
+        let point = OrderTraceChartPoint { time, price };
+        if is_temp {
+            self.tmp_point = Some(point);
+            return;
+        }
+
+        if self.points.is_empty() {
+            self.points.push(point);
+            return;
+        }
+
+        let mut same_price_at_new_time = *self.points.last().unwrap();
+        same_price_at_new_time.time = time;
+        self.points.push(same_price_at_new_time);
+        self.points.push(self.tmp_point.unwrap_or_default());
+
+        let mut final_point = same_price_at_new_time;
+        final_point.price = price;
+        self.points.push(final_point);
+
+        self.tmp_point = None;
+        self.can_finish = true;
+    }
+}
+
+impl Default for OrderTraceChartPoint {
+    fn default() -> Self {
+        Self {
+            time: 0.0,
+            price: 0.0,
+        }
+    }
+}
+
 /// Один ордер с зеркальным состоянием.
 ///
 /// Поля соответствуют BOrderWorker fields, которые приходят от сервера через
@@ -218,7 +295,14 @@ pub struct Order {
     /// Тип ордера, на котором установлен BulkReplace.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
+    /// Delphi `coBuy` order-line state built by `ApplyServerTrace`.
+    pub buy_trace_line: Option<OrderTraceLine>,
+    /// Delphi `coSell` order-line state built by `ApplyServerTrace`.
+    pub sell_trace_line: Option<OrderTraceLine>,
     /// Trace points (визуализация решения сервера).
+    ///
+    /// This is the raw inbound packet log. For Delphi-equivalent chart state,
+    /// use `buy_trace_line` / `sell_trace_line`.
     pub trace_points: VecDeque<OrderTracePoint>,
     /// True если ордер терминален и ожидает deferred removal.
     pub job_is_done: bool,
@@ -286,6 +370,8 @@ impl Order {
             pending_buy_cond_price: None,
             bulk_replace_buy: false,
             bulk_replace_sell: false,
+            buy_trace_line: None,
+            sell_trace_line: None,
             trace_points: VecDeque::new(),
             job_is_done: status_cmd.epoch_header.status.is_terminal(),
             cancel_request: false,
@@ -670,6 +756,7 @@ impl Orders {
                     );
                 };
                 tp.adjust_time(self.server_time_delta);
+                Self::apply_trace_line(entry, &tp);
                 entry.trace_points.push_back(tp);
                 (ApplyResult::Applied, OrderEvent::TracePoint { uid })
             }
@@ -851,6 +938,57 @@ impl Orders {
         }
     }
 
+    fn apply_trace_line(entry: &mut Order, tp: &OrderTracePoint) {
+        let is_buy_side = order_type_uses_buy_side(tp.ord_type);
+        let order_id = if is_buy_side {
+            entry.buy_order.int_id
+        } else {
+            entry.sell_order.int_id
+        };
+        let create_time = if is_buy_side {
+            entry.buy_order.create_time
+        } else {
+            entry.sell_order.create_time
+        };
+
+        let line_slot = if is_buy_side {
+            &mut entry.buy_trace_line
+        } else {
+            &mut entry.sell_trace_line
+        };
+
+        if tp.is_finish() {
+            if let Some(line) = line_slot.as_mut() {
+                line.set_point_trade(tp.trace_time, tp.trace_price, false, true);
+            }
+            return;
+        }
+
+        if line_slot
+            .as_ref()
+            .is_some_and(|line| line.order_type != tp.ord_type)
+        {
+            *line_slot = None;
+        }
+
+        if line_slot.is_none() && tp.is_initial() {
+            let mut line = OrderTraceLine::new(tp.ord_type, order_id);
+            line.set_point_trade(create_time, tp.base_price, false, false);
+            *line_slot = Some(line);
+        }
+
+        if let Some(line) = line_slot.as_mut() {
+            line.set_point_trade(tp.trace_time, tp.trace_price, tp.is_temp(), false);
+            line.order_id = order_id;
+        }
+
+        if tp.stop_price > 0.0 {
+            if let Some(line) = entry.sell_trace_line.as_mut() {
+                line.stop_price = Some(tp.stop_price);
+            }
+        }
+    }
+
     fn mark_pending_removal(&mut self, uid: u64, now_ms: i64, delay_ms: i64) {
         let due_ms = now_ms.saturating_add(delay_ms.max(0));
         if let Some(existing) = self.pending_removals.iter_mut().find(|p| p.uid == uid) {
@@ -1019,6 +1157,26 @@ mod tests {
 
     fn order_status_cmd(status: OrderStatus) -> TradeCommand {
         TradeCommand::OrderStatus(Box::new(status))
+    }
+
+    fn trace_point(
+        uid: u64,
+        order_type: OrderType,
+        flags: u8,
+        time: f64,
+        price: f32,
+        base: f32,
+        stop: f32,
+    ) -> OrderTracePoint {
+        OrderTracePoint {
+            market: make_market(uid, 3, "BTCUSDT"),
+            trace_time: time,
+            trace_price: price,
+            base_price: base,
+            stop_price: stop,
+            ord_type: order_type,
+            flags,
+        }
     }
 
     #[test]
@@ -1225,6 +1383,143 @@ mod tests {
         }
 
         assert_eq!(orders.get(42).unwrap().trace_points.len(), 300);
+    }
+
+    #[test]
+    fn trace_line_ignores_non_initial_without_existing_line_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            0,
+            45_000.0,
+            101.0,
+            100.0,
+            0.0,
+        )));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
+        let order = orders.get(42).unwrap();
+        assert_eq!(order.trace_points.len(), 1);
+        assert!(order.sell_trace_line.is_none());
+    }
+
+    #[test]
+    fn trace_line_initial_temp_and_finish_match_delphi_order_line() {
+        let mut orders = Orders::new();
+        let mut status = make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+        status.sell_order.create_time = 44_000.0;
+        status.sell_order.int_id = 77;
+        orders.apply(order_status_cmd(status));
+
+        orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            trace_flags::IS_INITIAL,
+            45_000.0,
+            101.0,
+            100.0,
+            99.0,
+        )));
+        {
+            let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+            assert_eq!(line.order_type, OrderType::Sell);
+            assert_eq!(line.order_id, 77);
+            assert!(line.prevent_delete);
+            assert_eq!(line.stop_price, Some(99.0));
+            assert_eq!(
+                line.points,
+                vec![
+                    OrderTraceChartPoint {
+                        time: 44_000.0,
+                        price: 100.0,
+                    },
+                    OrderTraceChartPoint {
+                        time: 45_000.0,
+                        price: 100.0,
+                    },
+                    OrderTraceChartPoint::default(),
+                    OrderTraceChartPoint {
+                        time: 45_000.0,
+                        price: 101.0,
+                    },
+                ]
+            );
+            assert!(line.can_finish);
+        }
+
+        orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            trace_flags::IS_TEMP,
+            45_010.0,
+            102.0,
+            100.0,
+            0.0,
+        )));
+        {
+            let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+            assert_eq!(
+                line.tmp_point,
+                Some(OrderTraceChartPoint {
+                    time: 45_010.0,
+                    price: 102.0,
+                })
+            );
+            assert_eq!(line.points.len(), 4);
+        }
+
+        orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            0,
+            45_020.0,
+            103.0,
+            100.0,
+            0.0,
+        )));
+        {
+            let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+            assert_eq!(
+                &line.points[4..],
+                &[
+                    OrderTraceChartPoint {
+                        time: 45_020.0,
+                        price: 101.0,
+                    },
+                    OrderTraceChartPoint {
+                        time: 45_010.0,
+                        price: 102.0,
+                    },
+                    OrderTraceChartPoint {
+                        time: 45_020.0,
+                        price: 103.0,
+                    },
+                ]
+            );
+            assert!(line.can_finish);
+        }
+
+        orders.apply(TradeCommand::OrderTracePoint(trace_point(
+            42,
+            OrderType::Sell,
+            trace_flags::IS_FINISH,
+            45_030.0,
+            104.0,
+            100.0,
+            0.0,
+        )));
+        let line = orders.get(42).unwrap().sell_trace_line.as_ref().unwrap();
+        assert_eq!(line.points.last().unwrap().price, 104.0);
+        assert!(!line.can_finish);
     }
 
     #[test]

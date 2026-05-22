@@ -29,7 +29,9 @@ pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
     OrderBookSnapshot, OrderBooks, TopOfBook,
 };
-pub use orders::{ApplyResult, Order, OrderEvent, Orders, SellReason};
+pub use orders::{
+    ApplyResult, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason,
+};
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
 pub use trades::{parse_trades_resend_response, TradesEvent, TradesState};

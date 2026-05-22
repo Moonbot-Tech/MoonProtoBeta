@@ -1775,3 +1775,29 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` / `DoTheJobVirtual` body, including visual trace side
   effects that are still represented only as stored trace points.
+
+### 2026-05-22 - Phase 1 partial: `TOrderTracePoint` line state
+
+Done:
+
+- Fixed the `TOrderTracePoint` read-model shape. Delphi
+  `BOrderWorker.ApplyServerTrace` does not just append raw packets: it mutates
+  per-side `coBuy` / `coSell` `TOrderLine` objects.
+- Added `OrderTraceLine` and `OrderTraceChartPoint`, plus
+  `Order::buy_trace_line` / `Order::sell_trace_line`.
+- The Rust line update now follows Delphi machine effects:
+  only `OrderType::Buy` targets the buy side; finish updates only an existing
+  line; a non-initial trace without a line is ignored for drawable line state;
+  initial trace creates the line with the compact order `CreateTime` and
+  `BasePrice`; temp trace stores `tmp_point`; normal trace appends the same
+  point sequence as `TOrderLine.SetPointTrade`; finish mutates the last point
+  only while `can_finish` is true.
+- Raw `trace_points` remains as diagnostic inbound packet history, but API docs
+  now direct UI users to the Delphi-equivalent line fields.
+- Added unit tests for ignored non-initial trace and for initial/temp/finish
+  sequence equivalence.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining order UI/lifecycle
+  side effects outside `ApplyServerTrace`.
