@@ -191,8 +191,6 @@ pub struct Order {
     pub emulator_mode: bool,
     /// True если UI клики должны игнорироваться (server-forced).
     pub immune_for_clicks: bool,
-    /// True если включена паник-распродажа.
-    pub panic_sell: bool,
     /// Тип ордера, на котором установлен BulkReplace.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
@@ -256,7 +254,6 @@ impl Order {
             from_cache: status_cmd.from_cache,
             emulator_mode: status_cmd.emulator_mode,
             immune_for_clicks: status_cmd.immune_for_clicks,
-            panic_sell: false,
             bulk_replace_buy: false,
             bulk_replace_sell: false,
             trace_points: VecDeque::new(),
@@ -312,8 +309,6 @@ pub enum OrderEvent {
     VStopChanged(u64),
     /// Стопы изменились.
     StopsChanged(u64),
-    /// Panic sell изменился.
-    PanicSellChanged(u64),
     /// TAllStatuses snapshot применён.
     Snapshot,
     /// Команда проигнорирована (out-of-order / phase rollback / unknown).
@@ -688,32 +683,12 @@ impl Orders {
                 }
             }
 
-            // --- Panic sell turn on/off ---
-            TradeCommand::TurnPanicSell(ts) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
-                };
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &ts.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
-                }
-                if entry.panic_sell != ts.turn_on {
-                    entry.panic_sell = ts.turn_on;
-                    return (ApplyResult::Applied, OrderEvent::PanicSellChanged(uid));
-                }
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
-            }
-
             // --- Client-originated команды (исходящие) — игнорируются в state ---
             TradeCommand::OrderReplace(_)
             | TradeCommand::OrderCancel(_)
             | TradeCommand::AllStatusesRequest(_)
             | TradeCommand::OrderStatusRequest(_)
+            | TradeCommand::TurnPanicSell(_)
             | TradeCommand::JoinOrders(_)
             | TradeCommand::SplitOrder(_)
             | TradeCommand::MoveAllSells(_)
@@ -996,6 +971,33 @@ mod tests {
             }
         ));
         assert!(!orders.get(42).unwrap().immune_for_clicks);
+    }
+
+    #[test]
+    fn incoming_turn_panic_sell_is_not_applied_by_process_command_order_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        let turn = TurnPanicSellCommand {
+            epoch_header: make_epoch(42, 3, "BTCUSDT", 2, OrderWorkerStatus::SellSet),
+            turn_on: true,
+        };
+        let (res, ev) = orders.apply(TradeCommand::TurnPanicSell(turn));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 42,
+                reason: ApplyResult::NotApplicable
+            }
+        ));
+        assert_eq!(orders.get(42).unwrap().status, OrderWorkerStatus::SellSet);
     }
 
     #[test]

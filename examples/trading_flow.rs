@@ -277,7 +277,6 @@ impl OrderEventName for OrderEvent {
             OrderEvent::CorridorChanged(_) => "CorridorChanged",
             OrderEvent::VStopChanged(_) => "VStopChanged",
             OrderEvent::StopsChanged(_) => "StopsChanged",
-            OrderEvent::PanicSellChanged(_) => "PanicSellChanged",
             OrderEvent::Snapshot => "Snapshot",
             OrderEvent::Ignored { .. } => "Ignored",
         }

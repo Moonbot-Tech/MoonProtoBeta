@@ -83,7 +83,6 @@ pub struct Order {
     pub from_cache: bool,
     pub emulator_mode: bool,
     pub immune_for_clicks: bool,
-    pub panic_sell: bool,
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     pub trace_points: VecDeque<OrderTracePoint>,
@@ -131,7 +130,6 @@ pub enum OrderEvent {
     CorridorChanged(u64),
     VStopChanged(u64),
     StopsChanged(u64),
-    PanicSellChanged(u64),
     Snapshot,
     Ignored { uid: u64, reason: ApplyResult },
 }

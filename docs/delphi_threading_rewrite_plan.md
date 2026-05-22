@@ -1488,3 +1488,26 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body: accepted/dropped class coverage still needs final
   sweep.
+
+### 2026-05-22 - Phase 1 partial: TurnPanicSell receive guard
+
+Done:
+
+- Fixed a `ProcessCommandOrder` parity bug: `TTurnPanicSellCommand` is an
+  outgoing client-to-server command in the Delphi client path. The Delphi
+  client may enqueue it through the generic epoch-command gate, but
+  `BOrderWorker.HandleServerCommand` has no `TTurnPanicSellCommand` branch, so
+  it has no incoming read-model effect.
+- Rust `Orders::apply(TradeCommand::TurnPanicSell)` now returns
+  `NotApplicable` / `Ignored` and does not mutate order state.
+- Removed the Rust-only `Order::panic_sell` read-model field and
+  `OrderEvent::PanicSellChanged` event. Panic sell remains available as an
+  outgoing API action (`Client::turn_panic_sell`) and as a sell reason code.
+- Added a unit test proving the Delphi receive-path guard.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body: direct `Orders::apply(TAllStatuses)` snapshot
+  handling still needs a final parity decision against the production
+  dispatcher path.
