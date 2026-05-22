@@ -1432,3 +1432,24 @@ Still not done:
 
 - Remaining `ProcessCommandOrder` branches still need line-by-line reverse
   equivalence checks.
+
+### 2026-05-22 - Phase 1 partial: ProcessCommandOrder SetImmune receive guard
+
+Done:
+
+- Fixed another `ProcessCommandOrder` parity bug: `TSetImmuneCommand` is
+  client-to-server UI/order action in Delphi and is not applied by the Delphi
+  client receive path.
+- Rust `Orders::apply(TradeCommand::SetImmune)` now returns
+  `NotApplicable` / `Ignored` and does not mutate `immune_for_clicks`.
+- API docs now state that `Client::set_immune` sends the command to the server,
+  while the read model learns `immune_for_clicks` from `TOrderStatus`.
+- Added a unit test proving the Delphi receive-path guard.
+
+Still not done:
+
+- `TOrderStatus` / `TOrderStatusUpdate` terminal-status removal timing and
+  `TOrderNotFound` handling still need reverse-equivalence against the
+  `BOrderWorker` command queue / worker-loop cleanup. Rust currently removes
+  entries synchronously inside `Orders::apply`; Delphi queues commands to the
+  worker and removes from `WCache` later.

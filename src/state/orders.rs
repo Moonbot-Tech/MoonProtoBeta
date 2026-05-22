@@ -673,16 +673,6 @@ impl Orders {
                 (ApplyResult::Applied, OrderEvent::Updated(uid))
             }
 
-            // --- Set immune (массово) ---
-            TradeCommand::SetImmune(si) => {
-                for it in &si.items {
-                    if let Some(entry) = self.map.get_mut(&it.uid) {
-                        entry.immune_for_clicks = it.value;
-                    }
-                }
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
-            }
-
             // --- Client-originated команды (исходящие) — игнорируются в state ---
             TradeCommand::OrderReplace(_)
             | TradeCommand::OrderCancel(_)
@@ -697,7 +687,8 @@ impl Orders {
             | TradeCommand::DoSplitPosition(_)
             | TradeCommand::DoMarketSplitPosition(_)
             | TradeCommand::DoSellOrder(_)
-            | TradeCommand::NewOrder(_) => (
+            | TradeCommand::NewOrder(_)
+            | TradeCommand::SetImmune(_) => (
                 ApplyResult::NotApplicable,
                 OrderEvent::Ignored {
                     uid,
@@ -890,6 +881,36 @@ mod tests {
             }
         ));
         assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn incoming_set_immune_is_not_applied_by_process_command_order_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+
+        let set_immune = SetImmuneCommand {
+            header: make_base(777, 3),
+            items: vec![ImmuneItem {
+                uid: 42,
+                value: true,
+            }],
+        };
+        let (res, ev) = orders.apply(TradeCommand::SetImmune(set_immune));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 777,
+                reason: ApplyResult::NotApplicable
+            }
+        ));
+        assert!(!orders.get(42).unwrap().immune_for_clicks);
     }
 
     #[test]

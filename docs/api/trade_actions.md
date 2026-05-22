@@ -54,7 +54,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `update_tracked_order_stops(order, &stops)` | Update stop settings for a tracked order. |
 | `turn_panic_sell(ctx, market, turn_on)` | Toggle panic sell. |
 | `turn_tracked_order_panic_sell(order, turn_on)` | Toggle panic sell for a tracked order. |
-| `set_immune(uid, items)` | Mark orders immune to clicks. |
+| `set_immune(uid, items)` | Send `TSetImmuneCommand` to mark orders immune to clicks on the server. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk. |
 | `update_vstop(ctx, market, params)` | Update volume stop. `params` is `VStopUpdateParams`; the wrapper writes `epoch = 0`. |
@@ -64,6 +64,10 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 Epoch is intentionally not part of the public outgoing wrappers. For replace and
 panic-sell commands, status is not public either: the Delphi client writes
 `epoch = 0` and `status = OS_None` for those commands.
+
+`set_immune` is an outgoing UI/order action. It does not synthesize an incoming
+`OrderEvent` by itself; the read model mirrors `immune_for_clicks` from
+`TOrderStatus`, matching Delphi's receive path.
 
 `move_all_sells` and `update_vstop` intentionally take parameter structs instead
 of long positional argument lists. This is part of the public API:
