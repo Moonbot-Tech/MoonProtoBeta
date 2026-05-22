@@ -1934,3 +1934,30 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining outgoing
   order/UI/strategy/balance command wrappers against the Delphi active-client
   call sites.
+
+### 2026-05-22 - Phase 1 partial: outgoing join/split/close/sell command parity audit
+
+Done:
+
+- Checked the active-client Delphi call sites for `TJoinOrdersCommand`,
+  `TSplitOrderCommand`, `TDoClosePositionCommand`,
+  `TDoLimitClosePositionCommand`, `TDoSplitPositionCommand`,
+  `TDoMarketSplitPositionCommand`, and `TDoSellOrderCommand`.
+- Checked Rust `Client` / `ClientSender` wrappers and the builders in
+  `commands::trade` against the Delphi constructors and `StoreToStream`
+  implementations.
+- No protocol code change was required for this block: these commands are
+  market-level wire intents, do not create or mutate a local order worker before
+  send, and use the same payload fields and retry counts as Delphi.
+- Confirmed the route bytes are session route bytes (`cfg.BaseCurrency` and
+  `cfg.Header.Current` in Delphi; `Client::trade_ctx` /
+  `Client::random_trade_ctx` in Rust). Existing-order wrappers continue to use
+  `order.trade_ctx()` only where the Delphi command is tied to a worker UID.
+- Cleaned one misleading `legacy` wording in the `TMoveAllBuysCommand` soft-read
+  comment: the machine effect is Delphi backward-compatible default `Side=Both`
+  when older payloads omit the side byte.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining outgoing UI/order
+  wrappers and server-receive consequences around these commands.

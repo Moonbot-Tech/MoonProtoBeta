@@ -1244,7 +1244,7 @@ impl MoveAllSellsCommand {
         let max_p = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
         let price_zone = PriceZone { min_p, max_p };
-        // Soft-read: side появилось позже. На отсутствии — Both (legacy default).
+        // Soft-read like Delphi: when older payloads have no Side byte, use Both.
         let side = if !r.is_empty() {
             let v = FixedPosition::from_byte(r[0])?;
             *r = &r[1..];
