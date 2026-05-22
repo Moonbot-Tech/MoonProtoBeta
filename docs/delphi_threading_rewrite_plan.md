@@ -1584,6 +1584,26 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: first new OrderStatus epoch bypass
+
+Done:
+
+- Fixed the first `TOrderStatus` create path. Delphi creates the virtual worker
+  in `ProcessCommandOrder`, then `OnMServerOrder` calls `HandleServerCommand`
+  directly; this bypasses `AcceptServerCommand`, so the first full status does
+  not update `FServerLatestEpoch`.
+- Rust now skips `accept_epoch_and_phase` only for a newly-created order's first
+  `TOrderStatus`. Existing `TOrderStatus` and all compact epoch commands still
+  use the epoch/phase guard.
+- Updated epoch tests so duplicate/stale checks first prime the Delphi
+  `FServerLatestEpoch` analogue, and added a test proving the first same-epoch
+  compact update after creation is accepted.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

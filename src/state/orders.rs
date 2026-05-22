@@ -424,8 +424,14 @@ impl Orders {
                         .entry(uid)
                         .or_insert_with(|| Order::from_status(&st));
 
-                    if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
-                        return (reason, OrderEvent::Ignored { uid, reason });
+                    // Delphi new-order path goes ProcessCommandOrder ->
+                    // OnMServerOrder -> HandleServerCommand(Cmd), bypassing
+                    // AcceptServerCommand and therefore not touching
+                    // FServerLatestEpoch for the first full status.
+                    if !new_order {
+                        if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
+                            return (reason, OrderEvent::Ignored { uid, reason });
+                        }
                     }
 
                     Self::apply_status_inner(entry, &st, self.server_time_delta);
@@ -1214,6 +1220,17 @@ mod tests {
             OrderWorkerStatus::BuySet,
             10,
         )));
+        // Первый full status при создании worker'а в Delphi идёт через
+        // OnMServerOrder -> HandleServerCommand и не заполняет
+        // FServerLatestEpoch. Следующая команда этого status уже проходит
+        // AcceptServerCommand и выставляет latest=10.
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        assert_eq!(res, ApplyResult::Applied);
         // epoch 5 после 10: backDist=10-5=5 <= 100 → stale
         let (res, _) = orders.apply(order_status_cmd(make_status(
             1,
@@ -1233,7 +1250,15 @@ mod tests {
             OrderWorkerStatus::BuySet,
             10,
         )));
-        // Тот же epoch — дубликат, отвергается (Delphi EpochIsOK: LastEpoch=NewEpoch → false)
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        assert_eq!(res, ApplyResult::Applied);
+        // Тот же epoch после AcceptServerCommand latest=10 — дубликат,
+        // отвергается (Delphi EpochIsOK: LastEpoch=NewEpoch → false).
         let (res, _) = orders.apply(order_status_cmd(make_status(
             1,
             "X",
@@ -1241,6 +1266,33 @@ mod tests {
             10,
         )));
         assert_eq!(res, ApplyResult::OutOfOrder);
+    }
+
+    #[test]
+    fn first_same_epoch_after_new_order_is_accepted_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.actual_price = 10.0;
+        orders.apply(order_status_cmd(status));
+
+        let same_epoch_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
+            update_data: OrderUpdateData {
+                actual_price: 11.0,
+                ..Default::default()
+            },
+            sell_reason_code: 0,
+        };
+        let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(same_epoch_update));
+
+        assert_eq!(
+            res,
+            ApplyResult::Applied,
+            "Delphi first TOrderStatus bypasses AcceptServerCommand, so latest epoch is still zero"
+        );
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let actual = orders.get(1).unwrap().buy_order.actual_price;
+        assert_eq!(actual, 11.0);
     }
 
     #[test]
@@ -1296,6 +1348,13 @@ mod tests {
             OrderWorkerStatus::BuySet,
             10,
         )));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        assert_eq!(res, ApplyResult::Applied);
 
         let stops = StopSettings {
             stop_loss_on: 1,
