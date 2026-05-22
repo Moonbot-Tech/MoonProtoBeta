@@ -85,6 +85,9 @@ acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
 `sell_price` is copied from the decoded snapshot field `SellPrice` when that
 field exists; incoming `TStratSellPriceUpdate` packets are not applied by the
 active client because Delphi client has no receive branch for that command.
+Incoming `TStratSnapshot` with `Full=true` does not delete local strategies
+that are absent from the payload. Delphi keeps those strategies as local
+"Own" entries; Rust keeps them in `StratsState` as well.
 
 `TStratDelete` has two independent Delphi effects: delete `StrategyID` when it
 is non-zero, then delete `FolderPath` when it names an existing empty non-root

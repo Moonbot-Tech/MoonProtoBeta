@@ -359,9 +359,9 @@ impl StratsState {
         full: bool,
     ) -> Option<StrategyBatch> {
         let batch = parse_strategy_batch(deflate_data)?;
-        if full {
-            self.clear_entries();
-        }
+        let _ = full;
+        // Delphi `ApplyStratSnapshot(IsFull=true)` does not clear strategies
+        // absent from the incoming payload. They remain local "Own" strategies.
         for s in &batch.strategies {
             self.upsert_from_snapshot(s);
         }
@@ -760,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn full_snapshot_replaces_missing_strategies() {
+    fn full_snapshot_preserves_missing_strategies_like_delphi() {
         use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
         let mut old_fields = HashMap::new();
@@ -792,8 +792,12 @@ mod tests {
         let payload = builder.finalize();
         s.apply_snapshot_decoded_with_mode(&payload, true).unwrap();
 
-        assert!(s.get(1).is_none());
-        assert!(s.snapshot(1).is_none());
+        assert!(s.get(1).is_some());
+        assert!(s.snapshot(1).is_some());
+        assert_eq!(
+            s.snapshot(1).and_then(|snap| snap.fields.get("Name")),
+            Some(&FieldValue::String("Old".to_string()))
+        );
         assert!(s.get(2).is_some());
         assert!(s.snapshot(2).is_some());
     }
