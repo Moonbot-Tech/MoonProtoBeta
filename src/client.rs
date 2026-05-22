@@ -504,12 +504,10 @@ struct ReaderRuntime {
     app_token: u64,
     reader_client_token: u64,
     server_addr: Option<SocketAddr>,
-    event_tx: mpsc::Sender<ClientEvent>,
     api_pending: Arc<ApiPending>,
     pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
     incoming_sliced_acks: Arc<Mutex<Vec<SlicedAck>>>,
     pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-    reader_wake_pending: Arc<AtomicBool>,
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
     reader_ping_state: Arc<Mutex<ReaderPingState>>,
     reader_transport_state: Arc<Mutex<ReaderTransportState>>,
@@ -592,12 +590,6 @@ impl ReaderRuntime {
                 total_recv_after,
                 timestamp_ms,
             ) {
-                break;
-            }
-
-            if notify_reader_work(&self.event_tx, &self.reader_wake_pending)
-                == RecvEnqueue::Disconnected
-            {
                 break;
             }
         }
@@ -1064,41 +1056,6 @@ impl ReaderRuntime {
                 self.epoch,
                 false,
             );
-        }
-    }
-}
-
-/// Reader/main control channel.
-///
-/// Production reader sends only coalesced `Wake` notifications here after
-/// reader-side protocol progress. Accepted UDP packets and user sends are not
-/// queued as events: reader data goes through `pending_reader_decoded`, while
-/// user/API/UI commands append directly into Delphi-style send queues.
-#[derive(Clone)]
-pub(crate) enum ClientEvent {
-    /// Wakes main loop after reader-side protocol progress that is stored
-    /// outside the shared Recv queue.
-    Wake,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecvEnqueue {
-    Delivered,
-    Disconnected,
-}
-
-fn notify_reader_work(
-    event_tx: &mpsc::Sender<ClientEvent>,
-    wake_pending: &AtomicBool,
-) -> RecvEnqueue {
-    if wake_pending.swap(true, Ordering::AcqRel) {
-        return RecvEnqueue::Delivered;
-    }
-    match event_tx.send(ClientEvent::Wake) {
-        Ok(()) => RecvEnqueue::Delivered,
-        Err(_) => {
-            wake_pending.store(false, Ordering::Release);
-            RecvEnqueue::Disconnected
         }
     }
 }
@@ -2601,9 +2558,7 @@ impl WriterRuntime<'_> {
             if self.client.socket.is_some() {
                 self.drain_reader_decoded(cur_tm, mode);
 
-                if !self.wait_for_reader_work_or_default_sleep() {
-                    return;
-                }
+                self.wait_for_reader_work_or_default_sleep();
                 self.drain_reader_decoded(cur_tm, mode);
 
                 self.transport_writer_maintenance_tick(cur_tm);
@@ -2621,30 +2576,13 @@ impl WriterRuntime<'_> {
         }
     }
 
-    fn wait_for_reader_work_or_default_sleep(&mut self) -> bool {
-        // Reader work is level-triggered: a Wake only means
-        // `pending_reader_decoded` may contain items. User/API/UI sends are
-        // already in SendQueues and must not travel through this channel.
-        let send_queues_empty = self.client.send_queues.lock().unwrap().is_empty();
-        if send_queues_empty {
-            match self
-                .client
-                .event_rx
-                .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
-            {
-                Ok(ClientEvent::Wake) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
-            }
+    fn wait_for_reader_work_or_default_sleep(&mut self) {
+        // Delphi Execute spins on shared queues and sleeps a fixed short tick
+        // when there is no outgoing work. Reader-decoded work is polled from
+        // `pending_reader_decoded`, not signalled through a Rust-only wake FIFO.
+        if self.client.send_queues.lock().unwrap().is_empty() {
+            thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
         }
-        loop {
-            match self.client.event_rx.try_recv() {
-                Ok(ClientEvent::Wake) => {}
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return false,
-            }
-        }
-        true
     }
 
     fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
@@ -2660,9 +2598,6 @@ impl WriterRuntime<'_> {
 
     fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         self.client.sync_transport_state_from_reader();
-        self.client
-            .reader_wake_pending
-            .store(false, Ordering::Release);
         let decoded = {
             let mut pending = self.client.pending_reader_decoded.lock().unwrap();
             if pending.is_empty() {
@@ -3907,11 +3842,6 @@ impl ReaderTransportState {
 pub struct Client {
     cfg: ClientConfig,
 
-    // Reader → main control FIFO. Production reader sends only coalesced Wake
-    // notifications; accepted UDP packets and user sends are not queued here.
-    event_tx: mpsc::Sender<ClientEvent>,
-    pub(crate) event_rx: mpsc::Receiver<ClientEvent>,
-
     app_queue_alive: Arc<AtomicBool>,
     // Delphi `DataToSend`, `DataToSendH`, `DataToSendL`: raw/user/API sends are
     // appended here directly by `send_cmd` / `ClientSender::send_cmd`.
@@ -3927,10 +3857,6 @@ pub struct Client {
     // datagrams run the DataReadInt decrypt/decompress core in the reader stack
     // and enter this queue only for user/active-library delivery.
     pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-    // Reader wake is a level-triggered notification for pending_reader_decoded:
-    // dense reader-side DataReadInt progress must not create an empty Wake
-    // backlog in the shared main-loop FIFO.
-    reader_wake_pending: Arc<AtomicBool>,
 
     // Main thread state
     socket: Option<UdpSocket>,
@@ -4206,12 +4132,10 @@ impl Client {
         // and user commands must not disappear because a local channel filled up.
         // Reader packets and raw send queues are separate so dense incoming
         // streams cannot keep user/API sends behind recv progress.
-        let (event_tx, event_rx) = mpsc::channel();
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_queues = Arc::new(Mutex::new(SendQueues::default()));
         let incoming_sliced_acks = Arc::new(Mutex::new(Vec::new()));
         let pending_reader_decoded = Arc::new(Mutex::new(Vec::new()));
-        let reader_wake_pending = Arc::new(AtomicBool::new(false));
         let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
         let reader_ping_state = Arc::new(Mutex::new(ReaderPingState::new()));
         let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
@@ -4232,15 +4156,12 @@ impl Client {
 
         Self {
             cfg,
-            event_tx,
-            event_rx,
             app_queue_alive,
             send_queues,
             pending_h: Vec::new(),
             sending: Vec::new(),
             incoming_sliced_acks,
             pending_reader_decoded,
-            reader_wake_pending,
             socket: None,
             connected: false,
             authorized: false,
@@ -4593,7 +4514,7 @@ impl Client {
     ///
     /// The command is appended directly to the unbounded Delphi-style
     /// `DataToSend*` queue for its priority, separate from accepted UDP packets
-    /// and reader wake events. This API has no local capacity-drop branch.
+    /// and reader-decoded delivery. This API has no local capacity-drop branch.
     ///
     /// E-V2-06: возвращает `()`, **но** при закрытом канале (main loop завершён)
     /// логирует error через `log` crate. Потерянная команда — серьёзный сигнал,
@@ -6575,12 +6496,10 @@ impl Client {
         let app_token = self.app_token;
         let reader_client_token_start = self.client_token;
         let server_addr = self.server_socket_addr();
-        let event_tx = self.event_tx.clone();
         let api_pending = Arc::clone(&self.api_pending);
         let pending_candles = Arc::clone(&self.pending_candles);
         let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
         let pending_reader_decoded = Arc::clone(&self.pending_reader_decoded);
-        let reader_wake_pending = Arc::clone(&self.reader_wake_pending);
         let reader_protocol = Arc::clone(&self.reader_protocol);
         let reader_ping_state = Arc::clone(&self.reader_ping_state);
         self.publish_transport_state_from_client();
@@ -6619,12 +6538,10 @@ impl Client {
                     app_token,
                     reader_client_token: reader_client_token_start,
                     server_addr,
-                    event_tx,
                     api_pending,
                     pending_candles,
                     incoming_sliced_acks,
                     pending_reader_decoded,
-                    reader_wake_pending,
                     reader_protocol,
                     reader_ping_state,
                     reader_transport_state,
@@ -7698,7 +7615,6 @@ impl Client {
         *self.recvd_slider.lock().unwrap() = Slider::new();
         *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
         self.pending_reader_decoded.lock().unwrap().clear();
-        self.reader_wake_pending.store(false, Ordering::Release);
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
         self.publish_transport_state_from_client();
@@ -12085,14 +12001,27 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
-    fn app_send_queue_is_not_blocked_by_reader_wake() {
+    fn app_send_queue_is_not_blocked_by_pending_reader_decode() {
         let mut client = Client::new(dummy_cfg());
         let mut dispatcher = EventDispatcher::new();
 
-        assert_eq!(
-            notify_reader_work(&client.event_tx, &client.reader_wake_pending),
-            RecvEnqueue::Delivered
-        );
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
         client.send_cmd(
             vec![1, 2, 3, 4],
             Command::UI,
@@ -12105,7 +12034,7 @@ mod event_loop_fairness_tests {
 
         assert!(
             !client.sending.is_empty(),
-            "app/user sends must use the separate outgoing queue, not wait behind reader wake"
+            "app/user sends must use the separate outgoing queue, not wait behind pending reader work"
         );
     }
 
@@ -12392,20 +12321,6 @@ mod service_cmd_tests {
         client.pending_reader_decoded.lock().unwrap().pop().unwrap()
     }
 
-    fn expect_single_reader_wake(client: &Client) {
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("reader wake")
-        {
-            ClientEvent::Wake => {}
-        }
-        assert!(
-            matches!(client.event_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
-            "reader wake must be coalesced and must not carry user/send data"
-        );
-    }
-
     fn reader_transport_snapshot(client: &Client) -> ReaderTransportState {
         client.reader_transport_state.lock().unwrap().clone()
     }
@@ -12481,30 +12396,45 @@ mod service_cmd_tests {
     }
 
     #[test]
-    fn reader_work_wake_is_coalesced_until_reader_queue_drain() {
-        let (tx, rx) = mpsc::channel();
-        let wake_pending = AtomicBool::new(false);
+    fn writer_polls_reader_decoded_without_wake_fifo() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        client.need_connect = false;
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xAA, 0xBB]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 2,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: false,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
 
-        for _ in 0..4096 {
-            assert_eq!(
-                notify_reader_work(&tx, &wake_pending),
-                RecvEnqueue::Delivered
-            );
-        }
-
-        let ClientEvent::Wake = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert_eq!(
-            rx.try_iter().count(),
-            0,
-            "reader-side DataReadInt progress must not create an empty Wake backlog"
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delivered_cb = Arc::clone(&delivered);
+        client.run(
+            Duration::from_millis(DEFAULT_SLEEP_MS + 5),
+            Box::new(move |cmd, payload| {
+                assert_eq!(cmd, Command::UI);
+                assert_eq!(payload, &[0xAA, 0xBB]);
+                delivered_cb.fetch_add(1, Ordering::Relaxed);
+            }),
         );
 
-        wake_pending.store(false, Ordering::Release);
         assert_eq!(
-            notify_reader_work(&tx, &wake_pending),
-            RecvEnqueue::Delivered
+            delivered.load(Ordering::Relaxed),
+            1,
+            "writer must poll pending_reader_decoded directly, without a wake FIFO"
         );
-        let ClientEvent::Wake = rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]
@@ -12611,7 +12541,6 @@ mod service_cmd_tests {
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
         );
-        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12670,7 +12599,6 @@ mod service_cmd_tests {
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
         );
-        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12725,7 +12653,6 @@ mod service_cmd_tests {
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
         );
-        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12773,7 +12700,6 @@ mod service_cmd_tests {
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
         );
-        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12835,7 +12761,6 @@ mod service_cmd_tests {
         assert_eq!(reader_state.total_recv, packet.len() as u64);
         assert_eq!(reader_state.auth_status, AuthStatus::Connected);
         assert!(!reader_state.need_connect);
-        expect_single_reader_wake(&client);
 
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let delivered_cb = Arc::clone(&delivered);
@@ -12922,7 +12847,6 @@ mod service_cmd_tests {
         assert_eq!(reader_state.client_token, token_before.wrapping_add(1));
         assert_eq!(reader_state.encode_key, encode_key);
         assert_eq!(reader_state.decode_key, decode_key);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WhoAreYou must not deliver user payload")),
@@ -12973,7 +12897,6 @@ mod service_cmd_tests {
         assert_eq!(reader_state.auth_status, AuthStatus::AuthDone);
         assert!(!reader_state.need_connect);
         assert!(!reader_state.waiting_hello);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("Fine must not deliver user payload")),
@@ -13005,7 +12928,6 @@ mod service_cmd_tests {
         let reader_state = reader_transport_snapshot(&client);
         assert_eq!(reader_state.auth_status, AuthStatus::Connected);
         assert!(!reader_state.waiting_hello);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WrongHello must not deliver user payload")),
@@ -13046,7 +12968,6 @@ mod service_cmd_tests {
         assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
         assert_eq!(client.total_sent(), 0);
         assert!(!client.recvd_slider.lock().unwrap().has_new_data);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WantNewHello must not deliver user payload")),
@@ -13082,7 +13003,6 @@ mod service_cmd_tests {
         assert_eq!(reader_state.waiting_hello_start, decoded.timestamp_ms);
         assert_eq!(reader_state.last_need_hello_again, decoded.timestamp_ms);
         assert_eq!(reader_state.last_sent_hello, NEVER_SENT_MS);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("NeedHelloAgain must not deliver user payload")),
@@ -13131,7 +13051,6 @@ mod service_cmd_tests {
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
         );
-        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -13165,7 +13084,6 @@ mod service_cmd_tests {
         assert_eq!(reader_state.auth_status, AuthStatus::Connected);
         assert_eq!(reader_state.total_recv, decoded.recv_bytes);
         assert_eq!(reader_state.last_online, decoded.timestamp_ms);
-        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("ErrEmu drop must not deliver user payload")),

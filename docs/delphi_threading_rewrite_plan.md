@@ -72,12 +72,11 @@ Delphi model по факту:
 
 Проверенные точки:
 
-- `src/client.rs` - `ClientEvent` has only coalesced reader `Wake`; accepted
-  UDP packets and user sends are not represented as event variants.
-- `src/client.rs` - `event_tx/event_rx`, `send_queues`,
+- `src/client.rs` - accepted UDP packets and user sends are not represented as
+  event variants.
+- `src/client.rs` - `send_queues`, `incoming_sliced_acks`,
   `pending_reader_decoded`.
-- `src/client.rs` - `run_inner` drains coalesced reader wakeups and
-  `pending_reader_decoded`, then calls
+- `src/client.rs` - `WriterRuntime::run` polls `pending_reader_decoded`, then calls
   `copy_send_ack_and_check_sening_data`, the Rust block matching Delphi
   `Execute -> GetCopySendList -> GetCopyAcks -> CopyRecvdData ->
   CheckSeningData`.
@@ -98,11 +97,10 @@ Delphi model по факту:
      complete выполняет общий `DataReadInt` decrypt/decompress core;
    - `MPC_SlicedACK`: кладёт ACK в reader→writer ACK queue;
    - обычные data packets и `MPC_Grouped`: выполняет `DataReadInt` core;
-   - кладёт decoded payload/state updates в `pending_reader_decoded` и шлёт
-     coalesced `ClientEvent::Wake` для user/active delivery.
+   - кладёт decoded payload/state updates в `pending_reader_decoded` для
+     user/active delivery.
 
-2. Main loop:
-   - дренит coalesced reader wakeups без `EVENT_DRAIN_BUDGET`;
+2. Writer/orchestrator loop:
    - дренит `pending_reader_decoded` и выполняет `OnNewData`/active delivery;
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
@@ -551,10 +549,8 @@ Done:
   `ClientEvent::Recv` and without delivering payload to user/active code.
 - Decoded payloads are put into a separate `pending_reader_decoded` queue only
   for user/active-library delivery; they still bypass generic recv backlog.
-- Reader wakeups for `pending_reader_decoded` are now level-triggered: dense
-  reader-side `DataReadInt` progress coalesces into one `ClientEvent::Wake`
-  until the main loop drains the decoded queue, so empty wake events no longer
-  form a Rust-only backlog.
+- Reader wakeups for `pending_reader_decoded` were removed in a later strict
+  parity pass; writer/orchestrator polls the decoded queue directly.
 - `MPC_WhoAreYou` now follows the Delphi reader-side handshake block for the
   network effect: reader decrypts the server Hello with `MasterKey`, derives
   session keys, builds `MPC_ImFriend`, sends the same payload twice with the
@@ -578,7 +574,7 @@ Done:
   `Sliced`, `SizeTest`, and `ProbeMTU` off generic recv backlog.
 - Targeted ErrEmu reader drop test: passed.
 - Targeted reader Ping response test: passed.
-- Targeted reader wake coalescing test: passed.
+- Targeted writer polling test for `pending_reader_decoded`: passed.
 - Targeted reader `WhoAreYou -> ImFriend, Sleep(32), ImFriend` test: passed.
 - Targeted reader `Fine -> AuthDone` test: passed.
 - Targeted reader hello-control tests for `WrongHello`, `WantNewHello`, and
@@ -593,8 +589,8 @@ Still not done:
 - Production accepted UDP packets no longer enqueue generic `ClientEvent::Recv`;
   the test-only fallback was also removed so tests exercise the live
   reader-decoded path.
-- `EVENT_DRAIN_BUDGET` was removed; reader wake is level-triggered and does not
-  carry user/API/UI send work.
+- `EVENT_DRAIN_BUDGET` was removed; reader decoded delivery does not carry
+  user/API/UI send work.
 
 ### 2026-05-22 - Phase 6 partial: active actions outbox
 
@@ -816,9 +812,10 @@ Done:
   reconnect tail inline.
 - Added `wait_for_reader_work_or_default_sleep`,
   `transport_writer_maintenance_tick`, and `transport_reconnect_tail_tick`.
-- The order is unchanged: drain reader delivery, wait/drain wake, drain reader
-  delivery again, writer maintenance (`CheckSeningData`, cleanup, indexes,
-  refresh, clock-jump), active trades tick, reconnect tail.
+- The order is unchanged for this phase: drain reader delivery, wait/drain wake,
+  drain reader delivery again, writer maintenance (`CheckSeningData`, cleanup,
+  indexes, refresh, clock-jump), active trades tick, reconnect tail. A later
+  strict parity pass removes the wake FIFO and keeps direct polling.
 - Targeted tests passed:
   `send_phase_runs_with_ready_send_queue`,
   `post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_gate`.
@@ -835,7 +832,7 @@ Done:
 - `spawn_reader` is now only the reader-thread factory: it clones/captures the
   exact runtime state, creates `ReaderRuntime`, and starts `ReaderRuntime::run`.
 - The UDP receive loop, transport unpack, ErrEmu drop branch, Sliced cleanup,
-  command dispatch, and wake notification now live inside `ReaderRuntime`.
+  command dispatch, and decoded-delivery enqueue now live inside `ReaderRuntime`.
 - The command bodies are still the same named reader blocks extracted earlier:
   Ping, handshake control/auth, PMTU probes, SlicedACK, Sliced, ErrEmu-drop,
   and regular data. No protocol branch was added or reordered.
@@ -890,7 +887,7 @@ Still not done:
 
 Done:
 
-- Moved reader-wake wait, writer maintenance tick, reconnect tail tick,
+- Moved reader wait/sleep, writer maintenance tick, reconnect tail tick,
   copy-send/copy-ack/copy-recvd-data, and `CheckSeningData` ordering into
   `WriterRuntime`.
 - The writer tick test now calls `WriterRuntime` directly instead of an old
@@ -1117,7 +1114,7 @@ Done:
 - Production reader paths now write that mirror immediately after successful
   packet unpack and inside the Ping/handshake branches. Queued
   `ReaderDecodedMsg` records from the real reader no longer re-apply recv
-  side effects; they wake writer/user delivery after the reader already made
+  side effects; writer/user delivery polls them after the reader already made
   the Delphi `UDPRead` state transition.
 - Writer runtime synchronizes the mirror before lifecycle and reconnect writer
   ticks, and writer-side reconnect changes publish back into the mirror so
@@ -1201,3 +1198,26 @@ Still not done:
   returns. It is not yet a persistent worker owned by a long-lived public handle.
 - Public callbacks/events are still executed by the writer runtime; they are
   not yet fully separated into a public event consumer queue.
+
+### 2026-05-22 - Phase 1 partial: removed reader wake FIFO
+
+Done:
+
+- Removed the Rust-only `ClientEvent::Wake` channel and its coalescing flag.
+- `ReaderRuntime` now only mutates reader-owned/shared protocol state and
+  appends `ReaderDecodedMsg` records to `pending_reader_decoded`.
+- `WriterRuntime` follows the Delphi-shaped poll/sleep tick: drain decoded
+  delivery, sleep `DEFAULT_SLEEP_MS` only when the outgoing send queues are
+  empty, drain decoded delivery again, then run writer maintenance and reconnect
+  tail.
+- User/API sends still append directly to unbounded Delphi-style send queues;
+  they do not compete with reader decoded delivery.
+- Tests now prove that writer delivery polls `pending_reader_decoded` without a
+  wake FIFO and that app sends are not blocked by pending reader delivery.
+
+Still not done:
+
+- `pending_reader_decoded` is still a Rust bridge for user/active-library
+  delivery. The next strict parity step is to decide, block-by-block, which
+  `OnNewData`/active-library handlers must move to reader-thread execution and
+  which Delphi handlers intentionally queue work elsewhere.

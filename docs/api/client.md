@@ -86,7 +86,7 @@ keep callbacks short and move slow UI/work to another queue or thread.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
-packets and reader wake events. Subscription methods update the reconnect
+packets and reader-decoded delivery. Subscription methods update the reconnect
 registry immediately and append their Engine API/UI wire commands to the same
 send queues. The public guarantee is no local capacity cap: dense incoming
 streams do not drop queued user commands or Engine API requests.
