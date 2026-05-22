@@ -707,3 +707,22 @@ Still not done:
 
 - The helper still feeds the current `incoming_sliced_acks` queue; ownership has
   not yet moved into a standalone writer runtime.
+
+### 2026-05-22 - Phase 1 partial: named reader `MPC_Ping` block
+
+Done:
+
+- Production reader `MPC_Ping` handling is now isolated as
+  `reader_on_new_ping`.
+- The block keeps Delphi's machine effect: apply Ping receive state and ACK
+  bitmap in the reader-side `DataReadInt` core, send the Ping response
+  immediately from reader stack, then queue main-side field delivery.
+- Targeted tests passed:
+  `reader_handles_ping_response_without_main_loop_tick`,
+  `ping_ack_does_not_drop_pending_h_until_writer_copy_apply`.
+
+Still not done:
+
+- Main-side application of the queued `ReaderPingUpdate` still mutates
+  `Client` fields from `run_inner`; those fields need shared/worker ownership
+  before this becomes a standalone reader-owned active core.

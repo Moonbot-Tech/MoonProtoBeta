@@ -5314,54 +5314,25 @@ impl Client {
                     }
                     match cmd {
                         Command::Ping => {
-                            let raw_now_dt = delphi_now_raw();
-                            let corrected_now_dt = delphi_now();
-                            if let Some((ping_update, response)) =
-                                Client::reader_build_ping_update_and_response(
-                                    &reader_protocol,
-                                    &reader_ping_state,
-                                    &server_time_delta_handle,
-                                    &payload,
-                                    raw_now_dt,
-                                    corrected_now_dt,
-                                    total_sent.load(Ordering::Relaxed),
-                                    total_recv_after,
-                                )
-                            {
-                                Client::reader_send_raw_packet(
-                                    &sock_clone,
-                                    server_addr,
-                                    &mac_ctx,
-                                    &mac_key,
-                                    Command::Ping,
-                                    client_id,
-                                    &response,
-                                    mask_ver,
-                                    &total_sent,
-                                    debug_outgoing_blackhole,
-                                );
-                                pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
-                                    cmd: hdr.cmd,
-                                    payload: Some(payload.clone()),
-                                    api_pending_consumed: false,
-                                    candles_chunk_consumed: false,
-                                    recv_bytes: n as u64,
-                                    timestamp_ms,
-                                    epoch: my_epoch,
-                                    apply_recv_effects: true,
-                                    sliced_stats: None,
-                                    ping_update: Some(ping_update),
-                                    handshake_update: None,
-                                });
-                            } else {
-                                Client::push_reader_recv_side_effect(
-                                    &pending_reader_decoded,
-                                    hdr.cmd,
-                                    n as u64,
-                                    timestamp_ms,
-                                    my_epoch,
-                                );
-                            }
+                            Client::reader_on_new_ping(
+                                &sock_clone,
+                                server_addr,
+                                &mac_ctx,
+                                &mac_key,
+                                client_id,
+                                mask_ver,
+                                &total_sent,
+                                debug_outgoing_blackhole,
+                                &reader_protocol,
+                                &reader_ping_state,
+                                &server_time_delta_handle,
+                                &pending_reader_decoded,
+                                &payload,
+                                n as u64,
+                                total_recv_after,
+                                timestamp_ms,
+                                my_epoch,
+                            );
                         }
                         Command::WrongHello
                         | Command::WantNewHello
@@ -5703,6 +5674,78 @@ impl Client {
             timestamp_ms,
             epoch,
         );
+    }
+
+    fn reader_on_new_ping(
+        sock: &UdpSocket,
+        server_addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        client_id: u64,
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_ping_state: &Arc<Mutex<ReaderPingState>>,
+        server_time_delta_handle: &Arc<std::sync::atomic::AtomicU64>,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        let raw_now_dt = delphi_now_raw();
+        let corrected_now_dt = delphi_now();
+        if let Some((ping_update, response)) = Self::reader_build_ping_update_and_response(
+            reader_protocol,
+            reader_ping_state,
+            server_time_delta_handle,
+            payload,
+            raw_now_dt,
+            corrected_now_dt,
+            total_sent.load(Ordering::Relaxed),
+            total_recv_after,
+        ) {
+            // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
+            // Ping response immediately from the reader stack.
+            Self::reader_send_raw_packet(
+                sock,
+                server_addr,
+                mac_ctx,
+                mac_key,
+                Command::Ping,
+                client_id,
+                &response,
+                mask_ver,
+                total_sent,
+                debug_outgoing_blackhole,
+            );
+            pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::Ping as u8,
+                    payload: Some(payload.to_vec()),
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: Some(ping_update),
+                    handshake_update: None,
+                });
+        } else {
+            Self::push_reader_recv_side_effect(
+                pending_reader_decoded,
+                Command::Ping as u8,
+                recv_bytes,
+                timestamp_ms,
+                epoch,
+            );
+        }
     }
 
     fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
