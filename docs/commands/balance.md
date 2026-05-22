@@ -7,7 +7,7 @@ Server → Client. Balance snapshots and incremental updates with bitmask optimi
 | CmdId | Class | Direction | Description |
 |-------|-------|-----------|-------------|
 | 001 | Base | S→C | Base with epoch + global balances |
-| 002 | Command | S→C | Full items (legacy) |
+| 002 | Command | S→C | Same item layout as full snapshot; Delphi client parses it but does not apply it to balance state |
 | 003 | SnapshotFull | S→C | Full map (every 10 sec, sliced) |
 | 004 | IncrUpdate | S→C | Incremental changes only (high priority) |
 | 005 | RequestRefresh | C→S | Trigger server to send fresh snapshot |
