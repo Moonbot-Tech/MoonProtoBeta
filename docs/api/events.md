@@ -46,6 +46,15 @@ dedicated scoped writer thread. Event callbacks run on that writer thread, not
 on the caller thread. Keep callbacks short; if UI work can block, hand events
 off to the UI thread explicitly.
 
+The client-level domain gate runs before dispatcher delivery. Until Init opens
+`domain_ready`, `Order`, `Strat`, `Balance`, `TradesStream`,
+`TradesResendResponse`, `OrderBook`, and `UI` packets are dropped and do not
+become events. `API`, `LogMsg`, and transport service packets are not gated.
+After Init, `TradesStream` and `TradesResendResponse` additionally require an
+explicit all-trades subscription intent from `InitConfig::subscribe_trades` or
+`Client::subscribe_all_trades`; otherwise they are treated as unexpected and
+dropped.
+
 `run_with_dispatcher` uses the active action path, which also:
 
 - links the dispatcher to this client's `ServerTimeDelta`;
@@ -146,7 +155,9 @@ dispatcher.dispatch_into(cmd, payload, now_ms, &mut out);
 ```
 
 If you call these directly, you do not get `Client`-backed auto-actions. In
-normal applications, prefer `Client::run_with_dispatcher`.
+particular, direct `EventDispatcher::dispatch` / `dispatch_into` calls do not
+know `Client::domain_ready` or the subscription registry. In normal
+applications, prefer `Client::run_with_dispatcher`.
 
 ## Trades Tick
 

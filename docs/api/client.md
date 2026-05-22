@@ -191,8 +191,12 @@ request. If `client.mark_server_update_sent()` was called before init, the next
 `ServerUpdateSent` behavior call the marker automatically:
 `ui_update_version`, `ui_switch_dex`, and `ui_switch_spot`.
 
-Domain pushes received before init completion are ignored, matching the Delphi
-`InitDone` gate. Once init succeeds, the helper sends the Delphi post-init
+Domain pushes received before init completion are ignored in every client run
+mode, including the raw `Client::run` callback. This matches the Delphi
+`InitDone` gate for `Order`, `Strat`, `Balance`, `TradesStream`,
+`TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
+transport service packets are not part of this domain gate, because Init itself
+depends on Engine API. Once init succeeds, the helper sends the Delphi post-init
 refresh set: order snapshot request, strategy snapshot reply from the
 dispatcher-owned strategy list, settings request, MM-orders subscription state,
 and balance refresh request. If no strategy provider is registered, the
@@ -355,6 +359,9 @@ The registry records the latest subscription intent. Before Init, transport
 `Fine` does not replay it. After the one-time Init completes, reconnect replays
 the registry automatically, so streams continue without the application running
 Init again.
+All-trades is opt-in in the Rust library. If the registry has no all-trades
+subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
+are treated as unexpected and are dropped instead of becoming public events.
 Orderbook subscriptions are per market name; incoming events carry `book_kind`
 so the application can render futures and spot books separately.
 The batched orderbook helpers update the same registry and send one

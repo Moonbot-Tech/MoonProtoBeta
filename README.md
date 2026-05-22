@@ -83,12 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 5. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
 6. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
 
-Before init completes, `run_with_dispatcher` drops domain snapshots and streams
+Before init completes, all client run modes drop domain snapshots and streams
 that the server may push immediately after transport auth. After a successful
-init it sends the same refresh set as the Delphi client: order snapshot request,
-strategy snapshot reply from the dispatcher-owned strategy list, settings
-request, MM-orders subscription state, and balance refresh request. If the
-application did not provide strategies, the reply is a valid empty strategy
+init the helper sends the same refresh set as the Delphi client: order snapshot
+request, strategy snapshot reply from the dispatcher-owned strategy list,
+settings request, MM-orders subscription state, and balance refresh request. If
+the application did not provide strategies, the reply is a valid empty strategy
 snapshot; later server snapshots fill the same read model.
 
 Use the lower-level `run_with_dispatcher` plus `run_init_sequence` pair only
@@ -202,6 +202,9 @@ not emit subscription traffic; after the single Init completes, reconnect inside
 the same `Client` session replays the registry automatically. From another
 thread, clone `client.sender()` and call typed subscription, trade, UI,
 strategy, or balance fire-and-forget methods on `ClientSender`.
+All-trades is opt-in: without `InitConfig::subscribe_trades` or
+`subscribe_all_trades`, incoming trades-stream packets are unexpected and are
+dropped instead of being emitted as events.
 
 ## Multi-Server
 

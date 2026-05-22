@@ -54,6 +54,8 @@ connect_and_init(
 // Domain state is opened only after init succeeds. Initial server pushes that
 // arrive earlier are dropped; the helper then requests fresh orders, settings,
 // balance, and strategy state.
+// All-trades is optional in the Rust public API; subscribe explicitly if the
+// application expects trades-stream events.
 // Init is one-time for this Client session; reconnect restore is automatic.
 
 client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {

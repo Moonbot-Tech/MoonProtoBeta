@@ -117,6 +117,25 @@ fn is_service_cmd(cmd: u8) -> bool {
     )
 }
 
+#[inline]
+fn is_domain_push_command(cmd: Command) -> bool {
+    matches!(
+        cmd,
+        Command::Order
+            | Command::Strat
+            | Command::Balance
+            | Command::TradesStream
+            | Command::TradesResendResponse
+            | Command::OrderBook
+            | Command::UI
+    )
+}
+
+#[inline]
+fn is_trades_stream_command(cmd: Command) -> bool {
+    matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
+}
+
 /// Возвращает `true` если пакет нужно дропнуть согласно ErrEmu.
 #[inline]
 fn err_emu_should_drop(cmd: u8) -> bool {
@@ -2760,6 +2779,18 @@ impl WriterRuntime<'_> {
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
+        let command = Command::from_byte(cmd);
+        if is_domain_push_command(command) && !self.client.domain_ready {
+            log::debug!(target: "moonproto::client",
+                "domain command {:?} skipped before InitDone/domain_ready", command);
+            return;
+        }
+        if is_trades_stream_command(command) && !self.client.has_trades_subscription_intent() {
+            log::warn!(target: "moonproto::client",
+                "unexpected {:?} received without all-trades subscription; packet dropped", command);
+            return;
+        }
+
         match mode {
             RunMode::Callback { on_data } => {
                 let mut sink = DispatchSink::Callback(on_data);
@@ -4384,6 +4415,14 @@ pub struct Client {
 }
 
 impl Client {
+    fn has_trades_subscription_intent(&self) -> bool {
+        self.subscription_registry
+            .lock()
+            .unwrap()
+            .trades_sub
+            .is_some()
+    }
+
     /// Create a client session from [`ClientConfig`].
     ///
     /// Construction does not contact the server. The socket, handshake, and
@@ -12002,6 +12041,7 @@ mod event_loop_fairness_tests {
     #[test]
     fn run_inner_executes_writer_runtime_on_dedicated_thread() {
         let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
         client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
         client
             .pending_reader_decoded
@@ -12124,8 +12164,134 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
+    fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
+        let mut client = Client::new(dummy_cfg());
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delivered_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |_, _| {
+                delivered_cb.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        for (idx, cmd) in [
+            Command::Order,
+            Command::Strat,
+            Command::Balance,
+            Command::TradesStream,
+            Command::TradesResendResponse,
+            Command::OrderBook,
+            Command::UI,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            client
+                .pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: cmd as u8,
+                    payload: Some(vec![idx as u8]),
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes: 10 + idx as u64,
+                    timestamp_ms: 100 + idx as i64,
+                    epoch: client.current_reader_epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: None,
+                    handshake_update: None,
+                });
+            WriterRuntime {
+                client: &mut client,
+            }
+            .drain_reader_decoded(100 + idx as i64, &mut mode);
+        }
+
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            0,
+            "Delphi ClientNewData drops domain pushes before InitDone/domain_ready"
+        );
+        assert_eq!(
+            client.total_recv, 91,
+            "transport receive side effects still happen before the domain gate"
+        );
+    }
+
+    #[test]
+    fn post_init_trades_stream_requires_explicit_subscription_intent() {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delivered_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |cmd, payload| {
+                assert_eq!(cmd, Command::TradesStream);
+                assert_eq!(payload, &[0xAA]);
+                delivered_cb.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::TradesStream as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: false,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(1, &mut mode);
+        assert_eq!(
+            delivered.load(Ordering::Relaxed),
+            0,
+            "optional-trades deviation: no API subscription means incoming trades are dropped"
+        );
+
+        client.subscribe_all_trades(false);
+        let _ = client.take_send_queues_for_test();
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::TradesStream as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 2,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: false,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(2, &mut mode);
+
+        assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn reader_decoded_sliced_payload_bypasses_recv_event_backlog() {
         let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
         let datagram_num = 77;
         client.slicer.lock().unwrap().receiving.insert(
             datagram_num,
@@ -12202,6 +12368,7 @@ mod event_loop_fairness_tests {
     #[test]
     fn reader_decoded_grouped_payload_applies_recv_effects_once() {
         let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
         let mut grouped = Vec::new();
         grouped.push(Command::UI as u8);
         grouped.extend_from_slice(&1u16.to_le_bytes());
@@ -12440,6 +12607,7 @@ mod service_cmd_tests {
     fn writer_polls_reader_decoded_without_wake_fifo() {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
+        client.testing_set_domain_ready(true);
         client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
         client.need_connect = false;
         client

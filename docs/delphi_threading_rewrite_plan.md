@@ -1346,3 +1346,26 @@ Still not done:
   `DataReadInt -> OnNewData`.
 - Order/Strat/Balance/Trades/OrderBook/UI command bodies still need the same
   block-by-block parity split against Delphi `ClientNewData`.
+
+### 2026-05-22 - Phase 1 partial: InitDone domain gate at ClientNewData boundary
+
+Done:
+
+- `WriterRuntime::client_new_data` now applies the Delphi `InitDone` /
+  `domain_ready` gate before either raw callback delivery or typed dispatcher
+  delivery.
+- Before `domain_ready`, `Order`, `Strat`, `Balance`, `TradesStream`,
+  `TradesResendResponse`, `OrderBook`, and `UI` packets are dropped. `API` and
+  transport service packets are not gated, because Init depends on Engine API.
+- `TradesStream` and `TradesResendResponse` now also require explicit
+  all-trades subscription intent in the registry. This is the accepted
+  author-decision deviation recorded in the root `DEVIATION.md`: unlike Delphi,
+  the Rust public library may run without all-trades.
+
+Still not done:
+
+- `client_new_data` still runs in the writer/orchestrator after
+  `pending_reader_decoded`, not inline in the reader thread as Delphi
+  `DataReadInt -> OnNewData`.
+- The per-command bodies under `ClientNewData` still need exact
+  block-by-block split and reverse-equivalence checks.
