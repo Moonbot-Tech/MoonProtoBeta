@@ -15,7 +15,7 @@
 //! - 10 — `TTriggerManageCommand`   (Sliced, Markets/Keys[])
 //! - 11 — `TResetProfitCommand`     (1 byte kind)
 //! - 12 — `TArbActivateNotify`      (TDateTime ArbValid)
-//! - 13 — `TSwitchDexCommand`       (ShortString[15] DexName, UK_DexSwitch, High)
+//! - 13 — `TSwitchDexCommand`       (ShortString\[15\] DexName, UK_DexSwitch, High)
 //! - 14 — `TSwitchSpotCommand`      (byte SpotIndex, UK_SpotSwitch, High)
 //!
 //! ## Замечание про ASCfg / ASCfg2
@@ -119,14 +119,15 @@ pub struct EmuTradePoint {
 /// settings.g_take_profit = 1.5;
 /// client.ui_send_settings(&settings);
 /// ```
-/// `uid` будет 0 — Client wrapper всё равно генерирует свой uid для отправки,
-/// поле `uid` в struct — это field используемый только в edge cases (явное
-/// проставление UID для dedup). Если не уверен — оставь 0 или `rand::random()`.
+/// `uid` will be `0` by default. The high-level `Client::ui_send_settings`
+/// wrapper generates a fresh wire UID and uses Delphi's fixed `UKey.UID = 1`
+/// for queue deduplication. Set this field only when using the low-level
+/// builder directly.
 #[derive(Debug, Clone, Default)]
 pub struct ClientSettingsCommand {
-    /// Уникальный идентификатор настройки. Обычно `0` (Client wrapper сам ставит
-    /// валидный uid при отправке); явно проставлять только когда нужен dedup
-    /// с конкретным UKey.
+    /// Wire command UID. Leave it as `0` when using `Client::ui_send_settings`;
+    /// the wrapper writes a fresh UID and uses the fixed Delphi settings UKey.
+    /// Set it manually only when using `build_client_settings` directly.
     pub uid: u64,
     // --- always present (v1+) ---
     pub x_sell: i32,
@@ -1028,7 +1029,7 @@ pub fn build_arb_activate_notify(uid: u64, arb_valid: f64) -> Vec<u8> {
     out
 }
 
-/// CmdId=13 `TSwitchDexCommand`. Передаются ровно 16 байт ShortString[15].
+/// CmdId=13 `TSwitchDexCommand`. Передаются ровно 16 байт ShortString\[15\].
 pub fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(27);
     write_header(&mut out, CMD_SWITCH_DEX, uid);

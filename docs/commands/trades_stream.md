@@ -87,6 +87,12 @@ Per fill (20 bytes):
   Flags      (1 byte): bit0=IsShort, bit1=IsOpen, bit2=IsTaker
 ```
 
+Public API: `TradeSection::WatcherFills` carries the section-level
+`market_index`, `user`, and raw `data` bytes. Use
+`TradeSection::watcher_fill_records()` or `parse_watcher_fills(data)` to decode
+the raw records into typed `WatcherFill` values (`time_delta_ms`, `price`, `qty`,
+`z_btc`, `position`, `order_type`, and flag helpers).
+
 ## Gap Detection
 
 PacketNum is monotonic (wraps at u16 max). Client tracks:

@@ -4,6 +4,12 @@ Arbitrage price updates arrive as `MPC_Balance` subcommand `6`. The public
 library parses the MoonProto envelope and decodes the compact kernel-to-client
 payload into price or isolation entries.
 
+The server sends this channel only to clients that are balance-subscribed. In
+the normal active-library flow this is handled by init: `connect_and_init` /
+`run_init_sequence` sends `UpdateMarketsList`, which enables balance-channel
+delivery on the Delphi server. A raw transport-only client that has not run init
+should not expect `Event::Arb` yet.
+
 ## EventDispatcher Path
 
 ```rust

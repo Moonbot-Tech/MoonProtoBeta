@@ -1,16 +1,17 @@
 //! # moonproto
 //!
-//! Rust клиент UDP-протокола MoonProto для серверов MoonBot (Delphi на VPS).
-//! Wire-format, криптография (AES-128-GCM + HMAC-CRC32C MAC), handshake, retry,
-//! slicing, ACK'и, PMTU discovery, и payload commands — byte-exact с Delphi
-//! референсом.
+//! Rust client for the MoonProto UDP protocol used by MoonBot servers.
+//! It ports the Delphi client behavior for the wire format, AES-128-GCM
+//! payload encryption, HMAC-CRC32C transport MAC, handshake, retry, slicing,
+//! ACK handling, PMTU discovery, and payload commands.
 //!
-//! `moonproto` — **active session manager**: transport reconnect, init-driven
-//! subscriptions/index fetch, orderbook full requests, trades gap recovery,
-//! pending API routing, NTP sync, candle chunk merging — всё внутри либы.
-//! До первого Init transport handshake (`Fine`) не шлёт Engine API. После
-//! единственного Init reconnect внутри той же `Client`-сессии сам восстанавливает
-//! свежие indexes для indexed streams и registry-подписки.
+//! `moonproto` is an **active session manager**. Transport reconnect,
+//! init-driven subscriptions and index fetches, orderbook full requests, trades
+//! gap recovery, pending Engine API routing, NTP sync, and candle chunk merging
+//! are owned by the library. Before the first Init, transport handshake
+//! readiness (`Fine`) does not send Engine API requests. After the single Init
+//! for a `Client` session, reconnect restores fresh indexes for indexed streams
+//! and registry subscriptions automatically.
 //!
 //! ## Quick Start
 //!
@@ -47,7 +48,7 @@
 //!     ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
 //! )?;
 //!
-//! // Long-running stream — типизированные events автоматически.
+//! // Long-running stream: typed events are produced automatically.
 //! client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
 //!     match event {
 //!         Event::Order(OrderEvent::Created(uid)) => println!("new order {uid}"),
@@ -70,6 +71,7 @@
 //! For common one-shot Engine API operations, use typed helpers such as
 //! [`Client::request_balance`], [`Client::request_hedge_mode`],
 //! [`Client::request_api_expiration_time`],
+//! [`Client::request_transfer_assets`],
 //! [`Client::request_coin_card_candles`], and
 //! [`Client::request_candles_data`]. They keep the client loop running, check
 //! the server status or channel completion, and parse or merge the response
@@ -87,7 +89,7 @@
 //! [`Client::run_until_response`], not direct `rx.recv_timeout(...)`; otherwise
 //! the client loop is stopped while the caller waits.
 //!
-//! Полные working examples — `examples/client_test.rs`, `examples/trading_flow.rs`,
+//! Working examples: `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
 //! `examples/api_expiration_time.rs`,
@@ -101,21 +103,21 @@
 //! `examples/multi_client_test.rs`,
 //! `examples/stress_client.rs`.
 //!
-//! ## Главные публичные модули
+//! ## Main Public Modules
 //!
 //! - [`client`] — [`Client`], `ClientConfig` builder, lifecycle, init sequence,
-//!   high-level команды.
-//! - [`events`] — [`EventDispatcher`] и типизированные [`Event`] values.
-//! - [`commands`] — wire-format builders/parsers для каналов протокола.
-//! - [`state`] — sync-state модели: Orders / OrderBooks / Trades / Balances /
+//!   and high-level commands.
+//! - [`events`] — [`EventDispatcher`] and typed [`Event`] values.
+//! - [`commands`] — wire-format builders and parsers for protocol channels.
+//! - [`state`] — sync-state models: Orders / OrderBooks / Trades / Balances /
 //!   Strats / Settings / Markets.
-//! - [`key_import`] — парсер base64 MoonBot exported key.
+//! - [`key_import`] — parser for base64 MoonBot exported keys.
 //! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
-//! - [`compression`] — SynLZ/DEFLATE helpers для wire-format.
+//! - [`compression`] — SynLZ/DEFLATE helpers for wire-format payloads.
 //!
-//! Зависит от [`moonproto_transport`] — низкоуровневый wire-layer (MAC,
-//! обфускация, headers, опциональная загрузка `moonext` для extended transport
-//! mode 1/2).
+//! Depends on [`moonproto_transport`] for the low-level wire layer: MAC,
+//! obfuscation, headers, and optional `moonext` loading for extended transport
+//! modes 1/2.
 
 mod api_pending;
 pub mod client;
@@ -129,10 +131,11 @@ pub mod protocol;
 pub mod state;
 
 pub use client::{
-    connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
-    EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    LifecycleEvent, RefreshConfig, TradeContextError,
+    connect_and_init, run_init_sequence, Client, ClientConfig, ClientSender, ConnectConfig,
+    ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
+    LifecycleEvent, RefreshConfig, SendPriority, SubscribeError, TradeContextError, UniqueKey,
 };
 pub use events::{Event, EventDispatcher, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};
+pub use protocol::Command;

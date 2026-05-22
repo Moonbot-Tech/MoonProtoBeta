@@ -73,36 +73,9 @@ pub enum BalanceEvent {
     EpochStale { incoming: u16, last: u16 },
 }
 
-/// DoS guard: верхний лимит количества market_name записей в `by_market`. Реальный
-/// бот видит сотни-тысячи маркетов; 20_000 — щедрый потолок. Враждебный сервер
-/// мог бы accumulate'ить unique market_names через incremental updates (cmd_id=4)
-/// → unbounded HashMap. См. `audit_robustness` C-3.
-///
-/// Cap применяется в `apply_incremental` (cmd_id=4). `apply_full_snapshot`
-/// (cmd_id=3) не нуждается в cap — full snapshot
-/// заменяет map целиком (любой DoS-flood сервера ограничен размером **одного**
-/// snapshot'а).
-pub const MAX_BALANCE_MARKETS: usize = 20_000;
-
 impl BalancesState {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// DoS guard insert: вставляет `BalanceItem` если cap не достигнут.
-    /// Возвращает true если вставлено, false если cap reached (skip + warn).
-    /// Existing key — всегда update (cap не нужен).
-    fn try_insert_balance(&mut self, item: BalanceItem) -> bool {
-        if !self.by_market.contains_key(&item.market_name)
-            && self.by_market.len() >= MAX_BALANCE_MARKETS
-        {
-            log::warn!(target: "moonproto::balances",
-                "BalancesState.by_market at MAX ({MAX_BALANCE_MARKETS}) — rejecting market='{}'",
-                item.market_name);
-            return false;
-        }
-        self.by_market.insert(item.market_name.clone(), item);
-        true
     }
 
     fn preserve_max_value(mut item: BalanceItem, previous_max_value: Option<f64>) -> BalanceItem {
@@ -123,12 +96,9 @@ impl BalancesState {
     fn insert_balance_mark_epoch(&mut self, item: BalanceItem, epoch: u16) -> bool {
         let item = self.prepare_item_for_apply(item);
         let market_name = item.market_name.clone();
-        if self.try_insert_balance(item) {
-            self.last_epoch_by_market.insert(market_name, epoch);
-            true
-        } else {
-            false
-        }
+        self.by_market.insert(market_name.clone(), item);
+        self.last_epoch_by_market.insert(market_name, epoch);
+        true
     }
 
     fn apply_incremental_item(&mut self, item: BalanceItem, epoch: u16) -> bool {
@@ -144,13 +114,28 @@ impl BalancesState {
     /// Epoch protection для incremental: `EpochIsOK` byte-exact с
     /// `MoonProtoFunc.pas:188-203`, применяется per-market как в Delphi.
     pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
+        self.apply_filtered(upd, |_| true)
+    }
+
+    /// Применить balance update только для market names, известных текущему списку
+    /// Markets. Это active-library путь, соответствующий Delphi
+    /// `Markets.MarketByNameFast(item.MarketName)`: unknown market не создаёт
+    /// отдельный balance entry.
+    pub(crate) fn apply_filtered<F>(
+        &mut self,
+        upd: BalanceUpdate,
+        is_known_market: F,
+    ) -> BalanceEvent
+    where
+        F: Fn(&str) -> bool,
+    {
         match upd.cmd_id {
             2 => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
             },
-            3 => self.apply_full_snapshot(upd),
-            4 => self.apply_incremental(upd),
+            3 => self.apply_full_snapshot(upd, &is_known_market),
+            4 => self.apply_incremental(upd, &is_known_market),
             _ => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
@@ -159,7 +144,10 @@ impl BalancesState {
     }
 
     /// Full snapshot (cmd_id=3): маркеты не в Items получают default (Delphi:1253-1275).
-    fn apply_full_snapshot(&mut self, upd: BalanceUpdate) -> BalanceEvent {
+    fn apply_full_snapshot<F>(&mut self, upd: BalanceUpdate, is_known_market: &F) -> BalanceEvent
+    where
+        F: Fn(&str) -> bool,
+    {
         self.global = GlobalBalance {
             btc_balance_total: upd.btc_balance_total,
             btc_balance_locked: upd.btc_balance_locked,
@@ -170,8 +158,11 @@ impl BalancesState {
         // Replace state — маркеты НЕ в snapshot сбрасываются в default.
         // Default для leverage_x = 1, остальные 0.
         let mut new_map: HashMap<String, BalanceItem> = HashMap::new();
-        let count = upd.items.len();
+        let mut count = 0;
         for it in upd.items {
+            if !is_known_market(&it.market_name) {
+                continue;
+            }
             let previous_max_value = new_map
                 .get(&it.market_name)
                 .map(|prev| prev.max_value)
@@ -184,6 +175,7 @@ impl BalancesState {
             self.last_epoch_by_market
                 .insert(it.market_name.clone(), upd.epoch);
             new_map.insert(it.market_name.clone(), it);
+            count += 1;
         }
         self.by_market = new_map;
         self.last_epoch = upd.epoch;
@@ -193,7 +185,10 @@ impl BalancesState {
         }
     }
 
-    fn apply_incremental(&mut self, upd: BalanceUpdate) -> BalanceEvent {
+    fn apply_incremental<F>(&mut self, upd: BalanceUpdate, is_known_market: &F) -> BalanceEvent
+    where
+        F: Fn(&str) -> bool,
+    {
         let global_changed = upd.global_changed;
         if global_changed {
             self.global = GlobalBalance {
@@ -205,6 +200,9 @@ impl BalancesState {
         }
         let mut count = 0;
         for it in upd.items {
+            if !is_known_market(&it.market_name) {
+                continue;
+            }
             if self.apply_incremental_item(it, upd.epoch) {
                 count += 1;
             }
@@ -401,6 +399,60 @@ mod tests {
             BalanceEvent::IncrementalApplied { count: 1, .. }
         ));
         assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 90.0);
+    }
+
+    #[test]
+    fn filtered_apply_ignores_unknown_markets_like_delphi() {
+        let mut s = BalancesState::new();
+
+        let ev = s.apply_filtered(
+            upd(
+                3,
+                1,
+                vec![make_item("BTCUSDT", 100.0), make_item("UNKNOWNUSDT", 200.0)],
+            ),
+            |name| name == "BTCUSDT",
+        );
+
+        assert!(matches!(
+            ev,
+            BalanceEvent::SnapshotApplied { count: 1, epoch: 1 }
+        ));
+        assert!(s.get("BTCUSDT").is_some());
+        assert!(s.get("UNKNOWNUSDT").is_none());
+
+        let ev = s.apply_filtered(
+            upd(
+                4,
+                2,
+                vec![make_item("ETHUSDT", 300.0), make_item("UNKNOWNUSDT", 400.0)],
+            ),
+            |name| name == "BTCUSDT" || name == "ETHUSDT",
+        );
+
+        assert!(matches!(
+            ev,
+            BalanceEvent::IncrementalApplied {
+                count: 1,
+                epoch: 2,
+                ..
+            }
+        ));
+        assert!(s.get("ETHUSDT").is_some());
+        assert!(s.get("UNKNOWNUSDT").is_none());
+    }
+
+    #[test]
+    fn incremental_accepts_more_than_former_rust_balance_cap() {
+        const FORMER_MAX_BALANCE_MARKETS: usize = 20_000;
+        let mut s = BalancesState::new();
+        for idx in 0..=FORMER_MAX_BALANCE_MARKETS {
+            let name = format!("M{idx}USDT");
+            s.apply(upd(4, idx as u16, vec![make_item(&name, idx as f64)]));
+        }
+
+        assert_eq!(s.len(), FORMER_MAX_BALANCE_MARKETS + 1);
+        assert!(s.get("M20000USDT").is_some());
     }
 
     #[test]

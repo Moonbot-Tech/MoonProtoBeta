@@ -8,12 +8,27 @@ cache ordering, full-snapshot recovery, and the applied current-book read model.
 
 ```rust
 client.subscribe_orderbook("BTCUSDT");
-client.subscribe_orderbook("ETHUSDT");
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
+client.unsubscribe_orderbook("ETHUSDT");
+client.unsubscribe_orderbooks(["SOLUSDT"]);
+client.unsubscribe_all_orderbooks();
 ```
 
 Subscriptions are stored in the client registry. Before Init, reconnect does not
 emit subscription traffic. After the one-time Init completes, reconnect replays
-the registry automatically and refetches indexes when needed.
+the registry automatically and refetches indexes when needed. Unsubscribe
+removes that market from the registry and sends `emk_UnsubscribeOrderBook` when
+the client loop is running.
+Use the batched helpers when a UI toggles several markets at once; they preserve
+one registry update and one batched Engine API request. Use
+`unsubscribe_all_orderbooks` to clear the registry and send the protocol's
+empty-market-list unsubscribe request.
+
+The public call queues the subscription intent locally. On the wire,
+`emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` are Engine API requests
+and their success or failure is reported as a later `Event::EngineResponse`.
+Orderbook snapshots and diffs then arrive asynchronously on the `MPC_OrderBook`
+stream.
 
 The server subscription is per market name. `OrderBookKind` is not part of the
 subscribe request; it is carried by incoming orderbook packets and by full-book

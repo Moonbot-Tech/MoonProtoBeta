@@ -46,16 +46,6 @@ thread_local! {
         std::cell::RefCell::new(Box::new([0u32; 4096]));
 }
 
-/// Maximum allowed output size for SynLZ decompression (DoS protection).
-///
-/// MoonProto-сообщения внутри Sliced ограничены ~384 KB (256 блоков × PMTU ≤ ~1.5 KB).
-/// Сжатые прикладные пакеты — единицы сотен KB максимум для реальной нагрузки.
-/// Лимит 1 MB закрывает burst-DoS vector: скомпрометированный сервер мог бы шлёт
-/// 100 pkt/sec с `out_size = 16 MB - 1` (под старым лимитом) → 1.6 GB/sec allocator
-/// thrash + zero-fill ~5 мс per 16 MB. Реалистичный потолок для MoonProto — ~512 KB,
-/// 1 MB даёт ×2 запас на будущие изменения. См. robustness audit C1.
-pub const MAX_SYNLZ_OUTPUT: usize = 1024 * 1024;
-
 /// Decompress SynLZ data. Returns decompressed bytes or None on error.
 ///
 /// **Byte-exact port** `mormot.core.base.pas:10636-10717 SynLZdecompress1passub`.
@@ -89,15 +79,6 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
         pos = 2;
         first_word as usize
     };
-
-    // DoS protection: cap decompressed size. Закрывает decompression-bomb vector
-    // когда скомпрометированный сервер отправляет header с гигантским out_size.
-    if out_size > MAX_SYNLZ_OUTPUT {
-        log::warn!(target: "moonproto::compression",
-            "synlz_decompress: out_size {} exceeds MAX_SYNLZ_OUTPUT {}, rejecting (DoS protection)",
-            out_size, MAX_SYNLZ_OUTPUT);
-        return None;
-    }
 
     let mut dst = vec![0u8; out_size];
 
@@ -467,5 +448,16 @@ mod tests {
         let decoded = synlz_decompress(&live_orderbook_payload)
             .expect("decompress must not depend on stale thread-local offsets");
         assert_eq!(decoded.len(), 63);
+    }
+
+    #[test]
+    fn synlz_decompress_has_no_rust_only_one_mb_cap() {
+        let plain = vec![0x5a; 1024 * 1024 + 1];
+        let compressed = synlz_compress(&plain);
+
+        let decoded = synlz_decompress(&compressed)
+            .expect("Delphi MPDecompress allocates DestSize without a 1 MiB cap");
+
+        assert_eq!(decoded, plain);
     }
 }

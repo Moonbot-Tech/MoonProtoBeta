@@ -73,10 +73,17 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
 - Detects trades gaps and sends `TradesResend` requests on periodic ticks.
 - Routes Engine API responses into one-shot `request_*` helpers or the
   `Receiver` returned by lower-level `api_*` calls.
+- Provides typed helpers for common Engine API reads including balances,
+  hedge mode, API-key expiration, transferable assets, and candles.
+- Provides registry-aware single, batched, and all-clear helpers for orderbook
+  subscriptions so reconnect restore follows the application's latest intent.
 - Queues events produced during one-shot waits in `EventDispatcher` so
   notifications are not lost while the helper owns the run loop.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
-- Runs the optional process-level NTP syncer when `ClientConfig::ntp_host` is set.
+- Runs the Delphi-style process-level NTP syncer by default with
+  `ClientConfig::new` (`pool.ntp.org`). Use `with_ntp_host` to override the
+  host, or `without_ntp` only for tests and tools that manage corrected time
+  themselves.
 - Aggregates chunked candle responses through `request_candles_data`.
 
 Applications use lifecycle events for UI status and alerting, not for recovery.

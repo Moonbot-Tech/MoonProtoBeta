@@ -20,6 +20,7 @@ use std::time::Duration;
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
+let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
@@ -49,11 +50,11 @@ UID is registered again.
 
 | Group | Methods |
 |---|---|
-| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_coin_card_candles` |
+| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
-| Orders | `api_cancel_all_orders` |
+| Orders | `api_get_order`, `api_get_open_orders`, `api_get_active_orders`, `api_cancel_all_orders` |
 | Account settings | `api_set_leverage(market, lev)`, `api_set_hedge_mode(bool)`, `api_query_hedge_mode`, `api_check_expiration_time` |
 | Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
 | Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
@@ -65,12 +66,15 @@ For subscriptions, prefer the registry-aware APIs:
 ```rust
 client.subscribe_all_trades(false);
 client.subscribe_orderbook("BTCUSDT");
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
+client.unsubscribe_all_orderbooks();
 ```
 
 Those APIs update the subscription registry. Before Init, transport handshakes
 do not replay registry state. After the one-time Init completes, reconnect
 restores registry-aware subscriptions automatically. Raw `api_subscribe_*` calls
-are useful for custom tools but do not update the subscription registry.
+and raw `api_unsubscribe_order_book(&[])` are useful for custom tools but do not
+update the subscription registry.
 
 ## Balance
 
@@ -120,6 +124,22 @@ as raw wrappers because their enum values exist in `TEngineMethodKind`. The
 current Delphi reference server has no request-handler branches for them and
 returns `Unknown method` (error 400).
 
+`api_update_transfer_assets` is a normal request/response Engine API call, not a
+fire-and-forget notification. Regular applications should use
+`request_transfer_assets`:
+
+```rust
+let assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
+for asset in assets {
+    println!("{} transferable={} total={}", asset.currency, asset.amount, asset.total);
+}
+```
+
+The typed parser is also available as
+`parse_update_transfer_assets_response`. The response payload is
+`count:i32 + count * (currency:string, amount:f64, total:f64)`, matching Delphi
+`Markets.FAssets[EKind]`.
+
 ## EngineResponse
 
 ```rust
@@ -135,6 +155,19 @@ pub struct EngineResponse {
 
 `data` is already DEFLATE-decompressed when the response was compressed on the
 wire.
+
+Transfer asset rows returned by `request_transfer_assets`:
+
+```rust
+pub struct TransferAsset {
+    pub currency: String,
+    pub amount: f64,
+    pub total: f64,
+}
+```
+
+`amount` is the transferable quantity; `total` is the exchange-reported total
+for the same asset row.
 
 ## Auto-Apply Through EventDispatcher
 

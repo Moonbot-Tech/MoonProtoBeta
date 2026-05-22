@@ -114,7 +114,7 @@ Single(f32)
 
 ## Sending Strategy Commands
 
-Prefer `Client` wrappers:
+Prefer `Client` wrappers when the caller owns the client thread:
 
 ```rust
 client.strat_snapshot_request();
@@ -122,6 +122,17 @@ client.strat_sell_price_update(strategy_id, sell_price);
 client.strat_delete(strategy_id, folder_path);
 client.strat_checked_sync(&items, true);
 client.strat_checked_echo(&items);
+```
+
+Use `ClientSender` for the same fire-and-forget strategy commands from UI or
+worker threads while `run_with_dispatcher` is active:
+
+```rust
+let sender = client.sender();
+std::thread::spawn(move || {
+    sender.strat_sell_price_update(strategy_id, sell_price);
+    sender.strat_checked_sync(&items, true);
+});
 ```
 
 For normal active-library flow, set the local list before init and let the

@@ -273,8 +273,8 @@ pub enum ApplyResult {
     OrderNotFound,
     /// Команда не относится к Orders state (например, AllStatusesRequest от клиента).
     NotApplicable,
-    /// Создание нового entry отвергнуто — `map.len() >= MAX_ORDERS` (DoS защита).
-    /// Существующие entries обновляются без cap-check.
+    /// Зарезервировано для обратной совместимости старых match-выражений.
+    /// Текущий Delphi-parity state не отбрасывает новые ордера по внутреннему cap.
     Rejected,
 }
 
@@ -314,18 +314,6 @@ impl From<&Order> for TradeCtx {
         order.trade_ctx()
     }
 }
-
-/// Верхний лимит количества активных ордеров в state. При попытке вставить
-/// новый uid когда `map.len() >= MAX_ORDERS` — insert отвергается с warn-логом.
-/// Защита от DoS / OOM в случае:
-///   - враждебный/скомпрометированный сервер шлёт поток `TOrderStatus` с
-///     уникальными uid'ами (35 MB/sec при 50K msg/sec);
-///   - сервер забыл прислать терминальный статус и ордера накапливаются;
-///   - очень долгая сессия с десятками тысяч ордеров.
-///
-/// Реальный бот держит сотни-единицы тысяч активных ордеров; 50_000 — щедрый
-/// запас. См. `audit_robustness` C-1.
-pub const MAX_ORDERS: usize = 50_000;
 
 /// Главная коллекция ордеров.
 ///
@@ -398,13 +386,6 @@ impl Orders {
                 let new_flag = self.current_snapshot_flag;
                 for st in &snap.orders {
                     let order_uid = st.epoch_header.market.base.uid;
-                    // DoS guard (audit_robustness C-1): cap при создании новых
-                    // entries. Существующие uid'ы — update пропускаем без cap-check.
-                    if !self.map.contains_key(&order_uid) && self.map.len() >= MAX_ORDERS {
-                        log::warn!(target: "moonproto::orders",
-                            "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting snapshot uid={order_uid}");
-                        continue;
-                    }
                     let entry = self
                         .map
                         .entry(order_uid)
@@ -421,19 +402,6 @@ impl Orders {
                     // Inc snapshot flag — это новый ордер из live update'а.
                 }
                 let new_order = !self.map.contains_key(&uid);
-                // DoS guard (audit_robustness C-1): cap новых ордеров. Update
-                // existing — пропускаем без cap-check.
-                if new_order && self.map.len() >= MAX_ORDERS {
-                    log::warn!(target: "moonproto::orders",
-                        "Orders.map at MAX_ORDERS ({MAX_ORDERS}) — rejecting new uid={uid}");
-                    return (
-                        ApplyResult::Rejected,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::Rejected,
-                        },
-                    );
-                }
                 let entry = self
                     .map
                     .entry(uid)
@@ -1125,5 +1093,24 @@ mod tests {
 
         let missing = orders.missing_after_snapshot();
         assert_eq!(missing, vec![2]);
+    }
+
+    #[test]
+    fn accepts_more_than_former_rust_order_cap() {
+        const FORMER_MAX_ORDERS: u64 = 50_000;
+        let mut orders = Orders::new();
+        for uid in 1..=FORMER_MAX_ORDERS + 1 {
+            let (res, ev) = orders.apply(order_status_cmd(make_status(
+                uid,
+                "X",
+                OrderWorkerStatus::BuySet,
+                1,
+            )));
+            assert_eq!(res, ApplyResult::Applied);
+            assert!(matches!(ev, OrderEvent::Created(id) if id == uid));
+        }
+
+        assert_eq!(orders.len(), (FORMER_MAX_ORDERS + 1) as usize);
+        assert!(orders.get(FORMER_MAX_ORDERS + 1).is_some());
     }
 }

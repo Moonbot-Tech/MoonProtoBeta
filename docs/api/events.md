@@ -120,7 +120,7 @@ directly to its callback.
 |---|---|
 | `Order` | Parses `TradeCommand`, applies `Orders`, emits `Event::Order`. |
 | `OrderBook` | Drops until market indexes are synchronized, applies `OrderBooks`, emits one or more `Event::OrderBook`. |
-| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` / `GapDetected` / `Duplicate` / `OutOfOrder` / `GapFilled` / `BucketClosed`). Duplicate packets also emit `Apply` for their payload. |
+| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` plus diagnostic gap/duplicate/out-of-order events). Duplicate packets also emit `Apply` for their payload. |
 | `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Apply` after `OutOfOrder`. |
 | `Balance` | Applies balance subcommands `2/3/4`; subcommand `6` becomes typed `Event::Arb`. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. |
@@ -145,6 +145,6 @@ normal applications, prefer `Client::run_with_dispatcher`.
 ## Trades Tick
 
 `tick_trades` and `tick_trades_with_events` are low-level hooks for custom loops.
-`Client::run_with_dispatcher` calls the tick automatically about every 100 ms and
-emits tick-generated `BucketClosed` diagnostics through the normal
-`Event::Trade(...)` callback.
+`Client::run_with_dispatcher` calls the tick automatically about every 100 ms.
+Gap lifecycle events are diagnostics for logging/telemetry; the library performs
+recovery without requiring the application to react to them.

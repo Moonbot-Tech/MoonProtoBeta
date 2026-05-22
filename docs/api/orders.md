@@ -118,10 +118,6 @@ pub enum OrderEvent {
 }
 ```
 
-`ApplyResult::Rejected` means the DoS/OOM guard rejected a new order because the
-state already contains `MAX_ORDERS` entries. Updates for existing orders are not
-blocked by that guard.
-
 ## Time Correction
 
 Order timestamps arrive as Delphi `TDateTime` values in server-local time. The

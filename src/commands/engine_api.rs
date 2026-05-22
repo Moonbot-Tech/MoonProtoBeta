@@ -1,4 +1,6 @@
-/// MPC_API (Engine RPC) — byte-exact port of MoonProtoEngineStruct.pas.
+/// `MPC_API` Engine RPC helpers.
+///
+/// This module is a byte-exact port of Delphi `MoonProtoEngineStruct.pas`.
 /// Source: MoonProtoEngineStruct.pas:364-403 (TEngineResponse.CreateFromStream)
 ///
 /// Request: client → server (CmdId=002)
@@ -11,44 +13,40 @@ use flate2::read::DeflateDecoder;
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 
-/// Engine RPC method identifiers — 31 метод торгового API.
+/// Engine RPC method identifiers.
 ///
-/// Каждый метод имеет соответствующий builder в [`super::engine_request`] (например,
-/// `build_engine_request` + специализированные функции) и Client-обёртку
-/// `Client::api_<method>()` (см. `moonproto::client::Client`). Большинство возвращают
-/// `mpsc::Receiver<EngineResponse>` для async-обработки через pending registry.
+/// Each method has a corresponding builder in [`super::engine_request`] and a
+/// `Client::api_*` wrapper. Most wrappers return an `mpsc::Receiver<EngineResponse>`
+/// for asynchronous handling through the pending-response registry.
 ///
-/// **Формат `EngineResponse::data`** различается per-метод — описан рядом с каждым
-/// variant'ом ниже. Парсеры для специфичных форматов — в соответствующих модулях
-/// (`commands::markets`, `commands::candles`, `commands::orders`).
+/// `EngineResponse::data` is method-specific. Method-specific parsers live next
+/// to the related protocol module, for example `commands::market`,
+/// `commands::candles`, or this module for small scalar responses.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineMethod {
-    /// Нулевой/неизвестный метод. Возвращается из `from_byte` при unknown id (server
-    /// прислал метод которого нет в порте — server-side extension).
+    /// Empty or unknown method. `from_byte` maps unknown server-side extensions
+    /// here after logging a warning.
     None = 0,
-    /// `BaseCheck` — sanity check связи с engine. Без параметров. Ответ: success/fail
-    /// без data. Обычно вызывается первым после Authenticated.
+    /// `BaseCheck`: engine health and server-identity check.
     BaseCheck = 1,
-    /// `AuthCheck` — проверка прав API-ключа на бирже (ping биржевого API через engine).
-    /// Без параметров. Ответ: success если ключи валидны.
+    /// `AuthCheck`: exchange API-key authorization check.
     AuthCheck = 2,
-    /// `GetMarketsList` — список всех торгуемых рынков (для futures+spot). Без параметров.
-    /// Ответ: data содержит `TMarket` записи в формате
-    /// [`commands::markets::parse_markets_list_response`].
+    /// `GetMarketsList`: full list of tradable markets.
+    ///
+    /// The response contains market records parsed by
+    /// [`crate::commands::market::parse_markets_list_response`].
     GetMarketsList = 3,
-    /// `UpdateMarketsList` — запросить дельту изменений рынков с последнего вызова.
-    /// Ответ парсится тем же [`commands::markets::parse_markets_list_response`].
-    /// Используется для инкрементальной синхронизации больших списков (deflate compressed).
+    /// `UpdateMarketsList`: refresh market prices, funding, mark price, and
+    /// correlation prices.
     UpdateMarketsList = 4,
-    /// `GetMarketsIndexes` — компактный mapping `market_name → market_index` (u16).
-    /// Без параметров. Ответ: пары strings+indexes, используется в TradesStream для
-    /// декодирования market_index в имя.
+    /// `GetMarketsIndexes`: compact server `mIndex -> market name` mapping used
+    /// by indexed streams.
     GetMarketsIndexes = 5,
-    /// `GetBalance` — текущий баланс по конкретной валюте. Параметр: `currency` (string).
-    /// Ответ: one Delphi `Double`, parse with [`parse_get_balance_response`].
+    /// `GetBalance`: current quantity for one currency. Parse with
+    /// [`parse_get_balance_response`].
     GetBalance = 6,
-    /// `GetMarketsBalanceFull` — server-side full balance refresh. Без параметров.
+    /// `GetMarketsBalanceFull`: server-side full balance refresh.
     ///
     /// Current Delphi `MoonProtoEngineServer.pas → ProcessRequest` calls
     /// `Engine.GetMarketsBalanceFull`, but the response writer is still a TODO
@@ -71,71 +69,54 @@ pub enum EngineMethod {
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method` (error 400).
     GetActiveOrders = 10,
-    /// `CancelAllOrders` — отменить все открытые ордера. Без параметров. Опасная команда.
+    /// `CancelAllOrders`: cancel all open orders.
     CancelAllOrders = 11,
-    /// `SetLeverage` — установить leverage для рынка. Параметры: `market` (string),
-    /// `new_lev` (i32). Не все биржи поддерживают.
+    /// `SetLeverage`: set leverage for one market.
     SetLeverage = 12,
-    /// `SetHedgeMode` — включить/выключить hedge mode (Binance Futures). Параметр: bool.
+    /// `SetHedgeMode`: enable or disable hedge mode.
     SetHedgeMode = 13,
-    /// `QueryHedgeMode` — текущий статус hedge mode. Без параметров.
-    /// Ответ: one Delphi `Boolean`, parse with [`parse_query_hedge_mode_response`].
+    /// `QueryHedgeMode`: current hedge-mode flag. Parse with
+    /// [`parse_query_hedge_mode_response`].
     QueryHedgeMode = 14,
-    /// `CheckAPIExpirationTime` — срок действия API ключа на бирже. Без параметров.
-    /// Ответ: one Delphi `TDateTime` double, parse with
+    /// `CheckAPIExpirationTime`: exchange API-key expiration as a Delphi
+    /// `TDateTime`, parsed by
     /// [`parse_api_expiration_time_response`].
     CheckAPIExpirationTime = 15,
-    /// `CheckBinanceTags` — verification Binance API tags (futures permissions, etc.).
-    /// Specific Binance debug. Без параметров.
+    /// `CheckBinanceTags`: Binance token permission tags.
     CheckBinanceTags = 16,
-    /// `TradesResend` — запросить повторную отправку trades batch'ей по номерам пакетов.
-    /// Параметры: массив `packet_nums` (u16). Используется для gap recovery в TradesStream.
-    /// См. [`commands::trades_stream`] gap detection.
+    /// `TradesResend`: request resend for missing TradesStream packet numbers.
     TradesResend = 17,
-    /// `SubscribeAllTrades` — подписаться на весь поток сделок. Без параметров. После
-    /// этого сервер начинает слать `MPC_TradesStream` пакеты. Обычно вызывается на
-    /// `LifecycleEvent::Authenticated`.
+    /// `SubscribeAllTrades`: subscribe to the all-trades stream.
     SubscribeAllTrades = 18,
-    /// `UnsubscribeAllTrades` — отписаться. После — TradesStream больше не приходит.
+    /// `UnsubscribeAllTrades`: unsubscribe from the all-trades stream.
     UnsubscribeAllTrades = 19,
-    /// `SubscribeOrderBook` — подписаться на orderbook конкретных рынков. Параметр:
-    /// массив `markets` (strings). После — приходят `MPC_OrderBook` пакеты (Full
-    /// snapshot + Diff'ы).
+    /// `SubscribeOrderBook`: subscribe to orderbooks for market names.
     SubscribeOrderBook = 20,
-    /// `UnsubscribeOrderBook` — отписаться от orderbook. Параметр: массив рынков.
+    /// `UnsubscribeOrderBook`: unsubscribe from orderbooks for market names.
     UnsubscribeOrderBook = 21,
-    /// `RequestOrderBookFull` — запросить полный snapshot orderbook'а конкретного рынка.
-    /// Параметры: `market_idx` (u16), `book_kind` (u8). Используется при gap recovery
-    /// (потеря Diff пакетов → запрос Full для пересинхронизации).
+    /// `RequestOrderBookFull`: request a full snapshot for one indexed orderbook.
     RequestOrderBookFull = 22,
-    /// `ReloadOrderBook` — принудительно пересоздать все подписанные order books. Без
-    /// параметров. Сервер пришлёт свежие snapshot'ы.
+    /// `ReloadOrderBook`: force reload of subscribed orderbooks.
     ReloadOrderBook = 23,
-    /// `RequestCandlesData` — запросить исторические свечи для рынка/таймфрейма.
-    /// Ответ — **chunked** (несколько `EngineResponse` пакетов с одним и тем же UID).
-    /// Pending registry не подходит — используй обычный `on_data` callback +
-    /// [`commands::candles::CandlesAggregator::on_chunk`] для сборки.
+    /// `RequestCandlesData`: request full historical candle data.
+    ///
+    /// The response is chunked: multiple `EngineResponse` packets share one UID.
+    /// Prefer `Client::request_candles_data` or `Client::api_request_candles_data_async`.
     RequestCandlesData = 24,
-    /// `ChangePositionType` — сменить тип позиции (isolated ↔ cross). Параметры:
-    /// `market` (string), `pos_type` (u8 — 0=isolated, 1=cross), `new_market` (bool).
+    /// `ChangePositionType`: change isolated/cross position type for a market.
     ChangePositionType = 25,
-    /// `ConvertDustBNB` — Binance-specific: конвертировать пыль на BNB. Без параметров.
+    /// `ConvertDustBNB`: convert dust balances to BNB.
     ConvertDustBNB = 26,
-    /// `ConfirmRiskLimit` — подтвердить risk limit для рынка (Bybit-specific обычно).
-    /// Параметр: `market` (string).
+    /// `ConfirmRiskLimit`: confirm risk limit for a market.
     ConfirmRiskLimit = 27,
-    /// `SetMAMode` — Multi-Assets mode (Binance Futures: разрешить использовать USDT,
-    /// USDC и BFUSD как залог). Параметр: bool.
+    /// `SetMAMode`: enable or disable Binance Multi-Assets mode.
     SetMAMode = 28,
-    /// `DoTransferAsset` — перевод актива между sub-account'ами / wallet'ами биржи.
-    /// Параметры: `asset` (string), `qty` (f64), `from` (u8 — wallet id), `to` (u8).
+    /// `DoTransferAsset`: transfer one asset between exchange wallet kinds.
     DoTransferAsset = 29,
-    /// `UpdateTransferAssets` — пересчитать список доступных для перевода активов.
-    /// Параметр: `kind` (u8 — направление перевода).
+    /// `UpdateTransferAssets`: refresh the transferable asset list for one
+    /// exchange wallet kind. Parse with [`parse_update_transfer_assets_response`].
     UpdateTransferAssets = 30,
-    /// `GetCoinCardCandles` — короткая история свечей для coin-card UI компонента.
-    /// Параметры: `market` (string), `ticks` (DeepHistoryKind enum). Использует
-    /// специализированный парсер [`commands::candles::parse_coin_card_candles_response`].
+    /// `GetCoinCardCandles`: short candle history for a coin-card UI component.
     GetCoinCardCandles = 31,
 }
 
@@ -208,15 +189,22 @@ mod tests {
     }
 }
 
-/// Parsed Engine Response (server → client)
+/// Parsed Engine API response (`TEngineResponse`, server to client).
 #[derive(Debug, Clone)]
 pub struct EngineResponse {
+    /// UID of the original `TEngineRequest`.
     pub request_uid: u64,
+    /// Engine method echoed by the server.
     pub method: EngineMethod,
+    /// Server success flag.
     pub success: bool,
+    /// Server error code when `success == false`.
     pub error_code: i32,
+    /// Server error message when `success == false`.
     pub error_msg: String,
-    pub data: Vec<u8>, // decompressed response payload
+    /// Method-specific response payload, already DEFLATE-decompressed when the
+    /// wire response was compressed.
+    pub data: Vec<u8>,
 }
 
 /// Parse TEngineResponse from command payload.
@@ -434,6 +422,71 @@ pub fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTi
     Some(ApiExpirationTime::from_delphi_time(f64::from_le_bytes(
         data[0..8].try_into().unwrap(),
     )))
+}
+
+/// One transferable asset row returned by `emk_UpdateTransferAssets`.
+///
+/// Delphi source:
+/// `MoonProtoEngineServer.pas` writes `Currency`, `Ammount`, and `Total` from
+/// `TAssetItem`; `MoonProtoEngine.pas` reads the same fields back into
+/// `Markets.FAssets[EKind]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransferAsset {
+    /// Asset symbol, for example `"USDT"` or `"BTC"`.
+    pub currency: String,
+    /// Transferable amount reported by the exchange.
+    ///
+    /// The field name in Delphi is `Ammount`; Rust exposes the corrected
+    /// spelling while preserving the wire meaning.
+    pub amount: f64,
+    /// Total balance reported for this transfer asset.
+    pub total: f64,
+}
+
+/// Parse `EngineResponse.data` for `emk_UpdateTransferAssets`
+/// (`EngineMethod::UpdateTransferAssets`).
+///
+/// Wire format:
+///
+/// ```text
+/// count: i32 LE
+/// items[count]:
+///   currency: string (u16 length + UTF-8)
+///   amount:   f64 LE
+///   total:    f64 LE
+/// ```
+pub fn parse_update_transfer_assets_response(data: &[u8]) -> Option<Vec<TransferAsset>> {
+    let mut pos = 0usize;
+    if data.len() < 4 {
+        return None;
+    }
+    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+    pos += 4;
+    if count_raw < 0 {
+        log::warn!(target: "moonproto::engine_api",
+            "UpdateTransferAssets: negative count {} rejected",
+            count_raw);
+        return None;
+    }
+
+    let count = count_raw as usize;
+    let mut assets = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let currency = read_string(data, &mut pos)?;
+        if pos + 16 > data.len() {
+            return None;
+        }
+        let amount = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        assets.push(TransferAsset {
+            currency,
+            amount,
+            total,
+        });
+    }
+    Some(assets)
 }
 
 // =============================================================================
@@ -968,6 +1021,53 @@ mod parse_engine_response_tests {
         let unknown = ApiExpirationTime::from_delphi_time(0.0);
         assert!(!unknown.is_known());
         assert_eq!(unknown.system_time(), None);
+    }
+
+    #[test]
+    fn parse_update_transfer_assets_response_reads_delphi_rows() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(2i32).to_le_bytes());
+        data.extend_from_slice(&(4u16).to_le_bytes());
+        data.extend_from_slice(b"USDT");
+        data.extend_from_slice(&(12.5f64).to_le_bytes());
+        data.extend_from_slice(&(100.0f64).to_le_bytes());
+        data.extend_from_slice(&(3u16).to_le_bytes());
+        data.extend_from_slice(b"BTC");
+        data.extend_from_slice(&(0.25f64).to_le_bytes());
+        data.extend_from_slice(&(1.0f64).to_le_bytes());
+
+        let parsed = parse_update_transfer_assets_response(&data).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                TransferAsset {
+                    currency: "USDT".to_string(),
+                    amount: 12.5,
+                    total: 100.0,
+                },
+                TransferAsset {
+                    currency: "BTC".to_string(),
+                    amount: 0.25,
+                    total: 1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_update_transfer_assets_response_rejects_bad_payloads() {
+        assert_eq!(parse_update_transfer_assets_response(&[]), None);
+        assert_eq!(
+            parse_update_transfer_assets_response(&(-1i32).to_le_bytes()),
+            None
+        );
+
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&(1i32).to_le_bytes());
+        truncated.extend_from_slice(&(4u16).to_le_bytes());
+        truncated.extend_from_slice(b"USDT");
+        truncated.extend_from_slice(&(12.5f64).to_le_bytes());
+        assert_eq!(parse_update_transfer_assets_response(&truncated), None);
     }
 
     #[test]

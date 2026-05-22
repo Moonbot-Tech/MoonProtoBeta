@@ -93,12 +93,15 @@ let sender = session.client.sender();
 ui_thread.spawn(move || {
     sender.subscribe_orderbook("BTCUSDT");
     sender.subscribe_all_trades(false);
+    sender.balance_request_refresh();
 });
 ```
 
 These subscriptions are per-client. Before Init, reconnect is transport-only.
 After each client's one-time Init completes, reconnect replays that client's
-registry automatically.
+registry automatically. Typed sender wrappers for trade, UI, strategy, and
+balance commands append into that client's own Delphi-style send queues, so a
+command sent through one session cannot leak into another connection.
 
 ## Exchange Type Flags
 

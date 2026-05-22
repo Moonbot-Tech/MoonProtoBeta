@@ -78,11 +78,12 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
-User/API sends and subscription intents use a separate unbounded app→main FIFO
-from accepted UDP packets. This matches Delphi `SendCmdInt` queues: dense
-incoming streams cannot keep user commands or Engine API requests behind the
-reader backlog, and there is no local capacity cap that drops accepted packets
-or queued sends.
+User/API sends append directly to the client's unbounded Delphi-style
+`DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
+packets and app/control events. Subscription intents still use a small
+app-to-main control FIFO because they mutate the reconnect registry before
+emitting wire commands. The public guarantee is no local capacity cap: dense
+incoming streams do not drop queued user commands or Engine API requests.
 
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`:
@@ -186,10 +187,11 @@ request. If `client.mark_server_update_sent()` was called before init, the next
 
 Domain pushes received before init completion are ignored, matching the Delphi
 `InitDone` gate. Once init succeeds, the helper sends the Delphi post-init
-refresh set: order snapshot request, strategy snapshot reply if a provider is
-registered, settings request, MM-orders subscription state, and balance refresh
-request. If no strategy provider is registered, init queues a
-`SnapshotRequested` event for a manual fresh reply. Set
+refresh set: order snapshot request, strategy snapshot reply from the
+dispatcher-owned strategy list, settings request, MM-orders subscription state,
+and balance refresh request. If no strategy provider is registered, the
+dispatcher sends the current local strategy list; an empty list is a valid
+reply. `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value independent from `subscribe_trades`.
 
@@ -222,6 +224,7 @@ For common one-shot reads, prefer typed request helpers:
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
+let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
@@ -328,7 +331,10 @@ Use registry-aware methods:
 ```rust
 client.subscribe_all_trades(false);
 client.subscribe_orderbook("BTCUSDT");
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
 client.unsubscribe_orderbook("BTCUSDT");
+client.unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
+client.unsubscribe_all_orderbooks();
 client.unsubscribe_all_trades();
 ```
 
@@ -338,26 +344,64 @@ the registry automatically, so streams continue without the application running
 Init again.
 Orderbook subscriptions are per market name; incoming events carry `book_kind`
 so the application can render futures and spot books separately.
+The batched orderbook helpers update the same registry and send one
+`emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` request for the changed
+market names. Use `unsubscribe_all_orderbooks` instead of raw
+`api_unsubscribe_order_book(&[])` when clearing the UI selection: the raw
+Engine API call does not update the reconnect registry.
 
 For UI threads, clone a `ClientSender`:
 
 ```rust
 let sender = client.sender();
 std::thread::spawn(move || {
-    sender.subscribe_orderbook("ETHUSDT");
+    sender.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
 });
 ```
 
-Fire-and-forget methods enqueue into an unbounded internal FIFO, matching the
-Delphi client queues: subscriptions and trading/API intents are not dropped by
-a local capacity cap. Use `try_*` methods when the UI needs explicit feedback
-that the client loop is still alive:
+Fire-and-forget command methods append into the same unbounded send queues as
+`Client::send_cmd`. Subscription methods enqueue control intents first, then the
+client loop updates the registry and appends the resulting wire commands into
+those send queues. Neither path has a local capacity cap. Use `try_*` methods
+when the UI needs explicit feedback that the client is still alive:
 
 ```rust
 match client.sender().try_subscribe_orderbook("BTCUSDT") {
     Ok(()) => {}
     Err(err) => eprintln!("subscribe failed: {err:?}"),
 }
+```
+
+`ClientSender` mirrors the fire-and-forget typed command wrappers for
+subscriptions, trade actions, UI commands, strategy commands, and balance
+refresh. Use it when another UI or worker thread needs to send commands while
+the owning thread is inside `run_with_dispatcher`:
+
+```rust
+let sender = client.sender();
+std::thread::spawn(move || {
+    sender.replace_order(ctx, "BTCUSDT", OrderType::Sell, 50100.0);
+    sender.ui_mm_subscribe(true);
+    sender.strat_sell_price_update(strategy_id, 49900.0);
+    sender.balance_request_refresh();
+});
+```
+
+The sender also exposes raw `send_cmd`, `send_cmd_keyed`, and
+`send_api_request` methods for tools that already have a serialized payload
+from `commands::*` builders. `send_api_request` is fire-and-forget: it does not
+register a pending receiver, so the response is delivered through the running
+dispatcher as `Event::EngineResponse`.
+
+```rust
+use moonproto::{Command, SendPriority};
+use moonproto::commands::engine_request;
+
+let sender = client.sender();
+sender.send_api_request(engine_request::check_binance_tags());
+
+let raw = build_custom_ui_payload();
+sender.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
 ```
 
 ## Periodic Refresh

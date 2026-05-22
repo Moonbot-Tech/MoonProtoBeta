@@ -54,7 +54,7 @@ to react to every later settings update.
 
 ## Sending UI Commands
 
-Prefer `Client` methods:
+Prefer `Client` methods when the caller owns the client thread:
 
 ```rust
 client.ui_settings_request();
@@ -73,9 +73,24 @@ client.ui_switch_dex("Main");
 client.ui_switch_spot(0);
 ```
 
-`ui_mm_subscribe` records the latest MM-orders intent in the client registry.
-Before Init, reconnect does not replay that flag. After the one-time Init
-completes, reconnect restores the latest MM-orders intent automatically.
+When the UI sends commands from another thread while the client loop is running,
+clone `client.sender()` and call the same fire-and-forget UI wrappers on
+`ClientSender`:
+
+```rust
+let sender = client.sender();
+std::thread::spawn(move || {
+    sender.ui_mm_subscribe(true);
+    sender.ui_update_version("", true);
+    sender.ui_switch_dex("Main");
+});
+```
+
+`ui_mm_subscribe` is registry-aware: it first queues a control intent, the
+client loop records the latest MM-orders value in the reconnect registry, then
+appends the wire `TMMOrdersSubscribeCommand` to the High send queue. Before Init,
+reconnect does not replay that flag. After the one-time Init completes,
+reconnect restores the latest MM-orders intent automatically.
 
 ### Version Update
 
@@ -134,17 +149,20 @@ use moonproto::commands::ui::{AS_CFG_SIZE, AS_CFG2_SIZE};
 
 ## Unique Keys
 
-The high-level wrappers set the correct UKey behavior internally:
+The high-level wrappers set the same UKey behavior as the Delphi command
+objects:
 
 | Command | UKey behavior |
 |---|---|
-| `ui_send_settings` | `UK_BaseUISettings` |
-| `ui_mm_subscribe` | `UK_TurnMMDetection` |
-| `ui_lev_manage` | `UK_LevManageSettings` |
-| `ui_switch_dex` | `UK_DexSwitch` |
-| `ui_switch_spot` | `UK_SpotSwitch` |
+| `ui_send_settings` | `UK_BaseUISettings` with fixed `UKey.UID = 1`; only the latest pending settings snapshot is kept. |
+| `ui_lev_manage` | `UK_LevManageSettings` with fixed `UKey.UID = 1`; only the latest pending leverage-management snapshot is kept. |
+| `ui_mm_subscribe` | `UK_TurnMMDetection` with the command's fresh wire UID; live rapid subscribe/unsubscribe commands do not collapse into one local slot. The client registry still remembers the latest desired value for reconnect restore. |
+| `ui_switch_dex` | `UK_DexSwitch` with the command's fresh wire UID; switch commands do not collapse into one local slot. |
+| `ui_switch_spot` | `UK_SpotSwitch` with the command's fresh wire UID; switch commands do not collapse into one local slot. |
 
-Rapid repeated sends for the same UKey collapse to the latest pending intent.
+This distinction matters because Delphi only overrides `SetUKey` for settings
+and leverage-management snapshots here. `MMOrders`, DEX, and Spot commands carry
+a unique command UID even though they have a non-`None` UKey kind.
 
 ## Low-Level Parsing
 

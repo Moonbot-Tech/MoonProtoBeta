@@ -105,7 +105,7 @@ pub enum TradesEvent {
     Duplicate,
     /// Пакет пришёл вне диапазона — может быть после reset, отображает packet_num.
     OutOfOrder { packet_num: u16 },
-    /// Принят out-of-order пакет, который был помечен в одном из gap-bucket'ов (recvd[i]=true).
+    /// Принят out-of-order пакет, который был помечен в одном из gap-bucket'ов (`recvd[i]=true`).
     GapFilled {
         packet_num: u16,
         bucket_seq_range: (u16, u16),

@@ -112,6 +112,36 @@ let items = [
 client.set_immune(rand::random(), &items);
 ```
 
+## Sending While The Client Is Running
+
+`Client` trade wrappers take `&self`, but the long-running pump methods take
+`&mut self` for the duration of the run tick. If a terminal sends commands from
+another UI thread while `run_with_dispatcher` is active, clone
+`client.sender()` before entering the run loop.
+
+`ClientSender` mirrors the fire-and-forget high-level trade wrappers, so UI code
+does not need to know wire priorities, retry counts, encryption flags, or UKey
+details:
+
+```rust
+let sender = client.sender();
+
+std::thread::spawn(move || {
+    sender.replace_order(ctx, "BTCUSDT", OrderType::Sell, 50100.0);
+    sender.cancel_tracked_order(&order);
+    sender.update_vstop(ctx, "BTCUSDT", vstop_params);
+});
+```
+
+One-shot helpers that must wait for an applied state change, such as
+`request_order_snapshot`, still require mutable access to `Client` and an
+`EventDispatcher` because they pump the UDP loop while waiting.
+
+Raw `ClientSender::send_cmd` / `send_cmd_keyed` remain available for advanced
+tools that intentionally build custom payloads with `commands::*`. These calls
+append directly into the client's Delphi-style send queues; they do not wait
+behind accepted UDP packets or subscription-control events.
+
 ## UKey Dedup
 
 Commands with the same UKey replace older pending commands in the client queues,

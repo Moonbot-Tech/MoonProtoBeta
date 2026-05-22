@@ -1,15 +1,18 @@
-//! Sync state модели — авто-применение входящих команд.
+//! Read models maintained by `EventDispatcher`.
 //!
-//! Каждый канал MoonProto имеет соответствующий sync state:
-//! - `Orders` → MPC_Order (TBaseTradeCommand sync state machine).
-//! - `Strats` → MPC_Strat (TBaseStratCommand).
-//! - `Balances` → MPC_Balance.
-//! - `Markets` → MPC_API GetMarketsList response.
-//! - `OrderBooks` → MPC_OrderBook (с reordering cache).
-//! - `Trades` → MPC_TradesStream (с gap detection + resend).
-//! - `Settings` → MPC_UI (TClientSettingsCommand snapshot).
+//! Each MoonProto channel has a matching state module:
+//! - `Orders` for `MPC_Order` trade-command state.
+//! - `Strats` for `MPC_Strat` strategy snapshots and updates.
+//! - `Balances` for `MPC_Balance` account and market balances.
+//! - `Markets` for Engine API market list, indexes, prices, and tags.
+//! - `OrderBooks` for `MPC_OrderBook` snapshots, diffs, and reordering caches.
+//! - `Trades` for `MPC_TradesStream` packets and automatic gap recovery.
+//! - `Settings` for `MPC_UI` settings snapshots and UI control events.
 //!
-//! Каждый модуль документирован в `moonproto/docs/api/<channel>.md`.
+//! Normal applications read these models through `EventDispatcher` getters
+//! after running `Client::run_with_dispatcher` or
+//! `Client::run_with_dispatcher_state`. The per-channel guides live in
+//! `moonproto/docs/api/<channel>.md`.
 
 pub mod balances;
 pub mod epoch;

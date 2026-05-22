@@ -10,6 +10,9 @@ The balance channel uses three related command IDs:
 - **cmd_id=4 (incremental)**: merges market rows and optionally updates global totals (gated by `global_changed: bool`).
 
 The sync state is `BalancesState`. The key is `market_name: String`, for example `"BTCUSDT"`.
+When using `EventDispatcher`, balance rows are applied only for markets present
+in the current `MarketsState`, matching Delphi `Markets.MarketByNameFast`.
+Unknown market names are ignored.
 
 For the common one-shot flow, use `Client::request_balance_snapshot`:
 
@@ -20,6 +23,19 @@ let balances = client.request_balance_snapshot(
 )?;
 println!("markets with balance rows={}", balances.len());
 ```
+
+For a fire-and-forget refresh from another UI or worker thread, clone
+`client.sender()` and call `sender.balance_request_refresh()`. The next full
+balance snapshot arrives through the normal `EventDispatcher` path.
+
+Balance-channel delivery is enabled by the normal init flow. The Delphi server
+sets its per-client balance-subscription flag when it handles
+`emk_UpdateMarketsList`; `connect_and_init` / `run_init_sequence` performs that
+market refresh before it waits for balance state. `TRequestBalanceRefresh`
+forces the server's next full snapshot tick, but by itself it does not enable
+delivery to a client that has never completed init or otherwise sent
+`UpdateMarketsList`. Regular applications should call balance snapshot helpers
+after init.
 
 ## Usage
 
@@ -175,6 +191,9 @@ previous `max_value` when the decoded value is zero or otherwise not greater tha
 ## Related API Surface
 
 `TArbPricesCommand` also uses the MPC_Balance channel (`CmdId=6`).
+It follows the same server-side balance-subscription filter as balance
+snapshots, so an initialized active client sees it through `Event::Arb`, while a
+raw pre-init transport connection should not expect arb broadcasts yet.
 `balance_usdt` calculation needs prices from `MarketsState`.
 `request_balance_snapshot` is the high-level full-snapshot helper.
 `request_balance` requests one-currency balance through Engine API.

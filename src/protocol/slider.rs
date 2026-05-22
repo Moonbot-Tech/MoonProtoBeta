@@ -38,19 +38,6 @@ impl Slider {
     /// Returns true = new message, false = duplicate/out-of-window.
     /// Matches TMoonProtoSlider.CheckRevd exactly.
     pub fn check_revd(&mut self, num: u64) -> bool {
-        // DoS guard (audit_robustness M9): атакующий или забагованный сервер может прислать
-        // Crypted-пакет с num близким к u64::MAX. `n - SLIDER_LEN + 1) << 6` тогда вызывает
-        // wrap-around start_num в маленькое значение → все последующие легитимные num
-        // окажутся "слишком старыми" → slider разрушен. Реалистичный темп: 100K pps × 5 лет
-        // ≈ 1.5×10^13 << 2^58. Любой num дальше start_num+2^32 (≈4 миллиарда) — adversarial.
-        const MAX_FORWARD_JUMP: u64 = 1u64 << 32;
-        if num > self.start_num.saturating_add(MAX_FORWARD_JUMP) {
-            log::warn!(target: "moonproto::slider",
-                "absurd msg_num jump {} (start={}, diff={}); rejected as adversarial",
-                num, self.start_num, num.saturating_sub(self.start_num));
-            return false;
-        }
-
         let n = num >> 6; // div 64
         let prev = self.start_num >> 6;
         let diff = (n as i64) - (prev as i64) - (SLIDER_LEN as i64) + 1;
@@ -153,6 +140,17 @@ mod tests {
         assert!(s.check_revd(5000));
         // Old message now rejected
         assert!(!s.check_revd(50));
+    }
+
+    #[test]
+    fn large_forward_jump_slides_window_like_delphi() {
+        let mut s = Slider::new();
+        let num = (1u64 << 40) + 7;
+
+        assert!(s.check_revd(num));
+        assert_eq!(s.start_num, (((num >> 6) - (SLIDER_LEN as u64) + 1) << 6));
+        assert!(!s.check_revd(num));
+        assert!(!s.check_revd(1));
     }
 
     #[test]

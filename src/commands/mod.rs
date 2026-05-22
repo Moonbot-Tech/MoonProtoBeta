@@ -1,3 +1,15 @@
+//! Byte-level builders and parsers for MoonProto command channels.
+//!
+//! Regular applications should prefer the high-level `Client` wrappers and
+//! typed `EventDispatcher` events. These modules are public for advanced tools,
+//! tests, custom protocol integrations, and consumers that need direct access to
+//! the wire payloads.
+//!
+//! The builders and parsers preserve the Delphi wire formats: base command
+//! header, command id, version, UID, per-command priority/retry semantics, and
+//! exact field order. See `moonproto/docs/commands/` and `moonproto/docs/api/`
+//! for consumer-facing guides.
+
 pub mod arb;
 pub mod balance;
 pub mod candles;
@@ -5,8 +17,6 @@ pub mod engine_api;
 pub mod engine_request;
 pub mod market;
 pub mod order_book;
-/// MoonProto Commands — deserialization of all command channels.
-/// Byte-exact port of MoonProtoBaseStruct.pas + all *Struct.pas files.
 pub mod registry;
 pub mod strat;
 pub mod strategy_serializer;
@@ -30,4 +40,4 @@ pub use trade::{
     OrderWorkerStatus, PriceZone, ReplaceMultiKind, SetImmuneCommand, SplitOrderCommand,
     StopSettings, TradeCommand, TradeCtx, TurnPanicSellCommand, VStopUpdate,
 };
-pub use trades_stream::{Trade, TradeSection, TradesPacket};
+pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};

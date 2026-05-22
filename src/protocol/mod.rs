@@ -1,9 +1,17 @@
+//! Low-level MoonProto protocol primitives.
+//!
+//! This module exposes command ordinals plus helpers for crypted payloads,
+//! handshake packets, sliced datagrams, and ACK sliders. Most applications do
+//! not need these APIs directly; use `Client`, `EventDispatcher`, and
+//! `commands::*` builders unless you are writing protocol diagnostics or a
+//! custom transport tool.
+
 pub mod crypted;
 pub mod handshake;
 pub mod slicing;
 pub mod slider;
 
-/// MoonProto command enum (matches Delphi TMoonProtoCommand ordinals)
+/// MoonProto command enum matching Delphi `TMoonProtoCommand` ordinals.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -48,9 +56,11 @@ pub enum Command {
 }
 
 impl Command {
-    /// Транспортный enum — silent drop через `Command::None` для unknown (стандарт UDP
-    /// "не понял пакет — игнорирую"). При unknown byte > 0 — warn для диагностики
-    /// server-side новых команд (A-02).
+    /// Convert a wire command byte into the typed enum.
+    ///
+    /// Unknown non-zero bytes map to `Command::None` after a throttled warning.
+    /// This keeps the UDP receive path tolerant of corrupted packets and future
+    /// server-side extensions.
     pub fn from_byte(b: u8) -> Self {
         match b & 0x7F {
             0 => Self::None,

@@ -1,12 +1,17 @@
-/// SNTP time synchronization — byte-exact port of TMoonProtoTymeSyncer + TMySNTP.GetBestNTP.
-/// Source: IndyUDPHelper.pas:459-522, MoonProtoIntStruct.pas:1246-1303
-///
-/// NTP packet format (RFC 4330): 48 bytes.
-/// Client sends: LI=0, VN=4, Mode=3 (client), rest zeros.
-/// Server responds with timestamps in NTP format (seconds since 1900-01-01, 32.32 fixed).
-///
-/// Offset = ((T2 - T1) + (T3 - T4)) / 2  (in seconds as f64)
-/// RoundTrip = (T4 - T1) - (T3 - T2)
+//! SNTP time synchronization helpers.
+//!
+//! `ClientConfig::new` enables the process-level syncer by default with
+//! `pool.ntp.org`, matching Delphi `TMoonProtoTymeSyncer`. The corrected offset
+//! is global to the process and is used by MoonProto Hello/Ping timestamps and
+//! lag diagnostics.
+//!
+//! Public functions in this module are mainly for diagnostics, tests, and tools
+//! that intentionally manage NTP outside [`crate::ClientConfig`]. Regular
+//! applications normally do not call them directly.
+//!
+//! The SNTP packet is 48 bytes. Offset is computed as
+//! `((T2 - T1) + (T3 - T4)) / 2`, and round trip as
+//! `(T4 - T1) - (T3 - T2)`.
 use log::{debug, warn};
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,10 +22,14 @@ const NTP_PORT: u16 = 123;
 const NTP_PACKET_SIZE: usize = 48;
 const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds between 1900-01-01 and 1970-01-01
 
+/// Result of an SNTP synchronization attempt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NtpSyncResult {
-    pub time_offset: f64,   // seconds (add to SystemTime to get corrected time)
-    pub round_trip_ms: i64, // milliseconds
+    /// Offset in seconds. Add it to local `SystemTime` to get corrected time.
+    pub time_offset: f64,
+    /// Round-trip delay in milliseconds for the selected SNTP response.
+    pub round_trip_ms: i64,
+    /// Whether at least one valid SNTP response was accepted.
     pub synced: bool,
 }
 

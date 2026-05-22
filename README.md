@@ -131,6 +131,7 @@ server status, and parse the response payload:
 let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(10))?;
 let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(10))?;
 let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(10))?;
+let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(10))?;
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
@@ -199,7 +200,8 @@ client.subscribe_orderbook("BTCUSDT");
 The library remembers these subscription intents. Before Init, reconnect does
 not emit subscription traffic; after the single Init completes, reconnect inside
 the same `Client` session replays the registry automatically. From another
-thread, clone `client.sender()` and call the same typed methods on `ClientSender`.
+thread, clone `client.sender()` and call typed subscription, trade, UI,
+strategy, or balance fire-and-forget methods on `ClientSender`.
 
 ## Multi-Server
 
@@ -293,8 +295,11 @@ Detailed public API notes live in `docs/api/`:
 - `order_books.md`
 - `trades.md`
 - `orders.md`
+- `balances.md`
 - `trade_actions.md`
+- `ui.md`
 - `strats.md`
+- `arb.md`
 - `candles.md`
 - `multi_server.md`
 

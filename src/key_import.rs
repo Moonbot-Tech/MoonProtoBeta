@@ -1,30 +1,33 @@
-/// Key import — parse MoonBot exported key (base64 encrypted container).
-/// Byte-exact port of MoonProtoUnit.pas:194-262 (bPasteKeyClick) + sfunc.pas:169-284 (DecodeBuffer).
-///
-/// Export format: base64(ts:i64_le + checksum:i64_le + EncodeBuffer(ts2:i64_le + TMoonProtoKeyContainer))
-/// Password: 'F$xC' + ts.ToString() + 'aR#d' (truncated to 25 chars = Delphi TCode = string[25])
-///
-/// TMoonProtoKeyContainer (72 bytes):
-///   rnd: string[16] (1 len + 16 chars = 17 bytes)
-///   Filled: boolean (1 byte)
-///   Date: TDateTime (8 bytes, f64)
-///   BotID: integer (4 bytes, i32)
-///   Ver: byte (1)
-///   Flags: byte (1)
-///   FKey: THash128 (16 bytes) ← MasterKey
-///   FMacKey: THash128 (16 bytes) ← MacKey
-///   hash: int64 (8 bytes)
+//! MoonBot exported-key importer.
+//!
+//! [`import_key`] decodes the base64 encrypted container copied from MoonBot
+//! and returns the two 128-bit keys required by [`crate::ClientConfig`]:
+//! the AES-GCM master key and the transport MAC/obfuscation key.
+//!
+//! The parser is a byte-exact port of the Delphi export path. The export format
+//! is `base64(ts:i64_le + checksum:i64_le + EncodeBuffer(ts2:i64_le +
+//! TMoonProtoKeyContainer))`; the password is built from the timestamp using the
+//! same short-string truncation as Delphi.
+//!
+//! `TMoonProtoKeyContainer` is 72 bytes and contains the fixed-size random
+//! marker, filled flag, Delphi `TDateTime`, bot id, version, flags, master key,
+//! MAC key, and checksum.
 use crate::MoonKey;
 
 /// Decoded key pair from MoonBot export.
 ///
-/// `Copy` — все поля Copy (`MoonKey = [u8; 16]`, bool, u8). Упрощает API:
-/// потребитель не пишет `keys.clone()` для передачи в несколько мест.
+/// This type is `Copy` because all fields are small value types. Applications
+/// can pass the imported keys into one or more `ClientConfig` builders without
+/// needing explicit clones.
 #[derive(Debug, Clone, Copy)]
 pub struct ImportedKeys {
+    /// AES-GCM master key used by the MoonProto session handshake.
     pub master_key: MoonKey,
+    /// Transport MAC/obfuscation key.
     pub mac_key: MoonKey,
+    /// Whether the exported MoonBot key container was marked as filled.
     pub filled: bool,
+    /// Key container format version from the MoonBot export.
     pub ver: u8,
 }
 

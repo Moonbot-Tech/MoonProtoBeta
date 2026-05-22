@@ -82,16 +82,20 @@ impl SliceHeader {
     }
 }
 
-// `Slice` (тип одного блока с header'ом) объединён в HashMap значения SlicedData.blocks
-// — отдельный тип не используется.
+// `Slice` (тип одного блока с header'ом) представлен парой `(BlockNum, payload)`.
 
 /// Tracks all blocks of one datagram being received
 #[derive(Debug)]
 pub struct SlicedData {
     pub datagram_num: u16,
-    pub blocks_count: usize,      // MaxBlockNum + 1
-    blocks: Vec<Option<Vec<u8>>>, // indexed by BlockNum, payload after SliceHeader
+    pub blocks_count: usize, // MaxBlockNum + 1
+    // Delphi keeps received slices in a sorted list and does not reject
+    // BlockNum > MaxBlockNum. Keep the same machine effect: ACK the actual
+    // BlockNum, insert by BlockNum if not a duplicate, and use Count ==
+    // BlocksCount as the completion test.
+    blocks: Vec<(u8, Vec<u8>)>,
     received_count: usize,
+    completion_returned: bool,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
     pub dup_count: u8,       // DupCount (matches IntStruct.pas:539)
 }
@@ -102,8 +106,9 @@ impl SlicedData {
         Self {
             datagram_num,
             blocks_count: count,
-            blocks: vec![None; count],
+            blocks: Vec::with_capacity(count),
             received_count: 0,
+            completion_returned: false,
             ack_flags: [0u8; 32],
             dup_count: 0,
         }
@@ -112,18 +117,21 @@ impl SlicedData {
     /// Receive a piece. Returns true if this completes the datagram.
     pub fn receive_piece(&mut self, block_num: u8, payload: Vec<u8>) -> bool {
         let idx = block_num as usize;
-        if idx >= self.blocks_count {
-            return false;
-        }
 
         // Set ACK flag (set of byte semantics: byte index = block_num / 8, bit = block_num % 8)
         self.ack_flags[idx / 8] |= 1 << (idx % 8);
 
-        if self.blocks[idx].is_none() {
-            self.blocks[idx] = Some(payload);
-            self.received_count += 1;
-        } else {
-            self.dup_count = self.dup_count.saturating_add(1);
+        match self
+            .blocks
+            .binary_search_by_key(&block_num, |(block, _)| *block)
+        {
+            Ok(_) => {
+                self.dup_count = self.dup_count.saturating_add(1);
+            }
+            Err(insert_at) => {
+                self.blocks.insert(insert_at, (block_num, payload));
+                self.received_count += 1;
+            }
         }
 
         self.received_count == self.blocks_count
@@ -143,26 +151,29 @@ impl SlicedData {
         // B-V2-09 fix: prealloc capacity по сумме block sizes — избегаем re-alloc'ов
         // в extend_from_slice. На больших Sliced сообщениях (~50KB) это экономит ~10
         // re-alloc'ов с растущей capacity до финального размера.
-        let total: usize = self
-            .blocks
-            .iter()
-            .filter_map(|b| b.as_ref())
-            .map(|b| b.len())
-            .sum();
+        let total: usize = self.blocks.iter().map(|(_, b)| b.len()).sum();
         let mut cmd = 0u8;
+        let mut saw_block_zero = false;
         let mut result = Vec::with_capacity(total.saturating_sub(1));
 
-        for (i, block) in self.blocks.iter().enumerate() {
-            let data = block.as_ref()?;
-            if i == 0 {
-                if data.is_empty() {
-                    return None;
+        for (block_num, data) in &self.blocks {
+            if *block_num == 0 {
+                saw_block_zero = true;
+                if let Some((&first, rest)) = data.split_first() {
+                    cmd = first; // TMoonProtoCommand byte
+                    result.extend_from_slice(rest);
                 }
-                cmd = data[0]; // TMoonProtoCommand byte
-                result.extend_from_slice(&data[1..]);
             } else {
                 result.extend_from_slice(data);
             }
+        }
+        if !saw_block_zero {
+            // Delphi `TMoonProtoSlicedData.GetReceivedStream` only updates Fcmd
+            // while iterating a BlockNum=0 slice. If malformed blocks complete a
+            // datagram without block 0, Fcmd stays at constructor default
+            // MPC_None, but BaseNet.OnNewSliced still calls DataReadInt and then
+            // removes the datagram from Receiving.
+            cmd = 0;
         }
         Some((cmd, result))
     }
@@ -189,6 +200,7 @@ pub struct SlicingReceiver {
     /// но размер известен compile-time → bounds checks eliminate'ятся.
     last_recvd_ts: Box<[i64; LAST_RECVD_BUF_SIZE]>,
     last_online: i64,
+    last_cleaned_received: i64,
 }
 
 const LAST_RECVD_BUF_SIZE: usize = 2048;
@@ -209,11 +221,21 @@ impl SlicingReceiver {
             receiving: HashMap::new(),
             last_recvd_ts: Box::new([NEVER_RECEIVED_MS; LAST_RECVD_BUF_SIZE]),
             last_online: 0,
+            last_cleaned_received: 0,
         }
     }
 
     pub fn set_last_online(&mut self, ms: i64) {
         self.last_online = ms;
+    }
+
+    /// Matches `TMoonProtoClient.DoCleanUp`: reader-side cleanup is driven by
+    /// accepted incoming packets and runs before command-specific handling.
+    pub fn do_cleanup(&mut self) {
+        if (self.last_cleaned_received - self.last_online).abs() > 5000 {
+            self.clear_old();
+            self.last_cleaned_received = self.last_online;
+        }
     }
 
     /// Check if this is a "new" datagram (not recently seen).
@@ -249,27 +271,6 @@ impl SlicingReceiver {
                 return (None, [0u8; ACK256_WIRE_SIZE]);
             }
         };
-
-        // Delphi accepts the full byte range: MaxBlockNum is u8, and
-        // MaxSlicedDataSize is computed as PTMU * 256 minus headers. Large
-        // chunked-candles responses legitimately use close to 256 blocks.
-        // Также reject block_num за пределами max_block_num (явная corruption / attack).
-        if hdr.block_num > hdr.max_block_num {
-            log::warn!(target: "moonproto::slicing",
-                "Sliced dgram={} block_num={} > max_block_num={} — rejecting",
-                hdr.datagram_num, hdr.block_num, hdr.max_block_num);
-            if trace {
-                eprintln!(
-                    "[slice-rx] t={} d={} b={}/{} len={} action=drop-bad-block",
-                    self.last_online,
-                    hdr.datagram_num,
-                    hdr.block_num,
-                    hdr.max_block_num,
-                    payload.len()
-                );
-            }
-            return (None, [0u8; ACK256_WIRE_SIZE]);
-        }
 
         let block_data = payload[SLICE_HEADER_SIZE..].to_vec();
         let datagram_num = hdr.datagram_num;
@@ -318,6 +319,21 @@ impl SlicingReceiver {
 
         // Add the piece
         let sliced = self.receiving.get_mut(&datagram_num).unwrap();
+        if sliced.completion_returned {
+            // Delphi BaseNet.OnNewSliced removes the completed datagram from
+            // Receiving immediately after DataReadInt. Because Rust still
+            // removes it from the main-loop side, any later block that arrives
+            // in this short gap must behave like Delphi's post-removal branch:
+            // no state mutation, no second assembled payload, ACK.SetAllFlags.
+            let full_ack = build_ack_bytes(&[0xFFu8; 32], datagram_num);
+            if trace {
+                eprintln!(
+                    "[slice-rx-complete] t={} d={} block_after_complete=true full_ack=true blocks={}",
+                    self.last_online, datagram_num, sliced.blocks_count
+                );
+            }
+            return (None, full_ack);
+        }
         let complete = sliced.receive_piece(hdr.block_num, block_data);
         let ack = build_ack_bytes(&sliced.ack_flags, datagram_num);
         if trace {
@@ -346,6 +362,9 @@ impl SlicingReceiver {
             let assembled = sliced
                 .assemble()
                 .map(|(cmd, data)| (datagram_num, cmd, data, dup_count, blocks_count));
+            if assembled.is_some() {
+                sliced.completion_returned = true;
+            }
             if trace {
                 match &assembled {
                     Some((_, cmd, data, dup_count, blocks_count)) => eprintln!(
@@ -391,6 +410,7 @@ impl SlicingReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Command;
 
     #[test]
     fn single_block_datagram() {
@@ -451,6 +471,133 @@ mod tests {
     }
 
     #[test]
+    fn completed_datagram_is_returned_only_once_before_caller_removes_it() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let payload = vec![
+            0x09, 0x00, // datagram_num = 9
+            0x00, // block_num = 0
+            0x00, // max_block_num = 0
+            0x0A, // cmd byte
+            0xDE, 0xAD,
+        ];
+
+        let (assembled, ack) = recv.on_new_sliced(&payload);
+        assert!(assembled.is_some());
+        assert_eq!(ack[0] & 0x01, 0x01);
+        assert!(recv.receiving.contains_key(&9));
+
+        let (duplicate_assembled, duplicate_ack) = recv.on_new_sliced(&payload);
+        assert!(
+            duplicate_assembled.is_none(),
+            "after a complete datagram was returned once, duplicate pieces must not queue a second DataReadInt"
+        );
+        assert_eq!(duplicate_ack[0] & 0x01, 0x01);
+        assert!(recv.receiving.contains_key(&9));
+    }
+
+    #[test]
+    fn duplicate_after_completed_datagram_gets_full_ack_like_delphi_post_removal() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let block0 = vec![
+            0x09, 0x00, // datagram_num = 9
+            0x00, // block_num = 0
+            0x03, // max_block_num = 3
+            0x0A, // cmd byte
+            0xAA,
+        ];
+        let block1 = vec![0x09, 0x00, 0x01, 0x03, 0xBB];
+        let block2 = vec![0x09, 0x00, 0x02, 0x03, 0xCC];
+        let block3 = vec![0x09, 0x00, 0x03, 0x03, 0xDD];
+
+        assert!(recv.on_new_sliced(&block0).0.is_none());
+        assert!(recv.on_new_sliced(&block1).0.is_none());
+        assert!(recv.on_new_sliced(&block2).0.is_none());
+        assert!(recv.on_new_sliced(&block3).0.is_some());
+        assert!(
+            recv.receiving.contains_key(&9),
+            "Rust keeps the completed datagram until caller runs DataReadInt and removes it"
+        );
+
+        let (duplicate_assembled, duplicate_ack) = recv.on_new_sliced(&block1);
+
+        assert!(duplicate_assembled.is_none());
+        assert!(
+            duplicate_ack[..32].iter().all(|byte| *byte == 0xFF),
+            "Delphi would already have removed Receiving, so the next duplicate hits ACK.SetAllFlags"
+        );
+        assert_eq!(&duplicate_ack[32..34], &9u16.to_le_bytes());
+    }
+
+    #[test]
+    fn non_duplicate_block_after_completed_datagram_does_not_mutate_receiver() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let malformed_complete = vec![
+            0x37, 0x00, // datagram_num = 55
+            0x07, // block_num = 7
+            0x00, // max_block_num = 0, so one received block completes the datagram
+            0xAA,
+        ];
+        let later_block_same_datagram = vec![
+            0x37, 0x00, // datagram_num = 55
+            0x08, // a different block before Rust caller removed Receiving
+            0x00, 0xBB,
+        ];
+
+        assert!(recv.on_new_sliced(&malformed_complete).0.is_some());
+        let before_blocks = recv
+            .receiving
+            .get(&55)
+            .expect("completed datagram stays until caller removal")
+            .blocks
+            .len();
+
+        let (assembled, ack) = recv.on_new_sliced(&later_block_same_datagram);
+
+        assert!(assembled.is_none());
+        assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
+        assert_eq!(
+            recv.receiving.get(&55).unwrap().blocks.len(),
+            before_blocks,
+            "after completion Rust must emulate Delphi post-removal path without adding later pieces"
+        );
+    }
+
+    #[test]
+    fn completed_datagram_without_block_zero_is_delivered_as_none_cmd_like_delphi() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let payload = vec![
+            0x21, 0x00, // datagram_num = 33
+            0x07, // block_num = 7 (malformed: no block 0)
+            0x00, // max_block_num = 0 (one block total)
+            0xAA, 0xBB, // payload copied as data, not command byte
+        ];
+
+        let (assembled, ack) = recv.on_new_sliced(&payload);
+        let (datagram_num, cmd, data, _, _) = assembled.unwrap();
+
+        assert_eq!(datagram_num, 33);
+        assert_eq!(
+            cmd,
+            Command::None as u8,
+            "Delphi leaves TMoonProtoSlicedData.Fcmd at MPC_None when no BlockNum=0 was seen"
+        );
+        assert_eq!(data, vec![0xAA, 0xBB]);
+        assert_eq!(ack[0] & (1 << 7), 1 << 7);
+        assert!(
+            recv.receiving.contains_key(&33),
+            "BaseNet.OnNewSliced removes Receiving only after DataReadInt"
+        );
+    }
+
+    #[test]
     fn accepts_full_256_block_datagram() {
         let mut recv = SlicingReceiver::new();
         recv.set_last_online(10000);
@@ -490,6 +637,32 @@ mod tests {
         assert_eq!(data[255], 255);
         assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
         assert_eq!(&ack[32..34], &datagram.to_le_bytes());
+        assert!(recv.receiving.contains_key(&datagram_num));
+        recv.receiving.remove(&datagram_num);
+    }
+
+    #[test]
+    fn block_num_above_max_is_received_like_delphi() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+
+        let payload = vec![
+            0x37, 0x00, // datagram_num = 55
+            0x01, // block_num = 1
+            0x00, // max_block_num = 0 (BlocksCount = 1)
+            0xAA, 0xBB,
+        ];
+
+        let (assembled, ack) = recv.on_new_sliced(&payload);
+        let (datagram_num, cmd, data, _dup_count, blocks_count) = assembled
+            .expect("Delphi ReceivedPiece inserts the slice even when BlockNum > MaxBlockNum");
+
+        assert_eq!(datagram_num, 55);
+        assert_eq!(cmd, 0, "without block 0 Delphi leaves Fcmd at MPC_None");
+        assert_eq!(data, vec![0xAA, 0xBB]);
+        assert_eq!(blocks_count, 1);
+        assert_eq!(ack[0] & 0b0000_0010, 0b0000_0010);
+        assert_eq!(&ack[32..34], &55u16.to_le_bytes());
         assert!(recv.receiving.contains_key(&datagram_num));
         recv.receiving.remove(&datagram_num);
     }
@@ -571,5 +744,32 @@ mod tests {
         assert!(recv.receiving.is_empty());
         assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
         assert_eq!(&ack[32..34], &42u16.to_le_bytes());
+    }
+
+    #[test]
+    fn do_cleanup_runs_on_reader_packet_cadence_like_delphi() {
+        let mut recv = SlicingReceiver::new();
+        recv.set_last_online(10000);
+        recv.do_cleanup();
+
+        let stale_block1 = vec![42, 0, 1, 1, 0xBB];
+        let (assembled, _) = recv.on_new_sliced(&stale_block1);
+        assert!(assembled.is_none());
+        assert_eq!(recv.receiving.len(), 1);
+
+        recv.set_last_online(14999);
+        recv.do_cleanup();
+        assert_eq!(
+            recv.receiving.len(),
+            1,
+            "Delphi DoCleanUp is throttled by abs(LastCleanedReceived - LastOnline) > 5000"
+        );
+
+        recv.set_last_online(20000);
+        recv.do_cleanup();
+        assert!(
+            recv.receiving.is_empty(),
+            "accepted reader packets drive ClearOldReceiving before command-specific handling"
+        );
     }
 }

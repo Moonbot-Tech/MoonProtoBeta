@@ -1,7 +1,9 @@
-//! Event dispatcher — высокоуровневое API поверх `on_data`.
+//! Event dispatcher: typed application events and read-only state on top of raw
+//! MoonProto channel payloads.
 //!
-//! Вместо того чтобы потребитель вручную парсил каждый канал и применял к state'ам,
-//! `EventDispatcher` делает это автоматически:
+//! Instead of making applications parse every protocol channel and apply every
+//! payload to their own state models, `EventDispatcher` performs that work
+//! automatically:
 //!
 //! ```ignore
 //! use moonproto::events::{EventDispatcher, Event};
@@ -20,8 +22,8 @@
 //! });
 //! ```
 //!
-//! Состояния (`Orders`, `OrderBooks`, `TradesState`, etc.) живут внутри dispatcher —
-//! доступны как поля `dispatcher.orders`, `dispatcher.order_books`, etc.
+//! State models (`Orders`, `OrderBooks`, `TradesState`, and the other channel
+//! states) are owned by the dispatcher and exposed through read-only getters.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use crate::commands::market::{
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::commands::trade::TradeCommand;
+use crate::commands::trade::{TradeCommand, TradeCtx};
 use crate::commands::trades_stream::parse_trades_packet;
 use crate::commands::ui::UICommand;
 use crate::protocol::Command;
@@ -99,53 +101,87 @@ impl StrategySnapshotReply {
     }
 }
 
-/// Все возможные события которые dispatcher может выдать.
+/// All typed events emitted by [`EventDispatcher`].
 #[derive(Debug)]
 pub enum Event {
-    /// Order channel: создание/обновление/удаление ордера.
+    /// Order channel event: order creation, update, removal, or snapshot
+    /// follow-up.
     Order(OrderEvent),
     /// OrderBook channel: applied updates/low-level cache control events.
     OrderBook(OrderBookEvent),
-    /// TradesStream channel: одно событие (Apply/Duplicate/GapDetected/...).
-    /// audit_rust_quality #11: variant изменён с `Trades(Vec<TradesEvent>)` на
-    /// `Trade(TradesEvent)` — каждый sub-event пушится в out отдельно, без
-    /// nested Vec allocation на каждом TradesStream пакете. На пике 50K pps это
-    /// экономит ~50K Vec alloc/sec + matching dealloc.
+    /// TradesStream channel event. A packet can produce several
+    /// [`TradesEvent`] values, so each sub-event is delivered as a separate
+    /// `Event::Trade` instead of a nested vector.
     Trade(TradesEvent),
     /// Balance channel: one event for full/incremental updates (cmd_id_sub 3/4).
     /// The exact base `TBalanceCommand` (cmd_id_sub 2) is parsed but ignored,
     /// matching Delphi `ProcessBalanceCommand`.
     Balance(BalanceEvent),
-    /// Arb channel (CmdId=6 внутри MPC_Balance): compact kernel→client payload.
+    /// Arb channel (`MPC_Balance` subcommand 6): compact kernel-to-client
+    /// payload.
     Arb { uid: u64, payload: ArbPayload },
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
     /// UI channel: settings updated, MM subscribe changed, etc.
     Settings(SettingsEvent),
-    /// Markets state updated (после Engine API response).
+    /// Markets state was updated after an Engine API response.
     Markets(MarketsEvent),
-    /// Engine API response пришёл, но не зарегистрирован в pending registry.
+    /// Engine API response that was not consumed by the pending-response
+    /// registry.
     EngineResponse(EngineResponse),
     /// Server-side log message (`MPC_LogMsg`): `time:TDateTime + msg:UTF-8 rest`.
     ServerLog { time: f64, msg: String },
-    /// Сырой payload — для каналов которые dispatcher не знает (LogMsg, Service, etc.).
+    /// Raw payload for channels the dispatcher does not parse.
     Raw { cmd: Command, payload: Vec<u8> },
-    /// Парсинг не удался (повреждённый payload).
+    /// Payload parsing failed.
     ParseFailed { cmd: Command, len: usize },
+}
+
+pub(crate) struct ActiveDispatchContext {
+    pub(crate) peer_app_token: u64,
+    pub(crate) market_indexes_current_for_peer: bool,
+    pub(crate) server_token: u64,
+    pub(crate) server_time_delta_source: Arc<AtomicU64>,
+    pub(crate) domain_ready: bool,
+}
+
+impl ActiveDispatchContext {
+    pub(crate) fn from_client(client: &crate::client::Client) -> Self {
+        Self {
+            peer_app_token: client.peer_app_token(),
+            market_indexes_current_for_peer: client.market_indexes_current_for_peer(),
+            server_token: client.server_token(),
+            server_time_delta_source: client.server_time_delta_handle(),
+            domain_ready: client.is_domain_ready(),
+        }
+    }
+}
+
+pub(crate) enum ActiveAction {
+    RequestOrderBookFull {
+        market_index: u16,
+        book_kind: u8,
+    },
+    SendStrategySnapshot {
+        server_epoch: u64,
+        client_max_last_date: u64,
+        full: bool,
+        data: Vec<u8>,
+    },
+    RequestOrderStatus {
+        ctx: TradeCtx,
+        market_name: String,
+    },
 }
 
 /// State bundle + dispatch logic.
 ///
-/// A-V2-09: `#[derive(Default)]` — каждое поле имеет свой `Default::default`
-/// (через `pub fn new()` который равен `default()`), что эквивалентно ручному
-/// `impl Default`. Ручной impl убран как избыточный.
-///
-/// **API encapsulation (audit_rust_quality #9):** state-поля имеют видимость
-/// `pub(crate)` (read-only снаружи). Пользователь получает доступ через
+/// The dispatcher owns all channel state and exposes it read-only through
 /// getters [`Self::orders`], [`Self::order_books`], [`Self::trades`],
 /// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
-/// Прямая мутация state'ов снаружи — запрещена: state поддерживается через
-/// [`Self::dispatch`] / [`Self::dispatch_into`] / [`Self::dispatch_into_active`].
+/// Applications should not mutate protocol state directly; state is maintained
+/// by [`Self::dispatch`], [`Self::dispatch_into`], and the active
+/// client-backed dispatch path used by `Client::run_with_dispatcher`.
 #[derive(Default)]
 pub struct EventDispatcher {
     pub(crate) orders: Orders,
@@ -193,29 +229,31 @@ impl EventDispatcher {
         Self::default()
     }
 
-    /// Read-only доступ к `Orders` state (sync-state ордеров — uid → Order map).
-    /// Состояние обновляется автоматически при dispatch'е `Command::Order` пакетов.
+    /// Read-only order state, keyed by server order UID.
+    ///
+    /// It is updated automatically when order-channel payloads are dispatched.
     pub fn orders(&self) -> &Orders {
         &self.orders
     }
 
-    /// Read-only доступ к `OrderBooks` state (per-market kind sliding каше).
-    /// Состояние обновляется при dispatch'е `Command::OrderBook` пакетов.
+    /// Read-only orderbook state, including per-market/per-kind recovery
+    /// caches and the latest applied books.
     pub fn order_books(&self) -> &OrderBooks {
         &self.order_books
     }
 
-    /// Read-only доступ к `TradesState` (gap detection + bucket tracking).
+    /// Read-only trades-stream state: packet counters, gap buckets, and resend
+    /// bookkeeping.
     pub fn trades(&self) -> &TradesState {
         &self.trades
     }
 
-    /// Read-only доступ к `BalancesState` (балансы валют + locked).
+    /// Read-only balance state for account totals and per-market balances.
     pub fn balances(&self) -> &BalancesState {
         &self.balances
     }
 
-    /// Read-only доступ к `StratsState` (стратегии: uid → StratSnapshot).
+    /// Read-only strategy state and decoded strategy snapshots.
     pub fn strats(&self) -> &StratsState {
         &self.strats
     }
@@ -255,14 +293,16 @@ impl EventDispatcher {
         self.strats.snapshot_vec()
     }
 
-    /// Read-only доступ к `SettingsState` (`TClientSettingsCommand` snapshot).
+    /// Read-only UI/settings state.
     pub fn settings(&self) -> &SettingsState {
         &self.settings
     }
 
-    /// Read-only доступ к `MarketsState` (markets list + indexes + token tags).
-    /// `markets().indexes_synchronized` — ключевой инвариант active library
-    /// (gating флаг для TradesStream/OrderBook парсинга).
+    /// Read-only markets state: market catalog, server indexes, prices, and
+    /// token tags.
+    ///
+    /// `markets().indexes_synchronized` gates indexed streams such as
+    /// TradesStream and OrderBook after server restarts.
     pub fn markets(&self) -> &MarketsState {
         &self.markets
     }
@@ -300,23 +340,22 @@ impl EventDispatcher {
         self.queued_events.extend(events);
     }
 
-    /// Periodic tick для `TradesState` gap recovery — генерирует `TradesResend`
-    /// payload'ы для пропущенных packet num'ов, закрывает старые buckets.
+    /// Periodic trades-gap recovery tick.
     ///
-    /// Пользователю **не нужно** вызывать вручную если используется
-    /// [`crate::client::Client::run_with_dispatcher`] (он делает это автоматически
-    /// каждые ~100мс).
+    /// It returns serialized `TradesResend` Engine API requests for missing
+    /// packet numbers and closes expired gap buckets. Applications do not need
+    /// to call this when using [`crate::client::Client::run_with_dispatcher`],
+    /// which ticks trades recovery automatically about every 100 ms.
     ///
-    /// Только при custom main loop'е (вызов `client.run(...)` с собственным
-    /// callback'ом): вызывай раз в ~100мс с актуальным `rtt_ms` и `now_ms` чтобы
-    /// trades-channel самовосстанавливался от UDP loss.
+    /// Custom loops that bypass `run_with_dispatcher` should call it with the
+    /// current RTT and monotonic timestamp, then send each returned request
+    /// through the client.
     pub fn tick_trades(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
         self.trades.tick(rtt_ms, now_ms)
     }
 
-    /// Variant of [`Self::tick_trades`] возвращающий также emitted `TradesEvent`'ы.
-    /// Полезно для observability — `BucketClosed` / `GapFilled` events не доходят до
-    /// потребителя через `dispatch`, только через tick.
+    /// Variant of [`Self::tick_trades`] that also returns tick-generated
+    /// [`TradesEvent`] diagnostics.
     pub fn tick_trades_with_events(
         &mut self,
         rtt_ms: i64,
@@ -325,27 +364,18 @@ impl EventDispatcher {
         self.trades.tick_with_events(rtt_ms, now_ms)
     }
 
-    /// Привязать dispatcher к per-Client `ServerTimeDelta` handle. После этого
-    /// `dispatch_into` для `Command::Order` применяет **этот** Client's delta вместо
-    /// глобального (multi-Client safe).
+    /// Attach this dispatcher to one client's `ServerTimeDelta` handle.
     ///
-    /// **Когда вызывать.** При multi-Client архитектуре — обязательно для каждого
-    /// `EventDispatcher` (по одному на Client). При single-Client можно не вызывать —
-    /// dispatcher падает обратно на global, который Client всё равно обновляет.
+    /// After this, order-channel dispatch uses that client's time delta instead
+    /// of the single-client compatibility fallback. Multi-server applications
+    /// should attach one dispatcher to the matching client. The usual
+    /// `Client::run_with_dispatcher` path links this automatically on first use.
     ///
-    /// **Auto-link.** `dispatch_into_active(&mut Client)` делает линковку
-    /// автоматически на первом вызове — для типичного use case'а
-    /// `Client::run_with_dispatcher` ручная привязка не нужна.
-    ///
-    /// Example:
     /// ```ignore
     /// let client = Client::new(cfg);
     /// let mut dispatcher = EventDispatcher::new();
     /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
-    /// // Теперь dispatcher.dispatch_into читает delta из client.
     /// ```
-    ///
-    /// См. `DEVIATION.md #23`.
     pub fn set_server_time_delta_source(&mut self, handle: Arc<AtomicU64>) {
         self.server_time_delta_source = Some(handle);
     }
@@ -377,8 +407,18 @@ impl EventDispatcher {
         request_uid: u64,
         client: &crate::client::Client,
     ) -> bool {
-        let snapshot = self
-            .strategy_snapshot_provider
+        let snapshot = self.strategy_snapshot_reply(request_uid);
+        client.strat_send_snapshot_payload(
+            snapshot.server_epoch,
+            snapshot.client_max_last_date,
+            snapshot.full,
+            &snapshot.data,
+        );
+        true
+    }
+
+    fn strategy_snapshot_reply(&mut self, request_uid: u64) -> StrategySnapshotReply {
+        self.strategy_snapshot_provider
             .as_mut()
             .and_then(|provider| provider(request_uid))
             .unwrap_or_else(|| {
@@ -387,14 +427,7 @@ impl EventDispatcher {
                     true,
                     &self.strats.snapshot_vec(),
                 )
-            });
-        client.strat_send_snapshot_payload(
-            snapshot.server_epoch,
-            snapshot.client_max_last_date,
-            snapshot.full,
-            &snapshot.data,
-        );
-        true
+            })
     }
 
     pub(crate) fn send_or_queue_strategy_snapshot_request(
@@ -419,10 +452,12 @@ impl EventDispatcher {
         }
     }
 
-    /// Распарсить входящий payload и применить к соответствующему state.
-    /// Возвращает список событий — для большинства каналов 0 или 1 событие,
-    /// для OrderBook (с buffered cache) и Balance (multi-market batch) может быть несколько.
-    #[must_use = "Events must be processed — пропуск приведёт к потере OrderEvent/TradesEvent/etc."]
+    /// Parse one incoming payload, apply it to the matching state model, and
+    /// return the produced typed events.
+    ///
+    /// Most channels produce zero or one event. OrderBook recovery and balance
+    /// batches can produce several events for one payload.
+    #[must_use = "Events must be processed or application notifications are lost."]
     pub fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
         // Convenience-обёртка над `dispatch_into`. Backwards compat.
         let mut out = Vec::new();
@@ -430,27 +465,19 @@ impl EventDispatcher {
         out
     }
 
-    /// Аудит #6 (audit_delphi_deviation): zero-alloc dispatch path.
+    /// Zero-allocation dispatch path for performance-sensitive consumers.
     ///
-    /// Раньше `dispatch` делал `vec![event]` per call → 50K alloc/sec на пике
-    /// TradesStream. Теперь events pushed в переданный `out` buffer который потребитель
-    /// переиспользует через `clear()` между вызовами.
+    /// Produced events are pushed into the caller-owned `out` buffer. Reuse the
+    /// same vector with `clear()` between packets to avoid per-packet
+    /// allocations on high-rate streams.
     ///
-    /// **Active library**: если есть `&mut Client` — используй
-    /// [`Self::dispatch_into_active`]. Этот вариант:
-    ///   1. блокирует обработку TradesStream/OrderBook пакетов когда
-    ///      `MarketsState.indexes_synchronized = false` (event drop'ается тихо);
-    ///   2. automatically sends `api_request_order_book_full` when orderbook
-    ///      cache recovery needs a fresh Full snapshot; this control event is
-    ///      consumed internally and is not delivered to the application callback;
-    ///   3. automatically sends `TOrderStatusRequest` for orders missing from a
-    ///      fresh `TAllStatuses` snapshot, matching Delphi `CleanupMissingWorkers`.
+    /// This method is the low-level compatibility path. It does not have a
+    /// `Client` reference, so it cannot perform client-backed recovery actions.
+    /// Normal applications should use `Client::run_with_dispatcher`, whose
+    /// active dispatch path gates stale indexed streams, sends orderbook full
+    /// requests when recovery needs them, and requests missing order statuses
+    /// after a fresh order snapshot.
     ///
-    /// `dispatch_into` (без Client) — backwards compat, потребитель должен сам
-    /// использовать `dispatch_into_active`, чтобы recovery-actions оставались
-    /// внутри библиотеки.
-    ///
-    /// Pattern для performance-sensitive потребителей:
     /// ```ignore
     /// let mut buf = Vec::with_capacity(8);
     /// loop {
@@ -570,7 +597,10 @@ impl EventDispatcher {
                     }
                     3 | 4 => match parse_balance(sub_cmd_id, body) {
                         Some(upd) => {
-                            let ev = self.balances.apply(upd);
+                            let known_markets = &self.markets.by_name;
+                            let ev = self
+                                .balances
+                                .apply_filtered(upd, |name| known_markets.contains_key(name));
                             out.push(Event::Balance(ev));
                         }
                         None => out.push(Event::ParseFailed {
@@ -733,23 +763,23 @@ impl EventDispatcher {
         }
     }
 
-    /// **Active library dispatch** — расширение `dispatch_into` с `&mut Client` для
-    /// auto-actions либы.
+    /// Active-library dispatch path with access to the owning
+    /// [`crate::client::Client`].
     ///
-    /// Auto-action: `OrderBookEvent::RequestFullNeeded` → автоматически отправляется
-    /// `emk_RequestOrderBookFull` через `send_api_request` (fire-and-forget — без
-    /// регистрации в pending API registry, т.к. response придёт обычным OrderBook-пакетом
-    /// который сам разберёт диспетчер). Control-event потребляется здесь и не
-    /// эмиттится в `out`: в Delphi `ProcessOrderBookPacket` вызывает
-    /// `RequestOrderBookFull` внутри engine и наружу не отдаёт отдельный callback.
+    /// This is what `Client::run_with_dispatcher` uses. It performs the
+    /// client-backed recovery actions that plain [`Self::dispatch_into`] cannot:
+    /// stale indexed streams are gated after server restart, orderbook
+    /// `RequestFullNeeded` control events are consumed internally and sent as
+    /// fire-and-forget `emk_RequestOrderBookFull`, and orders missing from a
+    /// fresh snapshot are requested through the client.
     ///
-    /// Дедупликация: за один `dispatch_into_active` вызов на одну `(market_idx, kind)`
-    /// пару отправляется максимум один запрос, даже если Grouped-payload содержит
-    /// несколько `RequestFullNeeded` для того же книги.
+    /// At most one full-book request is sent per `(market_index, book_kind)` in
+    /// one dispatch call, even when a grouped payload contains several matching
+    /// control events.
     ///
-    /// **Trades gap resend** в этой функции НЕ запускается — он управляется единым
-    /// периодическим тиком в `Client::run_with_dispatcher` (раз в ~100мс). Так
-    /// избегаем double-resend на одном пакете.
+    /// Trades gap resend is intentionally not sent from this method. It is owned
+    /// by the periodic trades tick in the client loop so a single packet cannot
+    /// trigger duplicate resend batches.
     pub fn dispatch_into_active(
         &mut self,
         cmd: Command,
@@ -758,13 +788,28 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
         client: &mut crate::client::Client,
     ) {
+        let ctx = ActiveDispatchContext::from_client(client);
+        let mut actions = Vec::new();
+        self.dispatch_into_active_actions(cmd, payload, now_ms, out, &ctx, &mut actions);
+        client.apply_active_actions(actions);
+    }
+
+    pub(crate) fn dispatch_into_active_actions(
+        &mut self,
+        cmd: Command,
+        payload: &[u8],
+        now_ms: i64,
+        out: &mut Vec<Event>,
+        ctx: &ActiveDispatchContext,
+        actions: &mut Vec<ActiveAction>,
+    ) {
         // Multi-Client safety: lazy-link `server_time_delta_source` к этому Client'у.
         // После первого вызова `dispatch_into_active` все последующие dispatch'и
         // используют Client-specific delta (а не global). Это критично при multi-Client:
         // global перезаписывается последним активным Client'ом, что без линковки давало
         // off-by-50-1000ms timestamps в ордерах других Client'ов. См. DEVIATION #23.
         if self.server_time_delta_source.is_none() {
-            self.server_time_delta_source = Some(client.server_time_delta_handle());
+            self.server_time_delta_source = Some(Arc::clone(&ctx.server_time_delta_source));
         }
 
         // Server restart / PeerAppToken change: Delphi gates stream parsing with
@@ -772,7 +817,7 @@ impl EventDispatcher {
         // Keep the same behavioral guard here. Otherwise old `indexes_synchronized`
         // from the previous server process would let fresh TradesStream/OrderBook
         // packets be decoded through stale market indexes.
-        if client.peer_app_token() != 0 && !client.market_indexes_current_for_peer() {
+        if ctx.peer_app_token != 0 && !ctx.market_indexes_current_for_peer {
             self.markets.mark_indexes_stale();
         }
 
@@ -783,7 +828,7 @@ impl EventDispatcher {
         // (последующие пакеты будут с тем же token, full_reset не нужен). Сброс
         // срабатывает только на ИЗМЕНЕНИИ token'а между установившейся сессией и
         // новой (hard reconnect через `WantNewHello` или server restart с новым ST).
-        let current_token = client.server_token();
+        let current_token = ctx.server_token;
         if current_token != 0
             && self.last_known_server_token != 0
             && self.last_known_server_token != current_token
@@ -796,7 +841,7 @@ impl EventDispatcher {
         }
         self.last_known_server_token = current_token;
 
-        if is_pre_init_domain_command(cmd) && !client.is_domain_ready() {
+        if is_pre_init_domain_command(cmd) && !ctx.domain_ready {
             log::debug!(target: "moonproto::events",
                 "domain command {:?} skipped before init completion", cmd);
             return;
@@ -852,20 +897,30 @@ impl EventDispatcher {
         for (mi, bk) in to_request_full {
             // Fire-and-forget — response придёт обычным OrderBook-пакетом (is_full=true)
             // через тот же dispatcher. Регистрировать pending API receiver не нужно.
-            client.send_api_request(&crate::commands::engine_request::request_order_book_full(
-                mi, bk,
-            ));
+            actions.push(ActiveAction::RequestOrderBookFull {
+                market_index: mi,
+                book_kind: bk,
+            });
         }
         if let Some(uid) = snapshot_requested_uid {
-            self.send_strategy_snapshot_reply(uid, client);
+            let snapshot = self.strategy_snapshot_reply(uid);
+            actions.push(ActiveAction::SendStrategySnapshot {
+                server_epoch: snapshot.server_epoch,
+                client_max_last_date: snapshot.client_max_last_date,
+                full: snapshot.full,
+                data: snapshot.data,
+            });
             // Событие всё равно эмиттится в `out` для UI/диагностики.
         }
         if order_snapshot_applied {
             let missing = self.orders.missing_after_snapshot();
             for uid in missing {
                 if let Some(order) = self.orders.get(uid) {
-                    let ctx = order.trade_ctx();
-                    client.request_order_status(ctx, &order.market_name);
+                    let trade_ctx = order.trade_ctx();
+                    actions.push(ActiveAction::RequestOrderStatus {
+                        ctx: trade_ctx,
+                        market_name: order.market_name.clone(),
+                    });
                 }
             }
         }
@@ -889,6 +944,8 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
+    use crate::commands::market::{BaseCurrency, Market, MarketsListResponse};
+    use crate::commands::registry::write_string;
     use crate::commands::strat::build_snapshot_request;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, MarketCommandHeader, OrderCompact,
@@ -937,6 +994,87 @@ mod tests {
         out.extend_from_slice(&0.0f64.to_le_bytes());
         out.extend_from_slice(&0i32.to_le_bytes());
         out
+    }
+
+    fn write_balance_item_minimal(out: &mut Vec<u8>, market_name: &str, initial_balance: f64) {
+        write_string(out, market_name);
+        out.extend_from_slice(&0u64.to_le_bytes()); // BalanceHash.
+        out.extend_from_slice(&1u32.to_le_bytes()); // InitialBalance flag only.
+        out.extend_from_slice(&initial_balance.to_le_bytes());
+    }
+
+    fn balance_payload_with_items(
+        cmd_id: u8,
+        uid: u64,
+        epoch: u16,
+        items: &[(&str, f64)],
+    ) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 + items.len() * 32);
+        out.push(cmd_id);
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&uid.to_le_bytes());
+        out.extend_from_slice(&epoch.to_le_bytes());
+        if cmd_id == 4 {
+            out.push(0); // GlobalChanged=false.
+        } else {
+            out.extend_from_slice(&1.0f64.to_le_bytes());
+            out.extend_from_slice(&0.0f64.to_le_bytes());
+            out.extend_from_slice(&0.0f64.to_le_bytes());
+            out.extend_from_slice(&0.0f64.to_le_bytes());
+        }
+        out.extend_from_slice(&(items.len() as i32).to_le_bytes());
+        for (market_name, initial_balance) in items {
+            write_balance_item_minimal(&mut out, market_name, *initial_balance);
+        }
+        out
+    }
+
+    fn event_market(name: &str) -> Market {
+        Market {
+            bn_market_name: name.to_string(),
+            market_currency: name.to_string(),
+            bn_market_currency: name.to_string(),
+            base_currency: "USDT".to_string(),
+            market_currency_long: name.to_string(),
+            market_currency_canonic: name.to_string(),
+            market_name: name.to_string(),
+            market_name_mb_classic: name.to_string(),
+            bn_status: "TRADING".to_string(),
+            leading1000: String::new(),
+            bn_price_precision: 2,
+            bn_quantity_precision: 5,
+            max_leverage: 50,
+            k1000: 1,
+            bn_iceberg_parts: 0,
+            bn_margin_table_id: 0,
+            bn_delivery_time: 0,
+            bn_tick_size: 0.01,
+            bn_step_size: 0.01,
+            bn_min_qty: 0.0,
+            bn_max_qty: 0.0,
+            bn_min_notional: 0.0,
+            bn_max_notional: 0.0,
+            bn_contract_size: 0.0,
+            bn_min_price: 0.0,
+            bn_max_price: 0.0,
+            bn_max_value: 0.0,
+            bn_multiplier_up: 0.0,
+            bn_multiplier_down: 0.0,
+            bid_multiplier_up: 0.0,
+            bid_multiplier_down: 0.0,
+            ask_multiplier_up: 0.0,
+            ask_multiplier_down: 0.0,
+            int_bn_max_qty: 0.0,
+            funding_rate: 0.0,
+            funding_time: 0.0,
+            volume: 0.0,
+            is_btc_market: false,
+            status_trading: true,
+            bn_is_fucking_shib: false,
+            bn_iceberg: false,
+            bn_only_isolated: false,
+            futures_type: BaseCurrency::USDT,
+        }
     }
 
     fn order_status_for_test(
@@ -1074,6 +1212,27 @@ mod tests {
         assert!(events.is_empty());
         assert_eq!(d.balances.global.btc_balance_total, 1.0);
         assert_eq!(d.balances.last_epoch, 1);
+    }
+
+    #[test]
+    fn dispatcher_filters_balance_items_through_markets_state() {
+        let mut d = EventDispatcher::new();
+        d.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![event_market("BTCUSDT")],
+            corr_markets: vec![],
+        });
+
+        let payload =
+            balance_payload_with_items(3, 10, 1, &[("BTCUSDT", 100.0), ("UNKNOWNUSDT", 200.0)]);
+        let events = d.dispatch(Command::Balance, &payload, 1000);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::Balance(BalanceEvent::SnapshotApplied { count: 1, epoch: 1 })
+        ));
+        assert!(d.balances.get("BTCUSDT").is_some());
+        assert!(d.balances.get("UNKNOWNUSDT").is_none());
     }
 
     #[test]
@@ -1216,14 +1375,11 @@ mod tests {
             .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
 
         let mut found = false;
-        for ev in client.drain_app_events_for_test() {
-            let crate::client::ClientEvent::Send(msg) = ev else {
-                continue;
-            };
-            if msg.item.cmd != Command::Order as u8 {
+        for item in drain_client_send_items(&client) {
+            if item.cmd != Command::Order as u8 {
                 continue;
             }
-            let Some(TradeCommand::OrderStatusRequest(req)) = TradeCommand::parse(&msg.item.data)
+            let Some(TradeCommand::OrderStatusRequest(req)) = TradeCommand::parse(&item.data)
             else {
                 continue;
             };
@@ -1281,12 +1437,9 @@ mod tests {
         );
 
         let mut found = false;
-        for ev in client.drain_app_events_for_test() {
-            let crate::client::ClientEvent::Send(msg) = ev else {
-                continue;
-            };
-            if msg.item.cmd == Command::API as u8
-                && msg.item.data.get(11).copied()
+        for item in drain_client_send_items(&client) {
+            if item.cmd == Command::API as u8
+                && item.data.get(11).copied()
                     == Some(crate::commands::engine_api::EngineMethod::RequestOrderBookFull as u8)
             {
                 found = true;
@@ -1420,6 +1573,13 @@ mod tests {
         }
     }
 
+    fn drain_client_send_items(client: &crate::client::Client) -> Vec<crate::client::SendItem> {
+        let (mut sliced, mut high, mut low) = client.take_send_queues_for_test();
+        sliced.append(&mut high);
+        sliced.append(&mut low);
+        sliced
+    }
+
     #[test]
     fn dispatch_into_active_records_initial_server_token() {
         // Первый вызов запоминает текущий server_token в last_known_server_token.
@@ -1530,30 +1690,27 @@ mod tests {
 
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — должна быть отправка Command::Strat с fresh
+        // Drain send queues — должна быть отправка Command::Strat с fresh
         // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
         let mut found_snapshot_send = false;
-        for ev in client.drain_app_events_for_test() {
-            if let crate::client::ClientEvent::Send(msg) = ev {
-                if msg.item.cmd == Command::Strat as u8 {
-                    let data = &msg.item.data;
-                    if data.len() == 11 + 8 + 8 + 4 + 1 + fresh_snapshot.len() {
-                        let cmd_subcode = data[0];
-                        let server_epoch = u64::from_le_bytes(data[11..19].try_into().unwrap());
-                        let client_max_last_date =
-                            u64::from_le_bytes(data[19..27].try_into().unwrap());
-                        let size = u32::from_le_bytes(data[27..31].try_into().unwrap());
-                        let full = data[31] != 0;
-                        let tail = &data[32..];
-                        if cmd_subcode == 2
-                            && server_epoch == 7
-                            && client_max_last_date == 99
-                            && size == fresh_snapshot.len() as u32
-                            && full
-                            && tail == fresh_snapshot.as_slice()
-                        {
-                            found_snapshot_send = true;
-                        }
+        for item in drain_client_send_items(&client) {
+            if item.cmd == Command::Strat as u8 {
+                let data = &item.data;
+                if data.len() == 11 + 8 + 8 + 4 + 1 + fresh_snapshot.len() {
+                    let cmd_subcode = data[0];
+                    let server_epoch = u64::from_le_bytes(data[11..19].try_into().unwrap());
+                    let client_max_last_date = u64::from_le_bytes(data[19..27].try_into().unwrap());
+                    let size = u32::from_le_bytes(data[27..31].try_into().unwrap());
+                    let full = data[31] != 0;
+                    let tail = &data[32..];
+                    if cmd_subcode == 2
+                        && server_epoch == 7
+                        && client_max_last_date == 99
+                        && size == fresh_snapshot.len() as u32
+                        && full
+                        && tail == fresh_snapshot.as_slice()
+                    {
+                        found_snapshot_send = true;
                     }
                 }
             }
@@ -1589,25 +1746,23 @@ mod tests {
         let payload = crate::commands::strat::build_snapshot_request(99);
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
-        // Drain event channel — должен быть Command::Strat с пустым serializer batch.
+        // Drain send queues — должен быть Command::Strat с пустым serializer batch.
         let mut empty_snapshot_sends = 0;
-        for ev in client.drain_app_events_for_test() {
-            if let crate::client::ClientEvent::Send(msg) = ev {
-                if msg.item.cmd == Command::Strat as u8 {
-                    let cmd = crate::commands::strat::StratCommand::parse(&msg.item.data)
-                        .expect("sent strat command must parse");
-                    match cmd {
-                        crate::commands::strat::StratCommand::Snapshot(snapshot) => {
-                            let batch = crate::commands::strategy_serializer::parse_strategy_batch(
-                                &snapshot.data,
-                            )
-                            .expect("empty strategy batch must parse");
-                            assert!(snapshot.full);
-                            assert!(batch.strategies.is_empty());
-                            empty_snapshot_sends += 1;
-                        }
-                        other => panic!("expected snapshot reply, got {other:?}"),
+        for item in drain_client_send_items(&client) {
+            if item.cmd == Command::Strat as u8 {
+                let cmd = crate::commands::strat::StratCommand::parse(&item.data)
+                    .expect("sent strat command must parse");
+                match cmd {
+                    crate::commands::strat::StratCommand::Snapshot(snapshot) => {
+                        let batch = crate::commands::strategy_serializer::parse_strategy_batch(
+                            &snapshot.data,
+                        )
+                        .expect("empty strategy batch must parse");
+                        assert!(snapshot.full);
+                        assert!(batch.strategies.is_empty());
+                        empty_snapshot_sends += 1;
                     }
+                    other => panic!("expected snapshot reply, got {other:?}"),
                 }
             }
         }
@@ -1660,14 +1815,11 @@ mod tests {
         d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
 
         let mut found = false;
-        for ev in client.drain_app_events_for_test() {
-            let crate::client::ClientEvent::Send(msg) = ev else {
-                continue;
-            };
-            if msg.item.cmd != Command::Strat as u8 {
+        for item in drain_client_send_items(&client) {
+            if item.cmd != Command::Strat as u8 {
                 continue;
             }
-            let cmd = crate::commands::strat::StratCommand::parse(&msg.item.data)
+            let cmd = crate::commands::strat::StratCommand::parse(&item.data)
                 .expect("sent strat command must parse");
             if let crate::commands::strat::StratCommand::Snapshot(snapshot) = cmd {
                 let batch =
