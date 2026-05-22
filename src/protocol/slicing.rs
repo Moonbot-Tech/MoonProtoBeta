@@ -170,7 +170,7 @@ impl SlicedData {
 
 /// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum = 34 bytes
 pub const ACK256_WIRE_SIZE: usize = 34;
-pub type SlicedPayloadResult = Option<(u8, Vec<u8>, u8, usize)>;
+pub type SlicedPayloadResult = Option<(u16, u8, Vec<u8>, u8, usize)>;
 pub type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
 
 pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
@@ -228,9 +228,12 @@ impl SlicingReceiver {
     }
 
     /// Process an incoming MPC_Sliced packet payload (after outer header strip).
-    /// Returns: (Option<(cmd, assembled_data)>, ack_to_send)
-    /// Matches TMoonProtoClient.OnNewSliced byte-for-byte.
-    /// Returns: (Option<(cmd, data, dup_count, blocks_count)>, ack_bytes)
+    /// Returns: (Option<(datagram_num, cmd, data, dup_count, blocks_count)>, ack_bytes).
+    ///
+    /// This matches `TMoonProtoClient.OnNewSliced`: it updates the receiving
+    /// dictionary and returns the completed `TMoonProtoSlicedData` equivalent.
+    /// The caller must run `DataReadInt` first and only then remove the datagram
+    /// from `Receiving`, like `TMoonProtoBaseNet.OnNewSliced`.
     pub fn on_new_sliced(&mut self, payload: &[u8]) -> SlicedProcessResult {
         let trace = trace_enabled();
         let hdr = match SliceHeader::from_bytes(payload) {
@@ -342,10 +345,10 @@ impl SlicingReceiver {
             let blocks_count = sliced.blocks_count;
             let assembled = sliced
                 .assemble()
-                .map(|(cmd, data)| (cmd, data, dup_count, blocks_count));
+                .map(|(cmd, data)| (datagram_num, cmd, data, dup_count, blocks_count));
             if trace {
                 match &assembled {
-                    Some((cmd, data, dup_count, blocks_count)) => eprintln!(
+                    Some((_, cmd, data, dup_count, blocks_count)) => eprintln!(
                         "[slice-rx-complete] t={} d={} inner_cmd={} len={} dup={} blocks={}",
                         self.last_online,
                         datagram_num,
@@ -360,7 +363,6 @@ impl SlicingReceiver {
                     ),
                 }
             }
-            self.receiving.remove(&datagram_num);
             (assembled, ack)
         } else {
             (None, ack)
@@ -405,9 +407,15 @@ mod tests {
         ];
 
         let (assembled, _ack) = recv.on_new_sliced(&payload);
-        let (cmd, data, _, _) = assembled.unwrap();
+        let (datagram_num, cmd, data, _, _) = assembled.unwrap();
+        assert_eq!(datagram_num, 1);
         assert_eq!(cmd, 0x0A);
         assert_eq!(data, vec![0xDE, 0xAD]);
+        assert!(
+            recv.receiving.contains_key(&datagram_num),
+            "TMoonProtoClient.OnNewSliced returns the completed object; BaseNet.OnNewSliced removes it after DataReadInt"
+        );
+        recv.receiving.remove(&datagram_num);
     }
 
     #[test]
@@ -434,9 +442,12 @@ mod tests {
             0xAA, // data
         ];
         let (assembled, _) = recv.on_new_sliced(&block0);
-        let (cmd, data, _, _) = assembled.unwrap();
+        let (datagram_num, cmd, data, _, _) = assembled.unwrap();
+        assert_eq!(datagram_num, 5);
         assert_eq!(cmd, 0x1C);
         assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
+        assert!(recv.receiving.contains_key(&datagram_num));
+        recv.receiving.remove(&datagram_num);
     }
 
     #[test]
@@ -469,8 +480,9 @@ mod tests {
             0,
         ];
         let (assembled, ack) = recv.on_new_sliced(&block0);
-        let (cmd, data, _dup_count, blocks_count) = assembled.unwrap();
+        let (datagram_num, cmd, data, _dup_count, blocks_count) = assembled.unwrap();
 
+        assert_eq!(datagram_num, datagram);
         assert_eq!(cmd, 0x1C);
         assert_eq!(blocks_count, 256);
         assert_eq!(data.len(), 256);
@@ -478,6 +490,8 @@ mod tests {
         assert_eq!(data[255], 255);
         assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
         assert_eq!(&ack[32..34], &datagram.to_le_bytes());
+        assert!(recv.receiving.contains_key(&datagram_num));
+        recv.receiving.remove(&datagram_num);
     }
 
     #[test]
@@ -494,12 +508,15 @@ mod tests {
         ];
 
         let (assembled, _ack) = recv.on_new_sliced(&payload);
-        let (cmd, data, _dup_count, blocks_count) = assembled
+        let (datagram_num, cmd, data, _dup_count, blocks_count) = assembled
             .expect("first ever datagram must be accepted even during first 9s after Client::new");
 
+        assert_eq!(datagram_num, 4);
         assert_eq!(cmd, 0x1F);
         assert_eq!(data, vec![0xAA, 0xBB]);
         assert_eq!(blocks_count, 1);
+        assert!(recv.receiving.contains_key(&datagram_num));
+        recv.receiving.remove(&datagram_num);
     }
 
     #[test]
@@ -523,12 +540,14 @@ mod tests {
 
         let block0 = vec![0, 0, 0, 1, 0x1C, 0xAA];
         let (assembled, _) = recv.on_new_sliced(&block0);
-        let (cmd, data, _dup_count, blocks_count) =
+        let (datagram_num, cmd, data, _dup_count, blocks_count) =
             assembled.expect("oldest incomplete datagram must not be evicted by a Rust-only cap");
 
+        assert_eq!(datagram_num, 0);
         assert_eq!(cmd, 0x1C);
         assert_eq!(blocks_count, 2);
         assert_eq!(data, vec![0xAA, 0x00]);
+        assert!(recv.receiving.contains_key(&datagram_num));
     }
 
     #[test]

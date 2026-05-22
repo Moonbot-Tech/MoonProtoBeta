@@ -4074,7 +4074,9 @@ impl Client {
                 // Batching/timer-based ACK снижает bandwidth, но увеличивает retry-латентность.
                 // НЕ оптимизировать частоту отправки. См. ARCHITECTURE.md OPEN-QUESTIONS §6 (ЗАКРЫТО).
                 self.send_raw_packet(Command::SlicedACK, &ack);
-                if let Some((inner_cmd, data, dup_count, blocks_count)) = assembled {
+                if let Some((datagram_num, inner_cmd, data, dup_count, blocks_count)) = assembled {
+                    self.data_read_int(inner_cmd, &data, sink);
+                    self.slicer.receiving.remove(&datagram_num);
                     // AvgDupCount EMA (matches Common.pas:701-703)
                     let dup_pct = dup_count as f64 / blocks_count.max(1) as f64 * 100.0;
                     if self.avg_dup_count == 0.0 {
@@ -4083,7 +4085,6 @@ impl Client {
                         // B-19: * 0.1 вместо / 10.0 — FDIV ~13-25 циклов, FMUL ~4-5.
                         self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
                     }
-                    self.data_read_int(inner_cmd, &data, sink);
                 }
             }
             Command::SlicedACK => {
