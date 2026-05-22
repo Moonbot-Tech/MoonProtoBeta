@@ -2426,8 +2426,9 @@ pub type EventWithStateFn =
 /// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
 ///   `EventDispatcher` (используется `Client::run_with_dispatcher`).
 ///
-/// Этот enum позволяет one-and-the-same internal pipeline (`handle_udp_command`
-/// и др.) обслуживать оба сценария без `Arc<Mutex>`-обходов borrow checker.
+/// Этот enum позволяет одному delivery pipeline (`WriterRuntime` drain +
+/// `deliver_data_read_int_decoded`) обслуживать оба сценария без
+/// `Arc<Mutex>`-обходов borrow checker.
 pub(crate) enum DispatchSink<'a> {
     Callback(&'a mut OnDataFn),
     Buffer(&'a mut Vec<(Command, Vec<u8>)>),
@@ -2480,7 +2481,7 @@ pub(crate) enum RunMode<'a> {
         on_event: DispatcherEventFn,
         /// Переиспользуемый буфер событий (избегаем alloc per packet).
         event_buf: Vec<crate::events::Event>,
-        /// Переиспользуемый буфер payload'ов из handle_udp_command.
+        /// Переиспользуемый буфер decoded payload'ов перед dispatcher.
         payload_buf: Vec<(Command, Vec<u8>)>,
         /// Переиспользуемый буфер active-library side effects.
         active_actions_buf: Vec<crate::events::ActiveAction>,
@@ -6717,112 +6718,6 @@ impl Client {
     }
 
     #[cfg(test)]
-    fn handle_udp_command(
-        &mut self,
-        cmd: Command,
-        raw_cmd: u8,
-        payload: &[u8],
-        sink: &mut DispatchSink<'_>,
-        reader_dataread_core_done: bool,
-    ) {
-        if matches!(
-            cmd,
-            Command::WantNewHello | Command::WrongHello | Command::WhoAreYou | Command::Fine
-        ) {
-            self.waiting_hello = false;
-        }
-
-        match cmd {
-            Command::WrongHello => {
-                self.auth_status = AuthStatus::Connected;
-            }
-            Command::WantNewHello => {
-                self.full_reset();
-                self.last_sent_hello = NEVER_SENT_MS;
-                self.auth_status = AuthStatus::Connected;
-                self.authorized = false;
-                self.need_connect = true;
-                self.soft_reconnect = false;
-            }
-            Command::NeedHelloAgain => {
-                let now = self.now_ms();
-                if (now - self.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS {
-                    self.last_need_hello_again = now;
-                    if !self.waiting_hello {
-                        self.waiting_hello_start = now;
-                    }
-                    self.waiting_hello = true;
-                    self.last_sent_hello = NEVER_SENT_MS;
-                }
-            }
-            Command::WhoAreYou | Command::Fine => {
-                self.handle_handshake(cmd, payload);
-            }
-            Command::SizeTest => {
-                self.handle_size_test(payload);
-            }
-            Command::ProbeMTU => {
-                self.handle_probe_mtu(payload);
-            }
-            Command::Sliced => {
-                let (assembled, ack) = {
-                    let mut slicer = self.slicer.lock().unwrap();
-                    slicer.set_last_online(self.now_ms());
-                    slicer.on_new_sliced(payload)
-                };
-                // Per-block ACK (one SlicedACK per received block) — НАМЕРЕННО.
-                // Для торгового канала критична скорость: минимальная задержка обнаружения
-                // потери блока важнее экономии bandwidth на мелких ACK (~34 байта каждый).
-                // Batching/timer-based ACK снижает bandwidth, но увеличивает retry-латентность.
-                // НЕ оптимизировать частоту отправки. См. ARCHITECTURE.md OPEN-QUESTIONS §6 (ЗАКРЫТО).
-                self.send_raw_packet(Command::SlicedACK, &ack);
-                if let Some((datagram_num, inner_cmd, data, dup_count, blocks_count)) = assembled {
-                    self.data_read_int(inner_cmd, &data, sink);
-                    self.slicer.lock().unwrap().receiving.remove(&datagram_num);
-                    // AvgDupCount EMA (matches Common.pas:701-703)
-                    let dup_pct = dup_count as f64 / blocks_count.max(1) as f64 * 100.0;
-                    if self.avg_dup_count == 0.0 {
-                        self.avg_dup_count = dup_pct;
-                    } else {
-                        // B-19: * 0.1 вместо / 10.0 — FDIV ~13-25 циклов, FMUL ~4-5.
-                        self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
-                    }
-                }
-            }
-            Command::SlicedACK => {
-                self.on_new_sliced_ack(payload);
-            }
-            Command::Ping => {
-                self.handle_ping_with_reader_core(payload, sink, reader_dataread_core_done);
-            }
-            _ => {
-                self.data_read(raw_cmd, payload, sink);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn data_read(&mut self, raw_cmd: u8, payload: &[u8], sink: &mut DispatchSink<'_>) {
-        let cmd = Command::from_byte(raw_cmd);
-        if cmd == Command::Grouped {
-            let mut pos = 0;
-            while pos + 3 <= payload.len() {
-                let sub_cmd = payload[pos];
-                pos += 1;
-                let sz = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
-                pos += 2;
-                if pos + sz > payload.len() {
-                    break;
-                }
-                self.data_read_int(sub_cmd, &payload[pos..pos + sz], sink);
-                pos += sz;
-            }
-        } else {
-            self.data_read_int(raw_cmd, payload, sink);
-        }
-    }
-
-    #[cfg(test)]
     fn decode_data_read_int_payload(&self, raw_cmd: u8, data: &[u8]) -> Option<(u8, Vec<u8>)> {
         Self::decode_data_read_int_payload_shared(&self.reader_protocol, raw_cmd, data)
     }
@@ -7342,41 +7237,6 @@ impl Client {
             {
                 self.send_markets_indexes_restore_request(now_ms);
             }
-        }
-    }
-
-    #[cfg(test)]
-    fn handle_size_test(&mut self, payload: &[u8]) {
-        // PMTU discovery шлёт серию ~17 SizeTest пакетов каждые ~5с (Delphi
-        // MoonProtoUDPClient.pas). Старый throttle 10/sec **ломал** PMTU
-        // discovery — серия не помещалась в окно. Delphi не throttle'ит,
-        // возвращаем byte-exact behavior.
-        let Some(ack) = Self::build_size_ack_payload(&self.reader_protocol, payload) else {
-            return;
-        };
-        self.set_dont_fragment(true);
-        self.send_raw_packet(Command::SizeAck, &ack);
-        self.set_dont_fragment(false);
-    }
-
-    #[cfg(test)]
-    fn handle_probe_mtu(&mut self, payload: &[u8]) {
-        // ProbeMTU тоже не throttle — см. handle_size_test rationale.
-        let Some(ack) = Self::build_probe_mtu_ack_payload(payload) else {
-            return;
-        };
-        self.set_dont_fragment(true);
-        self.send_raw_packet(Command::ProbeMTUAck, &ack);
-        self.set_dont_fragment(false);
-    }
-
-    /// Set IP_DONTFRAGMENT socket option (matches TUDPServerMP.TurnDontFragment).
-    /// **Cross-platform**: Windows / Linux / Android / macOS / iOS.
-    /// Реализовано через `setsockopt` напрямую (socket2 имеет `set_mtu_discover` только на Linux).
-    #[cfg(test)]
-    fn set_dont_fragment(&self, enable: bool) {
-        if let Some(ref sock) = self.socket {
-            set_dont_fragment_for_socket(sock, enable);
         }
     }
 
@@ -10732,15 +10592,7 @@ mod pmtu_tests {
         let mut ack = [0u8; 34];
         ack[0] = 0b0000_0011; // blocks 0 and 1 ACKed; block 2 still pending.
         ack[32..34].copy_from_slice(&1u16.to_le_bytes());
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
-        client.handle_udp_command(
-            Command::SlicedACK,
-            Command::SlicedACK as u8,
-            &ack,
-            &mut sink,
-            false,
-        );
+        client.on_new_sliced_ack(&ack);
         {
             let mut writer = WriterRuntime {
                 client: &mut client,
@@ -10777,16 +10629,8 @@ mod pmtu_tests {
         let mut ack = [0u8; 34];
         ack[0] = 0b0000_0001; // complete for first datagram, partial for second if wrongly applied.
         ack[32..34].copy_from_slice(&7u16.to_le_bytes());
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
 
-        client.handle_udp_command(
-            Command::SlicedACK,
-            Command::SlicedACK as u8,
-            &ack,
-            &mut sink,
-            false,
-        );
+        client.on_new_sliced_ack(&ack);
         {
             let mut writer = WriterRuntime {
                 client: &mut client,
@@ -13012,10 +12856,6 @@ mod reconnect_timing_tests {
         })
     }
 
-    fn callback_sink<'a>(cb: &'a mut OnDataFn) -> DispatchSink<'a> {
-        DispatchSink::Callback(cb)
-    }
-
     fn install_session_key(client: &mut Client) {
         client.server_token = 1;
         client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
@@ -13072,16 +12912,27 @@ mod reconnect_timing_tests {
     #[test]
     fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
         let mut client = dummy_client();
-        let mut cb: OnDataFn = Box::new(|_, _| {});
-        let mut sink = callback_sink(&mut cb);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(|_, _| {}),
+        };
+        let decoded = ReaderDecodedMsg {
+            cmd: Command::WantNewHello as u8,
+            payload: None,
+            api_pending_consumed: false,
+            candles_chunk_consumed: false,
+            recv_bytes: 0,
+            timestamp_ms: 0,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: Some(Client::simple_handshake_update(Command::WantNewHello)),
+        };
 
-        client.handle_udp_command(
-            Command::WantNewHello,
-            Command::WantNewHello as u8,
-            &[],
-            &mut sink,
-            false,
-        );
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded, 0, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         client.check_hello_send(100);
@@ -13311,16 +13162,27 @@ mod reconnect_timing_tests {
     fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
         let mut client = dummy_client();
         install_session_key(&mut client);
-        let mut cb: OnDataFn = Box::new(|_, _| {});
-        let mut sink = callback_sink(&mut cb);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(|_, _| {}),
+        };
+        let decoded = ReaderDecodedMsg {
+            cmd: Command::NeedHelloAgain as u8,
+            payload: None,
+            api_pending_consumed: false,
+            candles_chunk_consumed: false,
+            recv_bytes: 0,
+            timestamp_ms: 1000,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: Some(Client::simple_handshake_update(Command::NeedHelloAgain)),
+        };
 
-        client.handle_udp_command(
-            Command::NeedHelloAgain,
-            Command::NeedHelloAgain as u8,
-            &[],
-            &mut sink,
-            false,
-        );
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded, 1000, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         client.check_offline_reconnect(100);

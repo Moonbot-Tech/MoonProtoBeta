@@ -1031,6 +1031,27 @@ Still not done:
   reader records at the writer boundary; this remains the next strict placement
   check against Delphi `UDPRead`, where the reader thread mutates those fields
   before returning.
-- Test-only `handle_udp_command` / `handle_handshake` helper paths still exist
-  and must either be removed or reduced to thin calls into the runtime/pure
-  helpers so tests cannot preserve an old alternate protocol path.
+- Test-only `handle_handshake` helper paths still exist and must either be
+  removed or reduced to thin calls into the runtime/pure helpers so tests cannot
+  preserve an old alternate protocol path.
+
+### 2026-05-22 - Phase 1 partial: removed old test UDP command path
+
+Done:
+
+- Removed test-only `Client::handle_udp_command`.
+- Removed now-dead test-only `data_read`, `handle_size_test`,
+  `handle_probe_mtu`, and socket `set_dont_fragment` helper paths.
+- Updated SlicedACK tests to use the real reader-to-writer ACK queue helper and
+  handshake-control tests to use queued `ReaderDecodedMsg` through
+  `WriterRuntime::process_reader_decoded`.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Test-only `handle_ping*` / `handle_handshake` paths still exist for narrow
+  unit tests; next pass should replace them with runtime/pure-helper based tests
+  or delete them if redundant with service reader tests.
+- Reader-side handshake/Ping writer-visible state placement remains unresolved
+  against strict Delphi `UDPRead`.
