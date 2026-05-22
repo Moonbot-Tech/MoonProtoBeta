@@ -16,7 +16,9 @@
 //! ```
 //!
 //! Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже крутит
-//! main loop клиента.
+//! main loop клиента. Как только reader thread декодировал зарегистрированный
+//! `TEngineResponse`, он доставляет его в `ApiPending` сразу, до последующей
+//! active-dispatch доставки в `EventDispatcher`.
 //!
 //! Pending slot lifetime follows Delphi `TMoonProtoEngine.SendAndWait`: the
 //! caller that waits owns the timeout and removes the slot on timeout. There is
@@ -71,7 +73,9 @@ impl ApiPending {
     ///
     /// Для обычного однопоточного клиента передай возвращённый receiver в
     /// [`crate::client::Client::run_until_response`]. Прямой `rx.recv_timeout(...)`
-    /// подходит только когда другой thread уже крутит main loop клиента.
+    /// подходит только когда другой thread уже крутит main loop клиента; reader
+    /// доставит зарегистрированный response сразу после decode, но writer/send
+    /// progress всё ещё должен где-то выполняться.
     ///
     /// Если на тот же `uid` уже была регистрация — старый sender дропается (старый
     /// receiver получит "channel closed").
@@ -101,6 +105,16 @@ impl ApiPending {
     /// Удалить ожидание (например при timeout) чтобы освободить sender и не накапливать map.
     pub fn remove(&self, uid: u64) {
         self.lock_map().remove(&uid);
+    }
+
+    /// Проверить, есть ли активный waiter для `uid`.
+    ///
+    /// Reader thread uses this as a cheap guard before parsing a full
+    /// `TEngineResponse`: large unregistered Engine API packets (for example
+    /// candle chunks handled by another registry) should not be decompressed in
+    /// reader just to discover that no `ApiPending` receiver exists.
+    pub(crate) fn contains(&self, uid: u64) -> bool {
+        self.lock_map().contains_key(&uid)
     }
 
     /// Количество активных ожиданий.

@@ -615,3 +615,27 @@ Still not done:
   `run_with_dispatcher`; it is not yet a reader-owned `ActiveCore`.
 - User-visible events are still drained by `run_inner`; they are not yet a
   separate public event queue independent of transport progress.
+
+### 2026-05-22 - Phase 7 partial: reader-side Engine API pending dispatch
+
+Done:
+
+- Reader-side decoded `Command::API` payloads now peek `RequestUID` and, only
+  when that UID is registered in `ApiPending`, parse `TEngineResponse` and signal
+  the waiting receiver immediately from the reader DataReadInt path.
+- Main/dispatcher delivery keeps the same payload. If reader already consumed
+  the pending receiver, Callback mode does not duplicate it, while Dispatcher
+  mode still applies it to `EventDispatcher` for markets/indexes/tags and
+  `Event::EngineResponse`.
+- Large unregistered Engine API packets are not decompressed in reader just to
+  discover that no `ApiPending` waiter exists; the reader does a cheap UID peek
+  first.
+- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 420 passed.
+
+Still not done:
+
+- Single-threaded callers still need `run_until_response` because writer/send
+  progress is still owned by `run_inner`; only the response delivery side moved
+  reader-side.
+- Active state is still caller-owned and user-visible event delivery is still
+  drained by `run_inner`.

@@ -41,6 +41,13 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 Calling `rx.recv_timeout(...)` directly on the same thread usually times out
 because no UDP packets are processed during that wait.
 
+When a reader thread is already active and decodes a registered
+`TEngineResponse`, the receiver is signalled immediately from the reader-side
+DataReadInt path, before the same payload is later applied to `EventDispatcher`.
+This avoids waiting for a second dispatcher drain, but single-threaded callers
+still need `run_until_response` because the current writer/send loop is pumped
+there.
+
 For custom raw payloads with caller-owned timeout cleanup, call
 `Client::request_engine_response`. Raw `api_*` receivers keep their pending slot
 until a matching response arrives, a reconnect clears the session, or the same

@@ -257,6 +257,9 @@ Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
 The response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the
 client.
+With an active reader thread, registered Engine API responses are delivered to
+their receiver from the reader-side DataReadInt path before dispatcher event
+delivery. The same payload still reaches `EventDispatcher` for state updates.
 `run_until_response` uses the same queued-event behavior as typed one-shot
 helpers.
 

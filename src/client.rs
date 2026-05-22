@@ -453,6 +453,7 @@ impl SendQueues {
 pub(crate) struct ReaderDecodedMsg {
     cmd: u8,
     payload: Option<Vec<u8>>,
+    api_pending_consumed: bool,
     recv_bytes: u64,
     timestamp_ms: i64,
     epoch: u32,
@@ -4908,7 +4909,13 @@ impl Client {
             self.apply_reader_handshake_update(update, msg.timestamp_ms);
         }
         if let Some(payload) = msg.payload {
-            self.process_decoded_data_read_int(msg.cmd, payload, cur_tm, mode);
+            self.process_decoded_data_read_int(
+                msg.cmd,
+                payload,
+                msg.api_pending_consumed,
+                cur_tm,
+                mode,
+            );
         }
     }
 
@@ -5031,13 +5038,19 @@ impl Client {
         &mut self,
         cmd: u8,
         payload: Vec<u8>,
+        api_pending_consumed_by_reader: bool,
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
         match mode {
             RunMode::Callback { on_data } => {
                 let mut sink = DispatchSink::Callback(on_data);
-                self.deliver_data_read_int_decoded(cmd, payload, &mut sink);
+                self.deliver_data_read_int_decoded(
+                    cmd,
+                    payload,
+                    api_pending_consumed_by_reader,
+                    &mut sink,
+                );
             }
             RunMode::Dispatcher {
                 dispatcher,
@@ -5050,7 +5063,12 @@ impl Client {
                 let authorized_before = self.authorized;
                 {
                     let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.deliver_data_read_int_decoded(cmd, payload, &mut sink);
+                    self.deliver_data_read_int_decoded(
+                        cmd,
+                        payload,
+                        api_pending_consumed_by_reader,
+                        &mut sink,
+                    );
                 }
                 if !authorized_before && !self.authorized {
                     payload_buf.clear();
@@ -5133,6 +5151,7 @@ impl Client {
         let reader_client_token_start = self.client_token;
         let server_addr = self.server_socket_addr();
         let event_tx = self.event_tx.clone();
+        let api_pending = Arc::clone(&self.api_pending);
         let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
         let pending_reader_decoded = Arc::clone(&self.pending_reader_decoded);
         let reader_wake_pending = Arc::clone(&self.reader_wake_pending);
@@ -5290,6 +5309,7 @@ impl Client {
                                 pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                     cmd: hdr.cmd,
                                     payload: Some(payload.clone()),
+                                    api_pending_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5314,6 +5334,7 @@ impl Client {
                             pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                 cmd: hdr.cmd,
                                 payload: None,
+                                api_pending_consumed: false,
                                 recv_bytes: n as u64,
                                 timestamp_ms,
                                 epoch: my_epoch,
@@ -5368,6 +5389,7 @@ impl Client {
                                 pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                     cmd: hdr.cmd,
                                     payload: None,
+                                    api_pending_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5393,6 +5415,7 @@ impl Client {
                                 pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                     cmd: hdr.cmd,
                                     payload: None,
+                                    api_pending_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5509,9 +5532,18 @@ impl Client {
                                 let (cmd, payload) = decoded
                                     .map(|(cmd, payload)| (cmd, Some(payload)))
                                     .unwrap_or((cmd, None));
+                                let api_pending_consumed =
+                                    payload.as_deref().is_some_and(|payload| {
+                                        Client::dispatch_api_pending_from_reader(
+                                            &api_pending,
+                                            cmd,
+                                            payload,
+                                        )
+                                    });
                                 pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                     cmd,
                                     payload,
+                                    api_pending_consumed,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5536,6 +5568,7 @@ impl Client {
                         _ => {
                             let decoded = Client::reader_decode_data_packets(
                                 &reader_protocol,
+                                Some(&api_pending),
                                 hdr.cmd,
                                 &payload,
                                 n as u64,
@@ -5593,6 +5626,7 @@ impl Client {
         pending.lock().unwrap().push(ReaderDecodedMsg {
             cmd,
             payload: None,
+            api_pending_consumed: false,
             recv_bytes,
             timestamp_ms,
             epoch,
@@ -6136,8 +6170,33 @@ impl Client {
         Some((cmd, payload.into_owned()))
     }
 
+    fn engine_response_request_uid_from_payload(payload: &[u8]) -> Option<u64> {
+        // Engine response payload includes 11-byte TBaseCommand header, then
+        // RequestUID. This is enough to cheaply check ApiPending without
+        // inflating a full response in the reader thread.
+        let uid = payload.get(11..19)?;
+        Some(u64::from_le_bytes(uid.try_into().unwrap()))
+    }
+
+    fn dispatch_api_pending_from_reader(api_pending: &ApiPending, cmd: u8, payload: &[u8]) -> bool {
+        if cmd != Command::API as u8 {
+            return false;
+        }
+        let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
+            return false;
+        };
+        if !api_pending.contains(uid) {
+            return false;
+        }
+        let Some(resp) = parse_engine_response(payload) else {
+            return false;
+        };
+        api_pending.dispatch(resp).is_none()
+    }
+
     fn reader_decode_data_packets(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        api_pending: Option<&ApiPending>,
         raw_cmd: u8,
         payload: &[u8],
         recv_bytes: u64,
@@ -6151,9 +6210,17 @@ impl Client {
             let (cmd, payload) = decoded
                 .map(|(cmd, payload)| (cmd, Some(payload)))
                 .unwrap_or((raw_cmd, None));
+            let api_pending_consumed =
+                payload.as_deref().is_some_and(|payload| match api_pending {
+                    Some(api_pending) => {
+                        Self::dispatch_api_pending_from_reader(api_pending, cmd, payload)
+                    }
+                    None => false,
+                });
             out.push(ReaderDecodedMsg {
                 cmd,
                 payload,
+                api_pending_consumed,
                 recv_bytes,
                 timestamp_ms,
                 epoch,
@@ -6181,6 +6248,7 @@ impl Client {
                 out.push(ReaderDecodedMsg {
                     cmd: raw_cmd,
                     payload: None,
+                    api_pending_consumed: false,
                     recv_bytes,
                     timestamp_ms,
                     epoch,
@@ -6202,13 +6270,14 @@ impl Client {
         let Some((cmd, payload)) = self.decode_data_read_int_payload(raw_cmd, data) else {
             return;
         };
-        self.deliver_data_read_int_decoded(cmd, payload, sink);
+        self.deliver_data_read_int_decoded(cmd, payload, false, sink);
     }
 
     fn deliver_data_read_int_decoded(
         &mut self,
         cmd: u8,
         payload: Vec<u8>,
+        api_pending_consumed_by_reader: bool,
         sink: &mut DispatchSink<'_>,
     ) {
         // Engine API responses: попытаться доставить в pending registry / chunked
@@ -6249,7 +6318,8 @@ impl Client {
                 }
 
                 // 3. Pending registry (обычный async API).
-                let pending_consumed = self.api_pending.dispatch(resp).is_none();
+                let pending_consumed =
+                    api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
                 if !pending_consumed || sink.is_buffer() {
                     // Если response не ждал конкретный receiver — это обычный API event.
                     // Если ждал, но мы в Dispatcher mode, всё равно отдаём raw payload
@@ -8492,6 +8562,101 @@ mod api_pending_dispatch_tests {
     }
 
     #[test]
+    fn reader_decoded_api_response_reaches_pending_receiver_before_run_loop() {
+        let client = Client::new(dummy_cfg());
+        let request_uid = 0x7766_5544_3322_1100;
+        let rx = client.api_pending.register(request_uid);
+        let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+
+        let decoded = Client::reader_decode_data_packets(
+            &client.reader_protocol,
+            Some(&client.api_pending),
+            Command::API as u8,
+            &payload,
+            64,
+            123,
+            client.current_reader_epoch,
+        );
+
+        assert_eq!(decoded.len(), 1);
+        assert!(
+            decoded[0].api_pending_consumed,
+            "reader-side DataReadInt should deliver registered Engine API receiver before run loop"
+        );
+        let resp = rx
+            .try_recv()
+            .expect("receiver must be signalled by reader-side API dispatch");
+        assert_eq!(resp.request_uid, request_uid);
+        assert_eq!(resp.method, EngineMethod::AuthCheck);
+    }
+
+    #[test]
+    fn reader_consumed_api_response_is_not_duplicated_to_callback_sink() {
+        let mut client = Client::new(dummy_cfg());
+        let payload = build_engine_response_payload(0x55, EngineMethod::BaseCheck, &[]);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_cb = calls.clone();
+        let mode_event = ReaderDecodedMsg {
+            cmd: Command::API as u8,
+            payload: Some(payload),
+            api_pending_consumed: true,
+            recv_bytes: 64,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: None,
+        };
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |_cmd, _payload| {
+                calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }),
+        };
+
+        client.process_reader_decoded(mode_event, 123, &mut mode);
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn reader_consumed_api_response_still_reaches_dispatcher_state() {
+        let mut client = Client::new(dummy_cfg());
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        let payload = build_engine_response_payload(0x66, EngineMethod::AuthCheck, &[]);
+        let msg = ReaderDecodedMsg {
+            cmd: Command::API as u8,
+            payload: Some(payload),
+            api_pending_consumed: true,
+            recv_bytes: 64,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: None,
+        };
+        let mut dispatcher = EventDispatcher::new();
+        let mut mode = RunMode::Dispatcher {
+            dispatcher: &mut dispatcher,
+            on_event: DispatcherEventFn::Queue,
+            event_buf: Vec::new(),
+            payload_buf: Vec::new(),
+            active_actions_buf: Vec::new(),
+        };
+
+        client.process_reader_decoded(msg, 123, &mut mode);
+
+        let queued = dispatcher.take_queued_events();
+        assert!(queued.iter().any(|event| matches!(
+            event,
+            crate::events::Event::EngineResponse(resp)
+                if resp.request_uid == 0x66 && resp.method == EngineMethod::AuthCheck
+        )));
+    }
+
+    #[test]
     fn pending_api_response_is_not_duplicated_to_callback_sink() {
         let mut client = Client::new(dummy_cfg());
         let request_uid = 7;
@@ -8592,6 +8757,7 @@ mod api_pending_dispatch_tests {
             .push(ReaderDecodedMsg {
                 cmd: Command::API as u8,
                 payload: Some(payload),
+                api_pending_consumed: false,
                 recv_bytes: 64,
                 timestamp_ms: client.now_ms(),
                 epoch: client.current_reader_epoch,
@@ -11310,6 +11476,7 @@ mod event_loop_fairness_tests {
             .push(ReaderDecodedMsg {
                 cmd: Command::OrderBook as u8,
                 payload: None,
+                api_pending_consumed: false,
                 recv_bytes: 1234,
                 timestamp_ms: 777,
                 epoch: client.current_reader_epoch,
@@ -11373,6 +11540,7 @@ mod event_loop_fairness_tests {
             .push(ReaderDecodedMsg {
                 cmd: Command::UI as u8,
                 payload: Some(vec![0xAA, 0xBB]),
+                api_pending_consumed: false,
                 recv_bytes: 321,
                 timestamp_ms: 123,
                 epoch: client.current_reader_epoch,
@@ -11415,6 +11583,7 @@ mod event_loop_fairness_tests {
 
         let decoded = Client::reader_decode_data_packets(
             &client.reader_protocol,
+            None,
             Command::Grouped as u8,
             &grouped,
             77,
