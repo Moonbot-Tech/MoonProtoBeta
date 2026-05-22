@@ -1031,9 +1031,8 @@ Still not done:
   reader records at the writer boundary; this remains the next strict placement
   check against Delphi `UDPRead`, where the reader thread mutates those fields
   before returning.
-- Test-only `handle_handshake` helper paths still exist and must either be
-  removed or reduced to thin calls into the runtime/pure helpers so tests cannot
-  preserve an old alternate protocol path.
+- Test-only `handle_handshake` helper paths were removed in the later
+  2026-05-22 cleanup block below.
 
 ### 2026-05-22 - Phase 1 partial: removed old test UDP command path
 
@@ -1050,9 +1049,6 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Test-only `handle_handshake` paths still exist for narrow unit tests; next
-  pass should replace them with runtime/pure-helper based tests or delete them
-  if redundant with service reader tests.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.
 
@@ -1070,7 +1066,6 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Test-only `handle_handshake` paths remain.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.
 
@@ -1090,6 +1085,24 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Test-only `handle_handshake` paths remain.
+- Reader-side handshake/Ping writer-visible state placement remains unresolved
+  against strict Delphi `UDPRead`.
+
+### 2026-05-22 - Phase 1 partial: removed old test Handshake helper
+
+Done:
+
+- Removed test-only `Client::handle_handshake`.
+- Reconnect/handshake tests now decode with production
+  `decode_handshake_hello`, build `WhoAreYou` updates with
+  `build_who_are_you_imfriend`, and apply updates through
+  `WriterRuntime::apply_reader_handshake_update`.
+- Existing service reader tests still cover actual reader-thread sends such as
+  duplicate `MPC_ImFriend`.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.

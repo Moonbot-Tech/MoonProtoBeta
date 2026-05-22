@@ -7016,39 +7016,6 @@ impl Client {
         true
     }
 
-    #[cfg(test)]
-    fn handle_handshake(&mut self, cmd: Command, payload: &[u8]) {
-        let Some(hello) =
-            Self::decode_handshake_hello(&self.cfg.master_key, self.cfg.client_id, payload)
-        else {
-            return;
-        };
-
-        if cmd == Command::WhoAreYou {
-            let mut client_token = self.client_token;
-            let (update, encrypted) = Self::build_who_are_you_imfriend(
-                &self.cfg.master_key,
-                self.cfg.client_id,
-                self.app_token,
-                &mut client_token,
-                hello,
-            );
-            let now = self.now_ms();
-            WriterRuntime { client: self }.apply_reader_handshake_update(update, now);
-            // Delphi sends ImFriend twice with a blocking Sleep(32) between sends
-            // before it returns to the UDP read loop. Keep that ordering: post-Fine
-            // active work must not overtake the duplicate ImFriend.
-            self.send_raw_packet(Command::ImFriend, &encrypted);
-            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
-            self.send_raw_packet(Command::ImFriend, &encrypted);
-        }
-        if cmd == Command::Fine {
-            let now = self.now_ms();
-            WriterRuntime { client: self }
-                .apply_reader_handshake_update(Self::fine_handshake_update(), now);
-        }
-    }
-
     /// audit_robustness H5: process-global clock-jump generation → force_disconnect.
     /// Извлечён в метод для testability + чтобы main loop был чище.
     fn check_clock_jump(&mut self) {
@@ -12818,6 +12785,38 @@ mod reconnect_timing_tests {
         crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad)
     }
 
+    fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[u8]) -> bool {
+        let master_key = client.cfg.master_key;
+        let client_id = client.cfg.client_id;
+        let app_token = client.app_token;
+        let Some(hello) = Client::decode_handshake_hello(&master_key, client_id, payload) else {
+            return false;
+        };
+
+        match cmd {
+            Command::WhoAreYou => {
+                let mut client_token = client.client_token;
+                let (update, _encrypted_imfriend) = Client::build_who_are_you_imfriend(
+                    &master_key,
+                    client_id,
+                    app_token,
+                    &mut client_token,
+                    hello,
+                );
+                let now = client.now_ms();
+                WriterRuntime { client }.apply_reader_handshake_update(update, now);
+                true
+            }
+            Command::Fine => {
+                let now = client.now_ms();
+                WriterRuntime { client }
+                    .apply_reader_handshake_update(Client::fine_handshake_update(), now);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn method_id(payload: &[u8]) -> Option<u8> {
         payload.get(11).copied()
     }
@@ -12915,7 +12914,11 @@ mod reconnect_timing_tests {
     fn fine_requires_master_key_hello_payload_like_delphi() {
         let mut client = dummy_client();
 
-        client.handle_handshake(Command::Fine, b"not an encrypted hello");
+        assert!(!apply_reader_handshake_payload(
+            &mut client,
+            Command::Fine,
+            b"not an encrypted hello",
+        ));
 
         assert!(!client.authorized);
         assert_ne!(client.auth_status, AuthStatus::AuthDone);
@@ -12925,7 +12928,11 @@ mod reconnect_timing_tests {
         let aad = client.cfg.client_id.to_le_bytes();
         let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
 
-        client.handle_handshake(Command::Fine, &payload);
+        assert!(apply_reader_handshake_payload(
+            &mut client,
+            Command::Fine,
+            &payload,
+        ));
 
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
@@ -12949,7 +12956,11 @@ mod reconnect_timing_tests {
         let aad = client.cfg.client_id.to_le_bytes();
         let payload = crypto::encrypt(&client.cfg.master_key, &hello.to_bytes_packed(), &aad);
 
-        client.handle_handshake(Command::Fine, &payload);
+        assert!(apply_reader_handshake_payload(
+            &mut client,
+            Command::Fine,
+            &payload,
+        ));
 
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
@@ -12981,9 +12992,17 @@ mod reconnect_timing_tests {
         });
 
         let who = encrypted_hello(&client, 0x2222, 0x2000);
-        client.handle_handshake(Command::WhoAreYou, &who);
+        assert!(apply_reader_handshake_payload(
+            &mut client,
+            Command::WhoAreYou,
+            &who,
+        ));
         let fine = encrypted_hello(&client, 0x2222, 0x2000);
-        client.handle_handshake(Command::Fine, &fine);
+        assert!(apply_reader_handshake_payload(
+            &mut client,
+            Command::Fine,
+            &fine,
+        ));
 
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
