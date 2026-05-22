@@ -77,7 +77,10 @@ Delphi model по факту:
 - `src/client.rs` - `event_tx/event_rx`, `send_queues`,
   `pending_reader_decoded`.
 - `src/client.rs` - `run_inner` drains coalesced reader wakeups and
-  `pending_reader_decoded`, then copies Delphi-style send queues.
+  `pending_reader_decoded`, then calls
+  `copy_send_ack_and_check_sening_data`, the Rust block matching Delphi
+  `Execute -> GetCopySendList -> GetCopyAcks -> CopyRecvdData ->
+  CheckSeningData`.
 - `src/client.rs` - `spawn_reader` handles service commands, Sliced/SlicedACK,
   handshake, Ping, SizeTest/ProbeMTU, and data `DataReadInt` core in reader.
 - `src/client.rs` - ping handling writes shared `TmpSlider`; writer later copies
@@ -643,3 +646,25 @@ Still not done:
   reader-side.
 - Active state is still caller-owned and user-visible event delivery is still
   drained by `run_inner`.
+
+### 2026-05-22 - Phase 1 partial: named writer tick block
+
+Done:
+
+- The live main loop no longer spells the writer send order inline. It now calls
+  `copy_send_ack_and_check_sening_data`, which performs Delphi's
+  `GetCopySendList; GetCopyAcks; FClient.CopyRecvdData; CheckSeningData`
+  sequence in one movable block.
+- `check_sening_data` preserves the verified Delphi order: Sliced copy-send
+  cleanup/create, queued SlicedACK apply, regular H ACK apply, High send/retry,
+  first Low flush, Sliced retry, remaining Low flush.
+- Added `writer_tick_copies_ack_queues_then_check_sening_data_like_delphi` to
+  prove queued SlicedACK and ping `TmpSlider` ACKs do not affect `Sending` /
+  `PendingH` until this writer block runs.
+- Targeted test: `cargo test writer_tick_copies_ack_queues_then_check_sening_data_like_delphi --lib`
+  passed.
+
+Still not done:
+
+- This is only an extraction step. The writer block still executes from
+  `run_inner`; ownership has not yet moved to a background writer runtime.

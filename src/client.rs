@@ -4709,10 +4709,6 @@ impl Client {
             }
 
             if self.socket.is_some() {
-                let mut sliced = Vec::new();
-                let mut h_items = Vec::new();
-                let mut l_items = Vec::new();
-
                 self.drain_reader_decoded(cur_tm, &mut mode);
 
                 // Reader work is level-triggered: a Wake only means
@@ -4738,28 +4734,7 @@ impl Client {
                 }
                 self.drain_reader_decoded(cur_tm, &mut mode);
 
-                // Delphi `GetCopySendList`: copy DataToSend/DataToSendH/DataToSendL
-                // under SendLock and clear the source lists. Raw `send_cmd` paths
-                // append directly to these queues instead of going through app FIFO.
-                self.get_copy_send_list(&mut sliced, &mut h_items, &mut l_items);
-
-                self.apply_sliced_send_u_key_cleanup(&sliced);
-
-                let copy_acks = self.get_copy_acks();
-                self.copy_recvd_data();
-
-                // CheckSeningData: Sliced → CreateSlicedObject; H → batched; PendingH retry; L → batch
-                for item in &sliced {
-                    self.create_sliced_and_send(item);
-                }
-                self.apply_copy_acks(copy_acks, cur_tm);
-                self.apply_regular_hl_ack();
-                self.apply_high_send_u_key_cleanup(&h_items);
-                for mut item in h_items {
-                    self.send_h_item(&mut item, cur_tm);
-                }
-                self.retry_pending_h(cur_tm);
-                self.send_low_items_around_sliced_retry(&l_items, cur_tm);
+                self.copy_send_ack_and_check_sening_data(cur_tm);
 
                 // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
                 // to the reader-side UDPRead path (`FClient.DoCleanUp` before
@@ -4814,6 +4789,57 @@ impl Client {
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
         }
+    }
+
+    fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
+        let mut copy_send_list = Vec::new();
+        let mut copy_send_list_h = Vec::new();
+        let mut copy_send_list_l = Vec::new();
+
+        // Delphi `Execute` under `SendLock`:
+        // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
+        // Rust uses separate mutexes for these exact lists, but keeps the same
+        // writer-visible order before `CheckSeningData`.
+        self.get_copy_send_list(
+            &mut copy_send_list,
+            &mut copy_send_list_h,
+            &mut copy_send_list_l,
+        );
+        let copy_acks = self.get_copy_acks();
+        self.copy_recvd_data();
+
+        self.check_sening_data(
+            copy_send_list,
+            copy_send_list_h,
+            copy_send_list_l,
+            copy_acks,
+            cur_tm,
+        );
+    }
+
+    fn check_sening_data(
+        &mut self,
+        copy_send_list: Vec<SendItem>,
+        copy_send_list_h: Vec<SendItem>,
+        copy_send_list_l: Vec<SendItem>,
+        copy_acks: Vec<SlicedAck>,
+        cur_tm: i64,
+    ) {
+        // Delphi `CheckSeningData`: Sliced CopySendList first, then SlicedACK,
+        // then regular H ACK bitmap, High send/retry, first Low flush, Sliced
+        // retry, remaining Low flush. Keep this exact protocol order.
+        self.apply_sliced_send_u_key_cleanup(&copy_send_list);
+        for item in &copy_send_list {
+            self.create_sliced_and_send(item);
+        }
+        self.apply_copy_acks(copy_acks, cur_tm);
+        self.apply_regular_hl_ack();
+        self.apply_high_send_u_key_cleanup(&copy_send_list_h);
+        for mut item in copy_send_list_h {
+            self.send_h_item(&mut item, cur_tm);
+        }
+        self.retry_pending_h(cur_tm);
+        self.send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
     }
 
     fn get_copy_send_list(
@@ -10584,6 +10610,43 @@ mod pmtu_tests {
         assert!(
             client.sending.is_empty(),
             "writer copy/apply phase must remove completed sliced datagram"
+        );
+    }
+
+    #[test]
+    fn writer_tick_copies_ack_queues_then_check_sening_data_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        client.sending.push(sent_sliced_with_lengths(&[10], 100));
+        client.pending_h.push(pending_h_item(42));
+        client.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
+
+        let mut ack = [0u8; 34];
+        ack[0] = 0b0000_0001;
+        ack[32..34].copy_from_slice(&1u16.to_le_bytes());
+        client.on_new_sliced_ack(&ack);
+
+        client.copy_send_ack_and_check_sening_data(200);
+
+        assert!(
+            client.sending.is_empty(),
+            "writer tick must apply queued SlicedACK inside CheckSeningData"
+        );
+        assert!(
+            client.pending_h.is_empty(),
+            "writer tick must CopyRecvdData then ApplyRegularHLAck inside CheckSeningData"
+        );
+        assert!(
+            client.get_copy_acks().is_empty(),
+            "GetCopyAcks must clear reader-to-writer ACK queue before CheckSeningData"
+        );
+        assert!(
+            !client
+                .reader_protocol
+                .lock()
+                .unwrap()
+                .tmp_slider
+                .has_new_data,
+            "CopyRecvdData must clear TmpSlider after snapshot"
         );
     }
 }
