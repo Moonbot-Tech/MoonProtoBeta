@@ -221,6 +221,11 @@ sends the full CmdId=2 `TStratSnapshot` wire body:
 client.strat_send_snapshot_batch(server_epoch, true, &strategies);
 ```
 
+Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
+field-name and folder-path dictionary entries use a `Byte` length and write
+only that declared number of UTF-8 bytes; string field values use a `Word`
+length and write only that declared number of UTF-8 bytes.
+
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
 

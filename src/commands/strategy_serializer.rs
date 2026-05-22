@@ -420,11 +420,11 @@ impl StrategyBatchBuilder {
             let idx = self.name_index(name);
             self.body.extend_from_slice(&idx.to_le_bytes());
             write_field(&mut self.body, value);
-            field_count += 1;
+            field_count = field_count.wrapping_add(1);
         }
         // Backfill count
         self.body[count_offset..count_offset + 2].copy_from_slice(&field_count.to_le_bytes());
-        self.count += 1;
+        self.count = self.count.wrapping_add(1);
     }
 
     /// Финализировать в DEFLATE-compressed payload (формат TStratSnapshot.data).
@@ -436,15 +436,13 @@ impl StrategyBatchBuilder {
         for n in &self.name_dict {
             let b = n.as_bytes();
             // PathLen/NameLen — byte (max 255). Для стратегий имена полей < 255 байт.
-            plain.push(b.len() as u8);
-            plain.extend_from_slice(b);
+            write_u8_len_bytes(&mut plain, b);
         }
         // PathDict
         plain.extend_from_slice(&(self.path_dict.len() as u16).to_le_bytes());
         for p in &self.path_dict {
             let b = p.as_bytes();
-            plain.push(b.len() as u8);
-            plain.extend_from_slice(b);
+            write_u8_len_bytes(&mut plain, b);
         }
         // StratCount + body
         plain.extend_from_slice(&self.count.to_le_bytes());
@@ -477,10 +475,23 @@ fn write_field(out: &mut Vec<u8>, v: &FieldValue) {
         FieldValue::Double(d) => out.extend_from_slice(&d.to_le_bytes()),
         FieldValue::String(s) => {
             let b = s.as_bytes();
-            out.extend_from_slice(&(b.len() as u16).to_le_bytes());
-            out.extend_from_slice(b);
+            write_u16_len_bytes(out, b);
         }
     }
+}
+
+fn write_u8_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = bytes.len() as u8;
+    let len_usize = usize::from(len);
+    out.push(len);
+    out.extend_from_slice(&bytes[..len_usize]);
+}
+
+fn write_u16_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = bytes.len() as u16;
+    let len_usize = usize::from(len);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&bytes[..len_usize]);
 }
 
 // =============================================================================
@@ -643,6 +654,41 @@ mod tests {
         for (k, v) in &fields {
             assert_eq!(ps.fields.get(k), Some(v), "mismatch on {}", k);
         }
+    }
+
+    #[test]
+    fn writer_wraps_name_path_and_string_lengths_like_delphi() {
+        let long_name = "N".repeat(257);
+        let long_path = "P".repeat(257);
+        let long_value = "V".repeat(65_537);
+
+        let mut fields = HashMap::new();
+        fields.insert(long_name, FieldValue::Byte(7));
+        fields.insert("LongValue".to_string(), FieldValue::String(long_value));
+
+        let s = StrategySnapshot {
+            strategy_id: 1000,
+            strategy_ver: 1,
+            last_date: 1737000000000,
+            checked: true,
+            kind: 1,
+            path: long_path,
+            fields,
+        };
+
+        let mut b = StrategyBatchBuilder::new();
+        b.write_strategy(&s);
+        let compressed = b.finalize();
+        let parsed = parse_strategy_batch(&compressed).unwrap();
+        let ps = &parsed.strategies[0];
+
+        assert_eq!(ps.path, "P");
+        assert!(parsed.names.iter().any(|name| name == "N"));
+        assert_eq!(ps.fields.get("N"), Some(&FieldValue::Byte(7)));
+        assert_eq!(
+            ps.fields.get("LongValue"),
+            Some(&FieldValue::String("V".to_string()))
+        );
     }
 
     #[test]
