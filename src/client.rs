@@ -2814,22 +2814,32 @@ impl WriterRuntime<'_> {
         self.client.retry_pending_h(cur_tm);
     }
 
-    #[cfg(test)]
     fn retry_sliced(&mut self, cur_tm: i64) {
         self.client.retry_sliced(cur_tm);
     }
 
-    #[cfg(test)]
     fn batch_send_direct(&mut self, item: &SendItem) {
         self.client.batch_send_direct(item);
     }
 
     fn send_low_items_around_sliced_retry(&mut self, l_items: &[SendItem], cur_tm: i64) {
-        self.client
-            .send_low_items_around_sliced_retry(l_items, cur_tm);
+        // Delphi CheckSeningData has two Low phases:
+        // 1. before Sliced retry: send only CopySendListL[0] with NeedFlush=true
+        //    (or just flush accumulated H batch when there is no Low item);
+        // 2. after Sliced retry: send the remaining Low items and flush.
+        if let Some(first) = l_items.first() {
+            self.batch_send_direct(first);
+        }
+        self.flush_send_batch();
+
+        self.retry_sliced(cur_tm);
+
+        for item in l_items.iter().skip(1) {
+            self.batch_send_direct(item);
+        }
+        self.flush_send_batch();
     }
 
-    #[cfg(test)]
     fn flush_send_batch(&mut self) {
         self.client.flush_send_batch();
     }
@@ -7396,24 +7406,6 @@ impl Client {
         } else {
             self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
         }
-    }
-
-    fn send_low_items_around_sliced_retry(&mut self, l_items: &[SendItem], cur_tm: i64) {
-        // Delphi CheckSeningData has two Low phases:
-        // 1. before Sliced retry: send only CopySendListL[0] with NeedFlush=true
-        //    (or just flush accumulated H batch when there is no Low item);
-        // 2. after Sliced retry: send the remaining Low items and flush.
-        if let Some(first) = l_items.first() {
-            self.batch_send_direct(first);
-        }
-        self.flush_send_batch();
-
-        self.retry_sliced(cur_tm);
-
-        for item in l_items.iter().skip(1) {
-            self.batch_send_direct(item);
-        }
-        self.flush_send_batch();
     }
 
     /// Flush the send batch (matches DoSendTmpList, Common.pas:835-867).

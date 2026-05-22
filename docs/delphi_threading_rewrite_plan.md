@@ -942,3 +942,18 @@ Still not done:
   step is moving those bodies into `WriterRuntime` one by one.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: moved Low/Sliced retry ordering body
+
+Done:
+
+- Moved the body of `send_low_items_around_sliced_retry` into `WriterRuntime`.
+- The preserved order is Delphi `CheckSeningData`: first Low item, flush,
+  Sliced retry, remaining Low items, final flush.
+
+Still not done:
+
+- `batch_send_direct`, `flush_send_batch`, and `retry_sliced` bodies still
+  delegate to `Client`.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
