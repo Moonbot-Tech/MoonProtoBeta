@@ -10,6 +10,9 @@ Markets state is maintained from Engine API responses:
 When using `Client::run_with_dispatcher`, relevant responses are applied to
 `EventDispatcher::markets()` automatically.
 
+Low-level market response builders use Delphi string serialization: `Word`
+UTF-8 byte length followed by exactly that declared number of bytes.
+
 `CheckBinanceTags` follows the Delphi client: it updates only known markets that
 are present in the response. Markets absent from the response keep their previous
 token tags. A full `GetMarketsList` replacement prunes token tags for markets

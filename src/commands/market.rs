@@ -446,8 +446,10 @@ pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
 
 fn write_str(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
-    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-    out.extend_from_slice(bytes);
+    let len = bytes.len() as u16;
+    let len_usize = usize::from(len);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&bytes[..len_usize]);
 }
 
 // =============================================================================
@@ -860,6 +862,19 @@ mod tests {
         let mut r = EngineStreamReader::new(&buf);
         let m2 = read_market(&mut r, 2).unwrap();
         assert_eq!(m2.market_name_mb_classic, "LTCUSDT");
+    }
+
+    #[test]
+    fn market_write_str_writes_only_declared_wrapped_len_like_delphi() {
+        let s = "M".repeat(65_537);
+        let mut buf = Vec::new();
+        write_str(&mut buf, &s);
+
+        assert_eq!(&buf[..2], &1u16.to_le_bytes());
+        assert_eq!(buf.len(), 2 + 1);
+
+        let mut r = EngineStreamReader::new(&buf);
+        assert_eq!(r.read_str().unwrap(), "M");
     }
 
     #[test]
