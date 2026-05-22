@@ -330,6 +330,12 @@ pub(crate) struct RecvMsg {
     payload: Vec<u8>,
     recv_bytes: u64,
     timestamp_ms: i64,
+    /// Packet protocol body was already handled in the reader thread.
+    ///
+    /// Delphi `UDPRead` performs some protocol branches fully in the reader
+    /// path. Main/writer still has to observe the accepted-packet side effects
+    /// (`TotalRecvBytes`, `LastOnline`), but must not parse that packet again.
+    handled_in_reader: bool,
     /// Delphi updates `TotalRecvBytes`/`LastOnline` for a valid packet before
     /// `MoonProtoErrEmu` drops it. Keep the packet in the reader→main FIFO so
     /// main can apply those side effects, then skip protocol parsing.
@@ -1076,6 +1082,12 @@ impl SentSliced {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SlicedAck {
+    flags: [u8; 32],
+    datagram_num: u16,
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -1096,6 +1108,8 @@ pub struct Client {
     pending_h: Vec<SendItem>,
     // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
     sending: Vec<SentSliced>,
+    // Reader -> writer SlicedACK list (matches TMoonProtoBaseNet.ACKs).
+    incoming_sliced_acks: Arc<Mutex<Vec<SlicedAck>>>,
 
     // Main thread state
     socket: Option<UdpSocket>,
@@ -1350,6 +1364,7 @@ impl Client {
         let (event_tx, event_rx) = mpsc::channel();
         let app_events = Arc::new(Mutex::new(VecDeque::new()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
+        let incoming_sliced_acks = Arc::new(Mutex::new(Vec::new()));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
         // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
@@ -1372,6 +1387,7 @@ impl Client {
             app_queue_alive,
             pending_h: Vec::new(),
             sending: Vec::new(),
+            incoming_sliced_acks,
             socket: None,
             connected: false,
             authorized: false,
@@ -3554,10 +3570,13 @@ impl Client {
                     }
                 }
 
+                let copy_acks = self.get_copy_acks();
+
                 // CheckSeningData: Sliced → CreateSlicedObject; H → batched; PendingH retry; L → batch
                 for item in &sliced {
                     self.create_sliced_and_send(item);
                 }
+                self.apply_copy_acks(copy_acks, cur_tm);
                 for mut item in h_items {
                     self.send_h_item(&mut item, cur_tm);
                 }
@@ -3679,7 +3698,7 @@ impl Client {
         self.total_recv += msg.recv_bytes;
         self.track_recv(msg.recv_bytes, msg.timestamp_ms);
         self.last_online = msg.timestamp_ms;
-        if msg.err_emu_drop {
+        if msg.err_emu_drop || msg.handled_in_reader {
             return;
         }
         self.process_recv_msg(msg, cur_tm, mode);
@@ -3775,6 +3794,7 @@ impl Client {
         let mac_ctx = self.mac_ctx.clone(); // shared cached HMAC context (hot path).
         let mask_ver = self.cfg.mask_ver;
         let event_tx = self.event_tx.clone();
+        let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
         // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
         let start_time = self._start;
 
@@ -3870,12 +3890,18 @@ impl Client {
                 // получил `start_time` clone'ом из self._start (Instant — Copy).
                 // Тот же time base что в `Client::now_ms` — diff'ы остаются корректны.
                 let timestamp_ms = start_time.elapsed().as_millis() as i64;
+                let handled_in_reader =
+                    !err_emu_drop && Command::from_byte(hdr.cmd) == Command::SlicedACK;
+                if handled_in_reader {
+                    Client::push_sliced_ack(&incoming_sliced_acks, &payload);
+                }
 
                 let msg = RecvMsg {
                     cmd: hdr.cmd,
                     payload,
                     recv_bytes: n as u64,
                     timestamp_ms,
+                    handled_in_reader,
                     err_emu_drop,
                     epoch: my_epoch,
                 };
@@ -3892,6 +3918,106 @@ impl Client {
 
     // process_received удалён: обработка recv_msgs теперь inline в run() loop
     // (после event_rx.recv_timeout / try_recv дренажа event channel).
+
+    fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
+        // Delphi OnNewSlicedACK reads Flags(32 bytes) + DatagramNum(2 bytes)
+        // from the command payload after the transport header.
+        if payload.len() < 34 {
+            return None;
+        }
+        let mut flags = [0u8; 32];
+        flags.copy_from_slice(&payload[0..32]);
+        Some(SlicedAck {
+            flags,
+            datagram_num: u16::from_le_bytes([payload[32], payload[33]]),
+        })
+    }
+
+    fn push_sliced_ack(queue: &Arc<Mutex<Vec<SlicedAck>>>, payload: &[u8]) {
+        if let Some(ack) = Self::parse_sliced_ack_payload(payload) {
+            queue.lock().unwrap().push(ack);
+        }
+    }
+
+    fn on_new_sliced_ack(&self, payload: &[u8]) {
+        Self::push_sliced_ack(&self.incoming_sliced_acks, payload);
+    }
+
+    fn get_copy_acks(&self) -> Vec<SlicedAck> {
+        let mut acks = self.incoming_sliced_acks.lock().unwrap();
+        std::mem::take(&mut *acks)
+    }
+
+    fn apply_copy_acks(&mut self, copy_acks: Vec<SlicedAck>, cur_tm: i64) {
+        for ack in copy_acks {
+            self.apply_sliced_ack(ack, cur_tm);
+        }
+    }
+
+    fn apply_sliced_ack(&mut self, ack: SlicedAck, now_ms: i64) {
+        // Matches TMoonProtoClient.ApplyACK (MoonProtoIntStruct.pas:1200-1218):
+        // find first matching Sending datagram, apply, maybe remove, then stop.
+        let mut completed_ratio = None;
+        let mut completed_idx = None;
+        if let Some(idx) = self
+            .sending
+            .iter()
+            .position(|s| s.datagram_num == ack.datagram_num)
+        {
+            let s = &mut self.sending[idx];
+            // Merge ACK flags (set union, like Delphi Flags := Flags + ACK.Flags).
+            // If no new flag appears, Delphi `ApplyACK` exits before touching
+            // the piece list; keep the same no-op machine effect.
+            let mut changed = false;
+            for (dst, src) in s.ack_flags.iter_mut().zip(ack.flags) {
+                let before = *dst;
+                *dst |= src;
+                changed |= before != *dst;
+            }
+            if changed {
+                let complete = (0..s.blocks_count).all(|block| s.is_block_acked(block));
+                if complete {
+                    if s.blocks_count > 0 {
+                        completed_ratio =
+                            Some((s.sent_count as f64 / s.blocks_count as f64 - 1.0) * 100.0);
+                    }
+                    if trace_io_enabled() {
+                        eprintln!(
+                            "[mp-sliced-ack] d={} acked={}/{} complete=true sent_count={}",
+                            s.datagram_num, s.blocks_count, s.blocks_count, s.sent_count
+                        );
+                    }
+                    completed_idx = Some(idx);
+                } else {
+                    // Delphi ApplyACK frees ACKed pieces before retry. Rust keeps
+                    // arrays indexed by block number, so recompute over unACKed
+                    // pieces only.
+                    s.refresh_last_checked_from_unacked(now_ms);
+                    if trace_io_enabled() {
+                        let acked = (0..s.blocks_count)
+                            .filter(|&block| s.is_block_acked(block))
+                            .count();
+                        eprintln!(
+                            "[mp-sliced-ack] d={} acked={}/{} complete=false last_checked={}",
+                            s.datagram_num, acked, s.blocks_count, s.last_checked
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(idx) = completed_idx {
+            self.sending.remove(idx);
+        }
+
+        if let Some(ratio) = completed_ratio {
+            self.avg_over_heat = if self.avg_over_heat == 0.0 {
+                ratio
+            } else {
+                (self.avg_over_heat * 9.0 + ratio) * 0.1
+            };
+        }
+    }
 
     fn handle_udp_command(
         &mut self,
@@ -3961,93 +4087,7 @@ impl Client {
                 }
             }
             Command::SlicedACK => {
-                // Parse ACK: Flags(32 bytes) + DatagramNum(2 bytes) = 34 bytes
-                // Matches TMoonProtoClient.ApplyACK (MoonProtoIntStruct.pas:1200-1218)
-                if payload.len() >= 34 {
-                    let mut ack_flags = [0u8; 32];
-                    ack_flags.copy_from_slice(&payload[0..32]);
-                    let ack_dgram = u16::from_le_bytes([payload[32], payload[33]]);
-
-                    let now_ms = self.now_ms();
-
-                    // Delphi `TMoonProtoClient.ApplyACK` applies the ACK to the
-                    // first matching Sending item and then breaks. This matters on
-                    // u16 datagram wrap/collision: an old ACK must not mutate every
-                    // queued datagram with the same number.
-                    let mut completed_ratio = None;
-                    let mut completed_idx = None;
-                    if let Some(idx) = self
-                        .sending
-                        .iter()
-                        .position(|s| s.datagram_num == ack_dgram)
-                    {
-                        let s = &mut self.sending[idx];
-                        // Merge ACK flags (set union, like Delphi Flags := Flags + ACK.Flags).
-                        // If no new flag appears, Delphi `ApplyACK` exits before touching
-                        // the piece list; keep the same no-op machine effect.
-                        let mut changed = false;
-                        for (dst, src) in s.ack_flags.iter_mut().zip(ack_flags) {
-                            let before = *dst;
-                            *dst |= src;
-                            changed |= before != *dst;
-                        }
-                        if changed {
-                            // Check if all blocks ACK'd
-                            let complete = (0..s.blocks_count).all(|block| s.is_block_acked(block));
-                            if complete {
-                                // All ACK'd — записываем overhead ratio перед удалением
-                                // (matches MoonProtoIntStruct.pas:1210-1212).
-                                if s.blocks_count > 0 {
-                                    completed_ratio = Some(
-                                        (s.sent_count as f64 / s.blocks_count as f64 - 1.0) * 100.0,
-                                    );
-                                }
-                                if trace_io_enabled() {
-                                    eprintln!(
-                                        "[mp-sliced-ack] d={} acked={}/{} complete=true sent_count={}",
-                                        s.datagram_num,
-                                        s.blocks_count,
-                                        s.blocks_count,
-                                        s.sent_count
-                                    );
-                                }
-                                completed_idx = Some(idx);
-                            } else {
-                                // Delphi `TMoonProtoSlicedData.ApplyACK` frees ACKed
-                                // pieces before the next retry pass. Rust keeps the
-                                // arrays indexed by block number, so `last_checked`
-                                // must be recomputed over unACKed pieces only.
-                                s.refresh_last_checked_from_unacked(now_ms);
-                                if trace_io_enabled() {
-                                    let acked = (0..s.blocks_count)
-                                        .filter(|&block| s.is_block_acked(block))
-                                        .count();
-                                    eprintln!(
-                                        "[mp-sliced-ack] d={} acked={}/{} complete=false last_checked={}",
-                                        s.datagram_num,
-                                        acked,
-                                        s.blocks_count,
-                                        s.last_checked
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(idx) = completed_idx {
-                        self.sending.remove(idx);
-                    }
-
-                    // EMA update: avg_over_heat = (avg * 9 + new) / 10 (matches pas:1212).
-                    if let Some(ratio) = completed_ratio {
-                        self.avg_over_heat = if self.avg_over_heat == 0.0 {
-                            ratio
-                        } else {
-                            // B-19: * 0.1 вместо / 10.0
-                            (self.avg_over_heat * 9.0 + ratio) * 0.1
-                        };
-                    }
-                }
+                self.on_new_sliced_ack(payload);
             }
             Command::Ping => {
                 self.handle_ping(payload, sink);
@@ -6447,6 +6487,7 @@ mod api_pending_dispatch_tests {
                 payload,
                 recv_bytes: 64,
                 timestamp_ms: client.now_ms(),
+                handled_in_reader: false,
                 err_emu_drop: false,
                 epoch: client.current_reader_epoch,
             }))
@@ -7237,6 +7278,8 @@ mod pmtu_tests {
             &ack,
             &mut sink,
         );
+        let copy_acks = client.get_copy_acks();
+        client.apply_copy_acks(copy_acks, 300);
 
         client.retry_sliced(300);
         assert_eq!(client.sending[0].sent_count, 4);
@@ -7275,12 +7318,38 @@ mod pmtu_tests {
             &ack,
             &mut sink,
         );
+        let copy_acks = client.get_copy_acks();
+        client.apply_copy_acks(copy_acks, 100);
 
         assert_eq!(client.sending.len(), 1);
         assert_eq!(client.sending[0].blocks_count, 2);
         assert_eq!(
             client.sending[0].ack_flags[0], 0,
             "Delphi breaks after the first matching Sending item; a wrapped DatagramNum ACK must not mutate the next item"
+        );
+    }
+
+    #[test]
+    fn sliced_ack_reader_queues_writer_applies_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        client.sending.push(sent_sliced_with_lengths(&[10], 100));
+
+        let mut ack = [0u8; 34];
+        ack[0] = 0b0000_0001;
+        ack[32..34].copy_from_slice(&1u16.to_le_bytes());
+
+        client.on_new_sliced_ack(&ack);
+        assert_eq!(
+            client.sending.len(),
+            1,
+            "Delphi OnNewSlicedACK only queues ACKs; ApplyACK is writer/CheckSeningData work"
+        );
+
+        let copy_acks = client.get_copy_acks();
+        client.apply_copy_acks(copy_acks, 200);
+        assert!(
+            client.sending.is_empty(),
+            "writer copy/apply phase must remove completed sliced datagram"
         );
     }
 }
@@ -8286,6 +8355,7 @@ mod event_loop_fairness_tests {
             payload: Vec::new(),
             recv_bytes: 0,
             timestamp_ms: 0,
+            handled_in_reader: false,
             err_emu_drop: false,
             epoch: u32::MAX,
         })
@@ -8368,6 +8438,7 @@ mod event_loop_fairness_tests {
                 payload: vec![1, 2, 3],
                 recv_bytes: 1234,
                 timestamp_ms: 777,
+                handled_in_reader: false,
                 err_emu_drop: true,
                 epoch: client.current_reader_epoch,
             },
@@ -8397,6 +8468,7 @@ mod service_cmd_tests {
             payload: Vec::new(),
             recv_bytes: 0,
             timestamp_ms: 0,
+            handled_in_reader: false,
             err_emu_drop: false,
             epoch: 0,
         }
