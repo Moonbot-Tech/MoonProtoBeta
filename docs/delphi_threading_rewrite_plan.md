@@ -1301,3 +1301,27 @@ Still not done:
 
 - The actual socket, send buffer, byte accounting, and log throttling storage
   still live on `Client`. Moving those requires the larger `ClientShared` split.
+
+### 2026-05-22 - Phase 1 partial: moved writer periodic helpers into WriterRuntime
+
+Done:
+
+- Moved the remaining writer tick helper bodies from `Client` into
+  `WriterRuntime`: `tick_periodic_refresh`, `tick_periodic_refresh_at`,
+  `check_indexes_fetch_timeout`, `check_clock_jump`, and
+  `periodic_trades_tick`.
+- `transport_writer_maintenance_tick` now calls these same-runtime methods.
+- The method bodies were moved without changing the queue/send side effects:
+  markets-index timeout retry, periodic market/tag refresh, clock-jump forced
+  reconnect, and dispatcher-only trades tick keep the same state transitions and
+  packet enqueue points.
+- Unit tests for clock-jump/index timeout and periodic refresh now instantiate
+  `WriterRuntime` directly, so they verify the writer/orchestrator owner rather
+  than a `Client` shortcut.
+
+Still not done:
+
+- The actual send queue storage, socket send helper, and active-library
+  dispatcher state still live on `Client`.
+- `pending_reader_decoded` is still the Rust bridge between reader
+  `DataReadInt` core and user/active delivery.

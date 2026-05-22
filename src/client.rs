@@ -2577,7 +2577,7 @@ impl WriterRuntime<'_> {
                 // Active library: periodic trades.tick — только в Dispatcher mode.
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
                 // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
-                self.client.periodic_trades_tick(cur_tm, mode);
+                self.periodic_trades_tick(cur_tm, mode);
 
                 self.transport_reconnect_tail_tick(cur_tm);
             } else {
@@ -2837,19 +2837,137 @@ impl WriterRuntime<'_> {
         }
 
         // Timeout protection для init/API markets-index request marker.
-        self.client.check_indexes_fetch_timeout(cur_tm);
+        self.check_indexes_fetch_timeout(cur_tm);
 
         // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
         // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
         // фазе; до неё запрос потеряется впустую).
         if matches!(self.client.auth_status, AuthStatus::AuthDone) && self.client.domain_ready {
-            self.client.tick_periodic_refresh(cur_tm);
+            self.tick_periodic_refresh(cur_tm);
         }
 
         // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
         // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
         // чтобы full_reset + новый Hello с актуальным временем.
-        self.client.check_clock_jump();
+        self.check_clock_jump();
+    }
+
+    /// F6/F7: проверка пора ли слать periodic refresh-команды.
+    /// Вызывается из writer loop каждый тик (~5мс), но реальная отправка происходит
+    /// только когда прошёл `update_markets_every` / `check_tags_every` от последнего раза.
+    ///
+    /// Fire-and-forget: используем `send_api_request` без регистрации в pending registry —
+    /// EventDispatcher автоматически применяет ответ к MarketsState когда он придёт.
+    fn tick_periodic_refresh(&mut self, cur_tm: i64) {
+        let hour_slot = if self.client.cfg.refresh.check_tags_every.is_some() {
+            current_utc_hour_slot()
+        } else {
+            self.client.check_tags_hour_slot
+        };
+        self.tick_periodic_refresh_at(cur_tm, hour_slot);
+    }
+
+    fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
+        if self.client.domain_ready
+            && self.client.domain_restore_needs_indexes()
+            && self.client.peer_app_token != 0
+            && !self.client.market_indexes_current_for_peer()
+            && !self.client.indexes_fetch_in_flight
+        {
+            self.client.send_markets_indexes_restore_request(cur_tm);
+        }
+
+        if let Some(interval) = self.client.cfg.refresh.update_markets_every {
+            let interval_ms = interval.as_millis() as i64;
+            if (cur_tm - self.client.last_update_markets_ms) >= interval_ms {
+                self.client
+                    .send_api_request(&crate::commands::engine_request::update_markets_list());
+                self.client.last_update_markets_ms = cur_tm;
+            }
+        }
+        if let Some(interval) = self.client.cfg.refresh.check_tags_every {
+            if self.client.check_tags_hour_slot == i64::MIN {
+                self.client.check_tags_hour_slot = hour_slot;
+            } else if hour_slot != self.client.check_tags_hour_slot {
+                self.client.check_tags_hour_slot = hour_slot;
+                self.client.check_tags_burst_sent = 0;
+                self.client.last_check_tags_burst_ms = i64::MIN / 2;
+            }
+
+            let interval_ms = interval.as_millis() as i64;
+            let burst_due = self.client.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT
+                && (cur_tm - self.client.last_check_tags_burst_ms) >= CHECK_TAGS_BURST_SPACING_MS;
+            let interval_due = (cur_tm - self.client.last_check_tags_ms) >= interval_ms;
+
+            if burst_due || interval_due {
+                self.client
+                    .send_api_request(&crate::commands::engine_request::check_binance_tags());
+                self.client.last_check_tags_ms = cur_tm;
+                if self.client.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT {
+                    self.client.check_tags_burst_sent += 1;
+                    self.client.last_check_tags_burst_ms = cur_tm;
+                }
+            }
+        }
+    }
+
+    /// Periodic timeout cleanup/retry for an in-flight markets-index restore marker.
+    /// UDP-ответ может потеряться — без этой проверки `indexes_fetch_in_flight = true`
+    /// остался бы навсегда. До Init запрос НЕ отправляется; после Init reconnect
+    /// restore имеет право повторить `GetMarketsIndexes`, потому что пользовательский
+    /// intent уже был задан единственным init-проходом.
+    fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
+        const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
+        if self.client.indexes_fetch_in_flight
+            && now_ms - self.client.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
+        {
+            self.client.indexes_fetch_in_flight = false;
+            if self.client.domain_ready
+                && self.client.domain_restore_needs_indexes()
+                && self.client.peer_app_token != 0
+                && !self.client.market_indexes_current_for_peer()
+            {
+                self.client.send_markets_indexes_restore_request(now_ms);
+            }
+        }
+    }
+
+    /// audit_robustness H5: process-global clock-jump generation -> force_disconnect.
+    fn check_clock_jump(&mut self) {
+        use std::sync::atomic::Ordering;
+        let generation = CLOCK_JUMP_GENERATION.load(Ordering::Relaxed);
+        if generation != self.client.seen_clock_jump_generation {
+            self.client.seen_clock_jump_generation = generation;
+            log::warn!(target: "moonproto::client",
+                "clock jump -> force_disconnect; reconnect will refresh handshake timestamp");
+            self.client.force_disconnect = true;
+        }
+    }
+
+    /// Periodic trades.tick (только в Dispatcher mode). Throttle 100мс — соответствует
+    /// Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`. Сам tick также
+    /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
+    /// на каждом packet (он всё равно вернёт пустой Vec).
+    fn periodic_trades_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if let RunMode::Dispatcher {
+            dispatcher,
+            on_event,
+            event_buf,
+            ..
+        } = mode
+        {
+            if cur_tm - self.client.last_trades_tick_ms >= 100 {
+                self.client.last_trades_tick_ms = cur_tm;
+                let rtt = self.client.round_trip_delay;
+                let (payloads, tick_events) = dispatcher.trades.tick_with_events(rtt, cur_tm);
+                for p in payloads {
+                    self.client.send_api_request(&p);
+                }
+                event_buf.clear();
+                event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
+                on_event.drain_events(event_buf, dispatcher);
+            }
+        }
     }
 
     fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {
@@ -5397,65 +5515,6 @@ impl Client {
         self.sender().unsubscribe_all_trades();
     }
 
-    /// F6/F7: проверка пора ли слать periodic refresh-команды.
-    /// Вызывается из main loop каждый тик (~5мс), но реальная отправка происходит
-    /// только когда прошёл `update_markets_every` / `check_tags_every` от последнего раза.
-    ///
-    /// Fire-and-forget: используем `send_api_request` без регистрации в pending registry —
-    /// EventDispatcher автоматически применяет ответ к MarketsState когда он придёт.
-    /// На случай если ответ не дойдёт (UDP loss / server reset) — следующий тик
-    /// просто пошлёт заново, никакого retry/timeout-кода не нужно.
-    fn tick_periodic_refresh(&mut self, cur_tm: i64) {
-        let hour_slot = if self.cfg.refresh.check_tags_every.is_some() {
-            current_utc_hour_slot()
-        } else {
-            self.check_tags_hour_slot
-        };
-        self.tick_periodic_refresh_at(cur_tm, hour_slot);
-    }
-
-    fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
-        if self.domain_ready
-            && self.domain_restore_needs_indexes()
-            && self.peer_app_token != 0
-            && !self.market_indexes_current_for_peer()
-            && !self.indexes_fetch_in_flight
-        {
-            self.send_markets_indexes_restore_request(cur_tm);
-        }
-
-        if let Some(interval) = self.cfg.refresh.update_markets_every {
-            let interval_ms = interval.as_millis() as i64;
-            if (cur_tm - self.last_update_markets_ms) >= interval_ms {
-                self.send_api_request(&crate::commands::engine_request::update_markets_list());
-                self.last_update_markets_ms = cur_tm;
-            }
-        }
-        if let Some(interval) = self.cfg.refresh.check_tags_every {
-            if self.check_tags_hour_slot == i64::MIN {
-                self.check_tags_hour_slot = hour_slot;
-            } else if hour_slot != self.check_tags_hour_slot {
-                self.check_tags_hour_slot = hour_slot;
-                self.check_tags_burst_sent = 0;
-                self.last_check_tags_burst_ms = i64::MIN / 2;
-            }
-
-            let interval_ms = interval.as_millis() as i64;
-            let burst_due = self.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT
-                && (cur_tm - self.last_check_tags_burst_ms) >= CHECK_TAGS_BURST_SPACING_MS;
-            let interval_due = (cur_tm - self.last_check_tags_ms) >= interval_ms;
-
-            if burst_due || interval_due {
-                self.send_api_request(&crate::commands::engine_request::check_binance_tags());
-                self.last_check_tags_ms = cur_tm;
-                if self.check_tags_burst_sent < CHECK_TAGS_BURST_COUNT {
-                    self.check_tags_burst_sent += 1;
-                    self.last_check_tags_burst_ms = cur_tm;
-                }
-            }
-        }
-    }
-
     #[cfg(test)]
     fn outgoing_mm_orders_subscribe_intent(item: &SendItem) -> Option<bool> {
         if item.cmd != Command::UI as u8 || item.u_key.kind != UK_TURN_MM_DETECTION {
@@ -6588,32 +6647,6 @@ impl Client {
         }
     }
 
-    /// Periodic trades.tick (только в Dispatcher mode). Throttle 100мс — соответствует
-    /// Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`. Сам tick также
-    /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
-    /// на каждом packet (он всё равно вернёт пустой Vec).
-    fn periodic_trades_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher {
-            dispatcher,
-            on_event,
-            event_buf,
-            ..
-        } = mode
-        {
-            if cur_tm - self.last_trades_tick_ms >= 100 {
-                self.last_trades_tick_ms = cur_tm;
-                let rtt = self.round_trip_delay;
-                let (payloads, tick_events) = dispatcher.trades.tick_with_events(rtt, cur_tm);
-                for p in payloads {
-                    self.send_api_request(&p);
-                }
-                event_buf.clear();
-                event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
-                on_event.drain_events(event_buf, dispatcher);
-            }
-        }
-    }
-
     /// Spawn reader thread (≡ Indy TIdUDPListenerThread).
     /// Accepted packets run their protocol-owned receive core in this reader
     /// stack; main is woken only to apply queued user/active-library delivery
@@ -7409,42 +7442,6 @@ impl Client {
             }
         }
         true
-    }
-
-    /// audit_robustness H5: process-global clock-jump generation → force_disconnect.
-    /// Извлечён в метод для testability + чтобы main loop был чище.
-    fn check_clock_jump(&mut self) {
-        use std::sync::atomic::Ordering;
-        let generation = CLOCK_JUMP_GENERATION.load(Ordering::Relaxed);
-        if generation != self.seen_clock_jump_generation {
-            self.seen_clock_jump_generation = generation;
-            log::warn!(target: "moonproto::client",
-                "clock jump → force_disconnect; reconnect will refresh handshake timestamp");
-            self.force_disconnect = true;
-        }
-    }
-
-    /// Periodic timeout cleanup/retry for an in-flight markets-index restore marker.
-    /// UDP-ответ может потеряться — без этой проверки `indexes_fetch_in_flight = true`
-    /// остался бы навсегда. До Init запрос НЕ отправляется; после Init reconnect
-    /// restore имеет право повторить `GetMarketsIndexes`, потому что пользовательский
-    /// intent уже был задан единственным init-проходом.
-    ///
-    /// Вызывается из main loop'ов `run` / `run_with_dispatcher` раз за тик.
-    fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
-        const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
-        if self.indexes_fetch_in_flight
-            && now_ms - self.indexes_fetch_started_ms > INDEXES_FETCH_TIMEOUT_MS
-        {
-            self.indexes_fetch_in_flight = false;
-            if self.domain_ready
-                && self.domain_restore_needs_indexes()
-                && self.peer_app_token != 0
-                && !self.market_indexes_current_for_peer()
-            {
-                self.send_markets_indexes_restore_request(now_ms);
-            }
-        }
     }
 
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
@@ -11080,6 +11077,10 @@ mod active_library_helpers_tests {
         }
     }
 
+    fn writer(client: &mut Client) -> WriterRuntime<'_> {
+        WriterRuntime { client }
+    }
+
     /// Сериализует тесты которые трогают `CLOCK_JUMP_GENERATION` (process-global atomic).
     /// Cargo test запускает тесты в параллельных thread'ах — без этой блокировки
     /// race на generation даёт flaky failures.
@@ -11096,7 +11097,7 @@ mod active_library_helpers_tests {
         let mut client = Client::new(dummy_cfg());
         assert!(!client.force_disconnect);
         CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        client.check_clock_jump();
+        writer(&mut client).check_clock_jump();
         assert!(
             client.force_disconnect,
             "clock jump flag → force_disconnect = true"
@@ -11109,7 +11110,7 @@ mod active_library_helpers_tests {
         let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
         CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed);
         let mut client = Client::new(dummy_cfg());
-        client.check_clock_jump();
+        writer(&mut client).check_clock_jump();
         assert!(!client.force_disconnect, "без флага — никаких изменений");
     }
 
@@ -11120,13 +11121,13 @@ mod active_library_helpers_tests {
         CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed); // reset
         let mut client = Client::new(dummy_cfg());
         CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        client.check_clock_jump();
+        writer(&mut client).check_clock_jump();
         assert!(
             client.force_disconnect,
             "первый вызов с flag=true → force_disconnect"
         );
         client.force_disconnect = false; // reset для второй проверки
-        client.check_clock_jump();
+        writer(&mut client).check_clock_jump();
         assert!(
             !client.force_disconnect,
             "тот же generation — второй вызов no-op"
@@ -11141,8 +11142,8 @@ mod active_library_helpers_tests {
         let mut b = Client::new(dummy_cfg());
 
         CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        a.check_clock_jump();
-        b.check_clock_jump();
+        writer(&mut a).check_clock_jump();
+        writer(&mut b).check_clock_jump();
 
         assert!(
             a.force_disconnect,
@@ -11240,7 +11241,7 @@ mod active_library_helpers_tests {
         let mut client = Client::new(dummy_cfg());
         client.indexes_fetch_in_flight = false;
         client.indexes_fetch_started_ms = 0;
-        client.check_indexes_fetch_timeout(100_000_000);
+        writer(&mut client).check_indexes_fetch_timeout(100_000_000);
         assert!(!client.indexes_fetch_in_flight);
     }
 
@@ -11250,7 +11251,7 @@ mod active_library_helpers_tests {
         client.indexes_fetch_in_flight = true;
         client.indexes_fetch_started_ms = 0;
         // 5 секунд прошло — меньше 12с timeout.
-        client.check_indexes_fetch_timeout(5_000);
+        writer(&mut client).check_indexes_fetch_timeout(5_000);
         assert!(
             client.indexes_fetch_in_flight,
             "в пределах timeout — флаг сохраняется"
@@ -11265,7 +11266,7 @@ mod active_library_helpers_tests {
         client.peer_app_token = 0; // не triggers re-send (нет mismatch)
         client.tracked_indexes_peer_app_token = 0;
         // 13 секунд — больше 12с timeout.
-        client.check_indexes_fetch_timeout(13_000);
+        writer(&mut client).check_indexes_fetch_timeout(13_000);
         assert!(
             !client.indexes_fetch_in_flight,
             "после timeout без peer_app_token mismatch — флаг сбрасывается"
@@ -11281,7 +11282,7 @@ mod active_library_helpers_tests {
         client.peer_app_token = 0xABC;
         client.tracked_indexes_peer_app_token = 0xDEF;
         client.domain_ready = true;
-        client.check_indexes_fetch_timeout(13_000);
+        writer(&mut client).check_indexes_fetch_timeout(13_000);
         assert!(
             !client.indexes_fetch_in_flight,
             "timeout cleanup только сбрасывает marker"
@@ -11304,7 +11305,7 @@ mod active_library_helpers_tests {
         client.domain_ready = true;
         client.domain_restore.fetch_indexes = true;
 
-        client.check_indexes_fetch_timeout(13_000);
+        writer(&mut client).check_indexes_fetch_timeout(13_000);
 
         assert!(client.indexes_fetch_in_flight);
         assert_eq!(client.indexes_fetch_started_ms, 13_000);
@@ -11329,7 +11330,7 @@ mod active_library_helpers_tests {
         client.indexes_fetch_started_ms = 0;
         client.peer_app_token = 0;
         client.tracked_indexes_peer_app_token = 0xABC;
-        client.check_indexes_fetch_timeout(13_000);
+        writer(&mut client).check_indexes_fetch_timeout(13_000);
         assert!(
             !client.indexes_fetch_in_flight,
             "peer_app_token=0 (не подключены) → не re-send, флаг сброшен"
@@ -11550,6 +11551,10 @@ mod refresh_tick_tests {
         out
     }
 
+    fn writer(client: &mut Client) -> WriterRuntime<'_> {
+        WriterRuntime { client }
+    }
+
     #[test]
     fn refresh_config_defaults() {
         // Документированные дефолты: Delphi-worker cadence, gated by domain_ready.
@@ -11631,7 +11636,7 @@ mod refresh_tick_tests {
         }));
         let before = client.last_update_markets_ms;
         assert_eq!(before, i64::MIN / 2);
-        client.tick_periodic_refresh(0);
+        writer(&mut client).tick_periodic_refresh(0);
         assert_eq!(
             client.last_update_markets_ms, 0,
             "первый тик должен зафиксировать timestamp 0"
@@ -11647,14 +11652,14 @@ mod refresh_tick_tests {
         client.last_update_markets_ms = 50;
 
         // 50ms прошло из 100ms required — не должен слать.
-        client.tick_periodic_refresh(100);
+        writer(&mut client).tick_periodic_refresh(100);
         assert_eq!(
             client.last_update_markets_ms, 50,
             "interval не прошёл — last_update_markets_ms не меняется"
         );
 
         // 100ms прошло — отправка.
-        client.tick_periodic_refresh(150);
+        writer(&mut client).tick_periodic_refresh(150);
         assert_eq!(
             client.last_update_markets_ms, 150,
             "100ms прошло — отправка состоялась"
@@ -11669,7 +11674,7 @@ mod refresh_tick_tests {
         }));
         let was_markets = client.last_update_markets_ms;
         let was_tags = client.last_check_tags_ms;
-        client.tick_periodic_refresh(1_000_000);
+        writer(&mut client).tick_periodic_refresh(1_000_000);
         assert_eq!(
             client.last_update_markets_ms, was_markets,
             "update_markets выключен — last_update_markets_ms не меняется"
@@ -11687,7 +11692,7 @@ mod refresh_tick_tests {
             check_tags_every: Some(Duration::from_millis(200)),
         }));
         let was_markets = client.last_update_markets_ms;
-        client.tick_periodic_refresh(1_000_000);
+        writer(&mut client).tick_periodic_refresh(1_000_000);
         assert_eq!(
             client.last_update_markets_ms, was_markets,
             "update_markets выключен — не трогаем"
@@ -11706,7 +11711,7 @@ mod refresh_tick_tests {
         }));
         assert_eq!(client.check_tags_hour_slot, i64::MIN);
 
-        client.tick_periodic_refresh_at(0, 42);
+        writer(&mut client).tick_periodic_refresh_at(0, 42);
         assert_eq!(client.check_tags_hour_slot, 42);
         assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
         assert_eq!(
@@ -11714,7 +11719,7 @@ mod refresh_tick_tests {
             vec![EngineMethod::CheckBinanceTags as u8],
         );
 
-        client.tick_periodic_refresh_at(200, 42);
+        writer(&mut client).tick_periodic_refresh_at(200, 42);
         assert!(
             drain_api_methods(&client).is_empty(),
             "initial tick is not a burst"
@@ -11732,12 +11737,12 @@ mod refresh_tick_tests {
         client.last_check_tags_ms = 0;
 
         // 150ms: update_markets должен сработать (100ms прошло), check_tags нет.
-        client.tick_periodic_refresh(150);
+        writer(&mut client).tick_periodic_refresh(150);
         assert_eq!(client.last_update_markets_ms, 150);
         assert_eq!(client.last_check_tags_ms, 0);
 
         // 600ms: update_markets должен сработать (450ms с прошлого), check_tags тоже (600ms с прошлого).
-        client.tick_periodic_refresh(600);
+        writer(&mut client).tick_periodic_refresh(600);
         assert_eq!(client.last_update_markets_ms, 600);
         assert_eq!(client.last_check_tags_ms, 600);
     }
@@ -11753,22 +11758,22 @@ mod refresh_tick_tests {
         client.check_tags_burst_sent = CHECK_TAGS_BURST_COUNT;
         drain_api_methods(&client);
 
-        client.tick_periodic_refresh_at(10_000, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_000, 11);
         assert_eq!(
             drain_api_methods(&client),
             vec![EngineMethod::CheckBinanceTags as u8],
         );
         assert_eq!(client.check_tags_burst_sent, 1);
 
-        client.tick_periodic_refresh_at(10_100, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_100, 11);
         assert!(
             drain_api_methods(&client).is_empty(),
             "200ms spacing not reached"
         );
 
-        client.tick_periodic_refresh_at(10_200, 11);
-        client.tick_periodic_refresh_at(10_400, 11);
-        client.tick_periodic_refresh_at(10_600, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_200, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_400, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_600, 11);
         assert_eq!(
             drain_api_methods(&client),
             vec![
@@ -11779,7 +11784,7 @@ mod refresh_tick_tests {
         );
         assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
 
-        client.tick_periodic_refresh_at(10_800, 11);
+        writer(&mut client).tick_periodic_refresh_at(10_800, 11);
         assert!(
             drain_api_methods(&client).is_empty(),
             "no fifth burst request"
