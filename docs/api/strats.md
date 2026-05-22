@@ -37,7 +37,19 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
                 let info = state.strats().get(*strategy_id).expect("strategy state");
                 println!("strategy {strategy_id} sell price={} checked={}", sell_price, info.checked);
             }
-            StratEvent::Deleted { strategy_id } => remove_strategy(*strategy_id),
+            StratEvent::Deleted {
+                strategy_id,
+                folder_path,
+                strategy_deleted,
+                folder_deleted,
+            } => {
+                if *strategy_deleted {
+                    remove_strategy(*strategy_id);
+                }
+                if *folder_deleted {
+                    remove_empty_folder(folder_path);
+                }
+            }
             StratEvent::CheckedSynced { changed, is_delta } => {
                 println!("checked changed={changed} delta={is_delta}");
             }
@@ -74,6 +86,12 @@ stored there; they are stored as `StrategySnapshot` values owned by the
 dispatcher. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
 `PrevChecked`. Checked deltas are pending while these fields differ and become
 acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
+
+`TStratDelete` has two independent Delphi effects: delete `StrategyID` when it
+is non-zero, then delete `FolderPath` when it names an existing empty non-root
+folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
+`folder_deleted` tell which parts actually changed state; if both are false the
+dispatcher emits `StratEvent::Ignored`.
 
 ```rust
 use moonproto::commands::strategy_serializer::StrategySnapshot;

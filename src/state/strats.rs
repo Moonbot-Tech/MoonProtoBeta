@@ -61,8 +61,15 @@ pub enum StratEvent {
         server_epoch: u64,
         raw_data: Vec<u8>,
     },
-    /// Стратегия удалена.
-    Deleted { strategy_id: u64 },
+    /// Результат `TStratDelete`: Delphi сначала пробует удалить StrategyID,
+    /// затем FolderPath. Событие приходит только если хотя бы одна операция
+    /// реально изменила state.
+    Deleted {
+        strategy_id: u64,
+        folder_path: String,
+        strategy_deleted: bool,
+        folder_deleted: bool,
+    },
     /// Цена продажи обновлена.
     SellPriceUpdated { strategy_id: u64, sell_price: f64 },
     /// Checked-флаги синхронизированы (полная замена или delta).
@@ -91,6 +98,9 @@ pub struct StratsState {
     pub by_id: HashMap<u64, StrategyInfo>,
     /// Delphi `TStrategies` list order. `by_id` is only the lookup index.
     order: Vec<u64>,
+    /// Delphi folder tree analogue, keyed case-insensitively like `SameText`.
+    /// Values keep the first observed spelling of the full folder path.
+    folders_by_key: HashMap<String, String>,
     /// `strategy_id → StrategySnapshot`. Полный decoded snapshot, которым владеет
     /// active library: из него строится ответ на `TStratSnapshotRequest` и его же
     /// читает пользовательский код через API.
@@ -117,7 +127,76 @@ impl StratsState {
     fn clear_entries(&mut self) {
         self.by_id.clear();
         self.order.clear();
+        self.folders_by_key.clear();
         self.snapshots_by_id.clear();
+    }
+
+    fn folder_key(path: &str) -> String {
+        path.to_lowercase()
+    }
+
+    fn is_same_or_child_folder(candidate_key: &str, folder_key: &str) -> bool {
+        candidate_key == folder_key
+            || candidate_key
+                .strip_prefix(folder_key)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    fn create_folders_for_path(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+
+        let mut current = String::new();
+        for part in path.split('/') {
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(part);
+            let key = Self::folder_key(&current);
+            self.folders_by_key.entry(key).or_insert(current.clone());
+        }
+    }
+
+    fn remove_strategy_by_id(&mut self, strategy_id: u64) -> bool {
+        let removed = self.by_id.remove(&strategy_id).is_some();
+        if removed {
+            self.order.retain(|id| *id != strategy_id);
+            self.snapshots_by_id.remove(&strategy_id);
+        }
+        removed
+    }
+
+    fn folder_has_strategies(&self, folder_key: &str) -> bool {
+        self.by_id.values().any(|entry| {
+            let entry_key = Self::folder_key(&entry.folder_path);
+            Self::is_same_or_child_folder(&entry_key, folder_key)
+        })
+    }
+
+    fn delete_folder_by_path(&mut self, path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+
+        let key = Self::folder_key(path);
+        if !self.folders_by_key.contains_key(&key) {
+            return false;
+        }
+        if self.folder_has_strategies(&key) {
+            return false;
+        }
+
+        let deleted_keys: Vec<String> = self
+            .folders_by_key
+            .keys()
+            .filter(|candidate_key| Self::is_same_or_child_folder(candidate_key, &key))
+            .cloned()
+            .collect();
+        for deleted_key in deleted_keys {
+            self.folders_by_key.remove(&deleted_key);
+        }
+        true
     }
 
     /// Применить распарсенную команду.
@@ -138,11 +217,25 @@ impl StratsState {
                 }
             }
             StratCommand::Delete(d) => {
-                self.by_id.remove(&d.strategy_id);
-                self.order.retain(|id| *id != d.strategy_id);
-                self.snapshots_by_id.remove(&d.strategy_id);
-                StratEvent::Deleted {
-                    strategy_id: d.strategy_id,
+                let strategy_deleted = if d.strategy_id != 0 {
+                    self.remove_strategy_by_id(d.strategy_id)
+                } else {
+                    false
+                };
+                let folder_deleted = if d.folder_path.is_empty() {
+                    false
+                } else {
+                    self.delete_folder_by_path(&d.folder_path)
+                };
+                if strategy_deleted || folder_deleted {
+                    StratEvent::Deleted {
+                        strategy_id: d.strategy_id,
+                        folder_path: d.folder_path,
+                        strategy_deleted,
+                        folder_deleted,
+                    }
+                } else {
+                    StratEvent::Ignored
                 }
             }
             StratCommand::SellPriceUpdate(u) => match self.by_id.get_mut(&u.strategy_id) {
@@ -196,6 +289,8 @@ impl StratsState {
         let entry = self.get_or_insert(strategy_id);
         entry.last_date = last_date;
         entry.folder_path = folder_path;
+        let path = entry.folder_path.clone();
+        self.create_folders_for_path(&path);
     }
 
     /// Заменить owned strategy list списком из приложения.
@@ -226,6 +321,7 @@ impl StratsState {
             entry.checked = s.checked;
             entry.prev_checked = s.checked;
         }
+        self.create_folders_for_path(&s.path);
         self.snapshots_by_id.insert(s.strategy_id, s);
     }
 
@@ -245,6 +341,7 @@ impl StratsState {
             entry.checked = s.checked;
             entry.prev_checked = s.checked;
         }
+        self.create_folders_for_path(&s.path);
         self.snapshots_by_id.insert(s.strategy_id, s.clone());
         true
     }
@@ -316,6 +413,14 @@ impl StratsState {
 
     pub fn snapshot(&self, strategy_id: u64) -> Option<&StrategySnapshot> {
         self.snapshots_by_id.get(&strategy_id)
+    }
+
+    pub fn has_folder(&self, folder_path: &str) -> bool {
+        if folder_path.is_empty() {
+            return true;
+        }
+        self.folders_by_key
+            .contains_key(&Self::folder_key(folder_path))
     }
 
     pub fn snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
@@ -406,12 +511,140 @@ mod tests {
             path: "F".into(),
             fields,
         });
+        assert!(s.has_folder("F"));
+        let ev = s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "".into(),
+        }));
+        assert!(matches!(
+            ev,
+            StratEvent::Deleted {
+                strategy_id: 100,
+                strategy_deleted: true,
+                folder_deleted: false,
+                ..
+            }
+        ));
+        assert!(s.get(100).is_none());
+        assert!(s.snapshot(100).is_none());
+        assert!(s.has_folder("F"));
+    }
+
+    #[test]
+    fn delete_with_folder_path_deletes_strategy_then_empty_folder_like_delphi() {
+        let mut s = StratsState::new();
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: true,
+            kind: 1,
+            path: "Root/Sub".into(),
+            fields: HashMap::new(),
+        });
+
+        let ev = s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "Root/Sub".into(),
+        }));
+
+        assert!(matches!(
+            ev,
+            StratEvent::Deleted {
+                strategy_id: 100,
+                ref folder_path,
+                strategy_deleted: true,
+                folder_deleted: true,
+            } if folder_path == "Root/Sub"
+        ));
+        assert!(s.get(100).is_none());
+        assert!(!s.has_folder("Root/Sub"));
+        assert!(s.has_folder("Root"));
+    }
+
+    #[test]
+    fn delete_zero_strategy_id_can_delete_empty_folder_like_delphi() {
+        let mut s = StratsState::new();
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: false,
+            kind: 1,
+            path: "Root/Sub".into(),
+            fields: HashMap::new(),
+        });
         s.apply(StratCommand::Delete(StratDelete {
             strategy_id: 100,
             folder_path: "".into(),
         }));
-        assert!(s.get(100).is_none());
-        assert!(s.snapshot(100).is_none());
+        assert!(s.has_folder("Root/Sub"));
+
+        let ev = s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 0,
+            folder_path: "root/sub".into(),
+        }));
+
+        assert!(matches!(
+            ev,
+            StratEvent::Deleted {
+                strategy_id: 0,
+                ref folder_path,
+                strategy_deleted: false,
+                folder_deleted: true,
+            } if folder_path == "root/sub"
+        ));
+        assert!(!s.has_folder("Root/Sub"));
+    }
+
+    #[test]
+    fn delete_folder_path_keeps_non_empty_folder_like_delphi() {
+        let mut s = StratsState::new();
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: false,
+            kind: 1,
+            path: "Root/Sub".into(),
+            fields: HashMap::new(),
+        });
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 200,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: false,
+            kind: 1,
+            path: "Root/Sub/Child".into(),
+            fields: HashMap::new(),
+        });
+
+        let ev = s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 100,
+            folder_path: "Root/Sub".into(),
+        }));
+
+        assert!(matches!(
+            ev,
+            StratEvent::Deleted {
+                strategy_id: 100,
+                strategy_deleted: true,
+                folder_deleted: false,
+                ..
+            }
+        ));
+        assert!(s.has_folder("Root/Sub"));
+        assert!(s.has_folder("Root/Sub/Child"));
+    }
+
+    #[test]
+    fn delete_unknown_strategy_without_folder_change_is_ignored_like_delphi() {
+        let mut s = StratsState::new();
+        let ev = s.apply(StratCommand::Delete(StratDelete {
+            strategy_id: 404,
+            folder_path: "".into(),
+        }));
+        assert!(matches!(ev, StratEvent::Ignored));
     }
 
     #[test]
