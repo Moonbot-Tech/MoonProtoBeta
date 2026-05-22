@@ -40,6 +40,12 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 }));
 ```
 
+`run_with_dispatcher` and `run_with_dispatcher_state` block the caller for the
+requested duration while the MoonProto writer/orchestrator loop runs in a
+dedicated scoped writer thread. Event callbacks run on that writer thread, not
+on the caller thread. Keep callbacks short; if UI work can block, hand events
+off to the UI thread explicitly.
+
 `run_with_dispatcher` uses the active action path, which also:
 
 - links the dispatcher to this client's `ServerTimeDelta`;

@@ -78,6 +78,12 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
+`run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
+for the requested duration, but the MoonProto writer/orchestrator loop runs in a
+dedicated scoped writer thread while the call is active. The UDP reader is a
+separate reader thread. Event/raw callbacks are invoked by that writer thread;
+keep callbacks short and move slow UI/work to another queue or thread.
+
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
 packets and reader wake events. Subscription methods update the reconnect
