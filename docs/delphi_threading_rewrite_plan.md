@@ -1676,3 +1676,26 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
+
+### 2026-05-22 - Phase 1 partial: replace side selection for non-`O_BUY`
+
+Done:
+
+- Fixed another `ProcessCommandOrder`/`HandleServerCommand` parity bug around
+  order-side selection. Delphi uses the buy side only when
+  `OrderType = O_BUY`; every other `TOrderType` goes through the sell-side
+  branch.
+- Rust `OrderReplaceResponse` and `BulkReplaceNotify` previously treated every
+  non-`Sell` order type as buy-side, so `BuyStop`/`BuyLimit` had Rust-only
+  machine effects.
+- Rust now uses one helper with the exact Delphi predicate
+  `order_type == OrderType::Buy` for both branches.
+- Added unit tests for `OrderType::BuyStop` proving replace response and bulk
+  replace notification mutate sell-side state, not buy-side state.
+- Updated API docs for this exact side-selection rule and fixed the terminal
+  status list to include `SelLAlmostDone`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.

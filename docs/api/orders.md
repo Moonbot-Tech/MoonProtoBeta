@@ -62,6 +62,9 @@ orders only; its `BulkReplaced.uids` event lists only those actually found
 locally. `TOrderReplaceResponse` clears the matching flag; if no response
 arrives, the active dispatcher clears the flag after 5000 ms, matching Delphi's
 `ReplaceSentTime` timeout.
+For replace-response and bulk-replace side selection, Delphi treats only
+`OrderType::Buy` (`O_BUY`) as the buy side; `Sell`, `BuyStop`, and `BuyLimit`
+all use the sell side in the order read model.
 
 ## `Order`
 
@@ -138,8 +141,8 @@ pub enum OrderWorkerStatus {
 }
 ```
 
-Terminal statuses are `SelLDone`, `BuyCancel`, `BuyFail`, `SellCancel`, and
-`SellFail`.
+Terminal statuses are `SelLDone`, `SelLAlmostDone`, `BuyCancel`, `BuyFail`,
+`SellCancel`, and `SellFail`.
 
 ## Events
 

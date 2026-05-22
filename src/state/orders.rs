@@ -145,6 +145,10 @@ fn status_phase(s: OrderWorkerStatus) -> u8 {
     }
 }
 
+fn order_type_uses_buy_side(order_type: OrderType) -> bool {
+    order_type == OrderType::Buy
+}
+
 /// Один ордер с зеркальным состоянием.
 ///
 /// Поля соответствуют BOrderWorker fields, которые приходят от сервера через
@@ -544,10 +548,10 @@ impl Orders {
                 let mut data = rr.update_data;
                 data.adjust_time(self.server_time_delta);
 
-                let target = if rr.order_type == OrderType::Sell {
-                    &mut entry.sell_order
-                } else {
+                let target = if order_type_uses_buy_side(rr.order_type) {
                     &mut entry.buy_order
+                } else {
+                    &mut entry.sell_order
                 };
 
                 target.int_id = data.int_id;
@@ -565,14 +569,14 @@ impl Orders {
                 }
 
                 // Сбрасываем bulk_replace флаг на этой стороне (replace подтверждён).
-                if rr.order_type == OrderType::Sell {
-                    entry.sell_price = rr.price;
-                    entry.bulk_replace_sell = false;
-                    entry.bulk_replace_sell_sent_ms = 0;
-                } else {
+                if order_type_uses_buy_side(rr.order_type) {
                     entry.buy_price = rr.price;
                     entry.bulk_replace_buy = false;
                     entry.bulk_replace_buy_sent_ms = 0;
+                } else {
+                    entry.sell_price = rr.price;
+                    entry.bulk_replace_sell = false;
+                    entry.bulk_replace_sell_sent_ms = 0;
                 }
 
                 (ApplyResult::Applied, OrderEvent::Updated(uid))
@@ -654,12 +658,12 @@ impl Orders {
                 let mut affected = Vec::new();
                 for &uid_replaced in &brn.uids {
                     if let Some(entry) = self.map.get_mut(&uid_replaced) {
-                        if brn.order_type == OrderType::Sell {
-                            entry.bulk_replace_sell = true;
-                            entry.bulk_replace_sell_sent_ms = now_ms.max(1);
-                        } else {
+                        if order_type_uses_buy_side(brn.order_type) {
                             entry.bulk_replace_buy = true;
                             entry.bulk_replace_buy_sent_ms = now_ms.max(1);
+                        } else {
+                            entry.bulk_replace_sell = true;
+                            entry.bulk_replace_sell_sent_ms = now_ms.max(1);
                         }
                         affected.push(uid_replaced);
                     }
@@ -1568,6 +1572,39 @@ mod tests {
     }
 
     #[test]
+    fn replace_response_buy_stop_uses_sell_side_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.actual_price = 111.0;
+        status.sell_order.actual_price = 222.0;
+        orders.apply(order_status_cmd(status));
+
+        let rr = OrderReplaceResponse {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellSet),
+            order_type: OrderType::BuyStop,
+            price: 456.0,
+            update_data: OrderUpdateData {
+                actual_price: 456.0,
+                ..Default::default()
+            },
+            quantity_base: 7.5,
+        };
+        let (res, ev) = orders.apply(order_replace_response_cmd(rr));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        let buy_actual_price = order.buy_order.actual_price;
+        let sell_actual_price = order.sell_order.actual_price;
+        let sell_quantity_base = order.sell_order.quantity_base;
+        assert_eq!(buy_actual_price, 111.0);
+        assert_eq!(order.buy_price, 111.0);
+        assert_eq!(sell_actual_price, 456.0);
+        assert_eq!(sell_quantity_base, 7.5);
+        assert_eq!(order.sell_price, 456.0);
+    }
+
+    #[test]
     fn bulk_replace_timeout_clears_flag_after_5000ms_like_delphi() {
         let mut orders = Orders::new();
         orders.apply(order_status_cmd(make_status(
@@ -1637,6 +1674,30 @@ mod tests {
                 reason: ApplyResult::OrderNotFound
             }
         ));
+    }
+
+    #[test]
+    fn bulk_replace_notify_buy_stop_uses_sell_side_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            10,
+        )));
+
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::BuyStop,
+            uids: vec![1],
+        };
+        let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+        let order = orders.get(1).unwrap();
+        assert!(!order.bulk_replace_buy);
+        assert!(order.bulk_replace_sell);
     }
 
     #[test]
