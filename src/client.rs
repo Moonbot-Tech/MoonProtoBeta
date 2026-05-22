@@ -2854,14 +2854,136 @@ impl WriterRuntime<'_> {
 
     fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {
         // Reconnect logic
-        self.client.check_hello_send(cur_tm);
-        self.client.check_offline_reconnect(cur_tm);
-        self.client.check_reconnect_timeout(cur_tm);
-        self.client.check_dead_zone(cur_tm);
+        self.check_hello_send(cur_tm);
+        self.check_offline_reconnect(cur_tm);
+        self.check_reconnect_timeout(cur_tm);
+        self.check_dead_zone(cur_tm);
 
         if self.client.force_disconnect {
-            self.client.do_force_disconnect();
+            self.do_force_disconnect();
         }
+    }
+
+    fn send_hello(&mut self) {
+        let payload = handshake::build_hello_packet(
+            &self.client.cfg.master_key,
+            self.client.cfg.client_id,
+            &mut self.client.client_token,
+            self.client.app_token,
+            delphi_now(),
+        );
+        self.client.send_raw_packet(Command::Hello, &payload);
+    }
+
+    fn build_hello_again_packet(&mut self) -> Vec<u8> {
+        self.client.client_token += 1;
+        let mut hello = handshake::Hello::new(self.client.client_token, self.client.app_token);
+        hello.timestamp = delphi_now();
+        hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.client.server_token);
+        let packed = hello.to_bytes_packed();
+        let aad = self.client.cfg.client_id.to_le_bytes();
+        if let Some(cipher) = self.client.encode_cipher.as_ref() {
+            crypto::encrypt_with_cipher(cipher, &packed, &aad)
+        } else {
+            // Delphi initializes TMoonProtoClient.MPKeys[true/false] with MasterKey.
+            // Early HelloAgain packets before WhoAreYou are real packets encrypted
+            // with MasterKey, not skipped.
+            crypto::encrypt(&self.client.cfg.master_key, &packed, &aad)
+        }
+    }
+
+    fn send_hello_again(&mut self) {
+        let encrypted = self.build_hello_again_packet();
+        self.client.send_raw_packet(Command::HelloAgain, &encrypted);
+    }
+
+    fn check_hello_send(&mut self, cur_tm: i64) {
+        if !self.client.need_connect || self.client.force_disconnect {
+            return;
+        }
+        let interval = self.client.round_trip_delay.max(1000) * 2;
+        if (cur_tm - self.client.last_sent_hello).abs() <= interval {
+            return;
+        }
+        if self.client.soft_reconnect && self.client.server_token != 0 {
+            self.send_hello_again();
+        } else {
+            self.client.soft_reconnect = false;
+            self.send_hello();
+        }
+        self.client.last_sent_hello = cur_tm;
+        self.client.waiting_hello = true;
+        self.client.waiting_hello_start = cur_tm;
+        self.client.publish_transport_state_from_client();
+    }
+
+    fn check_offline_reconnect(&mut self, cur_tm: i64) {
+        let throttle = (self.client.round_trip_delay + 50).clamp(200, 1500);
+        let last_online = self.client.last_online;
+        let authorized = self.client.authorized;
+
+        let should = self.client.waiting_hello
+            || (authorized
+                && !self.client.need_connect
+                && (cur_tm - last_online).abs() > OFFLINE_BASE_MS + self.client.round_trip_delay);
+        if !should {
+            return;
+        }
+        if (cur_tm - self.client.last_sent_hello).abs() <= throttle {
+            return;
+        }
+
+        self.client.auth_status = AuthStatus::Offline;
+        if !self.client.waiting_hello {
+            self.client.waiting_hello_start = cur_tm;
+        }
+        self.client.waiting_hello = true;
+        self.send_hello_again();
+        self.client.last_sent_hello = cur_tm;
+        self.client.publish_transport_state_from_client();
+    }
+
+    fn check_reconnect_timeout(&mut self, cur_tm: i64) {
+        if self.client.waiting_hello
+            && (cur_tm - self.client.waiting_hello_start).abs() > RECONNECT_WAITING_MS
+            && (cur_tm - self.client.last_socket_recreate).abs() > RECONNECT_THROTTLE_MS
+        {
+            self.client.last_socket_recreate = cur_tm;
+            self.client.soft_reconnect = true;
+            self.client.force_disconnect = true;
+            self.client.need_connect = true;
+            self.client.waiting_hello = false;
+            self.client.publish_transport_state_from_client();
+        }
+    }
+
+    fn check_dead_zone(&mut self, cur_tm: i64) {
+        let authorized = self.client.authorized;
+        let last_online = self.client.last_online;
+        if !authorized && !self.client.need_connect && (cur_tm - last_online).abs() > DEAD_ZONE_MS {
+            self.client.soft_reconnect = false;
+            self.client.force_disconnect = true;
+            self.client.need_connect = true;
+            self.client.publish_transport_state_from_client();
+        }
+    }
+
+    fn do_force_disconnect(&mut self) {
+        if self.client.connected && !self.client.soft_reconnect {
+            self.client.send_raw_packet(Command::LogOff, &[]);
+        }
+        // Сигналим текущему reader thread завершиться (макс через 1с — read_timeout).
+        // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
+        // за длинную сессию (часы).
+        self.client.reader_shutdown.store(true, Ordering::Relaxed);
+        self.client.socket = None;
+        if !self.client.soft_reconnect {
+            self.client.full_reset();
+        }
+        self.client.connected = false;
+        self.client.authorized = false;
+        self.client.force_disconnect = false;
+        self.client.publish_transport_state_from_client();
     }
 
     fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
@@ -7485,128 +7607,6 @@ impl Client {
                 }
             }
         }
-    }
-
-    fn send_hello(&mut self) {
-        let payload = handshake::build_hello_packet(
-            &self.cfg.master_key,
-            self.cfg.client_id,
-            &mut self.client_token,
-            self.app_token,
-            delphi_now(),
-        );
-        self.send_raw_packet(Command::Hello, &payload);
-    }
-
-    fn build_hello_again_packet(&mut self) -> Vec<u8> {
-        self.client_token += 1;
-        let mut hello = handshake::Hello::new(self.client_token, self.app_token);
-        hello.timestamp = delphi_now();
-        hello.peer_mix = crypto::mix_values(&hello.rnd, hello.mix_ts, self.server_token);
-        let packed = hello.to_bytes_packed();
-        let aad = self.cfg.client_id.to_le_bytes();
-        if let Some(cipher) = self.encode_cipher.as_ref() {
-            crypto::encrypt_with_cipher(cipher, &packed, &aad)
-        } else {
-            // Delphi initializes TMoonProtoClient.MPKeys[true/false] with MasterKey.
-            // Early HelloAgain packets before WhoAreYou are real packets encrypted
-            // with MasterKey, not skipped.
-            crypto::encrypt(&self.cfg.master_key, &packed, &aad)
-        }
-    }
-
-    fn send_hello_again(&mut self) {
-        let encrypted = self.build_hello_again_packet();
-        self.send_raw_packet(Command::HelloAgain, &encrypted);
-    }
-
-    fn check_hello_send(&mut self, cur_tm: i64) {
-        if !self.need_connect || self.force_disconnect {
-            return;
-        }
-        let interval = self.round_trip_delay.max(1000) * 2;
-        if (cur_tm - self.last_sent_hello).abs() <= interval {
-            return;
-        }
-        if self.soft_reconnect && self.server_token != 0 {
-            self.send_hello_again();
-        } else {
-            self.soft_reconnect = false;
-            self.send_hello();
-        }
-        self.last_sent_hello = cur_tm;
-        self.waiting_hello = true;
-        self.waiting_hello_start = cur_tm;
-        self.publish_transport_state_from_client();
-    }
-
-    fn check_offline_reconnect(&mut self, cur_tm: i64) {
-        let throttle = (self.round_trip_delay + 50).clamp(200, 1500);
-        let last_online = self.last_online;
-        let authorized = self.authorized;
-
-        let should = self.waiting_hello
-            || (authorized
-                && !self.need_connect
-                && (cur_tm - last_online).abs() > OFFLINE_BASE_MS + self.round_trip_delay);
-        if !should {
-            return;
-        }
-        if (cur_tm - self.last_sent_hello).abs() <= throttle {
-            return;
-        }
-
-        self.auth_status = AuthStatus::Offline;
-        if !self.waiting_hello {
-            self.waiting_hello_start = cur_tm;
-        }
-        self.waiting_hello = true;
-        self.send_hello_again();
-        self.last_sent_hello = cur_tm;
-        self.publish_transport_state_from_client();
-    }
-
-    fn check_reconnect_timeout(&mut self, cur_tm: i64) {
-        if self.waiting_hello
-            && (cur_tm - self.waiting_hello_start).abs() > RECONNECT_WAITING_MS
-            && (cur_tm - self.last_socket_recreate).abs() > RECONNECT_THROTTLE_MS
-        {
-            self.last_socket_recreate = cur_tm;
-            self.soft_reconnect = true;
-            self.force_disconnect = true;
-            self.need_connect = true;
-            self.waiting_hello = false;
-            self.publish_transport_state_from_client();
-        }
-    }
-
-    fn check_dead_zone(&mut self, cur_tm: i64) {
-        let authorized = self.authorized;
-        let last_online = self.last_online;
-        if !authorized && !self.need_connect && (cur_tm - last_online).abs() > DEAD_ZONE_MS {
-            self.soft_reconnect = false;
-            self.force_disconnect = true;
-            self.need_connect = true;
-            self.publish_transport_state_from_client();
-        }
-    }
-
-    fn do_force_disconnect(&mut self) {
-        if self.connected && !self.soft_reconnect {
-            self.send_raw_packet(Command::LogOff, &[]);
-        }
-        // Сигналим текущему reader thread завершиться (макс через 1с — read_timeout).
-        // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
-        // за длинную сессию (часы).
-        self.reader_shutdown.store(true, Ordering::Relaxed);
-        self.socket = None;
-        if !self.soft_reconnect {
-            self.full_reset();
-        }
-        self.connected = false;
-        self.authorized = false;
-        self.force_disconnect = false;
-        self.publish_transport_state_from_client();
     }
 
     /// Matches TMoonProtoClient.Reset (IntStruct.pas:972-1000)
@@ -13291,7 +13291,10 @@ mod reconnect_timing_tests {
         .process_reader_decoded(decoded, 0, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-        client.check_hello_send(100);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_hello_send(100);
 
         assert_eq!(
             client.last_sent_hello, 100,
@@ -13304,7 +13307,10 @@ mod reconnect_timing_tests {
     fn early_hello_again_uses_master_key_before_whoareyou() {
         let mut client = dummy_client();
         let token_before = client.client_token;
-        let payload = client.build_hello_again_packet();
+        let payload = WriterRuntime {
+            client: &mut client,
+        }
+        .build_hello_again_packet();
         let aad = client.cfg.client_id.to_le_bytes();
         let decrypted = crypto::decrypt(&client.cfg.master_key, &payload, &aad)
             .expect("early HelloAgain must be encrypted with MasterKey");
@@ -13522,11 +13528,17 @@ mod reconnect_timing_tests {
         let mut client = dummy_client();
         let token_before = client.client_token;
 
-        client.check_hello_send(100);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_hello_send(100);
         assert_eq!(client.last_sent_hello, 100);
         assert!(client.waiting_hello);
 
-        client.check_offline_reconnect(350);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_offline_reconnect(350);
 
         assert_eq!(client.auth_status, AuthStatus::Offline);
         assert_eq!(
@@ -13567,7 +13579,10 @@ mod reconnect_timing_tests {
         .process_reader_decoded(decoded, 1000, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-        client.check_offline_reconnect(100);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_offline_reconnect(100);
 
         assert_eq!(
             client.last_sent_hello, 100,

@@ -1126,6 +1126,8 @@ Done:
 - Writer runtime synchronizes the mirror before lifecycle and reconnect writer
   ticks, and writer-side reconnect changes publish back into the mirror so
   reader decisions such as `NeedHelloAgain` see the current writer state.
+- Writer runtime now owns the reconnect tail blocks: Hello/HelloAgain send,
+  offline retry, reconnect timeout, dead-zone check, and force-disconnect.
 - `MPC_WantNewHello` now also resets reader-owned protocol pieces immediately
   in the reader path: decode/replay sliders, Ping session flag, incoming Sliced
   receiver, and shared receive byte counter.
@@ -1263,3 +1265,22 @@ Still not done:
 
 - Writer-side send helpers still need the same naming/ownership cleanup around
   the remaining `Client` methods called by `WriterRuntime`.
+
+### 2026-05-22 - Phase 1 partial: moved reconnect tail into WriterRuntime
+
+Done:
+
+- Moved writer-owned reconnect tail blocks from `Client` into `WriterRuntime`:
+  `send_hello`, `build_hello_again_packet`, `send_hello_again`,
+  `check_hello_send`, `check_offline_reconnect`, `check_reconnect_timeout`,
+  `check_dead_zone`, and `do_force_disconnect`.
+- `transport_reconnect_tail_tick` now calls same-runtime methods instead of
+  bouncing through `Client` helpers.
+- Existing reconnect timing tests now exercise the writer runtime methods
+  directly.
+
+Still not done:
+
+- Low-level packet send and shared storage still live on `Client`; the next
+  writer parity passes should continue moving only protocol-owned ordering
+  blocks, without changing public API shape yet.
