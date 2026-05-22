@@ -1508,6 +1508,25 @@ Done:
 Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
-  `ProcessCommandOrder` body: direct `Orders::apply(TAllStatuses)` snapshot
-  handling still needs a final parity decision against the production
-  dispatcher path.
+  `ProcessCommandOrder` body.
+
+### 2026-05-22 - Phase 1 partial: remove direct TAllStatuses state batch
+
+Done:
+
+- Removed the leftover direct `Orders::apply(TradeCommand::AllStatuses)` hidden
+  batch path. `TAllStatuses` is now dispatcher-level only, matching Delphi
+  `ClientNewData(MPC_Order)`: increment snapshot flag, call
+  `ProcessCommandOrder` once per contained `TOrderStatus`, then run
+  `CleanupMissingWorkers`.
+- `Orders::apply(AllStatuses)` now returns `NotApplicable` / `Ignored` instead
+  of silently mutating order state and emitting only a single `Snapshot` event.
+- Updated the low-level snapshot test to use the dispatcher-style
+  `begin_snapshot` + per-status loop, then `missing_after_snapshot`.
+- Added a unit test proving direct `AllStatuses` is not a hidden
+  `ProcessCommandOrder` batch.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.

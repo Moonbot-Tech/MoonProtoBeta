@@ -385,7 +385,8 @@ impl Orders {
     /// 3. Применение к Order (или создание нового).
     /// 4. ServerTimeDelta correction для TDateTime полей.
     /// 5. Deferred removal при terminal status / TOrderNotFound.
-    /// 6. Snapshot flag mechanics (CleanupMissing).
+    /// 6. Snapshot flag mechanics (CleanupMissing) through dispatcher-level
+    ///    `TAllStatuses` handling.
     /// 7. Генерация события.
     ///
     /// **Замечание**: команды-запросы от клиента (AllStatusesRequest, OrderStatusRequest)
@@ -393,27 +394,6 @@ impl Orders {
     pub fn apply(&mut self, cmd: TradeCommand) -> (ApplyResult, OrderEvent) {
         let uid = cmd.uid();
         match cmd {
-            // --- Snapshot ---
-            TradeCommand::AllStatuses(snap) => {
-                let new_flag = self.begin_snapshot();
-                for st in &snap.orders {
-                    let order_uid = st.epoch_header.market.base.uid;
-                    let is_done = {
-                        let entry = self
-                            .map
-                            .entry(order_uid)
-                            .or_insert_with(|| Order::from_status(st));
-                        Self::apply_status_inner(entry, st, self.server_time_delta);
-                        entry.snapshot_flag = new_flag;
-                        entry.job_is_done
-                    };
-                    if is_done {
-                        self.mark_pending_removal(order_uid);
-                    }
-                }
-                (ApplyResult::Applied, OrderEvent::Snapshot)
-            }
-
             // --- Full status (создание или обновление) ---
             TradeCommand::OrderStatus(st) => {
                 let new_order = !self.map.contains_key(&uid);
@@ -682,6 +662,15 @@ impl Orders {
                     )
                 }
             }
+
+            // --- Dispatcher-level aggregate, handled before ProcessCommandOrder ---
+            TradeCommand::AllStatuses(_) => (
+                ApplyResult::NotApplicable,
+                OrderEvent::Ignored {
+                    uid,
+                    reason: ApplyResult::NotApplicable,
+                },
+            ),
 
             // --- Client-originated команды (исходящие) — игнорируются в state ---
             TradeCommand::OrderReplace(_)
@@ -1375,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_after_snapshot_returns_old_orders() {
+    fn missing_after_snapshot_returns_old_orders_after_dispatcher_style_status_loop() {
         let mut orders = Orders::new();
         orders.apply(order_status_cmd(make_status(
             1,
@@ -1390,14 +1379,38 @@ mod tests {
             1,
         )));
 
+        orders.begin_snapshot();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            2,
+        )));
+
+        let missing = orders.missing_after_snapshot();
+        assert_eq!(missing, vec![2]);
+    }
+
+    #[test]
+    fn direct_all_statuses_is_not_hidden_batch_inside_process_command_order() {
+        let mut orders = Orders::new();
         let snap = AllStatuses {
             header: make_base(0, 3),
             orders: vec![make_status(1, "X", OrderWorkerStatus::SellSet, 2)],
         };
-        orders.apply(TradeCommand::AllStatuses(snap));
 
-        let missing = orders.missing_after_snapshot();
-        assert_eq!(missing, vec![2]);
+        let (res, ev) = orders.apply(TradeCommand::AllStatuses(snap));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 0,
+                reason: ApplyResult::NotApplicable
+            }
+        ));
+        assert!(orders.is_empty());
+        assert_eq!(orders.current_snapshot_flag(), 0);
     }
 
     #[test]
