@@ -47,6 +47,8 @@ const CMD_ARB_ACTIVATE_NOTIFY: u8 = 12;
 const CMD_SWITCH_DEX: u8 = 13;
 const CMD_SWITCH_SPOT: u8 = 14;
 
+const LEV_CMD_VER: u8 = 1;
+
 /// `TAutoStartConfig` packed record size in bytes (Config.pas:344).
 pub const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
@@ -229,7 +231,8 @@ pub struct NewMarketNotify {
 #[derive(Debug, Clone)]
 pub struct LevManage {
     pub uid: u64,
-    /// Версия внутри команды (`LevCmdVer = 1` в Delphi).
+    /// Версия внутри принятой команды. Outgoing builder always writes
+    /// Delphi's `LevCmdVer = 1`, regardless of this read-model field.
     pub cmd_ver: u8,
     pub auto_max_order: bool,
     pub auto_lev_up: bool,
@@ -978,7 +981,7 @@ pub fn build_new_market_notify(uid: u64) -> Vec<u8> {
 pub fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_LEV_MANAGE, uid);
-    out.push(cmd.cmd_ver);
+    out.push(LEV_CMD_VER);
     out.push(cmd.auto_max_order as u8);
     out.push(cmd.auto_lev_up as u8);
     out.push(cmd.auto_isolated as u8);
@@ -1164,7 +1167,7 @@ mod tests {
     fn lev_manage_roundtrip() {
         let cmd = LevManage {
             uid: 5,
-            cmd_ver: 1,
+            cmd_ver: 77,
             auto_max_order: true,
             auto_lev_up: false,
             auto_isolated: true,

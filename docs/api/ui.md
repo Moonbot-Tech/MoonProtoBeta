@@ -72,6 +72,10 @@ client.ui_switch_dex("Main");
 client.ui_switch_spot(0);
 ```
 
+`ui_lev_manage` follows Delphi `TLevManageCommand.StoreToStream`: the outgoing
+wire version byte is always `LevCmdVer = 1`. `LevManage::cmd_ver` is kept for
+low-level parsing of received payloads and does not change the outgoing packet.
+
 For Delphi `TStratStartStopCommandV2`, normal active-library code should send
 through `EventDispatcher`, not by hand-building `checked_items`. The dispatcher
 owns strategy checked-state and builds `Items` as Delphi does:
