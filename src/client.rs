@@ -2560,12 +2560,12 @@ impl WriterRuntime<'_> {
             }
 
             if self.client.socket.is_some() {
-                self.client.drain_reader_decoded(cur_tm, mode);
+                self.drain_reader_decoded(cur_tm, mode);
 
                 if !self.wait_for_reader_work_or_default_sleep() {
                     return;
                 }
-                self.client.drain_reader_decoded(cur_tm, mode);
+                self.drain_reader_decoded(cur_tm, mode);
 
                 self.transport_writer_maintenance_tick(cur_tm);
 
@@ -2606,6 +2606,222 @@ impl WriterRuntime<'_> {
             }
         }
         true
+    }
+
+    fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
+        self.client.connected = true;
+        if self.client.auth_status == AuthStatus::Base {
+            self.client.auth_status = AuthStatus::Connected;
+        }
+        self.client.total_recv += recv_bytes;
+        self.client.track_recv(recv_bytes, timestamp_ms);
+        self.client.last_online = timestamp_ms;
+    }
+
+    fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        self.client
+            .reader_wake_pending
+            .store(false, Ordering::Release);
+        let decoded = {
+            let mut pending = self.client.pending_reader_decoded.lock().unwrap();
+            if pending.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *pending)
+        };
+
+        for msg in decoded {
+            self.process_reader_decoded(msg, cur_tm, mode);
+        }
+    }
+
+    fn process_reader_decoded(
+        &mut self,
+        msg: ReaderDecodedMsg,
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+    ) {
+        if msg.epoch != self.client.current_reader_epoch {
+            if self.client.should_log("stale_reader_decoded_epoch", 5000) {
+                warn!(target: "moonproto::client",
+                    "dropping decoded reader data from old reader epoch (msg.epoch={} current={})",
+                    msg.epoch, self.client.current_reader_epoch);
+            }
+            return;
+        }
+
+        if msg.apply_recv_effects {
+            self.apply_recv_side_effects(msg.recv_bytes, msg.timestamp_ms);
+        }
+        if let Some(stats) = msg.sliced_stats {
+            let dup_pct = stats.dup_count as f64 / stats.blocks_count.max(1) as f64 * 100.0;
+            if self.client.avg_dup_count == 0.0 {
+                self.client.avg_dup_count = dup_pct;
+            } else {
+                self.client.avg_dup_count = (self.client.avg_dup_count * 9.0 + dup_pct) * 0.1;
+            }
+        }
+        if let Some(update) = msg.ping_update {
+            self.apply_reader_ping_update(update);
+        }
+        if let Some(update) = msg.handshake_update {
+            self.apply_reader_handshake_update(update, msg.timestamp_ms);
+        }
+        if let Some(payload) = msg.payload {
+            self.process_decoded_data_read_int(
+                msg.cmd,
+                payload,
+                msg.api_pending_consumed,
+                msg.candles_chunk_consumed,
+                cur_tm,
+                mode,
+            );
+        }
+    }
+
+    fn apply_reader_ping_update(&mut self, update: ReaderPingUpdate) {
+        self.client.ping_count = update.ping_count;
+        self.client.round_trip_delay = update.round_trip_delay;
+        self.client.actual_pmtu = update.actual_pmtu;
+        self.client.global_timing_orders = update.global_timing_orders;
+        self.client.overheat = update.overheat;
+        self.client.rs = update.rs;
+        self.client.need_connect = false;
+        self.client.server_time_delta = update.server_time_delta;
+        self.client.server_time_delta_handle.store(
+            update.server_time_delta.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        set_server_time_delta_global(update.server_time_delta);
+        self.client.net_lag_ping = update.net_lag_ping;
+        self.client.can_send_rate = update.can_send_rate;
+        self.client.used_sliced_limit = update.used_sliced_limit;
+    }
+
+    fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
+        match update.cmd {
+            Command::WrongHello => {
+                self.client.waiting_hello = false;
+                self.client.auth_status = AuthStatus::Connected;
+            }
+            Command::WantNewHello => {
+                self.client.waiting_hello = false;
+                self.client.full_reset();
+                self.client.last_sent_hello = NEVER_SENT_MS;
+                self.client.auth_status = AuthStatus::Connected;
+                self.client.authorized = false;
+                self.client.need_connect = true;
+                self.client.soft_reconnect = false;
+            }
+            Command::NeedHelloAgain => {
+                if (timestamp_ms - self.client.last_need_hello_again).abs()
+                    > NEED_HELLO_AGAIN_THROTTLE_MS
+                {
+                    self.client.last_need_hello_again = timestamp_ms;
+                    if !self.client.waiting_hello {
+                        self.client.waiting_hello_start = timestamp_ms;
+                    }
+                    self.client.waiting_hello = true;
+                    self.client.last_sent_hello = NEVER_SENT_MS;
+                }
+            }
+            Command::WhoAreYou => {
+                self.client.waiting_hello = false;
+                self.client.server_token = update.server_token;
+                let prev_app_token = self.client.peer_app_token;
+                self.client.peer_app_token = update.peer_app_token;
+                if prev_app_token != 0 && prev_app_token != update.peer_app_token {
+                    self.client.indexes_fetch_in_flight = false;
+                    self.client.tracked_indexes_peer_app_token = 0;
+                    self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
+                }
+                self.client.encode_key = update.encode_key;
+                self.client.decode_key = update.decode_key;
+                self.client.encode_cipher =
+                    Some(crate::crypto::cipher_from_key(&self.client.encode_key));
+                self.client
+                    .reader_protocol
+                    .lock()
+                    .unwrap()
+                    .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
+                self.client.client_token = update.client_token;
+            }
+            Command::Fine => {
+                let restore_after_reconnect =
+                    self.client.domain_ready && self.client.was_ever_connected;
+                self.client.need_connect = false;
+                self.client.waiting_hello = false;
+                self.client.auth_status = AuthStatus::AuthDone;
+                self.client.authorized = true;
+                if restore_after_reconnect {
+                    self.client.restore_domain_after_reconnect();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn process_decoded_data_read_int(
+        &mut self,
+        cmd: u8,
+        payload: Vec<u8>,
+        api_pending_consumed_by_reader: bool,
+        candles_chunk_consumed_by_reader: bool,
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+    ) {
+        match mode {
+            RunMode::Callback { on_data } => {
+                let mut sink = DispatchSink::Callback(on_data);
+                self.client.deliver_data_read_int_decoded(
+                    cmd,
+                    payload,
+                    api_pending_consumed_by_reader,
+                    candles_chunk_consumed_by_reader,
+                    &mut sink,
+                );
+            }
+            RunMode::Dispatcher {
+                dispatcher,
+                on_event,
+                event_buf,
+                payload_buf,
+                active_actions_buf,
+            } => {
+                payload_buf.clear();
+                let authorized_before = self.client.authorized;
+                {
+                    let mut sink = DispatchSink::Buffer(payload_buf);
+                    self.client.deliver_data_read_int_decoded(
+                        cmd,
+                        payload,
+                        api_pending_consumed_by_reader,
+                        candles_chunk_consumed_by_reader,
+                        &mut sink,
+                    );
+                }
+                if !authorized_before && !self.client.authorized {
+                    payload_buf.clear();
+                    return;
+                }
+                for (c, p) in payload_buf.drain(..) {
+                    event_buf.clear();
+                    active_actions_buf.clear();
+                    let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
+                    dispatcher.dispatch_into_active_actions(
+                        c,
+                        &p,
+                        cur_tm,
+                        event_buf,
+                        &ctx,
+                        active_actions_buf,
+                    );
+                    self.client
+                        .apply_active_actions(active_actions_buf.drain(..));
+                    on_event.drain_events(event_buf, dispatcher);
+                }
+            }
+        }
     }
 
     fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
@@ -5962,153 +6178,6 @@ impl Client {
         WriterRuntime { client: self }.run(duration, &mut mode);
     }
 
-    fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
-        self.connected = true;
-        if self.auth_status == AuthStatus::Base {
-            self.auth_status = AuthStatus::Connected;
-        }
-        self.total_recv += recv_bytes;
-        self.track_recv(recv_bytes, timestamp_ms);
-        self.last_online = timestamp_ms;
-    }
-
-    fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        self.reader_wake_pending.store(false, Ordering::Release);
-        let decoded = {
-            let mut pending = self.pending_reader_decoded.lock().unwrap();
-            if pending.is_empty() {
-                return;
-            }
-            std::mem::take(&mut *pending)
-        };
-
-        for msg in decoded {
-            self.process_reader_decoded(msg, cur_tm, mode);
-        }
-    }
-
-    fn process_reader_decoded(
-        &mut self,
-        msg: ReaderDecodedMsg,
-        cur_tm: i64,
-        mode: &mut RunMode<'_>,
-    ) {
-        if msg.epoch != self.current_reader_epoch {
-            if self.should_log("stale_reader_decoded_epoch", 5000) {
-                warn!(target: "moonproto::client",
-                    "dropping decoded reader data from old reader epoch (msg.epoch={} current={})",
-                    msg.epoch, self.current_reader_epoch);
-            }
-            return;
-        }
-
-        if msg.apply_recv_effects {
-            self.apply_recv_side_effects(msg.recv_bytes, msg.timestamp_ms);
-        }
-        if let Some(stats) = msg.sliced_stats {
-            let dup_pct = stats.dup_count as f64 / stats.blocks_count.max(1) as f64 * 100.0;
-            if self.avg_dup_count == 0.0 {
-                self.avg_dup_count = dup_pct;
-            } else {
-                self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
-            }
-        }
-        if let Some(update) = msg.ping_update {
-            self.apply_reader_ping_update(update);
-        }
-        if let Some(update) = msg.handshake_update {
-            self.apply_reader_handshake_update(update, msg.timestamp_ms);
-        }
-        if let Some(payload) = msg.payload {
-            self.process_decoded_data_read_int(
-                msg.cmd,
-                payload,
-                msg.api_pending_consumed,
-                msg.candles_chunk_consumed,
-                cur_tm,
-                mode,
-            );
-        }
-    }
-
-    fn apply_reader_ping_update(&mut self, update: ReaderPingUpdate) {
-        self.ping_count = update.ping_count;
-        self.round_trip_delay = update.round_trip_delay;
-        self.actual_pmtu = update.actual_pmtu;
-        self.global_timing_orders = update.global_timing_orders;
-        self.overheat = update.overheat;
-        self.rs = update.rs;
-        self.need_connect = false;
-        self.server_time_delta = update.server_time_delta;
-        self.server_time_delta_handle.store(
-            update.server_time_delta.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        set_server_time_delta_global(update.server_time_delta);
-        self.net_lag_ping = update.net_lag_ping;
-        self.can_send_rate = update.can_send_rate;
-        self.used_sliced_limit = update.used_sliced_limit;
-    }
-
-    fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
-        match update.cmd {
-            Command::WrongHello => {
-                self.waiting_hello = false;
-                self.auth_status = AuthStatus::Connected;
-            }
-            Command::WantNewHello => {
-                self.waiting_hello = false;
-                self.full_reset();
-                self.last_sent_hello = NEVER_SENT_MS;
-                self.auth_status = AuthStatus::Connected;
-                self.authorized = false;
-                self.need_connect = true;
-                self.soft_reconnect = false;
-            }
-            Command::NeedHelloAgain => {
-                if (timestamp_ms - self.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS
-                {
-                    self.last_need_hello_again = timestamp_ms;
-                    if !self.waiting_hello {
-                        self.waiting_hello_start = timestamp_ms;
-                    }
-                    self.waiting_hello = true;
-                    self.last_sent_hello = NEVER_SENT_MS;
-                }
-            }
-            Command::WhoAreYou => {
-                self.waiting_hello = false;
-                self.server_token = update.server_token;
-                let prev_app_token = self.peer_app_token;
-                self.peer_app_token = update.peer_app_token;
-                if prev_app_token != 0 && prev_app_token != update.peer_app_token {
-                    self.indexes_fetch_in_flight = false;
-                    self.tracked_indexes_peer_app_token = 0;
-                    self.fire_lifecycle(LifecycleEvent::ServerRestart);
-                }
-                self.encode_key = update.encode_key;
-                self.decode_key = update.decode_key;
-                self.encode_cipher = Some(crate::crypto::cipher_from_key(&self.encode_key));
-                self.reader_protocol
-                    .lock()
-                    .unwrap()
-                    .set_decode_cipher(crate::crypto::cipher_from_key(&self.decode_key));
-                self.client_token = update.client_token;
-            }
-            Command::Fine => {
-                let restore_after_reconnect = self.domain_ready && self.was_ever_connected;
-                self.need_connect = false;
-                self.waiting_hello = false;
-                self.auth_status = AuthStatus::AuthDone;
-                self.authorized = true;
-                if restore_after_reconnect {
-                    self.restore_domain_after_reconnect();
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(crate) fn apply_active_actions<I>(&self, actions: I)
     where
         I: IntoIterator<Item = crate::events::ActiveAction>,
@@ -6141,68 +6210,6 @@ impl Client {
                 }
                 crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
                     self.request_order_status(ctx, &market_name);
-                }
-            }
-        }
-    }
-
-    fn process_decoded_data_read_int(
-        &mut self,
-        cmd: u8,
-        payload: Vec<u8>,
-        api_pending_consumed_by_reader: bool,
-        candles_chunk_consumed_by_reader: bool,
-        cur_tm: i64,
-        mode: &mut RunMode<'_>,
-    ) {
-        match mode {
-            RunMode::Callback { on_data } => {
-                let mut sink = DispatchSink::Callback(on_data);
-                self.deliver_data_read_int_decoded(
-                    cmd,
-                    payload,
-                    api_pending_consumed_by_reader,
-                    candles_chunk_consumed_by_reader,
-                    &mut sink,
-                );
-            }
-            RunMode::Dispatcher {
-                dispatcher,
-                on_event,
-                event_buf,
-                payload_buf,
-                active_actions_buf,
-            } => {
-                payload_buf.clear();
-                let authorized_before = self.authorized;
-                {
-                    let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.deliver_data_read_int_decoded(
-                        cmd,
-                        payload,
-                        api_pending_consumed_by_reader,
-                        candles_chunk_consumed_by_reader,
-                        &mut sink,
-                    );
-                }
-                if !authorized_before && !self.authorized {
-                    payload_buf.clear();
-                    return;
-                }
-                for (c, p) in payload_buf.drain(..) {
-                    event_buf.clear();
-                    active_actions_buf.clear();
-                    let ctx = crate::events::ActiveDispatchContext::from_client(self);
-                    dispatcher.dispatch_into_active_actions(
-                        c,
-                        &p,
-                        cur_tm,
-                        event_buf,
-                        &ctx,
-                        active_actions_buf,
-                    );
-                    self.apply_active_actions(active_actions_buf.drain(..));
-                    on_event.drain_events(event_buf, dispatcher);
                 }
             }
         }
@@ -7286,7 +7293,8 @@ impl Client {
                 &mut client_token,
                 hello,
             );
-            self.apply_reader_handshake_update(update, self.now_ms());
+            let now = self.now_ms();
+            WriterRuntime { client: self }.apply_reader_handshake_update(update, now);
             // Delphi sends ImFriend twice with a blocking Sleep(32) between sends
             // before it returns to the UDP read loop. Keep that ordering: post-Fine
             // active work must not overtake the duplicate ImFriend.
@@ -7295,7 +7303,9 @@ impl Client {
             self.send_raw_packet(Command::ImFriend, &encrypted);
         }
         if cmd == Command::Fine {
-            self.apply_reader_handshake_update(Self::fine_handshake_update(), self.now_ms());
+            let now = self.now_ms();
+            WriterRuntime { client: self }
+                .apply_reader_handshake_update(Self::fine_handshake_update(), now);
         }
     }
 
@@ -8880,7 +8890,10 @@ mod api_pending_dispatch_tests {
             }),
         };
 
-        client.process_reader_decoded(mode_event, 123, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(mode_event, 123, &mut mode);
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
@@ -8913,7 +8926,10 @@ mod api_pending_dispatch_tests {
             active_actions_buf: Vec::new(),
         };
 
-        client.process_reader_decoded(msg, 123, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(msg, 123, &mut mode);
 
         let queued = dispatcher.take_queued_events();
         assert!(queued.iter().any(|event| matches!(
@@ -9006,7 +9022,10 @@ mod api_pending_dispatch_tests {
                 calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }),
         };
-        client.process_reader_decoded(msg, 123, &mut callback_mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(msg, 123, &mut callback_mode);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 
         let msg = ReaderDecodedMsg {
@@ -9030,7 +9049,10 @@ mod api_pending_dispatch_tests {
             payload_buf: Vec::new(),
             active_actions_buf: Vec::new(),
         };
-        client.process_reader_decoded(msg, 123, &mut dispatcher_mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(msg, 123, &mut dispatcher_mode);
         assert!(dispatcher.take_queued_events().is_empty());
     }
 
@@ -11949,7 +11971,10 @@ mod event_loop_fairness_tests {
                 ping_update: None,
                 handshake_update: None,
             });
-        client.drain_reader_decoded(777, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(777, &mut mode);
 
         assert!(client.connected);
         assert_eq!(client.auth_status, AuthStatus::Connected);
@@ -12018,7 +12043,10 @@ mod event_loop_fairness_tests {
                 handshake_update: None,
             });
 
-        client.drain_reader_decoded(123, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(123, &mut mode);
 
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
         assert!(
@@ -12084,7 +12112,10 @@ mod event_loop_fairness_tests {
             }),
         };
 
-        client.drain_reader_decoded(456, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(456, &mut mode);
 
         assert_eq!(delivered.load(Ordering::Relaxed), 2);
         assert_eq!(client.total_recv, 77);
@@ -12617,7 +12648,10 @@ mod service_cmd_tests {
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
-        client.process_reader_decoded(decoded, 0, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded, 0, &mut mode);
 
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
         assert_eq!(client.round_trip_delay_ms(), 123);
@@ -12689,7 +12723,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WhoAreYou must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert_eq!(client.server_token, server_token);
         assert_eq!(client.peer_app_token, peer_app_token);
         assert_eq!(client.client_token, token_before.wrapping_add(1));
@@ -12732,7 +12769,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("Fine must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
         assert!(!client.need_connect);
@@ -12758,7 +12798,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WrongHello must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert_eq!(client.auth_status, AuthStatus::Connected);
     }
 
@@ -12784,7 +12827,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WantNewHello must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         assert_eq!(client.auth_status, AuthStatus::Connected);
         assert!(!client.authorized);
@@ -12812,7 +12858,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("NeedHelloAgain must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert!(client.waiting_hello);
         assert_eq!(client.waiting_hello_start, decoded.timestamp_ms);
         assert_eq!(client.last_need_hello_again, decoded.timestamp_ms);
@@ -12883,7 +12932,10 @@ mod service_cmd_tests {
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("ErrEmu drop must not deliver user payload")),
         };
-        client.process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
         assert!(client.connected);
         assert_eq!(client.auth_status, AuthStatus::Connected);
         assert_eq!(client.total_recv, decoded.recv_bytes);

@@ -1009,3 +1009,28 @@ Still not done:
 - Reader-side handshake state effects still need a strict Delphi placement
   check: currently decoded reader work is queued to the writer/runtime boundary
   instead of being proven as the same immediate reader-thread machine effect.
+
+### 2026-05-22 - Phase 1 partial: moved reader delivery drain into writer runtime
+
+Done:
+
+- Moved `drain_reader_decoded`, `process_reader_decoded`, reader recv side
+  effects, queued Ping state apply, queued handshake state apply, and
+  dispatcher delivery from `Client` into `WriterRuntime`.
+- Updated tests to exercise these paths through `WriterRuntime` instead of
+  old `Client` helper bodies.
+- Kept `Client::apply_active_actions` on `Client`, because it is part of the
+  active-library action surface and is also used outside the writer runtime by
+  dispatcher tests.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Reader-side handshake/Ping writer-visible state is still applied from queued
+  reader records at the writer boundary; this remains the next strict placement
+  check against Delphi `UDPRead`, where the reader thread mutates those fields
+  before returning.
+- Test-only `handle_udp_command` / `handle_handshake` helper paths still exist
+  and must either be removed or reduced to thin calls into the runtime/pure
+  helpers so tests cannot preserve an old alternate protocol path.
