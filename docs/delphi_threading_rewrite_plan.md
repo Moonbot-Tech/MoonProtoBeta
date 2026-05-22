@@ -604,7 +604,7 @@ Still not done:
 Done:
 
 - `EventDispatcher` now has `ActiveDispatchContext` and `ActiveAction`.
-- Production `Client::process_decoded_data_read_int` snapshots the client
+- Production `WriterRuntime::client_new_data` snapshots the client
   context, calls `dispatch_into_active_actions`, then applies the returned
   action outbox.
 - Active auto-actions are now data, not hidden direct `&mut Client` mutation:
@@ -1061,7 +1061,7 @@ Still not done:
 Done:
 
 - Removed test-only `Client::data_read_int` and `Client::decode_data_read_int_payload`.
-- API delivery tests now call the current `deliver_data_read_int_decoded`
+- API delivery tests now call the current `client_new_data_decoded`
   delivery helper directly.
 - The compressed-garbage test uses the shared production decoder
   `decode_data_read_int_payload_shared`, then the same delivery helper.
@@ -1325,3 +1325,24 @@ Still not done:
   dispatcher state still live on `Client`.
 - `pending_reader_decoded` is still the Rust bridge between reader
   `DataReadInt` core and user/active delivery.
+
+### 2026-05-22 - Phase 1 partial: named ClientNewData/ProcessApiCommand blocks
+
+Done:
+
+- Renamed the writer-side decoded delivery block to
+  `WriterRuntime::client_new_data`, matching Delphi
+  `TMoonProtoNetClient.ClientNewData` at the current architecture boundary.
+- Renamed the shared decoded payload helper to `Client::client_new_data_decoded`.
+- Split API response handling into `Client::process_api_command_decoded`,
+  matching Delphi `TMoonProtoNetClient.ProcessApiCommand` as a named block.
+- Reworded the raw callback comments; `Client::run` is the raw callback API,
+  not a compatibility route.
+
+Still not done:
+
+- `client_new_data` still runs in the writer/orchestrator after
+  `pending_reader_decoded`, not inline in the reader thread as Delphi
+  `DataReadInt -> OnNewData`.
+- Order/Strat/Balance/Trades/OrderBook/UI command bodies still need the same
+  block-by-block parity split against Delphi `ClientNewData`.

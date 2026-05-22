@@ -2436,12 +2436,12 @@ pub type EventWithStateFn =
 /// Куда доставлять `Command + payload` после внутренней обработки (decrypt,
 /// decompress, Grouped split, API pending dispatch). Два варианта:
 ///
-/// * `Callback` — старый путь через `OnDataFn` (используется `Client::run`).
+/// * `Callback` — raw payload callback через `OnDataFn` (используется `Client::run`).
 /// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
 ///   `EventDispatcher` (используется `Client::run_with_dispatcher`).
 ///
 /// Этот enum позволяет одному delivery pipeline (`WriterRuntime` drain +
-/// `deliver_data_read_int_decoded`) обслуживать оба сценария без
+/// `client_new_data_decoded`) обслуживать оба сценария без
 /// `Arc<Mutex>`-обходов borrow checker.
 pub(crate) enum DispatchSink<'a> {
     Callback(&'a mut OnDataFn),
@@ -2656,7 +2656,7 @@ impl WriterRuntime<'_> {
             self.apply_reader_handshake_update(update, msg.timestamp_ms);
         }
         if let Some(payload) = msg.payload {
-            self.process_decoded_data_read_int(
+            self.client_new_data(
                 msg.cmd,
                 payload,
                 msg.api_pending_consumed,
@@ -2751,7 +2751,7 @@ impl WriterRuntime<'_> {
         self.client.publish_transport_state_from_client();
     }
 
-    fn process_decoded_data_read_int(
+    fn client_new_data(
         &mut self,
         cmd: u8,
         payload: Vec<u8>,
@@ -2763,7 +2763,7 @@ impl WriterRuntime<'_> {
         match mode {
             RunMode::Callback { on_data } => {
                 let mut sink = DispatchSink::Callback(on_data);
-                self.client.deliver_data_read_int_decoded(
+                self.client.client_new_data_decoded(
                     cmd,
                     payload,
                     api_pending_consumed_by_reader,
@@ -2782,7 +2782,7 @@ impl WriterRuntime<'_> {
                 let authorized_before = self.client.authorized;
                 {
                     let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.client.deliver_data_read_int_decoded(
+                    self.client.client_new_data_decoded(
                         cmd,
                         payload,
                         api_pending_consumed_by_reader,
@@ -7315,7 +7315,7 @@ impl Client {
         out
     }
 
-    fn deliver_data_read_int_decoded(
+    fn client_new_data_decoded(
         &mut self,
         cmd: u8,
         payload: Vec<u8>,
@@ -7323,68 +7323,88 @@ impl Client {
         candles_chunk_consumed_by_reader: bool,
         sink: &mut DispatchSink<'_>,
     ) {
-        // Engine API responses: попытаться доставить в pending registry / chunked
-        // candles aggregator / internal recovery flags. Если UID не зарегистрирован —
-        // пробрасываем как обычный data callback.
         if cmd == Command::API as u8 {
-            if candles_chunk_consumed_by_reader {
-                return;
-            }
-            if let Some(resp) = parse_engine_response(&payload) {
-                // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
-                // несколько response пакетов с одинаковым UID. До завершения сборки
-                // не дропаем slot.
-                if resp.method == EngineMethod::RequestCandlesData
-                    && Self::handle_candles_chunk_in_map(
-                        &self.pending_candles,
-                        &resp,
-                        self.now_ms(),
-                    )
-                {
-                    // Чанк потреблён aggregator'ом. Передаём в on_data только
-                    // если потребитель НЕ использует async API (тогда тут merged
-                    // ещё не готов — пусть приложение видит сырые chunks).
-                    // Однако: чтобы не путать — пропускаем on_data callback.
-                    // Async-потребитель получит результат через Receiver<MergedCandles>.
+            match self.process_api_command_decoded(
+                payload,
+                api_pending_consumed_by_reader,
+                candles_chunk_consumed_by_reader,
+                sink,
+            ) {
+                Ok(()) => {
                     return;
                 }
-                // Если slot не зарегистрирован — fallback на pending registry /
-                // on_data (для пользователей старого fire-and-forget API).
-
-                // 2. Active library: auto-clear indexes_fetch_in_flight на ответе
-                // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
-                if resp.method == EngineMethod::GetMarketsIndexes {
-                    self.indexes_fetch_in_flight = false;
-                    if resp.success {
-                        // Запоминаем что для текущего PeerAppToken индексы получены.
-                        self.tracked_indexes_peer_app_token = self.peer_app_token;
-                        if self.update_markets_after_indexes {
-                            self.update_markets_after_indexes = false;
-                            self.send_api_request(
-                                &crate::commands::engine_request::update_markets_list(),
-                            );
-                        }
-                    }
+                Err(payload) => {
+                    sink.deliver_owned(Command::from_byte(cmd), payload);
+                    return;
                 }
-
-                // 3. Pending registry (обычный async API).
-                let pending_consumed =
-                    api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
-                if !pending_consumed || sink.is_buffer() {
-                    // Если response не ждал конкретный receiver — это обычный API event.
-                    // Если ждал, но мы в Dispatcher mode, всё равно отдаём raw payload
-                    // dispatcher'у: active state (markets/indexes/tags) должен обновиться
-                    // независимо от того, ждёт ли user code этот же ответ через Receiver.
-                    // Callback mode сохраняет старую семантику: pending response не
-                    // дублируется в on_data callback.
-                    sink.deliver_owned(Command::API, payload);
-                }
-                return;
             }
-            // Не распарсилось — fallback на raw sink.
         }
 
         sink.deliver_owned(Command::from_byte(cmd), payload);
+    }
+
+    fn process_api_command_decoded(
+        &mut self,
+        payload: Vec<u8>,
+        api_pending_consumed_by_reader: bool,
+        candles_chunk_consumed_by_reader: bool,
+        sink: &mut DispatchSink<'_>,
+    ) -> Result<(), Vec<u8>> {
+        // Engine API responses: попытаться доставить в pending registry / chunked
+        // candles aggregator / internal recovery flags. Если UID не зарегистрирован —
+        // пробрасываем как обычный data callback.
+        if candles_chunk_consumed_by_reader {
+            return Ok(());
+        }
+        if let Some(resp) = parse_engine_response(&payload) {
+            // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
+            // несколько response пакетов с одинаковым UID. До завершения сборки
+            // не дропаем slot.
+            if resp.method == EngineMethod::RequestCandlesData
+                && Self::handle_candles_chunk_in_map(&self.pending_candles, &resp, self.now_ms())
+            {
+                // Чанк потреблён aggregator'ом. Передаём в on_data только
+                // если потребитель НЕ использует async API (тогда тут merged
+                // ещё не готов — пусть приложение видит сырые chunks).
+                // Однако: чтобы не путать — пропускаем on_data callback.
+                // Async-потребитель получит результат через Receiver<MergedCandles>.
+                return Ok(());
+            }
+            // Если slot не зарегистрирован — fallback на pending registry /
+            // on_data для fire-and-forget API users.
+
+            // 2. Active library: auto-clear indexes_fetch_in_flight на ответе
+            // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
+            if resp.method == EngineMethod::GetMarketsIndexes {
+                self.indexes_fetch_in_flight = false;
+                if resp.success {
+                    // Запоминаем что для текущего PeerAppToken индексы получены.
+                    self.tracked_indexes_peer_app_token = self.peer_app_token;
+                    if self.update_markets_after_indexes {
+                        self.update_markets_after_indexes = false;
+                        self.send_api_request(
+                            &crate::commands::engine_request::update_markets_list(),
+                        );
+                    }
+                }
+            }
+
+            // 3. Pending registry (обычный async API).
+            let pending_consumed =
+                api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
+            if !pending_consumed || sink.is_buffer() {
+                // Если response не ждал конкретный receiver — это обычный API event.
+                // Если ждал, но мы в Dispatcher mode, всё равно отдаём raw payload
+                // dispatcher'у: active state (markets/indexes/tags) должен обновиться
+                // независимо от того, ждёт ли user code этот же ответ через Receiver.
+                // Callback mode сохраняет семантику: pending response не
+                // дублируется в on_data callback.
+                sink.deliver_owned(Command::API, payload);
+            }
+            return Ok(());
+        }
+        // Не распарсилось — fallback на raw sink.
+        Err(payload)
     }
 
     /// Поглотить candles chunk через pending aggregator. Возвращает `true` если slot
@@ -8731,13 +8751,7 @@ mod api_pending_dispatch_tests {
         let mut payloads = Vec::new();
         {
             let mut sink = DispatchSink::Buffer(&mut payloads);
-            client.deliver_data_read_int_decoded(
-                Command::API as u8,
-                payload,
-                false,
-                false,
-                &mut sink,
-            );
+            client.client_new_data_decoded(Command::API as u8, payload, false, false, &mut sink);
         }
 
         let resp = rx.try_recv().expect("pending receiver must get response");
@@ -9008,13 +9022,7 @@ mod api_pending_dispatch_tests {
         });
         {
             let mut sink = DispatchSink::Callback(&mut cb);
-            client.deliver_data_read_int_decoded(
-                Command::API as u8,
-                payload,
-                false,
-                false,
-                &mut sink,
-            );
+            client.client_new_data_decoded(Command::API as u8, payload, false, false, &mut sink);
         }
 
         assert!(rx.try_recv().is_ok(), "pending receiver must get response");
@@ -9035,7 +9043,7 @@ mod api_pending_dispatch_tests {
 
         {
             let mut sink = DispatchSink::Buffer(&mut payloads);
-            client.deliver_data_read_int_decoded(cmd, payload, false, false, &mut sink);
+            client.client_new_data_decoded(cmd, payload, false, false, &mut sink);
         }
 
         assert_eq!(payloads.len(), 1);
@@ -13484,7 +13492,7 @@ mod reconnect_timing_tests {
         let mut buffered = Vec::new();
         {
             let mut sink = DispatchSink::Buffer(&mut buffered);
-            client.deliver_data_read_int_decoded(
+            client.client_new_data_decoded(
                 Command::API as u8,
                 response_payload,
                 false,
