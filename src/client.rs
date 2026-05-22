@@ -1710,11 +1710,23 @@ impl ClientSender {
         self.turn_panic_sell(order.trade_ctx(), &order.market_name, turn_on);
     }
 
-    /// Send `TSetImmuneCommand` for a batch of order immunity flags.
-    pub fn set_immune(&self, uid: u64, items: &[crate::commands::trade::ImmuneItem]) {
-        let raw = crate::commands::trade::build_set_immune(uid, items);
-        let items_uid_sum: u64 = items.iter().fold(0u64, |acc, it| acc.wrapping_add(it.uid));
+    /// Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand`.
+    pub fn set_immune(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        items: &[crate::commands::trade::ImmuneItem],
+    ) -> bool {
+        let applied = orders.set_immune_clicks(items);
+        if applied.is_empty() {
+            return false;
+        }
+        let raw = crate::commands::trade::build_set_immune(uid, &applied);
+        let items_uid_sum: u64 = applied
+            .iter()
+            .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
         self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
+        true
     }
 
     /// Send `TMoveAllBuysCommand` if Delphi active-client gate finds a candidate order.
@@ -5990,15 +6002,27 @@ impl Client {
         self.turn_panic_sell(order.trade_ctx(), &order.market_name, turn_on);
     }
 
-    /// Send `TSetImmuneCommand` (CmdId=22, `UK_ImmuneClicks`) for a batch of
-    /// order immunity flags.
+    /// Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand`
+    /// (CmdId=22, `UK_ImmuneClicks`) for found active orders.
     ///
     /// The dedup UID is `sum(items[].uid)`, matching Delphi
     /// `TSetImmuneCommand.SetUKey`.
-    pub fn set_immune(&self, uid: u64, items: &[crate::commands::trade::ImmuneItem]) {
-        let raw = crate::commands::trade::build_set_immune(uid, items);
-        let items_uid_sum: u64 = items.iter().fold(0u64, |acc, it| acc.wrapping_add(it.uid));
+    pub fn set_immune(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        items: &[crate::commands::trade::ImmuneItem],
+    ) -> bool {
+        let applied = orders.set_immune_clicks(items);
+        if applied.is_empty() {
+            return false;
+        }
+        let raw = crate::commands::trade::build_set_immune(uid, &applied);
+        let items_uid_sum: u64 = applied
+            .iter()
+            .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
         self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
+        true
     }
 
     /// `TMoveAllBuysCommand` (CmdId=27), gated like Delphi active-client UI.
@@ -9982,6 +10006,62 @@ mod client_subscribe_integration_tests {
             }
             other => panic!("unexpected trade command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_set_immune_applies_local_side_effect_before_wire_send() {
+        use crate::commands::trade::{ImmuneItem, OrderWorkerStatus, TradeCommand};
+
+        let mut orders = tracked_orders(
+            0x100,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+        let items = [
+            ImmuneItem {
+                uid: 0x100,
+                value: true,
+            },
+            ImmuneItem {
+                uid: 0x200,
+                value: true,
+            },
+        ];
+
+        assert!(client.set_immune(&mut orders, 0xABCD, &items));
+        assert!(orders.get(0x100).unwrap().immune_for_clicks);
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].u_key, UniqueKey::immune_clicks(0x100));
+        match TradeCommand::parse(&high[0].data).expect("valid set immune") {
+            TradeCommand::SetImmune(cmd) => {
+                assert_eq!(cmd.header.uid, 0xABCD);
+                assert_eq!(cmd.items.len(), 1);
+                assert_eq!(cmd.items[0].uid, 0x100);
+                assert!(cmd.items[0].value);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+
+        assert!(
+            !client.set_immune(
+                &mut orders,
+                0xABCE,
+                &[ImmuneItem {
+                    uid: 0x200,
+                    value: false,
+                }],
+            ),
+            "Delphi does not send if no local worker was found"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
     }
 
     #[test]

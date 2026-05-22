@@ -236,6 +236,15 @@ impl EventDispatcher {
         &self.orders
     }
 
+    /// Mutable order state for local Delphi-equivalent UI side effects.
+    ///
+    /// Normal receive updates still go through `dispatch_into_active`; this is
+    /// exposed for outgoing actions such as `Client::set_immune`, where Delphi
+    /// mutates the local worker before sending a command to the server.
+    pub fn orders_mut(&mut self) -> &mut Orders {
+        &mut self.orders
+    }
+
     /// Drain deferred order removals after a reader-decoded batch.
     ///
     /// Delphi queues terminal/order-not-found effects into `BOrderWorker` and

@@ -1442,8 +1442,9 @@ Done:
   client receive path.
 - Rust `Orders::apply(TradeCommand::SetImmune)` now returns
   `NotApplicable` / `Ignored` and does not mutate `immune_for_clicks`.
-- API docs now state that `Client::set_immune` sends the command to the server,
-  while the read model learns `immune_for_clicks` from `TOrderStatus`.
+- API docs state that incoming `SetImmune` is ignored by receive state. Outgoing
+  `Client::set_immune` is handled separately as Delphi `SetImmuneClicks`:
+  mutate local active orders first, then send the command.
 - Added a unit test proving the Delphi receive-path guard.
 
 Still not done:
@@ -1824,3 +1825,26 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining outgoing order/UI
   actions: join/split/close/sell, per-order cancel/replace/stops/vstop/panic,
   and local-state side effects around `SetImmuneClicks`.
+
+### 2026-05-22 - Phase 1 partial: `SetImmuneClicks` outgoing local side effect
+
+Done:
+
+- Fixed outgoing `SetImmune` parity against Delphi
+  `TOrdersWorkers.SetImmuneClicks`.
+- `Orders::apply(TradeCommand::SetImmune)` still ignores incoming packets,
+  matching `ProcessCommandOrder`: `SetImmune` is client-to-server UI intent, not
+  an incoming order-state update.
+- The outgoing wrappers now take `&mut Orders`, call
+  `Orders::set_immune_clicks`, mutate `immune_for_clicks` immediately for found
+  active local orders, and send only those found items. If no local active order
+  was found, they return `false` and queue nothing.
+- Added `EventDispatcher::orders_mut()` for this Delphi-equivalent local UI
+  mutation.
+- Added unit tests for the local side effect, filtering unknown/terminal orders,
+  and queueing only after a local worker match.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining outgoing order/UI
+  actions: join/split/close/sell and per-order cancel/replace/stops/vstop/panic.

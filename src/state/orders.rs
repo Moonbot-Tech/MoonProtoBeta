@@ -559,6 +559,26 @@ impl Orders {
         }
     }
 
+    /// Delphi `TOrdersWorkers.SetImmuneClicks` local side effect.
+    ///
+    /// Returns only items whose local active order was found and mutated. The
+    /// caller should send exactly these items in `TSetImmuneCommand`; an empty
+    /// list means Delphi would not put anything on the wire.
+    pub fn set_immune_clicks(&mut self, items: &[ImmuneItem]) -> Vec<ImmuneItem> {
+        let mut applied = Vec::new();
+        for item in items {
+            let Some(order) = self.map.get_mut(&item.uid) else {
+                continue;
+            };
+            if order.status.is_terminal() || order.job_is_done {
+                continue;
+            }
+            order.immune_for_clicks = item.value;
+            applied.push(*item);
+        }
+        applied
+    }
+
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
@@ -1343,6 +1363,44 @@ mod tests {
             }
         ));
         assert!(!orders.get(42).unwrap().immune_for_clicks);
+    }
+
+    #[test]
+    fn outgoing_set_immune_clicks_mutates_only_found_active_orders_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            43,
+            "BTCUSDT",
+            OrderWorkerStatus::SelLDone,
+            1,
+        )));
+
+        let applied = orders.set_immune_clicks(&[
+            ImmuneItem {
+                uid: 42,
+                value: true,
+            },
+            ImmuneItem {
+                uid: 43,
+                value: true,
+            },
+            ImmuneItem {
+                uid: 44,
+                value: true,
+            },
+        ]);
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].uid, 42);
+        assert!(orders.get(42).unwrap().immune_for_clicks);
+        assert!(!orders.get(43).unwrap().immune_for_clicks);
+        assert!(orders.get(44).is_none());
     }
 
     #[test]

@@ -54,7 +54,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `update_tracked_order_stops(order, &stops)` | Update stop settings for a tracked order. |
 | `turn_panic_sell(ctx, market, turn_on)` | Toggle panic sell. |
 | `turn_tracked_order_panic_sell(order, turn_on)` | Toggle panic sell for a tracked order. |
-| `set_immune(uid, items)` | Send `TSetImmuneCommand` to mark orders immune to clicks on the server. |
+| `set_immune(&mut orders, uid, items)` | Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand` for found active orders. Returns `true` when a command was queued. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(&orders, ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
 | `update_vstop(ctx, market, params)` | Update volume stop. `params` is `VStopUpdateParams`; the wrapper writes `epoch = 0`. |
@@ -65,9 +65,11 @@ Epoch is intentionally not part of the public outgoing wrappers. For replace and
 panic-sell commands, status is not public either: the Delphi client writes
 `epoch = 0` and `status = OS_None` for those commands.
 
-`set_immune` is an outgoing UI/order action. It does not synthesize an incoming
-`OrderEvent` by itself; the read model mirrors `immune_for_clicks` from
-`TOrderStatus`, matching Delphi's receive path.
+`set_immune` is an outgoing UI/order action with a local side effect. Delphi
+`TOrdersWorkers.SetImmuneClicks` sets `Worker.ImmuneForClicks` before sending the
+wire command, and sends nothing if no local active worker is found. Rust repeats
+that: pass `&mut Orders`, and the wrapper mutates found active orders before
+queueing `TSetImmuneCommand`.
 
 `move_all_sells` and `move_all_buys` require the current `Orders` read model.
 This mirrors Delphi active-client UI code: bulk move commands are not put on the
@@ -136,7 +138,7 @@ let items = [
     ImmuneItem { uid: 100, value: true },
     ImmuneItem { uid: 200, value: true },
 ];
-client.set_immune(rand::random(), &items);
+client.set_immune(dispatcher.orders_mut(), rand::random(), &items);
 ```
 
 ## Sending While The Client Is Running
@@ -191,7 +193,8 @@ Wrappers that use `UK_OrderMove(ctx.uid)`:
 The matching tracked-order wrappers use the same UKey and wire format; they only
 derive `TradeCtx`, market name, and current status from `Order`.
 
-`set_immune` uses `UK_ImmuneClicks(sum(items[].uid))`.
+`set_immune` uses `UK_ImmuneClicks(sum(found_items[].uid))`; items whose local
+active order is not found are not sent.
 
 ## Retry Counts
 

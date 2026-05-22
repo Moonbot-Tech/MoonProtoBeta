@@ -54,8 +54,10 @@ For a new non-cache `TOrderStatus`, the dispatcher also requires the market
 name to be present in `MarketsState`; otherwise the packet is dropped without
 creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
 Incoming `TSetImmuneCommand` packets are not applied to this read model: in the
-Delphi flow `SetImmune` is a client-to-server UI action, while the client-side
-order state learns `immune_for_clicks` from `TOrderStatus`.
+Delphi flow `SetImmune` is a client-to-server UI action. For outgoing UI clicks,
+`Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
+`immune_for_clicks` on found active orders, and then queues `TSetImmuneCommand`.
+Later `TOrderStatus` snapshots can refresh the same field from the server.
 Terminal statuses and `TOrderNotFound` are removed in a deferred flush after the
 current reader batch. `SelLDone` has an additional 400 ms grace window matching
 Delphi `DoTheJobVirtual`, which runs two `Sleep(200); ProcessCommands` passes
