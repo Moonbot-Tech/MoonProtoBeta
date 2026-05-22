@@ -2648,7 +2648,7 @@ impl WriterRuntime<'_> {
         } = mode
         {
             event_buf.clear();
-            dispatcher.drain_deferred_order_removals(event_buf);
+            dispatcher.drain_deferred_order_removals_due(cur_tm, event_buf);
             on_event.drain_events(event_buf, dispatcher);
         }
     }

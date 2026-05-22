@@ -241,10 +241,18 @@ impl EventDispatcher {
     /// Delphi queues terminal/order-not-found effects into `BOrderWorker` and
     /// removes the worker from `WCache` later, not inside
     /// `ProcessCommandOrder` itself. The dispatcher mirrors that by letting
-    /// terminal orders remain addressable for the rest of the current receive
-    /// batch, then emitting `OrderEvent::Removed` from this flush step.
+    /// terminal orders remain addressable until the caller explicitly flushes
+    /// them, then emitting `OrderEvent::Removed` from this step. The active
+    /// client path uses `drain_deferred_order_removals_due` so `SelLDone` keeps
+    /// Delphi's extra 400 ms final-trace window.
     pub fn drain_deferred_order_removals(&mut self, out: &mut Vec<Event>) {
         for uid in self.orders.drain_pending_removals() {
+            out.push(Event::Order(OrderEvent::Removed(uid)));
+        }
+    }
+
+    pub(crate) fn drain_deferred_order_removals_due(&mut self, now_ms: i64, out: &mut Vec<Event>) {
+        for uid in self.orders.drain_pending_removals_due(now_ms) {
             out.push(Event::Order(OrderEvent::Removed(uid)));
         }
     }
@@ -573,6 +581,7 @@ impl EventDispatcher {
         for ev in self.orders.tick_bulk_replace_timeouts(now_ms) {
             out.push(Event::Order(ev));
         }
+        self.drain_deferred_order_removals_due(now_ms, out);
     }
 
     /// Delphi `ProcessCommandOrder` first tries `WCache.TryFind(TaskUID)`.
@@ -1259,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_defers_terminal_order_removal_until_flush() {
+    fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
         let mut d = EventDispatcher::new();
         seed_event_markets(&mut d, &["BTCUSDT"]);
         let mut out = Vec::new();
@@ -1317,7 +1326,40 @@ mod tests {
         assert_eq!(d.orders().get(uid).unwrap().trace_points.len(), 1);
 
         out.clear();
-        d.drain_deferred_order_removals(&mut out);
+        d.drain_deferred_order_removals_due(1400, &mut out);
+        assert!(out.is_empty());
+        assert!(d.orders().get(uid).is_some());
+
+        d.process_command_order(
+            TradeCommand::OrderTracePoint(OrderTracePoint {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 25,
+                        ver: 3,
+                        uid,
+                    },
+                    currency: 7,
+                    platform: 9,
+                    market_name: "BTCUSDT".to_string(),
+                },
+                trace_time: 45_000.0,
+                trace_price: 102.0,
+                base_price: 100.0,
+                stop_price: 0.0,
+                ord_type: OrderType::Sell,
+                flags: trace_flags::IS_FINISH,
+            }),
+            1400,
+            &mut out,
+        );
+        assert!(matches!(
+            out.last(),
+            Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
+        ));
+        assert_eq!(d.orders().get(uid).unwrap().trace_points.len(), 2);
+
+        out.clear();
+        d.drain_deferred_order_removals_due(1401, &mut out);
         assert!(matches!(
             out.as_slice(),
             [Event::Order(OrderEvent::Removed(found))] if *found == uid

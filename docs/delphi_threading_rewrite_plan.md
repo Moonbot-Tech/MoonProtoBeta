@@ -1699,3 +1699,29 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
+
+### 2026-05-22 - Phase 1 partial: `SelLDone` final trace grace before removal
+
+Done:
+
+- Fixed deferred removal timing for `OS_SelLDone`. Delphi
+  `BOrderWorker.DoTheJobVirtual` does not remove the virtual worker from
+  `WCache` immediately after `Status = OS_SelLDone`: it runs two
+  `Sleep(200); ProcessCommands; DoQCall` passes so late server visual commands
+  such as `TOrderTracePoint` can still target the worker.
+- Rust previously kept terminal orders only until the current reader batch was
+  drained. That preserved same-batch trace packets but could drop trace/visual
+  packets arriving during Delphi's 400 ms final window.
+- Rust pending removals now carry a due timestamp. Non-`SelLDone` terminal
+  states and `TOrderNotFound` keep the existing batch-deferred removal;
+  `SelLDone` is due after 400 ms.
+- `Client::run_with_dispatcher` drains due removals with the current loop time,
+  and periodic order ticks also drain due removals when the grace window expires.
+- Added a dispatcher test proving a second `TOrderTracePoint` at +399 ms is
+  still accepted and removal happens at +400 ms.
+- Updated API docs for the 400 ms final-trace grace.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / `DoTheJobVirtual` body.

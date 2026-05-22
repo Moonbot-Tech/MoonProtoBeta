@@ -23,8 +23,9 @@
 use crate::commands::trade::*;
 use std::collections::{HashMap, VecDeque};
 
-const PRICE_EPS: f64 = 0.000000009;
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
+const PRICE_EPS: f64 = 0.000000009;
+const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
 
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
@@ -147,6 +148,20 @@ fn status_phase(s: OrderWorkerStatus) -> u8 {
 
 fn order_type_uses_buy_side(order_type: OrderType) -> bool {
     order_type == OrderType::Buy
+}
+
+fn terminal_removal_delay_ms(status: OrderWorkerStatus) -> i64 {
+    if status == OrderWorkerStatus::SelLDone {
+        SELL_DONE_REMOVAL_GRACE_MS
+    } else {
+        0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingRemoval {
+    uid: u64,
+    due_ms: i64,
 }
 
 /// Один ордер с зеркальным состоянием.
@@ -345,7 +360,7 @@ pub struct Orders {
     map: HashMap<u64, Order>,
     /// UID'ы, которые Delphi worker уже пометил бы как завершающиеся, но ещё
     /// не удалил бы из `WCache` прямо внутри `ProcessCommandOrder`.
-    pending_removals: Vec<u64>,
+    pending_removals: Vec<PendingRemoval>,
     /// Инкрементируется при каждом TAllStatuses (CurrentSnapshotFlag в Delphi).
     current_snapshot_flag: u8,
     /// ServerTimeDelta = InitialTime(server) - Now(client). Применяется к временам в командах.
@@ -416,6 +431,7 @@ impl Orders {
             // --- Full status (создание или обновление) ---
             TradeCommand::OrderStatus(st) => {
                 let new_order = !self.map.contains_key(&uid);
+                let status = st.epoch_header.status;
                 if new_order && st.from_cache {
                     return (
                         ApplyResult::OrderNotFound,
@@ -446,7 +462,7 @@ impl Orders {
                     entry.job_is_done
                 };
                 if is_done {
-                    self.mark_pending_removal(uid);
+                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
                 }
 
                 if new_order {
@@ -460,7 +476,8 @@ impl Orders {
 
             // --- Delta-update ---
             TradeCommand::OrderStatusUpdate(up) => {
-                let is_terminal = up.epoch_header.status.is_terminal();
+                let status = up.epoch_header.status;
+                let is_terminal = status.is_terminal();
                 {
                     let Some(entry) = self.map.get_mut(&uid) else {
                         return (
@@ -521,7 +538,7 @@ impl Orders {
                 }
 
                 if is_terminal {
-                    self.mark_pending_removal(uid);
+                    self.mark_pending_removal(uid, now_ms, terminal_removal_delay_ms(status));
                     return (ApplyResult::Applied, OrderEvent::Updated(uid));
                 }
 
@@ -697,7 +714,7 @@ impl Orders {
                     false
                 };
                 if found {
-                    self.mark_pending_removal(uid);
+                    self.mark_pending_removal(uid, now_ms, 0);
                     (ApplyResult::Applied, OrderEvent::Updated(uid))
                 } else {
                     (
@@ -830,9 +847,12 @@ impl Orders {
         }
     }
 
-    fn mark_pending_removal(&mut self, uid: u64) {
-        if !self.pending_removals.contains(&uid) {
-            self.pending_removals.push(uid);
+    fn mark_pending_removal(&mut self, uid: u64, now_ms: i64, delay_ms: i64) {
+        let due_ms = now_ms.saturating_add(delay_ms.max(0));
+        if let Some(existing) = self.pending_removals.iter_mut().find(|p| p.uid == uid) {
+            existing.due_ms = existing.due_ms.max(due_ms);
+        } else {
+            self.pending_removals.push(PendingRemoval { uid, due_ms });
         }
     }
 
@@ -849,11 +869,28 @@ impl Orders {
     pub fn drain_pending_removals(&mut self) -> Vec<u64> {
         let pending = std::mem::take(&mut self.pending_removals);
         let mut removed = Vec::with_capacity(pending.len());
-        for uid in pending {
-            if self.map.remove(&uid).is_some() {
-                removed.push(uid);
+        for pending in pending {
+            if self.map.remove(&pending.uid).is_some() {
+                removed.push(pending.uid);
             }
         }
+        removed
+    }
+
+    pub(crate) fn drain_pending_removals_due(&mut self, now_ms: i64) -> Vec<u64> {
+        let pending = std::mem::take(&mut self.pending_removals);
+        let mut keep = Vec::new();
+        let mut removed = Vec::new();
+        for pending in pending {
+            if now_ms >= pending.due_ms {
+                if self.map.remove(&pending.uid).is_some() {
+                    removed.push(pending.uid);
+                }
+            } else {
+                keep.push(pending);
+            }
+        }
+        self.pending_removals = keep;
         removed
     }
 
