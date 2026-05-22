@@ -44,7 +44,10 @@ state internally as packets arrive.
 When a server `TAllStatuses` snapshot arrives, the dispatcher follows the Delphi
 order: it advances the snapshot flag, applies each contained `TOrderStatus`
 through the same order-command path as live updates, emits the per-order events,
-then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup.
+then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup. Cleanup
+treats every order still present in the read model as a Delphi `WCache` worker:
+terminal entries waiting for deferred removal can still produce a follow-up
+`TOrderStatusRequest` when they are absent from the fresh snapshot.
 `TOrderStatus` responses marked `FromCache=true` update only an already tracked
 order; they do not create a new active order entry when the UID is unknown.
 For a new non-cache `TOrderStatus`, the dispatcher also requires the market
@@ -122,9 +125,10 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
 `UpdateData.MeanPrice` without applying the rest of `UpdateData` to
 `buy_order`, matching Delphi's pending visual-order branch.
-`TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately;
-`job_is_done` is reserved for terminal statuses, matching Delphi's split between
-`ProcessCommandOrder` and the later virtual-worker exit.
+`TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately.
+`job_is_done` is a read-model terminal marker; it is not used as Delphi
+`BOrderWorker.JobIsDone` for missing-order cleanup while the entry is still
+waiting for deferred removal.
 
 ## Status Values
 

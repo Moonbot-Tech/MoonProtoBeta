@@ -1458,7 +1458,7 @@ Done:
 - Fixed `ProcessCommandOrder` lifetime parity for terminal statuses and
   `TOrderNotFound`.
 - Rust no longer removes an order entry synchronously inside `Orders::apply`.
-  Terminal statuses mark `job_is_done`; `TOrderNotFound` marks
+  Terminal statuses mark the read-model terminal marker; `TOrderNotFound` marks
   `cancel_request` / `server_forced_remove`; both keep the entry addressable for
   the rest of the receive batch, then remove it through deferred flush.
 - `EventDispatcher::drain_deferred_order_removals` emits the delayed
@@ -1720,6 +1720,34 @@ Done:
 - Added a dispatcher test proving a second `TOrderTracePoint` at +399 ms is
   still accepted and removal happens at +400 ms.
 - Updated API docs for the 400 ms final-trace grace.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / `DoTheJobVirtual` body.
+
+### 2026-05-22 - Phase 1 partial: `CleanupMissingWorkers` uses WCache presence, not Rust terminal marker
+
+Done:
+
+- Fixed another `ProcessCommandOrder`/`CleanupMissingWorkers` parity bug around
+  terminal orders that are still waiting for deferred removal.
+- Delphi `CleanupMissingWorkers` iterates `WCache` and checks
+  `not Worker.JobIsDone`. In `DoTheJobVirtual`, `SetDoneFlags` does not set
+  `JobIsDone`; `JobIsDone` is set later by `Execute -> DoFinalSynCall`, after
+  `RemoveWorkerFromCache`. Therefore a terminal virtual worker still present in
+  `WCache` remains a missing-cleanup candidate.
+- Rust had used `Order::job_is_done` as a terminal read-model marker and also
+  filtered it out in `missing_after_snapshot()`. That skipped a follow-up
+  `TOrderStatusRequest` that Delphi could still send before deferred removal.
+- `missing_after_snapshot()` now treats Rust `Orders` presence as the WCache
+  equivalent: if the entry is still present and its snapshot flag was not
+  refreshed, it is missing. Once deferred removal runs, the entry leaves
+  `Orders` and no longer participates.
+- Updated API docs to make clear that `job_is_done` is a read-model terminal
+  marker, not the Delphi `Worker.JobIsDone` gate for cleanup.
+- Added a test proving a `SelLDone` entry still pending removal is returned by
+  `missing_after_snapshot()`, then disappears after the due removal drain.
 
 Still not done:
 

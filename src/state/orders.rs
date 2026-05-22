@@ -929,11 +929,17 @@ impl Orders {
     /// После TAllStatuses найти ордера, которых **нет** в свежем snapshot.
     /// Эти UID'ы нужно явно запросить через `build_order_status_request`.
     /// Соответствует `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
+    ///
+    /// Delphi checks `not Worker.JobIsDone`, but a worker still present in
+    /// `WCache` after a terminal status has not reached `DoFinalSynCall` yet.
+    /// In Rust, entries leave `Orders` through deferred removal; while the
+    /// entry is still here, it is still a cleanup candidate if the snapshot flag
+    /// was not refreshed.
     pub fn missing_after_snapshot(&self) -> Vec<u64> {
         let flag = self.current_snapshot_flag;
         self.map
             .values()
-            .filter(|o| o.snapshot_flag != flag && !o.job_is_done)
+            .filter(|o| o.snapshot_flag != flag)
             .map(|o| o.uid)
             .collect()
     }
@@ -1807,6 +1813,30 @@ mod tests {
 
         let missing = orders.missing_after_snapshot();
         assert_eq!(missing, vec![2]);
+    }
+
+    #[test]
+    fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal_like_delphi_wcache() {
+        let mut orders = Orders::new();
+        orders.apply_at(
+            order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),
+            1000,
+        );
+        orders.apply_at(
+            order_status_cmd(make_status(1, "X", OrderWorkerStatus::SelLDone, 2)),
+            1001,
+        );
+        assert!(orders.get(1).unwrap().job_is_done);
+
+        orders.begin_snapshot();
+
+        assert_eq!(
+            orders.missing_after_snapshot(),
+            vec![1],
+            "Delphi CleanupMissingWorkers still sees a terminal virtual worker while it remains in WCache"
+        );
+        assert_eq!(orders.drain_pending_removals_due(1401), vec![1]);
+        assert!(orders.missing_after_snapshot().is_empty());
     }
 
     #[test]
