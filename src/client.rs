@@ -494,6 +494,280 @@ pub(crate) struct ReaderHandshakeUpdate {
     decode_key: MoonKey,
 }
 
+struct ReaderRuntime {
+    sock: UdpSocket,
+    mac_key: MoonKey,
+    master_key: MoonKey,
+    mac_ctx: moonproto_transport::MacContext,
+    mask_ver: u8,
+    client_id: u64,
+    app_token: u64,
+    reader_client_token: u64,
+    server_addr: Option<SocketAddr>,
+    event_tx: mpsc::Sender<ClientEvent>,
+    api_pending: Arc<ApiPending>,
+    pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
+    incoming_sliced_acks: Arc<Mutex<Vec<SlicedAck>>>,
+    pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+    reader_wake_pending: Arc<AtomicBool>,
+    reader_protocol: Arc<Mutex<ReaderProtocolState>>,
+    reader_ping_state: Arc<Mutex<ReaderPingState>>,
+    server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
+    slicer: Arc<Mutex<slicing::SlicingReceiver>>,
+    total_sent: Arc<AtomicU64>,
+    total_recv_shared: Arc<AtomicU64>,
+    debug_outgoing_blackhole: bool,
+    start_time: Instant,
+    shutdown_flag: Arc<AtomicBool>,
+    epoch: u32,
+}
+
+impl ReaderRuntime {
+    fn run(mut self) {
+        let mut buf = [0u8; 65535];
+        loop {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let n = match self.sock.recv_from(&mut buf) {
+                Ok((n, _)) => n,
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    _ => {
+                        if self.shutdown_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                },
+            };
+
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
+                &self.mac_ctx,
+                &self.mac_key,
+                &buf[..n],
+                self.mask_ver,
+            ) else {
+                continue;
+            };
+
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                    Command::from_byte(hdr.cmd),
+                    hdr.cmd,
+                    n,
+                    payload.len()
+                );
+            }
+
+            let total_recv_after = self
+                .total_recv_shared
+                .fetch_add(n as u64, Ordering::Relaxed)
+                + n as u64;
+            let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
+
+            if err_emu_should_drop(hdr.cmd) {
+                Client::reader_on_err_emu_drop(
+                    &self.pending_reader_decoded,
+                    hdr.cmd,
+                    &payload,
+                    n as u64,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            } else if !self.handle_command(
+                hdr.cmd,
+                &payload,
+                n as u64,
+                total_recv_after,
+                timestamp_ms,
+            ) {
+                break;
+            }
+
+            if notify_reader_work(&self.event_tx, &self.reader_wake_pending)
+                == RecvEnqueue::Disconnected
+            {
+                break;
+            }
+        }
+    }
+
+    fn handle_command(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+    ) -> bool {
+        {
+            let mut slicer = self.slicer.lock().unwrap();
+            slicer.set_last_online(timestamp_ms);
+            slicer.do_cleanup();
+        }
+
+        match Command::from_byte(raw_cmd) {
+            Command::Ping => {
+                Client::reader_on_new_ping(
+                    &self.sock,
+                    self.server_addr,
+                    &self.mac_ctx,
+                    &self.mac_key,
+                    self.client_id,
+                    self.mask_ver,
+                    &self.total_sent,
+                    self.debug_outgoing_blackhole,
+                    &self.reader_protocol,
+                    &self.reader_ping_state,
+                    &self.server_time_delta_handle,
+                    &self.pending_reader_decoded,
+                    payload,
+                    recv_bytes,
+                    total_recv_after,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
+                Client::reader_on_handshake_control(
+                    &self.pending_reader_decoded,
+                    Command::from_byte(raw_cmd),
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::WhoAreYou => {
+                Client::reader_on_who_are_you(
+                    &self.sock,
+                    self.server_addr,
+                    &self.mac_ctx,
+                    &self.mac_key,
+                    &self.master_key,
+                    self.client_id,
+                    self.app_token,
+                    &mut self.reader_client_token,
+                    self.mask_ver,
+                    &self.total_sent,
+                    self.debug_outgoing_blackhole,
+                    &self.reader_protocol,
+                    &self.pending_reader_decoded,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::Fine => {
+                Client::reader_on_fine(
+                    &self.master_key,
+                    self.client_id,
+                    &self.pending_reader_decoded,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::SizeTest => {
+                Client::reader_on_new_size_test(
+                    &self.sock,
+                    self.server_addr,
+                    &self.mac_ctx,
+                    &self.mac_key,
+                    self.client_id,
+                    self.mask_ver,
+                    &self.total_sent,
+                    self.debug_outgoing_blackhole,
+                    &self.reader_protocol,
+                    &self.pending_reader_decoded,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::ProbeMTU => {
+                Client::reader_on_new_probe_mtu(
+                    &self.sock,
+                    self.server_addr,
+                    &self.mac_ctx,
+                    &self.mac_key,
+                    self.client_id,
+                    self.mask_ver,
+                    &self.total_sent,
+                    self.debug_outgoing_blackhole,
+                    &self.pending_reader_decoded,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::SlicedACK => {
+                Client::reader_on_new_sliced_ack(
+                    &self.pending_reader_decoded,
+                    &self.incoming_sliced_acks,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+            Command::Sliced => {
+                if !Client::reader_on_new_sliced(
+                    &self.shutdown_flag,
+                    &self.sock,
+                    self.server_addr,
+                    &self.mac_ctx,
+                    &self.mac_key,
+                    self.client_id,
+                    self.mask_ver,
+                    &self.total_sent,
+                    self.debug_outgoing_blackhole,
+                    &self.reader_protocol,
+                    &self.api_pending,
+                    &self.pending_candles,
+                    &self.pending_reader_decoded,
+                    &self.slicer,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                ) {
+                    return false;
+                }
+            }
+            _ => {
+                Client::reader_on_data_packet(
+                    &self.reader_protocol,
+                    &self.api_pending,
+                    &self.pending_candles,
+                    &self.pending_reader_decoded,
+                    raw_cmd,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    self.epoch,
+                );
+            }
+        }
+
+        true
+    }
+}
+
 /// Reader/main control channel.
 ///
 /// Production reader sends only coalesced `Wake` notifications here after
@@ -5228,240 +5502,35 @@ impl Client {
         let spawn_result = thread::Builder::new()
             .name("moonproto-reader".into())
             .spawn(move || {
-                let mut reader_client_token = reader_client_token_start;
-                let mut buf = [0u8; 65535];
-                loop {
-                if shutdown_flag.load(Ordering::Relaxed) {
-                    break; // graceful exit on do_force_disconnect / Drop
+                ReaderRuntime {
+                    sock: sock_clone,
+                    mac_key,
+                    master_key,
+                    mac_ctx,
+                    mask_ver,
+                    client_id,
+                    app_token,
+                    reader_client_token: reader_client_token_start,
+                    server_addr,
+                    event_tx,
+                    api_pending,
+                    pending_candles,
+                    incoming_sliced_acks,
+                    pending_reader_decoded,
+                    reader_wake_pending,
+                    reader_protocol,
+                    reader_ping_state,
+                    server_time_delta_handle,
+                    slicer,
+                    total_sent,
+                    total_recv_shared,
+                    debug_outgoing_blackhole,
+                    start_time,
+                    shutdown_flag,
+                    epoch: my_epoch,
                 }
-                let n = match sock_clone.recv_from(&mut buf) {
-                    Ok((n, _)) => n,
-                    Err(e) => {
-                        // D-V2-08 fix: различаем нормальные timeout (set_read_timeout=1s) от
-                        // реальных ошибок. На timeout — просто continue без sleep (1с уже
-                        // потратили внутри recv_from). На реальной ошибке (BadFd при socket
-                        // disconnect, ConnectionReset) — log + проверка shutdown.
-                        match e.kind() {
-                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                                continue;
-                            }
-                            _ => {
-                                if shutdown_flag.load(Ordering::Relaxed) {
-                                    // Сокет закрыт через do_force_disconnect — норма.
-                                    break;
-                                }
-                                // Реальная ошибка — log + короткая пауза перед retry.
-                                log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
-                                thread::sleep(Duration::from_millis(5));
-                                continue;
-                            }
-                        }
-                    }
-                };
-                if shutdown_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Transport unpack (OLC + MAC + ver check) — кэшированный MacContext.
-                let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
-                    &mac_ctx, &mac_key, &buf[..n], mask_ver,
-                ) else { continue; };
-                if trace_io_enabled() {
-                    eprintln!(
-                        "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
-                        Command::from_byte(hdr.cmd),
-                        hdr.cmd,
-                        n,
-                        payload.len()
-                    );
-                }
-
-                // ErrEmu: симуляция packet loss на стороне клиента (зеркало Delphi
-                // MoonProtoUDPClient.pas:534-541). Дроп ПОСЛЕ checksum+ver checks,
-                // т.е. валидный пакет просто отбрасывается. Служебные команды дропаются
-                // с rate/2 (чтобы handshake/ping не отваливались полностью).
-                let total_recv_after =
-                    total_recv_shared.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                let err_emu_drop = err_emu_should_drop(hdr.cmd);
-
-                // B-V3-02 fix: монотонный timestamp через Instant вместо SystemTime
-                // (~20x faster, не подвержен NTP-корректировкам). Reader thread
-                // получил `start_time` clone'ом из self._start (Instant — Copy).
-                // Тот же time base что в `Client::now_ms` — diff'ы остаются корректны.
-                let timestamp_ms = start_time.elapsed().as_millis() as i64;
-                let cmd = Command::from_byte(hdr.cmd);
-                if err_emu_drop {
-                    Client::reader_on_err_emu_drop(
-                        &pending_reader_decoded,
-                        hdr.cmd,
-                        &payload,
-                        n as u64,
-                        timestamp_ms,
-                        my_epoch,
-                    );
-                } else {
-                    {
-                        let mut slicer = slicer.lock().unwrap();
-                        slicer.set_last_online(timestamp_ms);
-                        slicer.do_cleanup();
-                    }
-                    match cmd {
-                        Command::Ping => {
-                            Client::reader_on_new_ping(
-                                &sock_clone,
-                                server_addr,
-                                &mac_ctx,
-                                &mac_key,
-                                client_id,
-                                mask_ver,
-                                &total_sent,
-                                debug_outgoing_blackhole,
-                                &reader_protocol,
-                                &reader_ping_state,
-                                &server_time_delta_handle,
-                                &pending_reader_decoded,
-                                &payload,
-                                n as u64,
-                                total_recv_after,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::WrongHello
-                        | Command::WantNewHello
-                        | Command::NeedHelloAgain => {
-                            Client::reader_on_handshake_control(
-                                &pending_reader_decoded,
-                                cmd,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::WhoAreYou => {
-                            Client::reader_on_who_are_you(
-                                &sock_clone,
-                                server_addr,
-                                &mac_ctx,
-                                &mac_key,
-                                &master_key,
-                                client_id,
-                                app_token,
-                                &mut reader_client_token,
-                                mask_ver,
-                                &total_sent,
-                                debug_outgoing_blackhole,
-                                &reader_protocol,
-                                &pending_reader_decoded,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::Fine => {
-                            Client::reader_on_fine(
-                                &master_key,
-                                client_id,
-                                &pending_reader_decoded,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::SizeTest => {
-                            Client::reader_on_new_size_test(
-                                &sock_clone,
-                                server_addr,
-                                &mac_ctx,
-                                &mac_key,
-                                client_id,
-                                mask_ver,
-                                &total_sent,
-                                debug_outgoing_blackhole,
-                                &reader_protocol,
-                                &pending_reader_decoded,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::ProbeMTU => {
-                            Client::reader_on_new_probe_mtu(
-                                &sock_clone,
-                                server_addr,
-                                &mac_ctx,
-                                &mac_key,
-                                client_id,
-                                mask_ver,
-                                &total_sent,
-                                debug_outgoing_blackhole,
-                                &pending_reader_decoded,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::SlicedACK => {
-                            Client::reader_on_new_sliced_ack(
-                                &pending_reader_decoded,
-                                &incoming_sliced_acks,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                        Command::Sliced => {
-                            if !Client::reader_on_new_sliced(
-                                &shutdown_flag,
-                                &sock_clone,
-                                server_addr,
-                                &mac_ctx,
-                                &mac_key,
-                                client_id,
-                                mask_ver,
-                                &total_sent,
-                                debug_outgoing_blackhole,
-                                &reader_protocol,
-                                &api_pending,
-                                &pending_candles,
-                                &pending_reader_decoded,
-                                &slicer,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            ) {
-                                break;
-                            }
-                        }
-                        _ => {
-                            Client::reader_on_data_packet(
-                                &reader_protocol,
-                                &api_pending,
-                                &pending_candles,
-                                &pending_reader_decoded,
-                                hdr.cmd,
-                                &payload,
-                                n as u64,
-                                timestamp_ms,
-                                my_epoch,
-                            );
-                        }
-                    }
-                }
-
-                if notify_reader_work(&event_tx, &reader_wake_pending)
-                    == RecvEnqueue::Disconnected
-                {
-                    break;
-                }
-            }
-        });
+                .run();
+            });
         if let Err(e) = spawn_result {
             error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
             self.force_disconnect = true;

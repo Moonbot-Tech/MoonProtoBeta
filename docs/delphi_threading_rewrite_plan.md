@@ -827,3 +827,24 @@ Still not done:
 
 - These are extraction methods only. The transport writer maintenance still runs
   from `run_inner`, not from a standalone writer thread.
+
+### 2026-05-22 - Phase 1 partial: introduced `ReaderRuntime`
+
+Done:
+
+- `spawn_reader` is now only the reader-thread factory: it clones/captures the
+  exact runtime state, creates `ReaderRuntime`, and starts `ReaderRuntime::run`.
+- The UDP receive loop, transport unpack, ErrEmu drop branch, Sliced cleanup,
+  command dispatch, and wake notification now live inside `ReaderRuntime`.
+- The command bodies are still the same named reader blocks extracted earlier:
+  Ping, handshake control/auth, PMTU probes, SlicedACK, Sliced, ErrEmu-drop,
+  and regular data. No protocol branch was added or reordered.
+
+Still not done:
+
+- `ReaderRuntime` still calls `Client::reader_on_*` helper blocks. The next
+  strict-parity step is to move reader-owned protocol helpers/state under the
+  runtime/transport ownership boundary instead of keeping them as `Client`
+  statics.
+- The writer/orchestrator is still a `run_inner` tick extraction, not a
+  dedicated Delphi-style writer runtime/thread.
