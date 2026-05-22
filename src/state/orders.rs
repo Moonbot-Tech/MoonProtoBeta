@@ -403,10 +403,16 @@ impl Orders {
 
             // --- Full status (создание или обновление) ---
             TradeCommand::OrderStatus(st) => {
-                if !st.from_cache {
-                    // Inc snapshot flag — это новый ордер из live update'а.
-                }
                 let new_order = !self.map.contains_key(&uid);
+                if new_order && st.from_cache {
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
+                }
                 let entry = self
                     .map
                     .entry(uid)
@@ -864,6 +870,25 @@ mod tests {
         let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLDone, 1);
         let (_, ev) = orders.apply(order_status_cmd(s2));
         assert!(matches!(ev, OrderEvent::Removed(42)));
+        assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn from_cache_status_does_not_create_unknown_order_like_delphi() {
+        let mut orders = Orders::new();
+        let mut cached = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        cached.from_cache = true;
+
+        let (res, ev) = orders.apply(order_status_cmd(cached));
+
+        assert_eq!(res, ApplyResult::OrderNotFound);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 42,
+                reason: ApplyResult::OrderNotFound
+            }
+        ));
         assert!(orders.get(42).is_none());
     }
 

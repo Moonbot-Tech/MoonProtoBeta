@@ -1416,3 +1416,19 @@ Still not done:
 - `process_command_order` still delegates most worker-state semantics to
   `Orders::apply`; its internals need a separate reverse-equivalence pass
   against Delphi `ProcessCommandOrder` line by line.
+
+### 2026-05-22 - Phase 1 partial: ProcessCommandOrder FromCache create guard
+
+Done:
+
+- Fixed a `ProcessCommandOrder` parity bug: Delphi creates a worker for unknown
+  `TOrderStatus` only when `FromCache=false`; `FromCache=true` without an
+  existing worker is freed/dropped.
+- Rust `Orders::apply(TradeCommand::OrderStatus)` now ignores unknown
+  `from_cache=true` statuses instead of creating a new active order entry.
+- Added a unit test proving the Delphi guard.
+
+Still not done:
+
+- Remaining `ProcessCommandOrder` branches still need line-by-line reverse
+  equivalence checks.

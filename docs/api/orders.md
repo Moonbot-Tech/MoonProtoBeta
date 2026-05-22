@@ -45,6 +45,8 @@ When a server `TAllStatuses` snapshot arrives, the dispatcher follows the Delphi
 order: it advances the snapshot flag, applies each contained `TOrderStatus`
 through the same order-command path as live updates, emits the per-order events,
 then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup.
+`TOrderStatus` responses marked `FromCache=true` update only an already tracked
+order; they do not create a new active order entry when the UID is unknown.
 
 ## `Order`
 
