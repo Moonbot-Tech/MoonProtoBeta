@@ -76,6 +76,11 @@ client.ui_switch_spot(0);
 wire version byte is always `LevCmdVer = 1`. `LevManage::cmd_ver` is kept for
 low-level parsing of received payloads and does not change the outgoing packet.
 
+The low-level builders for `TStratStartStopCommandV2`, `TEmuTradesCommand`, and
+`TTriggerManageCommand` mirror Delphi `Word Count` serialization: the count is
+written as the low 16 bits, and only that declared number of elements is written
+to the packet body.
+
 For Delphi `TStratStartStopCommandV2`, normal active-library code should send
 through `EventDispatcher`, not by hand-building `checked_items`. The dispatcher
 owns strategy checked-state and builds `Items` as Delphi does:

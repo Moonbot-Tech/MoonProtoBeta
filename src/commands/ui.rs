@@ -920,11 +920,13 @@ pub fn build_strat_start_stop(uid: u64, is_start: bool) -> Vec<u8> {
 
 /// CmdId=4 `TStratStartStopCommandV2`.
 pub fn build_strat_start_stop_v2(uid: u64, is_start: bool, items: &[StratCheckedItem]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 1 + 2 + items.len() * 9);
+    let count = items.len() as u16;
+    let count_usize = usize::from(count);
+    let mut out = Vec::with_capacity(11 + 1 + 2 + count_usize * 9);
     write_header(&mut out, CMD_STRAT_START_STOP_V2, uid);
     out.push(is_start as u8);
-    out.extend_from_slice(&(items.len() as u16).to_le_bytes());
-    for it in items {
+    out.extend_from_slice(&count.to_le_bytes());
+    for it in items.iter().take(count_usize) {
         out.extend_from_slice(&it.strategy_id.to_le_bytes());
         out.push(it.checked as u8);
     }
@@ -958,12 +960,14 @@ pub fn build_emu_trades(
     base_time: f64,
     points: &[EmuTradePoint],
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 2 + 8 + 2 + points.len() * 6);
+    let count = points.len() as u16;
+    let count_usize = usize::from(count);
+    let mut out = Vec::with_capacity(11 + 2 + 8 + 2 + count_usize * 6);
     write_header(&mut out, CMD_EMU_TRADES, uid);
     out.extend_from_slice(&m_index.to_le_bytes());
     out.extend_from_slice(&base_time.to_le_bytes());
-    out.extend_from_slice(&(points.len() as u16).to_le_bytes());
-    for p in points {
+    out.extend_from_slice(&count.to_le_bytes());
+    for p in points.iter().take(count_usize) {
         out.extend_from_slice(&p.time_delta_ms.to_le_bytes());
         out.extend_from_slice(&p.price.to_le_bytes());
     }
@@ -1001,16 +1005,21 @@ pub fn build_trigger_manage(
     markets: &[u16],
     keys: &[u16],
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 1 + 1 + 2 + markets.len() * 2 + 2 + keys.len() * 2);
+    let market_count = markets.len() as u16;
+    let market_count_usize = usize::from(market_count);
+    let key_count = keys.len() as u16;
+    let key_count_usize = usize::from(key_count);
+    let mut out =
+        Vec::with_capacity(11 + 1 + 1 + 2 + market_count_usize * 2 + 2 + key_count_usize * 2);
     write_header(&mut out, CMD_TRIGGER_MANAGE, uid);
     out.push(action);
     out.push(all_markets as u8);
-    out.extend_from_slice(&(markets.len() as u16).to_le_bytes());
-    for m in markets {
+    out.extend_from_slice(&market_count.to_le_bytes());
+    for m in markets.iter().take(market_count_usize) {
         out.extend_from_slice(&m.to_le_bytes());
     }
-    out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
-    for k in keys {
+    out.extend_from_slice(&key_count.to_le_bytes());
+    for k in keys.iter().take(key_count_usize) {
         out.extend_from_slice(&k.to_le_bytes());
     }
     out
@@ -1203,6 +1212,55 @@ mod tests {
                 assert!(!t.all_markets);
                 assert_eq!(t.markets, markets);
                 assert_eq!(t.keys, keys);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn word_count_builders_write_only_declared_wrapped_count_like_delphi() {
+        let items: Vec<_> = (0..65_537u64)
+            .map(|i| StratCheckedItem {
+                strategy_id: i + 100,
+                checked: i % 2 == 0,
+            })
+            .collect();
+        let raw = build_strat_start_stop_v2(42, true, &items);
+        assert_eq!(raw.len(), 11 + 1 + 2 + 9);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::StratStartStopV2(s) => {
+                assert!(s.is_start);
+                assert_eq!(s.items, vec![items[0]]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let points = vec![
+            EmuTradePoint {
+                time_delta_ms: 123,
+                price: -77.5,
+            };
+            65_537
+        ];
+        let raw = build_emu_trades(3, 42, 45123.5, &points);
+        assert_eq!(raw.len(), 11 + 2 + 8 + 2 + 6);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::EmuTrades(e) => {
+                assert_eq!(e.points, vec![points[0]]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let markets: Vec<_> = (0..65_537usize).map(|i| i as u16).collect();
+        let keys: Vec<_> = (0..65_537usize)
+            .map(|i| i.wrapping_add(900) as u16)
+            .collect();
+        let raw = build_trigger_manage(11, 1, false, &markets, &keys);
+        assert_eq!(raw.len(), 11 + 1 + 1 + 2 + 2 + 2 + 2);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::TriggerManage(t) => {
+                assert_eq!(t.markets, vec![markets[0]]);
+                assert_eq!(t.keys, vec![keys[0]]);
             }
             _ => panic!("wrong variant"),
         }
