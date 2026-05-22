@@ -806,10 +806,35 @@ mod tests {
         assert!(parse_request_candles_data_response(&zipped).is_none());
     }
 
+    #[test]
+    fn request_candles_data_test_writer_wraps_utf16_len_like_delphi() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        plain.push(2);
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0f64.to_le_bytes());
+        write_delphi_utf16_string(&mut plain, &"X".repeat(65_537));
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        for _ in 0..8 {
+            plain.extend_from_slice(&0f32.to_le_bytes());
+            plain.extend_from_slice(&0i32.to_le_bytes());
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let zipped = encoder.finish().unwrap();
+
+        let markets = parse_request_candles_data_response(&zipped).unwrap();
+        assert_eq!(markets.len(), 1);
+        assert_eq!(markets[0].market_name, "X");
+        assert!(markets[0].candles_5m.is_empty());
+    }
+
     fn write_delphi_utf16_string(out: &mut Vec<u8>, value: &str) {
         let utf16: Vec<u16> = value.encode_utf16().collect();
-        out.extend_from_slice(&(utf16.len() as u16).to_le_bytes());
-        for ch in utf16 {
+        let len = utf16.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        for ch in utf16.iter().take(usize::from(len)) {
             out.extend_from_slice(&ch.to_le_bytes());
         }
     }
