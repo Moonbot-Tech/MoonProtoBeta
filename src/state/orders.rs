@@ -23,6 +23,8 @@
 use crate::commands::trade::*;
 use std::collections::{HashMap, VecDeque};
 
+const PRICE_EPS: f64 = 0.000000009;
+
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
 /// Сервер выставляет код в поле `sell_reason_code` каждого `OrderStatusUpdate`. Терминал
@@ -163,6 +165,12 @@ pub struct Order {
     pub buy_order: OrderCompact,
     /// Sell ордер на бирже.
     pub sell_order: OrderCompact,
+    /// Delphi `pBuyOrder.Price`: desired/local replace price, not part of
+    /// `TOrderCompact` wire data.
+    pub buy_price: f64,
+    /// Delphi `pSellOrder.Price`: desired/local replace price, not part of
+    /// `TOrderCompact` wire data.
+    pub sell_price: f64,
     /// Настройки стопов.
     pub stops: StopSettings,
     /// VStop состояние.
@@ -202,6 +210,8 @@ pub struct Order {
     server_latest_epoch: [u16; 10],
     /// Snapshot flag — обновляется при TAllStatuses.
     pub(crate) snapshot_flag: u8,
+    last_buy_actual_price: f64,
+    last_sell_actual_price: f64,
 }
 
 impl Order {
@@ -228,9 +238,11 @@ impl Order {
             market_name: status_cmd.epoch_header.market.market_name.clone(),
             currency: status_cmd.epoch_header.market.currency,
             platform: status_cmd.epoch_header.market.platform,
-            status: status_cmd.epoch_header.status,
+            status: OrderWorkerStatus::None,
             buy_order: status_cmd.buy_order,
             sell_order: status_cmd.sell_order,
+            buy_price: 0.0,
+            sell_price: 0.0,
             stops: status_cmd.stops,
             vstop_on: false,
             vstop_fixed: false,
@@ -253,6 +265,8 @@ impl Order {
             sell_reason_code: 0,
             server_latest_epoch: [0; 10],
             snapshot_flag: 0,
+            last_buy_actual_price: 0.0,
+            last_sell_actual_price: 0.0,
         }
     }
 }
@@ -549,8 +563,10 @@ impl Orders {
 
                 // Сбрасываем bulk_replace флаг на этой стороне (replace подтверждён).
                 if rr.order_type == OrderType::Sell {
+                    entry.sell_price = rr.price;
                     entry.bulk_replace_sell = false;
                 } else {
+                    entry.buy_price = rr.price;
                     entry.bulk_replace_buy = false;
                 }
 
@@ -765,6 +781,7 @@ impl Orders {
         buy.adjust_time(server_time_delta);
         sell.adjust_time(server_time_delta);
 
+        let was_status_changed = st.epoch_header.status != entry.status;
         entry.status = st.epoch_header.status;
         entry.market_name = st.epoch_header.market.market_name.clone();
         entry.currency = st.epoch_header.market.currency;
@@ -779,6 +796,22 @@ impl Orders {
         entry.emulator_mode = st.emulator_mode;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
+
+        if was_status_changed {
+            entry.buy_price = entry.buy_order.actual_price;
+            entry.sell_price = entry.sell_order.actual_price;
+            entry.last_buy_actual_price = entry.buy_order.actual_price;
+            entry.last_sell_actual_price = entry.sell_order.actual_price;
+        } else {
+            if (entry.buy_order.actual_price - entry.last_buy_actual_price).abs() > PRICE_EPS {
+                entry.buy_price = entry.buy_order.actual_price;
+                entry.last_buy_actual_price = entry.buy_order.actual_price;
+            }
+            if (entry.sell_order.actual_price - entry.last_sell_actual_price).abs() > PRICE_EPS {
+                entry.sell_price = entry.sell_order.actual_price;
+                entry.last_sell_actual_price = entry.sell_order.actual_price;
+            }
+        }
     }
 
     fn mark_pending_removal(&mut self, uid: u64) {
@@ -1292,6 +1325,29 @@ mod tests {
         assert!(matches!(ev, OrderEvent::Updated(1)));
         let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
         assert_eq!(quantity_base, 12.5);
+        assert_eq!(orders.get(1).unwrap().buy_price, 123.0);
+    }
+
+    #[test]
+    fn order_status_maintains_local_price_fields_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.actual_price = 10.0;
+        status.sell_order.actual_price = 20.0;
+        orders.apply(order_status_cmd(status));
+
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.buy_price, 10.0);
+        assert_eq!(order.sell_price, 20.0);
+
+        let mut repeated = make_status(1, "X", OrderWorkerStatus::BuySet, 11);
+        repeated.buy_order.actual_price = 11.0;
+        repeated.sell_order.actual_price = 21.0;
+        orders.apply(order_status_cmd(repeated));
+
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.buy_price, 11.0);
+        assert_eq!(order.sell_price, 21.0);
     }
 
     #[test]

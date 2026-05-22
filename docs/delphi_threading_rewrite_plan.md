@@ -1477,10 +1477,14 @@ Done:
 - Fixed `TOrderReplaceResponse.QuantityBase`: Rust now updates target
   `quantity_base` only when the response value is positive, matching Delphi's
   `if cmd.QuantityBase > 0 then ...`.
+- Added Rust read-model equivalents of Delphi `pBuyOrder.Price` /
+  `pSellOrder.Price` as `Order::buy_price` / `Order::sell_price`. These are
+  maintained from `TOrderStatus` via Delphi's `FLast*ActualPrice` logic and
+  from `TOrderReplaceResponse.Price`; they are separate from
+  `TOrderCompact.ActualPrice`.
 
 Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
-  `ProcessCommandOrder` body: Delphi `TOrder.Price` / `FLast*ActualPrice`
-  side effects are not represented in Rust read model yet, and accepted/dropped
-  class coverage still needs final sweep.
+  `ProcessCommandOrder` body: accepted/dropped class coverage still needs final
+  sweep.

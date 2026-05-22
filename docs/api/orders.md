@@ -68,6 +68,8 @@ pub struct Order {
     pub status: OrderWorkerStatus,
     pub buy_order: OrderCompact,
     pub sell_order: OrderCompact,
+    pub buy_price: f64,
+    pub sell_price: f64,
     pub stops: StopSettings,
     pub vstop_on: bool,
     pub vstop_fixed: bool,
@@ -92,6 +94,10 @@ pub struct Order {
 ```
 
 Use `order.sell_reason()` to convert `sell_reason_code` into `SellReason`.
+`buy_price` and `sell_price` mirror Delphi `pBuyOrder.Price` /
+`pSellOrder.Price`: they are local desired/replace prices, distinct from
+`buy_order.actual_price` / `sell_order.actual_price` and not present in
+`TOrderCompact` wire data.
 
 ## Status Values
 
