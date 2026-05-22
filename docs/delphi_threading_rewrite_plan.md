@@ -762,3 +762,28 @@ Still not done:
 
 - `MPC_WhoAreYou` and `MPC_Fine` still need named reader blocks because they
   include decrypt/key side effects and duplicate `ImFriend` send timing.
+
+### 2026-05-22 - Phase 1 partial: named reader handshake auth blocks
+
+Done:
+
+- Production reader `MPC_WhoAreYou` handling is now isolated as
+  `reader_on_who_are_you`.
+- Production reader `MPC_Fine` handling is now isolated as `reader_on_fine`.
+- `reader_on_who_are_you` keeps Delphi's machine effect: decrypt server Hello
+  with `MasterKey`, derive session keys, install reader decode cipher, build
+  `ImFriend`, send it twice with the blocking 32ms delay, then queue the
+  handshake state update.
+- `reader_on_fine` keeps Delphi's machine effect: validate encrypted server
+  Hello with `MasterKey`, then queue AuthDone update without generic recv
+  backlog delivery.
+- Targeted tests passed:
+  `reader_handles_who_are_you_imfriend_without_main_loop_tick`,
+  `reader_handles_fine_auth_done_without_recv_event_backlog`.
+
+Still not done:
+
+- Main-side application of handshake updates still owns several protocol fields.
+  The next architecture step is moving those fields/state transitions behind
+  shared transport ownership so reader and writer runtimes can operate without
+  `run_inner` as the protocol motor.

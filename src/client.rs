@@ -5346,96 +5346,36 @@ impl Client {
                             );
                         }
                         Command::WhoAreYou => {
-                            if let Some(hello) =
-                                Client::decode_handshake_hello(&master_key, client_id, &payload)
-                            {
-                                let (update, encrypted) = Client::build_who_are_you_imfriend(
-                                    &master_key,
-                                    client_id,
-                                    app_token,
-                                    &mut reader_client_token,
-                                    hello,
-                                );
-                                reader_protocol
-                                    .lock()
-                                    .unwrap()
-                                    .set_decode_cipher(crate::crypto::cipher_from_key(
-                                        &update.decode_key,
-                                    ));
-                                Client::reader_send_raw_packet(
-                                    &sock_clone,
-                                    server_addr,
-                                    &mac_ctx,
-                                    &mac_key,
-                                    Command::ImFriend,
-                                    client_id,
-                                    &encrypted,
-                                    mask_ver,
-                                    &total_sent,
-                                    debug_outgoing_blackhole,
-                                );
-                                thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
-                                Client::reader_send_raw_packet(
-                                    &sock_clone,
-                                    server_addr,
-                                    &mac_ctx,
-                                    &mac_key,
-                                    Command::ImFriend,
-                                    client_id,
-                                    &encrypted,
-                                    mask_ver,
-                                    &total_sent,
-                                    debug_outgoing_blackhole,
-                                );
-                                pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
-                                    cmd: hdr.cmd,
-                                    payload: None,
-                                    api_pending_consumed: false,
-                                    candles_chunk_consumed: false,
-                                    recv_bytes: n as u64,
-                                    timestamp_ms,
-                                    epoch: my_epoch,
-                                    apply_recv_effects: true,
-                                    sliced_stats: None,
-                                    ping_update: None,
-                                    handshake_update: Some(update),
-                                });
-                            } else {
-                                Client::push_reader_recv_side_effect(
-                                    &pending_reader_decoded,
-                                    hdr.cmd,
-                                    n as u64,
-                                    timestamp_ms,
-                                    my_epoch,
-                                );
-                            }
+                            Client::reader_on_who_are_you(
+                                &sock_clone,
+                                server_addr,
+                                &mac_ctx,
+                                &mac_key,
+                                &master_key,
+                                client_id,
+                                app_token,
+                                &mut reader_client_token,
+                                mask_ver,
+                                &total_sent,
+                                debug_outgoing_blackhole,
+                                &reader_protocol,
+                                &pending_reader_decoded,
+                                &payload,
+                                n as u64,
+                                timestamp_ms,
+                                my_epoch,
+                            );
                         }
                         Command::Fine => {
-                            if Client::decode_handshake_hello(&master_key, client_id, &payload)
-                                .is_some()
-                            {
-                                pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
-                                    cmd: hdr.cmd,
-                                    payload: None,
-                                    api_pending_consumed: false,
-                                    candles_chunk_consumed: false,
-                                    recv_bytes: n as u64,
-                                    timestamp_ms,
-                                    epoch: my_epoch,
-                                    apply_recv_effects: true,
-                                    sliced_stats: None,
-                                    ping_update: None,
-                                    handshake_update: Some(Client::fine_handshake_update()),
-                                });
-                            } else {
-                                Client::push_reader_recv_side_effect(
-                                    &pending_reader_decoded,
-                                    hdr.cmd,
-                                    n as u64,
-                                    timestamp_ms,
-                                    my_epoch,
-                                );
-                            }
+                            Client::reader_on_fine(
+                                &master_key,
+                                client_id,
+                                &pending_reader_decoded,
+                                &payload,
+                                n as u64,
+                                timestamp_ms,
+                                my_epoch,
+                            );
                         }
                         Command::SizeTest => {
                             Client::reader_on_new_size_test(
@@ -5643,6 +5583,130 @@ impl Client {
                 ping_update: None,
                 handshake_update: Some(Self::simple_handshake_update(cmd)),
             });
+    }
+
+    fn reader_on_who_are_you(
+        sock: &UdpSocket,
+        server_addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        master_key: &MoonKey,
+        client_id: u64,
+        app_token: u64,
+        reader_client_token: &mut u64,
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        if let Some(hello) = Self::decode_handshake_hello(master_key, client_id, payload) {
+            let (update, encrypted) = Self::build_who_are_you_imfriend(
+                master_key,
+                client_id,
+                app_token,
+                reader_client_token,
+                hello,
+            );
+            reader_protocol
+                .lock()
+                .unwrap()
+                .set_decode_cipher(crate::crypto::cipher_from_key(&update.decode_key));
+
+            // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
+            // `MPC_ImFriend` twice with a blocking 32ms delay before returning
+            // to the reader loop.
+            Self::reader_send_raw_packet(
+                sock,
+                server_addr,
+                mac_ctx,
+                mac_key,
+                Command::ImFriend,
+                client_id,
+                &encrypted,
+                mask_ver,
+                total_sent,
+                debug_outgoing_blackhole,
+            );
+            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
+            Self::reader_send_raw_packet(
+                sock,
+                server_addr,
+                mac_ctx,
+                mac_key,
+                Command::ImFriend,
+                client_id,
+                &encrypted,
+                mask_ver,
+                total_sent,
+                debug_outgoing_blackhole,
+            );
+            pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::WhoAreYou as u8,
+                    payload: None,
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: None,
+                    handshake_update: Some(update),
+                });
+        } else {
+            Self::push_reader_recv_side_effect(
+                pending_reader_decoded,
+                Command::WhoAreYou as u8,
+                recv_bytes,
+                timestamp_ms,
+                epoch,
+            );
+        }
+    }
+
+    fn reader_on_fine(
+        master_key: &MoonKey,
+        client_id: u64,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        if Self::decode_handshake_hello(master_key, client_id, payload).is_some() {
+            pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::Fine as u8,
+                    payload: None,
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: None,
+                    handshake_update: Some(Self::fine_handshake_update()),
+                });
+        } else {
+            Self::push_reader_recv_side_effect(
+                pending_reader_decoded,
+                Command::Fine as u8,
+                recv_bytes,
+                timestamp_ms,
+                epoch,
+            );
+        }
     }
 
     fn reader_on_new_sliced(
