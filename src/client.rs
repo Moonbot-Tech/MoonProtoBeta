@@ -6473,7 +6473,12 @@ impl Client {
     ///     `trades.tick()` каждые 100мс. Для Callback mode tick не нужен (callback
     ///     потребитель сам решает что делать с TradesEvent).
     fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
-        WriterRuntime { client: self }.run(duration, &mut mode);
+        thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                WriterRuntime { client: self }.run(duration, &mut mode);
+            });
+            handle.join().expect("moonproto writer thread panicked");
+        });
     }
 
     pub(crate) fn apply_active_actions<I>(&self, actions: I)
@@ -12034,6 +12039,48 @@ mod event_loop_fairness_tests {
         assert!(
             !client.sending.is_empty(),
             "writer must copy direct Delphi-style send queues without app-event bridge"
+        );
+    }
+
+    #[test]
+    fn run_inner_executes_writer_runtime_on_dedicated_thread() {
+        let mut client = Client::new(dummy_cfg());
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+
+        let caller_thread = thread::current().id();
+        let (tx, rx) = mpsc::channel();
+        client.run(
+            Duration::from_millis(5),
+            Box::new(move |cmd, payload| {
+                assert_eq!(cmd, Command::UI);
+                assert_eq!(payload, &[0xAA]);
+                tx.send(thread::current().id()).unwrap();
+            }),
+        );
+
+        let writer_thread = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer callback thread id");
+        assert_ne!(
+            writer_thread, caller_thread,
+            "WriterRuntime must run on a dedicated writer thread, matching Delphi Execute"
         );
     }
 

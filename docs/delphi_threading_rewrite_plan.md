@@ -1183,3 +1183,21 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: run_inner uses a dedicated writer thread
+
+Done:
+
+- `Client::run_inner` now executes `WriterRuntime::run` inside a scoped writer
+  thread instead of running the writer/orchestrator loop directly on the caller
+  stack.
+- Added a unit test proving `run(...)` delivers its decoded callback from a
+  thread different from the caller thread, so the production run path now has
+  the Delphi-shaped reader thread plus writer/Execute thread split.
+
+Still not done:
+
+- The writer thread is scoped to each `run_*` call and joined before the call
+  returns. It is not yet a persistent worker owned by a long-lived public handle.
+- Public callbacks/events are still executed by the writer runtime; they are
+  not yet fully separated into a public event consumer queue.
