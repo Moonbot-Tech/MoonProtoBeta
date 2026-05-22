@@ -513,6 +513,8 @@ struct ReaderRuntime {
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
     reader_ping_state: Arc<Mutex<ReaderPingState>>,
     reader_transport_state: Arc<Mutex<ReaderTransportState>>,
+    crypt_msg_counter: Arc<AtomicU64>,
+    recvd_slider: Arc<Mutex<Slider>>,
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
     slicer: Arc<Mutex<slicing::SlicingReceiver>>,
     total_sent: Arc<AtomicU64>,
@@ -766,6 +768,9 @@ impl ReaderRuntime {
                 .lock()
                 .unwrap()
                 .reset_protocol_session();
+            self.crypt_msg_counter.store(0, Ordering::Relaxed);
+            self.total_sent.store(0, Ordering::Relaxed);
+            *self.recvd_slider.lock().unwrap() = Slider::new();
             *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
             self.total_recv_shared.store(0, Ordering::Relaxed);
         }
@@ -2990,7 +2995,7 @@ impl WriterRuntime<'_> {
             .unwrap()
             .copy_tmp_slider()
         {
-            self.client.recvd_slider = tmp_slider;
+            *self.client.recvd_slider.lock().unwrap() = tmp_slider;
         }
     }
 
@@ -3019,23 +3024,27 @@ impl WriterRuntime<'_> {
     }
 
     fn apply_regular_hl_ack(&mut self) {
-        if !self.client.recvd_slider.has_new_data {
-            return;
-        }
-        self.client.recvd_slider.has_new_data = false;
+        let recvd_slider = {
+            let mut recvd_slider = self.client.recvd_slider.lock().unwrap();
+            if !recvd_slider.has_new_data {
+                return;
+            }
+            recvd_slider.has_new_data = false;
+            recvd_slider.clone()
+        };
 
-        let limit = (self.client.recvd_slider.r_count.max(0) as u64) * 64;
+        let limit = (recvd_slider.r_count.max(0) as u64) * 64;
         self.client.pending_h.retain(|d| {
-            if d.msg_num < self.client.recvd_slider.start_num {
+            if d.msg_num < recvd_slider.start_num {
                 return true;
             }
-            let offset = d.msg_num - self.client.recvd_slider.start_num;
+            let offset = d.msg_num - recvd_slider.start_num;
             if offset >= limit {
                 return true;
             }
             let word_idx = (offset >> 6) as usize;
             let bit_idx = offset & 63;
-            (self.client.recvd_slider.bit_field[word_idx] >> bit_idx) & 1 == 0
+            (recvd_slider.bit_field[word_idx] >> bit_idx) & 1 == 0
         });
     }
 
@@ -3086,8 +3095,10 @@ impl WriterRuntime<'_> {
             let msg_num = if item.msg_num != 0 {
                 item.msg_num // retry — reuse existing MsgNum
             } else {
-                self.client.crypt_msg_counter += 1;
-                self.client.crypt_msg_counter
+                self.client
+                    .crypt_msg_counter
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
             };
 
             let mut crypto_hdr = [0u8; 12];
@@ -3208,8 +3219,10 @@ impl WriterRuntime<'_> {
             let msg_num = if item.msg_num != 0 {
                 item.msg_num
             } else {
-                self.client.crypt_msg_counter += 1;
-                self.client.crypt_msg_counter
+                self.client
+                    .crypt_msg_counter
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
             };
 
             let mut crypto_hdr = [0u8; 12];
@@ -3428,8 +3441,11 @@ impl WriterRuntime<'_> {
         // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
         // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
         let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
-            self.client.crypt_msg_counter += 1;
-            let msg_num = self.client.crypt_msg_counter;
+            let msg_num = self
+                .client
+                .crypt_msg_counter
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
             let mut crypto_hdr = [0u8; 12];
             let rnd: u16 = rand::random();
             crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
@@ -3947,7 +3963,7 @@ pub struct Client {
     last_cleanup: i64,
     prev_cycle_tm: i64, // for ActualSleepTime EMA
 
-    crypt_msg_counter: u64,
+    crypt_msg_counter: Arc<AtomicU64>,
     send_datagram_num: u16,
 
     round_trip_delay: i64,
@@ -4001,7 +4017,7 @@ pub struct Client {
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
-    recvd_slider: Slider,
+    recvd_slider: Arc<Mutex<Slider>>,
     slicer: Arc<Mutex<slicing::SlicingReceiver>>,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
@@ -4254,7 +4270,7 @@ impl Client {
             last_need_hello_again: i64::MIN / 2,
             last_cleanup: i64::MIN / 2,
             prev_cycle_tm: 0,
-            crypt_msg_counter: 0,
+            crypt_msg_counter: Arc::new(AtomicU64::new(0)),
             send_datagram_num: 0,
             round_trip_delay: 0,
             actual_pmtu: 508,
@@ -4282,7 +4298,7 @@ impl Client {
             reader_ping_state,
             reader_transport_state,
             reader_transport_seen_seq: 0,
-            recvd_slider: Slider::new(),
+            recvd_slider: Arc::new(Mutex::new(Slider::new())),
             slicer: Arc::new(Mutex::new(slicing::SlicingReceiver::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
@@ -6564,6 +6580,8 @@ impl Client {
         let reader_ping_state = Arc::clone(&self.reader_ping_state);
         self.publish_transport_state_from_client();
         let reader_transport_state = Arc::clone(&self.reader_transport_state);
+        let crypt_msg_counter = Arc::clone(&self.crypt_msg_counter);
+        let recvd_slider = Arc::clone(&self.recvd_slider);
         let server_time_delta_handle = Arc::clone(&self.server_time_delta_handle);
         let slicer = Arc::clone(&self.slicer);
         let total_sent = Arc::clone(&self.total_sent);
@@ -6605,6 +6623,8 @@ impl Client {
                     reader_protocol,
                     reader_ping_state,
                     reader_transport_state,
+                    crypt_msg_counter,
+                    recvd_slider,
                     server_time_delta_handle,
                     slicer,
                     total_sent,
@@ -7659,7 +7679,7 @@ impl Client {
     /// Does NOT reset: server_token, actual_pmtu, send_datagram_num, pending_h,
     /// sending, api_pending, pending_candles, trip_delay_k, can_send_rate.
     fn full_reset(&mut self) {
-        self.crypt_msg_counter = 0;
+        self.crypt_msg_counter.store(0, Ordering::Relaxed);
         self.total_sent.store(0, Ordering::Relaxed);
         self.total_recv = 0;
         self.total_recv_shared.store(0, Ordering::Relaxed);
@@ -7670,7 +7690,7 @@ impl Client {
             .unwrap()
             .reset_protocol_session();
         self.reader_protocol.lock().unwrap().reset();
-        self.recvd_slider = Slider::new();
+        *self.recvd_slider.lock().unwrap() = Slider::new();
         *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
         self.pending_reader_decoded.lock().unwrap().clear();
         self.reader_wake_pending.store(false, Ordering::Release);
@@ -10075,12 +10095,12 @@ mod pmtu_tests {
         client.pending_h.push(pending_h_item(42));
         let _rx = client.api_pending.register(0x4455);
 
-        client.crypt_msg_counter = 77;
+        client.crypt_msg_counter.store(77, Ordering::Relaxed);
         client.total_sent.store(1234, Ordering::Relaxed);
         client.total_recv = 5678;
         client.rs = 0.25;
         client.used_sliced_limit = true;
-        client.recvd_slider.has_new_data = true;
+        client.recvd_slider.lock().unwrap().has_new_data = true;
         client.last_online = 999;
         client.last_sent_hello = 888;
 
@@ -10101,12 +10121,12 @@ mod pmtu_tests {
             1,
             "API waiters are not part of Delphi TMoonProtoClient.Reset"
         );
-        assert_eq!(client.crypt_msg_counter, 0);
+        assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
         assert_eq!(client.total_sent(), 0);
         assert_eq!(client.total_recv, 0);
         assert_eq!(client.rs, 1.0);
         assert!(!client.used_sliced_limit);
-        assert!(!client.recvd_slider.has_new_data);
+        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
         assert_eq!(client.last_online, 0);
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     }
@@ -10250,7 +10270,7 @@ mod pmtu_tests {
                 .tmp_slider
                 .has_new_data
         );
-        assert!(!client.recvd_slider.has_new_data);
+        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
 
         WriterRuntime {
             client: &mut client,
@@ -10264,7 +10284,7 @@ mod pmtu_tests {
                 .tmp_slider
                 .has_new_data
         );
-        assert!(client.recvd_slider.has_new_data);
+        assert!(client.recvd_slider.lock().unwrap().has_new_data);
 
         WriterRuntime {
             client: &mut client,
@@ -10297,7 +10317,7 @@ mod pmtu_tests {
                 .tmp_slider
                 .has_new_data
         );
-        assert!(client.recvd_slider.has_new_data);
+        assert!(client.recvd_slider.lock().unwrap().has_new_data);
 
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let delivered_for_cb = Arc::clone(&delivered);
@@ -10424,10 +10444,13 @@ mod pmtu_tests {
         not_acked_same_key.u_key = key;
         client.pending_h.push(not_acked_same_key);
 
-        client.recvd_slider.start_num = 40;
-        client.recvd_slider.bit_field[0] = 1 << 2;
-        client.recvd_slider.has_new_data = true;
-        client.recvd_slider.r_count = 1;
+        {
+            let mut recvd_slider = client.recvd_slider.lock().unwrap();
+            recvd_slider.start_num = 40;
+            recvd_slider.bit_field[0] = 1 << 2;
+            recvd_slider.has_new_data = true;
+            recvd_slider.r_count = 1;
+        }
 
         let new_high = SendItem {
             data: vec![0x33],
@@ -12955,6 +12978,9 @@ mod service_cmd_tests {
         client.need_connect = false;
         client.soft_reconnect = true;
         client.last_sent_hello = 12345;
+        client.crypt_msg_counter.store(77, Ordering::Relaxed);
+        client.total_sent.store(123, Ordering::Relaxed);
+        client.recvd_slider.lock().unwrap().has_new_data = true;
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
         server_sock.send_to(&packet, client_addr).unwrap();
@@ -12970,6 +12996,9 @@ mod service_cmd_tests {
         assert!(!reader_state.authorized);
         assert!(reader_state.need_connect);
         assert!(!reader_state.soft_reconnect);
+        assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
+        assert_eq!(client.total_sent(), 0);
+        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {

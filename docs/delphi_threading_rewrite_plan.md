@@ -1125,6 +1125,9 @@ Done:
 - `MPC_WantNewHello` now also resets reader-owned protocol pieces immediately
   in the reader path: decode/replay sliders, Ping session flag, incoming Sliced
   receiver, and shared receive byte counter.
+- `MPC_WantNewHello` also resets `CryptedMsgCounter`,
+  `AttemptedBytes`/`total_sent`, and `RecvdSlider` immediately from the reader
+  path, matching the corresponding `TMoonProtoClient.Reset` assignments.
 - Tests now assert the reader-owned state before any writer tick for Ping,
   `WhoAreYou`, `Fine`, `WrongHello`, `WantNewHello`, `NeedHelloAgain`, PMTU
   service commands, regular data, SlicedACK, and ErrEmu drop.
@@ -1133,12 +1136,9 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- `MPC_WantNewHello` still relies on the writer-side queued update to run the
-  remaining Delphi `TMoonProtoClient.Reset` fields that are still writer-owned,
-  especially `CryptedMsgCounter`, `AttemptedBytes`/`total_sent`, and writer
-  `RecvdSlider`. Delphi calls `FClient.Reset` from `UDPRead`; the next strict
-  block must split or share those remaining reset-owned structures so the reset
-  placement is exact too.
+- Re-audit the full `TMoonProtoClient.Reset` list after the shared
+  `CryptedMsgCounter`/`RecvdSlider` move and close any stale "writer-owned
+  reset" wording that no longer applies.
 
 ### 2026-05-22 - Phase 1 partial: narrowed Rust reset to Delphi Reset
 
@@ -1156,5 +1156,30 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Some Delphi-reset fields are still applied when the writer consumes the
-  queued `WantNewHello` update, not inside reader `UDPRead` itself.
+
+### 2026-05-22 - Phase 1 partial: completed reader-side Reset field placement
+
+Done:
+
+- Re-checked `TMoonProtoClient.Reset` against Rust state:
+  - `Receiving.Clear`, `LastRecvdTS`, `LastCleanedReceived` -> shared
+    `SlicingReceiver::new()` in reader and `full_reset`.
+  - `CryptedMsgCounter := 0` -> shared atomic reset in reader and `full_reset`.
+  - `AttemptedBytes := 0` -> shared `total_sent` reset in reader and
+    `full_reset`.
+  - `TotalRecvBytes := 0`, `RS := 1.0`, `UsedSlicedLimit := false`,
+    `LastSentHello := 0`, `LastOnline := 0` -> reader transport mirror plus
+    `full_reset`.
+  - `MPSlider.Init`, `TmpSlider.Init` -> shared `ReaderProtocolState::reset()`.
+  - `RecvdSlider.Init` -> shared `Arc<Mutex<Slider>>` reset in reader and
+    `full_reset`.
+- `HSendAttempts`, `HRecvCount`, `PrevSentDown`, `PrevRemoteRecvDown`, and
+  `LastRDownUpdateMS` have no Rust state equivalent in the current code.
+- `MPC_WantNewHello` test now proves reader-side reset of crypt counter,
+  attempted bytes, and `RecvdSlider` before the writer processes the queued
+  update.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
