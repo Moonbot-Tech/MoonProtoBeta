@@ -86,6 +86,9 @@ Delphi model по факту:
   `ReaderRuntime::data_read` handles `MPC_Grouped` and calls
   `ReaderRuntime::data_read_int`; completed Sliced datagrams call
   `data_read_int` before `Receiving` removal.
+- `src/client.rs` - reader immediate replies use
+  `ReaderRuntime::send_command`, matching the Delphi reader-side calls to
+  `SendCommand` from SlicedACK/Ping/PMTU/ImFriend branches.
 - `src/client.rs` - ping handling writes shared `TmpSlider`; writer later copies
   it and runs `ApplyRegularHLAck`.
 - `src/events.rs:753` - `EventDispatcher::dispatch_into_active` требует `&mut Client` и может сам слать API через `client.send_api_request`.
@@ -1243,3 +1246,20 @@ Still not done:
 - `data_read_int` still queues `ReaderDecodedMsg` for public/active delivery
   instead of calling the full Delphi `OnNewData` body inline. That is the next
   block-by-block parity decision.
+
+### 2026-05-22 - Phase 1 partial: named reader SendCommand block
+
+Done:
+
+- Reader-side immediate UDP replies now go through
+  `ReaderRuntime::send_command`.
+- `SizeAck`, `ProbeMTUAck`, `SlicedACK`, duplicate `ImFriend`, and Ping response
+  all use that named reader block.
+- The lower-level packet pack/send helper remains shared, but production reader
+  method order now reads like Delphi: command branch -> `SendCommand(...)` ->
+  next local side effect.
+
+Still not done:
+
+- Writer-side send helpers still need the same naming/ownership cleanup around
+  the remaining `Client` methods called by `WriterRuntime`.

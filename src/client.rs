@@ -683,6 +683,21 @@ impl ReaderRuntime {
         self.data_read(raw_cmd, payload, recv_bytes, timestamp_ms, false);
     }
 
+    fn send_command(&self, cmd: Command, payload: &[u8]) {
+        Client::reader_send_raw_packet(
+            &self.sock,
+            self.server_addr,
+            &self.mac_ctx,
+            &self.mac_key,
+            cmd,
+            self.client_id,
+            payload,
+            self.mask_ver,
+            &self.total_sent,
+            self.debug_outgoing_blackhole,
+        );
+    }
+
     fn data_read(
         &self,
         raw_cmd: u8,
@@ -785,18 +800,7 @@ impl ReaderRuntime {
             // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
             // `MPC_SizeAck` of requested size, then turn DontFragment off.
             set_dont_fragment_for_socket(&self.sock, true);
-            Client::reader_send_raw_packet(
-                &self.sock,
-                self.server_addr,
-                &self.mac_ctx,
-                &self.mac_key,
-                Command::SizeAck,
-                self.client_id,
-                &ack,
-                self.mask_ver,
-                &self.total_sent,
-                self.debug_outgoing_blackhole,
-            );
+            self.send_command(Command::SizeAck, &ack);
             set_dont_fragment_for_socket(&self.sock, false);
         }
         Client::push_reader_recv_side_effect(
@@ -814,18 +818,7 @@ impl ReaderRuntime {
             // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
             // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
             set_dont_fragment_for_socket(&self.sock, true);
-            Client::reader_send_raw_packet(
-                &self.sock,
-                self.server_addr,
-                &self.mac_ctx,
-                &self.mac_key,
-                Command::ProbeMTUAck,
-                self.client_id,
-                &ack,
-                self.mask_ver,
-                &self.total_sent,
-                self.debug_outgoing_blackhole,
-            );
+            self.send_command(Command::ProbeMTUAck, &ack);
             set_dont_fragment_for_socket(&self.sock, false);
         }
         Client::push_reader_recv_side_effect(
@@ -897,31 +890,9 @@ impl ReaderRuntime {
             // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
             // `MPC_ImFriend` twice with a blocking 32ms delay before returning
             // to the reader loop.
-            Client::reader_send_raw_packet(
-                &self.sock,
-                self.server_addr,
-                &self.mac_ctx,
-                &self.mac_key,
-                Command::ImFriend,
-                self.client_id,
-                &encrypted,
-                self.mask_ver,
-                &self.total_sent,
-                self.debug_outgoing_blackhole,
-            );
+            self.send_command(Command::ImFriend, &encrypted);
             thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
-            Client::reader_send_raw_packet(
-                &self.sock,
-                self.server_addr,
-                &self.mac_ctx,
-                &self.mac_key,
-                Command::ImFriend,
-                self.client_id,
-                &encrypted,
-                self.mask_ver,
-                &self.total_sent,
-                self.debug_outgoing_blackhole,
-            );
+            self.send_command(Command::ImFriend, &encrypted);
             self.pending_reader_decoded
                 .lock()
                 .unwrap()
@@ -1002,18 +973,7 @@ impl ReaderRuntime {
         // Delphi `OnNewSliced`: every received slice gets an immediate
         // `MPC_SlicedACK` from the reader stack before any complete datagram is
         // passed into `DataReadInt`.
-        Client::reader_send_raw_packet(
-            &self.sock,
-            self.server_addr,
-            &self.mac_ctx,
-            &self.mac_key,
-            Command::SlicedACK,
-            self.client_id,
-            &ack,
-            self.mask_ver,
-            &self.total_sent,
-            self.debug_outgoing_blackhole,
-        );
+        self.send_command(Command::SlicedACK, &ack);
 
         if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
             self.data_read_int(
@@ -1081,18 +1041,7 @@ impl ReaderRuntime {
                 .apply_ping_update(&ping_update);
             // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
             // Ping response immediately from the reader stack.
-            Client::reader_send_raw_packet(
-                &self.sock,
-                self.server_addr,
-                &self.mac_ctx,
-                &self.mac_key,
-                Command::Ping,
-                self.client_id,
-                &response,
-                self.mask_ver,
-                &self.total_sent,
-                self.debug_outgoing_blackhole,
-            );
+            self.send_command(Command::Ping, &response);
             self.pending_reader_decoded
                 .lock()
                 .unwrap()
