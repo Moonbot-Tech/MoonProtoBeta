@@ -547,6 +547,10 @@ impl EventDispatcher {
 
     /// Delphi equivalent: `TMoonProtoNetClient.ProcessCommandOrder`.
     fn process_command_order(&mut self, tc: TradeCommand, out: &mut Vec<Event>) {
+        if self.drop_new_order_status_without_worker(&tc) {
+            return;
+        }
+
         // audit_responsibility A5 / active library: автоматически подхватываем
         // server_time_delta. При наличии per-Client `server_time_delta_source`
         // (multi-Client) — читаем оттуда. Иначе fallback на global для raw
@@ -557,6 +561,37 @@ impl EventDispatcher {
             .set_server_time_delta(self.current_server_time_delta());
         let (_apply_result, ev) = self.orders.apply(tc);
         out.push(Event::Order(ev));
+    }
+
+    /// Delphi `ProcessCommandOrder` first tries `WCache.TryFind(TaskUID)`.
+    /// Only an unknown, non-cache `TOrderStatus` may create a worker, and only
+    /// when `Cmd.m <> nil` (the market name resolved in local `Markets`).
+    fn drop_new_order_status_without_worker(&self, tc: &TradeCommand) -> bool {
+        let TradeCommand::OrderStatus(st) = tc else {
+            return false;
+        };
+
+        let uid = st.epoch_header.market.base.uid;
+        if self.orders.get(uid).is_some() {
+            return false;
+        }
+
+        if st.from_cache {
+            return true;
+        }
+
+        let market_name = &st.epoch_header.market.market_name;
+        if self.markets.get(market_name).is_none() {
+            log::warn!(
+                target: "moonproto::orders",
+                "Drop order <{}>: market not found locally ({})",
+                uid,
+                market_name
+            );
+            return true;
+        }
+
+        false
     }
 
     fn client_new_data_order_book(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
@@ -1137,6 +1172,13 @@ mod tests {
         }
     }
 
+    fn seed_event_markets(d: &mut EventDispatcher, names: &[&str]) {
+        d.markets.apply_markets_list(MarketsListResponse {
+            markets: names.iter().map(|name| event_market(name)).collect(),
+            corr_markets: vec![],
+        });
+    }
+
     fn order_status_for_test(
         uid: u64,
         market_name: &str,
@@ -1187,6 +1229,7 @@ mod tests {
     #[test]
     fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
         let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
         let uid = 0x1234_5678_ABCD_EF01;
         let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
         let payload = all_statuses_payload(0x55, &[status]);
@@ -1206,6 +1249,7 @@ mod tests {
     #[test]
     fn dispatcher_defers_terminal_order_removal_until_flush() {
         let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
         let mut out = Vec::new();
         let uid = 0x42;
 
@@ -1264,6 +1308,42 @@ mod tests {
             [Event::Order(OrderEvent::Removed(found))] if *found == uid
         ));
         assert!(d.orders().get(uid).is_none());
+    }
+
+    #[test]
+    fn dispatcher_drops_new_order_status_for_unknown_market_like_delphi() {
+        let mut d = EventDispatcher::new();
+        let mut out = Vec::new();
+        let uid = 0x77;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "UNKNOWNUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            &mut out,
+        );
+
+        assert!(out.is_empty());
+        assert!(d.orders.get(uid).is_none());
+    }
+
+    #[test]
+    fn dispatcher_drops_unknown_from_cache_status_without_event_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x78;
+        let mut status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+        status.from_cache = true;
+
+        d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), &mut out);
+
+        assert!(out.is_empty());
+        assert!(d.orders.get(uid).is_none());
     }
 
     #[test]

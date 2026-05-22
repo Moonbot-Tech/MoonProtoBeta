@@ -1510,6 +1510,26 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
+
+Done:
+
+- Fixed the Delphi `Cmd.m <> nil` worker-create guard in the active dispatcher.
+  Delphi resolves `TBaseMarketCommand.m` from local `Markets` while parsing; an
+  unknown new `TOrderStatus` is logged/dropped and does not create a worker.
+- Rust `EventDispatcher::process_command_order` now drops unknown new
+  `TOrderStatus` before `Orders::apply` unless the UID already exists. Existing
+  tracked orders still accept later status updates by UID, matching Delphi's
+  `WCache.TryFind` first.
+- Unknown `FromCache=true` statuses are also dropped without an order event in
+  the dispatcher path, matching Delphi's `Worker = nil; FreeAndNil(Acmd); exit`.
+- Added dispatcher tests for unknown-market and unknown-from-cache drops.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
 ### 2026-05-22 - Phase 1 partial: remove direct TAllStatuses state batch
 
 Done:

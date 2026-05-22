@@ -47,6 +47,9 @@ through the same order-command path as live updates, emits the per-order events,
 then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup.
 `TOrderStatus` responses marked `FromCache=true` update only an already tracked
 order; they do not create a new active order entry when the UID is unknown.
+For a new non-cache `TOrderStatus`, the dispatcher also requires the market
+name to be present in `MarketsState`; otherwise the packet is dropped without
+creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
 Incoming `TSetImmuneCommand` packets are not applied to this read model: in the
 Delphi flow `SetImmune` is a client-to-server UI action, while the client-side
 order state learns `immune_for_clicks` from `TOrderStatus`.
