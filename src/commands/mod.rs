@@ -34,10 +34,11 @@ pub use engine_api::{
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use trade::{
     AllStatuses, BulkReplaceNotify, CorridorUpdate, DoClosePositionCommand, DoSellOrderCommand,
-    FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCommand, MoveAllSellsCommand,
-    NewOrderCommand, OrderCancelCommand, OrderCompact, OrderReplaceCommand, OrderReplaceResponse,
-    OrderStatus, OrderStatusUpdate, OrderStopsUpdate, OrderTracePoint, OrderType, OrderUpdateData,
-    OrderWorkerStatus, PriceZone, ReplaceMultiKind, SetImmuneCommand, SplitOrderCommand,
-    StopSettings, TradeCommand, TradeCtx, TurnPanicSellCommand, VStopUpdate,
+    FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCmdType, MoveAllBuysCommand,
+    MoveAllCmdType, MoveAllSellsCommand, NewOrderCommand, OrderCancelCommand, OrderCompact,
+    OrderReplaceCommand, OrderReplaceResponse, OrderStatus, OrderStatusUpdate, OrderStopsUpdate,
+    OrderTracePoint, OrderType, OrderUpdateData, OrderWorkerStatus, PriceZone, ReplaceMultiKind,
+    SetImmuneCommand, SplitOrderCommand, StopSettings, TradeCommand, TradeCtx,
+    TurnPanicSellCommand, VStopUpdate,
 };
 pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};

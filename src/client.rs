@@ -1599,15 +1599,20 @@ impl ClientSender {
         );
     }
 
-    /// Send `TMoveAllSellsCommand`.
+    /// Send `TMoveAllSellsCommand` if Delphi active-client gate finds a candidate order.
     pub fn move_all_sells(
         &self,
+        orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         params: crate::commands::trade::MoveAllSellsParams,
-    ) {
+    ) -> bool {
+        if !orders.has_move_all_sells_candidate(market, params) {
+            return false;
+        }
         let raw = crate::commands::trade::build_move_all_sells(ctx, market, params);
         self.send_trade(raw, 3);
+        true
     }
 
     /// Send `TDoClosePositionCommand` (`MaxRetries=1`).
@@ -1712,25 +1717,25 @@ impl ClientSender {
         self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
     }
 
-    /// Send `TMoveAllBuysCommand`.
+    /// Send `TMoveAllBuysCommand` if Delphi active-client gate finds a candidate order.
     pub fn move_all_buys(
         &self,
+        orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
-        cmd_type: crate::commands::trade::MoveAllCmdType,
+        cmd_type: crate::commands::trade::MoveAllBuysCmdType,
         move_kind: crate::commands::trade::ReplaceMultiKind,
         price: f64,
         side: crate::commands::trade::FixedPosition,
-    ) {
+    ) -> bool {
+        if !orders.has_move_all_buys_candidate(market, cmd_type, move_kind, side) {
+            return false;
+        }
         let raw = crate::commands::trade::build_move_all_buys(
-            ctx,
-            market,
-            cmd_type as u8,
-            move_kind,
-            price,
-            side,
+            ctx, market, cmd_type, move_kind, price, side,
         );
         self.send_trade(raw, 3);
+        true
     }
 
     /// Send `TVStopUpdate` for one order.
@@ -5869,18 +5874,23 @@ impl Client {
         );
     }
 
-    /// `TMoveAllSellsCommand` (CmdId=13).
+    /// `TMoveAllSellsCommand` (CmdId=13), gated like Delphi active-client UI.
     ///
     /// The move mode, price, zone and side live in [`crate::commands::trade::MoveAllSellsParams`]
     /// to keep the public API resistant to swapped positional arguments.
     pub fn move_all_sells(
         &self,
+        orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         params: crate::commands::trade::MoveAllSellsParams,
-    ) {
+    ) -> bool {
+        if !orders.has_move_all_sells_candidate(market, params) {
+            return false;
+        }
         let raw = crate::commands::trade::build_move_all_sells(ctx, market, params);
         self.send_trade(raw, 3);
+        true
     }
 
     /// `TDoClosePositionCommand` (CmdId=14, MaxRetries=1).
@@ -5991,25 +6001,25 @@ impl Client {
         self.send_trade_keyed(raw, 3, UniqueKey::immune_clicks(items_uid_sum));
     }
 
-    /// `TMoveAllBuysCommand` (CmdId=27).
+    /// `TMoveAllBuysCommand` (CmdId=27), gated like Delphi active-client UI.
     pub fn move_all_buys(
         &self,
+        orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
-        cmd_type: crate::commands::trade::MoveAllCmdType,
+        cmd_type: crate::commands::trade::MoveAllBuysCmdType,
         move_kind: crate::commands::trade::ReplaceMultiKind,
         price: f64,
         side: crate::commands::trade::FixedPosition,
-    ) {
+    ) -> bool {
+        if !orders.has_move_all_buys_candidate(market, cmd_type, move_kind, side) {
+            return false;
+        }
         let raw = crate::commands::trade::build_move_all_buys(
-            ctx,
-            market,
-            cmd_type as u8,
-            move_kind,
-            price,
-            side,
+            ctx, market, cmd_type, move_kind, price, side,
         );
         self.send_trade(raw, 3);
+        true
     }
 
     /// Send `TVStopUpdate` (CmdId=29, `UK_OrderMove`).
@@ -9762,6 +9772,50 @@ mod client_subscribe_integration_tests {
         orders.get(uid).expect("order should be applied").clone()
     }
 
+    fn tracked_orders(
+        uid: u64,
+        currency: u8,
+        platform: u8,
+        market_name: &str,
+        status: crate::commands::trade::OrderWorkerStatus,
+        is_short: bool,
+        immune_for_clicks: bool,
+    ) -> crate::state::Orders {
+        use crate::commands::trade::{
+            BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
+            TradeCommand, TradeEpochHeader,
+        };
+
+        let mut orders = crate::state::Orders::new();
+        let status_cmd = OrderStatus {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 4,
+                        ver: 3,
+                        uid,
+                    },
+                    currency,
+                    platform,
+                    market_name: market_name.to_string(),
+                },
+                epoch: 11,
+                status,
+            },
+            buy_order: OrderCompact::default(),
+            sell_order: OrderCompact::default(),
+            stops: StopSettings::default(),
+            strat_id: 0,
+            is_short,
+            db_id: 0,
+            from_cache: false,
+            emulator_mode: false,
+            immune_for_clicks,
+        };
+        let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
+        orders
+    }
+
     #[test]
     fn client_subscribe_orderbook_updates_registry_and_wire_queue_through_sender() {
         let client = Client::new(dummy_cfg());
@@ -9821,6 +9875,110 @@ mod client_subscribe_integration_tests {
                 assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
                 assert_eq!(cmd.epoch_header.epoch, 0);
                 assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_move_all_sells_uses_delphi_pre_send_gate() {
+        use crate::commands::trade::{
+            FixedPosition, MoveAllCmdType, MoveAllSellsParams, OrderWorkerStatus, PriceZone,
+            ReplaceMultiKind, TradeCommand, TradeCtx,
+        };
+
+        let params = MoveAllSellsParams {
+            cmd_type: MoveAllCmdType::MoveKind,
+            move_kind: ReplaceMultiKind::TopVol,
+            price: 50100.0,
+            price_zone: PriceZone {
+                min_p: 49_500.0,
+                max_p: 50_500.0,
+            },
+            side: FixedPosition::Long,
+        };
+        let ctx = TradeCtx::with_route(0xCAFE, 17, 9);
+        let client = Client::new(dummy_cfg());
+        let empty_orders = crate::state::Orders::new();
+
+        assert!(
+            !client.move_all_sells(&empty_orders, ctx, "DOGEUSDT", params),
+            "Delphi active-client branch sends nothing without a matching order"
+        );
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
+
+        let orders = tracked_orders(
+            7,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        assert!(client.move_all_sells(&orders, ctx, "DOGEUSDT", params));
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid move all sells") {
+            TradeCommand::MoveAllSells(cmd) => {
+                assert_eq!(cmd.market.base.uid, ctx.uid);
+                assert_eq!(cmd.market.currency, 17);
+                assert_eq!(cmd.market.platform, 9);
+                assert_eq!(cmd.cmd_type, MoveAllCmdType::MoveKind as u8);
+                assert_eq!(cmd.move_kind, ReplaceMultiKind::TopVol);
+                assert_eq!(cmd.side, FixedPosition::Long);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_move_all_buys_uses_buy_only_cmd_type_and_delphi_gate() {
+        use crate::commands::trade::{
+            FixedPosition, MoveAllBuysCmdType, OrderWorkerStatus, ReplaceMultiKind, TradeCommand,
+            TradeCtx,
+        };
+
+        let ctx = TradeCtx::with_route(0xBEEF, 17, 9);
+        let client = Client::new(dummy_cfg());
+        let immune_orders =
+            tracked_orders(8, 17, 9, "DOGEUSDT", OrderWorkerStatus::BuySet, false, true);
+
+        assert!(
+            !client.move_all_buys(
+                &immune_orders,
+                ctx,
+                "DOGEUSDT",
+                MoveAllBuysCmdType::MoveKind,
+                ReplaceMultiKind::TopVol,
+                50100.0,
+                FixedPosition::Long,
+            ),
+            "MoveKind buy overload checks not ImmuneForClicks"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        assert!(client.move_all_buys(
+            &immune_orders,
+            ctx,
+            "DOGEUSDT",
+            MoveAllBuysCmdType::Pers,
+            ReplaceMultiKind::None,
+            1.5,
+            FixedPosition::Short,
+        ));
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid move all buys") {
+            TradeCommand::MoveAllBuys(cmd) => {
+                assert_eq!(cmd.market.base.uid, ctx.uid);
+                assert_eq!(cmd.cmd_type, MoveAllBuysCmdType::Pers as u8);
+                assert_eq!(cmd.move_kind, ReplaceMultiKind::None);
+                assert_eq!(cmd.side, FixedPosition::Short);
             }
             other => panic!("unexpected trade command: {other:?}"),
         }

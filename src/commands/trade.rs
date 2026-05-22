@@ -152,8 +152,8 @@ impl FixedPosition {
     }
 }
 
-/// TMoveAllCmdType (MoonProtoTradeStruct.pas:148 inline comment).
-/// Описывает интерпретацию параметра `Price`/`PriceZone` в `TMoveAllSells/BuysCommand`.
+/// Sell-side `TMoveAllCmdType` (MoonProtoTradeStruct.pas:148 inline comment).
+/// Описывает интерпретацию параметра `Price`/`PriceZone` в `TMoveAllSellsCommand`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveAllCmdType {
@@ -171,6 +171,29 @@ impl MoveAllCmdType {
         match b {
             0 => Some(Self::MoveKind),
             1 => Some(Self::PriceZone),
+            2 => Some(Self::Pers),
+            _ => None,
+        }
+    }
+}
+
+/// Buy-side `TMoveAllBuysCommand.CmdType`.
+///
+/// Delphi `TMoveAllBuysCommand` supports only `0: MoveKind` and `2: Pers`;
+/// there is no buy-side `PriceZone` mode and the server buy branch ignores
+/// `CmdType=1`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveAllBuysCmdType {
+    MoveKind = 0,
+    Pers = 2,
+}
+
+impl MoveAllBuysCmdType {
+    /// Возвращает `None` если байт неизвестен или sell-only (`PriceZone=1`).
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::MoveKind),
             2 => Some(Self::Pers),
             _ => None,
         }
@@ -1881,7 +1904,7 @@ pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
 pub fn build_move_all_buys(
     ctx: TradeCtx,
     market_name: &str,
-    cmd_type: u8,
+    cmd_type: MoveAllBuysCmdType,
     move_kind: ReplaceMultiKind,
     price: f64,
     side: FixedPosition,
@@ -1895,7 +1918,7 @@ pub fn build_move_all_buys(
         ctx.currency,
         ctx.platform,
     );
-    out.push(cmd_type);
+    out.push(cmd_type as u8);
     out.push(move_kind as u8);
     out.extend_from_slice(&price.to_le_bytes());
     out.push(side as u8);

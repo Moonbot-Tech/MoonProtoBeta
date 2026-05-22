@@ -1801,3 +1801,26 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining order UI/lifecycle
   side effects outside `ApplyServerTrace`.
+
+### 2026-05-22 - Phase 1 partial: bulk move outgoing gate
+
+Done:
+
+- Fixed outgoing bulk move parity against Delphi `TOrdersWorkers.MoveAllBuys` /
+  `MoveAllSells` active-client branches.
+- Rust `Client::move_all_sells` and `ClientSender::move_all_sells` now require
+  the current `Orders` read model and return `false` without queueing when
+  Delphi would not send: no matching local order, `RM_None`, side mismatch, or
+  immune order for the overloads that check `not ImmuneForClicks`.
+- Rust `Client::move_all_buys` and `ClientSender::move_all_buys` now use
+  `MoveAllBuysCmdType` instead of the sell-side `MoveAllCmdType`; regular API
+  code can no longer produce buy `CmdType=1`, which Delphi does not create and
+  the server buy branch does not handle.
+- Added unit tests for the Delphi send-gate predicates and queue-level wrapper
+  behavior.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining outgoing order/UI
+  actions: join/split/close/sell, per-order cancel/replace/stops/vstop/panic,
+  and local-state side effects around `SetImmuneClicks`.

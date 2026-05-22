@@ -43,7 +43,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `join_orders(ctx, market, is_short)` | Join open orders. |
 | `split_order(ctx, market, split_parts, split_small, split_small_sell)` | Split an order. |
 | `split_tracked_order(order, split_parts, split_small, split_small_sell)` | Split a tracked order. |
-| `move_all_sells(ctx, market, params)` | Move sell orders in bulk. `params` is `MoveAllSellsParams`. |
+| `move_all_sells(&orders, ctx, market, params)` | Move sell orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
 | `do_close_position(ctx, market, market_sell)` | Close a position. |
 | `do_limit_close_position(ctx, market, is_short)` | Close through a limit order. |
 | `do_split_position(ctx, market, is_short)` | Split a position. |
@@ -56,7 +56,7 @@ legacy Binance-USDT shortcut and should not be used by regular applications.
 | `turn_tracked_order_panic_sell(order, turn_on)` | Toggle panic sell for a tracked order. |
 | `set_immune(uid, items)` | Send `TSetImmuneCommand` to mark orders immune to clicks on the server. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
-| `move_all_buys(ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk. |
+| `move_all_buys(&orders, ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
 | `update_vstop(ctx, market, params)` | Update volume stop. `params` is `VStopUpdateParams`; the wrapper writes `epoch = 0`. |
 | `update_tracked_order_vstop(order, on, fixed, level, vol)` | Update volume stop for a tracked order. |
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
@@ -69,6 +69,17 @@ panic-sell commands, status is not public either: the Delphi client writes
 `OrderEvent` by itself; the read model mirrors `immune_for_clicks` from
 `TOrderStatus`, matching Delphi's receive path.
 
+`move_all_sells` and `move_all_buys` require the current `Orders` read model.
+This mirrors Delphi active-client UI code: bulk move commands are not put on the
+wire until the client has a matching local order worker. `MoveKind` modes reject
+`ReplaceMultiKind::None` and skip immune orders; sell `PriceZone` mode checks for
+any non-immune active sell on the market; percent (`Pers`) modes check only that
+an active buy/sell exists on the market.
+
+Buy bulk move uses `MoveAllBuysCmdType`, which has only `MoveKind = 0` and
+`Pers = 2`. Delphi has no buy-side `PriceZone` mode, and the server buy branch
+does not process `CmdType = 1`.
+
 `move_all_sells` and `update_vstop` intentionally take parameter structs instead
 of long positional argument lists. This is part of the public API:
 
@@ -78,15 +89,16 @@ of long positional argument lists. This is part of the public API:
   `vstop_level`, and `vstop_vol`.
 
 Low-level builders follow the same shape:
-`build_move_all_sells(ctx, market, params)` and
+`build_move_all_sells(ctx, market, params)`,
+`build_move_all_buys(ctx, market, cmd_type, move_kind, price, side)`, and
 `build_vstop_update(ctx, market, epoch, params)`.
 
 ## Example
 
 ```rust
 use moonproto::commands::trade::{
-    FixedPosition, ImmuneItem, MoveAllCmdType, MoveAllSellsParams, OrderType, PriceZone,
-    ReplaceMultiKind,
+    FixedPosition, ImmuneItem, MoveAllBuysCmdType, MoveAllCmdType, MoveAllSellsParams,
+    OrderType, PriceZone, ReplaceMultiKind,
 };
 
 let order = dispatcher.orders().get(order_uid).expect("known order");
@@ -98,6 +110,7 @@ let ctx = client.random_trade_ctx()
     .expect("run BaseCheck before market trade commands");
 
 client.move_all_sells(
+    dispatcher.orders(),
     ctx,
     "BTCUSDT",
     MoveAllSellsParams {
@@ -107,6 +120,16 @@ client.move_all_sells(
         price_zone: PriceZone { min_p: 49500.0, max_p: 50500.0 },
         side: FixedPosition::Long,
     },
+);
+
+client.move_all_buys(
+    dispatcher.orders(),
+    ctx,
+    "BTCUSDT",
+    MoveAllBuysCmdType::MoveKind,
+    ReplaceMultiKind::TopVol,
+    50000.0,
+    FixedPosition::Long,
 );
 
 let items = [
@@ -136,6 +159,10 @@ std::thread::spawn(move || {
     sender.update_vstop(ctx, "BTCUSDT", vstop_params);
 });
 ```
+
+`ClientSender::move_all_sells` and `ClientSender::move_all_buys` take the same
+`&Orders` argument as `Client`; they return `false` and queue nothing when the
+Delphi active-client gate does not find a matching local order.
 
 One-shot helpers that must wait for an applied state change, such as
 `request_order_snapshot`, still require mutable access to `Client` and an

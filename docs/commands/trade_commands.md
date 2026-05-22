@@ -77,6 +77,23 @@ The `CmdId` values are taken directly from `TradeCommand::parse`
 both directions. The client sends local updates, and the server sends echo or
 notify updates for changes made by another client or by the engine.
 
+## Bulk Move CmdType
+
+`MoveAllSellsCommand` uses `MoveAllCmdType`:
+
+- `0` = `MoveKind`;
+- `1` = `PriceZone`;
+- `2` = `Pers`.
+
+`MoveAllBuysCommand` uses `MoveAllBuysCmdType`:
+
+- `0` = `MoveKind`;
+- `2` = `Pers`.
+
+There is no buy-side `PriceZone` mode in Delphi. The Rust public builder and
+client wrappers use the separate `MoveAllBuysCmdType` enum so regular API code
+cannot create a buy command with `CmdType = 1`.
+
 ## Order state machine
 
 See the `OrderWorkerStatus` doc comment in

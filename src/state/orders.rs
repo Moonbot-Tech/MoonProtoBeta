@@ -490,6 +490,75 @@ impl Orders {
         self.current_snapshot_flag
     }
 
+    fn is_proper(order: &Order, market_name: &str, side: FixedPosition) -> bool {
+        if order.market_name != market_name {
+            return false;
+        }
+        match side {
+            FixedPosition::Both => true,
+            FixedPosition::Long => !order.is_short,
+            FixedPosition::Short => order.is_short,
+        }
+    }
+
+    /// Delphi active-client pre-send gate for
+    /// `TOrdersWorkers.MoveAllSells`.
+    ///
+    /// `MoveKind` mode checks side + non-immune and rejects `RM_None`;
+    /// `PriceZone` mode checks only market/status/non-immune before sending;
+    /// `%` (`Pers`) mode ignores immunity, matching the separate Delphi overload.
+    pub fn has_move_all_sells_candidate(
+        &self,
+        market_name: &str,
+        params: MoveAllSellsParams,
+    ) -> bool {
+        match params.cmd_type {
+            MoveAllCmdType::MoveKind => {
+                params.move_kind != ReplaceMultiKind::None
+                    && self.map.values().any(|order| {
+                        Self::is_proper(order, market_name, params.side)
+                            && order.status == OrderWorkerStatus::SellSet
+                            && !order.immune_for_clicks
+                    })
+            }
+            MoveAllCmdType::PriceZone => self.map.values().any(|order| {
+                order.market_name == market_name
+                    && order.status == OrderWorkerStatus::SellSet
+                    && !order.immune_for_clicks
+            }),
+            MoveAllCmdType::Pers => self.map.values().any(|order| {
+                order.market_name == market_name && order.status == OrderWorkerStatus::SellSet
+            }),
+        }
+    }
+
+    /// Delphi active-client pre-send gate for
+    /// `TOrdersWorkers.MoveAllBuys`.
+    ///
+    /// Buy bulk move has only `MoveKind` and `%` modes in Delphi; there is no
+    /// buy-side `PriceZone` command.
+    pub fn has_move_all_buys_candidate(
+        &self,
+        market_name: &str,
+        cmd_type: MoveAllBuysCmdType,
+        move_kind: ReplaceMultiKind,
+        side: FixedPosition,
+    ) -> bool {
+        match cmd_type {
+            MoveAllBuysCmdType::MoveKind => {
+                move_kind != ReplaceMultiKind::None
+                    && self.map.values().any(|order| {
+                        Self::is_proper(order, market_name, side)
+                            && order.status == OrderWorkerStatus::BuySet
+                            && !order.immune_for_clicks
+                    })
+            }
+            MoveAllBuysCmdType::Pers => self.map.values().any(|order| {
+                order.market_name == market_name && order.status == OrderWorkerStatus::BuySet
+            }),
+        }
+    }
+
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
@@ -1301,6 +1370,110 @@ mod tests {
             }
         ));
         assert_eq!(orders.get(42).unwrap().status, OrderWorkerStatus::SellSet);
+    }
+
+    #[test]
+    fn move_all_sells_candidate_gate_matches_delphi_active_client_overloads() {
+        let mut orders = Orders::new();
+        let mut immune_short = make_status(1, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+        immune_short.is_short = true;
+        immune_short.immune_for_clicks = true;
+        orders.apply(order_status_cmd(immune_short));
+
+        let move_kind = MoveAllSellsParams {
+            cmd_type: MoveAllCmdType::MoveKind,
+            move_kind: ReplaceMultiKind::TopVol,
+            price: 10.0,
+            price_zone: PriceZone::default(),
+            side: FixedPosition::Short,
+        };
+        assert!(
+            !orders.has_move_all_sells_candidate("BTCUSDT", move_kind),
+            "MoveKind overload checks not ImmuneForClicks before wire send"
+        );
+
+        let pers = MoveAllSellsParams {
+            cmd_type: MoveAllCmdType::Pers,
+            ..move_kind
+        };
+        assert!(
+            orders.has_move_all_sells_candidate("BTCUSDT", pers),
+            "percent overload ignores ImmuneForClicks in Delphi"
+        );
+
+        let mut long = make_status(2, "BTCUSDT", OrderWorkerStatus::SellSet, 1);
+        long.is_short = false;
+        orders.apply(order_status_cmd(long));
+
+        let price_zone = MoveAllSellsParams {
+            cmd_type: MoveAllCmdType::PriceZone,
+            side: FixedPosition::Short,
+            ..move_kind
+        };
+        assert!(
+            orders.has_move_all_sells_candidate("BTCUSDT", price_zone),
+            "PriceZone active-client send gate ignores ASide and checks only market/status/non-immune"
+        );
+
+        let none = MoveAllSellsParams {
+            move_kind: ReplaceMultiKind::None,
+            ..move_kind
+        };
+        assert!(
+            !orders.has_move_all_sells_candidate("BTCUSDT", none),
+            "RM_None exits before sending"
+        );
+    }
+
+    #[test]
+    fn move_all_buys_candidate_gate_matches_delphi_active_client_overloads() {
+        let mut orders = Orders::new();
+        let mut immune_long = make_status(1, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        immune_long.is_short = false;
+        immune_long.immune_for_clicks = true;
+        orders.apply(order_status_cmd(immune_long));
+
+        assert!(
+            !orders.has_move_all_buys_candidate(
+                "BTCUSDT",
+                MoveAllBuysCmdType::MoveKind,
+                ReplaceMultiKind::TopVol,
+                FixedPosition::Long,
+            ),
+            "MoveKind overload checks not ImmuneForClicks before wire send"
+        );
+        assert!(
+            orders.has_move_all_buys_candidate(
+                "BTCUSDT",
+                MoveAllBuysCmdType::Pers,
+                ReplaceMultiKind::None,
+                FixedPosition::Short,
+            ),
+            "percent overload checks only active market BuySet"
+        );
+
+        let mut short = make_status(2, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        short.is_short = true;
+        orders.apply(order_status_cmd(short));
+
+        assert!(
+            orders.has_move_all_buys_candidate(
+                "BTCUSDT",
+                MoveAllBuysCmdType::MoveKind,
+                ReplaceMultiKind::LastSet,
+                FixedPosition::Short,
+            ),
+            "MoveKind gate honors ASide"
+        );
+        assert!(
+            !orders.has_move_all_buys_candidate(
+                "BTCUSDT",
+                MoveAllBuysCmdType::MoveKind,
+                ReplaceMultiKind::None,
+                FixedPosition::Both,
+            ),
+            "RM_None exits before sending"
+        );
     }
 
     #[test]
