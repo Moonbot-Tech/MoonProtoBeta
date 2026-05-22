@@ -5525,10 +5525,10 @@ impl Client {
                             );
                         }
                         Command::SlicedACK => {
-                            Client::push_sliced_ack(&incoming_sliced_acks, &payload);
-                            Client::push_reader_recv_side_effect(
+                            Client::reader_on_new_sliced_ack(
                                 &pending_reader_decoded,
-                                hdr.cmd,
+                                &incoming_sliced_acks,
+                                &payload,
                                 n as u64,
                                 timestamp_ms,
                                 my_epoch,
@@ -5683,6 +5683,26 @@ impl Client {
         }
 
         true
+    }
+
+    fn reader_on_new_sliced_ack(
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        incoming_sliced_acks: &Arc<Mutex<Vec<SlicedAck>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
+        // Applying it is writer/`CheckSeningData` work.
+        Self::push_sliced_ack(incoming_sliced_acks, payload);
+        Self::push_reader_recv_side_effect(
+            pending_reader_decoded,
+            Command::SlicedACK as u8,
+            recv_bytes,
+            timestamp_ms,
+            epoch,
+        );
     }
 
     fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {

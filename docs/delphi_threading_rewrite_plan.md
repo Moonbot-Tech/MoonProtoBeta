@@ -690,3 +690,20 @@ Still not done:
 
 - Other reader command branches are still inline in `spawn_reader`; they need the
   same Delphi-named extraction before the reader runtime can be moved cleanly.
+
+### 2026-05-22 - Phase 1 partial: named reader `OnNewSlicedACK` block
+
+Done:
+
+- Production reader `MPC_SlicedACK` handling is now isolated as
+  `reader_on_new_sliced_ack`.
+- The block keeps Delphi's machine effect: append parsed ACK to the reader ->
+  writer ACK list, record receive side-effect, and do not apply ACK in reader.
+- Targeted tests passed:
+  `reader_handles_sliced_ack_without_recv_event_backlog`,
+  `sliced_ack_reader_queues_writer_applies_like_delphi`.
+
+Still not done:
+
+- The helper still feeds the current `incoming_sliced_acks` queue; ownership has
+  not yet moved into a standalone writer runtime.
