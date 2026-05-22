@@ -23,7 +23,7 @@ use log::{debug, error, warn};
 /// See MAPPING.md for line-by-line correspondence.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "diagnostic-trace")]
 use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Mutex};
@@ -364,6 +364,14 @@ pub(crate) struct SendMsg {
 #[derive(Clone)]
 pub(crate) enum ClientEvent {
     Recv(RecvMsg),
+    SlicedComplete {
+        datagram_num: u16,
+        cmd: u8,
+        payload: Vec<u8>,
+        dup_count: u8,
+        blocks_count: usize,
+        epoch: u32,
+    },
     Send(SendMsg),
     /// Подписаться на orderbook рынка. Main loop обновит registry и отправит
     /// `emk_SubscribeOrderBook` если подписки ещё не было (idempotent).
@@ -1184,8 +1192,8 @@ pub struct Client {
     tmp_send_size: usize,  // total bytes including headers
 
     slider: Slider,
-    slicer: slicing::SlicingReceiver,
-    total_sent: u64,
+    slicer: Arc<Mutex<slicing::SlicingReceiver>>,
+    total_sent: Arc<AtomicU64>,
     next_port: u16,
     ping_count: u32,
 
@@ -1443,8 +1451,8 @@ impl Client {
             tmp_send_count: 0,
             tmp_send_size: 15, // ClientMsgHeader(15) overhead
             slider: Slider::new(),
-            slicer: slicing::SlicingReceiver::new(),
-            total_sent: 0,
+            slicer: Arc::new(Mutex::new(slicing::SlicingReceiver::new())),
+            total_sent: Arc::new(AtomicU64::new(0)),
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
@@ -2396,7 +2404,7 @@ impl Client {
                 }
             }
             // Не-subscribe события не обрабатываются этим методом
-            ClientEvent::Recv(_) | ClientEvent::Send(_) => {
+            ClientEvent::Recv(_) | ClientEvent::SlicedComplete { .. } | ClientEvent::Send(_) => {
                 debug_assert!(
                     false,
                     "apply_subscribe_event called with non-subscribe event"
@@ -3593,7 +3601,7 @@ impl Client {
 
                 // Cleanup periodic (sliced receiver / pending_candles).
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-                    self.slicer.clear_old();
+                    self.slicer.lock().unwrap().clear_old();
                     let candles_before = self.pending_candles.len();
                     self.pending_candles.retain(|_uid, partial| {
                         (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
@@ -3659,6 +3667,23 @@ impl Client {
                 self.process_recv_event(msg, cur_tm, mode)
             }
             ClientEvent::Recv(msg) => deferred_recv.push(msg),
+            ClientEvent::SlicedComplete {
+                datagram_num,
+                cmd,
+                payload,
+                dup_count,
+                blocks_count,
+                epoch,
+            } => self.process_sliced_complete(
+                datagram_num,
+                cmd,
+                payload,
+                dup_count,
+                blocks_count,
+                epoch,
+                cur_tm,
+                mode,
+            ),
             ClientEvent::Send(s) => {
                 if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
                     control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
@@ -3743,6 +3768,68 @@ impl Client {
         }
     }
 
+    fn process_sliced_complete(
+        &mut self,
+        datagram_num: u16,
+        raw_cmd: u8,
+        payload: Vec<u8>,
+        dup_count: u8,
+        blocks_count: usize,
+        epoch: u32,
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+    ) {
+        if epoch != self.current_reader_epoch {
+            return;
+        }
+
+        self.process_data_read_int(raw_cmd, &payload, cur_tm, mode);
+        self.slicer.lock().unwrap().receiving.remove(&datagram_num);
+        let dup_pct = dup_count as f64 / blocks_count.max(1) as f64 * 100.0;
+        if self.avg_dup_count == 0.0 {
+            self.avg_dup_count = dup_pct;
+        } else {
+            self.avg_dup_count = (self.avg_dup_count * 9.0 + dup_pct) * 0.1;
+        }
+    }
+
+    fn process_data_read_int(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+    ) {
+        match mode {
+            RunMode::Callback { on_data } => {
+                let mut sink = DispatchSink::Callback(on_data);
+                self.data_read_int(raw_cmd, payload, &mut sink);
+            }
+            RunMode::Dispatcher {
+                dispatcher,
+                on_event,
+                event_buf,
+                payload_buf,
+            } => {
+                payload_buf.clear();
+                let authorized_before = self.authorized;
+                {
+                    let mut sink = DispatchSink::Buffer(payload_buf);
+                    self.data_read_int(raw_cmd, payload, &mut sink);
+                }
+                if !authorized_before && !self.authorized {
+                    payload_buf.clear();
+                    return;
+                }
+                for (c, p) in payload_buf.drain(..) {
+                    event_buf.clear();
+                    dispatcher.dispatch_into_active(c, &p, cur_tm, event_buf, self);
+                    on_event.drain_events(event_buf, dispatcher);
+                }
+            }
+        }
+    }
+
     /// Periodic trades.tick (только в Dispatcher mode). Throttle 100мс — соответствует
     /// Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`. Сам tick также
     /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
@@ -3793,8 +3880,13 @@ impl Client {
         let mac_key = self.cfg.mac_key;
         let mac_ctx = self.mac_ctx.clone(); // shared cached HMAC context (hot path).
         let mask_ver = self.cfg.mask_ver;
+        let client_id = self.cfg.client_id;
+        let server_addr = self.server_socket_addr();
         let event_tx = self.event_tx.clone();
         let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
+        let slicer = Arc::clone(&self.slicer);
+        let total_sent = Arc::clone(&self.total_sent);
+        let debug_outgoing_blackhole = self.debug_outgoing_blackhole;
         // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
         let start_time = self._start;
 
@@ -3841,6 +3933,9 @@ impl Client {
                         }
                     }
                 };
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 // Transport unpack (OLC + MAC + ver check) — кэшированный MacContext.
                 let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
@@ -3890,10 +3985,44 @@ impl Client {
                 // получил `start_time` clone'ом из self._start (Instant — Copy).
                 // Тот же time base что в `Client::now_ms` — diff'ы остаются корректны.
                 let timestamp_ms = start_time.elapsed().as_millis() as i64;
-                let handled_in_reader =
-                    !err_emu_drop && Command::from_byte(hdr.cmd) == Command::SlicedACK;
-                if handled_in_reader {
-                    Client::push_sliced_ack(&incoming_sliced_acks, &payload);
+                let cmd = Command::from_byte(hdr.cmd);
+                let mut handled_in_reader = false;
+                let mut sliced_complete = None;
+                if !err_emu_drop {
+                    match cmd {
+                        Command::SlicedACK => {
+                            Client::push_sliced_ack(&incoming_sliced_acks, &payload);
+                            handled_in_reader = true;
+                        }
+                        Command::Sliced => {
+                            if shutdown_flag.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let (assembled, ack) = {
+                                let mut slicer = slicer.lock().unwrap();
+                                slicer.set_last_online(timestamp_ms);
+                                slicer.on_new_sliced(&payload)
+                            };
+                            if shutdown_flag.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            Client::reader_send_raw_packet(
+                                &sock_clone,
+                                server_addr,
+                                &mac_ctx,
+                                &mac_key,
+                                Command::SlicedACK,
+                                client_id,
+                                &ack,
+                                mask_ver,
+                                &total_sent,
+                                debug_outgoing_blackhole,
+                            );
+                            sliced_complete = assembled;
+                            handled_in_reader = true;
+                        }
+                        _ => {}
+                    }
                 }
 
                 let msg = RecvMsg {
@@ -3907,6 +4036,21 @@ impl Client {
                 };
                 if enqueue_recv_event(&event_tx, msg, start_time) == RecvEnqueue::Disconnected {
                     break; // main thread dropped rx → exit reader
+                }
+                if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) =
+                    sliced_complete
+                {
+                    let event = ClientEvent::SlicedComplete {
+                        datagram_num,
+                        cmd,
+                        payload,
+                        dup_count,
+                        blocks_count,
+                        epoch: my_epoch,
+                    };
+                    if event_tx.send(event).is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -3936,6 +4080,82 @@ impl Client {
     fn push_sliced_ack(queue: &Arc<Mutex<Vec<SlicedAck>>>, payload: &[u8]) {
         if let Some(ack) = Self::parse_sliced_ack_payload(payload) {
             queue.lock().unwrap().push(ack);
+        }
+    }
+
+    fn reader_send_raw_packet(
+        sock: &UdpSocket,
+        addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        cmd: Command,
+        client_id: u64,
+        payload: &[u8],
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+    ) {
+        let Some(addr) = addr else {
+            return;
+        };
+        let mut packet = Vec::new();
+        let extra = moonproto_transport::transport_pack_into_with_mac(
+            &mut packet,
+            mac_ctx,
+            mac_key,
+            cmd as u8,
+            client_id,
+            payload,
+            mask_ver,
+        );
+
+        if debug_outgoing_blackhole {
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
+                    cmd,
+                    cmd as u8,
+                    packet.len(),
+                    extra.as_ref().map(|p| p.len()).unwrap_or(0),
+                    addr
+                );
+            }
+            return;
+        }
+
+        if let Some(extra_pkt) = extra.as_deref() {
+            if let Err(e) = sock.send_to(extra_pkt, addr) {
+                warn!("send_to(extra, cmd={}) failed: {e}", cmd as u8);
+            }
+        }
+        match sock.send_to(&packet, addr) {
+            Ok(_) => {
+                total_sent.fetch_add(packet.len() as u64, Ordering::Relaxed);
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-io-tx-ok] cmd={:?} raw={} packet_len={} total_sent={}",
+                        cmd,
+                        cmd as u8,
+                        packet.len(),
+                        total_sent.load(Ordering::Relaxed)
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                warn!(
+                    "send_to(cmd={}) would block (kernel send buffer full)",
+                    cmd as u8
+                );
+            }
+            Err(e) if is_datagram_too_large_error(&e) => {
+                warn!(
+                    "send_to(cmd={}) packet too large for current path MTU: {e}",
+                    cmd as u8
+                );
+            }
+            Err(e) => {
+                error!("send_to(cmd={}) failed: {e}", cmd as u8);
+            }
         }
     }
 
@@ -4066,8 +4286,11 @@ impl Client {
                 self.handle_probe_mtu(payload);
             }
             Command::Sliced => {
-                self.slicer.set_last_online(self.now_ms());
-                let (assembled, ack) = self.slicer.on_new_sliced(payload);
+                let (assembled, ack) = {
+                    let mut slicer = self.slicer.lock().unwrap();
+                    slicer.set_last_online(self.now_ms());
+                    slicer.on_new_sliced(payload)
+                };
                 // Per-block ACK (one SlicedACK per received block) — НАМЕРЕННО.
                 // Для торгового канала критична скорость: минимальная задержка обнаружения
                 // потери блока важнее экономии bandwidth на мелких ACK (~34 байта каждый).
@@ -4076,7 +4299,7 @@ impl Client {
                 self.send_raw_packet(Command::SlicedACK, &ack);
                 if let Some((datagram_num, inner_cmd, data, dup_count, blocks_count)) = assembled {
                     self.data_read_int(inner_cmd, &data, sink);
-                    self.slicer.receiving.remove(&datagram_num);
+                    self.slicer.lock().unwrap().receiving.remove(&datagram_num);
                     // AvgDupCount EMA (matches Common.pas:701-703)
                     let dup_pct = dup_count as f64 / blocks_count.max(1) as f64 * 100.0;
                     if self.avg_dup_count == 0.0 {
@@ -4330,7 +4553,7 @@ impl Client {
         // вызовами — server_time_delta и `Time` поля Ping получат согласованное значение.
         let mut response = payload[..50].to_vec();
         response[0..8].copy_from_slice(&now_dt.to_le_bytes());
-        response[25..33].copy_from_slice(&self.total_sent.to_le_bytes());
+        response[25..33].copy_from_slice(&self.total_sent.load(Ordering::Relaxed).to_le_bytes());
         response[33..41].copy_from_slice(&self.total_recv.to_le_bytes());
         let (ack_start, ack_words) = self.slider.build_ack_half();
         response[42..50].copy_from_slice(&ack_start.to_le_bytes());
@@ -5132,7 +5355,10 @@ impl Client {
         }
         match main_result {
             Ok(_) => {
-                self.total_sent += packet.len() as u64;
+                let total_sent = self
+                    .total_sent
+                    .fetch_add(packet.len() as u64, Ordering::Relaxed)
+                    + packet.len() as u64;
                 self.track_sent(packet.len() as u64, self.now_ms());
                 if trace_io_enabled() {
                     eprintln!(
@@ -5140,7 +5366,7 @@ impl Client {
                         Command::from_byte(cmd),
                         cmd,
                         packet.len(),
-                        self.total_sent
+                        total_sent
                     );
                 }
             }
@@ -5311,12 +5537,12 @@ impl Client {
     /// trip_delay_k, can_send_rate (those persist across reconnects).
     fn full_reset(&mut self) {
         self.crypt_msg_counter = 0;
-        self.total_sent = 0;
+        self.total_sent.store(0, Ordering::Relaxed);
         self.total_recv = 0;
         self.rs = 1.0;
         self.used_sliced_limit = false;
         self.slider = Slider::new();
-        self.slicer = slicing::SlicingReceiver::new();
+        *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
         // Аудит #9 (audit_delphi_deviation): очистка stale Sliced состояния при hard
@@ -5442,7 +5668,7 @@ impl Client {
         self.ping_count
     }
     pub fn total_sent(&self) -> u64 {
-        self.total_sent
+        self.total_sent.load(Ordering::Relaxed)
     }
     pub fn total_recv(&self) -> u64 {
         self.total_recv
@@ -8462,6 +8688,9 @@ mod event_loop_fairness_tests {
 #[cfg(test)]
 mod service_cmd_tests {
     use super::*;
+    use moonproto_transport::{
+        outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, TRANSPORT_VER,
+    };
 
     fn test_recv_msg(cmd: Command) -> RecvMsg {
         RecvMsg {
@@ -8473,6 +8702,48 @@ mod service_cmd_tests {
             err_emu_drop: false,
             epoch: 0,
         }
+    }
+
+    fn dummy_cfg_for_server(server_addr: SocketAddr) -> ClientConfig {
+        ClientConfig {
+            server_ip: server_addr.ip().to_string(),
+            server_port: server_addr.port(),
+            master_key: [0; 16],
+            mac_key: [0x11; 16],
+            mask_ver: 0,
+            client_id: 0x1234_5678_9ABC_DEF0,
+            ntp_host: None,
+            refresh: RefreshConfig::default(),
+        }
+    }
+
+    fn pack_server_packet(mac_key: &MoonKey, cmd: Command, payload: &[u8]) -> Vec<u8> {
+        let hdr = ServerMsgHeader {
+            rnd: 0x5A,
+            checksum: 0,
+            ver: TRANSPORT_VER,
+            cmd: cmd as u8,
+        };
+        let mut buf = hdr.to_bytes().to_vec();
+        buf.extend_from_slice(payload);
+        let mac_ctx = MacContext::new(mac_key);
+        let mac = mac_ctx.mac(&buf);
+        buf[1..5].copy_from_slice(&mac.to_le_bytes());
+        outer_light_crypt(&mut buf, mac_key);
+        buf
+    }
+
+    fn unpack_client_packet(mac_key: &MoonKey, raw: &[u8]) -> (ClientMsgHeader, Vec<u8>) {
+        const CLIENT_HDR_SIZE: usize = 15;
+        let mut buf = raw.to_vec();
+        outer_light_crypt(&mut buf, mac_key);
+        let hdr = ClientMsgHeader::from_bytes(&buf).unwrap();
+        let saved = [buf[1], buf[2], buf[3], buf[4]];
+        buf[1..5].copy_from_slice(&0u32.to_le_bytes());
+        let mac = MacContext::new(mac_key).mac(&buf);
+        assert_eq!(mac, hdr.checksum);
+        buf[1..5].copy_from_slice(&saved);
+        (hdr, buf[CLIENT_HDR_SIZE..].to_vec())
     }
 
     #[test]
@@ -8548,6 +8819,57 @@ mod service_cmd_tests {
     }
 
     #[test]
+    fn reader_sends_sliced_ack_without_main_loop_tick() {
+        set_err_emu(0);
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_sock
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let client_addr = client_sock.local_addr().unwrap();
+
+        let mut client = Client::new(dummy_cfg_for_server(server_addr));
+        client.socket = Some(client_sock);
+        client.spawn_reader();
+
+        let slice_payload = vec![
+            0x2A,
+            0x00, // DatagramNum = 42
+            0x00, // BlockNum = 0
+            0x00, // MaxBlockNum = 0
+            Command::API as u8,
+            0xDE,
+            0xAD,
+        ];
+        let packet = pack_server_packet(&client.cfg.mac_key, Command::Sliced, &slice_payload);
+        server_sock.send_to(&packet, client_addr).unwrap();
+
+        let mut ack_buf = [0u8; 256];
+        let (n, _from) = server_sock.recv_from(&mut ack_buf).unwrap();
+        let (hdr, ack_payload) = unpack_client_packet(&client.cfg.mac_key, &ack_buf[..n]);
+
+        client.reader_shutdown.store(true, Ordering::Relaxed);
+
+        assert_eq!(hdr.cmd, Command::SlicedACK as u8);
+        assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
+        assert_eq!(ack_payload[0] & 0x01, 0x01);
+        assert_eq!(&ack_payload[32..34], &42u16.to_le_bytes());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while client.total_sent() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            client.total_sent() > 0,
+            "reader-side ACK must go to UDP immediately, before run_inner/write tick"
+        );
+    }
+
+    #[test]
     fn datagram_too_large_errors_are_non_fatal_pmtu_feedback() {
         for code in [90, 10040] {
             let err = std::io::Error::from_raw_os_error(code);
@@ -8586,7 +8908,7 @@ mod service_cmd_tests {
 
         client.dispatch_send(Command::Ping as u8, &[0xAA], None, incompatible_addr);
 
-        assert_eq!(client.total_sent, 0, "IPv4 socket → IPv6 addr must fail");
+        assert_eq!(client.total_sent(), 0, "IPv4 socket → IPv6 addr must fail");
         assert!(
             !client.force_disconnect,
             "Delphi send error only logs; it must not start reconnect"

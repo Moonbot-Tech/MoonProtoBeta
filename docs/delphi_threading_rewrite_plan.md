@@ -412,3 +412,21 @@ UDPRead -> OnNewSliced -> SendCommand(MPC_SlicedACK) -> if complete DataReadInt
 ```
 
 Only after that move SlicedACK/H ACK copy-apply order and then split the rest of the main loop.
+
+## Progress log
+
+### 2026-05-22 - Phase 3 partial
+
+Done:
+
+- `MPC_Sliced` receive state is shared with the reader thread.
+- Reader calls the receive slicer and sends `MPC_SlicedACK` directly through UDP.
+- Reader-side ACK path is covered by `reader_sends_sliced_ack_without_main_loop_tick`.
+- `cargo test --lib`: 362 passed.
+
+Not done:
+
+- Full datagram still reaches `DataReadInt` through an internal `ClientEvent::SlicedComplete`.
+- Exact Delphi target remains:
+  `UDPRead -> OnNewSliced -> SendCommand(MPC_SlicedACK) -> if complete DataReadInt`
+  inside the reader path, without `EVENT_DRAIN_BUDGET` as a protocol-progress dependency.
