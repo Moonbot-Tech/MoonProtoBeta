@@ -926,3 +926,19 @@ Still not done:
   live on `Client`.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: routed send/retry tests through `WriterRuntime`
+
+Done:
+
+- `CheckSeningData` now calls writer send/retry wrapper methods on
+  `WriterRuntime`.
+- Unit tests for Sliced creation, H send, low batching/flush, and Sliced retry
+  now exercise those operations through `WriterRuntime`.
+
+Still not done:
+
+- The wrappers still delegate to `Client` method bodies. The next mechanical
+  step is moving those bodies into `WriterRuntime` one by one.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.

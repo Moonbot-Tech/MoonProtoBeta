@@ -2697,17 +2697,16 @@ impl WriterRuntime<'_> {
         // retry, remaining Low flush. Keep this exact protocol order.
         self.apply_sliced_send_u_key_cleanup(&copy_send_list);
         for item in &copy_send_list {
-            self.client.create_sliced_and_send(item);
+            self.create_sliced_and_send(item);
         }
         self.apply_copy_acks(copy_acks, cur_tm);
         self.apply_regular_hl_ack();
         self.apply_high_send_u_key_cleanup(&copy_send_list_h);
         for mut item in copy_send_list_h {
-            self.client.send_h_item(&mut item, cur_tm);
+            self.send_h_item(&mut item, cur_tm);
         }
-        self.client.retry_pending_h(cur_tm);
-        self.client
-            .send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
+        self.retry_pending_h(cur_tm);
+        self.send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
     }
 
     fn get_copy_send_list(
@@ -2801,6 +2800,38 @@ impl WriterRuntime<'_> {
                 }
             }
         }
+    }
+
+    fn create_sliced_and_send(&mut self, item: &SendItem) {
+        self.client.create_sliced_and_send(item);
+    }
+
+    fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
+        self.client.send_h_item(item, cur_tm);
+    }
+
+    fn retry_pending_h(&mut self, cur_tm: i64) {
+        self.client.retry_pending_h(cur_tm);
+    }
+
+    #[cfg(test)]
+    fn retry_sliced(&mut self, cur_tm: i64) {
+        self.client.retry_sliced(cur_tm);
+    }
+
+    #[cfg(test)]
+    fn batch_send_direct(&mut self, item: &SendItem) {
+        self.client.batch_send_direct(item);
+    }
+
+    fn send_low_items_around_sliced_retry(&mut self, l_items: &[SendItem], cur_tm: i64) {
+        self.client
+            .send_low_items_around_sliced_retry(l_items, cur_tm);
+    }
+
+    #[cfg(test)]
+    fn flush_send_batch(&mut self) {
+        self.client.flush_send_batch();
     }
 }
 
@@ -10081,6 +10112,10 @@ mod pmtu_tests {
         }
     }
 
+    fn writer(client: &mut Client) -> WriterRuntime<'_> {
+        WriterRuntime { client }
+    }
+
     #[test]
     fn ping_pmtu_above_8192_is_preserved() {
         let mut client = Client::new(dummy_cfg());
@@ -10138,7 +10173,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.create_sliced_and_send(&item);
+        writer(&mut client).create_sliced_and_send(&item);
         assert!(client.sending.is_empty());
     }
 
@@ -10360,7 +10395,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.create_sliced_and_send(&item);
+        writer(&mut client).create_sliced_and_send(&item);
 
         assert_eq!(client.sending.len(), 1);
         assert_eq!(client.sending[0].sent_count, 0);
@@ -10386,7 +10421,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.create_sliced_and_send(&item);
+        writer(&mut client).create_sliced_and_send(&item);
 
         assert_eq!(
             client.sending.len(),
@@ -10415,7 +10450,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.create_sliced_and_send(&item);
+        writer(&mut client).create_sliced_and_send(&item);
 
         assert!(
             client.sending.is_empty(),
@@ -10440,7 +10475,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.batch_send_direct(&item);
+        writer(&mut client).batch_send_direct(&item);
 
         let wire_len =
             u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
@@ -10488,8 +10523,8 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.batch_send_direct(&small);
-        client.batch_send_direct(&large);
+        writer(&mut client).batch_send_direct(&small);
+        writer(&mut client).batch_send_direct(&large);
 
         let mut raw = [0u8; 256];
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
@@ -10508,7 +10543,7 @@ mod pmtu_tests {
         );
         assert_eq!(&client.tmp_send_buf[3..], small.data.as_slice());
 
-        client.flush_send_batch();
+        writer(&mut client).flush_send_batch();
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
         let (cmd, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
         assert_eq!(cmd, Command::UI as u8);
@@ -10558,7 +10593,7 @@ mod pmtu_tests {
         };
         let l_items = vec![first_low.clone(), second_low.clone()];
 
-        client.send_low_items_around_sliced_retry(&l_items, 1000);
+        writer(&mut client).send_low_items_around_sliced_retry(&l_items, 1000);
 
         let mut raw = [0u8; 256];
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
@@ -10597,7 +10632,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.batch_send_direct(&item);
+        writer(&mut client).batch_send_direct(&item);
 
         assert_eq!(
             client.tmp_send_buf[0],
@@ -10622,7 +10657,7 @@ mod pmtu_tests {
             u_key: UniqueKey::none(),
         };
 
-        client.send_h_item(&mut item, 123);
+        writer(&mut client).send_h_item(&mut item, 123);
 
         assert_eq!(
             client.tmp_send_buf[0],
@@ -10641,7 +10676,7 @@ mod pmtu_tests {
         client.can_send_rate = 262_120; // 262120 * 5ms / 1000 = 1310.6 -> 1311
         client.sending.push(sent_sliced_with_lengths(&[1310, 1], 0));
 
-        client.retry_sliced(1000);
+        writer(&mut client).retry_sliced(1000);
 
         assert_eq!(client.sending[0].sent_count, 4);
     }
@@ -10655,7 +10690,7 @@ mod pmtu_tests {
         client.can_send_rate = 262_120; // ClientLimit = 1311, 80% threshold = round(1048.8) = 1049
         client.sending.push(sent_sliced_with_lengths(&[1048], 0));
 
-        client.retry_sliced(1000);
+        writer(&mut client).retry_sliced(1000);
 
         assert!(!client.used_sliced_limit);
     }
@@ -10670,7 +10705,7 @@ mod pmtu_tests {
         client.last_checked_slices = 1000;
         client.sending.push(sent_sliced_with_lengths(&[10], 1000));
 
-        client.retry_sliced(1105);
+        writer(&mut client).retry_sliced(1105);
         assert_eq!(
             client.sending[0].sent_count, 1,
             "Delphi outer gate may run before PathDelay and sends nothing"
@@ -10680,13 +10715,13 @@ mod pmtu_tests {
             "Delphi still writes LastCheckedSlices := CurTm on that empty pass"
         );
 
-        client.retry_sliced(1126);
+        writer(&mut client).retry_sliced(1126);
         assert_eq!(
             client.sending[0].sent_count, 1,
             "after the empty pass Delphi waits another RoundTripDelay before retry"
         );
 
-        client.retry_sliced(1206);
+        writer(&mut client).retry_sliced(1206);
         assert_eq!(client.sending[0].sent_count, 2);
     }
 
@@ -10702,7 +10737,7 @@ mod pmtu_tests {
         client.can_send_rate = 1_000_000;
         client.sending.push(sent_sliced_with_lengths(&[10], 1360));
 
-        client.retry_sliced(2500);
+        writer(&mut client).retry_sliced(2500);
 
         assert!((client.trip_delay_k - 1.15).abs() < 1e-12);
         assert_eq!(
@@ -10742,12 +10777,12 @@ mod pmtu_tests {
             writer.apply_copy_acks(copy_acks, 300);
         }
 
-        client.retry_sliced(300);
+        writer(&mut client).retry_sliced(300);
         assert_eq!(client.sending[0].sent_count, 4);
         assert_eq!(client.sending[0].piece_last_checked[2], 300);
         assert_eq!(client.sending[0].last_checked, 300);
 
-        client.retry_sliced(500);
+        writer(&mut client).retry_sliced(500);
         assert_eq!(
             client.sending[0].sent_count, 5,
             "unACKed block must be retried again; ACKed old blocks must not pin LastChecked"
