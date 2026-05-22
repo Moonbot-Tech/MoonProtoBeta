@@ -769,7 +769,7 @@ impl EventDispatcher {
     /// [`ActiveDispatchContext`], dispatches the payload, receives protocol
     /// actions into `actions`, then the client applies that outbox to its
     /// Delphi-style send queues. This keeps active dispatch from mutating
-    /// `Client` directly and avoids a second old send path.
+    /// `Client` directly and keeps one send path for active auto-actions.
     ///
     /// At most one full-book request is produced per `(market_index, book_kind)`
     /// in one dispatch call, even when a grouped payload contains several

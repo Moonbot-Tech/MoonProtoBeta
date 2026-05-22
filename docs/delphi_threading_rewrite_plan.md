@@ -668,3 +668,25 @@ Still not done:
 
 - This is only an extraction step. The writer block still executes from
   `run_inner`; ownership has not yet moved to a background writer runtime.
+
+### 2026-05-22 - Phase 1 partial: named reader `OnNewSliced` block
+
+Done:
+
+- Production reader `MPC_Sliced` handling is now isolated as
+  `reader_on_new_sliced`.
+- The block keeps the verified Delphi machine effect:
+  `OnNewSliced -> SendCommand(MPC_SlicedACK) -> if complete DataReadInt ->
+  Receiving.Remove -> queue decoded delivery`.
+- Removed misleading "old/backwards" wording around the live raw callback path
+  and active action outbox. The low-level `Client::run` API remains a real raw
+  callback API, not an internal compatibility bridge.
+- Targeted tests passed:
+  `reader_handles_partial_sliced_without_recv_event_backlog`,
+  `reader_decoded_sliced_payload_bypasses_recv_event_backlog`,
+  `reader_sends_sliced_ack_without_main_loop_tick`.
+
+Still not done:
+
+- Other reader command branches are still inline in `spawn_reader`; they need the
+  same Delphi-named extraction before the reader runtime can be moved cleanly.

@@ -1935,7 +1935,7 @@ impl<'a> DispatchSink<'a> {
 /// Режим работы main loop — определяет как доставлять входящие data-пакеты
 /// и нужны ли active-library auto-actions (periodic trades tick).
 ///
-/// `Callback` — backwards-compat path для `Client::run`. Потребитель получает
+/// `Callback` — low-level raw path для `Client::run`. Потребитель получает
 /// сырые `(Command, &[u8])` и сам решает что с ними делать (обычно — свой
 /// `dispatcher.dispatch_into(...)`).
 ///
@@ -4515,8 +4515,8 @@ impl Client {
     /// Run the client. Spawns reader thread, runs main loop for `duration`.
     /// Matches TMoonProtoUDPClient.Execute.
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
-        // Тонкий wrapper над унифицированным `run_inner`. Backwards-compat API —
-        // существует только для потребителей которым НЕ нужны active-library
+        // Тонкий wrapper над унифицированным `run_inner`. Low-level raw API для
+        // потребителей которым НЕ нужны active-library
         // auto-actions (RequestOrderBookFull, periodic trades.tick, и т.п.).
         // **Для большинства случаев предпочтительнее `run_with_dispatcher`** —
         // см. его doc-comment.
@@ -5535,82 +5535,27 @@ impl Client {
                             );
                         }
                         Command::Sliced => {
-                            if shutdown_flag.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            let (assembled, ack) = {
-                                let mut slicer = slicer.lock().unwrap();
-                                slicer.on_new_sliced(&payload)
-                            };
-                            if shutdown_flag.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            Client::reader_send_raw_packet(
+                            if !Client::reader_on_new_sliced(
+                                &shutdown_flag,
                                 &sock_clone,
                                 server_addr,
                                 &mac_ctx,
                                 &mac_key,
-                                Command::SlicedACK,
                                 client_id,
-                                &ack,
                                 mask_ver,
                                 &total_sent,
                                 debug_outgoing_blackhole,
-                            );
-                            if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) =
-                                assembled
-                            {
-                                let decoded =
-                                    Client::decode_data_read_int_payload_shared(
-                                        &reader_protocol,
-                                        cmd,
-                                        &payload,
-                                    );
-                                slicer.lock().unwrap().receiving.remove(&datagram_num);
-                                let (cmd, payload) = decoded
-                                    .map(|(cmd, payload)| (cmd, Some(payload)))
-                                    .unwrap_or((cmd, None));
-                                let api_pending_consumed =
-                                    payload.as_deref().is_some_and(|payload| {
-                                        Client::dispatch_api_pending_from_reader(
-                                            &api_pending,
-                                            cmd,
-                                            payload,
-                                        )
-                                    });
-                                let candles_chunk_consumed =
-                                    payload.as_deref().is_some_and(|payload| {
-                                        Client::dispatch_candles_chunk_from_reader(
-                                            &pending_candles,
-                                            cmd,
-                                            payload,
-                                            timestamp_ms,
-                                        )
-                                    });
-                                pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
-                                    cmd,
-                                    payload,
-                                    api_pending_consumed,
-                                    candles_chunk_consumed,
-                                    recv_bytes: n as u64,
-                                    timestamp_ms,
-                                    epoch: my_epoch,
-                                    apply_recv_effects: true,
-                                    sliced_stats: Some(ReaderSlicedStats {
-                                        dup_count,
-                                        blocks_count,
-                                    }),
-                                    ping_update: None,
-                                    handshake_update: None,
-                                });
-                            } else {
-                                Client::push_reader_recv_side_effect(
-                                    &pending_reader_decoded,
-                                    hdr.cmd,
-                                    n as u64,
-                                    timestamp_ms,
-                                    my_epoch,
-                                );
+                                &reader_protocol,
+                                &api_pending,
+                                &pending_candles,
+                                &pending_reader_decoded,
+                                &slicer,
+                                &payload,
+                                n as u64,
+                                timestamp_ms,
+                                my_epoch,
+                            ) {
+                                break;
                             }
                         }
                         _ => {
@@ -5642,8 +5587,103 @@ impl Client {
         }
     }
 
-    // process_received удалён: обработка recv_msgs теперь inline в run() loop
-    // (после event_rx.recv_timeout / try_recv дренажа event channel).
+    fn reader_on_new_sliced(
+        shutdown_flag: &AtomicBool,
+        sock: &UdpSocket,
+        server_addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        client_id: u64,
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        api_pending: &Arc<ApiPending>,
+        pending_candles: &Arc<Mutex<HashMap<u64, PartialCandles>>>,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        slicer: &Arc<Mutex<slicing::SlicingReceiver>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) -> bool {
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let (assembled, ack) = {
+            let mut slicer = slicer.lock().unwrap();
+            slicer.on_new_sliced(payload)
+        };
+
+        if shutdown_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        // Delphi `OnNewSliced`: every received slice gets an immediate
+        // `MPC_SlicedACK` from the reader stack before any complete datagram is
+        // passed into `DataReadInt`.
+        Self::reader_send_raw_packet(
+            sock,
+            server_addr,
+            mac_ctx,
+            mac_key,
+            Command::SlicedACK,
+            client_id,
+            &ack,
+            mask_ver,
+            total_sent,
+            debug_outgoing_blackhole,
+        );
+
+        if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
+            let decoded = Self::decode_data_read_int_payload_shared(reader_protocol, cmd, &payload);
+            slicer.lock().unwrap().receiving.remove(&datagram_num);
+            let (cmd, payload) = decoded
+                .map(|(cmd, payload)| (cmd, Some(payload)))
+                .unwrap_or((cmd, None));
+            let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
+                Self::dispatch_api_pending_from_reader(api_pending.as_ref(), cmd, payload)
+            });
+            let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
+                Self::dispatch_candles_chunk_from_reader(
+                    pending_candles.as_ref(),
+                    cmd,
+                    payload,
+                    timestamp_ms,
+                )
+            });
+            pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd,
+                    payload,
+                    api_pending_consumed,
+                    candles_chunk_consumed,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: Some(ReaderSlicedStats {
+                        dup_count,
+                        blocks_count,
+                    }),
+                    ping_update: None,
+                    handshake_update: None,
+                });
+        } else {
+            Self::push_reader_recv_side_effect(
+                pending_reader_decoded,
+                Command::Sliced as u8,
+                recv_bytes,
+                timestamp_ms,
+                epoch,
+            );
+        }
+
+        true
+    }
 
     fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
         // Delphi OnNewSlicedACK reads Flags(32 bytes) + DatagramNum(2 bytes)
