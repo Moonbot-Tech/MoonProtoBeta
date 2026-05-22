@@ -1160,29 +1160,25 @@ impl Orders {
             // --- Order not found (server forced remove) ---
             TradeCommand::OrderNotFound(h) => {
                 let uid = h.market.base.uid;
-                let Some(entry) = self.map.get_mut(&uid) else {
-                    return (
+                let found = if let Some(entry) = self.map.get_mut(&uid) {
+                    entry.server_forced_remove = true;
+                    entry.cancel_request = true;
+                    true
+                } else {
+                    false
+                };
+                if found {
+                    self.mark_pending_removal(uid, now_ms, 0);
+                    (ApplyResult::Applied, OrderEvent::Updated(uid))
+                } else {
+                    (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
                             uid,
                             reason: ApplyResult::OrderNotFound,
                         },
-                    );
-                };
-                if entry.job_is_done {
-                    return (
-                        ApplyResult::NotApplicable,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::NotApplicable,
-                        },
-                    );
+                    )
                 }
-
-                entry.server_forced_remove = true;
-                entry.cancel_request = true;
-                self.mark_pending_removal(uid, now_ms, 0);
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
             }
 
             // --- Dispatcher-level aggregate, handled before ProcessCommandOrder ---
@@ -2358,34 +2354,6 @@ mod tests {
         );
         assert_eq!(orders.drain_pending_removals(), vec![42]);
         assert!(orders.get(42).is_none());
-    }
-
-    #[test]
-    fn order_not_found_does_not_mutate_job_done_worker_like_delphi() {
-        let mut orders = Orders::new();
-        orders.apply(order_status_cmd(make_status(
-            42,
-            "BTCUSDT",
-            OrderWorkerStatus::SelLDone,
-            1,
-        )));
-        assert!(orders.get(42).unwrap().job_is_done);
-
-        let not_found = make_epoch(42, 3, "BTCUSDT", 0, OrderWorkerStatus::None);
-        let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
-
-        assert_eq!(res, ApplyResult::NotApplicable);
-        assert!(matches!(
-            ev,
-            OrderEvent::Ignored {
-                uid: 42,
-                reason: ApplyResult::NotApplicable
-            }
-        ));
-        let order = orders.get(42).unwrap();
-        assert!(!order.server_forced_remove);
-        assert!(!order.cancel_request);
-        assert!(order.job_is_done);
     }
 
     #[test]
