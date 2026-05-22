@@ -13,7 +13,9 @@
 //! приложение может читать последний полный snapshot через public API.
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
-use crate::commands::strategy_serializer::{parse_strategy_batch, StrategyBatch, StrategySnapshot};
+use crate::commands::strategy_serializer::{
+    parse_strategy_batch, FieldValue, StrategyBatch, StrategySnapshot,
+};
 use std::collections::HashMap;
 
 /// Информация по одной стратегии — то что хранится клиентом.
@@ -25,7 +27,7 @@ pub struct StrategyInfo {
     pub strategy_ver: i32,
     /// Время последнего апдейта (TDateTime f64 packed как UInt64).
     pub last_date: u64,
-    /// Цена продажи (из TStratSellPriceUpdate). 0.0 если не было апдейта.
+    /// Цена продажи из decoded snapshot field `SellPrice`, если это поле есть.
     pub sell_price: f64,
     /// Checked-state (для UI start/stop).
     pub checked: bool,
@@ -70,8 +72,6 @@ pub enum StratEvent {
         strategy_deleted: bool,
         folder_deleted: bool,
     },
-    /// Цена продажи обновлена.
-    SellPriceUpdated { strategy_id: u64, sell_price: f64 },
     /// Checked-флаги синхронизированы (полная замена или delta).
     CheckedSynced { changed: usize, is_delta: bool },
     /// Эхо checked-state от сервера (после нашего sync).
@@ -199,6 +199,13 @@ impl StratsState {
         true
     }
 
+    fn sell_price_from_snapshot(s: &StrategySnapshot) -> f64 {
+        match s.fields.get("SellPrice") {
+            Some(FieldValue::Double(v)) => *v,
+            _ => 0.0,
+        }
+    }
+
     /// Применить распарсенную команду.
     pub fn apply(&mut self, cmd: StratCommand) -> StratEvent {
         match cmd {
@@ -238,16 +245,9 @@ impl StratsState {
                     StratEvent::Ignored
                 }
             }
-            StratCommand::SellPriceUpdate(u) => match self.by_id.get_mut(&u.strategy_id) {
-                Some(entry) => {
-                    entry.sell_price = u.sell_price;
-                    StratEvent::SellPriceUpdated {
-                        strategy_id: u.strategy_id,
-                        sell_price: u.sell_price,
-                    }
-                }
-                None => StratEvent::Ignored,
-            },
+            // Delphi client has no TStratSellPriceUpdate receive branch.
+            // This command is client -> server; the server applies sg.SellPrice.
+            StratCommand::SellPriceUpdate(_) => StratEvent::Ignored,
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
                 for it in &s.items {
@@ -318,6 +318,7 @@ impl StratsState {
             entry.strategy_ver = s.strategy_ver;
             entry.last_date = s.last_date;
             entry.folder_path = s.path.clone();
+            entry.sell_price = Self::sell_price_from_snapshot(&s);
             entry.checked = s.checked;
             entry.prev_checked = s.checked;
         }
@@ -338,6 +339,7 @@ impl StratsState {
             entry.strategy_ver = s.strategy_ver;
             entry.last_date = s.last_date;
             entry.folder_path = s.path.clone();
+            entry.sell_price = Self::sell_price_from_snapshot(s);
             entry.checked = s.checked;
             entry.prev_checked = s.checked;
         }
@@ -466,34 +468,31 @@ mod tests {
     use crate::commands::strategy_serializer::FieldValue;
 
     #[test]
-    fn sell_price_update_ignores_unknown_strategy() {
+    fn sell_price_update_is_ignored_like_delphi_client() {
         let mut s = StratsState::new();
+        s.upsert(100, 0, "".into());
         let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
             strategy_id: 100,
             sell_price: 50.5,
         }));
         assert!(matches!(ev, StratEvent::Ignored));
-        assert!(s.get(100).is_none());
+        assert_eq!(s.get(100).unwrap().sell_price, 0.0);
     }
 
     #[test]
-    fn sell_price_update_existing_strategy() {
+    fn snapshot_sets_visible_sell_price_when_field_is_present() {
         let mut s = StratsState::new();
-        s.upsert(100, 0, "F".into());
-        let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
+        let mut fields = HashMap::new();
+        fields.insert("SellPrice".to_string(), FieldValue::Double(50.5));
+        s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
-            sell_price: 50.5,
-        }));
-        match ev {
-            StratEvent::SellPriceUpdated {
-                strategy_id,
-                sell_price,
-            } => {
-                assert_eq!(strategy_id, 100);
-                assert_eq!(sell_price, 50.5);
-            }
-            other => panic!("wrong event: {other:?}"),
-        }
+            strategy_ver: 1,
+            last_date: 1,
+            checked: false,
+            kind: 1,
+            path: "F".into(),
+            fields,
+        });
         assert_eq!(s.get(100).unwrap().sell_price, 50.5);
     }
 

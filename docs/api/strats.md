@@ -33,10 +33,6 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
                     }
                 }
             }
-            StratEvent::SellPriceUpdated { strategy_id, sell_price } => {
-                let info = state.strats().get(*strategy_id).expect("strategy state");
-                println!("strategy {strategy_id} sell price={} checked={}", sell_price, info.checked);
-            }
             StratEvent::Deleted {
                 strategy_id,
                 folder_path,
@@ -86,6 +82,9 @@ stored there; they are stored as `StrategySnapshot` values owned by the
 dispatcher. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
 `PrevChecked`. Checked deltas are pending while these fields differ and become
 acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
+`sell_price` is copied from the decoded snapshot field `SellPrice` when that
+field exists; incoming `TStratSellPriceUpdate` packets are not applied by the
+active client because Delphi client has no receive branch for that command.
 
 `TStratDelete` has two independent Delphi effects: delete `StrategyID` when it
 is non-zero, then delete `FolderPath` when it names an existing empty non-root
@@ -142,6 +141,10 @@ client.strat_snapshot_request();
 client.strat_sell_price_update(strategy_id, sell_price);
 client.strat_delete(strategy_id, folder_path);
 ```
+
+`strat_sell_price_update` is the Delphi client-to-server command. The server
+applies it to its local strategy if the strategy exists; the active client does
+not treat the same command as a server-to-client state update.
 
 Use `ClientSender` for the same fire-and-forget strategy commands from UI or
 worker threads while `run_with_dispatcher` is active:
