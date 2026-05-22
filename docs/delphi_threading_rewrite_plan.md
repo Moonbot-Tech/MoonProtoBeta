@@ -905,3 +905,24 @@ Still not done:
   the writer runtime boundary, while preserving exact Delphi method order.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: moved writer copy/apply helpers
+
+Done:
+
+- Moved `GetCopySendList`, `GetCopyAcks`, `CopyRecvdData`,
+  `ApplyRegularHLAck`, queued SlicedACK apply, and UKey cleanup helpers into
+  `WriterRuntime`.
+- Unit tests that exercise those helpers now instantiate `WriterRuntime`
+  directly instead of calling removed `Client` helper methods.
+- `CheckSeningData` still keeps the same order: Sliced cleanup/create,
+  SlicedACK apply, regular H ACK apply, High cleanup/send, H retry, Low/Sliced
+  retry/Low flush.
+
+Still not done:
+
+- The actual send/retry low-level methods (`create_sliced_and_send`,
+  `send_h_item`, `retry_pending_h`, `retry_sliced`, low batching/flush) still
+  live on `Client`.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.

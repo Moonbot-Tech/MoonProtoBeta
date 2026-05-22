@@ -2667,13 +2667,13 @@ impl WriterRuntime<'_> {
         // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
         // Rust uses separate mutexes for these exact lists, but keeps the same
         // writer-visible order before `CheckSeningData`.
-        self.client.get_copy_send_list(
+        self.get_copy_send_list(
             &mut copy_send_list,
             &mut copy_send_list_h,
             &mut copy_send_list_l,
         );
-        let copy_acks = self.client.get_copy_acks();
-        self.client.copy_recvd_data();
+        let copy_acks = self.get_copy_acks();
+        self.copy_recvd_data();
 
         self.check_sening_data(
             copy_send_list,
@@ -2695,19 +2695,112 @@ impl WriterRuntime<'_> {
         // Delphi `CheckSeningData`: Sliced CopySendList first, then SlicedACK,
         // then regular H ACK bitmap, High send/retry, first Low flush, Sliced
         // retry, remaining Low flush. Keep this exact protocol order.
-        self.client.apply_sliced_send_u_key_cleanup(&copy_send_list);
+        self.apply_sliced_send_u_key_cleanup(&copy_send_list);
         for item in &copy_send_list {
             self.client.create_sliced_and_send(item);
         }
-        self.client.apply_copy_acks(copy_acks, cur_tm);
-        self.client.apply_regular_hl_ack();
-        self.client.apply_high_send_u_key_cleanup(&copy_send_list_h);
+        self.apply_copy_acks(copy_acks, cur_tm);
+        self.apply_regular_hl_ack();
+        self.apply_high_send_u_key_cleanup(&copy_send_list_h);
         for mut item in copy_send_list_h {
             self.client.send_h_item(&mut item, cur_tm);
         }
         self.client.retry_pending_h(cur_tm);
         self.client
             .send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
+    }
+
+    fn get_copy_send_list(
+        &mut self,
+        sliced: &mut Vec<SendItem>,
+        h_items: &mut Vec<SendItem>,
+        l_items: &mut Vec<SendItem>,
+    ) {
+        self.client
+            .send_queues
+            .lock()
+            .unwrap()
+            .take_into(sliced, h_items, l_items);
+    }
+
+    fn get_copy_acks(&mut self) -> Vec<SlicedAck> {
+        let mut acks = self.client.incoming_sliced_acks.lock().unwrap();
+        std::mem::take(&mut *acks)
+    }
+
+    fn copy_recvd_data(&mut self) {
+        if let Some(tmp_slider) = self
+            .client
+            .reader_protocol
+            .lock()
+            .unwrap()
+            .copy_tmp_slider()
+        {
+            self.client.recvd_slider = tmp_slider;
+        }
+    }
+
+    fn apply_sliced_send_u_key_cleanup(&mut self, sliced: &[SendItem]) {
+        // Delphi `CheckSeningData` keeps the cleanup scopes separate:
+        // CopySendList (Sliced) calls `DeleteSendingByKey` before
+        // `CreateSlicedObject`. Delphi removes only the first matching entry.
+        for item in sliced {
+            if !item.u_key.is_none() {
+                if let Some(pos) = self
+                    .client
+                    .sending
+                    .iter()
+                    .position(|s| s.u_key == item.u_key)
+                {
+                    self.client.sending.remove(pos);
+                }
+            }
+        }
+    }
+
+    fn apply_copy_acks(&mut self, copy_acks: Vec<SlicedAck>, cur_tm: i64) {
+        for ack in copy_acks {
+            self.client.apply_sliced_ack(ack, cur_tm);
+        }
+    }
+
+    fn apply_regular_hl_ack(&mut self) {
+        if !self.client.recvd_slider.has_new_data {
+            return;
+        }
+        self.client.recvd_slider.has_new_data = false;
+
+        let limit = (self.client.recvd_slider.r_count.max(0) as u64) * 64;
+        self.client.pending_h.retain(|d| {
+            if d.msg_num < self.client.recvd_slider.start_num {
+                return true;
+            }
+            let offset = d.msg_num - self.client.recvd_slider.start_num;
+            if offset >= limit {
+                return true;
+            }
+            let word_idx = (offset >> 6) as usize;
+            let bit_idx = offset & 63;
+            (self.client.recvd_slider.bit_field[word_idx] >> bit_idx) & 1 == 0
+        });
+    }
+
+    fn apply_high_send_u_key_cleanup(&mut self, h_items: &[SendItem]) {
+        // Delphi calls `DeletePendingByKey` for copied High items after
+        // `ApplyACK` and `ApplyRegularHLAck`, immediately before sending High.
+        // It removes only the first matching PendingH entry.
+        for item in h_items {
+            if !item.u_key.is_none() {
+                if let Some(pos) = self
+                    .client
+                    .pending_h
+                    .iter()
+                    .position(|p| p.u_key == item.u_key)
+                {
+                    self.client.pending_h.remove(pos);
+                }
+            }
+        }
     }
 }
 
@@ -5398,44 +5491,6 @@ impl Client {
         WriterRuntime { client: self }.run(duration, &mut mode);
     }
 
-    fn get_copy_send_list(
-        &self,
-        sliced: &mut Vec<SendItem>,
-        h_items: &mut Vec<SendItem>,
-        l_items: &mut Vec<SendItem>,
-    ) {
-        self.send_queues
-            .lock()
-            .unwrap()
-            .take_into(sliced, h_items, l_items);
-    }
-
-    fn apply_sliced_send_u_key_cleanup(&mut self, sliced: &[SendItem]) {
-        // Delphi `CheckSeningData` keeps the cleanup scopes separate:
-        // CopySendList (Sliced) calls `DeleteSendingByKey` before
-        // `CreateSlicedObject`. Delphi removes only the first matching entry.
-        for item in sliced {
-            if !item.u_key.is_none() {
-                if let Some(pos) = self.sending.iter().position(|s| s.u_key == item.u_key) {
-                    self.sending.remove(pos);
-                }
-            }
-        }
-    }
-
-    fn apply_high_send_u_key_cleanup(&mut self, h_items: &[SendItem]) {
-        // Delphi calls `DeletePendingByKey` for copied High items after
-        // `ApplyACK` and `ApplyRegularHLAck`, immediately before sending High.
-        // It removes only the first matching PendingH entry.
-        for item in h_items {
-            if !item.u_key.is_none() {
-                if let Some(pos) = self.pending_h.iter().position(|p| p.u_key == item.u_key) {
-                    self.pending_h.remove(pos);
-                }
-            }
-        }
-    }
-
     fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
         self.connected = true;
         if self.auth_status == AuthStatus::Base {
@@ -6116,44 +6171,6 @@ impl Client {
     #[cfg(test)]
     fn on_new_sliced_ack(&self, payload: &[u8]) {
         Self::push_sliced_ack(&self.incoming_sliced_acks, payload);
-    }
-
-    fn get_copy_acks(&self) -> Vec<SlicedAck> {
-        let mut acks = self.incoming_sliced_acks.lock().unwrap();
-        std::mem::take(&mut *acks)
-    }
-
-    fn copy_recvd_data(&mut self) {
-        if let Some(tmp_slider) = self.reader_protocol.lock().unwrap().copy_tmp_slider() {
-            self.recvd_slider = tmp_slider;
-        }
-    }
-
-    fn apply_copy_acks(&mut self, copy_acks: Vec<SlicedAck>, cur_tm: i64) {
-        for ack in copy_acks {
-            self.apply_sliced_ack(ack, cur_tm);
-        }
-    }
-
-    fn apply_regular_hl_ack(&mut self) {
-        if !self.recvd_slider.has_new_data {
-            return;
-        }
-        self.recvd_slider.has_new_data = false;
-
-        let limit = (self.recvd_slider.r_count.max(0) as u64) * 64;
-        self.pending_h.retain(|d| {
-            if d.msg_num < self.recvd_slider.start_num {
-                return true;
-            }
-            let offset = d.msg_num - self.recvd_slider.start_num;
-            if offset >= limit {
-                return true;
-            }
-            let word_idx = (offset >> 6) as usize;
-            let bit_idx = offset & 63;
-            (self.recvd_slider.bit_field[word_idx] >> bit_idx) & 1 == 0
-        });
     }
 
     fn apply_sliced_ack(&mut self, ack: SlicedAck, now_ms: i64) {
@@ -10150,7 +10167,10 @@ mod pmtu_tests {
         );
         assert!(!client.recvd_slider.has_new_data);
 
-        client.copy_recvd_data();
+        WriterRuntime {
+            client: &mut client,
+        }
+        .copy_recvd_data();
         assert!(
             !client
                 .reader_protocol
@@ -10161,7 +10181,10 @@ mod pmtu_tests {
         );
         assert!(client.recvd_slider.has_new_data);
 
-        client.apply_regular_hl_ack();
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_regular_hl_ack();
         assert!(
             client.pending_h.is_empty(),
             "CheckSeningData/ApplyRegularHLAck must drop ACKed High packet"
@@ -10173,7 +10196,10 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         let payload = ping_payload_with_ack(40, &[1 << 2]);
         client.apply_ping_ack_bitmap(&payload);
-        client.copy_recvd_data();
+        WriterRuntime {
+            client: &mut client,
+        }
+        .copy_recvd_data();
         assert!(
             !client
                 .reader_protocol
@@ -10231,7 +10257,10 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        client.apply_sliced_send_u_key_cleanup(&[new_sliced]);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_sliced_send_u_key_cleanup(&[new_sliced]);
 
         assert_eq!(
             client.sending.len(),
@@ -10256,7 +10285,10 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        client.apply_high_send_u_key_cleanup(&[new_high]);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_high_send_u_key_cleanup(&[new_high]);
 
         assert_eq!(
             client.pending_h.len(),
@@ -10294,13 +10326,19 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        client.apply_regular_hl_ack();
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_regular_hl_ack();
         assert_eq!(
             client.pending_h.len(),
             1,
             "Delphi ApplyRegularHLAck runs before CopySendListH DeletePendingByKey"
         );
-        client.apply_high_send_u_key_cleanup(&[new_high]);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_high_send_u_key_cleanup(&[new_high]);
         assert!(
             client.pending_h.is_empty(),
             "then Delphi DeletePendingByKey removes the first remaining same-key High entry"
@@ -10696,8 +10734,13 @@ mod pmtu_tests {
             &mut sink,
             false,
         );
-        let copy_acks = client.get_copy_acks();
-        client.apply_copy_acks(copy_acks, 300);
+        {
+            let mut writer = WriterRuntime {
+                client: &mut client,
+            };
+            let copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(copy_acks, 300);
+        }
 
         client.retry_sliced(300);
         assert_eq!(client.sending[0].sent_count, 4);
@@ -10737,8 +10780,13 @@ mod pmtu_tests {
             &mut sink,
             false,
         );
-        let copy_acks = client.get_copy_acks();
-        client.apply_copy_acks(copy_acks, 100);
+        {
+            let mut writer = WriterRuntime {
+                client: &mut client,
+            };
+            let copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(copy_acks, 100);
+        }
 
         assert_eq!(client.sending.len(), 1);
         assert_eq!(client.sending[0].blocks_count, 2);
@@ -10764,8 +10812,13 @@ mod pmtu_tests {
             "Delphi OnNewSlicedACK only queues ACKs; ApplyACK is writer/CheckSeningData work"
         );
 
-        let copy_acks = client.get_copy_acks();
-        client.apply_copy_acks(copy_acks, 200);
+        {
+            let mut writer = WriterRuntime {
+                client: &mut client,
+            };
+            let copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(copy_acks, 200);
+        }
         assert!(
             client.sending.is_empty(),
             "writer copy/apply phase must remove completed sliced datagram"
@@ -10798,7 +10851,11 @@ mod pmtu_tests {
             "writer tick must CopyRecvdData then ApplyRegularHLAck inside CheckSeningData"
         );
         assert!(
-            client.get_copy_acks().is_empty(),
+            WriterRuntime {
+                client: &mut client,
+            }
+            .get_copy_acks()
+            .is_empty(),
             "GetCopyAcks must clear reader-to-writer ACK queue before CheckSeningData"
         );
         assert!(
