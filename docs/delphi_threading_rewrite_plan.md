@@ -726,3 +726,21 @@ Still not done:
 - Main-side application of the queued `ReaderPingUpdate` still mutates
   `Client` fields from `run_inner`; those fields need shared/worker ownership
   before this becomes a standalone reader-owned active core.
+
+### 2026-05-22 - Phase 1 partial: named reader PMTU blocks
+
+Done:
+
+- Production reader `MPC_SizeTest` and `MPC_ProbeMTU` handling is now isolated
+  as `reader_on_new_size_test` and `reader_on_new_probe_mtu`.
+- Both blocks keep Delphi's machine effect: build the corresponding ACK payload,
+  toggle DontFragment around the send, then record receive side-effect without
+  entering a recv backlog.
+- Targeted tests passed:
+  `reader_handles_size_test_without_main_loop_tick`,
+  `reader_handles_probe_mtu_without_main_loop_tick`.
+
+Still not done:
+
+- Handshake/control reader branches are still inline in `spawn_reader`; those are
+  the next reader extraction target.

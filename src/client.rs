@@ -5444,52 +5444,35 @@ impl Client {
                             }
                         }
                         Command::SizeTest => {
-                            if let Some(ack) =
-                                Client::build_size_ack_payload(&reader_protocol, &payload)
-                            {
-                                set_dont_fragment_for_socket(&sock_clone, true);
-                                Client::reader_send_raw_packet(
-                                    &sock_clone,
-                                    server_addr,
-                                    &mac_ctx,
-                                    &mac_key,
-                                    Command::SizeAck,
-                                    client_id,
-                                    &ack,
-                                    mask_ver,
-                                    &total_sent,
-                                    debug_outgoing_blackhole,
-                                );
-                                set_dont_fragment_for_socket(&sock_clone, false);
-                            }
-                            Client::push_reader_recv_side_effect(
+                            Client::reader_on_new_size_test(
+                                &sock_clone,
+                                server_addr,
+                                &mac_ctx,
+                                &mac_key,
+                                client_id,
+                                mask_ver,
+                                &total_sent,
+                                debug_outgoing_blackhole,
+                                &reader_protocol,
                                 &pending_reader_decoded,
-                                hdr.cmd,
+                                &payload,
                                 n as u64,
                                 timestamp_ms,
                                 my_epoch,
                             );
                         }
                         Command::ProbeMTU => {
-                            if let Some(ack) = Client::build_probe_mtu_ack_payload(&payload) {
-                                set_dont_fragment_for_socket(&sock_clone, true);
-                                Client::reader_send_raw_packet(
-                                    &sock_clone,
-                                    server_addr,
-                                    &mac_ctx,
-                                    &mac_key,
-                                    Command::ProbeMTUAck,
-                                    client_id,
-                                    &ack,
-                                    mask_ver,
-                                    &total_sent,
-                                    debug_outgoing_blackhole,
-                                );
-                                set_dont_fragment_for_socket(&sock_clone, false);
-                            }
-                            Client::push_reader_recv_side_effect(
+                            Client::reader_on_new_probe_mtu(
+                                &sock_clone,
+                                server_addr,
+                                &mac_ctx,
+                                &mac_key,
+                                client_id,
+                                mask_ver,
+                                &total_sent,
+                                debug_outgoing_blackhole,
                                 &pending_reader_decoded,
-                                hdr.cmd,
+                                &payload,
                                 n as u64,
                                 timestamp_ms,
                                 my_epoch,
@@ -5556,6 +5539,91 @@ impl Client {
             error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
             self.force_disconnect = true;
         }
+    }
+
+    fn reader_on_new_size_test(
+        sock: &UdpSocket,
+        server_addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        client_id: u64,
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        if let Some(ack) = Self::build_size_ack_payload(reader_protocol, payload) {
+            // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
+            // `MPC_SizeAck` of requested size, then turn DontFragment off.
+            set_dont_fragment_for_socket(sock, true);
+            Self::reader_send_raw_packet(
+                sock,
+                server_addr,
+                mac_ctx,
+                mac_key,
+                Command::SizeAck,
+                client_id,
+                &ack,
+                mask_ver,
+                total_sent,
+                debug_outgoing_blackhole,
+            );
+            set_dont_fragment_for_socket(sock, false);
+        }
+        Self::push_reader_recv_side_effect(
+            pending_reader_decoded,
+            Command::SizeTest as u8,
+            recv_bytes,
+            timestamp_ms,
+            epoch,
+        );
+    }
+
+    fn reader_on_new_probe_mtu(
+        sock: &UdpSocket,
+        server_addr: Option<SocketAddr>,
+        mac_ctx: &moonproto_transport::MacContext,
+        mac_key: &MoonKey,
+        client_id: u64,
+        mask_ver: u8,
+        total_sent: &Arc<AtomicU64>,
+        debug_outgoing_blackhole: bool,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        if let Some(ack) = Self::build_probe_mtu_ack_payload(payload) {
+            // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
+            // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
+            set_dont_fragment_for_socket(sock, true);
+            Self::reader_send_raw_packet(
+                sock,
+                server_addr,
+                mac_ctx,
+                mac_key,
+                Command::ProbeMTUAck,
+                client_id,
+                &ack,
+                mask_ver,
+                total_sent,
+                debug_outgoing_blackhole,
+            );
+            set_dont_fragment_for_socket(sock, false);
+        }
+        Self::push_reader_recv_side_effect(
+            pending_reader_decoded,
+            Command::ProbeMTU as u8,
+            recv_bytes,
+            timestamp_ms,
+            epoch,
+        );
     }
 
     fn reader_on_new_sliced(
