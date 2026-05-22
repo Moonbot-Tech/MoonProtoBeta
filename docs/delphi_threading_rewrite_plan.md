@@ -1055,3 +1055,21 @@ Still not done:
   or delete them if redundant with service reader tests.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.
+
+### 2026-05-22 - Phase 1 partial: removed old test DataReadInt helper
+
+Done:
+
+- Removed test-only `Client::data_read_int` and `Client::decode_data_read_int_payload`.
+- API delivery tests now call the current `deliver_data_read_int_decoded`
+  delivery helper directly.
+- The compressed-garbage test uses the shared production decoder
+  `decode_data_read_int_payload_shared`, then the same delivery helper.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Test-only `handle_ping*` / `handle_handshake` paths remain.
+- Reader-side handshake/Ping writer-visible state placement remains unresolved
+  against strict Delphi `UDPRead`.

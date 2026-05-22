@@ -6717,11 +6717,6 @@ impl Client {
         }
     }
 
-    #[cfg(test)]
-    fn decode_data_read_int_payload(&self, raw_cmd: u8, data: &[u8]) -> Option<(u8, Vec<u8>)> {
-        Self::decode_data_read_int_payload_shared(&self.reader_protocol, raw_cmd, data)
-    }
-
     fn decode_data_read_int_payload_shared(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
         raw_cmd: u8,
@@ -6907,14 +6902,6 @@ impl Client {
         }
 
         out
-    }
-
-    #[cfg(test)]
-    fn data_read_int(&mut self, raw_cmd: u8, data: &[u8], sink: &mut DispatchSink<'_>) {
-        let Some((cmd, payload)) = self.decode_data_read_int_payload(raw_cmd, data) else {
-            return;
-        };
-        self.deliver_data_read_int_decoded(cmd, payload, false, false, sink);
     }
 
     fn deliver_data_read_int_decoded(
@@ -8662,7 +8649,13 @@ mod api_pending_dispatch_tests {
         let mut payloads = Vec::new();
         {
             let mut sink = DispatchSink::Buffer(&mut payloads);
-            client.data_read_int(Command::API as u8, &payload, &mut sink);
+            client.deliver_data_read_int_decoded(
+                Command::API as u8,
+                payload,
+                false,
+                false,
+                &mut sink,
+            );
         }
 
         let resp = rx.try_recv().expect("pending receiver must get response");
@@ -8930,7 +8923,13 @@ mod api_pending_dispatch_tests {
         });
         {
             let mut sink = DispatchSink::Callback(&mut cb);
-            client.data_read_int(Command::API as u8, &payload, &mut sink);
+            client.deliver_data_read_int_decoded(
+                Command::API as u8,
+                payload,
+                false,
+                false,
+                &mut sink,
+            );
         }
 
         assert!(rx.try_recv().is_ok(), "pending receiver must get response");
@@ -8942,14 +8941,16 @@ mod api_pending_dispatch_tests {
         let mut client = Client::new(dummy_cfg());
         let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
         let mut payloads = Vec::new();
+        let (cmd, payload) = Client::decode_data_read_int_payload_shared(
+            &client.reader_protocol,
+            Command::UI as u8 | COMPRESSED_FLAG,
+            &compressed_garbage,
+        )
+        .expect("failed compressed payload still has a decoded real command");
 
         {
             let mut sink = DispatchSink::Buffer(&mut payloads);
-            client.data_read_int(
-                Command::UI as u8 | COMPRESSED_FLAG,
-                &compressed_garbage,
-                &mut sink,
-            );
+            client.deliver_data_read_int_decoded(cmd, payload, false, false, &mut sink);
         }
 
         assert_eq!(payloads.len(), 1);
@@ -13081,7 +13082,13 @@ mod reconnect_timing_tests {
         let mut buffered = Vec::new();
         {
             let mut sink = DispatchSink::Buffer(&mut buffered);
-            client.data_read_int(Command::API as u8, &response_payload, &mut sink);
+            client.deliver_data_read_int_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
         }
         assert!(!client.indexes_fetch_in_flight);
         assert!(client.market_indexes_current_for_peer());
