@@ -364,6 +364,12 @@ impl Orders {
         self.current_snapshot_flag
     }
 
+    /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
+    pub(crate) fn begin_snapshot(&mut self) -> u8 {
+        self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
+        self.current_snapshot_flag
+    }
+
     /// Применить команду из канала MPC_Order. Возвращает событие для UI/каллера.
     ///
     /// Это **главная** функция модуля. Внутри:
@@ -382,8 +388,7 @@ impl Orders {
         match cmd {
             // --- Snapshot ---
             TradeCommand::AllStatuses(snap) => {
-                self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
-                let new_flag = self.current_snapshot_flag;
+                let new_flag = self.begin_snapshot();
                 for st in &snap.orders {
                     let order_uid = st.epoch_header.market.base.uid;
                     let entry = self

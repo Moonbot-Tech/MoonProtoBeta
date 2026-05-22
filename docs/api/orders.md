@@ -41,6 +41,10 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 
 `Orders::iter()` yields read-only `&Order` values. The dispatcher mutates the
 state internally as packets arrive.
+When a server `TAllStatuses` snapshot arrives, the dispatcher follows the Delphi
+order: it advances the snapshot flag, applies each contained `TOrderStatus`
+through the same order-command path as live updates, emits the per-order events,
+then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup.
 
 ## `Order`
 
@@ -117,6 +121,9 @@ pub enum OrderEvent {
     Ignored { uid: u64, reason: ApplyResult },
 }
 ```
+
+For `TAllStatuses`, expect zero or more per-order events before the final
+`Snapshot` marker.
 
 ## Time Correction
 

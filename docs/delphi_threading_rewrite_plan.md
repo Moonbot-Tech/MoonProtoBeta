@@ -1394,3 +1394,23 @@ Still not done:
 - The bodies now have stable names, but exact reverse-equivalence is still open
   per block: first priority is `Order` / `ProcessCommandOrder`, then `Strat`,
   `Balance`, `Trades`, `OrderBook`, `UI`, and API market/candles handling.
+
+### 2026-05-22 - Phase 1 partial: Order TAllStatuses calls ProcessCommandOrder
+
+Done:
+
+- Fixed the first `Order` reverse-equivalence mismatch found after naming the
+  blocks. Rust no longer applies `TAllStatuses` as a hidden batch inside
+  `Orders::apply`.
+- `client_new_data_order` now matches Delphi order for `TAllStatuses`: begin
+  snapshot / increment snapshot flag, call `process_command_order` for each
+  contained `TOrderStatus`, then emit the snapshot marker that drives
+  `CleanupMissingWorkers`-equivalent active actions.
+- API docs now state that a snapshot can emit per-order events before the final
+  `OrderEvent::Snapshot`.
+
+Still not done:
+
+- `process_command_order` still delegates most worker-state semantics to
+  `Orders::apply`; its internals need a separate reverse-equivalence pass
+  against Delphi `ProcessCommandOrder` line by line.

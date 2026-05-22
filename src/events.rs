@@ -38,7 +38,7 @@ use crate::commands::market::{
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::commands::trade::{TradeCommand, TradeCtx};
+use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
 use crate::commands::trades_stream::parse_trades_packet;
 use crate::commands::ui::UICommand;
 use crate::protocol::Command;
@@ -514,12 +514,22 @@ impl EventDispatcher {
 
     fn client_new_data_order(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         match TradeCommand::parse(payload) {
+            Some(TradeCommand::AllStatuses(snap)) => self.process_all_statuses(snap, out),
             Some(tc) => self.process_command_order(tc, out),
             None => out.push(Event::ParseFailed {
                 cmd: Command::Order,
                 len: payload.len(),
             }),
         }
+    }
+
+    /// Delphi equivalent: `ClientNewData(MPC_Order)` / `TAllStatuses` branch.
+    fn process_all_statuses(&mut self, snap: AllStatuses, out: &mut Vec<Event>) {
+        self.orders.begin_snapshot();
+        for status in snap.orders {
+            self.process_command_order(TradeCommand::OrderStatus(Box::new(status)), out);
+        }
+        out.push(Event::Order(OrderEvent::Snapshot));
     }
 
     /// Delphi equivalent: `TMoonProtoNetClient.ProcessCommandOrder`.
@@ -984,6 +994,34 @@ mod tests {
         out
     }
 
+    fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {
+        let mut out = Vec::new();
+        BaseCommandHeader {
+            cmd_id: 8,
+            ver: 3,
+            uid,
+        }
+        .write(&mut out);
+        out.extend_from_slice(&(orders.len() as i32).to_le_bytes());
+        for st in orders {
+            st.epoch_header.write(
+                &mut out,
+                st.epoch_header.market.currency,
+                st.epoch_header.market.platform,
+            );
+            st.buy_order.write_to(&mut out);
+            st.sell_order.write_to(&mut out);
+            st.stops.write_to(&mut out);
+            out.extend_from_slice(&st.strat_id.to_le_bytes());
+            out.push(st.is_short as u8);
+            out.extend_from_slice(&st.db_id.to_le_bytes());
+            out.push(st.from_cache as u8);
+            out.push(st.emulator_mode as u8);
+            out.push(st.immune_for_clicks as u8);
+        }
+        out
+    }
+
     fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {
         let mut out = Vec::with_capacity(49);
         out.push(cmd_id);
@@ -1124,6 +1162,25 @@ mod tests {
             Event::Order(_) => {}
             other => panic!("expected Order event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
+        let mut d = EventDispatcher::new();
+        let uid = 0x1234_5678_ABCD_EF01;
+        let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+        let payload = all_statuses_payload(0x55, &[status]);
+
+        let events = d.dispatch(Command::Order, &payload, 1000);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            Event::Order(OrderEvent::Created(found_uid)) if found_uid == uid
+        ));
+        assert!(matches!(events[1], Event::Order(OrderEvent::Snapshot)));
+        assert_eq!(d.orders.current_snapshot_flag(), 1);
+        assert!(d.orders.get(uid).is_some());
     }
 
     #[test]
