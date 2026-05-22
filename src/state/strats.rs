@@ -29,6 +29,8 @@ pub struct StrategyInfo {
     pub sell_price: f64,
     /// Checked-state (для UI start/stop).
     pub checked: bool,
+    /// Last server-acknowledged checked-state (`TStrategy.PrevChecked`).
+    pub prev_checked: bool,
     /// Folder path в дереве стратегий (из последнего TStratDelete / Snapshot).
     pub folder_path: String,
 }
@@ -41,6 +43,7 @@ impl StrategyInfo {
             last_date: 0,
             sell_price: 0.0,
             checked: false,
+            prev_checked: false,
             folder_path: String::new(),
         }
     }
@@ -86,6 +89,8 @@ pub enum StratEvent {
 pub struct StratsState {
     /// `strategy_id → StrategyInfo`. Удаляется при `TStratDelete`.
     pub by_id: HashMap<u64, StrategyInfo>,
+    /// Delphi `TStrategies` list order. `by_id` is only the lookup index.
+    order: Vec<u64>,
     /// `strategy_id → StrategySnapshot`. Полный decoded snapshot, которым владеет
     /// active library: из него строится ответ на `TStratSnapshotRequest` и его же
     /// читает пользовательский код через API.
@@ -101,6 +106,9 @@ impl StratsState {
     }
 
     fn get_or_insert(&mut self, strategy_id: u64) -> &mut StrategyInfo {
+        if !self.by_id.contains_key(&strategy_id) {
+            self.order.push(strategy_id);
+        }
         self.by_id
             .entry(strategy_id)
             .or_insert_with(|| StrategyInfo::new(strategy_id))
@@ -108,6 +116,7 @@ impl StratsState {
 
     fn clear_entries(&mut self) {
         self.by_id.clear();
+        self.order.clear();
         self.snapshots_by_id.clear();
     }
 
@@ -130,6 +139,7 @@ impl StratsState {
             }
             StratCommand::Delete(d) => {
                 self.by_id.remove(&d.strategy_id);
+                self.order.retain(|id| *id != d.strategy_id);
                 self.snapshots_by_id.remove(&d.strategy_id);
                 StratEvent::Deleted {
                     strategy_id: d.strategy_id,
@@ -147,21 +157,13 @@ impl StratsState {
             },
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
-                if !s.is_delta {
-                    // Полная замена — сначала пометить все existing как unchecked.
-                    for (_, info) in self.by_id.iter_mut() {
-                        info.checked = false;
-                    }
-                    for snapshot in self.snapshots_by_id.values_mut() {
-                        snapshot.checked = false;
-                    }
-                }
                 for it in &s.items {
                     if let Some(entry) = self.by_id.get_mut(&it.strategy_id) {
                         if entry.checked != it.checked {
-                            entry.checked = it.checked;
                             changed += 1;
                         }
+                        entry.checked = it.checked;
+                        entry.prev_checked = it.checked;
                     }
                     if let Some(snapshot) = self.snapshots_by_id.get_mut(&it.strategy_id) {
                         snapshot.checked = it.checked;
@@ -172,9 +174,18 @@ impl StratsState {
                     is_delta: s.is_delta,
                 }
             }
-            StratCommand::CheckedEcho(e) => StratEvent::CheckedEcho {
-                count: e.items.len(),
-            },
+            StratCommand::CheckedEcho(e) => {
+                for it in &e.items {
+                    if let Some(entry) = self.by_id.get_mut(&it.strategy_id) {
+                        if entry.checked == it.checked {
+                            entry.prev_checked = it.checked;
+                        }
+                    }
+                }
+                StratEvent::CheckedEcho {
+                    count: e.items.len(),
+                }
+            }
             StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
             StratCommand::Unknown { .. } => StratEvent::Ignored,
         }
@@ -213,6 +224,7 @@ impl StratsState {
             entry.last_date = s.last_date;
             entry.folder_path = s.path.clone();
             entry.checked = s.checked;
+            entry.prev_checked = s.checked;
         }
         self.snapshots_by_id.insert(s.strategy_id, s);
     }
@@ -231,6 +243,7 @@ impl StratsState {
             entry.last_date = s.last_date;
             entry.folder_path = s.path.clone();
             entry.checked = s.checked;
+            entry.prev_checked = s.checked;
         }
         self.snapshots_by_id.insert(s.strategy_id, s.clone());
         true
@@ -267,6 +280,36 @@ impl StratsState {
         }
     }
 
+    /// Delphi `TStrategy.Checked := value`: local UI mutation. It changes
+    /// checked state but leaves `PrevChecked` untouched until server sync/echo.
+    pub fn set_checked(&mut self, strategy_id: u64, checked: bool) -> bool {
+        let Some(entry) = self.by_id.get_mut(&strategy_id) else {
+            return false;
+        };
+        entry.checked = checked;
+        if let Some(snapshot) = self.snapshots_by_id.get_mut(&strategy_id) {
+            snapshot.checked = checked;
+        }
+        true
+    }
+
+    /// Delphi `TStrategies.GetCheckedDelta`.
+    pub fn checked_delta(&self) -> Vec<StratCheckedItem> {
+        let mut out = Vec::new();
+        for strategy_id in &self.order {
+            let Some(entry) = self.by_id.get(strategy_id) else {
+                continue;
+            };
+            if entry.checked != entry.prev_checked {
+                out.push(StratCheckedItem {
+                    strategy_id: *strategy_id,
+                    checked: entry.checked,
+                });
+            }
+        }
+        out
+    }
+
     pub fn get(&self, strategy_id: u64) -> Option<&StrategyInfo> {
         self.by_id.get(&strategy_id)
     }
@@ -276,12 +319,18 @@ impl StratsState {
     }
 
     pub fn snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
-        self.snapshots_by_id.values()
+        self.order
+            .iter()
+            .filter_map(|strategy_id| self.snapshots_by_id.get(strategy_id))
     }
 
     pub fn snapshot_vec(&self) -> Vec<StrategySnapshot> {
-        let mut out: Vec<_> = self.snapshots_by_id.values().cloned().collect();
-        out.sort_by_key(|s| s.strategy_id);
+        let mut out = Vec::new();
+        for strategy_id in &self.order {
+            if let Some(snapshot) = self.snapshots_by_id.get(strategy_id) {
+                out.push(snapshot.clone());
+            }
+        }
         out
     }
 
@@ -306,7 +355,9 @@ impl StratsState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::strat::{StratCheckedSync, StratDelete, StratSellPriceUpdate};
+    use crate::commands::strat::{
+        StratCheckedEcho, StratCheckedSync, StratDelete, StratSellPriceUpdate,
+    };
     use crate::commands::strategy_serializer::FieldValue;
 
     #[test]
@@ -385,8 +436,10 @@ mod tests {
             }
         ));
         assert!(s.get(1).unwrap().checked);
+        assert!(s.get(1).unwrap().prev_checked);
         // id=2 не трогался.
         assert!(!s.get(2).unwrap().checked);
+        assert!(!s.get(2).unwrap().prev_checked);
     }
 
     #[test]
@@ -447,6 +500,7 @@ mod tests {
         assert_eq!(info100.last_date, 1737000000000);
         assert_eq!(info100.folder_path, "F/A");
         assert!(info100.checked);
+        assert!(info100.prev_checked);
         assert_eq!(
             s.snapshot(100).and_then(|snap| snap.fields.get("Name")),
             Some(&FieldValue::String("Strat-A".to_string()))
@@ -455,6 +509,7 @@ mod tests {
         let info200 = s.get(200).unwrap();
         assert_eq!(info200.folder_path, "F/B");
         assert!(!info200.checked);
+        assert!(!info200.prev_checked);
 
         // Поля стратегий доступны через возвращённый batch
         assert_eq!(
@@ -512,18 +567,21 @@ mod tests {
     }
 
     #[test]
-    fn checked_sync_full_resets_others() {
+    fn checked_sync_full_only_updates_items_like_delphi() {
         let mut s = StratsState::new();
         // Изначально id=1 и id=2 checked.
         s.upsert(1, 0, "".into());
         s.upsert(2, 0, "".into());
         s.by_id.get_mut(&1).unwrap().checked = true;
+        s.by_id.get_mut(&1).unwrap().prev_checked = true;
         s.by_id.get_mut(&2).unwrap().checked = true;
-        // Full sync — только id=1 checked. id=2 должен стать unchecked.
+        s.by_id.get_mut(&2).unwrap().prev_checked = true;
+        // Delphi receive path does not clear omitted strategies. Full packets
+        // are full because their constructor includes every strategy.
         let cmd = StratCommand::CheckedSync(StratCheckedSync {
             items: vec![StratCheckedItem {
                 strategy_id: 1,
-                checked: true,
+                checked: false,
             }],
             is_delta: false,
         });
@@ -535,8 +593,10 @@ mod tests {
                 is_delta: false
             }
         ));
-        assert!(s.get(1).unwrap().checked);
-        assert!(!s.get(2).unwrap().checked);
+        assert!(!s.get(1).unwrap().checked);
+        assert!(!s.get(1).unwrap().prev_checked);
+        assert!(s.get(2).unwrap().checked);
+        assert!(s.get(2).unwrap().prev_checked);
     }
 
     #[test]
@@ -602,6 +662,88 @@ mod tests {
         assert_eq!(info.last_date, 200);
         assert_eq!(info.folder_path, "NewPath");
         assert!(info.checked);
+        assert!(info.prev_checked);
+    }
+
+    #[test]
+    fn local_checked_delta_waits_for_matching_echo() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+
+        let mut fields = HashMap::new();
+        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        let mut s = StratsState::new();
+        s.upsert_from_snapshot(&StrategySnapshot {
+            strategy_id: 100,
+            strategy_ver: 1,
+            last_date: 1,
+            checked: true,
+            kind: 1,
+            path: "P".to_string(),
+            fields,
+        });
+        assert!(s.checked_delta().is_empty());
+
+        assert!(s.set_checked(100, false));
+        assert_eq!(
+            s.checked_delta(),
+            vec![StratCheckedItem {
+                strategy_id: 100,
+                checked: false
+            }]
+        );
+
+        let stale_echo = StratCommand::CheckedEcho(StratCheckedEcho {
+            items: vec![StratCheckedItem {
+                strategy_id: 100,
+                checked: true,
+            }],
+        });
+        assert!(matches!(
+            s.apply(stale_echo),
+            StratEvent::CheckedEcho { count: 1 }
+        ));
+        assert_eq!(
+            s.checked_delta(),
+            vec![StratCheckedItem {
+                strategy_id: 100,
+                checked: false
+            }]
+        );
+
+        let matching_echo = StratCommand::CheckedEcho(StratCheckedEcho {
+            items: vec![StratCheckedItem {
+                strategy_id: 100,
+                checked: false,
+            }],
+        });
+        s.apply(matching_echo);
+        assert!(s.checked_delta().is_empty());
+        assert!(!s.get(100).unwrap().prev_checked);
+    }
+
+    #[test]
+    fn snapshot_vec_preserves_delphi_list_order() {
+        use crate::commands::strategy_serializer::StrategySnapshot;
+
+        let mut s = StratsState::new();
+        for strategy_id in [30, 10, 20] {
+            s.upsert_local_snapshot(StrategySnapshot {
+                strategy_id,
+                strategy_ver: 1,
+                last_date: strategy_id,
+                checked: false,
+                kind: 1,
+                path: String::new(),
+                fields: HashMap::new(),
+            });
+        }
+
+        let ids: Vec<u64> = s
+            .snapshot_vec()
+            .into_iter()
+            .map(|snapshot| snapshot.strategy_id)
+            .collect();
+        assert_eq!(ids, vec![30, 10, 20]);
     }
 
     #[test]

@@ -60,7 +60,6 @@ Prefer `Client` methods when the caller owns the client thread:
 client.ui_settings_request();
 client.ui_send_settings(&settings);
 client.ui_strat_start_stop(true);
-client.ui_strat_start_stop_v2(true, &checked_items);
 client.ui_mm_subscribe(true);
 client.ui_update_version("", true);            // release update button
 client.ui_update_version("MoonBot-7", false);  // test/beta version name
@@ -71,6 +70,16 @@ client.ui_reset_profit(kind);
 client.ui_arb_activate_notify(arb_valid_until);
 client.ui_switch_dex("Main");
 client.ui_switch_spot(0);
+```
+
+For Delphi `TStratStartStopCommandV2`, normal active-library code should send
+through `EventDispatcher`, not by hand-building `checked_items`. The dispatcher
+owns strategy checked-state and builds `Items` as Delphi does:
+`CheckedDirect != PrevChecked`.
+
+```rust
+dispatcher.set_strategy_checked(strategy_id, true);
+dispatcher.ui_strat_start_stop_v2(&client, true);
 ```
 
 When the UI sends commands from another thread while the client loop is running,

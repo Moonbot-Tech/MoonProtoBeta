@@ -2027,7 +2027,11 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
-    /// Send `TStratStartStopCommandV2` with checked strategy items.
+    /// Send `TStratStartStopCommandV2` with an explicit checked delta.
+    ///
+    /// Regular active-library callers should prefer
+    /// `EventDispatcher::ui_strat_start_stop_v2`, which builds the delta from
+    /// owned strategy state like Delphi `TStratStartStopCommandV2.Create`.
     pub fn ui_strat_start_stop_v2(
         &self,
         is_start: bool,
@@ -2241,7 +2245,11 @@ impl ClientSender {
         );
     }
 
-    /// Send `TStratCheckedSync`.
+    /// Send `TStratCheckedSync` with explicit items.
+    ///
+    /// Regular active-library callers should prefer
+    /// `EventDispatcher::send_strategy_checked_delta`, which builds
+    /// `TStrategies.GetCheckedDelta` from owned strategy state.
     pub fn strat_checked_sync(
         &self,
         items: &[crate::commands::strat::StratCheckedItem],
@@ -2251,7 +2259,10 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
     }
 
-    /// Send `TStratCheckedEcho`.
+    /// Send `TStratCheckedEcho` with explicit items.
+    ///
+    /// This is normally a server response path; public use is for protocol tools
+    /// that already own the exact Delphi `Items` array.
     pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
         let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
@@ -6584,8 +6595,12 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
-    /// Send `TStratStartStopCommandV2` (UI CmdId=4, High) with checked strategy
-    /// items.
+    /// Send `TStratStartStopCommandV2` (UI CmdId=4, High) with an explicit
+    /// checked delta.
+    ///
+    /// Regular active-library callers should prefer
+    /// `EventDispatcher::ui_strat_start_stop_v2`, which builds the delta from
+    /// owned strategy state like Delphi `TStratStartStopCommandV2.Create`.
     pub fn ui_strat_start_stop_v2(
         &self,
         is_start: bool,
@@ -6812,10 +6827,13 @@ impl Client {
         );
     }
 
-    /// Send `TStratCheckedSync` (Strat CmdId=5, Sliced) for strategy checked
-    /// state.
+    /// Send `TStratCheckedSync` (Strat CmdId=5, Sliced) with explicit checked
+    /// items.
     ///
     /// `is_delta = false` sends a full list; `true` sends a delta.
+    /// Regular active-library callers should prefer
+    /// `EventDispatcher::send_strategy_checked_delta`, which builds Delphi
+    /// `TStrategies.GetCheckedDelta` from owned strategy state.
     pub fn strat_checked_sync(
         &self,
         items: &[crate::commands::strat::StratCheckedItem],
@@ -6825,7 +6843,10 @@ impl Client {
         self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
     }
 
-    /// Send `TStratCheckedEcho` (Strat CmdId=6, High).
+    /// Send `TStratCheckedEcho` (Strat CmdId=6, High) with explicit items.
+    ///
+    /// This is normally a server response path; public use is for protocol tools
+    /// that already own the exact Delphi `Items` array.
     pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
         let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);

@@ -302,6 +302,15 @@ impl EventDispatcher {
         self.strats.upsert_local_snapshot(strategy);
     }
 
+    /// Change one local strategy checked flag like Delphi `TStrategy.Checked`.
+    ///
+    /// This does not mark the change acknowledged. The delta stays pending
+    /// until a matching `TStratCheckedEcho` or `TStratCheckedSync` arrives from
+    /// the server.
+    pub fn set_strategy_checked(&mut self, strategy_id: u64, checked: bool) -> bool {
+        self.strats.set_checked(strategy_id, checked)
+    }
+
     /// Clear the owned strategy list. The next server request will receive an
     /// empty `TStratSnapshot` unless a provider override supplies one.
     pub fn clear_local_strategies(&mut self) {
@@ -318,9 +327,39 @@ impl EventDispatcher {
         self.strats.snapshots()
     }
 
-    /// Clone the current strategy snapshot list in deterministic id order.
+    /// Clone the current strategy snapshot list in Delphi list order.
     pub fn strategy_snapshot_vec(&self) -> Vec<StrategySnapshot> {
         self.strats.snapshot_vec()
+    }
+
+    /// Delphi `TStrategies.GetCheckedDelta` over the active-library strategy
+    /// list.
+    pub fn strategy_checked_delta(&self) -> Vec<crate::commands::strat::StratCheckedItem> {
+        self.strats.checked_delta()
+    }
+
+    /// Send `TStratCheckedSync.Create(true)` if Delphi checked delta is non-empty.
+    ///
+    /// Returns the number of delta items queued. The local `PrevChecked` is not
+    /// advanced here; Delphi advances it only after server echo/sync.
+    pub fn send_strategy_checked_delta(&self, client: &crate::client::Client) -> usize {
+        let items = self.strats.checked_delta();
+        if items.is_empty() {
+            return 0;
+        }
+        client.strat_checked_sync(&items, true);
+        items.len()
+    }
+
+    /// Send Delphi `TStratStartStopCommandV2.Create(is_start)`.
+    ///
+    /// The command is always queued after the client's Init gate is open, even
+    /// when the checked delta is empty, because the same packet also carries the
+    /// start/stop action.
+    pub fn ui_strat_start_stop_v2(&self, client: &crate::client::Client, is_start: bool) -> usize {
+        let items = self.strats.checked_delta();
+        client.ui_strat_start_stop_v2(is_start, &items);
+        items.len()
     }
 
     /// Read-only UI/settings state.
@@ -2290,6 +2329,64 @@ mod tests {
             }
         }
         assert!(found, "local strategy snapshot must be sent");
+    }
+
+    #[test]
+    fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
+        use crate::commands::strategy_serializer::StrategySnapshot;
+        use std::collections::HashMap;
+
+        let strategies = vec![
+            StrategySnapshot {
+                strategy_id: 30,
+                strategy_ver: 1,
+                last_date: 1,
+                checked: false,
+                kind: 1,
+                path: String::new(),
+                fields: HashMap::new(),
+            },
+            StrategySnapshot {
+                strategy_id: 10,
+                strategy_ver: 1,
+                last_date: 2,
+                checked: true,
+                kind: 1,
+                path: String::new(),
+                fields: HashMap::new(),
+            },
+        ];
+        let mut d = EventDispatcher::new();
+        d.set_local_strategies(&strategies);
+        assert!(d.set_strategy_checked(30, true));
+        assert!(d.set_strategy_checked(10, false));
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        assert_eq!(d.ui_strat_start_stop_v2(&client, true), 2);
+
+        let sent = drain_client_send_items(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].cmd, Command::UI as u8);
+        match crate::commands::ui::UICommand::parse(&sent[0].data).unwrap() {
+            crate::commands::ui::UICommand::StratStartStopV2(cmd) => {
+                assert!(cmd.is_start);
+                assert_eq!(
+                    cmd.items,
+                    vec![
+                        crate::commands::strat::StratCheckedItem {
+                            strategy_id: 30,
+                            checked: true
+                        },
+                        crate::commands::strat::StratCheckedItem {
+                            strategy_id: 10,
+                            checked: false
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected StratStartStopV2, got {other:?}"),
+        }
     }
 
     #[test]

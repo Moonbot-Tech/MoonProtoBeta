@@ -64,13 +64,16 @@ pub struct StrategyInfo {
     pub last_date: u64,
     pub sell_price: f64,
     pub checked: bool,
+    pub prev_checked: bool,
     pub folder_path: String,
 }
 ```
 
 `StrategyInfo` is a lightweight UI/index state. Full `TStrategy` fields are not
 stored there; they are stored as `StrategySnapshot` values owned by the
-dispatcher.
+dispatcher. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
+`PrevChecked`. Checked deltas are pending while these fields differ and become
+acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
 
 ```rust
 use moonproto::commands::strategy_serializer::StrategySnapshot;
@@ -120,8 +123,6 @@ Prefer `Client` wrappers when the caller owns the client thread:
 client.strat_snapshot_request();
 client.strat_sell_price_update(strategy_id, sell_price);
 client.strat_delete(strategy_id, folder_path);
-client.strat_checked_sync(&items, true);
-client.strat_checked_echo(&items);
 ```
 
 Use `ClientSender` for the same fire-and-forget strategy commands from UI or
@@ -131,7 +132,6 @@ worker threads while `run_with_dispatcher` is active:
 let sender = client.sender();
 std::thread::spawn(move || {
     sender.strat_sell_price_update(strategy_id, sell_price);
-    sender.strat_checked_sync(&items, true);
 });
 ```
 
@@ -145,6 +145,32 @@ let strategies: Vec<StrategySnapshot> = load_current_strategies();
 dispatcher.set_local_strategies(&strategies);
 connect_and_init(&mut client, &mut dispatcher, connect_cfg)?;
 ```
+
+Checked-state sends should also go through the active-library state. This
+matches Delphi `TStrategies.GetCheckedDelta`: local UI changes update
+`checked`, leave `prev_checked` untouched, and the outgoing delta contains only
+items where `checked != prev_checked`.
+
+```rust
+dispatcher.set_strategy_checked(strategy_id, true);
+let pending = dispatcher.strategy_checked_delta();
+let sent_count = dispatcher.send_strategy_checked_delta(&client);
+let start_delta_count = dispatcher.ui_strat_start_stop_v2(&client, true);
+```
+
+`send_strategy_checked_delta` sends `TStratCheckedSync` only when the delta is
+non-empty. `ui_strat_start_stop_v2` always sends the UI start/stop command after
+the client's Init gate is open; the checked delta may be empty because the same
+wire packet also carries the start/stop action. Both helpers keep
+`prev_checked` unchanged until the server confirms with `TStratCheckedEcho` or
+`TStratCheckedSync`.
+
+The explicit `client.strat_checked_sync(&items, true)`,
+`client.strat_checked_echo(&items)`, and
+`client.ui_strat_start_stop_v2(is_start, &items)` methods remain available for
+protocol tools that already have the exact Delphi `Items` array. Regular
+applications should prefer the dispatcher helpers so the library-owned strategy
+state stays authoritative.
 
 The lower-level typed batch API remains available for explicit strategy sends.
 It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
