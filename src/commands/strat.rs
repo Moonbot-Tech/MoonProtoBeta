@@ -285,10 +285,12 @@ pub fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> V
 
 /// `TStratCheckedSync` (CmdId=5).
 pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 2 + items.len() * 9 + 1);
+    let count = items.len() as u16;
+    let count_usize = usize::from(count);
+    let mut out = Vec::with_capacity(11 + 2 + count_usize * 9 + 1);
     write_header(&mut out, CMD_CHECKED_SYNC, uid);
-    out.extend_from_slice(&(items.len() as u16).to_le_bytes());
-    for it in items {
+    out.extend_from_slice(&count.to_le_bytes());
+    for it in items.iter().take(count_usize) {
         out.extend_from_slice(&it.strategy_id.to_le_bytes());
         out.push(it.checked as u8);
     }
@@ -298,10 +300,12 @@ pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) 
 
 /// `TStratCheckedEcho` (CmdId=6).
 pub fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(11 + 2 + items.len() * 9);
+    let count = items.len() as u16;
+    let count_usize = usize::from(count);
+    let mut out = Vec::with_capacity(11 + 2 + count_usize * 9);
     write_header(&mut out, CMD_CHECKED_ECHO, uid);
-    out.extend_from_slice(&(items.len() as u16).to_le_bytes());
-    for it in items {
+    out.extend_from_slice(&count.to_le_bytes());
+    for it in items.iter().take(count_usize) {
         out.extend_from_slice(&it.strategy_id.to_le_bytes());
         out.push(it.checked as u8);
     }
@@ -364,6 +368,37 @@ mod tests {
             StratCommand::CheckedSync(s) => {
                 assert_eq!(s.items, items);
                 assert!(s.is_delta);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn checked_word_count_builders_write_only_declared_wrapped_count_like_delphi() {
+        let items: Vec<_> = (0..65_537u64)
+            .map(|i| StratCheckedItem {
+                strategy_id: i + 500,
+                checked: i % 2 == 0,
+            })
+            .collect();
+
+        let payload = build_checked_sync(7, &items, false);
+        assert_eq!(payload.len(), 11 + 2 + 9 + 1);
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::CheckedSync(s) => {
+                assert_eq!(s.items, vec![items[0]]);
+                assert!(!s.is_delta);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let payload = build_checked_echo(8, &items);
+        assert_eq!(payload.len(), 11 + 2 + 9);
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::CheckedEcho(e) => {
+                assert_eq!(e.items, vec![items[0]]);
             }
             _ => panic!("wrong variant"),
         }

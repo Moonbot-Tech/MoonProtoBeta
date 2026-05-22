@@ -209,6 +209,10 @@ protocol tools that already have the exact Delphi `Items` array. Regular
 applications should prefer the dispatcher helpers so the library-owned strategy
 state stays authoritative.
 
+Checked-item arrays are serialized with Delphi `Word Count` semantics: the
+outgoing count is the low 16 bits, and only that declared number of items is
+written to the packet body.
+
 The lower-level typed batch API remains available for explicit strategy sends.
 It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
 sends the full CmdId=2 `TStratSnapshot` wire body:
