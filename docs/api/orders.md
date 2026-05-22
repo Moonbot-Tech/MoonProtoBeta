@@ -96,6 +96,7 @@ pub struct Order {
     pub bulk_replace_sell: bool,
     pub trace_points: VecDeque<OrderTracePoint>,
     pub job_is_done: bool,
+    pub cancel_request: bool,
     pub server_forced_remove: bool,
     pub sell_reason_code: u8,
 }
@@ -113,6 +114,9 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
 `UpdateData.MeanPrice` without applying the rest of `UpdateData` to
 `buy_order`, matching Delphi's pending visual-order branch.
+`TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately;
+`job_is_done` is reserved for terminal statuses, matching Delphi's split between
+`ProcessCommandOrder` and the later virtual-worker exit.
 
 ## Status Values
 

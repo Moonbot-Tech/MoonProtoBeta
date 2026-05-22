@@ -1604,6 +1604,23 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: OrderNotFound cancellation flags
+
+Done:
+
+- Fixed `TOrderNotFound` state semantics. Delphi `ProcessCommandOrder` sets
+  `Worker.CancellRequest := true` and `Worker.ServerForcedRemove := true`, but
+  does not set `JobIsDone` there; the virtual worker exits/removes itself later.
+- Rust now exposes `Order::cancel_request`, sets it together with
+  `server_forced_remove`, and leaves `job_is_done` unchanged for
+  `TOrderNotFound` until deferred removal removes the entry.
+- Updated the unit test to assert the exact immediate flags.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

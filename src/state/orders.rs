@@ -201,6 +201,8 @@ pub struct Order {
     pub trace_points: VecDeque<OrderTracePoint>,
     /// True если ордер терминален и ожидает deferred removal.
     pub job_is_done: bool,
+    /// Delphi `CancellRequest`: server requested worker cancellation.
+    pub cancel_request: bool,
     /// Server-forced removal (TOrderNotFound пришёл).
     pub server_forced_remove: bool,
     /// Reason code последней продажи.
@@ -264,6 +266,7 @@ impl Order {
             bulk_replace_sell: false,
             trace_points: VecDeque::new(),
             job_is_done: status_cmd.epoch_header.status.is_terminal(),
+            cancel_request: false,
             server_forced_remove: false,
             sell_reason_code: 0,
             server_latest_epoch: [0; 10],
@@ -684,7 +687,7 @@ impl Orders {
                 let uid = h.market.base.uid;
                 let found = if let Some(entry) = self.map.get_mut(&uid) {
                     entry.server_forced_remove = true;
-                    entry.job_is_done = true;
+                    entry.cancel_request = true;
                     true
                 } else {
                     false
@@ -1165,7 +1168,11 @@ mod tests {
         assert!(matches!(ev, OrderEvent::Updated(42)));
         let order = orders.get(42).unwrap();
         assert!(order.server_forced_remove);
-        assert!(order.job_is_done);
+        assert!(order.cancel_request);
+        assert!(
+            !order.job_is_done,
+            "Delphi TOrderNotFound sets CancellRequest, not JobIsDone, inside ProcessCommandOrder"
+        );
         assert_eq!(orders.drain_pending_removals(), vec![42]);
         assert!(orders.get(42).is_none());
     }
