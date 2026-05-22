@@ -744,3 +744,21 @@ Still not done:
 
 - Handshake/control reader branches are still inline in `spawn_reader`; those are
   the next reader extraction target.
+
+### 2026-05-22 - Phase 1 partial: named reader handshake-control block
+
+Done:
+
+- Production reader handling for `MPC_WrongHello`, `MPC_WantNewHello`, and
+  `MPC_NeedHelloAgain` is now isolated as `reader_on_handshake_control`.
+- The block keeps Delphi's machine effect: accepted packet side-effect plus the
+  corresponding handshake state update, without generic recv backlog delivery.
+- Targeted tests passed:
+  `reader_handles_wrong_hello_without_recv_event_backlog`,
+  `reader_handles_want_new_hello_without_recv_event_backlog`,
+  `reader_handles_need_hello_again_without_recv_event_backlog`.
+
+Still not done:
+
+- `MPC_WhoAreYou` and `MPC_Fine` still need named reader blocks because they
+  include decrypt/key side effects and duplicate `ImFriend` send timing.

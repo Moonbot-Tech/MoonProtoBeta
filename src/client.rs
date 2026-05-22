@@ -5337,19 +5337,13 @@ impl Client {
                         Command::WrongHello
                         | Command::WantNewHello
                         | Command::NeedHelloAgain => {
-                            pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
-                                cmd: hdr.cmd,
-                                payload: None,
-                                api_pending_consumed: false,
-                                candles_chunk_consumed: false,
-                                recv_bytes: n as u64,
+                            Client::reader_on_handshake_control(
+                                &pending_reader_decoded,
+                                cmd,
+                                n as u64,
                                 timestamp_ms,
-                                epoch: my_epoch,
-                                apply_recv_effects: true,
-                                sliced_stats: None,
-                                ping_update: None,
-                                handshake_update: Some(Client::simple_handshake_update(cmd)),
-                            });
+                                my_epoch,
+                            );
                         }
                         Command::WhoAreYou => {
                             if let Some(hello) =
@@ -5624,6 +5618,31 @@ impl Client {
             timestamp_ms,
             epoch,
         );
+    }
+
+    fn reader_on_handshake_control(
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        cmd: Command,
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: cmd as u8,
+                payload: None,
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes,
+                timestamp_ms,
+                epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: Some(Self::simple_handshake_update(cmd)),
+            });
     }
 
     fn reader_on_new_sliced(
