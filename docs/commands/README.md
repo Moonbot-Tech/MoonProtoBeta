@@ -34,6 +34,10 @@ All strings in the protocol use UTF-8 with a 2-byte LE length prefix:
 Length (2 bytes, u16 LE) + UTF-8 bytes (no null terminator)
 ```
 
+Delphi stores the length in a `Word` and then writes exactly that declared
+number of bytes. Overlong strings therefore wrap to the low 16-bit length and
+only those leading bytes are present in the packet body.
+
 ## Files
 
 - [trades_stream.md](trades_stream.md) — Real-time trade feed format

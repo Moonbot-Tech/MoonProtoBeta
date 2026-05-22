@@ -54,6 +54,27 @@ pub fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
 /// Write a UTF-8 string with 2-byte LE length prefix.
 pub fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
-    buf.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-    buf.extend_from_slice(bytes);
+    let len = bytes.len() as u16;
+    let len_usize = usize::from(len);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(&bytes[..len_usize]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_string_writes_only_declared_wrapped_len_like_delphi() {
+        let s = "a".repeat(65_537);
+        let mut buf = Vec::new();
+        write_string(&mut buf, &s);
+
+        assert_eq!(&buf[..2], &1u16.to_le_bytes());
+        assert_eq!(buf.len(), 2 + 1);
+
+        let mut pos = 0;
+        assert_eq!(read_string(&buf, &mut pos).unwrap(), "a");
+        assert_eq!(pos, buf.len());
+    }
 }
