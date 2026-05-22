@@ -1530,6 +1530,27 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` / virtual-worker side effects.
 
+### 2026-05-22 - Phase 1 partial: pending OS_None update data
+
+Done:
+
+- Fixed the remaining `TOrderStatusUpdate(Status=OS_None)` body semantics.
+  Delphi does not apply `UpdateData` to `pBuyOrder` for this status; if
+  `IsPending` and `vOrder <> nil`, it sets `vOrder.BuyCondPrice :=
+  cmd.UpdateData.MeanPrice`.
+- Rust now exposes `Order::pending_buy_cond_price` as the read-model analogue of
+  Delphi `vOrder.BuyCondPrice`. Full `TOrderStatus(Status=None)` seeds it from
+  `BuyOrder.MeanPrice`; `TOrderStatusUpdate(Status=None)` updates it from
+  `UpdateData.MeanPrice` without mutating `buy_order`; non-`None` statuses clear
+  it.
+- Added a unit test proving the pending-price update and non-application of the
+  rest of `UpdateData`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / virtual-worker side effects.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

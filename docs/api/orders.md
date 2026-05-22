@@ -90,6 +90,7 @@ pub struct Order {
     pub from_cache: bool,
     pub emulator_mode: bool,
     pub immune_for_clicks: bool,
+    pub pending_buy_cond_price: Option<f64>,
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     pub trace_points: VecDeque<OrderTracePoint>,
@@ -104,6 +105,10 @@ Use `order.sell_reason()` to convert `sell_reason_code` into `SellReason`.
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in
 `TOrderCompact` wire data.
+`pending_buy_cond_price` mirrors Delphi `vOrder.BuyCondPrice` for pending
+`OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
+`UpdateData.MeanPrice` without applying the rest of `UpdateData` to
+`buy_order`, matching Delphi's pending visual-order branch.
 
 ## Status Values
 

@@ -192,6 +192,8 @@ pub struct Order {
     pub emulator_mode: bool,
     /// True если UI клики должны игнорироваться (server-forced).
     pub immune_for_clicks: bool,
+    /// Delphi `vOrder.BuyCondPrice` for pending `OS_None` orders.
+    pub pending_buy_cond_price: Option<f64>,
     /// Тип ордера, на котором установлен BulkReplace.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
@@ -257,6 +259,7 @@ impl Order {
             from_cache: status_cmd.from_cache,
             emulator_mode: status_cmd.emulator_mode,
             immune_for_clicks: status_cmd.immune_for_clicks,
+            pending_buy_cond_price: None,
             bulk_replace_buy: false,
             bulk_replace_sell: false,
             trace_points: VecDeque::new(),
@@ -489,6 +492,11 @@ impl Orders {
                         target.stop_flag = data.stop_flag;
                     }
 
+                    if up.epoch_header.status == OrderWorkerStatus::None {
+                        entry.pending_buy_cond_price = Some(up.update_data.mean_price);
+                    } else {
+                        entry.pending_buy_cond_price = None;
+                    }
                     entry.status = up.epoch_header.status;
                     entry.sell_reason_code = up.sell_reason_code;
 
@@ -773,6 +781,11 @@ impl Orders {
         entry.emulator_mode = st.emulator_mode;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
+        if st.epoch_header.status == OrderWorkerStatus::None {
+            entry.pending_buy_cond_price = Some(entry.buy_order.mean_price);
+        } else {
+            entry.pending_buy_cond_price = None;
+        }
 
         if was_status_changed {
             entry.buy_price = entry.buy_order.actual_price;
@@ -1336,6 +1349,53 @@ mod tests {
         assert_eq!(sell_mean, 0.0);
         assert_eq!(order.sell_reason_code, 14);
         assert!(order.job_is_done);
+    }
+
+    #[test]
+    fn pending_status_update_tracks_vorder_buy_cond_price_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::None, 10);
+        status.buy_order.mean_price = 10.0;
+        orders.apply(order_status_cmd(status));
+
+        assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, Some(10.0));
+        let initial_buy_mean = orders.get(1).unwrap().buy_order.mean_price;
+        assert_eq!(initial_buy_mean, 10.0);
+
+        let pending_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::None),
+            update_data: OrderUpdateData {
+                mean_price: 11.0,
+                actual_price: 999.0,
+                ..Default::default()
+            },
+            sell_reason_code: 0,
+        };
+        let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(pending_update));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        let buy_mean = order.buy_order.mean_price;
+        let buy_actual = order.buy_order.actual_price;
+        assert_eq!(order.pending_buy_cond_price, Some(11.0));
+        assert_eq!(
+            buy_mean, 10.0,
+            "OS_None update changes vOrder.BuyCondPrice, not pBuyOrder"
+        );
+        assert_eq!(buy_actual, 0.0);
+
+        let buy_set_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::BuySet),
+            update_data: OrderUpdateData {
+                mean_price: 12.0,
+                actual_price: 12.0,
+                ..Default::default()
+            },
+            sell_reason_code: 0,
+        };
+        orders.apply(TradeCommand::OrderStatusUpdate(buy_set_update));
+        assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, None);
     }
 
     #[test]
