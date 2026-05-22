@@ -48,6 +48,10 @@ This avoids waiting for a second dispatcher drain, but single-threaded callers
 still need `run_until_response` because the current writer/send loop is pumped
 there.
 
+Chunked `RequestCandlesData` uses its own pending registry: registered chunks
+are also consumed and merged from reader-side DataReadInt, and the final
+`MergedCandles` receiver is signalled when the last chunk arrives.
+
 For custom raw payloads with caller-owned timeout cleanup, call
 `Client::request_engine_response`. Raw `api_*` receivers keep their pending slot
 until a matching response arrives, a reconnect clears the session, or the same

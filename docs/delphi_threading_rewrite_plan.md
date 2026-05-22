@@ -630,7 +630,11 @@ Done:
 - Large unregistered Engine API packets are not decompressed in reader just to
   discover that no `ApiPending` waiter exists; the reader does a cheap UID peek
   first.
-- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 420 passed.
+- Registered `RequestCandlesData` chunks now use the same reader-side direction:
+  reader peeks UID/method, consumes chunks only when a pending candle aggregator
+  exists, signals `MergedCandles` on the final chunk, and prevents consumed
+  chunks from being re-delivered to raw callbacks or `EventDispatcher`.
+- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 422 passed.
 
 Still not done:
 

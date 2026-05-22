@@ -271,6 +271,10 @@ registered again.
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Use `request_candles_data` for the common one-shot flow:
 
+Registered candle chunks are aggregated from the reader-side DataReadInt path
+when the reader thread is active; consumed chunks do not produce raw callback or
+dispatcher events.
+
 ```rust
 let merged = client.request_candles_data(
     &mut dispatcher,

@@ -454,6 +454,7 @@ pub(crate) struct ReaderDecodedMsg {
     cmd: u8,
     payload: Option<Vec<u8>>,
     api_pending_consumed: bool,
+    candles_chunk_consumed: bool,
     recv_bytes: u64,
     timestamp_ms: i64,
     epoch: u32,
@@ -2377,7 +2378,7 @@ pub struct Client {
     ///
     /// **Внутренняя работа** — потребитель API не знает об этом поле, видит только
     /// `mpsc::Receiver<MergedCandles>`.
-    pending_candles: HashMap<u64, PartialCandles>,
+    pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
 
     /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
     /// Используется в `handle_handshake` и `handle_ping` для детекции server restart:
@@ -2611,7 +2612,7 @@ impl Client {
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
             domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
-            pending_candles: HashMap::new(),
+            pending_candles: Arc::new(Mutex::new(HashMap::new())),
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
             update_markets_after_indexes: false,
@@ -3363,7 +3364,7 @@ impl Client {
         };
         // Замещение существующего slot'а допустимо — старый sender дропнется, его
         // receiver получит Err(Disconnected) (что корректно при двойном вызове).
-        self.pending_candles.insert(uid, partial);
+        self.pending_candles.lock().unwrap().insert(uid, partial);
         self.send_api_request(&raw);
         (uid, rx)
     }
@@ -3402,7 +3403,7 @@ impl Client {
         match self.run_until_response(dispatcher, &rx, timeout) {
             Ok(merged) => Ok(merged),
             Err(err) => {
-                self.pending_candles.remove(&uid);
+                self.pending_candles.lock().unwrap().remove(&uid);
                 Err(err)
             }
         }
@@ -4764,11 +4765,13 @@ impl Client {
                 // to the reader-side UDPRead path (`FClient.DoCleanUp` before
                 // command handling in Delphi), so it is not driven by writer ticks.
                 if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-                    let candles_before = self.pending_candles.len();
-                    self.pending_candles.retain(|_uid, partial| {
+                    let mut pending_candles = self.pending_candles.lock().unwrap();
+                    let candles_before = pending_candles.len();
+                    pending_candles.retain(|_uid, partial| {
                         (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
                     });
-                    let candles_removed = candles_before - self.pending_candles.len();
+                    let candles_removed = candles_before - pending_candles.len();
+                    drop(pending_candles);
                     if candles_removed > 0 {
                         log::debug!(target: "moonproto::client",
                             "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
@@ -4913,6 +4916,7 @@ impl Client {
                 msg.cmd,
                 payload,
                 msg.api_pending_consumed,
+                msg.candles_chunk_consumed,
                 cur_tm,
                 mode,
             );
@@ -5039,6 +5043,7 @@ impl Client {
         cmd: u8,
         payload: Vec<u8>,
         api_pending_consumed_by_reader: bool,
+        candles_chunk_consumed_by_reader: bool,
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
@@ -5049,6 +5054,7 @@ impl Client {
                     cmd,
                     payload,
                     api_pending_consumed_by_reader,
+                    candles_chunk_consumed_by_reader,
                     &mut sink,
                 );
             }
@@ -5067,6 +5073,7 @@ impl Client {
                         cmd,
                         payload,
                         api_pending_consumed_by_reader,
+                        candles_chunk_consumed_by_reader,
                         &mut sink,
                     );
                 }
@@ -5152,6 +5159,7 @@ impl Client {
         let server_addr = self.server_socket_addr();
         let event_tx = self.event_tx.clone();
         let api_pending = Arc::clone(&self.api_pending);
+        let pending_candles = Arc::clone(&self.pending_candles);
         let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
         let pending_reader_decoded = Arc::clone(&self.pending_reader_decoded);
         let reader_wake_pending = Arc::clone(&self.reader_wake_pending);
@@ -5310,6 +5318,7 @@ impl Client {
                                     cmd: hdr.cmd,
                                     payload: Some(payload.clone()),
                                     api_pending_consumed: false,
+                                    candles_chunk_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5335,6 +5344,7 @@ impl Client {
                                 cmd: hdr.cmd,
                                 payload: None,
                                 api_pending_consumed: false,
+                                candles_chunk_consumed: false,
                                 recv_bytes: n as u64,
                                 timestamp_ms,
                                 epoch: my_epoch,
@@ -5390,6 +5400,7 @@ impl Client {
                                     cmd: hdr.cmd,
                                     payload: None,
                                     api_pending_consumed: false,
+                                    candles_chunk_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5416,6 +5427,7 @@ impl Client {
                                     cmd: hdr.cmd,
                                     payload: None,
                                     api_pending_consumed: false,
+                                    candles_chunk_consumed: false,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5540,10 +5552,20 @@ impl Client {
                                             payload,
                                         )
                                     });
+                                let candles_chunk_consumed =
+                                    payload.as_deref().is_some_and(|payload| {
+                                        Client::dispatch_candles_chunk_from_reader(
+                                            &pending_candles,
+                                            cmd,
+                                            payload,
+                                            timestamp_ms,
+                                        )
+                                    });
                                 pending_reader_decoded.lock().unwrap().push(ReaderDecodedMsg {
                                     cmd,
                                     payload,
                                     api_pending_consumed,
+                                    candles_chunk_consumed,
                                     recv_bytes: n as u64,
                                     timestamp_ms,
                                     epoch: my_epoch,
@@ -5569,6 +5591,7 @@ impl Client {
                             let decoded = Client::reader_decode_data_packets(
                                 &reader_protocol,
                                 Some(&api_pending),
+                                Some(&pending_candles),
                                 hdr.cmd,
                                 &payload,
                                 n as u64,
@@ -5627,6 +5650,7 @@ impl Client {
             cmd,
             payload: None,
             api_pending_consumed: false,
+            candles_chunk_consumed: false,
             recv_bytes,
             timestamp_ms,
             epoch,
@@ -6178,6 +6202,10 @@ impl Client {
         Some(u64::from_le_bytes(uid.try_into().unwrap()))
     }
 
+    fn engine_response_method_from_payload(payload: &[u8]) -> Option<EngineMethod> {
+        payload.get(19).copied().map(EngineMethod::from_byte)
+    }
+
     fn dispatch_api_pending_from_reader(api_pending: &ApiPending, cmd: u8, payload: &[u8]) -> bool {
         if cmd != Command::API as u8 {
             return false;
@@ -6194,9 +6222,36 @@ impl Client {
         api_pending.dispatch(resp).is_none()
     }
 
+    fn dispatch_candles_chunk_from_reader(
+        pending_candles: &Mutex<HashMap<u64, PartialCandles>>,
+        cmd: u8,
+        payload: &[u8],
+        now_ms: i64,
+    ) -> bool {
+        if cmd != Command::API as u8 {
+            return false;
+        }
+        if Self::engine_response_method_from_payload(payload)
+            != Some(EngineMethod::RequestCandlesData)
+        {
+            return false;
+        }
+        let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
+            return false;
+        };
+        if !pending_candles.lock().unwrap().contains_key(&uid) {
+            return false;
+        }
+        let Some(resp) = parse_engine_response(payload) else {
+            return false;
+        };
+        Self::handle_candles_chunk_in_map(pending_candles, &resp, now_ms)
+    }
+
     fn reader_decode_data_packets(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
         api_pending: Option<&ApiPending>,
+        pending_candles: Option<&Mutex<HashMap<u64, PartialCandles>>>,
         raw_cmd: u8,
         payload: &[u8],
         recv_bytes: u64,
@@ -6217,10 +6272,23 @@ impl Client {
                     }
                     None => false,
                 });
+            let candles_chunk_consumed =
+                payload
+                    .as_deref()
+                    .is_some_and(|payload| match pending_candles {
+                        Some(pending_candles) => Self::dispatch_candles_chunk_from_reader(
+                            pending_candles,
+                            cmd,
+                            payload,
+                            timestamp_ms,
+                        ),
+                        None => false,
+                    });
             out.push(ReaderDecodedMsg {
                 cmd,
                 payload,
                 api_pending_consumed,
+                candles_chunk_consumed,
                 recv_bytes,
                 timestamp_ms,
                 epoch,
@@ -6249,6 +6317,7 @@ impl Client {
                     cmd: raw_cmd,
                     payload: None,
                     api_pending_consumed: false,
+                    candles_chunk_consumed: false,
                     recv_bytes,
                     timestamp_ms,
                     epoch,
@@ -6270,7 +6339,7 @@ impl Client {
         let Some((cmd, payload)) = self.decode_data_read_int_payload(raw_cmd, data) else {
             return;
         };
-        self.deliver_data_read_int_decoded(cmd, payload, false, sink);
+        self.deliver_data_read_int_decoded(cmd, payload, false, false, sink);
     }
 
     fn deliver_data_read_int_decoded(
@@ -6278,18 +6347,26 @@ impl Client {
         cmd: u8,
         payload: Vec<u8>,
         api_pending_consumed_by_reader: bool,
+        candles_chunk_consumed_by_reader: bool,
         sink: &mut DispatchSink<'_>,
     ) {
         // Engine API responses: попытаться доставить в pending registry / chunked
         // candles aggregator / internal recovery flags. Если UID не зарегистрирован —
         // пробрасываем как обычный data callback.
         if cmd == Command::API as u8 {
+            if candles_chunk_consumed_by_reader {
+                return;
+            }
             if let Some(resp) = parse_engine_response(&payload) {
                 // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
                 // несколько response пакетов с одинаковым UID. До завершения сборки
                 // не дропаем slot.
                 if resp.method == EngineMethod::RequestCandlesData
-                    && self.handle_candles_chunk(&resp)
+                    && Self::handle_candles_chunk_in_map(
+                        &self.pending_candles,
+                        &resp,
+                        self.now_ms(),
+                    )
                 {
                     // Чанк потреблён aggregator'ом. Передаём в on_data только
                     // если потребитель НЕ использует async API (тогда тут merged
@@ -6344,11 +6421,14 @@ impl Client {
     /// Когда aggregator вернул merged — sender'у отправляется готовый `MergedCandles`,
     /// slot удаляется. Если sender уже дропнут (receiver не ждёт) — slot всё равно
     /// удаляется (semantic = "fire-and-forget с финализацией").
-    fn handle_candles_chunk(&mut self, resp: &EngineResponse) -> bool {
+    fn handle_candles_chunk_in_map(
+        pending_candles: &Mutex<HashMap<u64, PartialCandles>>,
+        resp: &EngineResponse,
+        now_ms: i64,
+    ) -> bool {
         // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
-        let now_ms = self.now_ms();
         if !resp.success {
-            if let Some(partial) = self.pending_candles.remove(&resp.request_uid) {
+            if let Some(partial) = pending_candles.lock().unwrap().remove(&resp.request_uid) {
                 log::warn!(target: "moonproto::client",
                     "candles request uid={} failed code={} msg={}",
                     resp.request_uid, resp.error_code, resp.error_msg);
@@ -6360,7 +6440,8 @@ impl Client {
 
         let uid = resp.request_uid;
         let chunk_result = {
-            let Some(partial) = self.pending_candles.get_mut(&uid) else {
+            let mut pending_candles = pending_candles.lock().unwrap();
+            let Some(partial) = pending_candles.get_mut(&uid) else {
                 return false;
             };
             let chunk_result = partial.aggregator.on_chunk_result(&resp.data);
@@ -6378,7 +6459,7 @@ impl Client {
                     "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, zipped_data.len());
                 Vec::new()
             });
-            if let Some(partial) = self.pending_candles.remove(&uid) {
+            if let Some(partial) = pending_candles.lock().unwrap().remove(&uid) {
                 let _ = partial.sender.send(MergedCandles {
                     uid,
                     zipped_data,
@@ -7439,7 +7520,7 @@ impl Client {
         // Симметрично с api_pending: senders drop'аются → receivers получают
         // `Err(Disconnected)` → потребитель делает re-request с новым UID. Иначе
         // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS.
-        self.pending_candles.clear();
+        self.pending_candles.lock().unwrap().clear();
     }
 
     fn bind_socket(&mut self, cur_tm: i64) {
@@ -8571,6 +8652,7 @@ mod api_pending_dispatch_tests {
         let decoded = Client::reader_decode_data_packets(
             &client.reader_protocol,
             Some(&client.api_pending),
+            None,
             Command::API as u8,
             &payload,
             64,
@@ -8600,6 +8682,7 @@ mod api_pending_dispatch_tests {
             cmd: Command::API as u8,
             payload: Some(payload),
             api_pending_consumed: true,
+            candles_chunk_consumed: false,
             recv_bytes: 64,
             timestamp_ms: 123,
             epoch: client.current_reader_epoch,
@@ -8629,6 +8712,7 @@ mod api_pending_dispatch_tests {
             cmd: Command::API as u8,
             payload: Some(payload),
             api_pending_consumed: true,
+            candles_chunk_consumed: false,
             recv_bytes: 64,
             timestamp_ms: 123,
             epoch: client.current_reader_epoch,
@@ -8654,6 +8738,117 @@ mod api_pending_dispatch_tests {
             crate::events::Event::EngineResponse(resp)
                 if resp.request_uid == 0x66 && resp.method == EngineMethod::AuthCheck
         )));
+    }
+
+    #[test]
+    fn reader_decoded_candles_chunks_complete_receiver_before_run_loop() {
+        let mut client = Client::new(dummy_cfg());
+        let (uid, rx) = client.api_request_candles_data_async_registered();
+        let chunk0 = [0u8, 0, 2, 0, 1, 2];
+        let chunk1 = [1u8, 0, 2, 0, 3, 4];
+        let payload0 =
+            build_engine_response_payload(uid, EngineMethod::RequestCandlesData, &chunk0);
+        let payload1 =
+            build_engine_response_payload(uid, EngineMethod::RequestCandlesData, &chunk1);
+
+        let decoded0 = Client::reader_decode_data_packets(
+            &client.reader_protocol,
+            Some(&client.api_pending),
+            Some(&client.pending_candles),
+            Command::API as u8,
+            &payload0,
+            64,
+            10,
+            client.current_reader_epoch,
+        );
+        assert_eq!(decoded0.len(), 1);
+        assert!(
+            decoded0[0].candles_chunk_consumed,
+            "registered candles chunk must be consumed by reader-side aggregator"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "first chunk stores progress but does not complete receiver"
+        );
+
+        let decoded1 = Client::reader_decode_data_packets(
+            &client.reader_protocol,
+            Some(&client.api_pending),
+            Some(&client.pending_candles),
+            Command::API as u8,
+            &payload1,
+            64,
+            20,
+            client.current_reader_epoch,
+        );
+        assert_eq!(decoded1.len(), 1);
+        assert!(decoded1[0].candles_chunk_consumed);
+
+        let merged = rx
+            .try_recv()
+            .expect("second chunk should complete candles receiver in reader");
+        assert_eq!(merged.uid, uid);
+        assert_eq!(merged.zipped_data, vec![1, 2, 3, 4]);
+        assert!(merged.markets.is_empty());
+        assert!(client.pending_candles.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reader_consumed_candles_chunk_is_not_delivered_to_callback_or_dispatcher() {
+        let mut client = Client::new(dummy_cfg());
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        let payload = build_engine_response_payload(
+            0x1234,
+            EngineMethod::RequestCandlesData,
+            &[0u8, 0, 1, 0, 1, 2],
+        );
+        let msg = ReaderDecodedMsg {
+            cmd: Command::API as u8,
+            payload: Some(payload.clone()),
+            api_pending_consumed: false,
+            candles_chunk_consumed: true,
+            recv_bytes: 64,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: None,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_cb = calls.clone();
+        let mut callback_mode = RunMode::Callback {
+            on_data: Box::new(move |_cmd, _payload| {
+                calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }),
+        };
+        client.process_reader_decoded(msg, 123, &mut callback_mode);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let msg = ReaderDecodedMsg {
+            cmd: Command::API as u8,
+            payload: Some(payload),
+            api_pending_consumed: false,
+            candles_chunk_consumed: true,
+            recv_bytes: 64,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: None,
+            handshake_update: None,
+        };
+        let mut dispatcher = EventDispatcher::new();
+        let mut dispatcher_mode = RunMode::Dispatcher {
+            dispatcher: &mut dispatcher,
+            on_event: DispatcherEventFn::Queue,
+            event_buf: Vec::new(),
+            payload_buf: Vec::new(),
+            active_actions_buf: Vec::new(),
+        };
+        client.process_reader_decoded(msg, 123, &mut dispatcher_mode);
+        assert!(dispatcher.take_queued_events().is_empty());
     }
 
     #[test]
@@ -8722,7 +8917,7 @@ mod api_pending_dispatch_tests {
             .expect_err("zero timeout should expire before any chunk arrives");
 
         assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
-        assert!(client.pending_candles.is_empty());
+        assert!(client.pending_candles.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -8758,6 +8953,7 @@ mod api_pending_dispatch_tests {
                 cmd: Command::API as u8,
                 payload: Some(payload),
                 api_pending_consumed: false,
+                candles_chunk_consumed: false,
                 recv_bytes: 64,
                 timestamp_ms: client.now_ms(),
                 epoch: client.current_reader_epoch,
@@ -11477,6 +11673,7 @@ mod event_loop_fairness_tests {
                 cmd: Command::OrderBook as u8,
                 payload: None,
                 api_pending_consumed: false,
+                candles_chunk_consumed: false,
                 recv_bytes: 1234,
                 timestamp_ms: 777,
                 epoch: client.current_reader_epoch,
@@ -11541,6 +11738,7 @@ mod event_loop_fairness_tests {
                 cmd: Command::UI as u8,
                 payload: Some(vec![0xAA, 0xBB]),
                 api_pending_consumed: false,
+                candles_chunk_consumed: false,
                 recv_bytes: 321,
                 timestamp_ms: 123,
                 epoch: client.current_reader_epoch,
@@ -11583,6 +11781,7 @@ mod event_loop_fairness_tests {
 
         let decoded = Client::reader_decode_data_packets(
             &client.reader_protocol,
+            None,
             None,
             Command::Grouped as u8,
             &grouped,
