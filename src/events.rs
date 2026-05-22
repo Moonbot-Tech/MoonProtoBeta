@@ -180,8 +180,8 @@ pub(crate) enum ActiveAction {
 /// getters [`Self::orders`], [`Self::order_books`], [`Self::trades`],
 /// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
 /// Applications should not mutate protocol state directly; state is maintained
-/// by [`Self::dispatch`], [`Self::dispatch_into`], and the active
-/// client-backed dispatch path used by `Client::run_with_dispatcher`.
+/// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
+/// outbox path used by `Client::run_with_dispatcher`.
 #[derive(Default)]
 pub struct EventDispatcher {
     pub(crate) orders: Orders,
@@ -204,12 +204,12 @@ pub struct EventDispatcher {
     last_known_server_token: u64,
     /// Per-Client `ServerTimeDelta` source. Если `Some` — `dispatch_into` для
     /// `Command::Order` читает delta отсюда (multi-Client safe). Если `None` —
-    /// fallback на global `SERVER_TIME_DELTA_DAYS` (back-compat для single-Client
-    /// потребителей без линковки). См. `DEVIATION.md #23`.
+    /// fallback на global `SERVER_TIME_DELTA_DAYS` для raw `dispatch_into`
+    /// потребителей без линковки. См. `DEVIATION.md #23`.
     ///
     /// Привязка: либо явный вызов [`Self::set_server_time_delta_source`] с
-    /// `client.server_time_delta_handle()`, либо автоматически — `dispatch_into_active`
-    /// делает lazy-link при первом вызове.
+    /// `client.server_time_delta_handle()`, либо автоматически через
+    /// `Client::run_with_dispatcher`.
     server_time_delta_source: Option<Arc<AtomicU64>>,
     /// Optional override for fresh application-owned strategies. Without an
     /// override the dispatcher answers from `strats.snapshot_vec()`.
@@ -367,7 +367,7 @@ impl EventDispatcher {
     /// Attach this dispatcher to one client's `ServerTimeDelta` handle.
     ///
     /// After this, order-channel dispatch uses that client's time delta instead
-    /// of the single-client compatibility fallback. Multi-server applications
+    /// of the process-global raw-dispatch fallback. Multi-server applications
     /// should attach one dispatcher to the matching client. The usual
     /// `Client::run_with_dispatcher` path links this automatically on first use.
     ///
@@ -459,7 +459,7 @@ impl EventDispatcher {
     /// batches can produce several events for one payload.
     #[must_use = "Events must be processed or application notifications are lost."]
     pub fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
-        // Convenience-обёртка над `dispatch_into`. Backwards compat.
+        // Convenience-обёртка над `dispatch_into`.
         let mut out = Vec::new();
         self.dispatch_into(cmd, payload, now_ms, &mut out);
         out
@@ -471,8 +471,8 @@ impl EventDispatcher {
     /// same vector with `clear()` between packets to avoid per-packet
     /// allocations on high-rate streams.
     ///
-    /// This method is the low-level compatibility path. It does not have a
-    /// `Client` reference, so it cannot perform client-backed recovery actions.
+    /// This method is the low-level parser path. It does not have a `Client`
+    /// reference, so it cannot perform client-backed recovery actions.
     /// Normal applications should use `Client::run_with_dispatcher`, whose
     /// active dispatch path gates stale indexed streams, sends orderbook full
     /// requests when recovery needs them, and requests missing order statuses
@@ -499,8 +499,8 @@ impl EventDispatcher {
                     Some(tc) => {
                         // audit_responsibility A5 / active library: автоматически подхватываем
                         // server_time_delta. При наличии per-Client `server_time_delta_source`
-                        // (multi-Client) — читаем оттуда. Иначе fallback на global (single-Client
-                        // back-compat). Без этого Orders::apply применяет AdjustTime со старым
+                        // (multi-Client) — читаем оттуда. Иначе fallback на global для raw
+                        // dispatch без Client source. Без этого Orders::apply применяет AdjustTime со старым
                         // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
                         // См. DEVIATION #23.
                         self.orders
@@ -763,37 +763,19 @@ impl EventDispatcher {
         }
     }
 
-    /// Active-library dispatch path with access to the owning
-    /// [`crate::client::Client`].
+    /// Active-library parser step used by `Client::run_with_dispatcher`.
     ///
-    /// This is what `Client::run_with_dispatcher` uses. It performs the
-    /// client-backed recovery actions that plain [`Self::dispatch_into`] cannot:
-    /// stale indexed streams are gated after server restart, orderbook
-    /// `RequestFullNeeded` control events are consumed internally and sent as
-    /// fire-and-forget `emk_RequestOrderBookFull`, and orders missing from a
-    /// fresh snapshot are requested through the client.
+    /// The reader/main-loop side snapshots the owning `Client` into
+    /// [`ActiveDispatchContext`], dispatches the payload, receives protocol
+    /// actions into `actions`, then the client applies that outbox to its
+    /// Delphi-style send queues. This keeps active dispatch from mutating
+    /// `Client` directly and avoids a second old send path.
     ///
-    /// At most one full-book request is sent per `(market_index, book_kind)` in
-    /// one dispatch call, even when a grouped payload contains several matching
-    /// control events.
-    ///
-    /// Trades gap resend is intentionally not sent from this method. It is owned
-    /// by the periodic trades tick in the client loop so a single packet cannot
-    /// trigger duplicate resend batches.
-    pub fn dispatch_into_active(
-        &mut self,
-        cmd: Command,
-        payload: &[u8],
-        now_ms: i64,
-        out: &mut Vec<Event>,
-        client: &mut crate::client::Client,
-    ) {
-        let ctx = ActiveDispatchContext::from_client(client);
-        let mut actions = Vec::new();
-        self.dispatch_into_active_actions(cmd, payload, now_ms, out, &ctx, &mut actions);
-        client.apply_active_actions(actions);
-    }
-
+    /// At most one full-book request is produced per `(market_index, book_kind)`
+    /// in one dispatch call, even when a grouped payload contains several
+    /// matching control events. Trades gap resend is owned by the periodic
+    /// trades tick in the client loop so a single packet cannot trigger
+    /// duplicate resend batches.
     pub(crate) fn dispatch_into_active_actions(
         &mut self,
         cmd: Command,
@@ -1333,13 +1315,16 @@ mod tests {
         client.testing_set_peer_app_tokens(0x2222, 0x1111);
 
         let mut out = Vec::new();
+        let mut actions = Vec::new();
         let dummy_payload = vec![0u8; 32];
-        d.dispatch_into_active(
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::OrderBook,
             &dummy_payload,
             1000,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
 
         assert!(
@@ -1362,13 +1347,17 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
-        d.dispatch_into_active(
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::Order,
             &empty_all_statuses_payload(0x55),
             1000,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
+        apply_active_actions_for_test(&client, &mut actions);
 
         assert!(out
             .iter()
@@ -1403,30 +1392,42 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
+        let mut actions = Vec::new();
 
-        d.dispatch_into_active(
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 1, true),
             1000,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
+        apply_active_actions_for_test(&client, &mut actions);
         out.clear();
-        d.dispatch_into_active(
+        actions.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 10, false),
             1010,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
+        apply_active_actions_for_test(&client, &mut actions);
         out.clear();
-        d.dispatch_into_active(
+        actions.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 11, false),
             2000,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
+        apply_active_actions_for_test(&client, &mut actions);
 
         assert!(
             !out.iter().any(|ev| matches!(
@@ -1452,15 +1453,18 @@ mod tests {
     #[test]
     fn dispatch_into_active_drops_domain_commands_before_init() {
         let mut d = EventDispatcher::new();
-        let mut client = crate::client::Client::new(dummy_client_cfg());
+        let client = crate::client::Client::new(dummy_client_cfg());
         let mut out = Vec::new();
+        let mut actions = Vec::new();
 
-        d.dispatch_into_active(
+        dispatch_active_packet_for_test(
+            &mut d,
             Command::Order,
             &empty_all_statuses_payload(0x55),
             1000,
             &mut out,
-            &mut client,
+            &client,
+            &mut actions,
         );
 
         assert!(
@@ -1482,7 +1486,7 @@ mod tests {
     #[test]
     fn current_delta_falls_back_to_global_when_source_is_none() {
         let _guard = server_time_delta_test_lock();
-        // Single-Client back-compat: без линковки dispatcher читает global.
+        // Raw dispatch без линковки dispatcher читает global.
         let d = EventDispatcher::new();
         assert!(d.server_time_delta_source.is_none());
         // Записываем в global → dispatcher видит то же значение.
@@ -1580,6 +1584,26 @@ mod tests {
         sliced
     }
 
+    fn dispatch_active_packet_for_test(
+        dispatcher: &mut EventDispatcher,
+        cmd: Command,
+        payload: &[u8],
+        now_ms: i64,
+        out: &mut Vec<Event>,
+        client: &crate::client::Client,
+        actions: &mut Vec<ActiveAction>,
+    ) {
+        let ctx = ActiveDispatchContext::from_client(client);
+        dispatcher.dispatch_into_active_actions(cmd, payload, now_ms, out, &ctx, actions);
+    }
+
+    fn apply_active_actions_for_test(
+        client: &crate::client::Client,
+        actions: &mut Vec<ActiveAction>,
+    ) {
+        client.apply_active_actions(actions.drain(..));
+    }
+
     #[test]
     fn dispatch_into_active_records_initial_server_token() {
         // Первый вызов запоминает текущий server_token в last_known_server_token.
@@ -1590,7 +1614,16 @@ mod tests {
         client.testing_set_server_token(42);
         assert_eq!(d.last_known_server_token, 0);
         let mut out = Vec::new();
-        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Reserved1,
+            b"x",
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
         assert_eq!(
             d.last_known_server_token, 42,
             "первый dispatch_into_active должен запомнить server_token"
@@ -1609,7 +1642,16 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_server_token(0x100);
         let mut out = Vec::new();
-        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Reserved1,
+            b"x",
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
         // markets state НЕ должны быть сброшен (full_reset не вызывался).
         assert_eq!(
             d.markets.by_name.len(),
@@ -1629,7 +1671,16 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_server_token(0xBBB);
         let mut out = Vec::new();
-        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Reserved1,
+            b"x",
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
         assert_eq!(
             d.last_known_server_token, 0xBBB,
             "после смены токена — last_known обновлён"
@@ -1647,7 +1698,16 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
-        d.dispatch_into_active(Command::Reserved1, b"x", 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Reserved1,
+            b"x",
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
         assert!(
             d.server_time_delta_source.is_some(),
             "после первого dispatch_into_active — source привязан к Client'у"
@@ -1655,7 +1715,16 @@ mod tests {
 
         // Повторный вызов — source не меняется (already linked).
         let handle_after_first = Arc::clone(d.server_time_delta_source.as_ref().unwrap());
-        d.dispatch_into_active(Command::Reserved1, b"y", 0, &mut out, &mut client);
+        actions.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Reserved1,
+            b"y",
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
         let handle_after_second = d.server_time_delta_source.as_ref().unwrap();
         assert!(
             Arc::ptr_eq(&handle_after_first, handle_after_second),
@@ -1683,12 +1752,22 @@ mod tests {
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
+        let mut actions = Vec::new();
 
         // Server prods клиента: "пришли свой snapshot стратегий" — это
         // StratCommand::SnapshotRequest. Payload = `build_snapshot_request(uid)`.
         let payload = crate::commands::strat::build_snapshot_request(42);
 
-        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        apply_active_actions_for_test(&client, &mut actions);
 
         // Drain send queues — должна быть отправка Command::Strat с fresh
         // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
@@ -1744,7 +1823,17 @@ mod tests {
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         let payload = crate::commands::strat::build_snapshot_request(99);
-        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        apply_active_actions_for_test(&client, &mut actions);
 
         // Drain send queues — должен быть Command::Strat с пустым serializer batch.
         let mut empty_snapshot_sends = 0;
@@ -1812,7 +1901,17 @@ mod tests {
         client.testing_set_domain_ready(true);
         let mut out = Vec::new();
         let payload = crate::commands::strat::build_snapshot_request(100);
-        d.dispatch_into_active(Command::Strat, &payload, 0, &mut out, &mut client);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        apply_active_actions_for_test(&client, &mut actions);
 
         let mut found = false;
         for item in drain_client_send_items(&client) {

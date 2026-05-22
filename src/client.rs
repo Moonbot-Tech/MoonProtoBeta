@@ -2463,12 +2463,12 @@ pub struct Client {
     ///
     /// Хранит текущий `ServerTimeDelta` (в днях, TDateTime-формат, упакован в u64
     /// через `f64::to_bits`). Обновляется в `handle_ping` синхронно с
-    /// `self.server_time_delta` и (для back-compat) с глобальным
-    /// `SERVER_TIME_DELTA_DAYS`.
+    /// `self.server_time_delta` и с глобальным `SERVER_TIME_DELTA_DAYS`,
+    /// который нужен только raw `EventDispatcher::dispatch_into` без handle.
     ///
     /// **Multi-Client** (DEVIATION #23): `EventDispatcher` должен быть привязан к
     /// этому handle через `EventDispatcher::set_server_time_delta_source(handle)`
-    /// или автоматически через `run_with_dispatcher` / `dispatch_into_active`. Без
+    /// или автоматически через `run_with_dispatcher`. Без
     /// привязки EventDispatcher падает обратно на global, что при multi-Client даёт
     /// off-by-50-1000ms timestamps в ордерах (последний Client перезаписывает
     /// delta всех остальных).
@@ -2717,9 +2717,8 @@ impl Client {
     /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
     /// ```
     ///
-    /// Если использовать `Client::run_with_dispatcher` или
-    /// `EventDispatcher::dispatch_into_active(&mut Client)` — линковка делается
-    /// автоматически на первом вызове (lazy).
+    /// Если использовать `Client::run_with_dispatcher` — линковка делается
+    /// автоматически на первом active-dispatch шаге.
     ///
     /// См. `DEVIATION.md #23` (single-Client → multi-Client refactor).
     pub fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
@@ -6379,7 +6378,7 @@ impl Client {
         self.server_time_delta = initial_time - raw_now_dt;
         // audit_responsibility A5 / active library: автоматически пробрасываем delta в
         // per-Client `Arc<AtomicU64>` handle (multi-Client) И в глобальный atomic
-        // (back-compat для одиночных EventDispatcher::new() без линковки). См. DEVIATION #23.
+        // для raw EventDispatcher::new() без линковки. См. DEVIATION #23.
         self.server_time_delta_handle.store(
             self.server_time_delta.to_bits(),
             std::sync::atomic::Ordering::Relaxed,
@@ -8476,13 +8475,17 @@ mod api_pending_dispatch_tests {
 
         let mut dispatcher = EventDispatcher::new();
         let mut out = Vec::new();
-        dispatcher.dispatch_into_active(
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        let mut actions = Vec::new();
+        dispatcher.dispatch_into_active_actions(
             cmd,
             &dispatcher_payload,
             client.now_ms(),
             &mut out,
-            &mut client,
+            &ctx,
+            &mut actions,
         );
+        client.apply_active_actions(actions.drain(..));
 
         assert!(dispatcher.markets().indexes_synchronized);
         assert_eq!(dispatcher.markets().market_indexes, names);
@@ -12553,21 +12556,35 @@ mod reconnect_timing_tests {
 
         let mut dispatcher = EventDispatcher::new();
         let mut out = Vec::new();
+        let mut actions = Vec::new();
         let (cmd, payload) = buffered.pop().expect("API response must reach dispatcher");
-        dispatcher.dispatch_into_active(cmd, &payload, client.now_ms(), &mut out, &mut client);
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
+            cmd,
+            &payload,
+            client.now_ms(),
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+        client.apply_active_actions(actions.drain(..));
         assert!(
             dispatcher.markets().indexes_synchronized,
             "fresh GetMarketsIndexes response reopens indexed stream gate"
         );
 
         out.clear();
-        dispatcher.dispatch_into_active(
+        actions.clear();
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
             Command::OrderBook,
             &[],
             client.now_ms(),
             &mut out,
-            &mut client,
+            &ctx,
+            &mut actions,
         );
+        client.apply_active_actions(actions.drain(..));
         assert!(
             out.iter().any(|ev| matches!(
                 ev,
@@ -12656,24 +12673,24 @@ fn get_ntp_offset_days() -> f64 {
     f64::from_bits(NTP_OFFSET_DAYS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Back-compat fallback для low-level `EventDispatcher::dispatch_into` callers
+/// Process-global fallback для low-level `EventDispatcher::dispatch_into` callers
 /// которые не привязали per-client `ServerTimeDelta` source. Рекомендуемый
 /// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
-/// через `dispatch_into_active` и **не использует** это global значение.
+/// через `Client::run_with_dispatcher` и **не использует** это global значение.
 ///
 /// DEVIATION #23 закрыт: multi-Client больше не страдает от перезаписи —
 /// каждый Client имеет свой `Arc<AtomicU64>` handle.
 static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Установить fallback server_time_delta (в днях, как TDateTime).
-/// Вызывается из `Client::handle_ping` (back-compat write); потребитель НЕ должен
+/// Вызывается из `Client::handle_ping`; потребитель НЕ должен
 /// вызывать напрямую — используй `client.server_time_delta_handle()` для multi-Client.
 pub(crate) fn set_server_time_delta_global(delta_days: f64) {
     SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Получить fallback server_time_delta (дни). Используется `EventDispatcher` когда
-/// per-Client source не привязан (single-Client back-compat).
+/// per-Client source не привязан.
 pub(crate) fn get_server_time_delta_global() -> f64 {
     f64::from_bits(SERVER_TIME_DELTA_DAYS.load(std::sync::atomic::Ordering::Relaxed))
 }

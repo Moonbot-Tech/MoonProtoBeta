@@ -40,7 +40,7 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 }));
 ```
 
-`run_with_dispatcher` calls `dispatch_into_active`, which also:
+`run_with_dispatcher` uses the active action path, which also:
 
 - links the dispatcher to this client's `ServerTimeDelta`;
 - resets per-session trades/orderbook state after server-token change;

@@ -80,8 +80,8 @@ For custom loops:
 dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
 ```
 
-Without this link, low-level `dispatch_into` falls back to a process-global value
-kept for single-client compatibility.
+Without this link, low-level `dispatch_into` falls back to a process-global
+value used only by raw custom loops.
 
 ## Thread-Safe UI Subscriptions
 

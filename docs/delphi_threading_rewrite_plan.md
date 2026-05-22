@@ -152,8 +152,8 @@ Target: public send APIs пишут в `SendQueues` напрямую через 
 В Delphi transport работает пока жив thread. Блокирующий `SendAndWait` не обязан вручную качать UDP
 receive path; reader и writer продолжают жить.
 
-Target: `Client::start`/constructor поднимает worker'ы; `run_*` становится consumer'ом public events
-или compatibility pump, но не владельцем transport progress. `api_*` receiver должен получать response
+Target: `Client::start`/constructor поднимает worker'ы; `run_*` становится consumer'ом public events,
+но не владельцем transport progress. `api_*` receiver должен получать response
 без необходимости вызывать `run_until_response`.
 
 ### 6. Active lib сейчас сцеплена с `&mut Client`
@@ -165,8 +165,9 @@ Target: `Client::start`/constructor поднимает worker'ы; `run_*` ста
 Текущее состояние: production receive path уже вызывает
 `EventDispatcher::dispatch_into_active_actions(...)`, передаёт snapshot
 `ActiveDispatchContext`, получает `ActiveAction` outbox и только потом `Client`
-применяет эти actions к send queues. Старый `dispatch_into_active(..., client)`
-оставлен как compatibility wrapper для тестов/ручных callers.
+применяет эти actions к send queues. Старый публичный
+`dispatch_into_active(..., client)` удалён; тесты вызывают тот же action-outbox
+шаг, который использует production path.
 
 Target: active state должен выдавать `ClientAction`/`SendIntent` outbox, а не напрямую мутировать
 transport client. Reader/domain path кладёт эти actions в send queues. User-visible events уходят в
@@ -338,19 +339,20 @@ Tests:
 
 ### Phase 6 - decouple active lib from `&mut Client`
 
-Change `EventDispatcher::dispatch_into_active` shape:
+Replace direct `&mut Client` active dispatch with an action outbox:
 
-Current:
+Old shape:
 
 ```rust
 dispatcher.dispatch_into_active(cmd, payload, now_ms, out, self)
 ```
 
-Target:
+Target shape:
 
 ```rust
-let actions = active.dispatch_into_active(cmd, payload, now_ms, out);
-send_queues.push_actions(actions);
+let ctx = ActiveDispatchContext::from_client(self);
+dispatcher.dispatch_into_active_actions(cmd, payload, now_ms, out, &ctx, &mut actions);
+self.apply_active_actions(actions.drain(..));
 ```
 
 Rules:
@@ -368,12 +370,12 @@ Tests:
 - token change invalidates/rebuilds market indexes as Delphi does;
 - public callback can stall without stopping transport receive/send.
 
-### Phase 7 - demote `run_*` to compatibility/event API
+### Phase 7 - demote `run_*` to event API
 
 After worker threads own progress:
 
 - `run(duration, cb)` consumes public events for duration;
-- `run_with_dispatcher` either becomes no-op wrapper around internal active state or a compatibility mirror;
+- `run_with_dispatcher` either becomes a thin event consumer around internal active state or is intentionally removed;
 - `run_until_response` no longer pumps protocol, it waits on receiver while workers continue.
 
 API docs must be updated in the API docs themselves if signatures/semantics change.
@@ -382,7 +384,7 @@ Tests:
 
 - call `api_base_check`, block on receiver, no manual `run_until_response`, response still arrives;
 - callback not reading events does not stop ping/SlicedACK/retry;
-- old examples either continue working or are intentionally updated with docs.
+- examples either continue working or are intentionally updated with docs.
 
 ### Phase 8 - remove Rust-only budget/defer machinery
 
@@ -578,7 +580,7 @@ Done:
 - Targeted reader `Fine -> AuthDone` test: passed.
 - Targeted reader hello-control tests for `WrongHello`, `WantNewHello`, and
   `NeedHelloAgain`: passed.
-- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 421 passed.
+- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 417 passed.
 
 Still not done:
 
@@ -596,15 +598,16 @@ Still not done:
 Done:
 
 - `EventDispatcher` now has `ActiveDispatchContext` and `ActiveAction`.
-- Production `Client::process_decoded_data_read_int` no longer calls
-  `dispatch_into_active(..., &mut Client)`. It snapshots the client context,
-  calls `dispatch_into_active_actions`, then applies the returned action outbox.
+- Production `Client::process_decoded_data_read_int` snapshots the client
+  context, calls `dispatch_into_active_actions`, then applies the returned
+  action outbox.
 - Active auto-actions are now data, not hidden direct `&mut Client` mutation:
   `RequestOrderBookFull`, `SendStrategySnapshot`, and missing-order
   `RequestOrderStatus`.
-- The old `dispatch_into_active(..., client)` wrapper remains for compatibility
-  and tests; it delegates to the action outbox and immediately applies actions.
-- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 421 passed.
+- The old public `dispatch_into_active(..., client)` wrapper was removed; tests
+  now call the same `ActiveDispatchContext -> dispatch_into_active_actions ->
+  apply_active_actions` path as production.
+- `cargo fmt --check`, `cargo check --examples`, `cargo test --lib`: 417 passed.
 
 Still not done:
 
