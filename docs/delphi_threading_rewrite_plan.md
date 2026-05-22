@@ -1448,9 +1448,8 @@ Done:
 
 Still not done:
 
-- `TOrderStatus` / `TOrderStatusUpdate` terminal-status removal timing and
-  `TOrderNotFound` handling still need reverse-equivalence against the
-  `BOrderWorker` command queue / worker-loop cleanup.
+- Continue side-effect parity for `BOrderWorker` UI/lifecycle behavior outside
+  the already-covered `ProcessCommandOrder` queue/removal timing.
 
 ### 2026-05-22 - Phase 1 partial: deferred terminal order removal
 
@@ -1458,10 +1457,10 @@ Done:
 
 - Fixed `ProcessCommandOrder` lifetime parity for terminal statuses and
   `TOrderNotFound`.
-- Rust no longer removes an order entry synchronously inside `Orders::apply`
-  when terminal status / `TOrderNotFound` arrives. It marks `job_is_done` /
-  `server_forced_remove`, keeps the entry addressable for the rest of the
-  receive batch, then removes it through deferred flush.
+- Rust no longer removes an order entry synchronously inside `Orders::apply`.
+  Terminal statuses mark `job_is_done`; `TOrderNotFound` marks
+  `cancel_request` / `server_forced_remove`; both keep the entry addressable for
+  the rest of the receive batch, then remove it through deferred flush.
 - `EventDispatcher::drain_deferred_order_removals` emits the delayed
   `OrderEvent::Removed` after the reader-decoded batch, matching Delphi's
   "queue command into worker now, remove from WCache later" machine effect.
