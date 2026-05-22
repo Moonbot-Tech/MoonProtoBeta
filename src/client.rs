@@ -577,14 +577,7 @@ impl ReaderRuntime {
             let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
 
             if err_emu_should_drop(hdr.cmd) {
-                Client::reader_on_err_emu_drop(
-                    &self.pending_reader_decoded,
-                    hdr.cmd,
-                    &payload,
-                    n as u64,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
             } else if !self.handle_command(
                 hdr.cmd,
                 &payload,
@@ -619,152 +612,413 @@ impl ReaderRuntime {
 
         match Command::from_byte(raw_cmd) {
             Command::Ping => {
-                Client::reader_on_new_ping(
-                    &self.sock,
-                    self.server_addr,
-                    &self.mac_ctx,
-                    &self.mac_key,
-                    self.client_id,
-                    self.mask_ver,
-                    &self.total_sent,
-                    self.debug_outgoing_blackhole,
-                    &self.reader_protocol,
-                    &self.reader_ping_state,
-                    &self.server_time_delta_handle,
-                    &self.pending_reader_decoded,
-                    payload,
-                    recv_bytes,
-                    total_recv_after,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms);
             }
             Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
-                Client::reader_on_handshake_control(
-                    &self.pending_reader_decoded,
-                    Command::from_byte(raw_cmd),
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_handshake_control(Command::from_byte(raw_cmd), recv_bytes, timestamp_ms);
             }
             Command::WhoAreYou => {
-                Client::reader_on_who_are_you(
-                    &self.sock,
-                    self.server_addr,
-                    &self.mac_ctx,
-                    &self.mac_key,
-                    &self.master_key,
-                    self.client_id,
-                    self.app_token,
-                    &mut self.reader_client_token,
-                    self.mask_ver,
-                    &self.total_sent,
-                    self.debug_outgoing_blackhole,
-                    &self.reader_protocol,
-                    &self.pending_reader_decoded,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_who_are_you(payload, recv_bytes, timestamp_ms);
             }
             Command::Fine => {
-                Client::reader_on_fine(
-                    &self.master_key,
-                    self.client_id,
-                    &self.pending_reader_decoded,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_fine(payload, recv_bytes, timestamp_ms);
             }
             Command::SizeTest => {
-                Client::reader_on_new_size_test(
-                    &self.sock,
-                    self.server_addr,
-                    &self.mac_ctx,
-                    &self.mac_key,
-                    self.client_id,
-                    self.mask_ver,
-                    &self.total_sent,
-                    self.debug_outgoing_blackhole,
-                    &self.reader_protocol,
-                    &self.pending_reader_decoded,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_new_size_test(payload, recv_bytes, timestamp_ms);
             }
             Command::ProbeMTU => {
-                Client::reader_on_new_probe_mtu(
-                    &self.sock,
-                    self.server_addr,
-                    &self.mac_ctx,
-                    &self.mac_key,
-                    self.client_id,
-                    self.mask_ver,
-                    &self.total_sent,
-                    self.debug_outgoing_blackhole,
-                    &self.pending_reader_decoded,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_new_probe_mtu(payload, recv_bytes, timestamp_ms);
             }
             Command::SlicedACK => {
-                Client::reader_on_new_sliced_ack(
-                    &self.pending_reader_decoded,
-                    &self.incoming_sliced_acks,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_new_sliced_ack(payload, recv_bytes, timestamp_ms);
             }
             Command::Sliced => {
-                if !Client::reader_on_new_sliced(
-                    &self.shutdown_flag,
-                    &self.sock,
-                    self.server_addr,
-                    &self.mac_ctx,
-                    &self.mac_key,
-                    self.client_id,
-                    self.mask_ver,
-                    &self.total_sent,
-                    self.debug_outgoing_blackhole,
-                    &self.reader_protocol,
-                    &self.api_pending,
-                    &self.pending_candles,
-                    &self.pending_reader_decoded,
-                    &self.slicer,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                ) {
+                if !self.on_new_sliced(payload, recv_bytes, timestamp_ms) {
                     return false;
                 }
             }
             _ => {
-                Client::reader_on_data_packet(
-                    &self.reader_protocol,
-                    &self.api_pending,
-                    &self.pending_candles,
-                    &self.pending_reader_decoded,
-                    raw_cmd,
-                    payload,
-                    recv_bytes,
-                    timestamp_ms,
-                    self.epoch,
-                );
+                self.on_data_packet(raw_cmd, payload, recv_bytes, timestamp_ms);
             }
         }
 
         true
+    }
+
+    fn on_err_emu_drop(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
+                Command::from_byte(raw_cmd),
+                raw_cmd,
+                payload.len()
+            );
+        }
+        if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
+            if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
+                eprintln!(
+                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
+                    sh.datagram_num,
+                    sh.block_num,
+                    sh.max_block_num,
+                    payload.len()
+                );
+            } else {
+                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
+            }
+        }
+
+        // Delphi ErrEmu exits after packet accounting / LastOnline side effects;
+        // it does not deliver the packet into protocol/user handlers.
+        Client::push_reader_recv_side_effect(
+            &self.pending_reader_decoded,
+            raw_cmd,
+            recv_bytes,
+            timestamp_ms,
+            self.epoch,
+        );
+    }
+
+    fn on_data_packet(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        let decoded = Client::reader_decode_data_packets(
+            &self.reader_protocol,
+            Some(self.api_pending.as_ref()),
+            Some(self.pending_candles.as_ref()),
+            raw_cmd,
+            payload,
+            recv_bytes,
+            timestamp_ms,
+            self.epoch,
+        );
+        self.pending_reader_decoded.lock().unwrap().extend(decoded);
+    }
+
+    fn on_new_size_test(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if let Some(ack) = Client::build_size_ack_payload(&self.reader_protocol, payload) {
+            // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
+            // `MPC_SizeAck` of requested size, then turn DontFragment off.
+            set_dont_fragment_for_socket(&self.sock, true);
+            Client::reader_send_raw_packet(
+                &self.sock,
+                self.server_addr,
+                &self.mac_ctx,
+                &self.mac_key,
+                Command::SizeAck,
+                self.client_id,
+                &ack,
+                self.mask_ver,
+                &self.total_sent,
+                self.debug_outgoing_blackhole,
+            );
+            set_dont_fragment_for_socket(&self.sock, false);
+        }
+        Client::push_reader_recv_side_effect(
+            &self.pending_reader_decoded,
+            Command::SizeTest as u8,
+            recv_bytes,
+            timestamp_ms,
+            self.epoch,
+        );
+    }
+
+    fn on_new_probe_mtu(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
+            // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
+            // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
+            set_dont_fragment_for_socket(&self.sock, true);
+            Client::reader_send_raw_packet(
+                &self.sock,
+                self.server_addr,
+                &self.mac_ctx,
+                &self.mac_key,
+                Command::ProbeMTUAck,
+                self.client_id,
+                &ack,
+                self.mask_ver,
+                &self.total_sent,
+                self.debug_outgoing_blackhole,
+            );
+            set_dont_fragment_for_socket(&self.sock, false);
+        }
+        Client::push_reader_recv_side_effect(
+            &self.pending_reader_decoded,
+            Command::ProbeMTU as u8,
+            recv_bytes,
+            timestamp_ms,
+            self.epoch,
+        );
+    }
+
+    fn on_handshake_control(&self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
+        self.pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: cmd as u8,
+                payload: None,
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes,
+                timestamp_ms,
+                epoch: self.epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: Some(Client::simple_handshake_update(cmd)),
+            });
+    }
+
+    fn on_who_are_you(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if let Some(hello) =
+            Client::decode_handshake_hello(&self.master_key, self.client_id, payload)
+        {
+            let (update, encrypted) = Client::build_who_are_you_imfriend(
+                &self.master_key,
+                self.client_id,
+                self.app_token,
+                &mut self.reader_client_token,
+                hello,
+            );
+            self.reader_protocol
+                .lock()
+                .unwrap()
+                .set_decode_cipher(crate::crypto::cipher_from_key(&update.decode_key));
+
+            // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
+            // `MPC_ImFriend` twice with a blocking 32ms delay before returning
+            // to the reader loop.
+            Client::reader_send_raw_packet(
+                &self.sock,
+                self.server_addr,
+                &self.mac_ctx,
+                &self.mac_key,
+                Command::ImFriend,
+                self.client_id,
+                &encrypted,
+                self.mask_ver,
+                &self.total_sent,
+                self.debug_outgoing_blackhole,
+            );
+            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
+            Client::reader_send_raw_packet(
+                &self.sock,
+                self.server_addr,
+                &self.mac_ctx,
+                &self.mac_key,
+                Command::ImFriend,
+                self.client_id,
+                &encrypted,
+                self.mask_ver,
+                &self.total_sent,
+                self.debug_outgoing_blackhole,
+            );
+            self.pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::WhoAreYou as u8,
+                    payload: None,
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch: self.epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: None,
+                    handshake_update: Some(update),
+                });
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.pending_reader_decoded,
+                Command::WhoAreYou as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.epoch,
+            );
+        }
+    }
+
+    fn on_fine(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if Client::decode_handshake_hello(&self.master_key, self.client_id, payload).is_some() {
+            self.pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::Fine as u8,
+                    payload: None,
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch: self.epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: None,
+                    handshake_update: Some(Client::fine_handshake_update()),
+                });
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.pending_reader_decoded,
+                Command::Fine as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.epoch,
+            );
+        }
+    }
+
+    fn on_new_sliced(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) -> bool {
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let (assembled, ack) = {
+            let mut slicer = self.slicer.lock().unwrap();
+            slicer.on_new_sliced(payload)
+        };
+
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        // Delphi `OnNewSliced`: every received slice gets an immediate
+        // `MPC_SlicedACK` from the reader stack before any complete datagram is
+        // passed into `DataReadInt`.
+        Client::reader_send_raw_packet(
+            &self.sock,
+            self.server_addr,
+            &self.mac_ctx,
+            &self.mac_key,
+            Command::SlicedACK,
+            self.client_id,
+            &ack,
+            self.mask_ver,
+            &self.total_sent,
+            self.debug_outgoing_blackhole,
+        );
+
+        if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
+            let decoded =
+                Client::decode_data_read_int_payload_shared(&self.reader_protocol, cmd, &payload);
+            self.slicer.lock().unwrap().receiving.remove(&datagram_num);
+            let (cmd, payload) = decoded
+                .map(|(cmd, payload)| (cmd, Some(payload)))
+                .unwrap_or((cmd, None));
+            let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
+                Client::dispatch_api_pending_from_reader(self.api_pending.as_ref(), cmd, payload)
+            });
+            let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
+                Client::dispatch_candles_chunk_from_reader(
+                    self.pending_candles.as_ref(),
+                    cmd,
+                    payload,
+                    timestamp_ms,
+                )
+            });
+            self.pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd,
+                    payload,
+                    api_pending_consumed,
+                    candles_chunk_consumed,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch: self.epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: Some(ReaderSlicedStats {
+                        dup_count,
+                        blocks_count,
+                    }),
+                    ping_update: None,
+                    handshake_update: None,
+                });
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.pending_reader_decoded,
+                Command::Sliced as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.epoch,
+            );
+        }
+
+        true
+    }
+
+    fn on_new_sliced_ack(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
+        // Applying it is writer/`CheckSeningData` work.
+        Client::push_sliced_ack(&self.incoming_sliced_acks, payload);
+        Client::push_reader_recv_side_effect(
+            &self.pending_reader_decoded,
+            Command::SlicedACK as u8,
+            recv_bytes,
+            timestamp_ms,
+            self.epoch,
+        );
+    }
+
+    fn on_new_ping(
+        &self,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+    ) {
+        let raw_now_dt = delphi_now_raw();
+        let corrected_now_dt = delphi_now();
+        if let Some((ping_update, response)) = Client::reader_build_ping_update_and_response(
+            &self.reader_protocol,
+            &self.reader_ping_state,
+            &self.server_time_delta_handle,
+            payload,
+            raw_now_dt,
+            corrected_now_dt,
+            self.total_sent.load(Ordering::Relaxed),
+            total_recv_after,
+        ) {
+            // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
+            // Ping response immediately from the reader stack.
+            Client::reader_send_raw_packet(
+                &self.sock,
+                self.server_addr,
+                &self.mac_ctx,
+                &self.mac_key,
+                Command::Ping,
+                self.client_id,
+                &response,
+                self.mask_ver,
+                &self.total_sent,
+                self.debug_outgoing_blackhole,
+            );
+            self.pending_reader_decoded
+                .lock()
+                .unwrap()
+                .push(ReaderDecodedMsg {
+                    cmd: Command::Ping as u8,
+                    payload: Some(payload.to_vec()),
+                    api_pending_consumed: false,
+                    candles_chunk_consumed: false,
+                    recv_bytes,
+                    timestamp_ms,
+                    epoch: self.epoch,
+                    apply_recv_effects: true,
+                    sliced_stats: None,
+                    ping_update: Some(ping_update),
+                    handshake_update: None,
+                });
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.pending_reader_decoded,
+                Command::Ping as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.epoch,
+            );
+        }
     }
 }
 
@@ -5534,495 +5788,6 @@ impl Client {
         if let Err(e) = spawn_result {
             error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
             self.force_disconnect = true;
-        }
-    }
-
-    fn reader_on_err_emu_drop(
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        if trace_io_enabled() {
-            eprintln!(
-                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
-                Command::from_byte(raw_cmd),
-                raw_cmd,
-                payload.len()
-            );
-        }
-        if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
-            if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
-                eprintln!(
-                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
-                    sh.datagram_num,
-                    sh.block_num,
-                    sh.max_block_num,
-                    payload.len()
-                );
-            } else {
-                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
-            }
-        }
-
-        // Delphi ErrEmu exits after packet accounting / LastOnline side effects;
-        // it does not deliver the packet into protocol/user handlers.
-        Self::push_reader_recv_side_effect(
-            pending_reader_decoded,
-            raw_cmd,
-            recv_bytes,
-            timestamp_ms,
-            epoch,
-        );
-    }
-
-    fn reader_on_data_packet(
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        api_pending: &Arc<ApiPending>,
-        pending_candles: &Arc<Mutex<HashMap<u64, PartialCandles>>>,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        let decoded = Self::reader_decode_data_packets(
-            reader_protocol,
-            Some(api_pending.as_ref()),
-            Some(pending_candles.as_ref()),
-            raw_cmd,
-            payload,
-            recv_bytes,
-            timestamp_ms,
-            epoch,
-        );
-        pending_reader_decoded.lock().unwrap().extend(decoded);
-    }
-
-    fn reader_on_new_size_test(
-        sock: &UdpSocket,
-        server_addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        client_id: u64,
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        if let Some(ack) = Self::build_size_ack_payload(reader_protocol, payload) {
-            // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
-            // `MPC_SizeAck` of requested size, then turn DontFragment off.
-            set_dont_fragment_for_socket(sock, true);
-            Self::reader_send_raw_packet(
-                sock,
-                server_addr,
-                mac_ctx,
-                mac_key,
-                Command::SizeAck,
-                client_id,
-                &ack,
-                mask_ver,
-                total_sent,
-                debug_outgoing_blackhole,
-            );
-            set_dont_fragment_for_socket(sock, false);
-        }
-        Self::push_reader_recv_side_effect(
-            pending_reader_decoded,
-            Command::SizeTest as u8,
-            recv_bytes,
-            timestamp_ms,
-            epoch,
-        );
-    }
-
-    fn reader_on_new_probe_mtu(
-        sock: &UdpSocket,
-        server_addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        client_id: u64,
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        if let Some(ack) = Self::build_probe_mtu_ack_payload(payload) {
-            // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
-            // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
-            set_dont_fragment_for_socket(sock, true);
-            Self::reader_send_raw_packet(
-                sock,
-                server_addr,
-                mac_ctx,
-                mac_key,
-                Command::ProbeMTUAck,
-                client_id,
-                &ack,
-                mask_ver,
-                total_sent,
-                debug_outgoing_blackhole,
-            );
-            set_dont_fragment_for_socket(sock, false);
-        }
-        Self::push_reader_recv_side_effect(
-            pending_reader_decoded,
-            Command::ProbeMTU as u8,
-            recv_bytes,
-            timestamp_ms,
-            epoch,
-        );
-    }
-
-    fn reader_on_handshake_control(
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        cmd: Command,
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        pending_reader_decoded
-            .lock()
-            .unwrap()
-            .push(ReaderDecodedMsg {
-                cmd: cmd as u8,
-                payload: None,
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-                apply_recv_effects: true,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: Some(Self::simple_handshake_update(cmd)),
-            });
-    }
-
-    fn reader_on_who_are_you(
-        sock: &UdpSocket,
-        server_addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        master_key: &MoonKey,
-        client_id: u64,
-        app_token: u64,
-        reader_client_token: &mut u64,
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        if let Some(hello) = Self::decode_handshake_hello(master_key, client_id, payload) {
-            let (update, encrypted) = Self::build_who_are_you_imfriend(
-                master_key,
-                client_id,
-                app_token,
-                reader_client_token,
-                hello,
-            );
-            reader_protocol
-                .lock()
-                .unwrap()
-                .set_decode_cipher(crate::crypto::cipher_from_key(&update.decode_key));
-
-            // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
-            // `MPC_ImFriend` twice with a blocking 32ms delay before returning
-            // to the reader loop.
-            Self::reader_send_raw_packet(
-                sock,
-                server_addr,
-                mac_ctx,
-                mac_key,
-                Command::ImFriend,
-                client_id,
-                &encrypted,
-                mask_ver,
-                total_sent,
-                debug_outgoing_blackhole,
-            );
-            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
-            Self::reader_send_raw_packet(
-                sock,
-                server_addr,
-                mac_ctx,
-                mac_key,
-                Command::ImFriend,
-                client_id,
-                &encrypted,
-                mask_ver,
-                total_sent,
-                debug_outgoing_blackhole,
-            );
-            pending_reader_decoded
-                .lock()
-                .unwrap()
-                .push(ReaderDecodedMsg {
-                    cmd: Command::WhoAreYou as u8,
-                    payload: None,
-                    api_pending_consumed: false,
-                    candles_chunk_consumed: false,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch,
-                    apply_recv_effects: true,
-                    sliced_stats: None,
-                    ping_update: None,
-                    handshake_update: Some(update),
-                });
-        } else {
-            Self::push_reader_recv_side_effect(
-                pending_reader_decoded,
-                Command::WhoAreYou as u8,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-            );
-        }
-    }
-
-    fn reader_on_fine(
-        master_key: &MoonKey,
-        client_id: u64,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        if Self::decode_handshake_hello(master_key, client_id, payload).is_some() {
-            pending_reader_decoded
-                .lock()
-                .unwrap()
-                .push(ReaderDecodedMsg {
-                    cmd: Command::Fine as u8,
-                    payload: None,
-                    api_pending_consumed: false,
-                    candles_chunk_consumed: false,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch,
-                    apply_recv_effects: true,
-                    sliced_stats: None,
-                    ping_update: None,
-                    handshake_update: Some(Self::fine_handshake_update()),
-                });
-        } else {
-            Self::push_reader_recv_side_effect(
-                pending_reader_decoded,
-                Command::Fine as u8,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-            );
-        }
-    }
-
-    fn reader_on_new_sliced(
-        shutdown_flag: &AtomicBool,
-        sock: &UdpSocket,
-        server_addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        client_id: u64,
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        api_pending: &Arc<ApiPending>,
-        pending_candles: &Arc<Mutex<HashMap<u64, PartialCandles>>>,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        slicer: &Arc<Mutex<slicing::SlicingReceiver>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) -> bool {
-        if shutdown_flag.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        let (assembled, ack) = {
-            let mut slicer = slicer.lock().unwrap();
-            slicer.on_new_sliced(payload)
-        };
-
-        if shutdown_flag.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        // Delphi `OnNewSliced`: every received slice gets an immediate
-        // `MPC_SlicedACK` from the reader stack before any complete datagram is
-        // passed into `DataReadInt`.
-        Self::reader_send_raw_packet(
-            sock,
-            server_addr,
-            mac_ctx,
-            mac_key,
-            Command::SlicedACK,
-            client_id,
-            &ack,
-            mask_ver,
-            total_sent,
-            debug_outgoing_blackhole,
-        );
-
-        if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
-            let decoded = Self::decode_data_read_int_payload_shared(reader_protocol, cmd, &payload);
-            slicer.lock().unwrap().receiving.remove(&datagram_num);
-            let (cmd, payload) = decoded
-                .map(|(cmd, payload)| (cmd, Some(payload)))
-                .unwrap_or((cmd, None));
-            let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
-                Self::dispatch_api_pending_from_reader(api_pending.as_ref(), cmd, payload)
-            });
-            let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
-                Self::dispatch_candles_chunk_from_reader(
-                    pending_candles.as_ref(),
-                    cmd,
-                    payload,
-                    timestamp_ms,
-                )
-            });
-            pending_reader_decoded
-                .lock()
-                .unwrap()
-                .push(ReaderDecodedMsg {
-                    cmd,
-                    payload,
-                    api_pending_consumed,
-                    candles_chunk_consumed,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch,
-                    apply_recv_effects: true,
-                    sliced_stats: Some(ReaderSlicedStats {
-                        dup_count,
-                        blocks_count,
-                    }),
-                    ping_update: None,
-                    handshake_update: None,
-                });
-        } else {
-            Self::push_reader_recv_side_effect(
-                pending_reader_decoded,
-                Command::Sliced as u8,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-            );
-        }
-
-        true
-    }
-
-    fn reader_on_new_sliced_ack(
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        incoming_sliced_acks: &Arc<Mutex<Vec<SlicedAck>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
-        // Applying it is writer/`CheckSeningData` work.
-        Self::push_sliced_ack(incoming_sliced_acks, payload);
-        Self::push_reader_recv_side_effect(
-            pending_reader_decoded,
-            Command::SlicedACK as u8,
-            recv_bytes,
-            timestamp_ms,
-            epoch,
-        );
-    }
-
-    fn reader_on_new_ping(
-        sock: &UdpSocket,
-        server_addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        client_id: u64,
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        reader_ping_state: &Arc<Mutex<ReaderPingState>>,
-        server_time_delta_handle: &Arc<std::sync::atomic::AtomicU64>,
-        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-        payload: &[u8],
-        recv_bytes: u64,
-        total_recv_after: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-    ) {
-        let raw_now_dt = delphi_now_raw();
-        let corrected_now_dt = delphi_now();
-        if let Some((ping_update, response)) = Self::reader_build_ping_update_and_response(
-            reader_protocol,
-            reader_ping_state,
-            server_time_delta_handle,
-            payload,
-            raw_now_dt,
-            corrected_now_dt,
-            total_sent.load(Ordering::Relaxed),
-            total_recv_after,
-        ) {
-            // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
-            // Ping response immediately from the reader stack.
-            Self::reader_send_raw_packet(
-                sock,
-                server_addr,
-                mac_ctx,
-                mac_key,
-                Command::Ping,
-                client_id,
-                &response,
-                mask_ver,
-                total_sent,
-                debug_outgoing_blackhole,
-            );
-            pending_reader_decoded
-                .lock()
-                .unwrap()
-                .push(ReaderDecodedMsg {
-                    cmd: Command::Ping as u8,
-                    payload: Some(payload.to_vec()),
-                    api_pending_consumed: false,
-                    candles_chunk_consumed: false,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch,
-                    apply_recv_effects: true,
-                    sliced_stats: None,
-                    ping_update: Some(ping_update),
-                    handshake_update: None,
-                });
-        } else {
-            Self::push_reader_recv_side_effect(
-                pending_reader_decoded,
-                Command::Ping as u8,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-            );
         }
     }
 

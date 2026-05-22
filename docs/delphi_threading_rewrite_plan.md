@@ -842,9 +842,28 @@ Done:
 
 Still not done:
 
-- `ReaderRuntime` still calls `Client::reader_on_*` helper blocks. The next
-  strict-parity step is to move reader-owned protocol helpers/state under the
-  runtime/transport ownership boundary instead of keeping them as `Client`
-  statics.
+- `ReaderRuntime` still uses lower-level `Client` helpers for shared decode,
+  packet building, and raw send. The next strict-parity step is to decide which
+  of those helpers are pure shared helpers and which must become transport-owned
+  runtime methods.
 - The writer/orchestrator is still a `run_inner` tick extraction, not a
   dedicated Delphi-style writer runtime/thread.
+
+### 2026-05-22 - Phase 1 partial: moved reader command blocks into `ReaderRuntime`
+
+Done:
+
+- Removed the `Client::reader_on_*` command blocks.
+- `ReaderRuntime::handle_command` now calls its own `on_*` methods for Ping,
+  handshake control/auth, PMTU probes, SlicedACK, Sliced, ErrEmu-drop, and
+  regular data.
+- `Client` still keeps pure/shared helpers used by tests and by the runtime:
+  data decode, handshake payload build/decode, ACK parsing, reader side-effect
+  enqueue, and raw packet send.
+
+Still not done:
+
+- Need split the remaining helper set by ownership: pure protocol helpers can
+  stay shared, while socket/stateful transport helpers should move behind
+  reader/writer runtime ownership.
+- The writer/orchestrator is still not a standalone Delphi-style runtime/thread.
