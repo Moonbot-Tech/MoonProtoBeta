@@ -1470,10 +1470,17 @@ Done:
 - Removed Rust-only `max_trace_points` cap after the test exposed
   `EventDispatcher::default()` had effectively capped stored trace points at
   zero. Delphi `ApplyServerTrace` has no equivalent fixed cap in this block.
+- Fixed `TOrderStatusUpdate` body parity: Rust now applies `UpdateData` only
+  for `BuySet` / `SellSet`, matching Delphi `HandleServerCommand`; terminal
+  statuses update status/sell reason/removal marker without overwriting compact
+  order fields.
+- Fixed `TOrderReplaceResponse.QuantityBase`: Rust now updates target
+  `quantity_base` only when the response value is positive, matching Delphi's
+  `if cmd.QuantityBase > 0 then ...`.
 
 Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
-  `ProcessCommandOrder` body: price field side effects in
-  `HandleServerCommand`, `OrderReplaceResponse` exact semantics, and which
-  epoch/visual classes are accepted or dropped.
+  `ProcessCommandOrder` body: Delphi `TOrder.Price` / `FLast*ActualPrice`
+  side effects are not represented in Rust read model yet, and accepted/dropped
+  class coverage still needs final sweep.

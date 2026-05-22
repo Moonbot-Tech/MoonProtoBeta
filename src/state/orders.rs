@@ -462,34 +462,34 @@ impl Orders {
                         return (reason, OrderEvent::Ignored { uid, reason });
                     }
 
-                    // Apply delta-update.
-                    let mut data = up.update_data;
-                    data.adjust_time(self.server_time_delta);
-
-                    // Routing по status — какой ордер обновлять.
-                    let target = if matches!(
+                    if matches!(
                         up.epoch_header.status,
-                        OrderWorkerStatus::SellSet
-                            | OrderWorkerStatus::SelLAlmostDone
-                            | OrderWorkerStatus::SelLDone
-                            | OrderWorkerStatus::SellCancel
-                            | OrderWorkerStatus::SellFail
+                        OrderWorkerStatus::BuySet | OrderWorkerStatus::SellSet
                     ) {
-                        &mut entry.sell_order
-                    } else {
-                        &mut entry.buy_order
-                    };
+                        // Apply delta-update. Delphi applies UpdateData only
+                        // for OS_BuySet and OS_SellSet; terminal statuses only
+                        // move Status/SellReason and do not overwrite order
+                        // compact fields.
+                        let mut data = up.update_data;
+                        data.adjust_time(self.server_time_delta);
 
-                    target.int_id = data.int_id;
-                    target.actual_price = data.actual_price;
-                    target.open_time = data.open_time;
-                    target.quantity = data.quantity;
-                    target.quantity_remaining = data.quantity_remaining;
-                    target.actual_q = data.actual_q;
-                    target.total_btc = data.total_btc;
-                    target.mean_price = data.mean_price;
-                    target.partial_done = data.partial_done;
-                    target.stop_flag = data.stop_flag;
+                        let target = if up.epoch_header.status == OrderWorkerStatus::SellSet {
+                            &mut entry.sell_order
+                        } else {
+                            &mut entry.buy_order
+                        };
+
+                        target.int_id = data.int_id;
+                        target.actual_price = data.actual_price;
+                        target.open_time = data.open_time;
+                        target.quantity = data.quantity;
+                        target.quantity_remaining = data.quantity_remaining;
+                        target.actual_q = data.actual_q;
+                        target.total_btc = data.total_btc;
+                        target.mean_price = data.mean_price;
+                        target.partial_done = data.partial_done;
+                        target.stop_flag = data.stop_flag;
+                    }
 
                     entry.status = up.epoch_header.status;
                     entry.sell_reason_code = up.sell_reason_code;
@@ -543,7 +543,9 @@ impl Orders {
                 target.mean_price = data.mean_price;
                 target.partial_done = data.partial_done;
                 target.stop_flag = data.stop_flag;
-                target.quantity_base = rr.quantity_base;
+                if rr.quantity_base > 0.0 {
+                    target.quantity_base = rr.quantity_base;
+                }
 
                 // Сбрасываем bulk_replace флаг на этой стороне (replace подтверждён).
                 if rr.order_type == OrderType::Sell {
@@ -1235,6 +1237,61 @@ mod tests {
         let (res, _) = orders.apply(TradeCommand::VStopUpdate(rollback));
         assert_eq!(res, ApplyResult::PhaseRollback);
         assert!(!orders.get(1).unwrap().vstop_on);
+    }
+
+    #[test]
+    fn terminal_status_update_does_not_apply_update_data_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
+        status.sell_order.actual_price = 10.0;
+        orders.apply(order_status_cmd(status));
+
+        let terminal_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SelLDone),
+            update_data: OrderUpdateData {
+                actual_price: 999.0,
+                mean_price: 999.0,
+                quantity: 999.0,
+                ..Default::default()
+            },
+            sell_reason_code: 14,
+        };
+        let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(terminal_update));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        let sell_actual = order.sell_order.actual_price;
+        let sell_mean = order.sell_order.mean_price;
+        assert_eq!(sell_actual, 10.0);
+        assert_eq!(sell_mean, 0.0);
+        assert_eq!(order.sell_reason_code, 14);
+        assert!(order.job_is_done);
+    }
+
+    #[test]
+    fn replace_response_quantity_base_zero_preserves_existing_value_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.quantity_base = 12.5;
+        orders.apply(order_status_cmd(status));
+
+        let rr = OrderReplaceResponse {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
+            order_type: OrderType::Buy,
+            price: 123.0,
+            update_data: OrderUpdateData {
+                actual_price: 123.0,
+                ..Default::default()
+            },
+            quantity_base: 0.0,
+        };
+        let (res, ev) = orders.apply(order_replace_response_cmd(rr));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
+        assert_eq!(quantity_base, 12.5);
     }
 
     #[test]
