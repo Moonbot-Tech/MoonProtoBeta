@@ -957,3 +957,20 @@ Still not done:
   delegate to `Client`.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: moved H/Low batching writer bodies
+
+Done:
+
+- Moved `send_h_item`, `retry_pending_h`, `batch_send_direct`,
+  `do_send_mp_data_wire`, tmp-send append, and `flush_send_batch` bodies into
+  `WriterRuntime`.
+- Removed those method bodies from `Client`.
+- Preserved Delphi order for PendingH retry: clone/resend intent, decrement,
+  drop exhausted entries, then resend cloned items through H send.
+
+Still not done:
+
+- `create_sliced_and_send` and `retry_sliced` bodies still delegate to `Client`.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.

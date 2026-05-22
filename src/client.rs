@@ -2807,11 +2807,98 @@ impl WriterRuntime<'_> {
     }
 
     fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
-        self.client.send_h_item(item, cur_tm);
+        // Auto-compression (matches Delphi TMoonProtoDataToSend.Create pas:661-672).
+        // Сжимает payload > 64 байт если результат < 95% оригинала. Inner cmd получает
+        // COMPRESSED_FLAG (0x80). Закрывает DEVIATION #11.
+        let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
+
+        if item.encrypted {
+            let msg_num = if item.msg_num != 0 {
+                item.msg_num
+            } else {
+                self.client.crypt_msg_counter += 1;
+                self.client.crypt_msg_counter
+            };
+
+            let mut crypto_hdr = [0u8; 12];
+            let rnd: u16 = rand::random();
+            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
+            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
+            crypto_hdr[10] = eff_cmd;
+            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
+
+            let mut plaintext = Vec::with_capacity(12 + eff_data.len());
+            plaintext.extend_from_slice(&crypto_hdr);
+            plaintext.extend_from_slice(&eff_data);
+
+            // B-V2-03: кэшированный cipher.
+            let Some(cipher) = self.client.encode_cipher.as_ref() else {
+                error!(target: "moonproto::crypto", "encrypt batch called before handshake — packet dropped");
+                return;
+            };
+            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
+
+            // Delphi `Client.Crypt`: outer MPC_Crypted carries COMPRESSED_FLAG too
+            // when the encrypted inner command is compressed.
+            let wire_cmd = Client::crypted_wire_cmd(eff_cmd);
+
+            self.do_send_mp_data_wire(wire_cmd, &encrypted);
+
+            // Add to PendingH for retry (first send only)
+            if item.retry_left > 0 && item.msg_num == 0 {
+                let mut pending_item = item.clone();
+                pending_item.msg_num = msg_num;
+                pending_item.last_sent_at = cur_tm;
+                // Сохраняем СЖАТЫЕ данные + cmd с COMPRESSED_FLAG — при retry encrypt
+                // снова обернёт их (compression deterministic, можно было бы не хранить —
+                // но проще не пересжимать).
+                pending_item.cmd = eff_cmd;
+                // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
+                // alloc здесь (необходимый — pending_h хранит копию между retry).
+                pending_item.data = eff_data.into_owned();
+                // Delphi `PendingH` не имеет capacity-cap: H-команды живут до ACK
+                // или исчерпания `RetryLeft`. Старые trading-команды не дропаются
+                // искусственно при большом burst'е.
+                self.client.pending_h.push(pending_item);
+            }
+        } else {
+            self.do_send_mp_data_wire(eff_cmd, &eff_data);
+        }
+        item.last_sent_at = cur_tm;
     }
 
     fn retry_pending_h(&mut self, cur_tm: i64) {
-        self.client.retry_pending_h(cur_tm);
+        // Delphi: Max(200, Min(500, round(Client.RoundTripDelay * 1.1 + 10)))
+        let path_delay =
+            ((self.client.round_trip_delay as f64 * 1.1 + 10.0).round() as i64).clamp(200, 500);
+        let mut to_drop = Vec::new();
+        let mut to_resend = Vec::new();
+
+        for (idx, item) in self.client.pending_h.iter_mut().enumerate() {
+            if (item.last_sent_at - cur_tm).abs() > path_delay {
+                item.last_sent_at = cur_tm;
+                // 1+2. Сначала клонируем с ТЕКУЩИМ retry_left и кладём на resend.
+                //      WantACK будет вычислен в send_h_item как `retry_left > 0` — на последнем
+                //      retry (когда retry_left=1 ДО decrement) WantACK=true → сервер ACK'нет.
+                to_resend.push(item.clone());
+                // 3. Decrement.
+                item.retry_left -= 1;
+                // 4. Drop если исчерпался.
+                if item.retry_left <= 0 {
+                    to_drop.push(idx);
+                }
+            }
+        }
+
+        // Remove exhausted (reverse order to preserve indices)
+        for idx in to_drop.into_iter().rev() {
+            self.client.pending_h.remove(idx);
+        }
+
+        // Resend via direct MPC_Crypted (NOT through Sliced — matches Delphi DoSendMPData)
+        for mut item in to_resend {
+            self.send_h_item(&mut item, cur_tm);
+        }
     }
 
     fn retry_sliced(&mut self, cur_tm: i64) {
@@ -2819,7 +2906,42 @@ impl WriterRuntime<'_> {
     }
 
     fn batch_send_direct(&mut self, item: &SendItem) {
-        self.client.batch_send_direct(item);
+        // Auto-compression (DEVIATION #11 — закрыто).
+        let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
+
+        // Encrypt if needed
+        // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
+        // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
+        let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
+            self.client.crypt_msg_counter += 1;
+            let msg_num = self.client.crypt_msg_counter;
+            let mut crypto_hdr = [0u8; 12];
+            let rnd: u16 = rand::random();
+            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
+            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
+            crypto_hdr[10] = eff_cmd;
+            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
+            let mut plaintext = Vec::with_capacity(12 + eff_data.len());
+            plaintext.extend_from_slice(&crypto_hdr);
+            plaintext.extend_from_slice(&eff_data);
+            // B-V2-03: кэшированный cipher.
+            let cipher = match self.client.encode_cipher.as_ref() {
+                Some(c) => c,
+                None => {
+                    error!(target: "moonproto::crypto", "encrypt batch_direct called before handshake — packet dropped");
+                    return;
+                }
+            };
+            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
+            (
+                Client::crypted_wire_cmd(eff_cmd),
+                std::borrow::Cow::Owned(encrypted),
+            )
+        } else {
+            (eff_cmd, eff_data)
+        };
+
+        self.do_send_mp_data_wire(wire_cmd, &wire_data);
     }
 
     fn send_low_items_around_sliced_retry(&mut self, l_items: &[SendItem], cur_tm: i64) {
@@ -2841,7 +2963,56 @@ impl WriterRuntime<'_> {
     }
 
     fn flush_send_batch(&mut self) {
-        self.client.flush_send_batch();
+        if self.client.tmp_send_count == 0 {
+            return;
+        }
+
+        if self.client.tmp_send_count > 1 {
+            // Send as MPC_Grouped
+            let payload = std::mem::take(&mut self.client.tmp_send_buf);
+            self.client.send_raw_packet(Command::Grouped, &payload);
+        } else {
+            // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
+            // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
+            let buf = std::mem::take(&mut self.client.tmp_send_buf);
+            if buf.len() >= 3 {
+                let cmd = buf[0];
+                // sz прочитан только для slicing data (после 3 байт group-header'а).
+                let data = &buf[3..];
+                self.client.send_raw_packet_cmd(cmd, data);
+            }
+        }
+        self.client.tmp_send_count = 0;
+        self.client.tmp_send_size = 0;
+    }
+
+    fn push_tmp_send_item(&mut self, wire_cmd: u8, wire_data: &[u8], accounted_size: usize) {
+        self.client.tmp_send_buf.push(wire_cmd);
+        let sz = wire_data.len() as u16;
+        self.client
+            .tmp_send_buf
+            .extend_from_slice(&sz.to_le_bytes());
+        self.client.tmp_send_buf.extend_from_slice(wire_data);
+        self.client.tmp_send_count += 1;
+        self.client.tmp_send_size += accounted_size;
+    }
+
+    fn do_send_mp_data_wire(&mut self, wire_cmd: u8, wire_data: &[u8]) {
+        // Delphi DoSendMPData uses `sz = d.ms.Size + GetHeaderSize + 3`.
+        // The counter intentionally over-accounts the transport header for every
+        // buffered item, and its overflow branch may send the current item
+        // directly while keeping the previous buffer for a later NeedFlush.
+        let accounted_size = wire_data.len() + 15 + 3;
+        if self.client.tmp_send_size + accounted_size > self.client.actual_pmtu as usize {
+            if self.client.tmp_send_size > accounted_size {
+                self.flush_send_batch();
+                self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
+            } else {
+                self.client.send_raw_packet_cmd(wire_cmd, wire_data);
+            }
+        } else {
+            self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
+        }
     }
 }
 
@@ -7081,71 +7252,6 @@ impl Client {
         let _ = msg_num;
     }
 
-    /// Send H-priority item directly via MPC_Crypted (no SliceHeader).
-    /// Matches Delphi DoSendMPData → Client.Crypt → SendCommand(MPC_Crypted, data).
-    /// H-priority does NOT go through slicing — it's sent as direct MPC_Crypted packet.
-    /// Send H-priority item through batch (matches DoSendMPData for H, Common.pas:933-938)
-    fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
-        // Auto-compression (matches Delphi TMoonProtoDataToSend.Create pas:661-672).
-        // Сжимает payload > 64 байт если результат < 95% оригинала. Inner cmd получает
-        // COMPRESSED_FLAG (0x80). Закрывает DEVIATION #11.
-        let (eff_cmd, eff_data) = Self::maybe_compress(item.cmd, &item.data);
-
-        if item.encrypted {
-            let msg_num = if item.msg_num != 0 {
-                item.msg_num
-            } else {
-                self.crypt_msg_counter += 1;
-                self.crypt_msg_counter
-            };
-
-            let mut crypto_hdr = [0u8; 12];
-            let rnd: u16 = rand::random();
-            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
-            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
-            crypto_hdr[10] = eff_cmd;
-            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
-
-            let mut plaintext = Vec::with_capacity(12 + eff_data.len());
-            plaintext.extend_from_slice(&crypto_hdr);
-            plaintext.extend_from_slice(&eff_data);
-
-            // B-V2-03: кэшированный cipher.
-            let Some(cipher) = self.encode_cipher.as_ref() else {
-                error!(target: "moonproto::crypto", "encrypt batch called before handshake — packet dropped");
-                return;
-            };
-            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
-
-            // Delphi `Client.Crypt`: outer MPC_Crypted carries COMPRESSED_FLAG too
-            // when the encrypted inner command is compressed.
-            let wire_cmd = Self::crypted_wire_cmd(eff_cmd);
-
-            self.do_send_mp_data_wire(wire_cmd, &encrypted);
-
-            // Add to PendingH for retry (first send only)
-            if item.retry_left > 0 && item.msg_num == 0 {
-                let mut pending_item = item.clone();
-                pending_item.msg_num = msg_num;
-                pending_item.last_sent_at = cur_tm;
-                // Сохраняем СЖАТЫЕ данные + cmd с COMPRESSED_FLAG — при retry encrypt
-                // снова обернёт их (compression deterministic, можно было бы не хранить —
-                // но проще не пересжимать).
-                pending_item.cmd = eff_cmd;
-                // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
-                // alloc здесь (необходимый — pending_h хранит копию между retry).
-                pending_item.data = eff_data.into_owned();
-                // Delphi `PendingH` не имеет capacity-cap: H-команды живут до ACK
-                // или исчерпания `RetryLeft`. Старые trading-команды не дропаются
-                // искусственно при большом burst'е.
-                self.pending_h.push(pending_item);
-            }
-        } else {
-            self.do_send_mp_data_wire(eff_cmd, &eff_data);
-        }
-        item.last_sent_at = cur_tm;
-    }
-
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
     /// и `mp_compress` дал savings ≥ 5% (`mp_compress` сам возвращает None если меньше).
     /// Соответствует Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
@@ -7168,48 +7274,6 @@ impl Client {
             Command::Crypted as u8 | COMPRESSED_FLAG
         } else {
             Command::Crypted as u8
-        }
-    }
-
-    /// Retry pending H-commands (matches CheckSeningData:944-954).
-    /// **Порядок ВАЖЕН** (byte-exact с Delphi):
-    ///   1. clone (с текущим retry_left → WantACK = (retry_left > 0))
-    ///   2. resend
-    ///   3. decrement retry_left
-    ///   4. check ≤ 0 → drop
-    ///
-    /// Это гарантирует что **последний** retry уходит с WantACK=true (сервер пришлёт ACK).
-    fn retry_pending_h(&mut self, cur_tm: i64) {
-        // Delphi: Max(200, Min(500, round(Client.RoundTripDelay * 1.1 + 10)))
-        let path_delay =
-            ((self.round_trip_delay as f64 * 1.1 + 10.0).round() as i64).clamp(200, 500);
-        let mut to_drop = Vec::new();
-        let mut to_resend = Vec::new();
-
-        for (idx, item) in self.pending_h.iter_mut().enumerate() {
-            if (item.last_sent_at - cur_tm).abs() > path_delay {
-                item.last_sent_at = cur_tm;
-                // 1+2. Сначала клонируем с ТЕКУЩИМ retry_left и кладём на resend.
-                //      WantACK будет вычислен в send_h_item как `retry_left > 0` — на последнем
-                //      retry (когда retry_left=1 ДО decrement) WantACK=true → сервер ACK'нет.
-                to_resend.push(item.clone());
-                // 3. Decrement.
-                item.retry_left -= 1;
-                // 4. Drop если исчерпался.
-                if item.retry_left <= 0 {
-                    to_drop.push(idx);
-                }
-            }
-        }
-
-        // Remove exhausted (reverse order to preserve indices)
-        for idx in to_drop.into_iter().rev() {
-            self.pending_h.remove(idx);
-        }
-
-        // Resend via direct MPC_Crypted (NOT through Sliced — matches Delphi DoSendMPData)
-        for mut item in to_resend {
-            self.send_h_item(&mut item, cur_tm);
         }
     }
 
@@ -7337,104 +7401,6 @@ impl Client {
         for idx in to_remove.into_iter().rev() {
             self.sending.remove(idx);
         }
-    }
-
-    /// Send a packet directly (low-level, no queue)
-    /// Buffer an item for Grouped batching (matches DoSendMPData, Common.pas:795-833).
-    /// Items are accumulated until PMTU is reached, then flushed as MPC_Grouped.
-    fn batch_send_direct(&mut self, item: &SendItem) {
-        // Auto-compression (DEVIATION #11 — закрыто).
-        let (eff_cmd, eff_data) = Self::maybe_compress(item.cmd, &item.data);
-
-        // Encrypt if needed
-        // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
-        // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
-        let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
-            self.crypt_msg_counter += 1;
-            let msg_num = self.crypt_msg_counter;
-            let mut crypto_hdr = [0u8; 12];
-            let rnd: u16 = rand::random();
-            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
-            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
-            crypto_hdr[10] = eff_cmd;
-            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
-            let mut plaintext = Vec::with_capacity(12 + eff_data.len());
-            plaintext.extend_from_slice(&crypto_hdr);
-            plaintext.extend_from_slice(&eff_data);
-            // B-V2-03: кэшированный cipher.
-            let cipher = match self.encode_cipher.as_ref() {
-                Some(c) => c,
-                None => {
-                    error!(target: "moonproto::crypto", "encrypt batch_direct called before handshake — packet dropped");
-                    return;
-                }
-            };
-            let encrypted = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
-            (
-                Self::crypted_wire_cmd(eff_cmd),
-                std::borrow::Cow::Owned(encrypted),
-            )
-        } else {
-            (eff_cmd, eff_data)
-        };
-
-        self.do_send_mp_data_wire(wire_cmd, &wire_data);
-    }
-
-    fn push_tmp_send_item(&mut self, wire_cmd: u8, wire_data: &[u8], accounted_size: usize) {
-        self.tmp_send_buf.push(wire_cmd);
-        let sz = wire_data.len() as u16;
-        self.tmp_send_buf.extend_from_slice(&sz.to_le_bytes());
-        self.tmp_send_buf.extend_from_slice(&wire_data);
-        self.tmp_send_count += 1;
-        self.tmp_send_size += accounted_size;
-    }
-
-    fn do_send_mp_data_wire(&mut self, wire_cmd: u8, wire_data: &[u8]) {
-        // Delphi DoSendMPData uses `sz = d.ms.Size + GetHeaderSize + 3`.
-        // The counter intentionally over-accounts the transport header for every
-        // buffered item, and its overflow branch may send the current item
-        // directly while keeping the previous buffer for a later NeedFlush.
-        let accounted_size = wire_data.len() + 15 + 3;
-        if self.tmp_send_size + accounted_size > self.actual_pmtu as usize {
-            if self.tmp_send_size > accounted_size {
-                self.flush_send_batch();
-                self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
-            } else {
-                self.send_raw_packet_cmd(wire_cmd, wire_data);
-            }
-        } else {
-            self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
-        }
-    }
-
-    /// Flush the send batch (matches DoSendTmpList, Common.pas:835-867).
-    /// If count>1 → MPC_Grouped. If count==1 → single packet.
-    /// A-19 fix: для single случая не re-парсим cmd/sz из buf — мы их знаем при добавлении.
-    /// Single-element путь теперь без bounds-check парсинга.
-    fn flush_send_batch(&mut self) {
-        if self.tmp_send_count == 0 {
-            return;
-        }
-
-        if self.tmp_send_count > 1 {
-            // Send as MPC_Grouped
-            let payload = std::mem::take(&mut self.tmp_send_buf);
-            self.send_raw_packet(Command::Grouped, &payload);
-        } else {
-            // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
-            // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
-            let buf = std::mem::take(&mut self.tmp_send_buf);
-            if buf.len() >= 3 {
-                let cmd = buf[0];
-                // sz прочитан только для slicing data (после 3 байт group-header'а).
-                // Используем оставшийся len как `len - 3` — это и есть фактический payload.
-                self.send_raw_packet_cmd(cmd, &buf[3..]);
-            }
-        }
-
-        self.tmp_send_count = 0;
-        self.tmp_send_size = 0;
     }
 
     fn send_raw_packet_cmd(&mut self, cmd: u8, payload: &[u8]) {
