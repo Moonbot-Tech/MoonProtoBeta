@@ -1050,9 +1050,9 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Test-only `handle_ping*` / `handle_handshake` paths still exist for narrow
-  unit tests; next pass should replace them with runtime/pure-helper based tests
-  or delete them if redundant with service reader tests.
+- Test-only `handle_handshake` paths still exist for narrow unit tests; next
+  pass should replace them with runtime/pure-helper based tests or delete them
+  if redundant with service reader tests.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.
 
@@ -1070,6 +1070,26 @@ Still not done:
 
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
-- Test-only `handle_ping*` / `handle_handshake` paths remain.
+- Test-only `handle_handshake` paths remain.
+- Reader-side handshake/Ping writer-visible state placement remains unresolved
+  against strict Delphi `UDPRead`.
+
+### 2026-05-22 - Phase 1 partial: removed old test Ping helper
+
+Done:
+
+- Removed test-only `Client::handle_ping`, `handle_ping_at`,
+  `handle_ping_with_reader_core`, and `Client::apply_ping_ack_bitmap`.
+- Ping tests now use production reader helper
+  `reader_build_ping_update_and_response` plus
+  `WriterRuntime::process_reader_decoded`.
+- Removed now-dead `ReaderPingState::sync_from_main` and the unused
+  `DispatchSink::deliver` test helper.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Test-only `handle_handshake` paths remain.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.

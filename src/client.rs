@@ -2440,16 +2440,6 @@ impl<'a> DispatchSink<'a> {
         matches!(self, Self::Buffer(_))
     }
 
-    /// Доставка по ссылке — копия только для Buffer ветки.
-    #[cfg(test)]
-    #[inline]
-    fn deliver(&mut self, cmd: Command, payload: &[u8]) {
-        match self {
-            Self::Callback(cb) => cb(cmd, payload),
-            Self::Buffer(buf) => buf.push((cmd, payload.to_vec())),
-        }
-    }
-
     /// Доставка с уже-владеемым Vec (avoid лишний `to_vec`, когда payload
     /// родился из decrypt/decompress и уже Owned).
     #[inline]
@@ -3697,13 +3687,6 @@ impl ReaderPingState {
     fn reset_protocol_session(&mut self) {
         self.used_sliced_limit = false;
     }
-
-    #[cfg(test)]
-    fn sync_from_main(&mut self, ping_count: u32, can_send_rate: i32, used_sliced_limit: bool) {
-        self.ping_count = ping_count;
-        self.can_send_rate = can_send_rate;
-        self.used_sliced_limit = used_sliced_limit;
-    }
 }
 
 /// Public handle to the client. Allows sending commands from any thread.
@@ -3879,7 +3862,7 @@ pub struct Client {
     pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
 
     /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
-    /// Используется в `handle_handshake` и `handle_ping` для детекции server restart:
+    /// Используется в handshake/Ping processing для детекции server restart:
     /// если incoming `peer_app_token != tracked_peer_app_token` — помечаем индексы stale.
     /// 0 = ещё не было успешной синхронизации (init состояние).
     tracked_indexes_peer_app_token: u64,
@@ -3962,7 +3945,7 @@ pub struct Client {
     /// **Per-Client ServerTimeDelta handle** — shareable через `Arc::clone`.
     ///
     /// Хранит текущий `ServerTimeDelta` (в днях, TDateTime-формат, упакован в u64
-    /// через `f64::to_bits`). Обновляется в `handle_ping` синхронно с
+    /// через `f64::to_bits`). Обновляется при обработке `MPC_Ping` синхронно с
     /// `self.server_time_delta` и с глобальным `SERVER_TIME_DELTA_DAYS`,
     /// который нужен только raw `EventDispatcher::dispatch_into` без handle.
     ///
@@ -6758,7 +6741,7 @@ impl Client {
             }
         }
 
-        // MPC_Ping is handled in handle_ping. Its server ACK bitmap follows the
+        // MPC_Ping is handled in the reader Ping path. Its server ACK bitmap follows the
         // Delphi TmpSlider -> RecvdSlider -> ApplyRegularHLAck path, not this
         // generic delivery branch.
         Some((cmd, payload.into_owned()))
@@ -7031,131 +7014,6 @@ impl Client {
             }
         }
         true
-    }
-
-    #[cfg(test)]
-    fn handle_ping(&mut self, payload: &[u8], sink: &mut DispatchSink<'_>) {
-        self.handle_ping_with_reader_core(payload, sink, false);
-    }
-
-    #[cfg(test)]
-    fn handle_ping_with_reader_core(
-        &mut self,
-        payload: &[u8],
-        sink: &mut DispatchSink<'_>,
-        reader_dataread_core_done: bool,
-    ) {
-        let raw_now_dt = delphi_now_raw();
-        let corrected_now_dt = delphi_now();
-        self.handle_ping_at(
-            payload,
-            sink,
-            raw_now_dt,
-            corrected_now_dt,
-            reader_dataread_core_done,
-        );
-    }
-
-    #[cfg(test)]
-    fn handle_ping_at(
-        &mut self,
-        payload: &[u8],
-        sink: &mut DispatchSink<'_>,
-        raw_now_dt: f64,
-        corrected_now_dt: f64,
-        reader_dataread_core_done: bool,
-    ) {
-        if payload.len() < 50 {
-            return;
-        }
-        self.ping_count += 1;
-        // TMoonProtoPing fields (matches MoonProtoDataStruct.pas:63-74)
-        let initial_time = f64::from_le_bytes(payload[8..16].try_into().unwrap());
-        self.round_trip_delay = i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64;
-        // Delphi assigns APing.PMTU verbatim (MoonProtoUDPClient.pas:632-635).
-        // Runtime ProbeMTU can legitimately grow above MaxNeededDatagramSize=8000
-        // by +32 steps, so upper clamping here would break discovery.
-        let pmtu_raw = u16::from_le_bytes(payload[20..22].try_into().unwrap());
-        self.actual_pmtu = pmtu_raw;
-        self.global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
-        self.overheat = payload[24];
-        // B-19: умножение на const reciprocal вместо деления (FDIV → FMUL).
-        // Компилятор инлайнит `1.0 / 255.0` как const expression.
-        self.rs = payload[41] as f64 * (1.0 / 255.0);
-        self.need_connect = false;
-
-        // C9: ServerTimeDelta + NetLagPing (matches MoonProtoClient.pas:267-269)
-        // Delphi uses raw `Now` for order-time correction, but NTP-corrected
-        // `Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset` for NetLagPing
-        // and the outbound Ping.Time.
-        self.server_time_delta = initial_time - raw_now_dt;
-        // audit_responsibility A5 / active library: автоматически пробрасываем delta в
-        // per-Client `Arc<AtomicU64>` handle (multi-Client) И в глобальный atomic
-        // для raw EventDispatcher::new() без линковки. См. DEVIATION #23.
-        self.server_time_delta_handle.store(
-            self.server_time_delta.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        set_server_time_delta_global(self.server_time_delta);
-        let server_time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
-        self.net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
-
-        // Adaptive CanSendRate control (matches UDPClient.pas:643-660)
-        const COMFORTABLE_RS: f64 = 0.92;
-        const CRITICAL_RS: f64 = 0.85;
-        const MIN_RATE: i32 = 256 * 1024;
-        const MAX_RATE: i32 = 8 * 1024 * 1024;
-        if self.used_sliced_limit {
-            let new_rate = if self.rs > COMFORTABLE_RS {
-                let increase = (self.can_send_rate as f64 * 0.03).round() as i32;
-                self.can_send_rate + increase.max(32 * 1024)
-            } else if self.rs < CRITICAL_RS {
-                (self.can_send_rate as f64 * 0.85).round() as i32
-            } else {
-                let drift = (self.rs - COMFORTABLE_RS) / COMFORTABLE_RS;
-                (self.can_send_rate as f64 * (1.0 + drift * 0.05)).round() as i32
-            };
-            self.can_send_rate = new_rate.clamp(MIN_RATE, MAX_RATE);
-            self.used_sliced_limit = false;
-        }
-        self.reader_ping_state.lock().unwrap().sync_from_main(
-            self.ping_count,
-            self.can_send_rate,
-            self.used_sliced_limit,
-        );
-
-        // DataReadInt(MPC_Ping): parse server's ACK bitmap into TmpSlider before
-        // OnNewData/SendPing. Delphi DataReadInt writes TmpSlider, then
-        // TMoonProtoNetClient.ClientNewData sends the Ping response.
-        if !reader_dataread_core_done {
-            self.apply_ping_ack_bitmap(payload);
-        }
-
-        // Send ping response (matches Delphi SendPing exactly):
-        // - Struct written first (AckStart at offset 42 = SERVER's value, untouched)
-        // - BuildAckHalf provides AckWords APPENDED after struct
-        // BuildAckHalf fills AckStart + AckWords, then we write struct with correct AckStart
-        //
-        let mut response = payload[..50].to_vec();
-        response[0..8].copy_from_slice(&corrected_now_dt.to_le_bytes());
-        response[25..33].copy_from_slice(&self.total_sent.load(Ordering::Relaxed).to_le_bytes());
-        response[33..41].copy_from_slice(&self.total_recv.to_le_bytes());
-        let (ack_start, ack_words) = self.reader_protocol.lock().unwrap().build_ack_half();
-        response[42..50].copy_from_slice(&ack_start.to_le_bytes());
-        for w in &ack_words {
-            response.extend_from_slice(&w.to_le_bytes());
-        }
-        self.send_raw_packet(Command::Ping, &response);
-
-        sink.deliver(Command::Ping, payload);
-    }
-
-    #[cfg(test)]
-    fn apply_ping_ack_bitmap(&mut self, payload: &[u8]) {
-        self.reader_protocol
-            .lock()
-            .unwrap()
-            .apply_ping_ack_bitmap(payload);
     }
 
     #[cfg(test)]
@@ -9949,13 +9807,74 @@ mod pmtu_tests {
         WriterRuntime { client }
     }
 
+    fn process_ping_reader_msg(
+        client: &mut Client,
+        payload: &[u8],
+        raw_now_dt: f64,
+        corrected_now_dt: f64,
+    ) -> Vec<(Command, Vec<u8>)> {
+        let recv_bytes = payload.len() as u64;
+        let (ping_update, _response) = Client::reader_build_ping_update_and_response(
+            &client.reader_protocol,
+            &client.reader_ping_state,
+            &client.server_time_delta_handle,
+            payload,
+            raw_now_dt,
+            corrected_now_dt,
+            client.total_sent.load(Ordering::Relaxed),
+            recv_bytes,
+        )
+        .expect("valid ping payload");
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let delivered_for_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |cmd, payload| {
+                delivered_for_cb
+                    .lock()
+                    .unwrap()
+                    .push((cmd, payload.to_vec()));
+            }),
+        };
+        let decoded = ReaderDecodedMsg {
+            cmd: Command::Ping as u8,
+            payload: Some(payload.to_vec()),
+            api_pending_consumed: false,
+            candles_chunk_consumed: false,
+            recv_bytes,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: Some(ping_update),
+            handshake_update: None,
+        };
+
+        writer(client).process_reader_decoded(decoded, 123, &mut mode);
+        drop(mode);
+        Arc::try_unwrap(delivered).unwrap().into_inner().unwrap()
+    }
+
+    fn direct_ping_update_for_writer(client: &Client, payload: &[u8]) -> ReaderPingUpdate {
+        ReaderPingUpdate {
+            ping_count: client.ping_count.wrapping_add(1),
+            round_trip_delay: i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64,
+            actual_pmtu: u16::from_le_bytes(payload[20..22].try_into().unwrap()),
+            global_timing_orders: u16::from_le_bytes(payload[22..24].try_into().unwrap()),
+            overheat: payload[24],
+            rs: payload[41] as f64 * (1.0 / 255.0),
+            server_time_delta: client.server_time_delta,
+            net_lag_ping: client.net_lag_ping,
+            can_send_rate: client.can_send_rate,
+            used_sliced_limit: client.used_sliced_limit,
+        }
+    }
+
     #[test]
     fn ping_pmtu_above_8192_is_preserved() {
         let mut client = Client::new(dummy_cfg());
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
 
-        client.handle_ping(&ping_payload_with_pmtu(8_224), &mut sink);
+        let delivered =
+            process_ping_reader_msg(&mut client, &ping_payload_with_pmtu(8_224), 0.0, 0.0);
 
         assert_eq!(client.actual_pmtu(), 8_224);
         assert_eq!(delivered.len(), 1);
@@ -9965,8 +9884,6 @@ mod pmtu_tests {
     #[test]
     fn ping_server_time_delta_uses_raw_now_not_ntp_corrected_now() {
         let mut client = Client::new(dummy_cfg());
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
         let raw_now: f64 = 45_000.0;
         let corrected_now: f64 = raw_now + 3600.0 / 86400.0;
         let initial_time: f64 = raw_now + 2.0 / 86400.0;
@@ -9975,7 +9892,7 @@ mod pmtu_tests {
         payload[0..8].copy_from_slice(&server_time.to_le_bytes());
         payload[8..16].copy_from_slice(&initial_time.to_le_bytes());
 
-        client.handle_ping_at(&payload, &mut sink, raw_now, corrected_now, false);
+        let delivered = process_ping_reader_msg(&mut client, &payload, raw_now, corrected_now);
 
         assert!(
             ((client.server_time_delta_days() * 86400.0) - 2.0).abs() < 0.001,
@@ -9989,9 +9906,7 @@ mod pmtu_tests {
     #[test]
     fn tiny_ping_pmtu_does_not_underflow_sliced_send() {
         let mut client = Client::new(dummy_cfg());
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
-        client.handle_ping(&ping_payload_with_pmtu(18), &mut sink);
+        process_ping_reader_msg(&mut client, &ping_payload_with_pmtu(18), 0.0, 0.0);
         assert_eq!(client.actual_pmtu(), 18);
 
         let item = SendItem {
@@ -10014,11 +9929,9 @@ mod pmtu_tests {
     fn ping_ack_does_not_drop_pending_h_until_writer_copy_apply() {
         let mut client = Client::new(dummy_cfg());
         client.pending_h.push(pending_h_item(42));
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
 
         // AckStart=40, bit 2 set => MsgNum 42 is ACKed by the server.
-        client.handle_ping(&ping_payload_with_ack(40, &[1 << 2]), &mut sink);
+        process_ping_reader_msg(&mut client, &ping_payload_with_ack(40, &[1 << 2]), 0.0, 0.0);
 
         assert_eq!(
             client.pending_h.len(),
@@ -10063,7 +9976,11 @@ mod pmtu_tests {
     fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
         let mut client = Client::new(dummy_cfg());
         let payload = ping_payload_with_ack(40, &[1 << 2]);
-        client.apply_ping_ack_bitmap(&payload);
+        client
+            .reader_protocol
+            .lock()
+            .unwrap()
+            .apply_ping_ack_bitmap(&payload);
         WriterRuntime {
             client: &mut client,
         }
@@ -10078,9 +9995,35 @@ mod pmtu_tests {
         );
         assert!(client.recvd_slider.has_new_data);
 
-        let mut delivered = Vec::new();
-        let mut sink = DispatchSink::Buffer(&mut delivered);
-        client.handle_ping_at(&payload, &mut sink, 10.0, 10.0, true);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let delivered_for_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |cmd, payload| {
+                delivered_for_cb
+                    .lock()
+                    .unwrap()
+                    .push((cmd, payload.to_vec()));
+            }),
+        };
+        let decoded = ReaderDecodedMsg {
+            cmd: Command::Ping as u8,
+            payload: Some(payload.clone()),
+            api_pending_consumed: false,
+            candles_chunk_consumed: false,
+            recv_bytes: payload.len() as u64,
+            timestamp_ms: 123,
+            epoch: client.current_reader_epoch,
+            apply_recv_effects: true,
+            sliced_stats: None,
+            ping_update: Some(direct_ping_update_for_writer(&client, &payload)),
+            handshake_update: None,
+        };
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded, 123, &mut mode);
+        drop(mode);
+        let delivered = Arc::try_unwrap(delivered).unwrap().into_inner().unwrap();
 
         assert!(
             !client
@@ -10682,7 +10625,11 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         client.sending.push(sent_sliced_with_lengths(&[10], 100));
         client.pending_h.push(pending_h_item(42));
-        client.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
+        client
+            .reader_protocol
+            .lock()
+            .unwrap()
+            .apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
 
         let mut ack = [0u8; 34];
         ack[0] = 0b0000_0001;
@@ -13239,7 +13186,7 @@ fn get_ntp_offset_days() -> f64 {
 static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Установить fallback server_time_delta (в днях, как TDateTime).
-/// Вызывается из `Client::handle_ping`; потребитель НЕ должен
+/// Вызывается из обработки `MPC_Ping`; потребитель НЕ должен
 /// вызывать напрямую — используй `client.server_time_delta_handle()` для multi-Client.
 pub(crate) fn set_server_time_delta_global(delta_days: f64) {
     SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), std::sync::atomic::Ordering::Relaxed);
