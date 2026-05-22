@@ -400,12 +400,16 @@ the owning thread is inside `run_with_dispatcher`:
 ```rust
 let sender = client.sender();
 std::thread::spawn(move || {
-    sender.replace_order(ctx, "BTCUSDT", OrderType::Sell, 50100.0);
     sender.ui_mm_subscribe(true);
     sender.strat_sell_price_update(strategy_id, 49900.0);
     sender.balance_request_refresh();
 });
 ```
+
+Order actions with Delphi-local side effects, such as replace/cancel/panic,
+stop/VStop, and immune clicks, require mutable access to `Orders`. Send those
+from the code path that owns the dispatcher/order state, or marshal the UI
+intent there before calling the matching `Client`/`ClientSender` helper.
 
 The sender also exposes raw `send_cmd`, `send_cmd_keyed`, and
 `send_api_request` methods for tools that already have a serialized payload

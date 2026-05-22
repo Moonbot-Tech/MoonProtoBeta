@@ -93,6 +93,7 @@ pub struct Order {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
+    pub panic_sell: bool,
     pub is_moon_shot: bool,
     pub corridor_price_down: f32,
     pub corridor_price_up: f32,
@@ -103,6 +104,7 @@ pub struct Order {
     pub emulator_mode: bool,
     pub immune_for_clicks: bool,
     pub pending_buy_cond_price: Option<f64>,
+    pub pending_cancel: bool,
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     pub buy_trace_line: Option<OrderTraceLine>,
@@ -143,6 +145,9 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in
 `TOrderCompact` wire data.
+`panic_sell` mirrors Delphi `BOrderWorker.FPanicSell`, the local outgoing
+panic-sell intent used by market-level `turn_panic_sell` /
+`switch_panic_sell_by_market` and per-order `turn_order_panic_sell`.
 `TCorridorUpdate` mirrors Delphi `HandleServerCommand`: it sets
 `is_moon_shot = true` and stores `corridor_price_down` /
 `corridor_price_up` as Delphi `TestPriceDown` / `TestPriceUp`.
@@ -156,6 +161,9 @@ point only when Delphi `CanFinish` would allow it.
 `OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
 `UpdateData.MeanPrice` without applying the rest of `UpdateData` to
 `buy_order`, matching Delphi's pending visual-order branch.
+`pending_cancel` mirrors Delphi `vOrder.PendingCancel`. Calling
+`cancel_order` for a pending `OS_None` order sets this flag and follows
+Delphi's `CheckReplaceFlag` pending path.
 `TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately.
 `job_is_done` is a read-model terminal marker; it is not used as Delphi
 `BOrderWorker.JobIsDone` for missing-order cleanup while the entry is still

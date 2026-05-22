@@ -164,6 +164,27 @@ struct PendingRemoval {
     due_ms: i64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum OrderCancelSend {
+    PendingReplaceThenCancel {
+        ctx: TradeCtx,
+        market: String,
+        price: f64,
+    },
+    Cancel {
+        ctx: TradeCtx,
+        market: String,
+        status: OrderWorkerStatus,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PanicSellSend {
+    pub ctx: TradeCtx,
+    pub market: String,
+    pub turn_on: bool,
+}
+
 /// One chart point in Delphi `TOrderLine.Points`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrderTraceChartPoint {
@@ -275,6 +296,8 @@ pub struct Order {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
+    /// Delphi `BOrderWorker.FPanicSell`, local outgoing panic-sell intent.
+    pub panic_sell: bool,
     /// Delphi `BOrderWorker.IsMoonShot`, raised by `TCorridorUpdate`.
     pub is_moon_shot: bool,
     /// Корридор цен (последний апдейт).
@@ -292,6 +315,8 @@ pub struct Order {
     pub immune_for_clicks: bool,
     /// Delphi `vOrder.BuyCondPrice` for pending `OS_None` orders.
     pub pending_buy_cond_price: Option<f64>,
+    /// Delphi `vOrder.PendingCancel` for pending `OS_None` orders.
+    pub pending_cancel: bool,
     /// Тип ордера, на котором установлен BulkReplace.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
@@ -320,6 +345,7 @@ pub struct Order {
     pub(crate) snapshot_flag: u8,
     bulk_replace_buy_sent_ms: i64,
     bulk_replace_sell_sent_ms: i64,
+    prev_panic_sell: bool,
     last_buy_actual_price: f64,
     last_sell_actual_price: f64,
 }
@@ -358,6 +384,7 @@ impl Order {
             vstop_fixed: false,
             vstop_level: 0.0,
             vstop_vol: 0.0,
+            panic_sell: false,
             is_moon_shot: false,
             corridor_price_down: 0.0,
             corridor_price_up: 0.0,
@@ -368,6 +395,7 @@ impl Order {
             emulator_mode: status_cmd.emulator_mode,
             immune_for_clicks: status_cmd.immune_for_clicks,
             pending_buy_cond_price: None,
+            pending_cancel: false,
             bulk_replace_buy: false,
             bulk_replace_sell: false,
             buy_trace_line: None,
@@ -381,6 +409,7 @@ impl Order {
             snapshot_flag: 0,
             bulk_replace_buy_sent_ms: 0,
             bulk_replace_sell_sent_ms: 0,
+            prev_panic_sell: false,
             last_buy_actual_price: 0.0,
             last_sell_actual_price: 0.0,
         }
@@ -642,6 +671,187 @@ impl Orders {
         ))
     }
 
+    /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` replace part.
+    ///
+    /// This combines the local UI intent (`p*Order.Price` +
+    /// `p*Order.OrderReplace := true`) with the worker tick that sends only when
+    /// `ReplaceSentTime = 0`. If a replace is already in flight, the local
+    /// desired price is updated but no new packet is queued.
+    pub(crate) fn send_replace_if_requested(
+        &mut self,
+        uid: u64,
+        new_price: f64,
+        now_ms: i64,
+    ) -> Option<(TradeCtx, String, OrderType, f64)> {
+        let order = self.map.get_mut(&uid)?;
+        let order_type = match order.status {
+            OrderWorkerStatus::None => {
+                let prev = order.pending_buy_cond_price?;
+                if (prev - new_price).abs() <= PRICE_EPS {
+                    return None;
+                }
+                order.pending_buy_cond_price = Some(new_price);
+                OrderType::Buy
+            }
+            OrderWorkerStatus::BuySet => {
+                let order_type = OrderType::from_byte(order.buy_order.order_type)?;
+                if order.bulk_replace_buy_sent_ms > 0 && !order.bulk_replace_buy {
+                    order.bulk_replace_buy_sent_ms = 0;
+                }
+                order.buy_price = new_price;
+                if order.bulk_replace_buy && order.bulk_replace_buy_sent_ms > 0 {
+                    return None;
+                }
+                order.bulk_replace_buy = true;
+                order.bulk_replace_buy_sent_ms = now_ms.max(1);
+                order_type
+            }
+            OrderWorkerStatus::SellSet => {
+                let order_type = OrderType::from_byte(order.sell_order.order_type)?;
+                if order.bulk_replace_sell_sent_ms > 0 && !order.bulk_replace_sell {
+                    order.bulk_replace_sell_sent_ms = 0;
+                }
+                order.sell_price = new_price;
+                if order.bulk_replace_sell && order.bulk_replace_sell_sent_ms > 0 {
+                    return None;
+                }
+                order.bulk_replace_sell = true;
+                order.bulk_replace_sell_sent_ms = now_ms.max(1);
+                order_type
+            }
+            _ => return None,
+        };
+
+        Some((
+            order.trade_ctx(),
+            order.market_name.clone(),
+            order_type,
+            new_price,
+        ))
+    }
+
+    /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` cancel part.
+    ///
+    /// Active buy/sell orders use local `FOrder.CancelRequest` and clear it
+    /// after queueing. Pending `OS_None` orders use `vOrder.PendingCancel` and
+    /// keep that flag set like Delphi.
+    pub(crate) fn send_cancel_if_requested(&mut self, uid: u64) -> Option<OrderCancelSend> {
+        let order = self.map.get_mut(&uid)?;
+        match order.status {
+            OrderWorkerStatus::None => {
+                let price = order.pending_buy_cond_price?;
+                order.pending_cancel = true;
+                let out = OrderCancelSend::PendingReplaceThenCancel {
+                    ctx: order.trade_ctx(),
+                    market: order.market_name.clone(),
+                    price,
+                };
+                return Some(out);
+            }
+            OrderWorkerStatus::BuySet | OrderWorkerStatus::SellSet => {}
+            _ => return None,
+        }
+
+        order.cancel_request = true;
+        let out = OrderCancelSend::Cancel {
+            ctx: order.trade_ctx(),
+            market: order.market_name.clone(),
+            status: order.status,
+        };
+        order.cancel_request = false;
+        Some(out)
+    }
+
+    /// Delphi `CheckReplaceFlag` panic-sell part.
+    ///
+    /// Sends only for `OS_SellSet` and only when `FPanicSell` differs from
+    /// `PrevPanicSell`; then updates the previous value before queueing.
+    pub(crate) fn send_panic_sell_if_changed(
+        &mut self,
+        uid: u64,
+        turn_on: bool,
+    ) -> Option<PanicSellSend> {
+        let order = self.map.get_mut(&uid)?;
+        if order.status != OrderWorkerStatus::SellSet {
+            return None;
+        }
+        order.panic_sell = turn_on;
+        if order.prev_panic_sell == order.panic_sell {
+            return None;
+        }
+        order.prev_panic_sell = order.panic_sell;
+        Some(PanicSellSend {
+            ctx: order.trade_ctx(),
+            market: order.market_name.clone(),
+            turn_on: order.panic_sell,
+        })
+    }
+
+    /// Delphi `TOrdersWorkers.TurnPanicSell(m, AValue)`.
+    ///
+    /// Sets `FPanicSell := AValue` on all active `OS_SellSet` workers in the
+    /// market. The returned sends are exactly the workers whose
+    /// `PrevPanicSell` differs and whose `CheckReplaceFlag` would enqueue
+    /// `TTurnPanicSellCommand` on its next tick.
+    pub(crate) fn turn_panic_sell_by_market(
+        &mut self,
+        market_name: &str,
+        turn_on: bool,
+    ) -> Vec<PanicSellSend> {
+        let uids: Vec<u64> = self
+            .map
+            .values()
+            .filter(|order| {
+                order.market_name == market_name && order.status == OrderWorkerStatus::SellSet
+            })
+            .map(|order| order.uid)
+            .collect();
+
+        let mut sends = Vec::new();
+        for uid in uids {
+            if let Some(send) = self.send_panic_sell_if_changed(uid, turn_on) {
+                sends.push(send);
+            }
+        }
+        sends
+    }
+
+    /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket(m, TurnON)`.
+    ///
+    /// If any active sell worker in the market already has `FPanicSell`, the
+    /// function turns panic sell off for all active sell workers and returns
+    /// `false`. Otherwise, when `TurnON` is true, it turns panic sell on for all
+    /// active sell workers and returns `true`. When `TurnON` is false and
+    /// nothing was active, it does nothing and returns `false`.
+    pub(crate) fn switch_panic_sell_by_market(
+        &mut self,
+        market_name: &str,
+        turn_on: bool,
+    ) -> (bool, Vec<PanicSellSend>) {
+        let mut was_turned_off = false;
+        let mut was_turned_on = false;
+
+        for order in self.map.values() {
+            if order.market_name == market_name && order.status == OrderWorkerStatus::SellSet {
+                if order.panic_sell {
+                    was_turned_off = true;
+                    break;
+                } else if turn_on {
+                    was_turned_on = true;
+                    break;
+                }
+            }
+        }
+
+        if was_turned_off {
+            (false, self.turn_panic_sell_by_market(market_name, false))
+        } else if was_turned_on {
+            (true, self.turn_panic_sell_by_market(market_name, true))
+        } else {
+            (false, Vec::new())
+        }
+    }
+
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
@@ -767,6 +977,7 @@ impl Orders {
                         entry.pending_buy_cond_price = Some(up.update_data.mean_price);
                     } else {
                         entry.pending_buy_cond_price = None;
+                        entry.pending_cancel = false;
                     }
                     entry.status = up.epoch_header.status;
                     if up.sell_reason_code != 0 && up.sell_reason_code != entry.sell_reason_code {
@@ -1071,6 +1282,7 @@ impl Orders {
             entry.pending_buy_cond_price = Some(entry.buy_order.mean_price);
         } else {
             entry.pending_buy_cond_price = None;
+            entry.pending_cancel = false;
         }
 
         if was_status_changed {
@@ -1568,6 +1780,204 @@ mod tests {
                 .is_none(),
             "FPrevVStop* was updated before sending"
         );
+    }
+
+    #[test]
+    fn outgoing_send_replace_if_requested_matches_delphi_gate() {
+        let mut orders = Orders::new();
+        let mut buy_status = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        buy_status.buy_order.order_type = OrderType::Buy as u8;
+        orders.apply(order_status_cmd(buy_status));
+
+        assert!(
+            orders.send_replace_if_requested(404, 10.0, 1000).is_none(),
+            "Delphi exits when local worker is absent"
+        );
+
+        let (ctx, market, order_type, price) = orders
+            .send_replace_if_requested(42, 10.5, 1000)
+            .expect("first replace should be sent");
+        assert_eq!(ctx.uid, 42);
+        assert_eq!(ctx.currency, 1);
+        assert_eq!(ctx.platform, 4);
+        assert_eq!(market, "BTCUSDT");
+        assert_eq!(order_type, OrderType::Buy);
+        assert_eq!(price, 10.5);
+        let order = orders.get(42).unwrap();
+        assert_eq!(order.buy_price, 10.5);
+        assert!(order.bulk_replace_buy);
+        assert_eq!(order.bulk_replace_buy_sent_ms, 1000);
+
+        assert!(
+            orders.send_replace_if_requested(42, 10.7, 1001).is_none(),
+            "ReplaceSentTime gate suppresses another packet while replace is in flight"
+        );
+        assert_eq!(orders.get(42).unwrap().buy_price, 10.7);
+
+        let mut pending = make_status(43, "BTCUSDT", OrderWorkerStatus::None, 1);
+        pending.buy_order.mean_price = 9.0;
+        orders.apply(order_status_cmd(pending));
+        assert!(
+            orders.send_replace_if_requested(43, 9.0, 1000).is_none(),
+            "pending replace sends only when BuyCondPrice changes"
+        );
+        let (_, _, order_type, price) = orders
+            .send_replace_if_requested(43, 9.1, 1000)
+            .expect("changed pending price should send O_BUY replace");
+        assert_eq!(order_type, OrderType::Buy);
+        assert_eq!(price, 9.1);
+        assert_eq!(orders.get(43).unwrap().pending_buy_cond_price, Some(9.1));
+    }
+
+    #[test]
+    fn outgoing_send_cancel_if_requested_matches_delphi_gate() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            43,
+            "BTCUSDT",
+            OrderWorkerStatus::SelLDone,
+            1,
+        )));
+
+        assert!(orders.send_cancel_if_requested(404).is_none());
+        assert!(orders.send_cancel_if_requested(43).is_none());
+
+        let send = orders
+            .send_cancel_if_requested(42)
+            .expect("sell-set cancel should be sent");
+        match send {
+            OrderCancelSend::Cancel {
+                ctx,
+                market,
+                status,
+            } => {
+                assert_eq!(ctx.uid, 42);
+                assert_eq!(market, "BTCUSDT");
+                assert_eq!(status, OrderWorkerStatus::SellSet);
+            }
+            other => panic!("unexpected cancel send: {other:?}"),
+        }
+        assert!(
+            !orders.get(42).unwrap().cancel_request,
+            "Delphi clears FOrder.CancelRequest after sending"
+        );
+
+        let mut pending = make_status(44, "BTCUSDT", OrderWorkerStatus::None, 1);
+        pending.buy_order.mean_price = 9.25;
+        orders.apply(order_status_cmd(pending));
+        let send = orders
+            .send_cancel_if_requested(44)
+            .expect("pending cancel should be sent");
+        match send {
+            OrderCancelSend::PendingReplaceThenCancel { ctx, market, price } => {
+                assert_eq!(ctx.uid, 44);
+                assert_eq!(market, "BTCUSDT");
+                assert_eq!(price, 9.25);
+            }
+            other => panic!("unexpected pending cancel send: {other:?}"),
+        }
+        assert!(
+            orders.get(44).unwrap().pending_cancel,
+            "Delphi leaves vOrder.PendingCancel set on the pending order"
+        );
+    }
+
+    #[test]
+    fn outgoing_send_panic_sell_if_changed_matches_delphi_gate() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            43,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+
+        assert!(
+            orders.send_panic_sell_if_changed(43, true).is_none(),
+            "Delphi sends panic-sell only from OS_SellSet workers"
+        );
+        assert!(
+            orders.send_panic_sell_if_changed(42, false).is_none(),
+            "initial PrevPanicSell=false suppresses redundant false"
+        );
+
+        let send = orders
+            .send_panic_sell_if_changed(42, true)
+            .expect("false -> true should be sent");
+        assert_eq!(send.ctx.uid, 42);
+        assert_eq!(send.market, "BTCUSDT");
+        assert!(send.turn_on);
+        assert!(orders.get(42).unwrap().panic_sell);
+
+        assert!(
+            orders.send_panic_sell_if_changed(42, true).is_none(),
+            "PrevPanicSell was updated before sending"
+        );
+        let send = orders
+            .send_panic_sell_if_changed(42, false)
+            .expect("true -> false should be sent");
+        assert!(!send.turn_on);
+        assert!(!orders.get(42).unwrap().panic_sell);
+    }
+
+    #[test]
+    fn outgoing_market_panic_sell_matches_delphi_workers_toggle() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            43,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            44,
+            "ETHUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+        orders.apply(order_status_cmd(make_status(
+            45,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+
+        let sends = orders.turn_panic_sell_by_market("BTCUSDT", true);
+        assert_eq!(sends.len(), 2);
+        assert!(orders.get(42).unwrap().panic_sell);
+        assert!(orders.get(43).unwrap().panic_sell);
+        assert!(!orders.get(44).unwrap().panic_sell);
+        assert!(!orders.get(45).unwrap().panic_sell);
+
+        let (panic_sell_on, sends) = orders.switch_panic_sell_by_market("BTCUSDT", true);
+        assert!(!panic_sell_on);
+        assert_eq!(sends.len(), 2);
+        assert!(sends.iter().all(|send| !send.turn_on));
+        assert!(!orders.get(42).unwrap().panic_sell);
+        assert!(!orders.get(43).unwrap().panic_sell);
+
+        let (panic_sell_on, sends) = orders.switch_panic_sell_by_market("BTCUSDT", true);
+        assert!(panic_sell_on);
+        assert_eq!(sends.len(), 2);
+        assert!(sends.iter().all(|send| send.turn_on));
     }
 
     #[test]

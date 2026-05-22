@@ -1500,15 +1500,46 @@ Done:
   it has no incoming read-model effect.
 - Rust `Orders::apply(TradeCommand::TurnPanicSell)` now returns
   `NotApplicable` / `Ignored` and does not mutate order state.
-- Removed the Rust-only `Order::panic_sell` read-model field and
-  `OrderEvent::PanicSellChanged` event. Panic sell remains available as an
-  outgoing API action (`Client::turn_panic_sell`) and as a sell reason code.
+- Removed the Rust-only incoming `OrderEvent::PanicSellChanged` path. Panic
+  sell has no incoming read-model effect; the local `Order::panic_sell` field is
+  used only as the outgoing Delphi `BOrderWorker.FPanicSell` intent for
+  `CheckReplaceFlag`, not as a server-applied event.
 - Added a unit test proving the Delphi receive-path guard.
 
 Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
+
+### 2026-05-22 - Phase 1 partial: CheckReplaceFlag outgoing order actions
+
+Done:
+
+- Fixed raw-send public wrappers for replace/cancel/panic-sell. They now require
+  local `Orders` state, derive route/status/order type from the local order, and
+  return without queueing when the matching Delphi worker would not send.
+- `replace_order` repeats the Delphi `ReplaceSentTime = 0` gate and the 5000 ms
+  timeout-owned local flags. A second replace while one is in flight updates the
+  local desired price but queues no packet.
+- `cancel_order` repeats both Delphi branches: active buy/sell sends one cancel
+  with current status and clears `CancelRequest`; pending `OS_None` sets the
+  `vOrder.PendingCancel` analogue and performs the `replace O_BUY current
+  BuyCondPrice` then `cancel OS_None` send sequence.
+- Panic sell now has the Delphi market-level shape:
+  `turn_panic_sell(&mut Orders, market, value)` mirrors
+  `TOrdersWorkers.TurnPanicSell`, and
+  `switch_panic_sell_by_market(&mut Orders, market, turn_on)` mirrors the chart
+  button `SwitchPanicSellByMarket` toggle. Per-order panic remains only as the
+  explicit worker-level helper and still uses the same `FPanicSell` /
+  `PrevPanicSell` gate.
+- API docs were updated with the new state-aware signatures and side effects.
+- Added unit tests for replace gate, active cancel, pending replace-then-cancel,
+  per-order panic gate, and market-level panic toggle.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / virtual-worker side effects.
 
 ### 2026-05-22 - Phase 1 partial: BulkReplaceNotify timeout
 

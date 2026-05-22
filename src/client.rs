@@ -1141,6 +1141,7 @@ pub struct ClientSender {
     send_queues: Arc<Mutex<SendQueues>>,
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
+    start: Instant,
 }
 
 impl ClientSender {
@@ -1491,6 +1492,48 @@ impl ClientSender {
         );
     }
 
+    fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
+        match request {
+            crate::state::orders::OrderCancelSend::PendingReplaceThenCancel {
+                ctx,
+                market,
+                price,
+            } => {
+                let replace = crate::commands::trade::build_order_replace(
+                    ctx,
+                    &market,
+                    crate::commands::trade::OrderType::Buy,
+                    price,
+                );
+                self.send_trade_keyed(replace, 3, UniqueKey::order_move(ctx.uid));
+                let cancel = crate::commands::trade::build_order_cancel(
+                    ctx,
+                    &market,
+                    0,
+                    crate::commands::trade::OrderWorkerStatus::None,
+                );
+                self.send_trade_keyed(cancel, 3, UniqueKey::order_move(ctx.uid));
+            }
+            crate::state::orders::OrderCancelSend::Cancel {
+                ctx,
+                market,
+                status,
+            } => {
+                let raw = crate::commands::trade::build_order_cancel(ctx, &market, 0, status);
+                self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+            }
+        }
+    }
+
+    fn send_panic_sell_request(&self, request: crate::state::orders::PanicSellSend) {
+        let raw = crate::commands::trade::build_turn_panic_sell(
+            request.ctx,
+            &request.market,
+            request.turn_on,
+        );
+        self.send_trade_keyed(raw, 3, UniqueKey::order_move(request.ctx.uid));
+    }
+
     /// Send `TNewOrderCommand` from a thread-safe sender.
     ///
     /// This mirrors [`Client::new_order`]: `MPC_Order`, high priority,
@@ -1510,26 +1553,36 @@ impl ClientSender {
         self.send_trade(raw, 3);
     }
 
-    /// Send `TOrderReplaceCommand` for an existing order task id.
+    #[inline]
+    fn now_ms(&self) -> i64 {
+        self.start.elapsed().as_millis() as i64
+    }
+
+    /// Apply Delphi replace request locally and send `TOrderReplaceCommand`.
     pub fn replace_order(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        order_type: crate::commands::trade::OrderType,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         new_price: f64,
-    ) {
-        let raw = crate::commands::trade::build_order_replace(ctx, market, order_type, new_price);
+    ) -> bool {
+        let Some((ctx, market, order_type, price)) =
+            orders.send_replace_if_requested(uid, new_price, self.now_ms())
+        else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_order_replace(ctx, &market, order_type, price);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Replace an order already tracked by `EventDispatcher::orders()`.
     pub fn replace_tracked_order(
         &self,
-        order: &crate::state::Order,
-        order_type: crate::commands::trade::OrderType,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         new_price: f64,
-    ) {
-        self.replace_order(order.trade_ctx(), &order.market_name, order_type, new_price);
+    ) -> bool {
+        self.replace_order(orders, uid, new_price)
     }
 
     /// Send low-level `TAllStatusesReq`.
@@ -1541,20 +1594,18 @@ impl ClientSender {
         self.send_trade(raw, 3);
     }
 
-    /// Send `TOrderCancelCommand` for one order.
-    pub fn cancel_order(
-        &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        status: crate::commands::trade::OrderWorkerStatus,
-    ) {
-        let raw = crate::commands::trade::build_order_cancel(ctx, market, 0, status);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    /// Apply Delphi cancel request locally and send `TOrderCancelCommand`.
+    pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        let Some(request) = orders.send_cancel_if_requested(uid) else {
+            return false;
+        };
+        self.send_order_cancel_request(request);
+        true
     }
 
     /// Cancel an order already tracked by `EventDispatcher::orders()`.
-    pub fn cancel_tracked_order(&self, order: &crate::state::Order) {
-        self.cancel_order(order.trade_ctx(), &order.market_name, order.status);
+    pub fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        self.cancel_order(orders, uid)
     }
 
     /// Send `TJoinOrdersCommand`.
@@ -1697,21 +1748,59 @@ impl ClientSender {
         self.update_order_stops(orders, uid, stops)
     }
 
-    /// Send `TTurnPanicSellCommand`.
+    /// Delphi `TOrdersWorkers.TurnPanicSell`: set panic sell for every local
+    /// active sell order in `market_name`.
     pub fn turn_panic_sell(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
+        orders: &mut crate::state::Orders,
+        market_name: &str,
         turn_on: bool,
-    ) {
-        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, turn_on);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    ) -> usize {
+        let requests = orders.turn_panic_sell_by_market(market_name, turn_on);
+        let queued = requests.len();
+        for request in requests {
+            self.send_panic_sell_request(request);
+        }
+        queued
+    }
+
+    /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket` button semantics.
+    pub fn switch_panic_sell_by_market(
+        &self,
+        orders: &mut crate::state::Orders,
+        market_name: &str,
+        turn_on: bool,
+    ) -> bool {
+        let (panic_sell_on, requests) = orders.switch_panic_sell_by_market(market_name, turn_on);
+        for request in requests {
+            self.send_panic_sell_request(request);
+        }
+        panic_sell_on
+    }
+
+    /// Apply Delphi per-worker panic-sell flag and send `TTurnPanicSellCommand`.
+    pub fn turn_order_panic_sell(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        turn_on: bool,
+    ) -> bool {
+        let Some(request) = orders.send_panic_sell_if_changed(uid, turn_on) else {
+            return false;
+        };
+        self.send_panic_sell_request(request);
+        true
     }
 
     /// Toggle panic sell for an order already tracked by
     /// `EventDispatcher::orders()`.
-    pub fn turn_tracked_order_panic_sell(&self, order: &crate::state::Order, turn_on: bool) {
-        self.turn_panic_sell(order.trade_ctx(), &order.market_name, turn_on);
+    pub fn turn_tracked_order_panic_sell(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        turn_on: bool,
+    ) -> bool {
+        self.turn_order_panic_sell(orders, uid, turn_on)
     }
 
     /// Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand`.
@@ -5514,6 +5603,7 @@ impl Client {
             send_queues: Arc::clone(&self.send_queues),
             subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
+            start: self._start,
         }
     }
 
@@ -5735,6 +5825,48 @@ impl Client {
         );
     }
 
+    fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
+        match request {
+            crate::state::orders::OrderCancelSend::PendingReplaceThenCancel {
+                ctx,
+                market,
+                price,
+            } => {
+                let replace = crate::commands::trade::build_order_replace(
+                    ctx,
+                    &market,
+                    crate::commands::trade::OrderType::Buy,
+                    price,
+                );
+                self.send_trade_keyed(replace, 3, UniqueKey::order_move(ctx.uid));
+                let cancel = crate::commands::trade::build_order_cancel(
+                    ctx,
+                    &market,
+                    0,
+                    crate::commands::trade::OrderWorkerStatus::None,
+                );
+                self.send_trade_keyed(cancel, 3, UniqueKey::order_move(ctx.uid));
+            }
+            crate::state::orders::OrderCancelSend::Cancel {
+                ctx,
+                market,
+                status,
+            } => {
+                let raw = crate::commands::trade::build_order_cancel(ctx, &market, 0, status);
+                self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+            }
+        }
+    }
+
+    fn send_panic_sell_request(&self, request: crate::state::orders::PanicSellSend) {
+        let raw = crate::commands::trade::build_turn_panic_sell(
+            request.ctx,
+            &request.market,
+            request.turn_on,
+        );
+        self.send_trade_keyed(raw, 3, UniqueKey::order_move(request.ctx.uid));
+    }
+
     /// Send `TNewOrderCommand` (CmdId=3) to open a new order.
     pub fn new_order(
         &self,
@@ -5751,36 +5883,36 @@ impl Client {
         self.send_trade(raw, 3);
     }
 
-    /// Send `TOrderReplaceCommand` (CmdId=6, `UK_OrderMove`) with a new price.
+    /// Delphi local replace request + `TOrderReplaceCommand` (CmdId=6,
+    /// `UK_OrderMove`) with a new price.
     ///
-    /// `ctx.uid` must be the server order task id so UKey dedup collapses
-    /// repeated moves for the same order.
-    ///
-    /// `Epoch=0` и `Status=OS_None` устанавливаются внутри: Delphi
-    /// `TOrderReplaceCommand.Create` не принимает статус для client-side replace.
+    /// Requires the local `Orders` read model. The wrapper derives market route
+    /// and order type from the local order and repeats the Delphi
+    /// `ReplaceSentTime = 0` gate.
     pub fn replace_order(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        order_type: crate::commands::trade::OrderType,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         new_price: f64,
-    ) {
-        let raw = crate::commands::trade::build_order_replace(ctx, market, order_type, new_price);
+    ) -> bool {
+        let Some((ctx, market, order_type, price)) =
+            orders.send_replace_if_requested(uid, new_price, self.now_ms())
+        else {
+            return false;
+        };
+        let raw = crate::commands::trade::build_order_replace(ctx, &market, order_type, price);
         self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+        true
     }
 
     /// Replace an order already tracked by `EventDispatcher::orders()`.
-    ///
-    /// This is the regular consumer path for UI actions on an existing order:
-    /// UID, market name, currency, and platform are derived from the tracked
-    /// order state.
     pub fn replace_tracked_order(
         &self,
-        order: &crate::state::Order,
-        order_type: crate::commands::trade::OrderType,
+        orders: &mut crate::state::Orders,
+        uid: u64,
         new_price: f64,
-    ) {
-        self.replace_order(order.trade_ctx(), &order.market_name, order_type, new_price);
+    ) -> bool {
+        self.replace_order(orders, uid, new_price)
     }
 
     /// Send low-level `TAllStatusesReq` (CmdId=9).
@@ -5825,27 +5957,22 @@ impl Client {
         }
     }
 
-    /// Send `TOrderCancelCommand` (CmdId=10, `UK_OrderMove`) for one order.
+    /// Delphi local cancel request + `TOrderCancelCommand` (CmdId=10,
+    /// `UK_OrderMove`) for one order.
     ///
-    /// `ctx.uid` must be the server order task id for correct dedup. The wrapper
-    /// writes `Epoch=0`, matching the Delphi client-originated command path.
-    pub fn cancel_order(
-        &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
-        status: crate::commands::trade::OrderWorkerStatus,
-    ) {
-        let raw = crate::commands::trade::build_order_cancel(ctx, market, 0, status);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    /// Requires the local `Orders` read model. The wrapper derives current
+    /// status from the local order and clears the local request after queueing.
+    pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        let Some(request) = orders.send_cancel_if_requested(uid) else {
+            return false;
+        };
+        self.send_order_cancel_request(request);
+        true
     }
 
     /// Cancel an order already tracked by `EventDispatcher::orders()`.
-    ///
-    /// The Delphi client creates `TOrderCancelCommand` from the live order
-    /// worker, so consumers should not have to remember the protocol context or
-    /// current status separately.
-    pub fn cancel_tracked_order(&self, order: &crate::state::Order) {
-        self.cancel_order(order.trade_ctx(), &order.market_name, order.status);
+    pub fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        self.cancel_order(orders, uid)
     }
 
     /// Send `TJoinOrdersCommand` (CmdId=11) to join open orders.
@@ -5995,22 +6122,60 @@ impl Client {
         self.update_order_stops(orders, uid, stops)
     }
 
-    /// `TTurnPanicSellCommand` (CmdId=21, UK_OrderMove). `ctx.uid` = task_id ордера.
-    /// `Epoch=0` и `Status=OS_None` устанавливаются внутри, как в Delphi client path.
+    /// Delphi `TOrdersWorkers.TurnPanicSell`: set panic sell for every local
+    /// active sell order in `market_name`.
     pub fn turn_panic_sell(
         &self,
-        ctx: crate::commands::trade::TradeCtx,
-        market: &str,
+        orders: &mut crate::state::Orders,
+        market_name: &str,
         turn_on: bool,
-    ) {
-        let raw = crate::commands::trade::build_turn_panic_sell(ctx, market, turn_on);
-        self.send_trade_keyed(raw, 3, UniqueKey::order_move(ctx.uid));
+    ) -> usize {
+        let requests = orders.turn_panic_sell_by_market(market_name, turn_on);
+        let queued = requests.len();
+        for request in requests {
+            self.send_panic_sell_request(request);
+        }
+        queued
+    }
+
+    /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket` button semantics.
+    pub fn switch_panic_sell_by_market(
+        &self,
+        orders: &mut crate::state::Orders,
+        market_name: &str,
+        turn_on: bool,
+    ) -> bool {
+        let (panic_sell_on, requests) = orders.switch_panic_sell_by_market(market_name, turn_on);
+        for request in requests {
+            self.send_panic_sell_request(request);
+        }
+        panic_sell_on
+    }
+
+    /// Delphi per-worker panic-sell flag + `TTurnPanicSellCommand` (CmdId=21,
+    /// UK_OrderMove).
+    pub fn turn_order_panic_sell(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        turn_on: bool,
+    ) -> bool {
+        let Some(request) = orders.send_panic_sell_if_changed(uid, turn_on) else {
+            return false;
+        };
+        self.send_panic_sell_request(request);
+        true
     }
 
     /// Toggle panic sell for an order already tracked by
     /// `EventDispatcher::orders()`.
-    pub fn turn_tracked_order_panic_sell(&self, order: &crate::state::Order, turn_on: bool) {
-        self.turn_panic_sell(order.trade_ctx(), &order.market_name, turn_on);
+    pub fn turn_tracked_order_panic_sell(
+        &self,
+        orders: &mut crate::state::Orders,
+        uid: u64,
+        turn_on: bool,
+    ) -> bool {
+        self.turn_order_panic_sell(orders, uid, turn_on)
     }
 
     /// Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand`
@@ -9378,6 +9543,7 @@ mod client_sender_tests {
                 send_queues: Arc::clone(&send_queues),
                 subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
+                start: Instant::now(),
             },
             subscription_registry,
             send_queues,
@@ -9396,6 +9562,48 @@ mod client_sender_tests {
         sliced.extend(high);
         sliced.extend(low);
         sliced
+    }
+
+    fn tracked_orders_for_sender(
+        uid: u64,
+        currency: u8,
+        platform: u8,
+        market_name: &str,
+        status: crate::commands::trade::OrderWorkerStatus,
+    ) -> crate::state::Orders {
+        use crate::commands::trade::{
+            BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
+            TradeCommand, TradeEpochHeader,
+        };
+
+        let mut orders = crate::state::Orders::new();
+        let status_cmd = OrderStatus {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 4,
+                        ver: 3,
+                        uid,
+                    },
+                    currency,
+                    platform,
+                    market_name: market_name.to_string(),
+                },
+                epoch: 11,
+                status,
+            },
+            buy_order: OrderCompact::default(),
+            sell_order: OrderCompact::default(),
+            stops: StopSettings::default(),
+            strat_id: 0,
+            is_short: false,
+            db_id: 0,
+            from_cache: false,
+            emulator_mode: false,
+            immune_for_clicks: false,
+        };
+        let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
+        orders
     }
 
     fn command_uid(payload: &[u8]) -> Option<u64> {
@@ -9621,14 +9829,16 @@ mod client_sender_tests {
     #[test]
     fn sender_replace_order_uses_client_wrapper_wire_defaults() {
         let (sender, _, send_q, _, _) = make_sender();
-        let ctx = crate::commands::trade::TradeCtx::with_route(42, 17, 9);
-
-        sender.replace_order(
-            ctx,
+        let uid = 42;
+        let mut orders = tracked_orders_for_sender(
+            uid,
+            17,
+            9,
             "BTCUSDT",
-            crate::commands::trade::OrderType::Sell,
-            50100.0,
+            crate::commands::trade::OrderWorkerStatus::SellSet,
         );
+
+        assert!(sender.replace_order(&mut orders, uid, 50100.0));
 
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
@@ -9638,7 +9848,7 @@ mod client_sender_tests {
         assert!(item.encrypted);
         assert_eq!(item.max_retries, 3);
         assert_eq!(item.retry_left, 2);
-        assert_eq!(item.u_key, UniqueKey::order_move(ctx.uid));
+        assert_eq!(item.u_key, UniqueKey::order_move(uid));
 
         match crate::commands::trade::TradeCommand::parse(&item.data)
             .expect("valid replace command")
@@ -9766,47 +9976,6 @@ mod client_subscribe_integration_tests {
         out
     }
 
-    fn tracked_order(
-        uid: u64,
-        currency: u8,
-        platform: u8,
-        status: crate::commands::trade::OrderWorkerStatus,
-    ) -> crate::state::Order {
-        use crate::commands::trade::{
-            BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
-            TradeCommand, TradeEpochHeader,
-        };
-
-        let mut orders = crate::state::Orders::new();
-        let status_cmd = OrderStatus {
-            epoch_header: TradeEpochHeader {
-                market: MarketCommandHeader {
-                    base: BaseCommandHeader {
-                        cmd_id: 4,
-                        ver: 3,
-                        uid,
-                    },
-                    currency,
-                    platform,
-                    market_name: "DOGEUSDT".to_string(),
-                },
-                epoch: 11,
-                status,
-            },
-            buy_order: OrderCompact::default(),
-            sell_order: OrderCompact::default(),
-            stops: StopSettings::default(),
-            strat_id: 0,
-            is_short: false,
-            db_id: 0,
-            from_cache: false,
-            emulator_mode: false,
-            immune_for_clicks: false,
-        };
-        let _ = orders.apply(TradeCommand::OrderStatus(Box::new(status_cmd)));
-        orders.get(uid).expect("order should be applied").clone()
-    }
-
     fn tracked_orders(
         uid: u64,
         currency: u8,
@@ -9889,10 +10058,18 @@ mod client_subscribe_integration_tests {
         use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
 
         let uid = 0x1122_3344_5566_7788;
-        let order = tracked_order(uid, 17, 9, OrderWorkerStatus::SellSet);
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
         let client = Client::new(dummy_cfg());
 
-        client.cancel_tracked_order(&order);
+        assert!(client.cancel_tracked_order(&mut orders, uid));
 
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
@@ -9912,6 +10089,208 @@ mod client_subscribe_integration_tests {
                 assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::SellSet);
             }
             other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_cancel_pending_order_matches_delphi_replace_then_cancel_effect() {
+        use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+        let uid = 0x1188;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::None,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+
+        assert!(client.cancel_order(&mut orders, uid));
+        assert!(
+            orders.get(uid).unwrap().pending_cancel,
+            "Delphi keeps vOrder.PendingCancel set on a pending order"
+        );
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(
+            high.len(),
+            1,
+            "Delphi SendCmdInt UKey-dedups the immediate replace before the cancel if the writer has not copied it"
+        );
+        assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+        match TradeCommand::parse(&high[0].data).expect("valid cancel command") {
+            TradeCommand::OrderCancel(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::None);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_replace_order_uses_delphi_local_gate() {
+        use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCommand};
+
+        let uid = 0x2233;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+
+        assert!(client.replace_order(&mut orders, uid, 50100.0));
+        assert_eq!(orders.get(uid).unwrap().sell_price, 50100.0);
+        assert!(orders.get(uid).unwrap().bulk_replace_sell);
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+        match TradeCommand::parse(&high[0].data).expect("valid replace command") {
+            TradeCommand::OrderReplace(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.order_type, OrderType::Sell);
+                assert_eq!(cmd.new_price, 50100.0);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+
+        assert!(
+            !client.replace_order(&mut orders, uid, 50200.0),
+            "Delphi ReplaceSentTime gate suppresses a second replace while in flight"
+        );
+        assert_eq!(orders.get(uid).unwrap().sell_price, 50200.0);
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+    }
+
+    #[test]
+    fn client_turn_order_panic_sell_uses_delphi_local_gate() {
+        use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+        let uid = 0x3344;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        let client = Client::new(dummy_cfg());
+
+        assert!(
+            !client.turn_order_panic_sell(&mut orders, uid, false),
+            "initial PrevPanicSell=false suppresses redundant false"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        assert!(client.turn_order_panic_sell(&mut orders, uid, true));
+        assert!(orders.get(uid).unwrap().panic_sell);
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].u_key, UniqueKey::order_move(uid));
+        match TradeCommand::parse(&high[0].data).expect("valid panic command") {
+            TradeCommand::TurnPanicSell(cmd) => {
+                assert_eq!(cmd.epoch_header.market.base.uid, uid);
+                assert_eq!(cmd.epoch_header.market.currency, 17);
+                assert_eq!(cmd.epoch_header.market.platform, 9);
+                assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                assert!(cmd.turn_on);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+
+        assert!(!client.turn_order_panic_sell(&mut orders, uid, true));
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+    }
+
+    #[test]
+    fn client_switch_panic_sell_by_market_matches_delphi_button_semantics() {
+        use crate::commands::trade::{OrderWorkerStatus, TradeCommand};
+
+        let uid_a = 0x3345;
+        let uid_b = 0x3346;
+        let mut orders = tracked_orders(
+            uid_a,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+        let status_cmd = {
+            use crate::commands::trade::{
+                BaseCommandHeader, MarketCommandHeader, OrderCompact, OrderStatus, StopSettings,
+                TradeCommand, TradeEpochHeader,
+            };
+            TradeCommand::OrderStatus(Box::new(OrderStatus {
+                epoch_header: TradeEpochHeader {
+                    market: MarketCommandHeader {
+                        base: BaseCommandHeader {
+                            cmd_id: 4,
+                            ver: 3,
+                            uid: uid_b,
+                        },
+                        currency: 17,
+                        platform: 9,
+                        market_name: "DOGEUSDT".to_string(),
+                    },
+                    epoch: 11,
+                    status: OrderWorkerStatus::SellSet,
+                },
+                buy_order: OrderCompact::default(),
+                sell_order: OrderCompact::default(),
+                stops: StopSettings::default(),
+                strat_id: 0,
+                is_short: false,
+                db_id: 0,
+                from_cache: false,
+                emulator_mode: false,
+                immune_for_clicks: false,
+            }))
+        };
+        let _ = orders.apply(status_cmd);
+        let client = Client::new(dummy_cfg());
+
+        assert!(client.switch_panic_sell_by_market(&mut orders, "DOGEUSDT", true));
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 2);
+        for item in &high {
+            match TradeCommand::parse(&item.data).expect("valid panic command") {
+                TradeCommand::TurnPanicSell(cmd) => {
+                    assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
+                    assert!(cmd.turn_on);
+                }
+                other => panic!("unexpected trade command: {other:?}"),
+            }
+        }
+
+        assert!(!client.switch_panic_sell_by_market(&mut orders, "DOGEUSDT", true));
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 2);
+        for item in &high {
+            match TradeCommand::parse(&item.data).expect("valid panic command") {
+                TradeCommand::TurnPanicSell(cmd) => assert!(!cmd.turn_on),
+                other => panic!("unexpected trade command: {other:?}"),
+            }
         }
     }
 

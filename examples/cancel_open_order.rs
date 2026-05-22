@@ -108,7 +108,11 @@ fn main() {
         return;
     }
 
-    client.cancel_tracked_order(&order);
+    if !client.cancel_tracked_order(dispatcher.orders_mut(), order.uid) {
+        println!("[send] cancel was not queued; local order state is no longer cancellable");
+        client.disconnect();
+        return;
+    }
     println!("[send] cancel queued; listening briefly for order updates...");
 
     client.run_with_dispatcher(
