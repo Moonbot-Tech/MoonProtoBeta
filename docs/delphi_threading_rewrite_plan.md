@@ -807,3 +807,23 @@ Still not done:
 - These named blocks still live as `Client` helpers called by the reader thread
   closure. The next structural step is packaging the closure state into a
   `ReaderRuntime` owner.
+
+### 2026-05-22 - Phase 1 partial: extracted transport ticks from `run_inner`
+
+Done:
+
+- `run_inner` no longer spells reader-wake wait, writer maintenance, and
+  reconnect tail inline.
+- Added `wait_for_reader_work_or_default_sleep`,
+  `transport_writer_maintenance_tick`, and `transport_reconnect_tail_tick`.
+- The order is unchanged: drain reader delivery, wait/drain wake, drain reader
+  delivery again, writer maintenance (`CheckSeningData`, cleanup, indexes,
+  refresh, clock-jump), active trades tick, reconnect tail.
+- Targeted tests passed:
+  `send_phase_runs_with_ready_send_queue`,
+  `post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_gate`.
+
+Still not done:
+
+- These are extraction methods only. The transport writer maintenance still runs
+  from `run_inner`, not from a standalone writer thread.

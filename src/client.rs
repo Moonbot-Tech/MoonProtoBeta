@@ -4711,83 +4711,98 @@ impl Client {
             if self.socket.is_some() {
                 self.drain_reader_decoded(cur_tm, &mut mode);
 
-                // Reader work is level-triggered: a Wake only means
-                // `pending_reader_decoded` may contain items. User/API/UI sends are
-                // already in SendQueues and must not travel through this channel.
-                let send_queues_empty = self.send_queues.lock().unwrap().is_empty();
-                if send_queues_empty {
-                    match self
-                        .event_rx
-                        .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
-                    {
-                        Ok(ClientEvent::Wake) => {}
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    }
-                }
-                loop {
-                    match self.event_rx.try_recv() {
-                        Ok(ClientEvent::Wake) => {}
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => return,
-                    }
+                if !self.wait_for_reader_work_or_default_sleep() {
+                    return;
                 }
                 self.drain_reader_decoded(cur_tm, &mut mode);
 
-                self.copy_send_ack_and_check_sening_data(cur_tm);
-
-                // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
-                // to the reader-side UDPRead path (`FClient.DoCleanUp` before
-                // command handling in Delphi), so it is not driven by writer ticks.
-                if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-                    let mut pending_candles = self.pending_candles.lock().unwrap();
-                    let candles_before = pending_candles.len();
-                    pending_candles.retain(|_uid, partial| {
-                        (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
-                    });
-                    let candles_removed = candles_before - pending_candles.len();
-                    drop(pending_candles);
-                    if candles_removed > 0 {
-                        log::debug!(target: "moonproto::client",
-                            "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
-                            candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
-                    }
-                    self.last_cleanup = cur_tm;
-                }
-
-                // Timeout protection для init/API markets-index request marker.
-                self.check_indexes_fetch_timeout(cur_tm);
-
-                // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
-                // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
-                // фазе; до неё запрос потеряется впустую).
-                if matches!(self.auth_status, AuthStatus::AuthDone) && self.domain_ready {
-                    self.tick_periodic_refresh(cur_tm);
-                }
-
-                // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
-                // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
-                // чтобы full_reset + новый Hello с актуальным временем.
-                self.check_clock_jump();
+                self.transport_writer_maintenance_tick(cur_tm);
 
                 // Active library: periodic trades.tick — только в Dispatcher mode.
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
                 // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
                 self.periodic_trades_tick(cur_tm, &mut mode);
 
-                // Reconnect logic
-                self.check_hello_send(cur_tm);
-                self.check_offline_reconnect(cur_tm);
-                self.check_reconnect_timeout(cur_tm);
-                self.check_dead_zone(cur_tm);
-
-                if self.force_disconnect {
-                    self.do_force_disconnect();
-                }
+                self.transport_reconnect_tail_tick(cur_tm);
             } else {
                 // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
+        }
+    }
+
+    fn wait_for_reader_work_or_default_sleep(&mut self) -> bool {
+        // Reader work is level-triggered: a Wake only means
+        // `pending_reader_decoded` may contain items. User/API/UI sends are
+        // already in SendQueues and must not travel through this channel.
+        let send_queues_empty = self.send_queues.lock().unwrap().is_empty();
+        if send_queues_empty {
+            match self
+                .event_rx
+                .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
+            {
+                Ok(ClientEvent::Wake) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(ClientEvent::Wake) => {}
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return false,
+            }
+        }
+        true
+    }
+
+    fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
+        self.copy_send_ack_and_check_sening_data(cur_tm);
+
+        // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
+        // to the reader-side UDPRead path (`FClient.DoCleanUp` before
+        // command handling in Delphi), so it is not driven by writer ticks.
+        if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
+            let mut pending_candles = self.pending_candles.lock().unwrap();
+            let candles_before = pending_candles.len();
+            pending_candles.retain(|_uid, partial| {
+                (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
+            });
+            let candles_removed = candles_before - pending_candles.len();
+            drop(pending_candles);
+            if candles_removed > 0 {
+                log::debug!(target: "moonproto::client",
+                    "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
+                    candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
+            }
+            self.last_cleanup = cur_tm;
+        }
+
+        // Timeout protection для init/API markets-index request marker.
+        self.check_indexes_fetch_timeout(cur_tm);
+
+        // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
+        // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
+        // фазе; до неё запрос потеряется впустую).
+        if matches!(self.auth_status, AuthStatus::AuthDone) && self.domain_ready {
+            self.tick_periodic_refresh(cur_tm);
+        }
+
+        // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
+        // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
+        // чтобы full_reset + новый Hello с актуальным временем.
+        self.check_clock_jump();
+    }
+
+    fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {
+        // Reconnect logic
+        self.check_hello_send(cur_tm);
+        self.check_offline_reconnect(cur_tm);
+        self.check_reconnect_timeout(cur_tm);
+        self.check_dead_zone(cur_tm);
+
+        if self.force_disconnect {
+            self.do_force_disconnect();
         }
     }
 
