@@ -32,8 +32,9 @@ prefer `order.trade_ctx()` or the `*_tracked_order` wrappers below. They also
 preserve the currency/platform bytes carried by the server-side order state.
 
 `TradeCtx::with_route(uid, currency, platform)` is available for low-level tools
-that intentionally provide raw Delphi enum ordinals. `TradeCtx::new(uid)` is a
-legacy Binance-USDT shortcut and should not be used by regular applications.
+that intentionally provide raw Delphi enum ordinals. There is no default
+Binance/USDT shortcut: route bytes must come from `BaseCheck`, tracked order
+state, or explicit protocol-tool input.
 
 ## Wrappers
 

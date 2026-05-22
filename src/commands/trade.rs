@@ -1625,9 +1625,6 @@ impl VStopUpdate {
 //  Builders для исходящих команд (client → server)
 // ============================================================================
 
-const TRADE_BASE_CURRENCY: u8 = 1; // Legacy BC_USDT fallback for low-level builders.
-const TRADE_BASE_PLATFORM: u8 = 4; // Legacy Platform_FBinance fallback for low-level builders.
-
 fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.push(cmd_id);
     out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
@@ -1694,19 +1691,6 @@ impl TradeCtx {
             currency,
             platform,
         }
-    }
-
-    /// Legacy Binance-USDT route shortcut.
-    ///
-    /// This keeps old low-level callers compiling, but it is not a safe default
-    /// for multi-server or non-Binance sessions. Use [`crate::Client::trade_ctx`]
-    /// after `BaseCheck`, [`crate::Client::random_trade_ctx`], or
-    /// [`TradeCtx::with_route`] with explicit route bytes.
-    #[deprecated(
-        note = "use Client::trade_ctx/random_trade_ctx after BaseCheck, or TradeCtx::with_route for explicit low-level route"
-    )]
-    pub fn new(uid: u64) -> Self {
-        Self::with_route(uid, TRADE_BASE_CURRENCY, TRADE_BASE_PLATFORM)
     }
 }
 
