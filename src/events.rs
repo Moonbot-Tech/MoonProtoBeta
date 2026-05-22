@@ -925,15 +925,20 @@ impl EventDispatcher {
             // Событие всё равно эмиттится в `out` для UI/диагностики.
         }
         if order_snapshot_applied {
-            let missing = self.orders.missing_after_snapshot();
-            for uid in missing {
-                if let Some(order) = self.orders.get(uid) {
-                    let trade_ctx = order.trade_ctx();
-                    actions.push(ActiveAction::RequestOrderStatus {
-                        ctx: trade_ctx,
-                        market_name: order.market_name.clone(),
-                    });
-                }
+            self.cleanup_missing_workers(actions);
+        }
+    }
+
+    /// Delphi equivalent: `TMoonProtoNetClient.CleanupMissingWorkers`.
+    fn cleanup_missing_workers(&self, actions: &mut Vec<ActiveAction>) {
+        let missing = self.orders.missing_after_snapshot();
+        for uid in missing {
+            if let Some(order) = self.orders.get(uid) {
+                let trade_ctx = order.trade_ctx();
+                actions.push(ActiveAction::RequestOrderStatus {
+                    ctx: trade_ctx,
+                    market_name: order.market_name.clone(),
+                });
             }
         }
     }

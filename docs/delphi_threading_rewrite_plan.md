@@ -1406,6 +1406,8 @@ Done:
   snapshot / increment snapshot flag, call `process_command_order` for each
   contained `TOrderStatus`, then emit the snapshot marker that drives
   `CleanupMissingWorkers`-equivalent active actions.
+- The missing-order active action is now named `cleanup_missing_workers`, the
+  Rust counterpart of Delphi `TMoonProtoNetClient.CleanupMissingWorkers`.
 - API docs now state that a snapshot can emit per-order events before the final
   `OrderEvent::Snapshot`.
 
