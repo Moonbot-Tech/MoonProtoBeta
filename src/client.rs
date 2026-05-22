@@ -2522,6 +2522,68 @@ impl DispatcherEventFn {
     }
 }
 
+struct WriterRuntime<'client, 'mode> {
+    client: &'client mut Client,
+    mode: RunMode<'mode>,
+}
+
+impl WriterRuntime<'_, '_> {
+    fn run(mut self, duration: Duration) {
+        let run_start = Instant::now();
+
+        loop {
+            if run_start.elapsed() >= duration {
+                break;
+            }
+            let cur_tm = self.client.now_ms();
+
+            // Emit lifecycle events on auth_status transitions.
+            self.client.check_lifecycle_transition();
+
+            // ActualSleepTime EMA (matches UDPClient.pas:725-734)
+            if self.client.prev_cycle_tm != 0 {
+                let raw = (cur_tm - self.client.prev_cycle_tm).abs();
+                if raw > 0 && raw < 100 {
+                    if self.client.actual_sleep_time <= 0.0 {
+                        self.client.actual_sleep_time = raw as f64;
+                    } else {
+                        self.client.actual_sleep_time =
+                            self.client.actual_sleep_time * 0.7 + raw as f64 * 0.3;
+                    }
+                }
+            }
+            self.client.prev_cycle_tm = cur_tm;
+
+            // Bind socket if needed
+            if self.client.socket.is_none() && self.client.need_connect {
+                self.client.bind_socket(cur_tm);
+                self.client.spawn_reader();
+            }
+
+            if self.client.socket.is_some() {
+                self.client.drain_reader_decoded(cur_tm, &mut self.mode);
+
+                if !self.client.wait_for_reader_work_or_default_sleep() {
+                    return;
+                }
+                self.client.drain_reader_decoded(cur_tm, &mut self.mode);
+
+                self.client.transport_writer_maintenance_tick(cur_tm);
+
+                // Active library: periodic trades.tick — только в Dispatcher mode.
+                // В Callback mode TradesEvent попадает к потребителю напрямую,
+                // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
+                self.client.periodic_trades_tick(cur_tm, &mut self.mode);
+
+                self.client.transport_reconnect_tail_tick(cur_tm);
+            } else {
+                // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
+                thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
+            }
+        }
+    }
+}
+
 // =============================================================================
 //  Subscription Registry — active library principle
 //
@@ -5205,58 +5267,8 @@ impl Client {
     ///   - В конце iter: для Dispatcher mode дополнительно — periodic
     ///     `trades.tick()` каждые 100мс. Для Callback mode tick не нужен (callback
     ///     потребитель сам решает что делать с TradesEvent).
-    fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
-        let run_start = Instant::now();
-
-        loop {
-            if run_start.elapsed() >= duration {
-                break;
-            }
-            let cur_tm = self.now_ms();
-
-            // Emit lifecycle events on auth_status transitions.
-            self.check_lifecycle_transition();
-
-            // ActualSleepTime EMA (matches UDPClient.pas:725-734)
-            if self.prev_cycle_tm != 0 {
-                let raw = (cur_tm - self.prev_cycle_tm).abs();
-                if raw > 0 && raw < 100 {
-                    if self.actual_sleep_time <= 0.0 {
-                        self.actual_sleep_time = raw as f64;
-                    } else {
-                        self.actual_sleep_time = self.actual_sleep_time * 0.7 + raw as f64 * 0.3;
-                    }
-                }
-            }
-            self.prev_cycle_tm = cur_tm;
-
-            // Bind socket if needed
-            if self.socket.is_none() && self.need_connect {
-                self.bind_socket(cur_tm);
-                self.spawn_reader();
-            }
-
-            if self.socket.is_some() {
-                self.drain_reader_decoded(cur_tm, &mut mode);
-
-                if !self.wait_for_reader_work_or_default_sleep() {
-                    return;
-                }
-                self.drain_reader_decoded(cur_tm, &mut mode);
-
-                self.transport_writer_maintenance_tick(cur_tm);
-
-                // Active library: periodic trades.tick — только в Dispatcher mode.
-                // В Callback mode TradesEvent попадает к потребителю напрямую,
-                // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
-                self.periodic_trades_tick(cur_tm, &mut mode);
-
-                self.transport_reconnect_tail_tick(cur_tm);
-            } else {
-                // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
-                thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
-            }
-        }
+    fn run_inner(&mut self, duration: Duration, mode: RunMode<'_>) {
+        WriterRuntime { client: self, mode }.run(duration);
     }
 
     fn wait_for_reader_work_or_default_sleep(&mut self) -> bool {

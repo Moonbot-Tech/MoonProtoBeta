@@ -867,3 +867,21 @@ Still not done:
   stay shared, while socket/stateful transport helpers should move behind
   reader/writer runtime ownership.
 - The writer/orchestrator is still not a standalone Delphi-style runtime/thread.
+
+### 2026-05-22 - Phase 1 partial: introduced `WriterRuntime` shell
+
+Done:
+
+- Added `WriterRuntime` as the owner of the former `run_inner` loop body.
+- `Client::run_inner` is now a thin wrapper that constructs `WriterRuntime` and
+  calls `WriterRuntime::run`.
+- The loop order is unchanged: lifecycle transition, ActualSleepTime EMA,
+  bind/spawn reader, drain reader delivery, wait, drain again, writer
+  maintenance, active trades tick, reconnect tail.
+
+Still not done:
+
+- Writer/orchestrator helper blocks still live as `Client` methods and are
+  called through `WriterRuntime.client`.
+- This is not yet a separately spawned writer thread; it is the explicit runtime
+  for the caller thread that runs the Delphi writer/orchestrator loop.
