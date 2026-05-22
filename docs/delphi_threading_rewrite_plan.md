@@ -991,3 +991,21 @@ Still not done:
 - `retry_sliced` body still delegates to `Client`.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: moved Sliced retry body
+
+Done:
+
+- Moved `retry_sliced` body into `WriterRuntime`.
+- Removed the old `Client` method body.
+- `WriterRuntime` now owns the Sliced writer side around `CheckSeningData`:
+  Sliced enqueue, ACK apply, per-piece retry timing, `UsedSlicedLimit`, and
+  actual `MPC_Sliced` retransmit send.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Reader-side handshake state effects still need a strict Delphi placement
+  check: currently decoded reader work is queued to the writer/runtime boundary
+  instead of being proven as the same immediate reader-thread machine effect.

@@ -3039,7 +3039,129 @@ impl WriterRuntime<'_> {
     }
 
     fn retry_sliced(&mut self, cur_tm: i64) {
-        self.client.retry_sliced(cur_tm);
+        let client = &mut self.client;
+        if client.sending.is_empty() {
+            return;
+        }
+
+        // Outer gate: only check if enough time passed (matches Common.pas:970).
+        if (cur_tm - client.last_checked_slices).abs() <= client.round_trip_delay {
+            return;
+        }
+
+        // TripDelayK adaptation every 2s (matches :975-979). Delphi does this
+        // before PathDelay is computed, so the same tick uses the new K.
+        if (cur_tm - client.last_set_trip_k).abs() > 2000 {
+            client.last_set_trip_k = cur_tm;
+            if client.avg_dup_count > 5.0 {
+                client.trip_delay_k = (client.trip_delay_k + 0.05).min(1.25);
+            }
+            if client.avg_dup_count == 0.0 {
+                client.trip_delay_k = (client.trip_delay_k - 0.01).max(1.05);
+            }
+        }
+
+        let path_delay =
+            (client.round_trip_delay as f64 * client.trip_delay_k + 10.0).round() as i64;
+        let cycle_time_ms = 5.0f64.max(client.actual_sleep_time).min(15.0);
+        // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
+        // Delphi uses `round(Client.CanSendRate * CycleTimeMS / 1000.0)`,
+        // so keep rounding instead of truncating on the hot retry boundary.
+        let client_limit = (client.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
+        let mut bytes_sent_at_once: usize = 0;
+        client.last_checked_slices = cur_tm;
+
+        // Аудит #2 (audit_delphi_deviation): индексы вместо clone. Раньше каждый
+        // ретранслируемый блок копировался в `to_send: Vec<Vec<u8>>` — 200 alloc/sec
+        // при congestion (10 active Sliced × 20 blocks × 2 retries/sec × ~500б).
+        // Теперь храним `(sending_idx, block_num)` (16 байт), отправляем по ссылке.
+        // Соответствует Delphi `SendCommand(Client, MPC_Sliced, Piece.data)` где Piece.data —
+        // `TMemoryStream` по ссылке (ноль копий).
+        let mut to_send_indices: Vec<(usize, usize)> = Vec::new();
+        let mut to_remove = Vec::new();
+
+        for (idx, sliced) in client.sending.iter_mut().enumerate() {
+            if (cur_tm - sliced.last_checked).abs() <= path_delay {
+                continue;
+            }
+
+            let prev_last_checked = sliced.last_checked;
+            sliced.last_checked = cur_tm;
+
+            for (block_num, slice_data) in sliced.slices.iter().enumerate() {
+                if sliced.is_block_acked(block_num) {
+                    continue;
+                } // ACK'd
+
+                // Per-piece check (matches :989)
+                if sliced.piece_last_checked[block_num] != prev_last_checked {
+                    continue;
+                }
+                if (cur_tm - sliced.piece_last_checked[block_num]).abs() <= path_delay {
+                    continue;
+                }
+                if bytes_sent_at_once >= client_limit {
+                    break;
+                }
+
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-sliced-tx] d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={}",
+                        sliced.datagram_num,
+                        block_num,
+                        sliced.blocks_count.saturating_sub(1),
+                        sliced.retry_count,
+                        sliced.sent_count,
+                        bytes_sent_at_once,
+                        client_limit
+                    );
+                }
+                to_send_indices.push((idx, block_num));
+                sliced.piece_last_checked[block_num] = cur_tm;
+                sliced.sent_count += 1;
+                bytes_sent_at_once += slice_data.len();
+            }
+
+            // Sliced.LastChecked = Min(remaining Piece.LastChecked) (matches :996
+            // after Delphi `ApplyACK` removed ACKed pieces from the list).
+            sliced.refresh_last_checked_from_unacked(cur_tm);
+
+            // Conditional increment (matches :998-999)
+            if prev_last_checked != sliced.last_checked {
+                sliced.retry_count += 1;
+            }
+            client.last_checked_slices = client.last_checked_slices.min(sliced.last_checked);
+
+            if sliced.retry_count > sliced.max_retry_count {
+                to_remove.push(idx);
+            }
+        }
+
+        // UsedSlicedLimit flag (matches :1009-1011)
+        let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
+        if bytes_sent_at_once >= used_limit_threshold {
+            client.used_sliced_limit = true;
+            client.reader_ping_state.lock().unwrap().used_sliced_limit = true;
+        }
+
+        // Аудит #2: отправляем по индексу из self.sending — никаких clone.
+        // ВАЖНО: send_raw_packet берёт `&[u8]`, поэтому borrow на self.sending живёт только
+        // на время одного send. send_raw_packet требует `&mut self` (внутри пишет в
+        // bps/total_sent/socket), а sending borrow read-only — нужен split. Делаем мини-
+        // dance: snapshot нужного slice во временный буфер (1 alloc per packet вместо 1
+        // alloc на каждый element в общем Vec<Vec<u8>>). Чуть лучше но не zero-alloc.
+        // **TODO** для следующей версии: разнести send_raw_packet чтобы slice мог быть
+        // передан без holding &mut self на сокет.
+        let mut tmp_slice: Vec<u8> = Vec::new();
+        for (idx, block_num) in to_send_indices {
+            tmp_slice.clear();
+            tmp_slice.extend_from_slice(&client.sending[idx].slices[block_num]);
+            client.send_raw_packet(Command::Sliced, &tmp_slice);
+        }
+
+        for idx in to_remove.into_iter().rev() {
+            client.sending.remove(idx);
+        }
     }
 
     fn batch_send_direct(&mut self, item: &SendItem) {
@@ -7270,132 +7392,6 @@ impl Client {
             Command::Crypted as u8 | COMPRESSED_FLAG
         } else {
             Command::Crypted as u8
-        }
-    }
-
-    /// Retry unACK'd Sliced blocks (byte-exact port of MoonProtoCommon.pas:970-1007)
-    /// Per-piece LastChecked, BytesSentAtOnce limit, conditional FRetryCount, TripDelayK.
-    fn retry_sliced(&mut self, cur_tm: i64) {
-        if self.sending.is_empty() {
-            return;
-        }
-
-        // Outer gate: only check if enough time passed (matches Common.pas:970).
-        if (cur_tm - self.last_checked_slices).abs() <= self.round_trip_delay {
-            return;
-        }
-
-        // TripDelayK adaptation every 2s (matches :975-979). Delphi does this
-        // before PathDelay is computed, so the same tick uses the new K.
-        if (cur_tm - self.last_set_trip_k).abs() > 2000 {
-            self.last_set_trip_k = cur_tm;
-            if self.avg_dup_count > 5.0 {
-                self.trip_delay_k = (self.trip_delay_k + 0.05).min(1.25);
-            }
-            if self.avg_dup_count == 0.0 {
-                self.trip_delay_k = (self.trip_delay_k - 0.01).max(1.05);
-            }
-        }
-
-        let path_delay = (self.round_trip_delay as f64 * self.trip_delay_k + 10.0).round() as i64;
-        let cycle_time_ms = 5.0f64.max(self.actual_sleep_time).min(15.0);
-        // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
-        // Delphi uses `round(Client.CanSendRate * CycleTimeMS / 1000.0)`,
-        // so keep rounding instead of truncating on the hot retry boundary.
-        let client_limit = (self.can_send_rate as f64 * cycle_time_ms * 0.001).round() as usize;
-        let mut bytes_sent_at_once: usize = 0;
-        self.last_checked_slices = cur_tm;
-
-        // Аудит #2 (audit_delphi_deviation): индексы вместо clone. Раньше каждый
-        // ретранслируемый блок копировался в `to_send: Vec<Vec<u8>>` — 200 alloc/sec
-        // при congestion (10 active Sliced × 20 blocks × 2 retries/sec × ~500б).
-        // Теперь храним `(sending_idx, block_num)` (16 байт), отправляем по ссылке.
-        // Соответствует Delphi `SendCommand(Client, MPC_Sliced, Piece.data)` где Piece.data —
-        // `TMemoryStream` по ссылке (ноль копий).
-        let mut to_send_indices: Vec<(usize, usize)> = Vec::new();
-        let mut to_remove = Vec::new();
-
-        for (idx, sliced) in self.sending.iter_mut().enumerate() {
-            if (cur_tm - sliced.last_checked).abs() <= path_delay {
-                continue;
-            }
-
-            let prev_last_checked = sliced.last_checked;
-            sliced.last_checked = cur_tm;
-
-            for (block_num, slice_data) in sliced.slices.iter().enumerate() {
-                if sliced.is_block_acked(block_num) {
-                    continue;
-                } // ACK'd
-
-                // Per-piece check (matches :989)
-                if sliced.piece_last_checked[block_num] != prev_last_checked {
-                    continue;
-                }
-                if (cur_tm - sliced.piece_last_checked[block_num]).abs() <= path_delay {
-                    continue;
-                }
-                if bytes_sent_at_once >= client_limit {
-                    break;
-                }
-
-                if trace_io_enabled() {
-                    eprintln!(
-                        "[mp-sliced-tx] d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={}",
-                        sliced.datagram_num,
-                        block_num,
-                        sliced.blocks_count.saturating_sub(1),
-                        sliced.retry_count,
-                        sliced.sent_count,
-                        bytes_sent_at_once,
-                        client_limit
-                    );
-                }
-                to_send_indices.push((idx, block_num));
-                sliced.piece_last_checked[block_num] = cur_tm;
-                sliced.sent_count += 1;
-                bytes_sent_at_once += slice_data.len();
-            }
-
-            // Sliced.LastChecked = Min(remaining Piece.LastChecked) (matches :996
-            // after Delphi `ApplyACK` removed ACKed pieces from the list).
-            sliced.refresh_last_checked_from_unacked(cur_tm);
-
-            // Conditional increment (matches :998-999)
-            if prev_last_checked != sliced.last_checked {
-                sliced.retry_count += 1;
-            }
-            self.last_checked_slices = self.last_checked_slices.min(sliced.last_checked);
-
-            if sliced.retry_count > sliced.max_retry_count {
-                to_remove.push(idx);
-            }
-        }
-
-        // UsedSlicedLimit flag (matches :1009-1011)
-        let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
-        if bytes_sent_at_once >= used_limit_threshold {
-            self.used_sliced_limit = true;
-            self.reader_ping_state.lock().unwrap().used_sliced_limit = true;
-        }
-
-        // Аудит #2: отправляем по индексу из self.sending — никаких clone.
-        // ВАЖНО: send_raw_packet берёт `&[u8]`, поэтому borrow на self.sending живёт только
-        // на время одного send. self.send_raw_packet требует `&mut self` (внутри пишет в
-        // bps/total_sent/socket), а sending borrow read-only — нужен split. Делаем мини-
-        // dance: snapshot нужного slice во временный буфер (1 alloc per packet вместо 1
-        // alloc на каждый element в общем Vec<Vec<u8>>). Чуть лучше но не zero-alloc.
-        // **TODO** для следующей версии: разнести send_raw_packet чтобы slice мог быть
-        // передан без holding &mut self на сокет.
-        let mut tmp_slice: Vec<u8> = Vec::new();
-        for (idx, block_num) in to_send_indices {
-            tmp_slice.clear();
-            tmp_slice.extend_from_slice(&self.sending[idx].slices[block_num]);
-            self.send_raw_packet(Command::Sliced, &tmp_slice);
-        }
-
-        for idx in to_remove.into_iter().rev() {
-            self.sending.remove(idx);
         }
     }
 
