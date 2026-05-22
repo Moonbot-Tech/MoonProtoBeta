@@ -124,6 +124,7 @@ impl ApiPending {
     }
 
     /// Очистить все ожидания (например при reconnect).
+    #[cfg(test)]
     pub fn clear(&self) {
         self.lock_map().clear();
     }

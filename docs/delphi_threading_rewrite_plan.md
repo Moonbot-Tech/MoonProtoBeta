@@ -1134,7 +1134,27 @@ Still not done:
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
 - `MPC_WantNewHello` still relies on the writer-side queued update to run the
-  remaining writer-owned reset (`sending`, pending API/candles, writer
-  `recvd_slider`, etc.). Delphi calls `FClient.Reset` from `UDPRead`; the next
-  strict block must split or share those remaining reset-owned structures so
-  the reset placement is exact too.
+  remaining Delphi `TMoonProtoClient.Reset` fields that are still writer-owned,
+  especially `CryptedMsgCounter`, `AttemptedBytes`/`total_sent`, and writer
+  `RecvdSlider`. Delphi calls `FClient.Reset` from `UDPRead`; the next strict
+  block must split or share those remaining reset-owned structures so the reset
+  placement is exact too.
+
+### 2026-05-22 - Phase 1 partial: narrowed Rust reset to Delphi Reset
+
+Done:
+
+- Removed Rust-only cleanup from `Client::full_reset`: it no longer clears
+  outgoing `Sending`, pending H commands, API waiters, or candle aggregators.
+  Delphi `TMoonProtoClient.Reset` does not clear those structures.
+- Added a reset parity test proving `Sending`, pending H, and API waiter slots
+  survive reset while Delphi-reset fields such as crypt counter, attempted
+  bytes, total recv, `RS`, `UsedSlicedLimit`, `RecvdSlider`, `LastOnline`, and
+  `LastSentHello` are reset.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- Some Delphi-reset fields are still applied when the writer consumes the
+  queued `WantNewHello` update, not inside reader `UDPRead` itself.

@@ -7657,7 +7657,7 @@ impl Client {
 
     /// Matches TMoonProtoClient.Reset (IntStruct.pas:972-1000)
     /// Does NOT reset: server_token, actual_pmtu, send_datagram_num, pending_h,
-    /// trip_delay_k, can_send_rate (those persist across reconnects).
+    /// sending, api_pending, pending_candles, trip_delay_k, can_send_rate.
     fn full_reset(&mut self) {
         self.crypt_msg_counter = 0;
         self.total_sent.store(0, Ordering::Relaxed);
@@ -7676,24 +7676,6 @@ impl Client {
         self.reader_wake_pending.store(false, Ordering::Release);
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
-        // Аудит #9 (audit_delphi_deviation): очистка stale Sliced состояния при hard
-        // reconnect. После полного reset crypt_msg_counter=0 и ключи **поменяются** в
-        // следующем handshake. Старые `sending` зашифрованы прежними ключами / прежними
-        // MsgNum'ами — сервер их дропнет (bad keys / out-of-order). Без clear retry будет
-        // слать мусорный трафик на сервер до max_retry exhaustion (bandwidth waste +
-        // noise на reconnect). pending_h оставляем (это user'ские торговые команды —
-        // re-encrypt при retry через send_h_item с новыми ключами).
-        self.sending.clear();
-        // audit_robustness H2: api_pending sender'ы относятся к UID'ам предыдущей сессии.
-        // Сервер новой сессии этих UID не знает → ответ никогда не придёт → Sender живёт
-        // в map бесконечно, receiver потребителя блокируется. Дропаем — receivers получат
-        // `Err(channel closed)` и поймут что нужен retry.
-        self.api_pending.clear();
-        // audit_responsibility F9: pending candles aggregators — те же UID'ы старой сессии.
-        // Симметрично с api_pending: senders drop'аются → receivers получают
-        // `Err(Disconnected)` → потребитель делает re-request с новым UID. Иначе
-        // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS.
-        self.pending_candles.lock().unwrap().clear();
         self.publish_transport_state_from_client();
     }
 
@@ -10084,6 +10066,49 @@ mod pmtu_tests {
 
     fn writer(client: &mut Client) -> WriterRuntime<'_> {
         WriterRuntime { client }
+    }
+
+    #[test]
+    fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
+        let mut client = Client::new(dummy_cfg());
+        client.sending.push(sent_sliced_with_lengths(&[8], 0));
+        client.pending_h.push(pending_h_item(42));
+        let _rx = client.api_pending.register(0x4455);
+
+        client.crypt_msg_counter = 77;
+        client.total_sent.store(1234, Ordering::Relaxed);
+        client.total_recv = 5678;
+        client.rs = 0.25;
+        client.used_sliced_limit = true;
+        client.recvd_slider.has_new_data = true;
+        client.last_online = 999;
+        client.last_sent_hello = 888;
+
+        client.full_reset();
+
+        assert_eq!(
+            client.sending.len(),
+            1,
+            "Delphi Reset does not clear Sending"
+        );
+        assert_eq!(
+            client.pending_h.len(),
+            1,
+            "Delphi Reset does not clear pending H commands"
+        );
+        assert_eq!(
+            client.api_pending.pending_count(),
+            1,
+            "API waiters are not part of Delphi TMoonProtoClient.Reset"
+        );
+        assert_eq!(client.crypt_msg_counter, 0);
+        assert_eq!(client.total_sent(), 0);
+        assert_eq!(client.total_recv, 0);
+        assert_eq!(client.rs, 1.0);
+        assert!(!client.used_sliced_limit);
+        assert!(!client.recvd_slider.has_new_data);
+        assert_eq!(client.last_online, 0);
+        assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     }
 
     fn process_ping_reader_msg(
