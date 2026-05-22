@@ -44,9 +44,9 @@ use crate::commands::ui::UICommand;
 use crate::protocol::Command;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
-    BalanceEvent, BalancesState, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks,
-    OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent, StratsState, TradesEvent,
-    TradesState,
+    ApplyResult, BalanceEvent, BalancesState, MarketsEvent, MarketsState, OrderBookEvent,
+    OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent, StratsState,
+    TradesEvent, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -638,8 +638,10 @@ impl EventDispatcher {
         // См. DEVIATION #23.
         self.orders
             .set_server_time_delta(self.current_server_time_delta());
-        let (_apply_result, ev) = self.orders.apply_at(tc, now_ms);
-        out.push(Event::Order(ev));
+        let (apply_result, ev) = self.orders.apply_at(tc, now_ms);
+        if apply_result != ApplyResult::NotApplicable {
+            out.push(Event::Order(ev));
+        }
     }
 
     pub fn tick_orders(&mut self, now_ms: i64) -> Vec<Event> {
@@ -1107,8 +1109,8 @@ mod tests {
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
-        OrderCompact, OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, StopSettings,
-        TradeCommand, TradeCtx, TradeEpochHeader,
+        OrderCompact, OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, SetImmuneCommand,
+        StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
     };
 
     static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1308,14 +1310,13 @@ mod tests {
     #[test]
     fn dispatcher_routes_order_to_orders_state() {
         let mut d = EventDispatcher::new();
-        // Empty AllStatusesReq — парсер вернёт TradeCommand::AllStatusesReq
-        let payload = build_all_statuses_request(123);
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let uid = 0x123;
+        let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+        let payload = all_statuses_payload(0x55, &[status]);
         let events = d.dispatch(Command::Order, &payload, 1000);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            Event::Order(_) => {}
-            other => panic!("expected Order event, got {:?}", other),
-        }
+        assert!(events.iter().any(|ev| matches!(ev, Event::Order(_))));
+        assert!(d.orders.get(uid).is_some());
     }
 
     #[test]
@@ -1476,11 +1477,48 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_tick_orders_clears_bulk_replace_timeout_like_delphi() {
+    fn dispatcher_drops_client_originated_order_command_without_event_like_delphi() {
         let mut d = EventDispatcher::new();
         seed_event_markets(&mut d, &["BTCUSDT"]);
         let mut out = Vec::new();
         let uid = 0x79;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            1000,
+            &mut out,
+        );
+        out.clear();
+
+        d.process_command_order(
+            TradeCommand::SetImmune(SetImmuneCommand {
+                header: BaseCommandHeader {
+                    cmd_id: 22,
+                    ver: 3,
+                    uid,
+                },
+                items: Vec::new(),
+            }),
+            1010,
+            &mut out,
+        );
+
+        assert!(out.is_empty());
+        assert!(!d.orders.get(uid).unwrap().immune_for_clicks);
+    }
+
+    #[test]
+    fn dispatcher_tick_orders_clears_bulk_replace_timeout_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x7A;
 
         d.process_command_order(
             TradeCommand::OrderStatus(Box::new(order_status_for_test(
@@ -1713,7 +1751,17 @@ mod tests {
     fn dispatcher_order_not_blocked_by_indexes_sync() {
         // Order channel не зависит от market_idx → не должен блокироваться indexes_sync.
         let mut d = EventDispatcher::new();
-        let payload = build_all_statuses_request(123);
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let payload = all_statuses_payload(
+            0x55,
+            &[order_status_for_test(
+                0x124,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            )],
+        );
         let events = d.dispatch(Command::Order, &payload, 1000);
         assert!(
             !events.is_empty(),

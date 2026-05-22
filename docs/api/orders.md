@@ -53,8 +53,10 @@ order; they do not create a new active order entry when the UID is unknown.
 For a new non-cache `TOrderStatus`, the dispatcher also requires the market
 name to be present in `MarketsState`; otherwise the packet is dropped without
 creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
-Incoming `TSetImmuneCommand` packets are not applied to this read model: in the
-Delphi flow `SetImmune` is a client-to-server UI action. For outgoing UI clicks,
+Incoming client-originated order commands such as `TSetImmuneCommand`,
+`TTurnPanicSellCommand`, join/split/close/sell/move commands, and raw request
+commands are not applied and do not emit `OrderEvent`: in the Delphi receive
+flow they are not server state updates. For outgoing UI clicks,
 `Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
 `immune_for_clicks` on found active orders, and then queues `TSetImmuneCommand`.
 Later `TOrderStatus` snapshots can refresh the same field from the server.

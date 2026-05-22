@@ -1961,3 +1961,23 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining outgoing UI/order
   wrappers and server-receive consequences around these commands.
+
+### 2026-05-22 - Phase 1 partial: client-originated order commands are silent on receive
+
+Done:
+
+- Fixed dispatcher-level `ProcessCommandOrder` delivery for commands that are
+  client-originated or otherwise not server state updates.
+- Low-level `Orders::apply` still returns `NotApplicable` for diagnostic direct
+  calls, but `EventDispatcher::process_command_order` no longer publishes
+  `OrderEvent::Ignored` for that result.
+- This matches Delphi `TMoonProtoNetClient.ProcessCommandOrder`: such packets
+  are freed/exited or queued into a worker without a separate public ignored
+  event, and `BOrderWorker.HandleServerCommand` has no state branch for
+  `TTurnPanicSellCommand` / `SetImmune` / join-split-close-sell style client
+  intents.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` branches that do have server-state side effects.
