@@ -72,13 +72,12 @@ Delphi model по факту:
 
 Проверенные точки:
 
-- `src/client.rs` - `EVENT_DRAIN_BUDGET = 512`.
-- `src/client.rs` - `ClientEvent`; production reader now sends coalesced `Wake`,
-  while legacy `Recv`/`Send` variants are test-only.
-- `src/client.rs` - `event_tx/event_rx`, `app_events`, `send_queues`,
+- `src/client.rs` - `ClientEvent` has only coalesced reader `Wake`; accepted
+  UDP packets and user sends are not represented as event variants.
+- `src/client.rs` - `event_tx/event_rx`, `send_queues`,
   `pending_reader_decoded`.
-- `src/client.rs` - `run_inner` drains control intents, coalesced reader wakeups,
-  and `pending_reader_decoded`.
+- `src/client.rs` - `run_inner` drains coalesced reader wakeups and
+  `pending_reader_decoded`, then copies Delphi-style send queues.
 - `src/client.rs` - `spawn_reader` handles service commands, Sliced/SlicedACK,
   handshake, Ping, SizeTest/ProbeMTU, and data `DataReadInt` core in reader.
 - `src/client.rs` - ping handling writes shared `TmpSlider`; writer later copies
@@ -100,8 +99,7 @@ Delphi model по факту:
      coalesced `ClientEvent::Wake` для user/active delivery.
 
 2. Main loop:
-   - дренит remaining app/control intents и coalesced reader wakeups через
-     `EVENT_DRAIN_BUDGET`;
+   - дренит coalesced reader wakeups без `EVENT_DRAIN_BUDGET`;
    - дренит `pending_reader_decoded` и выполняет `OnNewData`/active delivery;
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
@@ -122,7 +120,7 @@ code через main/run очередь.
 Target: `MPC_Sliced` обрабатывается в reader thread: `SlicingReceiver::on_new_sliced`, immediate
 `send_raw_packet(MPC_SlicedACK)`, complete datagram идёт в `DataReadInt` path,
 а затем в reader-owned `OnNewData`/active dispatch без зависимости от
-`EVENT_DRAIN_BUDGET`.
+main-loop wake budgeting.
 
 ### 2. SlicedACK не должен применяться в reader
 
@@ -261,7 +259,8 @@ Tests:
 
 ### Phase 2 - introduce queues matching Delphi
 
-Replace current semantic dependence on `ClientEvent::Send` for user/API commands:
+Closed target: remove semantic dependence on `ClientEvent::Send` for user/API
+commands:
 
 - public `send_*` writes to `SendQueues`;
 - `api_pending.register(uid)` still happens before queue insert;
@@ -291,7 +290,8 @@ domain processing.
 Tests:
 
 - receiving one Sliced block emits ACK before any writer tick;
-- complete incoming Sliced calls data dispatch without passing through `EVENT_DRAIN_BUDGET`;
+- complete incoming Sliced calls data dispatch without depending on main-loop
+  event budgeting;
 - `err_emu=10%` FireTest must receive full candle snapshot or produce a narrower logged failure.
 
 ### Phase 4 - move SlicedACK and ping ACK to Delphi copy/apply order
@@ -386,7 +386,9 @@ Tests:
 
 ### Phase 8 - remove Rust-only budget/defer machinery
 
-Delete after previous phases are green:
+Delete after previous phases are green. `EVENT_DRAIN_BUDGET`, recv
+`ClientEvent` protocol progress, and app/control FIFO send paths are now gone
+from live code:
 
 - `EVENT_DRAIN_BUDGET`;
 - recv `ClientEvent` as protocol progress mechanism;
@@ -439,12 +441,13 @@ Done:
 - Reader-side ACK path is covered by `reader_sends_sliced_ack_without_main_loop_tick`.
 - `cargo test --lib`: 362 passed.
 
-Not done:
+Superseded by later phases:
 
-- Full datagram still reaches `DataReadInt` through an internal `ClientEvent::SlicedComplete`.
-- Exact Delphi target remains:
+- Full datagram no longer reaches `DataReadInt` through an internal
+  `ClientEvent::SlicedComplete`.
+- Exact Delphi target was implemented for the transport-owned core:
   `UDPRead -> OnNewSliced -> SendCommand(MPC_SlicedACK) -> if complete DataReadInt`
-  inside the reader path, without `EVENT_DRAIN_BUDGET` as a protocol-progress dependency.
+  inside the reader path.
 
 ### 2026-05-22 - Night progress review
 
@@ -469,16 +472,13 @@ Done:
 - `cargo fmt` was applied after review.
 - `cargo test --lib`: 404 passed.
 
-Still not done:
+Superseded by later phases:
 
-- Full incoming sliced datagram is still processed by the main/run loop through
-  `pending_completed_sliced`; it is no longer behind generic recv backlog, but
-  it is not yet the exact Delphi reader call:
-  `OnNewSliced -> DataReadInt` in the same reader stack.
-- `EVENT_DRAIN_BUDGET` still exists in production and `run_*` is still a
-  protocol-progress motor. This remains a protocol parity blocker.
-- Generic non-sliced `ClientEvent::Recv` packets still depend on the main/run
-  loop. Delphi `UDPRead -> DataRead -> DataReadInt -> OnNewData` is reader-side.
+- Full incoming sliced datagrams are no longer processed through
+  `pending_completed_sliced`; the reader now runs the transport-owned
+  `OnNewSliced -> DataReadInt` core.
+- `EVENT_DRAIN_BUDGET` and generic non-sliced `ClientEvent::Recv` were removed
+  from live/test paths.
 - Active dispatcher still calls back through `&mut Client`, so receive/domain
   processing cannot yet be moved fully into a reader-owned path.
 
@@ -492,22 +492,19 @@ Done:
 - `SendQueues::push_send_cmd_int` matches Delphi `SendCmdInt`: unbounded lists,
   selected-priority queue, UKey dedup only for Sliced/High, remove the first
   older matching item, then append the new item.
-- The run loop now applies subscription/control intents, then performs
-  `get_copy_send_list` before `GetCopyAcks` / `CopyRecvdData`, so control
-  handlers that emit wire commands land in the copied send queues for that
-  writer tick.
-- `ClientSender` raw/trade/UI/strategy/balance command helpers use the same
-  direct send queues; subscription helpers remain app/control intents because
-  they must mutate the reconnect registry first.
+- The run loop performs `get_copy_send_list` before `GetCopyAcks` /
+  `CopyRecvdData`; user/API/UI commands have already appended directly to
+  Delphi-style send queues.
+- `ClientSender` raw/trade/UI/strategy/balance/subscription helpers use the
+  same direct send queues. Subscription helpers mutate the shared reconnect
+  registry immediately, then append the corresponding wire request.
 - API docs were updated in-place for the changed queue semantics.
-- `cargo test --lib`: 406 passed.
+- `cargo test --lib`: 417 passed after removal of old event bridge tests.
 
 Still not done:
 
-- Subscription/control intents still use `app_events` until registry mutation is
-  split into a Delphi-equivalent shared state block.
-- `EVENT_DRAIN_BUDGET` still exists because generic receive processing has not
-  moved into the reader stack yet.
+- Active/user delivery still depends on the main loop; the registry/send-queue
+  path no longer has a separate app/control FIFO.
 
 ### 2026-05-22 - Phase 3 partial: reader-side Sliced DataReadInt core
 
@@ -589,9 +586,10 @@ Still not done:
   Delphi reader-thread delivery, even though the `DataReadInt` core is now
   reader-side for data packets.
 - Production accepted UDP packets no longer enqueue generic `ClientEvent::Recv`;
-  that fallback is test-only now.
-- `EVENT_DRAIN_BUDGET` still exists until active dispatch/control delivery no
-  longer shares writer progress.
+  the test-only fallback was also removed so tests exercise the live
+  reader-decoded path.
+- `EVENT_DRAIN_BUDGET` was removed; reader wake is level-triggered and does not
+  carry user/API/UI send work.
 
 ### 2026-05-22 - Phase 6 partial: active actions outbox
 

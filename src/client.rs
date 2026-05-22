@@ -31,7 +31,7 @@ use log::{debug, error, warn};
 // MoonProto UDP Client architecture follows the Delphi split:
 // main/send loop plus UDP reader thread. See MAPPING.md for line-by-line
 // correspondence.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "diagnostic-trace")]
@@ -173,9 +173,6 @@ fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
 
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
-                                 // Temporary Rust-only guard while control intents and active delivery still share
-                                 // the main loop with writer work. Accepted UDP packets are no longer budgeted here.
-const EVENT_DRAIN_BUDGET: usize = 512;
 const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
@@ -446,38 +443,10 @@ impl SendQueues {
         high.append(&mut self.high);
         low.append(&mut self.low);
     }
-}
 
-/// Test-only legacy reader message.
-///
-/// Production reader no longer queues accepted UDP packets as `ClientEvent::Recv`:
-/// protocol-owned receive work runs in the reader stack, and decoded payloads
-/// use `pending_reader_decoded` plus a coalesced `Wake`.
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct RecvMsg {
-    cmd: u8,
-    payload: Vec<u8>,
-    recv_bytes: u64,
-    timestamp_ms: i64,
-    /// Packet protocol body was already handled in the reader thread.
-    ///
-    /// Delphi `UDPRead` performs some protocol branches fully in the reader
-    /// path. Main/writer still has to observe the accepted-packet side effects
-    /// (`TotalRecvBytes`, `LastOnline`), but must not parse that packet again.
-    handled_in_reader: bool,
-    /// Delphi updates `TotalRecvBytes`/`LastOnline` for a valid packet before
-    /// `MoonProtoErrEmu` drops it. Keep the packet in the reader→main FIFO so
-    /// main can apply those side effects, then skip protocol parsing.
-    err_emu_drop: bool,
-    /// Reader already performed the DataReadInt protocol-owned core for this
-    /// packet, but main still has to run the remaining command-specific branch.
-    reader_dataread_core_done: bool,
-    /// Аудит #7 (audit_delphi_deviation E-V2-02): эпоха reader thread'а который создал
-    /// это сообщение. Инкрементируется на каждый `spawn_reader`. Main loop игнорирует
-    /// сообщения с epoch != `current_reader_epoch` — это защита от пакетов старого
-    /// reader thread'а который ещё не завершился во время reconnect'а.
-    epoch: u32,
+    fn is_empty(&self) -> bool {
+        self.sliced.is_empty() && self.high.is_empty() && self.low.is_empty()
+    }
 }
 
 #[derive(Clone)]
@@ -523,75 +492,23 @@ pub(crate) struct ReaderHandshakeUpdate {
     decode_key: MoonKey,
 }
 
-/// Legacy message from app to main loop (send command request).
-///
-/// New production send paths append directly to [`SendQueues`] to match Delphi
-/// `SendCmdInt`. Keep this variant temporarily for tests and any already queued
-/// control-path events while the threading rewrite is in progress.
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct SendMsg {
-    pub item: SendItem,
-}
-
 /// Reader/main control channel.
 ///
 /// Production reader sends only coalesced `Wake` notifications here after
-/// reader-side protocol progress. Accepted UDP packets are not queued as events:
-/// data and service command branches run in the reader stack, then decoded
-/// payloads use a separate queue for user/active delivery.
-///
-/// F4: Subscribe events позволяют UI-thread'у попросить либу обновить подписку
-/// без `&mut Client` lock. Main loop обрабатывает их идентично прямым
-/// `subscribe_*` методам — apply registry change + emit wire request.
+/// reader-side protocol progress. Accepted UDP packets and user sends are not
+/// queued as events: reader data goes through `pending_reader_decoded`, while
+/// user/API/UI commands append directly into Delphi-style send queues.
 #[derive(Clone)]
 pub(crate) enum ClientEvent {
     /// Wakes main loop after reader-side protocol progress that is stored
     /// outside the shared Recv queue.
     Wake,
-    #[cfg(test)]
-    Recv(RecvMsg),
-    #[cfg(test)]
-    Send(SendMsg),
-    /// Registry-aware `TMMOrdersSubscribeCommand` intent.
-    MmOrdersSubscribe { subscribe: bool },
-    /// Подписаться на orderbook рынка. Main loop обновит registry и отправит
-    /// `emk_SubscribeOrderBook` если подписки ещё не было (idempotent).
-    SubscribeOrderBook { market_name: String },
-    /// Subscribe to several orderbook markets with one registry-aware intent.
-    SubscribeOrderBooks { market_names: Vec<String> },
-    /// Отписаться от orderbook рынка.
-    UnsubscribeOrderBook { market_name: String },
-    /// Unsubscribe from several orderbook markets with one registry-aware intent.
-    UnsubscribeOrderBooks { market_names: Vec<String> },
-    /// Clear all remembered orderbook subscriptions and send the server's
-    /// empty-market-list unsubscribe request.
-    UnsubscribeAllOrderBooks,
-    /// Подписаться на all-trades поток с параметром `want_mm` (нужны ли MM-ордера).
-    SubscribeAllTrades { want_mm: bool },
-    /// Отписаться от all-trades потока.
-    UnsubscribeAllTrades,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecvEnqueue {
     Delivered,
     Disconnected,
-}
-
-#[cfg(test)]
-fn enqueue_recv_event(
-    event_tx: &mpsc::Sender<ClientEvent>,
-    msg: RecvMsg,
-    _start_time: Instant,
-) -> RecvEnqueue {
-    // Test helper for the former reader->main packet FIFO. The production
-    // reader path must not add a second local loss/backpressure mode on top of
-    // UDP/ErrEmu.
-    match event_tx.send(ClientEvent::Recv(msg)) {
-        Ok(()) => RecvEnqueue::Delivered,
-        Err(_) => RecvEnqueue::Disconnected,
-    }
 }
 
 fn notify_reader_work(
@@ -610,11 +527,6 @@ fn notify_reader_work(
     }
 }
 
-enum QueuedControlEvent {
-    Subscribe(ClientEvent),
-    MmOrdersSubscribe(bool),
-}
-
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
 /// Send/control queues are intentionally unbounded to preserve the Delphi
@@ -622,10 +534,6 @@ enum QueuedControlEvent {
 /// owning `Client` has been dropped or its run loop has shut down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
-    /// Legacy/reserved. Internal queues are intentionally unbounded to match
-    /// Delphi: accepted packets and user intents are not dropped by a local
-    /// capacity check. Current code does not return this variant.
-    ChannelFull,
     /// The owning `Client` was dropped or the main loop exited, so this sender
     /// can no longer enqueue work.
     Disconnected,
@@ -634,7 +542,6 @@ pub enum SubscribeError {
 impl std::fmt::Display for SubscribeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelFull => write!(f, "Client queues have no capacity cap"),
             Self::Disconnected => write!(f, "Client queues disconnected"),
         }
     }
@@ -667,9 +574,9 @@ impl std::error::Error for SubscribeError {}
 /// [`SubscribeError`] when the caller needs explicit feedback.
 #[derive(Clone)]
 pub struct ClientSender {
-    app_events: Arc<Mutex<VecDeque<ClientEvent>>>,
     app_queue_alive: Arc<AtomicBool>,
     send_queues: Arc<Mutex<SendQueues>>,
+    subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
 }
 
@@ -694,8 +601,8 @@ impl ClientSender {
     /// Subscribe to several orderbook streams and remember all intents for
     /// reconnect restore.
     ///
-    /// This sends one control intent to the client loop. The loop deduplicates
-    /// already remembered market names and emits one batched
+    /// This updates the shared reconnect registry immediately, deduplicates
+    /// already remembered market names, and appends one batched
     /// `emk_SubscribeOrderBook` request for newly added markets.
     pub fn subscribe_orderbooks<I, S>(&self, market_names: I)
     where
@@ -748,16 +655,42 @@ impl ClientSender {
 
     /// Fallible orderbook subscription.
     pub fn try_subscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
-        self.try_send(ClientEvent::SubscribeOrderBook {
-            market_name: market_name.to_string(),
-        })
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let market_name = market_name.to_string();
+        let newly_added = self
+            .subscription_registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .insert(market_name.clone());
+        if newly_added {
+            self.try_send_api_request(crate::commands::engine_request::subscribe_order_book(&[
+                &market_name,
+            ]))?;
+        }
+        Ok(())
     }
 
     /// Fallible orderbook unsubscribe.
     pub fn try_unsubscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
-        self.try_send(ClientEvent::UnsubscribeOrderBook {
-            market_name: market_name.to_string(),
-        })
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let market_name = market_name.to_string();
+        let removed = self
+            .subscription_registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .remove(&market_name);
+        if removed {
+            self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[
+                &market_name,
+            ]))?;
+        }
+        Ok(())
     }
 
     /// Fallible batched orderbook subscription.
@@ -773,7 +706,25 @@ impl ClientSender {
         if market_names.is_empty() {
             return Ok(());
         }
-        self.try_send(ClientEvent::SubscribeOrderBooks { market_names })
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let mut new_names = Vec::new();
+        {
+            let mut registry = self.subscription_registry.lock().unwrap();
+            for market_name in market_names {
+                if registry.orderbook_subs.insert(market_name.clone()) {
+                    new_names.push(market_name);
+                }
+            }
+        }
+        if !new_names.is_empty() {
+            let refs: Vec<&str> = new_names.iter().map(String::as_str).collect();
+            self.try_send_api_request(crate::commands::engine_request::subscribe_order_book(
+                &refs,
+            ))?;
+        }
+        Ok(())
     }
 
     /// Fallible batched orderbook unsubscribe.
@@ -789,22 +740,71 @@ impl ClientSender {
         if market_names.is_empty() {
             return Ok(());
         }
-        self.try_send(ClientEvent::UnsubscribeOrderBooks { market_names })
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let mut removed_names = Vec::new();
+        {
+            let mut registry = self.subscription_registry.lock().unwrap();
+            for market_name in market_names {
+                if registry.orderbook_subs.remove(&market_name) {
+                    removed_names.push(market_name);
+                }
+            }
+        }
+        if !removed_names.is_empty() {
+            let refs: Vec<&str> = removed_names.iter().map(String::as_str).collect();
+            self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(
+                &refs,
+            ))?;
+        }
+        Ok(())
     }
 
     /// Fallible all-orderbooks unsubscribe.
     pub fn try_unsubscribe_all_orderbooks(&self) -> Result<(), SubscribeError> {
-        self.try_send(ClientEvent::UnsubscribeAllOrderBooks)
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        self.subscription_registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .clear();
+        self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[]))
     }
 
     /// Fallible all-trades subscription.
     pub fn try_subscribe_all_trades(&self, want_mm: bool) -> Result<(), SubscribeError> {
-        self.try_send(ClientEvent::SubscribeAllTrades { want_mm })
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        {
+            let mut registry = self.subscription_registry.lock().unwrap();
+            registry.trades_sub = Some(TradesSubscription { want_mm });
+            registry.mm_orders_sub = Some(want_mm);
+        }
+        self.try_send_api_request(crate::commands::engine_request::subscribe_all_trades(
+            want_mm,
+        ))
     }
 
     /// Fallible all-trades unsubscribe.
     pub fn try_unsubscribe_all_trades(&self) -> Result<(), SubscribeError> {
-        self.try_send(ClientEvent::UnsubscribeAllTrades)
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        let had_subscription = self
+            .subscription_registry
+            .lock()
+            .unwrap()
+            .trades_sub
+            .take()
+            .is_some();
+        if had_subscription {
+            self.try_send_api_request(crate::commands::engine_request::unsubscribe_all_trades())?;
+        }
+        Ok(())
     }
 
     /// Queue an already-serialized command payload for sending.
@@ -1267,10 +1267,34 @@ impl ClientSender {
 
     /// Send `TMMOrdersSubscribeCommand`.
     pub fn ui_mm_subscribe(&self, subscribe: bool) {
-        if let Err(e) = self.try_send(ClientEvent::MmOrdersSubscribe { subscribe }) {
+        if let Err(e) = self.try_ui_mm_subscribe(subscribe) {
             log::warn!(target: "moonproto::client",
                 "ui_mm_subscribe({subscribe}) dropped: {e}");
         }
+    }
+
+    /// Fallible `TMMOrdersSubscribeCommand`.
+    pub fn try_ui_mm_subscribe(&self, subscribe: bool) -> Result<(), SubscribeError> {
+        if !self.app_queue_alive.load(Ordering::Relaxed) {
+            return Err(SubscribeError::Disconnected);
+        }
+        {
+            let mut registry = self.subscription_registry.lock().unwrap();
+            registry.mm_orders_sub = Some(subscribe);
+            if let Some(trades_sub) = registry.trades_sub.as_mut() {
+                trades_sub.want_mm = subscribe;
+            }
+        }
+        let uid = rand::random();
+        let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);
+        self.try_send_cmd_keyed(
+            raw,
+            Command::UI,
+            SendPriority::High,
+            true,
+            3,
+            UniqueKey::turn_mm_detection_for(uid),
+        )
     }
 
     /// Send `TUpdateVersionCommand` and mark Delphi `ServerUpdateSent`.
@@ -1464,14 +1488,6 @@ impl ClientSender {
         self.send_cmd(raw, Command::Balance, SendPriority::High, true, 3);
     }
 
-    fn try_send(&self, ev: ClientEvent) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
-            return Err(SubscribeError::Disconnected);
-        }
-        self.app_events.lock().unwrap().push_back(ev);
-        Ok(())
-    }
-
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
@@ -1480,8 +1496,6 @@ impl ClientSender {
         Ok(())
     }
 }
-
-// A-V2-07 fix: бывший ручной impl Clone заменён на #[derive(Clone)] на RecvMsg выше.
 
 /// Transport authorization state for one [`Client`].
 ///
@@ -2197,15 +2211,10 @@ pub struct Client {
     cfg: ClientConfig,
 
     // Reader → main control FIFO. Production reader sends only coalesced Wake
-    // notifications; accepted UDP packets are not queued here. Test builds keep
-    // a legacy Recv variant for parity regression tests.
+    // notifications; accepted UDP packets and user sends are not queued here.
     event_tx: mpsc::Sender<ClientEvent>,
     pub(crate) event_rx: mpsc::Receiver<ClientEvent>,
 
-    // App/control → main FIFO: registry-changing intents that still require
-    // `&mut Client`. Raw SendCmd no longer uses this queue; it appends directly
-    // into Delphi-style `send_queues` below.
-    app_events: Arc<Mutex<VecDeque<ClientEvent>>>,
     app_queue_alive: Arc<AtomicBool>,
     // Delphi `DataToSend`, `DataToSendH`, `DataToSendL`: raw/user/API sends are
     // appended here directly by `send_cmd` / `ClientSender::send_cmd`.
@@ -2350,7 +2359,7 @@ pub struct Client {
     /// **Active library — subscription registry**: что app просил подписать.
     /// До Init transport handshake не отправляет этот реестр. После Init reconnect
     /// сам восстанавливает registry через текущие keys / market mapping.
-    pub(crate) subscription_registry: SubscriptionRegistry,
+    pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
 
     /// Сохранённый intent первого и единственного init-прохода. Нужен для
     /// post-reconnect restore без повторного `run_init_sequence`.
@@ -2494,10 +2503,9 @@ impl Client {
         // Delphi queues are ordinary grow-only TList/TDictionary structures with no
         // fixed capacity cap. Keep Rust queues unbounded too: accepted UDP packets
         // and user commands must not disappear because a local channel filled up.
-        // Reader packets, app/control intents, and raw send queues are separate
-        // so dense incoming streams cannot keep user/API sends behind recv backlog.
+        // Reader packets and raw send queues are separate so dense incoming
+        // streams cannot keep user/API sends behind recv progress.
         let (event_tx, event_rx) = mpsc::channel();
-        let app_events = Arc::new(Mutex::new(VecDeque::new()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_queues = Arc::new(Mutex::new(SendQueues::default()));
         let incoming_sliced_acks = Arc::new(Mutex::new(Vec::new()));
@@ -2524,7 +2532,6 @@ impl Client {
             cfg,
             event_tx,
             event_rx,
-            app_events,
             app_queue_alive,
             send_queues,
             pending_h: Vec::new(),
@@ -2600,7 +2607,7 @@ impl Client {
             reader_shutdown: Arc::new(AtomicBool::new(false)),
             current_reader_epoch: 0,
             cached_server_addr: None,
-            subscription_registry: SubscriptionRegistry::default(),
+            subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
             domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
             pending_candles: HashMap::new(),
@@ -2791,7 +2798,7 @@ impl Client {
     ///
     /// The command is appended directly to the unbounded Delphi-style
     /// `DataToSend*` queue for its priority, separate from accepted UDP packets
-    /// and app/control events. This API has no local capacity-drop branch.
+    /// and reader wake events. This API has no local capacity-drop branch.
     ///
     /// E-V2-06: возвращает `()`, **но** при закрытом канале (main loop завершён)
     /// логирует error через `log` crate. Потерянная команда — серьёзный сигнал,
@@ -2852,7 +2859,7 @@ impl Client {
         };
         // Delphi `SendCmdInt`: append into DataToSend/DataToSendH/DataToSendL
         // under SendLock. The writer tick later copies those lists; raw sends do
-        // not wait behind the app/control FIFO.
+        // not wait behind reader delivery.
         if self.enqueue_send_item(item).is_err() {
             log::error!(target: "moonproto::client",
                 "send_cmd: send queues closed (client dropped?) — packet cmd={:?} priority={:?} dropped",
@@ -2868,15 +2875,6 @@ impl Client {
         Ok(())
     }
 
-    fn pop_app_event(&self) -> Option<ClientEvent> {
-        self.app_events.lock().unwrap().pop_front()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn drain_app_events_for_test(&self) -> Vec<ClientEvent> {
-        self.app_events.lock().unwrap().drain(..).collect()
-    }
-
     #[cfg(test)]
     pub(crate) fn take_send_queues_for_test(
         &self,
@@ -2889,6 +2887,24 @@ impl Client {
             .unwrap()
             .take_into(&mut sliced, &mut high, &mut low);
         (sliced, high, low)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_subscription_registry<R>(
+        &self,
+        f: impl FnOnce(&SubscriptionRegistry) -> R,
+    ) -> R {
+        let registry = self.subscription_registry.lock().unwrap();
+        f(&registry)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_subscription_registry_mut<R>(
+        &self,
+        f: impl FnOnce(&mut SubscriptionRegistry) -> R,
+    ) -> R {
+        let mut registry = self.subscription_registry.lock().unwrap();
+        f(&mut registry)
     }
 
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
@@ -3425,9 +3441,9 @@ impl Client {
     /// ```
     pub fn sender(&self) -> ClientSender {
         ClientSender {
-            app_events: Arc::clone(&self.app_events),
             app_queue_alive: Arc::clone(&self.app_queue_alive),
             send_queues: Arc::clone(&self.send_queues),
+            subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
         }
     }
@@ -3445,8 +3461,9 @@ impl Client {
     /// Subscribe to the orderbook stream for one market name.
     ///
     /// This is a fire-and-forget convenience wrapper around
-    /// `self.sender().subscribe_orderbook(...)`. It enqueues into the unbounded
-    /// app-to-client FIFO; a warning is logged only if the client loop is gone.
+    /// `self.sender().subscribe_orderbook(...)`. It records the intent in the
+    /// shared registry and appends the resulting wire request directly into the
+    /// Delphi-style send queues; a warning is logged only if the client is gone.
     /// Use `client.sender().try_subscribe_orderbook(...)` when the caller needs
     /// explicit failure feedback.
     ///
@@ -3574,114 +3591,6 @@ impl Client {
         }
     }
 
-    /// Внутренний метод: применить одну subscribe-команду (registry update + wire send).
-    /// Вызывается main loop при получении `ClientEvent::Subscribe*`/`Unsubscribe*`.
-    fn apply_subscribe_event(&mut self, ev: ClientEvent) {
-        match ev {
-            ClientEvent::SubscribeOrderBook { market_name } => {
-                // Wire подписка идёт по `market_name` (resolve делает сервер) — поэтому
-                // подписку можно вызвать ДО получения `emk_GetMarketsList`.
-                let newly_added = self
-                    .subscription_registry
-                    .orderbook_subs
-                    .insert(market_name.clone());
-                if newly_added {
-                    self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
-                        &[&market_name],
-                    ));
-                }
-            }
-            ClientEvent::SubscribeOrderBooks { market_names } => {
-                let mut new_names = Vec::new();
-                for market_name in market_names {
-                    if self
-                        .subscription_registry
-                        .orderbook_subs
-                        .insert(market_name.clone())
-                    {
-                        new_names.push(market_name);
-                    }
-                }
-                if !new_names.is_empty() {
-                    let refs: Vec<&str> = new_names.iter().map(String::as_str).collect();
-                    self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
-                        &refs,
-                    ));
-                }
-            }
-            ClientEvent::UnsubscribeOrderBook { market_name } => {
-                if self
-                    .subscription_registry
-                    .orderbook_subs
-                    .remove(&market_name)
-                {
-                    self.send_api_request(
-                        &crate::commands::engine_request::unsubscribe_order_book(&[&market_name]),
-                    );
-                }
-            }
-            ClientEvent::UnsubscribeOrderBooks { market_names } => {
-                let mut removed_names = Vec::new();
-                for market_name in market_names {
-                    if self
-                        .subscription_registry
-                        .orderbook_subs
-                        .remove(&market_name)
-                    {
-                        removed_names.push(market_name);
-                    }
-                }
-                if !removed_names.is_empty() {
-                    let refs: Vec<&str> = removed_names.iter().map(String::as_str).collect();
-                    self.send_api_request(
-                        &crate::commands::engine_request::unsubscribe_order_book(&refs),
-                    );
-                }
-            }
-            ClientEvent::UnsubscribeAllOrderBooks => {
-                self.subscription_registry.orderbook_subs.clear();
-                self.send_api_request(
-                    &crate::commands::engine_request::unsubscribe_order_book(&[]),
-                );
-            }
-            ClientEvent::SubscribeAllTrades { want_mm } => {
-                self.subscription_registry.trades_sub = Some(TradesSubscription { want_mm });
-                self.subscription_registry.mm_orders_sub = Some(want_mm);
-                self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
-                    want_mm,
-                ));
-            }
-            ClientEvent::UnsubscribeAllTrades => {
-                if self.subscription_registry.trades_sub.take().is_some() {
-                    self.send_api_request(
-                        &crate::commands::engine_request::unsubscribe_all_trades(),
-                    );
-                }
-            }
-            // Не-subscribe события не обрабатываются этим методом
-            ClientEvent::Wake | ClientEvent::MmOrdersSubscribe { .. } => {
-                debug_assert!(
-                    false,
-                    "apply_subscribe_event called with non-subscribe event"
-                );
-            }
-            #[cfg(test)]
-            ClientEvent::Recv(_) => {
-                debug_assert!(
-                    false,
-                    "apply_subscribe_event called with non-subscribe event"
-                );
-            }
-            #[cfg(test)]
-            ClientEvent::Send(_) => {
-                debug_assert!(
-                    false,
-                    "apply_subscribe_event called with non-subscribe event"
-                );
-            }
-        }
-    }
-
     #[cfg(test)]
     fn outgoing_mm_orders_subscribe_intent(item: &SendItem) -> Option<bool> {
         if item.cmd != Command::UI as u8 || item.u_key.kind != UK_TURN_MM_DETECTION {
@@ -3694,8 +3603,9 @@ impl Client {
     }
 
     fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
-        self.subscription_registry.mm_orders_sub = Some(subscribe);
-        if let Some(trades_sub) = self.subscription_registry.trades_sub.as_mut() {
+        let mut registry = self.subscription_registry.lock().unwrap();
+        registry.mm_orders_sub = Some(subscribe);
+        if let Some(trades_sub) = registry.trades_sub.as_mut() {
             trades_sub.want_mm = subscribe;
         }
     }
@@ -3714,9 +3624,10 @@ impl Client {
     }
 
     fn domain_restore_needs_indexes(&self) -> bool {
+        let registry = self.subscription_registry.lock().unwrap();
         self.domain_restore.fetch_indexes
-            || self.subscription_registry.trades_sub.is_some()
-            || !self.subscription_registry.orderbook_subs.is_empty()
+            || registry.trades_sub.is_some()
+            || !registry.orderbook_subs.is_empty()
     }
 
     fn send_markets_indexes_restore_request(&mut self, now_ms: i64) {
@@ -3750,23 +3661,24 @@ impl Client {
     /// OrderBook подписки отправляются одним `emk_SubscribeOrderBook` batch'ем:
     /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
     fn restore_registry_subscriptions(&mut self) {
-        if let Some(sub) = self.subscription_registry.trades_sub {
-            let want_mm = self
-                .subscription_registry
-                .mm_orders_sub
-                .unwrap_or(sub.want_mm);
+        let (trades_sub, mm_orders_sub, orderbook_subs) = {
+            let registry = self.subscription_registry.lock().unwrap();
+            (
+                registry.trades_sub,
+                registry.mm_orders_sub,
+                registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
+            )
+        };
+
+        if let Some(sub) = trades_sub {
+            let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
             self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                 want_mm,
             ));
-        } else if let Some(subscribe) = self.subscription_registry.mm_orders_sub {
+        } else if let Some(subscribe) = mm_orders_sub {
             self.send_mm_orders_subscribe_cmd(subscribe);
         }
-        let refs: Vec<&str> = self
-            .subscription_registry
-            .orderbook_subs
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
         if !refs.is_empty() {
             self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
                 &refs,
@@ -4799,77 +4711,36 @@ impl Client {
                 let mut sliced = Vec::new();
                 let mut h_items = Vec::new();
                 let mut l_items = Vec::new();
-                // F4: subscribe/unsubscribe/control events применяются ПОСЛЕ closure (нужен
-                // &mut self для registry mutation + send_api_request — borrow checker
-                // не пропустит внутри closure которая уже держит &mut на четыре Vec).
-                let mut control_events: Vec<QueuedControlEvent> = Vec::new();
-
-                let mut processed_events = 0usize;
-                let mut waited_for_reader = false;
 
                 self.drain_reader_decoded(cur_tm, &mut mode);
 
-                // Delphi separates app SendCmdInt queues from UDPRead. Raw/API
-                // sends already append directly to send queues; the remaining
-                // budget covers control intents and coalesced reader Wake events,
-                // not accepted UDP packets.
-                while processed_events < EVENT_DRAIN_BUDGET {
-                    self.drain_reader_decoded(cur_tm, &mut mode);
-                    let event = if let Some(ev) = self.pop_app_event() {
-                        Some(ev)
-                    } else if !waited_for_reader && processed_events == 0 {
-                        waited_for_reader = true;
-                        match self
-                            .event_rx
-                            .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
-                        {
-                            Ok(ev) => Some(ev),
-                            Err(mpsc::RecvTimeoutError::Timeout) => None,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
-                    } else {
-                        match self.event_rx.try_recv() {
-                            Ok(ev) => Some(ev),
-                            Err(mpsc::TryRecvError::Empty) => break,
-                            Err(mpsc::TryRecvError::Disconnected) => return,
-                        }
-                    };
-
-                    if let Some(ev) = event {
-                        processed_events += 1;
-                        self.handle_main_event(
-                            ev,
-                            cur_tm,
-                            &mut mode,
-                            &mut sliced,
-                            &mut h_items,
-                            &mut l_items,
-                            &mut control_events,
-                        );
-                    } else {
-                        break;
+                // Reader work is level-triggered: a Wake only means
+                // `pending_reader_decoded` may contain items. User/API/UI sends are
+                // already in SendQueues and must not travel through this channel.
+                let send_queues_empty = self.send_queues.lock().unwrap().is_empty();
+                if send_queues_empty {
+                    match self
+                        .event_rx
+                        .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
+                    {
+                        Ok(ClientEvent::Wake) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                loop {
+                    match self.event_rx.try_recv() {
+                        Ok(ClientEvent::Wake) => {}
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => return,
                     }
                 }
                 self.drain_reader_decoded(cur_tm, &mut mode);
-
-                // F4: применяем subscribe/unsubscribe/control события до GetCopySendList:
-                // control handlers call send_cmd/send_api_request, and Delphi would place
-                // those commands into DataToSend* before the writer copies queues if the
-                // SendLock is acquired in this order.
-                for ev in control_events {
-                    self.apply_control_event(ev);
-                }
 
                 // Delphi `GetCopySendList`: copy DataToSend/DataToSendH/DataToSendL
                 // under SendLock and clear the source lists. Raw `send_cmd` paths
                 // append directly to these queues instead of going through app FIFO.
                 self.get_copy_send_list(&mut sliced, &mut h_items, &mut l_items);
-
-                // Legacy ClientEvent::Send events can still accumulate local items
-                // during the rewrite. Keep Delphi UKey "latest wins" semantics for
-                // the copied batch too, including duplicates across old/new paths.
-                Self::dedup_send_items_by_u_key(&mut sliced);
-                Self::dedup_send_items_by_u_key(&mut h_items);
 
                 self.apply_sliced_send_u_key_cleanup(&sliced);
 
@@ -4942,46 +4813,6 @@ impl Client {
         }
     }
 
-    fn handle_main_event(
-        &mut self,
-        ev: ClientEvent,
-        _cur_tm: i64,
-        _mode: &mut RunMode<'_>,
-        _sliced: &mut Vec<SendItem>,
-        _h_items: &mut Vec<SendItem>,
-        _l_items: &mut Vec<SendItem>,
-        control_events: &mut Vec<QueuedControlEvent>,
-    ) {
-        match ev {
-            ClientEvent::Wake => {}
-            #[cfg(test)]
-            ClientEvent::Recv(msg) => self.process_recv_event(msg, _cur_tm, _mode),
-            #[cfg(test)]
-            ClientEvent::Send(s) => {
-                if let Some(subscribe) = Self::outgoing_mm_orders_subscribe_intent(&s.item) {
-                    control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
-                }
-                match s.item.priority {
-                    SendPriority::Sliced => _sliced.push(s.item),
-                    SendPriority::High => _h_items.push(s.item),
-                    SendPriority::Low => _l_items.push(s.item),
-                }
-            }
-            ClientEvent::MmOrdersSubscribe { subscribe } => {
-                control_events.push(QueuedControlEvent::MmOrdersSubscribe(subscribe));
-            }
-            ev @ ClientEvent::SubscribeOrderBook { .. }
-            | ev @ ClientEvent::SubscribeOrderBooks { .. }
-            | ev @ ClientEvent::UnsubscribeOrderBook { .. }
-            | ev @ ClientEvent::UnsubscribeOrderBooks { .. }
-            | ev @ ClientEvent::UnsubscribeAllOrderBooks
-            | ev @ ClientEvent::SubscribeAllTrades { .. }
-            | ev @ ClientEvent::UnsubscribeAllTrades => {
-                control_events.push(QueuedControlEvent::Subscribe(ev));
-            }
-        }
-    }
-
     fn get_copy_send_list(
         &self,
         sliced: &mut Vec<SendItem>,
@@ -5020,40 +4851,6 @@ impl Client {
         }
     }
 
-    fn apply_control_event(&mut self, ev: QueuedControlEvent) {
-        match ev {
-            QueuedControlEvent::Subscribe(ev) => self.apply_subscribe_event(ev),
-            QueuedControlEvent::MmOrdersSubscribe(subscribe) => {
-                self.apply_mm_orders_subscribe_intent(subscribe);
-                self.send_mm_orders_subscribe_cmd(subscribe);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn process_recv_event(&mut self, msg: RecvMsg, cur_tm: i64, mode: &mut RunMode<'_>) {
-        // Фильтр stale epoch — пакеты от старого reader thread'а после reconnect
-        // (epoch-tag дает эквивалент Delphi `UDPClient.Active := false`).
-        let current_epoch = self.current_reader_epoch;
-        if msg.epoch != current_epoch {
-            if self.should_log("stale_reader_epoch", 5000) {
-                warn!(target: "moonproto::client",
-                    "dropping stale packet from old reader epoch (msg.epoch={} current={})",
-                    msg.epoch, current_epoch);
-            }
-            return;
-        }
-
-        self.apply_recv_side_effects(msg.recv_bytes, msg.timestamp_ms);
-        if msg.err_emu_drop {
-            return;
-        }
-        if msg.handled_in_reader {
-            return;
-        }
-        self.process_recv_msg(msg, cur_tm, mode);
-    }
-
     fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
         self.connected = true;
         if self.auth_status == AuthStatus::Base {
@@ -5076,60 +4873,6 @@ impl Client {
 
         for msg in decoded {
             self.process_reader_decoded(msg, cur_tm, mode);
-        }
-    }
-
-    /// Обработать один входящий UDP-пакет: decrypt/decompress/Grouped-split через
-    /// handle_udp_command, доставить наружу через mode-specific sink.
-    #[cfg(test)]
-    fn process_recv_msg(&mut self, msg: RecvMsg, cur_tm: i64, mode: &mut RunMode<'_>) {
-        let cmd = Command::from_byte(msg.cmd);
-        let raw_cmd = msg.cmd;
-        let reader_dataread_core_done = msg.reader_dataread_core_done;
-        match mode {
-            RunMode::Callback { on_data } => {
-                let mut sink = DispatchSink::Callback(on_data);
-                self.handle_udp_command(
-                    cmd,
-                    raw_cmd,
-                    &msg.payload,
-                    &mut sink,
-                    reader_dataread_core_done,
-                );
-            }
-            RunMode::Dispatcher {
-                dispatcher,
-                on_event,
-                event_buf,
-                payload_buf,
-                ..
-            } => {
-                payload_buf.clear();
-                let authorized_before = self.authorized;
-                {
-                    let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.handle_udp_command(
-                        cmd,
-                        raw_cmd,
-                        &msg.payload,
-                        &mut sink,
-                        reader_dataread_core_done,
-                    );
-                }
-                // During startup the server may send large app-state snapshots before
-                // `Fine`. Do not let active state parsing delay the handshake path:
-                // handle transport/handshake commands first, then dispatch app payloads
-                // only once the client is authorized.
-                if !authorized_before && !self.authorized {
-                    payload_buf.clear();
-                    return;
-                }
-                for (c, p) in payload_buf.drain(..) {
-                    event_buf.clear();
-                    dispatcher.dispatch_into_active(c, &p, cur_tm, event_buf, self);
-                    on_event.drain_events(event_buf, dispatcher);
-                }
-            }
         }
     }
 
@@ -7010,18 +6753,6 @@ impl Client {
         item.last_sent_at = cur_tm;
     }
 
-    fn dedup_send_items_by_u_key(items: &mut Vec<SendItem>) {
-        let mut idx = 0;
-        while idx < items.len() {
-            let u_key = items[idx].u_key;
-            if !u_key.is_none() && items[idx + 1..].iter().any(|item| item.u_key == u_key) {
-                items.remove(idx);
-            } else {
-                idx += 1;
-            }
-        }
-    }
-
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
     /// и `mp_compress` дал savings ≥ 5% (`mp_compress` сам возвращает None если меньше).
     /// Соответствует Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
@@ -8431,9 +8162,7 @@ pub fn run_init_sequence(
     client.domain_ready = true;
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
 
-    // === 7. SubscribeAllTrades === optional; идёт через subscription_registry (fire-and-forget).
-    // Subscribe events идут в event channel; main loop их применит на следующем тике
-    // (либо здесь же если ниже идёт wait, либо в основном run_with_dispatcher после init).
+    // === 7. SubscribeAllTrades === optional; registry update + direct wire enqueue.
     if let Some(want_mm) = cfg.subscribe_trades {
         client.subscribe_all_trades(want_mm);
         result.trades_subscribed = true;
@@ -8445,10 +8174,10 @@ pub fn run_init_sequence(
         result.orderbooks_subscribed += 1;
     }
 
-    // === 9. Drain fire-and-forget subscribe events ===
-    // subscribe_* пушит ClientEvent::Subscribe* в channel. Без тика main loop
-    // events лежат в channel и wire-команды не уходят. Прогоняем короткий тик
-    // чтобы обработка подписки реально стартовала к моменту выхода из init.
+    // === 9. Pump queued post-init wire commands ===
+    // post-init resync and optional subscriptions have already appended wire
+    // commands to Delphi-style send queues; run a short tick so they are flushed
+    // before the helper returns.
     if result.post_init_resync_sent
         || cfg.subscribe_trades.is_some()
         || !cfg.subscribe_orderbooks.is_empty()
@@ -8469,9 +8198,10 @@ fn send_post_init_resync(
     result.strategy_snapshot_sent =
         dispatcher.send_or_queue_strategy_snapshot_request(rand::random(), client);
     client.ui_settings_request();
+    let registry_mm_orders = client.subscription_registry.lock().unwrap().mm_orders_sub;
     let mm_orders = cfg
         .mm_orders_subscribe
-        .or(client.subscription_registry.mm_orders_sub)
+        .or(registry_mm_orders)
         .or(cfg.subscribe_trades)
         .unwrap_or(false);
     client.apply_mm_orders_subscribe_intent(mm_orders);
@@ -8810,7 +8540,8 @@ mod api_pending_dispatch_tests {
             rx.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
-        assert!(client.drain_app_events_for_test().is_empty());
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
     }
 
     #[test]
@@ -8852,18 +8583,20 @@ mod api_pending_dispatch_tests {
         let rx = client.api_pending.register(request_uid);
         let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
         client
-            .event_tx
-            .send(ClientEvent::Recv(RecvMsg {
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
                 cmd: Command::API as u8,
-                payload,
+                payload: Some(payload),
                 recv_bytes: 64,
                 timestamp_ms: client.now_ms(),
-                handled_in_reader: false,
-                err_emu_drop: false,
-                reader_dataread_core_done: false,
                 epoch: client.current_reader_epoch,
-            }))
-            .unwrap();
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
 
         let mut dispatcher = EventDispatcher::new();
         let resp = client
@@ -8992,37 +8725,31 @@ mod api_pending_dispatch_tests {
 #[cfg(test)]
 mod client_sender_tests {
     use super::*;
+    use crate::commands::engine_api::EngineMethod;
 
     fn make_sender() -> (
         ClientSender,
-        Arc<Mutex<VecDeque<ClientEvent>>>,
+        Arc<Mutex<SubscriptionRegistry>>,
         Arc<Mutex<SendQueues>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
     ) {
-        let app_events = Arc::new(Mutex::new(VecDeque::new()));
+        let subscription_registry = Arc::new(Mutex::new(SubscriptionRegistry::default()));
         let send_queues = Arc::new(Mutex::new(SendQueues::default()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let server_update_sent = Arc::new(AtomicBool::new(false));
         (
             ClientSender {
-                app_events: Arc::clone(&app_events),
                 app_queue_alive: Arc::clone(&app_queue_alive),
                 send_queues: Arc::clone(&send_queues),
+                subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
             },
-            app_events,
+            subscription_registry,
             send_queues,
             app_queue_alive,
             server_update_sent,
         )
-    }
-
-    fn pop_event(q: &Arc<Mutex<VecDeque<ClientEvent>>>) -> ClientEvent {
-        q.lock()
-            .unwrap()
-            .pop_front()
-            .expect("event should be queued")
     }
 
     fn take_send_items(q: &Arc<Mutex<SendQueues>>) -> Vec<SendItem> {
@@ -9044,93 +8771,125 @@ mod client_sender_tests {
             .map(u64::from_le_bytes)
     }
 
+    fn method_id(payload: &[u8]) -> Option<u8> {
+        payload.get(11).copied()
+    }
+
     #[test]
-    fn subscribe_orderbook_pushes_event_with_correct_fields() {
-        let (sender, q, _, _, _) = make_sender();
+    fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
         sender.subscribe_orderbook("BTCUSDT");
-        match pop_event(&q) {
-            ClientEvent::SubscribeOrderBook { market_name } => {
-                assert_eq!(market_name, "BTCUSDT");
-            }
-            other => panic!(
-                "expected SubscribeOrderBook, got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
+        assert!(registry.lock().unwrap().orderbook_subs.contains("BTCUSDT"));
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].cmd, Command::API as u8);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::SubscribeOrderBook as u8)
+        );
     }
 
     #[test]
-    fn unsubscribe_orderbook_pushes_event() {
-        let (sender, q, _, _, _) = make_sender();
+    fn unsubscribe_orderbook_updates_registry_and_sends_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
+        registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .insert("ETHUSDT".to_string());
         sender.unsubscribe_orderbook("ETHUSDT");
-        match pop_event(&q) {
-            ClientEvent::UnsubscribeOrderBook { market_name } => {
-                assert_eq!(market_name, "ETHUSDT");
-            }
-            _ => panic!("expected UnsubscribeOrderBook"),
-        }
+        assert!(!registry.lock().unwrap().orderbook_subs.contains("ETHUSDT"));
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::UnsubscribeOrderBook as u8)
+        );
     }
 
     #[test]
-    fn subscribe_orderbooks_pushes_one_batched_event() {
-        let (sender, q, _, _, _) = make_sender();
+    fn subscribe_orderbooks_sends_one_batched_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
         sender.subscribe_orderbooks(["BTCUSDT", "ETHUSDT"]);
-        match pop_event(&q) {
-            ClientEvent::SubscribeOrderBooks { market_names } => {
-                assert_eq!(
-                    market_names,
-                    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-                );
-            }
-            _ => panic!("expected SubscribeOrderBooks"),
-        }
+        let registry = registry.lock().unwrap();
+        assert!(registry.orderbook_subs.contains("BTCUSDT"));
+        assert!(registry.orderbook_subs.contains("ETHUSDT"));
+        drop(registry);
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::SubscribeOrderBook as u8)
+        );
     }
 
     #[test]
-    fn unsubscribe_orderbooks_pushes_one_batched_event() {
-        let (sender, q, _, _, _) = make_sender();
+    fn unsubscribe_orderbooks_sends_one_batched_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
+        registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .extend(["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
         sender.unsubscribe_orderbooks(["BTCUSDT", "ETHUSDT"]);
-        match pop_event(&q) {
-            ClientEvent::UnsubscribeOrderBooks { market_names } => {
-                assert_eq!(
-                    market_names,
-                    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-                );
-            }
-            _ => panic!("expected UnsubscribeOrderBooks"),
-        }
+        assert!(registry.lock().unwrap().orderbook_subs.is_empty());
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::UnsubscribeOrderBook as u8)
+        );
     }
 
     #[test]
-    fn unsubscribe_all_orderbooks_pushes_event() {
-        let (sender, q, _, _, _) = make_sender();
+    fn unsubscribe_all_orderbooks_clears_registry_and_sends_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
+        registry
+            .lock()
+            .unwrap()
+            .orderbook_subs
+            .insert("BTCUSDT".to_string());
         sender.unsubscribe_all_orderbooks();
-        assert!(matches!(
-            pop_event(&q),
-            ClientEvent::UnsubscribeAllOrderBooks
-        ));
+        assert!(registry.lock().unwrap().orderbook_subs.is_empty());
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::UnsubscribeOrderBook as u8)
+        );
     }
 
     #[test]
     fn subscribe_all_trades_carries_want_mm_flag() {
-        let (sender, q, _, _, _) = make_sender();
+        let (sender, registry, send_q, _, _) = make_sender();
         sender.subscribe_all_trades(true);
         sender.subscribe_all_trades(false);
-        match pop_event(&q) {
-            ClientEvent::SubscribeAllTrades { want_mm } => assert!(want_mm),
-            _ => panic!("expected SubscribeAllTrades(true)"),
-        }
-        match pop_event(&q) {
-            ClientEvent::SubscribeAllTrades { want_mm } => assert!(!want_mm),
-            _ => panic!("expected SubscribeAllTrades(false)"),
-        }
+        let registry = registry.lock().unwrap();
+        assert_eq!(
+            registry.trades_sub,
+            Some(TradesSubscription { want_mm: false })
+        );
+        assert_eq!(registry.mm_orders_sub, Some(false));
+        drop(registry);
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 2);
+        assert!(sent
+            .iter()
+            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeAllTrades as u8)));
     }
 
     #[test]
-    fn unsubscribe_all_trades_pushes_event() {
-        let (sender, q, _, _, _) = make_sender();
+    fn unsubscribe_all_trades_clears_registry_and_sends_wire_request() {
+        let (sender, registry, send_q, _, _) = make_sender();
+        registry.lock().unwrap().trades_sub = Some(TradesSubscription { want_mm: true });
         sender.unsubscribe_all_trades();
-        assert!(matches!(pop_event(&q), ClientEvent::UnsubscribeAllTrades));
+        assert!(registry.lock().unwrap().trades_sub.is_none());
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0].data),
+            Some(EngineMethod::UnsubscribeAllTrades as u8)
+        );
     }
 
     #[test]
@@ -9162,7 +8921,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_try_send_cmd_keyed_queues_send_item() {
-        let (sender, q, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _) = make_sender();
         let payload = vec![1, 2, 3, 4];
         let key = UniqueKey::order_move(42);
 
@@ -9177,7 +8936,6 @@ mod client_sender_tests {
             )
             .expect("send command should enqueue");
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].data, payload);
@@ -9191,14 +8949,13 @@ mod client_sender_tests {
 
     #[test]
     fn sender_try_send_api_request_uses_sliced_api_defaults() {
-        let (sender, q, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _) = make_sender();
         let payload = crate::commands::engine_request::base_check();
 
         sender
             .try_send_api_request(payload.clone())
             .expect("api request should enqueue");
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].data, payload);
@@ -9211,29 +8968,25 @@ mod client_sender_tests {
     }
 
     #[test]
-    fn cloned_sender_pushes_into_same_channel() {
-        // Это база для thread-safe API: получили sender, клонировали, оба пушат в
-        // один и тот же channel который слушает main loop.
-        let (sender_a, q, _, _, _) = make_sender();
+    fn cloned_sender_updates_same_registry_and_send_queues() {
+        let (sender_a, registry, send_q, _, _) = make_sender();
         let sender_b = sender_a.clone();
         sender_a.subscribe_orderbook("A");
         sender_b.subscribe_orderbook("B");
-        let evs: Vec<_> = q.lock().unwrap().drain(..).collect();
-        assert_eq!(evs.len(), 2);
-        // FIFO: первое событие — от sender_a.
-        match &evs[0] {
-            ClientEvent::SubscribeOrderBook { market_name, .. } => assert_eq!(market_name, "A"),
-            _ => panic!("expected first SubscribeOrderBook(A)"),
-        }
-        match &evs[1] {
-            ClientEvent::SubscribeOrderBook { market_name, .. } => assert_eq!(market_name, "B"),
-            _ => panic!("expected second SubscribeOrderBook(B)"),
-        }
+        let registry = registry.lock().unwrap();
+        assert!(registry.orderbook_subs.contains("A"));
+        assert!(registry.orderbook_subs.contains("B"));
+        drop(registry);
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 2);
+        assert!(sent
+            .iter()
+            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook as u8)));
     }
 
     #[test]
     fn sender_replace_order_uses_client_wrapper_wire_defaults() {
-        let (sender, q, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _) = make_sender();
         let ctx = crate::commands::trade::TradeCtx::with_route(42, 17, 9);
 
         sender.replace_order(
@@ -9243,7 +8996,6 @@ mod client_sender_tests {
             50100.0,
         );
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         let item = &sent[0];
@@ -9269,14 +9021,13 @@ mod client_sender_tests {
 
     #[test]
     fn sender_ui_switches_mark_server_update_sent_and_keep_delphi_u_key_uid() {
-        let (sender, q, send_q, _, server_update_sent) = make_sender();
+        let (sender, _, send_q, _, server_update_sent) = make_sender();
 
         sender.ui_switch_dex("MainDex");
         sender.ui_switch_spot(1);
 
         assert!(server_update_sent.load(Ordering::Relaxed));
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 2);
 
@@ -9293,11 +9044,10 @@ mod client_sender_tests {
 
     #[test]
     fn sender_strat_snapshot_payload_uses_sliced_snapshot_u_key() {
-        let (sender, q, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _) = make_sender();
 
         sender.strat_send_snapshot_payload(1, 2, true, &[1, 2, 3]);
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].cmd, Command::Strat as u8);
@@ -9310,11 +9060,10 @@ mod client_sender_tests {
 
     #[test]
     fn sender_balance_request_refresh_uses_balance_channel_defaults() {
-        let (sender, q, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _) = make_sender();
 
         sender.balance_request_refresh();
 
-        assert!(q.lock().unwrap().is_empty());
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].cmd, Command::Balance as u8);
@@ -9328,10 +9077,6 @@ mod client_sender_tests {
     #[test]
     fn subscribe_error_displays_with_message() {
         // Просто проверка что Display impl работает (полезно для логирования).
-        assert_eq!(
-            format!("{}", SubscribeError::ChannelFull),
-            "Client queues have no capacity cap"
-        );
         assert_eq!(
             format!("{}", SubscribeError::Disconnected),
             "Client queues disconnected"
@@ -9429,39 +9174,36 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
-    fn client_subscribe_orderbook_pushes_event_through_sender() {
-        // Convenience-метод `Client::subscribe_orderbook(&self, ...)` должен пушить
-        // событие в app→main queue. До запуска run_with_dispatcher event лежит
-        // в очереди и будет обработан первым сетевым тиком.
+    fn client_subscribe_orderbook_updates_registry_and_wire_queue_through_sender() {
         let client = Client::new(dummy_cfg());
         client.subscribe_orderbook("BTCUSDT");
-        let ev = client
-            .drain_app_events_for_test()
-            .pop()
-            .expect("event should be queued");
-        match ev {
-            ClientEvent::SubscribeOrderBook { market_name } => {
-                assert_eq!(market_name, "BTCUSDT");
-            }
-            _ => panic!("expected SubscribeOrderBook"),
-        }
+        assert!(client
+            .with_subscription_registry(|registry| registry.orderbook_subs.contains("BTCUSDT")));
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0]),
+            Some(EngineMethod::SubscribeOrderBook as u8)
+        );
     }
 
     #[test]
     fn client_sender_can_be_held_independently_of_client() {
         // Sender держит clone; даже если client держится по `&` ссылке — sender
-        // независим. Это база для multi-thread субскрайба.
+        // независим. Это база для multi-thread субскрайба без app-event backlog.
         let client = Client::new(dummy_cfg());
         let sender = client.sender();
         sender.subscribe_all_trades(true);
-        let ev = client
-            .drain_app_events_for_test()
-            .pop()
-            .expect("event queued via sender");
-        assert!(matches!(
-            ev,
-            ClientEvent::SubscribeAllTrades { want_mm: true }
-        ));
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.trades_sub),
+            Some(TradesSubscription { want_mm: true })
+        );
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0]),
+            Some(EngineMethod::SubscribeAllTrades as u8)
+        );
     }
 
     #[test]
@@ -9497,33 +9239,13 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn client_ui_mm_subscribe_updates_registry_and_pushes_keyed_send() {
-        let mut client = Client::new(dummy_cfg());
+        let client = Client::new(dummy_cfg());
         client.ui_mm_subscribe(true);
-        let ev = client
-            .drain_app_events_for_test()
-            .pop()
-            .expect("mm subscribe intent queued");
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(|_, _| {}),
-        };
-        let mut sliced = Vec::new();
-        let mut h_items = Vec::new();
-        let mut l_items = Vec::new();
-        let mut control_events = Vec::new();
-        client.handle_main_event(
-            ev,
-            0,
-            &mut mode,
-            &mut sliced,
-            &mut h_items,
-            &mut l_items,
-            &mut control_events,
-        );
-        for ev in control_events.drain(..) {
-            client.apply_control_event(ev);
-        }
 
-        assert_eq!(client.subscription_registry.mm_orders_sub, Some(true));
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
+            Some(true)
+        );
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
         let item = &high[0];
@@ -9586,63 +9308,54 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
-    fn apply_subscribe_event_inserts_into_registry() {
-        // apply_subscribe_event — точка где main loop принимает решение
-        // обновить registry. Без живого сервера wire-команда уходит в socket=None
-        // ветку (log warn + skip), но регистрация в registry происходит.
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
-            market_name: "BTC".to_string(),
-        });
-        assert!(client.subscription_registry.orderbook_subs.contains("BTC"));
+    fn subscribe_orderbook_inserts_into_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbook("BTC");
+        assert!(
+            client.with_subscription_registry(|registry| registry.orderbook_subs.contains("BTC"))
+        );
     }
 
     #[test]
-    fn apply_subscribe_event_inserts_batched_orderbooks_into_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeOrderBooks {
-            market_names: vec!["BTC".to_string(), "ETH".to_string(), "BTC".to_string()],
+    fn subscribe_orderbooks_inserts_batched_orderbooks_into_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbooks(["BTC", "ETH", "BTC"]);
+        client.with_subscription_registry(|registry| {
+            assert_eq!(registry.orderbook_subs.len(), 2);
+            assert!(registry.orderbook_subs.contains("BTC"));
+            assert!(registry.orderbook_subs.contains("ETH"));
         });
-        assert_eq!(client.subscription_registry.orderbook_subs.len(), 2);
-        assert!(client.subscription_registry.orderbook_subs.contains("BTC"));
-        assert!(client.subscription_registry.orderbook_subs.contains("ETH"));
     }
 
     #[test]
-    fn apply_subscribe_event_unsubscribe_removes_from_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeOrderBook {
-            market_name: "BTC".to_string(),
-        });
-        client.apply_subscribe_event(ClientEvent::UnsubscribeOrderBook {
-            market_name: "BTC".to_string(),
-        });
-        assert!(!client.subscription_registry.orderbook_subs.contains("BTC"));
+    fn unsubscribe_orderbook_removes_from_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbook("BTC");
+        client.unsubscribe_orderbook("BTC");
+        assert!(
+            !client.with_subscription_registry(|registry| registry.orderbook_subs.contains("BTC"))
+        );
     }
 
     #[test]
-    fn apply_subscribe_event_batched_unsubscribe_removes_from_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeOrderBooks {
-            market_names: vec!["BTC".to_string(), "ETH".to_string(), "XRP".to_string()],
+    fn batched_unsubscribe_orderbooks_removes_from_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbooks(["BTC", "ETH", "XRP"]);
+        client.unsubscribe_orderbooks(["ETH", "DOGE"]);
+        client.with_subscription_registry(|registry| {
+            assert!(registry.orderbook_subs.contains("BTC"));
+            assert!(!registry.orderbook_subs.contains("ETH"));
+            assert!(registry.orderbook_subs.contains("XRP"));
         });
-        client.apply_subscribe_event(ClientEvent::UnsubscribeOrderBooks {
-            market_names: vec!["ETH".to_string(), "DOGE".to_string()],
-        });
-        assert!(client.subscription_registry.orderbook_subs.contains("BTC"));
-        assert!(!client.subscription_registry.orderbook_subs.contains("ETH"));
-        assert!(client.subscription_registry.orderbook_subs.contains("XRP"));
     }
 
     #[test]
-    fn apply_subscribe_event_unsubscribe_all_orderbooks_clears_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeOrderBooks {
-            market_names: vec!["BTC".to_string(), "ETH".to_string()],
-        });
+    fn unsubscribe_all_orderbooks_clears_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbooks(["BTC", "ETH"]);
         let _ = drain_api_requests(&client);
-        client.apply_subscribe_event(ClientEvent::UnsubscribeAllOrderBooks);
-        assert!(client.subscription_registry.orderbook_subs.is_empty());
+        client.unsubscribe_all_orderbooks();
+        assert!(client.with_subscription_registry(|registry| registry.orderbook_subs.is_empty()));
         let sent = drain_api_requests(&client);
         assert_eq!(sent.len(), 1);
         assert_eq!(
@@ -9653,45 +9366,52 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
-    fn apply_subscribe_event_is_idempotent() {
+    fn subscribe_orderbook_is_idempotent() {
         // Двойной subscribe для одной пары не должен иметь побочных эффектов
-        // в registry (HashSet dedup) и не должен слать второй wire-запрос (но это
-        // мы не можем проверить здесь — socket=None, проверяем только registry).
-        let mut client = Client::new(dummy_cfg());
-        let ev = || ClientEvent::SubscribeOrderBook {
-            market_name: "ETH".to_string(),
-        };
-        client.apply_subscribe_event(ev());
-        client.apply_subscribe_event(ev());
-        assert_eq!(client.subscription_registry.orderbook_subs.len(), 1);
+        // в registry (HashSet dedup) и не должен слать второй wire-запрос.
+        let client = Client::new(dummy_cfg());
+        client.subscribe_orderbook("ETH");
+        client.subscribe_orderbook("ETH");
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.orderbook_subs.len()),
+            1
+        );
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1);
     }
 
     #[test]
-    fn apply_subscribe_all_trades_sets_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
+    fn subscribe_all_trades_sets_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_all_trades(true);
         assert_eq!(
-            client.subscription_registry.trades_sub,
+            client.with_subscription_registry(|registry| registry.trades_sub),
             Some(TradesSubscription { want_mm: true }),
         );
-        assert_eq!(client.subscription_registry.mm_orders_sub, Some(true));
-        // Повторный с другим want_mm — обновляет registry.
-        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
         assert_eq!(
-            client.subscription_registry.trades_sub,
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
+            Some(true)
+        );
+        // Повторный с другим want_mm — обновляет registry.
+        client.subscribe_all_trades(false);
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.trades_sub),
             Some(TradesSubscription { want_mm: false }),
         );
-        assert_eq!(client.subscription_registry.mm_orders_sub, Some(false));
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
+            Some(false)
+        );
     }
 
     #[test]
-    fn apply_unsubscribe_all_trades_clears_registry() {
-        let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: true });
-        client.apply_subscribe_event(ClientEvent::UnsubscribeAllTrades);
-        assert!(client.subscription_registry.trades_sub.is_none());
+    fn unsubscribe_all_trades_clears_registry() {
+        let client = Client::new(dummy_cfg());
+        client.subscribe_all_trades(true);
+        client.unsubscribe_all_trades();
+        assert!(client.with_subscription_registry(|registry| registry.trades_sub.is_none()));
         assert_eq!(
-            client.subscription_registry.mm_orders_sub,
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
             Some(true),
             "Delphi UnsubscribeAllTrades clears IsTradesSubscribed but not the MM flag",
         );
@@ -9700,14 +9420,17 @@ mod client_subscribe_integration_tests {
     #[test]
     fn apply_mm_orders_subscribe_updates_registry_and_active_trades_flag() {
         let mut client = Client::new(dummy_cfg());
-        client.apply_subscribe_event(ClientEvent::SubscribeAllTrades { want_mm: false });
+        client.subscribe_all_trades(false);
         let _ = client.take_send_queues_for_test(); // drain SubscribeAllTrades send command
 
         client.apply_mm_orders_subscribe_intent(true);
 
-        assert_eq!(client.subscription_registry.mm_orders_sub, Some(true));
         assert_eq!(
-            client.subscription_registry.trades_sub,
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
+            Some(true)
+        );
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.trades_sub),
             Some(TradesSubscription { want_mm: true }),
         );
     }
@@ -10562,27 +10285,6 @@ mod send_queue_dedup_tests {
     }
 
     #[test]
-    fn send_queue_dedup_keeps_last_item_for_same_u_key() {
-        let mut items = vec![
-            item(UK_NONE, 0, 0),
-            item(UK_ORDER_MOVE, 7, 1),
-            item(UK_ORDER_MOVE, 8, 2),
-            item(UK_ORDER_MOVE, 7, 3),
-            item(UK_NONE, 0, 4),
-            item(UK_ORDER_MOVE, 8, 5),
-        ];
-
-        Client::dedup_send_items_by_u_key(&mut items);
-
-        let markers: Vec<u8> = items.iter().map(|item| item.data[0]).collect();
-        assert_eq!(
-            markers,
-            vec![0, 3, 4, 5],
-            "Delphi SendCmdInt removes older queued items with same non-empty UKey",
-        );
-    }
-
-    #[test]
     fn send_cmd_int_queue_removes_first_matching_sliced_or_high_before_append() {
         let mut queues = SendQueues::default();
         queues.push_send_cmd_int(item_with_priority(UK_ORDER_MOVE, 7, 1, SendPriority::High));
@@ -10866,7 +10568,6 @@ mod active_library_helpers_tests {
             client.indexes_fetch_started_ms, 0,
             "no re-send means started timestamp is unchanged"
         );
-        assert!(client.drain_app_events_for_test().is_empty());
         let (sliced, high, low) = client.take_send_queues_for_test();
         assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
     }
@@ -10989,7 +10690,9 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_trades_only_sends_single_subscribe_all_trades() {
         let mut client = Client::new(dummy_cfg());
-        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -11004,8 +10707,10 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_trades_uses_latest_mm_orders_flag() {
         let mut client = Client::new(dummy_cfg());
-        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
-        client.subscription_registry.mm_orders_sub = Some(true);
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: false });
+            registry.mm_orders_sub = Some(true);
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -11020,7 +10725,9 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_mm_orders_without_trades_sends_ui_subscription() {
         let mut client = Client::new(dummy_cfg());
-        client.subscription_registry.mm_orders_sub = Some(true);
+        client.with_subscription_registry_mut(|registry| {
+            registry.mm_orders_sub = Some(true);
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_send_items(&client);
@@ -11036,18 +10743,11 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_orderbooks_are_batched_into_single_request() {
         let mut client = Client::new(dummy_cfg());
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTC".to_string());
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("ETH".to_string());
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("XRP".to_string());
+        client.with_subscription_registry_mut(|registry| {
+            registry.orderbook_subs.insert("BTC".to_string());
+            registry.orderbook_subs.insert("ETH".to_string());
+            registry.orderbook_subs.insert("XRP".to_string());
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -11062,14 +10762,10 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_orderbooks_dedup_by_market_name() {
         let mut client = Client::new(dummy_cfg());
-        assert!(client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTC".to_string()));
-        assert!(!client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTC".to_string()));
+        client.with_subscription_registry_mut(|registry| {
+            assert!(registry.orderbook_subs.insert("BTC".to_string()));
+            assert!(!registry.orderbook_subs.insert("BTC".to_string()));
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -11083,15 +10779,11 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_combined_sends_trades_plus_orderbook_batches() {
         let mut client = Client::new(dummy_cfg());
-        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTC".to_string());
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("XRP".to_string());
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: false });
+            registry.orderbook_subs.insert("BTC".to_string());
+            registry.orderbook_subs.insert("XRP".to_string());
+        });
         client.server_token = 1;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -11551,63 +11243,11 @@ mod event_loop_fairness_tests {
         }
     }
 
-    fn stale_recv_event() -> ClientEvent {
-        ClientEvent::Recv(RecvMsg {
-            cmd: Command::OrderBook as u8,
-            payload: Vec::new(),
-            recv_bytes: 0,
-            timestamp_ms: 0,
-            handled_in_reader: false,
-            err_emu_drop: false,
-            reader_dataread_core_done: false,
-            epoch: u32::MAX,
-        })
-    }
-
     #[test]
-    fn send_phase_runs_with_recv_backlog() {
+    fn send_phase_runs_with_ready_send_queue() {
         let mut client = Client::new(dummy_cfg());
         let mut dispatcher = EventDispatcher::new();
 
-        for _ in 0..(EVENT_DRAIN_BUDGET / 2) {
-            client.event_tx.send(stale_recv_event()).unwrap();
-        }
-        client
-            .event_tx
-            .send(ClientEvent::Send(SendMsg {
-                item: SendItem {
-                    data: vec![1, 2, 3, 4],
-                    cmd: Command::UI as u8,
-                    priority: SendPriority::Sliced,
-                    encrypted: false,
-                    retry_left: 0,
-                    max_retries: 0,
-                    msg_num: 0,
-                    last_sent_at: 0,
-                    u_key: UniqueKey::none(),
-                },
-            }))
-            .unwrap();
-        for _ in 0..EVENT_DRAIN_BUDGET {
-            client.event_tx.send(stale_recv_event()).unwrap();
-        }
-
-        client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
-
-        assert!(
-            !client.sending.is_empty(),
-            "send phase must run even when recv backlog remains possible"
-        );
-    }
-
-    #[test]
-    fn app_send_queue_is_not_blocked_by_reader_backlog() {
-        let mut client = Client::new(dummy_cfg());
-        let mut dispatcher = EventDispatcher::new();
-
-        for _ in 0..(EVENT_DRAIN_BUDGET * 2) {
-            client.event_tx.send(stale_recv_event()).unwrap();
-        }
         client.send_cmd(
             vec![1, 2, 3, 4],
             Command::UI,
@@ -11620,7 +11260,32 @@ mod event_loop_fairness_tests {
 
         assert!(
             !client.sending.is_empty(),
-            "app/user sends must use the separate outgoing queue, not wait behind reader backlog"
+            "writer must copy direct Delphi-style send queues without app-event bridge"
+        );
+    }
+
+    #[test]
+    fn app_send_queue_is_not_blocked_by_reader_wake() {
+        let mut client = Client::new(dummy_cfg());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert_eq!(
+            notify_reader_work(&client.event_tx, &client.reader_wake_pending),
+            RecvEnqueue::Delivered
+        );
+        client.send_cmd(
+            vec![1, 2, 3, 4],
+            Command::UI,
+            SendPriority::Sliced,
+            false,
+            0,
+        );
+
+        client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
+
+        assert!(
+            !client.sending.is_empty(),
+            "app/user sends must use the separate outgoing queue, not wait behind reader wake"
         );
     }
 
@@ -11635,20 +11300,22 @@ mod event_loop_fairness_tests {
             }),
         };
 
-        client.process_recv_event(
-            RecvMsg {
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
                 cmd: Command::OrderBook as u8,
-                payload: vec![1, 2, 3],
+                payload: None,
                 recv_bytes: 1234,
                 timestamp_ms: 777,
-                handled_in_reader: false,
-                err_emu_drop: true,
-                reader_dataread_core_done: false,
                 epoch: client.current_reader_epoch,
-            },
-            777,
-            &mut mode,
-        );
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+        client.drain_reader_decoded(777, &mut mode);
 
         assert!(client.connected);
         assert_eq!(client.auth_status, AuthStatus::Connected);
@@ -11658,49 +11325,6 @@ mod event_loop_fairness_tests {
             delivered.load(Ordering::Relaxed),
             0,
             "ErrEmu drop must happen after Delphi stats side effects but before protocol delivery"
-        );
-    }
-
-    #[test]
-    fn recv_event_is_processed_in_drain_position_like_delphi() {
-        let mut client = Client::new(dummy_cfg());
-        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let delivered_cb = Arc::clone(&delivered);
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(move |cmd, payload| {
-                assert_eq!(cmd, Command::UI);
-                assert_eq!(payload, &[0xAA]);
-                delivered_cb.fetch_add(1, Ordering::Relaxed);
-            }),
-        };
-        let mut sliced = Vec::new();
-        let mut h_items = Vec::new();
-        let mut l_items = Vec::new();
-        let mut control_events = Vec::new();
-
-        client.handle_main_event(
-            ClientEvent::Recv(RecvMsg {
-                cmd: Command::UI as u8,
-                payload: vec![0xAA],
-                recv_bytes: 1,
-                timestamp_ms: 777,
-                handled_in_reader: false,
-                err_emu_drop: false,
-                reader_dataread_core_done: false,
-                epoch: client.current_reader_epoch,
-            }),
-            777,
-            &mut mode,
-            &mut sliced,
-            &mut h_items,
-            &mut l_items,
-            &mut control_events,
-        );
-
-        assert_eq!(
-            delivered.load(Ordering::Relaxed),
-            1,
-            "Delphi UDPRead calls DataRead/DataReadInt before the writer tick; Recv must not wait in a post-send deferred queue"
         );
     }
 
@@ -11739,9 +11363,6 @@ mod event_loop_fairness_tests {
             }),
         };
 
-        for _ in 0..(EVENT_DRAIN_BUDGET * 2) {
-            client.event_tx.send(stale_recv_event()).unwrap();
-        }
         client
             .pending_reader_decoded
             .lock()
@@ -11858,19 +11479,6 @@ mod service_cmd_tests {
         ErrEmuTestGuard { _lock: guard }
     }
 
-    fn test_recv_msg(cmd: Command) -> RecvMsg {
-        RecvMsg {
-            cmd: cmd as u8,
-            payload: Vec::new(),
-            recv_bytes: 0,
-            timestamp_ms: 0,
-            handled_in_reader: false,
-            err_emu_drop: false,
-            reader_dataread_core_done: false,
-            epoch: 0,
-        }
-    }
-
     fn dummy_cfg_for_server(server_addr: SocketAddr) -> ClientConfig {
         ClientConfig {
             server_ip: server_addr.ip().to_string(),
@@ -11948,6 +11556,20 @@ mod service_cmd_tests {
         client.pending_reader_decoded.lock().unwrap().pop().unwrap()
     }
 
+    fn expect_single_reader_wake(client: &Client) {
+        match client
+            .event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader wake")
+        {
+            ClientEvent::Wake => {}
+        }
+        assert!(
+            matches!(client.event_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "reader wake must be coalesced and must not carry user/send data"
+        );
+    }
+
     fn service_ping_payload(
         trip_delay: i32,
         pmtu: u16,
@@ -12019,34 +11641,6 @@ mod service_cmd_tests {
     }
 
     #[test]
-    fn recv_event_queue_has_no_capacity_cap_for_data_packets() {
-        let (tx, rx) = mpsc::channel();
-
-        for _ in 0..4096 {
-            let result = enqueue_recv_event(&tx, test_recv_msg(Command::OrderBook), Instant::now());
-            assert_eq!(result, RecvEnqueue::Delivered);
-        }
-
-        assert_eq!(rx.try_iter().count(), 4096);
-    }
-
-    #[test]
-    fn recv_event_queue_has_no_capacity_cap_for_accepted_sliced_packets() {
-        let (tx, rx) = mpsc::channel();
-
-        for _ in 0..4096 {
-            let result = enqueue_recv_event(&tx, test_recv_msg(Command::Sliced), Instant::now());
-            assert_eq!(result, RecvEnqueue::Delivered);
-        }
-
-        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ClientEvent::Recv(msg) => assert_eq!(msg.cmd, Command::Sliced as u8),
-            _ => panic!("expected Sliced Recv event"),
-        }
-        assert_eq!(rx.try_iter().count(), 4095);
-    }
-
-    #[test]
     fn reader_work_wake_is_coalesced_until_reader_queue_drain() {
         let (tx, rx) = mpsc::channel();
         let wake_pending = AtomicBool::new(false);
@@ -12058,10 +11652,7 @@ mod service_cmd_tests {
             );
         }
 
-        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ClientEvent::Wake => {}
-            _ => panic!("expected a single coalesced reader Wake"),
-        }
+        let ClientEvent::Wake = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(
             rx.try_iter().count(),
             0,
@@ -12073,10 +11664,7 @@ mod service_cmd_tests {
             notify_reader_work(&tx, &wake_pending),
             RecvEnqueue::Delivered
         );
-        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-            ClientEvent::Wake => {}
-            _ => panic!("expected a new Wake after drain cleared the level flag"),
-        }
+        let ClientEvent::Wake = rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]
@@ -12179,17 +11767,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::SlicedACK as u8);
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("SlicedACK must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12244,17 +11822,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::Sliced as u8);
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("partial Sliced must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12305,17 +11873,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::SizeTest as u8);
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("SizeTest must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12359,17 +11917,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::ProbeMTU as u8);
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("ProbeMTU must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12420,17 +11968,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.payload.as_deref(), Some(&ping[..]));
         assert!(decoded.apply_recv_effects);
         assert!(decoded.ping_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("Ping must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let delivered_cb = Arc::clone(&delivered);
@@ -12508,17 +12046,7 @@ mod service_cmd_tests {
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
         assert!(decoded.handshake_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("WhoAreYou must not wait in generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WhoAreYou must not deliver user payload")),
@@ -12561,17 +12089,7 @@ mod service_cmd_tests {
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
         assert!(decoded.handshake_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("Fine must not wait in generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("Fine must not deliver user payload")),
@@ -12597,17 +12115,7 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::WrongHello as u8);
         assert!(decoded.handshake_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("WrongHello must not wait in generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WrongHello must not deliver user payload")),
@@ -12633,17 +12141,7 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::WantNewHello as u8);
         assert!(decoded.handshake_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("WantNewHello must not wait in generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("WantNewHello must not deliver user payload")),
@@ -12671,17 +12169,7 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::NeedHelloAgain as u8);
         assert!(decoded.handshake_update.is_some());
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("NeedHelloAgain must not wait in generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("NeedHelloAgain must not deliver user payload")),
@@ -12723,17 +12211,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::UI as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&[0xAA, 0xBB][..]));
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("regular data must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
     }
 
     #[test]
@@ -12762,17 +12240,7 @@ mod service_cmd_tests {
         assert_eq!(decoded.cmd, Command::UI as u8);
         assert!(decoded.payload.is_none());
         assert!(decoded.apply_recv_effects);
-        match client
-            .event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-        {
-            ClientEvent::Wake => {}
-            ClientEvent::Recv(_) => panic!("ErrEmu drop must not enter generic recv backlog"),
-            #[cfg(test)]
-            ClientEvent::Send(_) => panic!("unexpected send event"),
-            _ => panic!("unexpected control event"),
-        }
+        expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
             on_data: Box::new(|_, _| panic!("ErrEmu drop must not deliver user payload")),
@@ -12981,12 +12449,11 @@ mod reconnect_timing_tests {
         client.domain_ready = false;
         client.peer_app_token = 0xABCD;
         client.tracked_indexes_peer_app_token = 0;
-        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: true });
-        client.subscription_registry.mm_orders_sub = Some(true);
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTCUSDT".to_string());
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: true });
+            registry.mm_orders_sub = Some(true);
+            registry.orderbook_subs.insert("BTCUSDT".to_string());
+        });
 
         let mut hello = handshake::Hello::new(client.client_token, client.app_token);
         hello.timestamp = delphi_now();
@@ -12997,8 +12464,9 @@ mod reconnect_timing_tests {
 
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        let (sliced, high, low) = client.take_send_queues_for_test();
         assert!(
-            client.drain_app_events_for_test().is_empty(),
+            sliced.is_empty() && high.is_empty() && low.is_empty(),
             "first Fine must not restore; restore starts only after a completed Init session",
         );
     }
@@ -13018,11 +12486,10 @@ mod reconnect_timing_tests {
         client.domain_restore = DomainRestoreIntent {
             fetch_indexes: true,
         };
-        client.subscription_registry.trades_sub = Some(TradesSubscription { want_mm: false });
-        client
-            .subscription_registry
-            .orderbook_subs
-            .insert("BTCUSDT".to_string());
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: false });
+            registry.orderbook_subs.insert("BTCUSDT".to_string());
+        });
 
         let who = encrypted_hello(&client, 0x2222, 0x2000);
         client.handle_handshake(Command::WhoAreYou, &who);

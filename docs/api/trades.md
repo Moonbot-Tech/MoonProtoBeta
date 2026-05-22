@@ -17,7 +17,8 @@ After the one-time Init completes, reconnect replays it automatically.
 Unsubscribe removes the registry intent and sends `emk_UnsubscribeAllTrades`
 when the client loop is running.
 
-The public call queues the subscription intent locally. On the wire,
+The public call updates the reconnect registry immediately and appends the wire
+Engine API request to the Delphi-style send queues. On the wire,
 `emk_SubscribeAllTrades` / `emk_UnsubscribeAllTrades` are Engine API requests
 and their success or failure is reported as a later `Event::EngineResponse`.
 Trades packets then arrive asynchronously on the `MPC_TradesStream` channel.

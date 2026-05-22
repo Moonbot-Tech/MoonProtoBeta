@@ -24,7 +24,8 @@ one registry update and one batched Engine API request. Use
 `unsubscribe_all_orderbooks` to clear the registry and send the protocol's
 empty-market-list unsubscribe request.
 
-The public call queues the subscription intent locally. On the wire,
+The public call updates the reconnect registry immediately and appends the wire
+Engine API request to the Delphi-style send queues. On the wire,
 `emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` are Engine API requests
 and their success or failure is reported as a later `Event::EngineResponse`.
 Orderbook snapshots and diffs then arrive asynchronously on the `MPC_OrderBook`

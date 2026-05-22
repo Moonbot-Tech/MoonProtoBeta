@@ -80,10 +80,10 @@ inside the same `Client` session maintains the user-requested active-lib state.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
-packets and app/control events. Subscription intents still use a small
-app-to-main control FIFO because they mutate the reconnect registry before
-emitting wire commands. The public guarantee is no local capacity cap: dense
-incoming streams do not drop queued user commands or Engine API requests.
+packets and reader wake events. Subscription methods update the reconnect
+registry immediately and append their Engine API/UI wire commands to the same
+send queues. The public guarantee is no local capacity cap: dense incoming
+streams do not drop queued user commands or Engine API requests.
 
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`:
@@ -360,9 +360,9 @@ std::thread::spawn(move || {
 ```
 
 Fire-and-forget command methods append into the same unbounded send queues as
-`Client::send_cmd`. Subscription methods enqueue control intents first, then the
-client loop updates the registry and appends the resulting wire commands into
-those send queues. Neither path has a local capacity cap. Use `try_*` methods
+`Client::send_cmd`. Subscription methods update the shared reconnect registry
+immediately and append the resulting wire commands into those send queues.
+Neither path has a local capacity cap. Use `try_*` methods
 when the UI needs explicit feedback that the client is still alive:
 
 ```rust

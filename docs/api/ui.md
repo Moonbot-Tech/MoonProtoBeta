@@ -86,11 +86,11 @@ std::thread::spawn(move || {
 });
 ```
 
-`ui_mm_subscribe` is registry-aware: it first queues a control intent, the
-client loop records the latest MM-orders value in the reconnect registry, then
-appends the wire `TMMOrdersSubscribeCommand` to the High send queue. Before Init,
-reconnect does not replay that flag. After the one-time Init completes,
-reconnect restores the latest MM-orders intent automatically.
+`ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in
+the reconnect registry immediately and appends the wire
+`TMMOrdersSubscribeCommand` to the High send queue. Before Init, reconnect does
+not replay that flag. After the one-time Init completes, reconnect restores the
+latest MM-orders intent automatically.
 
 ### Version Update
 
