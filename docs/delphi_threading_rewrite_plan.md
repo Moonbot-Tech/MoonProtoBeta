@@ -974,3 +974,20 @@ Still not done:
 - `create_sliced_and_send` and `retry_sliced` bodies still delegate to `Client`.
 - This is still the caller-thread writer/orchestrator runtime, not a spawned
   background writer thread.
+
+### 2026-05-22 - Phase 1 partial: moved Sliced creation body
+
+Done:
+
+- Moved `create_sliced_and_send` / `CreateSlicedObject` body into
+  `WriterRuntime`.
+- Removed the old `Client` method body.
+- Sliced datagram formation still preserves Delphi order: compression before
+  max-size check, optional crypt, datagram number increment, block construction,
+  priority insert by block count, `LastChecked` reset.
+
+Still not done:
+
+- `retry_sliced` body still delegates to `Client`.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.

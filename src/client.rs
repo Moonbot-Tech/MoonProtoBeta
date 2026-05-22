@@ -2803,7 +2803,144 @@ impl WriterRuntime<'_> {
     }
 
     fn create_sliced_and_send(&mut self, item: &SendItem) {
-        self.client.create_sliced_and_send(item);
+        let header_size = 15u16;
+        let slice_hdr_size = 4u16;
+
+        // TMoonProtoDataToSend.Create compresses before CreateSlicedObject sees
+        // the stream. Therefore size/empty checks below use the effective
+        // compressed payload, not the original item data.
+        let (send_cmd, send_data) = Client::maybe_compress(item.cmd, &item.data);
+
+        // MaxSlicedDataSize check (matches IntStruct.pas:1071-1079)
+        let pmtu_for_check_i32 =
+            self.client.actual_pmtu as i32 - header_size as i32 - slice_hdr_size as i32;
+        if pmtu_for_check_i32 <= 0 {
+            return;
+        }
+        let pmtu_for_check = pmtu_for_check_i32 as usize;
+        let max_sliced_data_size = pmtu_for_check * 256 - 12 - 1; // 12=CryptoHeader, 1=cmd byte
+        if send_data.len() >= max_sliced_data_size {
+            return; // too large, drop (Delphi logs + exits)
+        }
+        if send_data.is_empty() {
+            return; // empty data (Delphi logs + exits before Crypt)
+        }
+
+        // Crypt if needed
+        let (wire_cmd, wire_data, msg_num) = if item.encrypted {
+            let msg_num = if item.msg_num != 0 {
+                item.msg_num // retry — reuse existing MsgNum
+            } else {
+                self.client.crypt_msg_counter += 1;
+                self.client.crypt_msg_counter
+            };
+
+            let mut crypto_hdr = [0u8; 12];
+            let rnd: u16 = rand::random();
+            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
+            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
+            crypto_hdr[10] = send_cmd; // inner cmd (may have COMPRESSED_FLAG)
+            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
+
+            let mut plaintext = Vec::with_capacity(12 + send_data.len());
+            plaintext.extend_from_slice(&crypto_hdr);
+            plaintext.extend_from_slice(send_data.as_ref());
+
+            // B-V2-03: используем кэшированный cipher из Client.
+            let Some(cipher) = self.client.encode_cipher.as_ref() else {
+                error!(target: "moonproto::crypto", "encrypt H-prio called before handshake — packet dropped");
+                return;
+            };
+            let encrypted_data = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
+            // Delphi: NewCmd := MPC_Crypted; if IsCompressed(d.Fcmd) then NewCmd := SetCompressed(NewCmd)
+            let wire_cmd = Client::crypted_wire_cmd(send_cmd);
+            (wire_cmd, encrypted_data, msg_num)
+        } else {
+            (send_cmd, send_data.into_owned(), 0u64)
+        };
+
+        // CreateSlicedObject
+        let pmtu = (self.client.actual_pmtu - header_size - slice_hdr_size) as usize;
+        let total_size = wire_data.len() + 1; // +1 cmd byte in block 0
+        let n_blocks = total_size.div_ceil(pmtu).max(1);
+        let max_block_num = (n_blocks - 1) as u8;
+        let datagram_num = self.client.send_datagram_num;
+        self.client.send_datagram_num = self.client.send_datagram_num.wrapping_add(1);
+
+        if trace_io_enabled() {
+            let api = if item.cmd == Command::API as u8 && item.data.len() >= 12 {
+                let uid = u64::from_le_bytes(item.data[3..11].try_into().unwrap());
+                let method = item.data[11];
+                format!(" api_uid={uid} api_method={method}")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[mp-sliced-queue] d={} inner_cmd={:?} raw={} encrypted={} payload_len={} blocks={} max_retries={}{}",
+                datagram_num,
+                Command::from_byte(item.cmd),
+                item.cmd,
+                item.encrypted,
+                item.data.len(),
+                n_blocks,
+                item.max_retries,
+                api
+            );
+        }
+
+        let mut data_pos = 0;
+        let mut sent_slices = Vec::with_capacity(n_blocks);
+        for block_num in 0..n_blocks {
+            let mut slice = Vec::with_capacity(4 + pmtu);
+            slice.extend_from_slice(&datagram_num.to_le_bytes());
+            slice.push(block_num as u8);
+            slice.push(max_block_num);
+
+            if block_num == 0 {
+                slice.push(wire_cmd);
+                let write_size = (pmtu - 1).min(wire_data.len() - data_pos);
+                slice.extend_from_slice(&wire_data[data_pos..data_pos + write_size]);
+                data_pos += write_size;
+            } else {
+                let write_size = pmtu.min(wire_data.len() - data_pos);
+                slice.extend_from_slice(&wire_data[data_pos..data_pos + write_size]);
+                data_pos += write_size;
+            }
+
+            sent_slices.push(slice);
+        }
+
+        // Store in Sending list with priority insert (matches IntStruct.pas:1112-1116)
+        let new_sliced = SentSliced {
+            datagram_num,
+            // Delphi `TMoonProtoSlice.Create` and `TMoonProtoSlicedData.Create`
+            // initialise LastChecked to 0. `CreateSlicedObject` only enqueues the
+            // slices; actual sends happen below in `retry_sliced` / CheckSeningData
+            // under ClientLimit.
+            piece_last_checked: vec![0; n_blocks],
+            slices: sent_slices,
+            ack_flags: [0u8; 32],
+            blocks_count: n_blocks,
+            sent_count: 0,
+            last_checked: 0,
+            retry_count: 0,
+            max_retry_count: item.max_retries,
+            u_key: item.u_key,
+        };
+        // Priority: fewer blocks → earlier in queue (smaller datagrams retry first)
+        let insert_pos = self
+            .client
+            .sending
+            .iter()
+            .position(|s| s.blocks_count > n_blocks)
+            .unwrap_or(self.client.sending.len());
+        self.client.sending.insert(insert_pos, new_sliced);
+        self.client.last_checked_slices = 0;
+
+        // NB: Sliced retry уже работает через self.sending + retry_sliced (per-piece LastChecked,
+        // ClientLimit, FRetryCount → MaxRetryCount). Не добавляем в pending_h — это двойной retry.
+        // (Delphi: PendingH используется только для H-priority команд через DoSendMPData, не для Sliced.)
+        let _ = msg_num;
     }
 
     fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
@@ -7109,147 +7246,6 @@ impl Client {
         if let Some(ref sock) = self.socket {
             set_dont_fragment_for_socket(sock, enable);
         }
-    }
-
-    /// Crypt + CreateSlicedObject + send (matches MoonProtoIntStruct.pas:1058-1196)
-    fn create_sliced_and_send(&mut self, item: &SendItem) {
-        let header_size = 15u16;
-        let slice_hdr_size = 4u16;
-
-        // TMoonProtoDataToSend.Create compresses before CreateSlicedObject sees
-        // the stream. Therefore size/empty checks below use the effective
-        // compressed payload, not the original item data.
-        let (send_cmd, send_data) = Self::maybe_compress(item.cmd, &item.data);
-
-        // MaxSlicedDataSize check (matches IntStruct.pas:1071-1079)
-        let pmtu_for_check_i32 =
-            self.actual_pmtu as i32 - header_size as i32 - slice_hdr_size as i32;
-        if pmtu_for_check_i32 <= 0 {
-            return;
-        }
-        let pmtu_for_check = pmtu_for_check_i32 as usize;
-        let max_sliced_data_size = pmtu_for_check * 256 - 12 - 1; // 12=CryptoHeader, 1=cmd byte
-        if send_data.len() >= max_sliced_data_size {
-            return; // too large, drop (Delphi logs + exits)
-        }
-        if send_data.is_empty() {
-            return; // empty data (Delphi logs + exits before Crypt)
-        }
-
-        // Crypt if needed
-        let (wire_cmd, wire_data, msg_num) = if item.encrypted {
-            let msg_num = if item.msg_num != 0 {
-                item.msg_num // retry — reuse existing MsgNum
-            } else {
-                self.crypt_msg_counter += 1;
-                self.crypt_msg_counter
-            };
-
-            let mut crypto_hdr = [0u8; 12];
-            let rnd: u16 = rand::random();
-            crypto_hdr[0..2].copy_from_slice(&rnd.to_le_bytes());
-            crypto_hdr[2..10].copy_from_slice(&msg_num.to_le_bytes());
-            crypto_hdr[10] = send_cmd; // inner cmd (may have COMPRESSED_FLAG)
-            crypto_hdr[11] = if item.retry_left > 0 { 1 } else { 0 };
-
-            let mut plaintext = Vec::with_capacity(12 + send_data.len());
-            plaintext.extend_from_slice(&crypto_hdr);
-            plaintext.extend_from_slice(send_data.as_ref());
-
-            // B-V2-03: используем кэшированный cipher из Client.
-            let Some(cipher) = self.encode_cipher.as_ref() else {
-                error!(target: "moonproto::crypto", "encrypt H-prio called before handshake — packet dropped");
-                return;
-            };
-            let encrypted_data = crypto::encrypt_with_cipher(cipher, &plaintext, &[]);
-            // Delphi: NewCmd := MPC_Crypted; if IsCompressed(d.Fcmd) then NewCmd := SetCompressed(NewCmd)
-            let wire_cmd = Self::crypted_wire_cmd(send_cmd);
-            (wire_cmd, encrypted_data, msg_num)
-        } else {
-            (send_cmd, send_data.into_owned(), 0u64)
-        };
-
-        // CreateSlicedObject
-        let pmtu = (self.actual_pmtu - header_size - slice_hdr_size) as usize;
-        let total_size = wire_data.len() + 1; // +1 cmd byte in block 0
-        let n_blocks = total_size.div_ceil(pmtu).max(1);
-        let max_block_num = (n_blocks - 1) as u8;
-        let datagram_num = self.send_datagram_num;
-        self.send_datagram_num = self.send_datagram_num.wrapping_add(1);
-
-        if trace_io_enabled() {
-            let api = if item.cmd == Command::API as u8 && item.data.len() >= 12 {
-                let uid = u64::from_le_bytes(item.data[3..11].try_into().unwrap());
-                let method = item.data[11];
-                format!(" api_uid={uid} api_method={method}")
-            } else {
-                String::new()
-            };
-            eprintln!(
-                "[mp-sliced-queue] d={} inner_cmd={:?} raw={} encrypted={} payload_len={} blocks={} max_retries={}{}",
-                datagram_num,
-                Command::from_byte(item.cmd),
-                item.cmd,
-                item.encrypted,
-                item.data.len(),
-                n_blocks,
-                item.max_retries,
-                api
-            );
-        }
-
-        let mut data_pos = 0;
-        let mut sent_slices = Vec::with_capacity(n_blocks);
-        for block_num in 0..n_blocks {
-            let mut slice = Vec::with_capacity(4 + pmtu);
-            slice.extend_from_slice(&datagram_num.to_le_bytes());
-            slice.push(block_num as u8);
-            slice.push(max_block_num);
-
-            if block_num == 0 {
-                slice.push(wire_cmd);
-                let write_size = (pmtu - 1).min(wire_data.len() - data_pos);
-                slice.extend_from_slice(&wire_data[data_pos..data_pos + write_size]);
-                data_pos += write_size;
-            } else {
-                let write_size = pmtu.min(wire_data.len() - data_pos);
-                slice.extend_from_slice(&wire_data[data_pos..data_pos + write_size]);
-                data_pos += write_size;
-            }
-
-            sent_slices.push(slice);
-        }
-
-        // Store in Sending list with priority insert (matches IntStruct.pas:1112-1116)
-        let new_sliced = SentSliced {
-            datagram_num,
-            // Delphi `TMoonProtoSlice.Create` and `TMoonProtoSlicedData.Create`
-            // initialise LastChecked to 0. `CreateSlicedObject` only enqueues the
-            // slices; actual sends happen below in `retry_sliced` / CheckSeningData
-            // under ClientLimit.
-            piece_last_checked: vec![0; n_blocks],
-            slices: sent_slices,
-            ack_flags: [0u8; 32],
-            blocks_count: n_blocks,
-            sent_count: 0,
-            last_checked: 0,
-            retry_count: 0,
-            max_retry_count: item.max_retries,
-            u_key: item.u_key,
-        };
-        // Priority: fewer blocks → earlier in queue (smaller datagrams retry first)
-        let insert_pos = self
-            .sending
-            .iter()
-            .position(|s| s.blocks_count > n_blocks)
-            .unwrap_or(self.sending.len());
-        self.sending.insert(insert_pos, new_sliced);
-        self.last_checked_slices = 0;
-
-        // NB: Sliced retry уже работает через self.sending + retry_sliced (per-piece LastChecked,
-        // ClientLimit, FRetryCount → MaxRetryCount). Не добавляем в pending_h — это двойной retry.
-        // (Delphi: PendingH используется только для H-priority команд через DoSendMPData, не для Sliced.)
-        let _ = msg_num;
     }
 
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
