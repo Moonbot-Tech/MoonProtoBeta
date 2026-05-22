@@ -1652,6 +1652,25 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: OrderNotFound JobIsDone guard
+
+Done:
+
+- Fixed the remaining `TOrderNotFound` guard. Delphi sets
+  `CancellRequest := true` and `ServerForcedRemove := true` only when
+  `not Worker.JobIsDone`; if the worker is already done, the command is freed
+  without mutating the worker and without entering `AcceptServerCommand`.
+- Rust `Orders::apply(TradeCommand::OrderNotFound)` now returns
+  `NotApplicable` / `Ignored` for already-terminal entries and leaves
+  `cancel_request` / `server_forced_remove` unchanged.
+- Added a unit test proving a terminal order that still waits for deferred
+  removal is not mutated by `TOrderNotFound`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
 ### 2026-05-22 - Phase 1 partial: SellReason description strings
 
 Done:
