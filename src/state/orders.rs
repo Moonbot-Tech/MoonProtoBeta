@@ -28,10 +28,10 @@ const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
-/// Сервер выставляет код в поле `sell_reason_code` каждого `OrderStatusUpdate`. Терминал
-/// должен показывать пользователю причину закрытия (напр. "Stop Loss", "Take Profit",
-/// "Panic Sell"). Используйте `SellReason::from_u8(order.sell_reason_code)` или
-/// `Order::sell_reason()`.
+/// Сервер может выставить код в поле `sell_reason_code` у `OrderStatusUpdate`.
+/// Delphi обновляет локальную причину продажи только когда код ненулевой и
+/// отличается от предыдущего. Терминал хранит строку, но по wire идёт byte-код.
+/// Используйте `SellReason::from_u8(order.sell_reason_code)` или `Order::sell_reason()`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SellReason {
@@ -498,7 +498,9 @@ impl Orders {
                         entry.pending_buy_cond_price = None;
                     }
                     entry.status = up.epoch_header.status;
-                    entry.sell_reason_code = up.sell_reason_code;
+                    if up.sell_reason_code != 0 && up.sell_reason_code != entry.sell_reason_code {
+                        entry.sell_reason_code = up.sell_reason_code;
+                    }
 
                     if is_terminal {
                         entry.job_is_done = true;
@@ -640,6 +642,7 @@ impl Orders {
 
             // --- Bulk replace notification ---
             TradeCommand::BulkReplaceNotify(brn) => {
+                let mut affected = Vec::new();
                 for &uid_replaced in &brn.uids {
                     if let Some(entry) = self.map.get_mut(&uid_replaced) {
                         if brn.order_type == OrderType::Sell {
@@ -649,13 +652,23 @@ impl Orders {
                             entry.bulk_replace_buy = true;
                             entry.bulk_replace_buy_sent_ms = now_ms.max(1);
                         }
+                        affected.push(uid_replaced);
                     }
+                }
+                if affected.is_empty() {
+                    return (
+                        ApplyResult::OrderNotFound,
+                        OrderEvent::Ignored {
+                            uid,
+                            reason: ApplyResult::OrderNotFound,
+                        },
+                    );
                 }
                 (
                     ApplyResult::Applied,
                     OrderEvent::BulkReplaced {
                         order_type: brn.order_type,
-                        uids: brn.uids.clone(),
+                        uids: affected,
                     },
                 )
             }
@@ -1352,6 +1365,45 @@ mod tests {
     }
 
     #[test]
+    fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            10,
+        )));
+
+        let first_reason = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellSet),
+            update_data: Default::default(),
+            sell_reason_code: 14,
+        };
+        orders.apply(TradeCommand::OrderStatusUpdate(first_reason));
+        assert_eq!(orders.get(1).unwrap().sell_reason_code, 14);
+
+        let zero_reason = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::SellSet),
+            update_data: Default::default(),
+            sell_reason_code: 0,
+        };
+        orders.apply(TradeCommand::OrderStatusUpdate(zero_reason));
+        assert_eq!(
+            orders.get(1).unwrap().sell_reason_code,
+            14,
+            "Delphi ignores SellReasonCode=0 and keeps FPrevSellReasonCode/SellReason"
+        );
+
+        let changed_reason = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 13, OrderWorkerStatus::SellSet),
+            update_data: Default::default(),
+            sell_reason_code: 9,
+        };
+        orders.apply(TradeCommand::OrderStatusUpdate(changed_reason));
+        assert_eq!(orders.get(1).unwrap().sell_reason_code, 9);
+    }
+
+    #[test]
     fn pending_status_update_tracks_vorder_buy_cond_price_like_delphi() {
         let mut orders = Orders::new();
         let mut status = make_status(1, "X", OrderWorkerStatus::None, 10);
@@ -1450,6 +1502,50 @@ mod tests {
         let events = orders.tick_bulk_replace_timeouts(6001);
         assert!(matches!(events.as_slice(), [OrderEvent::Updated(1)]));
         assert!(!orders.get(1).unwrap().bulk_replace_buy);
+    }
+
+    #[test]
+    fn bulk_replace_notify_reports_only_found_workers_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::Buy,
+            uids: vec![1, 2],
+        };
+        let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(orders.get(1).unwrap().bulk_replace_buy);
+        assert!(matches!(
+            ev,
+            OrderEvent::BulkReplaced {
+                order_type: OrderType::Buy,
+                uids
+            } if uids == vec![1]
+        ));
+
+        let missing_notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::Sell,
+            uids: vec![2],
+        };
+        let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(missing_notify), 1000);
+
+        assert_eq!(res, ApplyResult::OrderNotFound);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 0,
+                reason: ApplyResult::OrderNotFound
+            }
+        ));
     }
 
     #[test]

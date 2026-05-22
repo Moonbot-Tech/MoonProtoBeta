@@ -1551,6 +1551,39 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` / virtual-worker side effects.
 
+### 2026-05-22 - Phase 1 partial: SellReasonCode zero guard
+
+Done:
+
+- Fixed `TOrderStatusUpdate.SellReasonCode` body semantics. Delphi
+  `BOrderWorker.HandleServerCommand` updates `FPrevSellReasonCode`/`SellReason`
+  only when `cmd.SellReasonCode <> 0` and differs from the previous code.
+- Rust now keeps the previous `Order::sell_reason_code` when an incoming update
+  carries `SellReasonCode = 0`; non-zero changed values are applied.
+- Added a unit test for non-zero set, zero keep, and later non-zero change.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
+### 2026-05-22 - Phase 1 partial: BulkReplaceNotify affected UID list
+
+Done:
+
+- Fixed the API event semantics around `TBulkReplaceNotify`. Delphi loops over
+  `notify.UIDs` and mutates only workers found in `WCache`; missing UID's have
+  no side effect.
+- Rust now emits `OrderEvent::BulkReplaced.uids` with only the UID's that were
+  actually found and flagged. If none are found, the command returns
+  `OrderNotFound`/`Ignored` instead of reporting a fake bulk replace.
+- Added a unit test for mixed found/missing and all-missing notify lists.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

@@ -58,8 +58,9 @@ current reader batch. This matches Delphi's `ProcessCommandOrder`: the worker
 remains addressable long enough for immediately following visual packets such as
 `TOrderTracePoint`, then `OrderEvent::Removed` is emitted.
 `TBulkReplaceNotify` sets `bulk_replace_buy` / `bulk_replace_sell` for found
-orders. `TOrderReplaceResponse` clears the matching flag; if no response arrives,
-the active dispatcher clears the flag after 5000 ms, matching Delphi's
+orders only; its `BulkReplaced.uids` event lists only those actually found
+locally. `TOrderReplaceResponse` clears the matching flag; if no response
+arrives, the active dispatcher clears the flag after 5000 ms, matching Delphi's
 `ReplaceSentTime` timeout.
 
 ## `Order`
@@ -101,6 +102,9 @@ pub struct Order {
 ```
 
 Use `order.sell_reason()` to convert `sell_reason_code` into `SellReason`.
+Incoming `TOrderStatusUpdate` changes this code only when the wire
+`SellReasonCode` is non-zero, matching Delphi's `FPrevSellReasonCode` guard.
+A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `buy_price` and `sell_price` mirror Delphi `pBuyOrder.Price` /
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in
