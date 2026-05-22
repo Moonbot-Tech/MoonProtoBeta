@@ -2864,6 +2864,22 @@ impl WriterRuntime<'_> {
         }
     }
 
+    fn send_command(&mut self, cmd: Command, payload: &[u8]) {
+        Self::send_command_on_client(self.client, cmd, payload);
+    }
+
+    fn send_command_raw(&mut self, cmd: u8, payload: &[u8]) {
+        Self::send_command_raw_on_client(self.client, cmd, payload);
+    }
+
+    fn send_command_on_client(client: &mut Client, cmd: Command, payload: &[u8]) {
+        client.send_raw_packet(cmd, payload);
+    }
+
+    fn send_command_raw_on_client(client: &mut Client, cmd: u8, payload: &[u8]) {
+        client.send_raw_packet_cmd(cmd, payload);
+    }
+
     fn send_hello(&mut self) {
         let payload = handshake::build_hello_packet(
             &self.client.cfg.master_key,
@@ -2872,7 +2888,7 @@ impl WriterRuntime<'_> {
             self.client.app_token,
             delphi_now(),
         );
-        self.client.send_raw_packet(Command::Hello, &payload);
+        self.send_command(Command::Hello, &payload);
     }
 
     fn build_hello_again_packet(&mut self) -> Vec<u8> {
@@ -2894,7 +2910,7 @@ impl WriterRuntime<'_> {
 
     fn send_hello_again(&mut self) {
         let encrypted = self.build_hello_again_packet();
-        self.client.send_raw_packet(Command::HelloAgain, &encrypted);
+        self.send_command(Command::HelloAgain, &encrypted);
     }
 
     fn check_hello_send(&mut self, cur_tm: i64) {
@@ -2970,7 +2986,7 @@ impl WriterRuntime<'_> {
 
     fn do_force_disconnect(&mut self) {
         if self.client.connected && !self.client.soft_reconnect {
-            self.client.send_raw_packet(Command::LogOff, &[]);
+            self.send_command(Command::LogOff, &[]);
         }
         // Сигналим текущему reader thread завершиться (макс через 1с — read_timeout).
         // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
@@ -3493,7 +3509,7 @@ impl WriterRuntime<'_> {
         for (idx, block_num) in to_send_indices {
             tmp_slice.clear();
             tmp_slice.extend_from_slice(&client.sending[idx].slices[block_num]);
-            client.send_raw_packet(Command::Sliced, &tmp_slice);
+            Self::send_command_on_client(client, Command::Sliced, &tmp_slice);
         }
 
         for idx in to_remove.into_iter().rev() {
@@ -3569,7 +3585,7 @@ impl WriterRuntime<'_> {
         if self.client.tmp_send_count > 1 {
             // Send as MPC_Grouped
             let payload = std::mem::take(&mut self.client.tmp_send_buf);
-            self.client.send_raw_packet(Command::Grouped, &payload);
+            self.send_command(Command::Grouped, &payload);
         } else {
             // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
             // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
@@ -3578,7 +3594,7 @@ impl WriterRuntime<'_> {
                 let cmd = buf[0];
                 // sz прочитан только для slicing data (после 3 байт group-header'а).
                 let data = &buf[3..];
-                self.client.send_raw_packet_cmd(cmd, data);
+                self.send_command_raw(cmd, data);
             }
         }
         self.client.tmp_send_count = 0;
@@ -3607,7 +3623,7 @@ impl WriterRuntime<'_> {
                 self.flush_send_batch();
                 self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
             } else {
-                self.client.send_raw_packet_cmd(wire_cmd, wire_data);
+                self.send_command_raw(wire_cmd, wire_data);
             }
         } else {
             self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);

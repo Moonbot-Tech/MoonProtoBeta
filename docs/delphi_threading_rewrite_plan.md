@@ -1128,6 +1128,8 @@ Done:
   reader decisions such as `NeedHelloAgain` see the current writer state.
 - Writer runtime now owns the reconnect tail blocks: Hello/HelloAgain send,
   offline retry, reconnect timeout, dead-zone check, and force-disconnect.
+- Writer runtime also has named send-command wrappers for its immediate wire
+  sends; low-level packet packing remains on `Client` storage.
 - `MPC_WantNewHello` now also resets reader-owned protocol pieces immediately
   in the reader path: decode/replay sliders, Ping session flag, incoming Sliced
   receiver, and shared receive byte counter.
@@ -1284,3 +1286,18 @@ Still not done:
 - Low-level packet send and shared storage still live on `Client`; the next
   writer parity passes should continue moving only protocol-owned ordering
   blocks, without changing public API shape yet.
+
+### 2026-05-22 - Phase 1 partial: named writer SendCommand wrappers
+
+Done:
+
+- Writer-side direct wire sends now pass through
+  `WriterRuntime::send_command` / `send_command_raw`.
+- Hello, HelloAgain, LogOff, Sliced retry pieces, Grouped flushes, single-item
+  flushes, and direct overflow sends now use writer-owned wrappers before
+  reaching the shared packet pack/send helper.
+
+Still not done:
+
+- The actual socket, send buffer, byte accounting, and log throttling storage
+  still live on `Client`. Moving those requires the larger `ClientShared` split.
