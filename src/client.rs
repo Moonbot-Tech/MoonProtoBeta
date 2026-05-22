@@ -2522,13 +2522,12 @@ impl DispatcherEventFn {
     }
 }
 
-struct WriterRuntime<'client, 'mode> {
+struct WriterRuntime<'client> {
     client: &'client mut Client,
-    mode: RunMode<'mode>,
 }
 
-impl WriterRuntime<'_, '_> {
-    fn run(mut self, duration: Duration) {
+impl WriterRuntime<'_> {
+    fn run(&mut self, duration: Duration, mode: &mut RunMode<'_>) {
         let run_start = Instant::now();
 
         loop {
@@ -2561,26 +2560,154 @@ impl WriterRuntime<'_, '_> {
             }
 
             if self.client.socket.is_some() {
-                self.client.drain_reader_decoded(cur_tm, &mut self.mode);
+                self.client.drain_reader_decoded(cur_tm, mode);
 
-                if !self.client.wait_for_reader_work_or_default_sleep() {
+                if !self.wait_for_reader_work_or_default_sleep() {
                     return;
                 }
-                self.client.drain_reader_decoded(cur_tm, &mut self.mode);
+                self.client.drain_reader_decoded(cur_tm, mode);
 
-                self.client.transport_writer_maintenance_tick(cur_tm);
+                self.transport_writer_maintenance_tick(cur_tm);
 
                 // Active library: periodic trades.tick — только в Dispatcher mode.
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
                 // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
-                self.client.periodic_trades_tick(cur_tm, &mut self.mode);
+                self.client.periodic_trades_tick(cur_tm, mode);
 
-                self.client.transport_reconnect_tail_tick(cur_tm);
+                self.transport_reconnect_tail_tick(cur_tm);
             } else {
                 // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
         }
+    }
+
+    fn wait_for_reader_work_or_default_sleep(&mut self) -> bool {
+        // Reader work is level-triggered: a Wake only means
+        // `pending_reader_decoded` may contain items. User/API/UI sends are
+        // already in SendQueues and must not travel through this channel.
+        let send_queues_empty = self.client.send_queues.lock().unwrap().is_empty();
+        if send_queues_empty {
+            match self
+                .client
+                .event_rx
+                .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
+            {
+                Ok(ClientEvent::Wake) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+        loop {
+            match self.client.event_rx.try_recv() {
+                Ok(ClientEvent::Wake) => {}
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return false,
+            }
+        }
+        true
+    }
+
+    fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
+        self.copy_send_ack_and_check_sening_data(cur_tm);
+
+        // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
+        // to the reader-side UDPRead path (`FClient.DoCleanUp` before
+        // command handling in Delphi), so it is not driven by writer ticks.
+        if (cur_tm - self.client.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
+            let mut pending_candles = self.client.pending_candles.lock().unwrap();
+            let candles_before = pending_candles.len();
+            pending_candles.retain(|_uid, partial| {
+                (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
+            });
+            let candles_removed = candles_before - pending_candles.len();
+            drop(pending_candles);
+            if candles_removed > 0 {
+                log::debug!(target: "moonproto::client",
+                    "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
+                    candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
+            }
+            self.client.last_cleanup = cur_tm;
+        }
+
+        // Timeout protection для init/API markets-index request marker.
+        self.client.check_indexes_fetch_timeout(cur_tm);
+
+        // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
+        // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
+        // фазе; до неё запрос потеряется впустую).
+        if matches!(self.client.auth_status, AuthStatus::AuthDone) && self.client.domain_ready {
+            self.client.tick_periodic_refresh(cur_tm);
+        }
+
+        // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
+        // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
+        // чтобы full_reset + новый Hello с актуальным временем.
+        self.client.check_clock_jump();
+    }
+
+    fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {
+        // Reconnect logic
+        self.client.check_hello_send(cur_tm);
+        self.client.check_offline_reconnect(cur_tm);
+        self.client.check_reconnect_timeout(cur_tm);
+        self.client.check_dead_zone(cur_tm);
+
+        if self.client.force_disconnect {
+            self.client.do_force_disconnect();
+        }
+    }
+
+    fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
+        let mut copy_send_list = Vec::new();
+        let mut copy_send_list_h = Vec::new();
+        let mut copy_send_list_l = Vec::new();
+
+        // Delphi `Execute` under `SendLock`:
+        // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
+        // Rust uses separate mutexes for these exact lists, but keeps the same
+        // writer-visible order before `CheckSeningData`.
+        self.client.get_copy_send_list(
+            &mut copy_send_list,
+            &mut copy_send_list_h,
+            &mut copy_send_list_l,
+        );
+        let copy_acks = self.client.get_copy_acks();
+        self.client.copy_recvd_data();
+
+        self.check_sening_data(
+            copy_send_list,
+            copy_send_list_h,
+            copy_send_list_l,
+            copy_acks,
+            cur_tm,
+        );
+    }
+
+    fn check_sening_data(
+        &mut self,
+        copy_send_list: Vec<SendItem>,
+        copy_send_list_h: Vec<SendItem>,
+        copy_send_list_l: Vec<SendItem>,
+        copy_acks: Vec<SlicedAck>,
+        cur_tm: i64,
+    ) {
+        // Delphi `CheckSeningData`: Sliced CopySendList first, then SlicedACK,
+        // then regular H ACK bitmap, High send/retry, first Low flush, Sliced
+        // retry, remaining Low flush. Keep this exact protocol order.
+        self.client.apply_sliced_send_u_key_cleanup(&copy_send_list);
+        for item in &copy_send_list {
+            self.client.create_sliced_and_send(item);
+        }
+        self.client.apply_copy_acks(copy_acks, cur_tm);
+        self.client.apply_regular_hl_ack();
+        self.client.apply_high_send_u_key_cleanup(&copy_send_list_h);
+        for mut item in copy_send_list_h {
+            self.client.send_h_item(&mut item, cur_tm);
+        }
+        self.client.retry_pending_h(cur_tm);
+        self.client
+            .send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
     }
 }
 
@@ -5267,134 +5394,8 @@ impl Client {
     ///   - В конце iter: для Dispatcher mode дополнительно — periodic
     ///     `trades.tick()` каждые 100мс. Для Callback mode tick не нужен (callback
     ///     потребитель сам решает что делать с TradesEvent).
-    fn run_inner(&mut self, duration: Duration, mode: RunMode<'_>) {
-        WriterRuntime { client: self, mode }.run(duration);
-    }
-
-    fn wait_for_reader_work_or_default_sleep(&mut self) -> bool {
-        // Reader work is level-triggered: a Wake only means
-        // `pending_reader_decoded` may contain items. User/API/UI sends are
-        // already in SendQueues and must not travel through this channel.
-        let send_queues_empty = self.send_queues.lock().unwrap().is_empty();
-        if send_queues_empty {
-            match self
-                .event_rx
-                .recv_timeout(Duration::from_millis(DEFAULT_SLEEP_MS))
-            {
-                Ok(ClientEvent::Wake) => {}
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
-            }
-        }
-        loop {
-            match self.event_rx.try_recv() {
-                Ok(ClientEvent::Wake) => {}
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return false,
-            }
-        }
-        true
-    }
-
-    fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
-        self.copy_send_ack_and_check_sening_data(cur_tm);
-
-        // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
-        // to the reader-side UDPRead path (`FClient.DoCleanUp` before
-        // command handling in Delphi), so it is not driven by writer ticks.
-        if (cur_tm - self.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-            let mut pending_candles = self.pending_candles.lock().unwrap();
-            let candles_before = pending_candles.len();
-            pending_candles.retain(|_uid, partial| {
-                (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
-            });
-            let candles_removed = candles_before - pending_candles.len();
-            drop(pending_candles);
-            if candles_removed > 0 {
-                log::debug!(target: "moonproto::client",
-                    "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
-                    candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
-            }
-            self.last_cleanup = cur_tm;
-        }
-
-        // Timeout protection для init/API markets-index request marker.
-        self.check_indexes_fetch_timeout(cur_tm);
-
-        // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
-        // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
-        // фазе; до неё запрос потеряется впустую).
-        if matches!(self.auth_status, AuthStatus::AuthDone) && self.domain_ready {
-            self.tick_periodic_refresh(cur_tm);
-        }
-
-        // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
-        // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
-        // чтобы full_reset + новый Hello с актуальным временем.
-        self.check_clock_jump();
-    }
-
-    fn transport_reconnect_tail_tick(&mut self, cur_tm: i64) {
-        // Reconnect logic
-        self.check_hello_send(cur_tm);
-        self.check_offline_reconnect(cur_tm);
-        self.check_reconnect_timeout(cur_tm);
-        self.check_dead_zone(cur_tm);
-
-        if self.force_disconnect {
-            self.do_force_disconnect();
-        }
-    }
-
-    fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
-        let mut copy_send_list = Vec::new();
-        let mut copy_send_list_h = Vec::new();
-        let mut copy_send_list_l = Vec::new();
-
-        // Delphi `Execute` under `SendLock`:
-        // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
-        // Rust uses separate mutexes for these exact lists, but keeps the same
-        // writer-visible order before `CheckSeningData`.
-        self.get_copy_send_list(
-            &mut copy_send_list,
-            &mut copy_send_list_h,
-            &mut copy_send_list_l,
-        );
-        let copy_acks = self.get_copy_acks();
-        self.copy_recvd_data();
-
-        self.check_sening_data(
-            copy_send_list,
-            copy_send_list_h,
-            copy_send_list_l,
-            copy_acks,
-            cur_tm,
-        );
-    }
-
-    fn check_sening_data(
-        &mut self,
-        copy_send_list: Vec<SendItem>,
-        copy_send_list_h: Vec<SendItem>,
-        copy_send_list_l: Vec<SendItem>,
-        copy_acks: Vec<SlicedAck>,
-        cur_tm: i64,
-    ) {
-        // Delphi `CheckSeningData`: Sliced CopySendList first, then SlicedACK,
-        // then regular H ACK bitmap, High send/retry, first Low flush, Sliced
-        // retry, remaining Low flush. Keep this exact protocol order.
-        self.apply_sliced_send_u_key_cleanup(&copy_send_list);
-        for item in &copy_send_list {
-            self.create_sliced_and_send(item);
-        }
-        self.apply_copy_acks(copy_acks, cur_tm);
-        self.apply_regular_hl_ack();
-        self.apply_high_send_u_key_cleanup(&copy_send_list_h);
-        for mut item in copy_send_list_h {
-            self.send_h_item(&mut item, cur_tm);
-        }
-        self.retry_pending_h(cur_tm);
-        self.send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
+    fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
+        WriterRuntime { client: self }.run(duration, &mut mode);
     }
 
     fn get_copy_send_list(
@@ -10783,7 +10784,10 @@ mod pmtu_tests {
         ack[32..34].copy_from_slice(&1u16.to_le_bytes());
         client.on_new_sliced_ack(&ack);
 
-        client.copy_send_ack_and_check_sening_data(200);
+        WriterRuntime {
+            client: &mut client,
+        }
+        .copy_send_ack_and_check_sening_data(200);
 
         assert!(
             client.sending.is_empty(),

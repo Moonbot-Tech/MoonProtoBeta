@@ -885,3 +885,23 @@ Still not done:
   called through `WriterRuntime.client`.
 - This is not yet a separately spawned writer thread; it is the explicit runtime
   for the caller thread that runs the Delphi writer/orchestrator loop.
+
+### 2026-05-22 - Phase 1 partial: moved writer tick blocks into `WriterRuntime`
+
+Done:
+
+- Moved reader-wake wait, writer maintenance tick, reconnect tail tick,
+  copy-send/copy-ack/copy-recvd-data, and `CheckSeningData` ordering into
+  `WriterRuntime`.
+- The writer tick test now calls `WriterRuntime` directly instead of an old
+  `Client` wrapper.
+- `Client` still owns low-level mutation helpers (`get_copy_send_list`,
+  `apply_copy_acks`, `send_h_item`, `retry_pending_h`, etc.), but the tick
+  orchestration order is no longer a `Client` method.
+
+Still not done:
+
+- Need continue moving low-level writer-owned protocol mutation helpers behind
+  the writer runtime boundary, while preserving exact Delphi method order.
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
