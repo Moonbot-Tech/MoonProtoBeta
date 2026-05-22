@@ -8,6 +8,8 @@
 use std::time::{Duration, SystemTime};
 
 use super::registry::read_string;
+#[cfg(test)]
+use super::registry::write_string;
 use flate2::read::DeflateDecoder;
 
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
@@ -866,8 +868,7 @@ mod parse_engine_response_tests {
         buf.push(method as u8); // Method
         buf.push(success as u8); // Success
         buf.extend_from_slice(&error_code.to_le_bytes()); // ErrorCode
-        buf.extend_from_slice(&(error_msg.len() as u16).to_le_bytes()); // ErrorMsg len
-        buf.extend_from_slice(error_msg.as_bytes());
+        write_string(&mut buf, error_msg);
         buf.push(0u8); // IsCompressed = false
         buf.extend_from_slice(&(data.len() as i32).to_le_bytes()); // DataSize
         buf.extend_from_slice(data);
@@ -929,6 +930,22 @@ mod parse_engine_response_tests {
         assert!(!resp.success);
         assert_eq!(resp.error_code, -123);
         assert_eq!(resp.error_msg, "Invalid API key");
+        assert_eq!(resp.request_uid, 42);
+    }
+
+    #[test]
+    fn response_helper_writes_error_msg_like_delphi_string() {
+        let payload = build_wire_response(
+            1,
+            42,
+            EngineMethod::AuthCheck,
+            false,
+            -123,
+            &"E".repeat(65_537),
+            &[],
+        );
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.error_msg, "E");
         assert_eq!(resp.request_uid, 42);
     }
 
@@ -1104,8 +1121,7 @@ mod base_check_tests {
         let Some(name) = &info.server_name else {
             return buf;
         };
-        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        buf.extend_from_slice(name.as_bytes());
+        write_string(&mut buf, name);
         let Some(ex_code) = info.exchange_code else {
             return buf;
         };
@@ -1113,8 +1129,7 @@ mod base_check_tests {
         let Some(ex_name) = &info.exchange_name else {
             return buf;
         };
-        buf.extend_from_slice(&(ex_name.len() as u16).to_le_bytes());
-        buf.extend_from_slice(ex_name.as_bytes());
+        write_string(&mut buf, ex_name);
         let Some(mask) = info.exchange_type_mask else {
             return buf;
         };
@@ -1122,13 +1137,11 @@ mod base_check_tests {
         let Some(dex) = &info.dex_name else {
             return buf;
         };
-        buf.extend_from_slice(&(dex.len() as u16).to_le_bytes());
-        buf.extend_from_slice(dex.as_bytes());
+        write_string(&mut buf, dex);
         let Some(bc_name) = &info.base_currency_name else {
             return buf;
         };
-        buf.extend_from_slice(&(bc_name.len() as u16).to_le_bytes());
-        buf.extend_from_slice(bc_name.as_bytes());
+        write_string(&mut buf, bc_name);
         let Some(bc_code) = info.base_currency_code else {
             return buf;
         };
@@ -1175,6 +1188,28 @@ mod base_check_tests {
         assert!(parsed.has_identity());
         assert!(parsed.supports(exchange_type_flags::FUTURES));
         assert!(!parsed.supports(exchange_type_flags::SPOT));
+    }
+
+    #[test]
+    fn base_check_helper_writes_strings_like_delphi() {
+        let original = ServerInfo {
+            bot_id: Some(123456789),
+            server_name: Some("S".repeat(65_537)),
+            exchange_code: Some(3),
+            exchange_name: Some("Exchange".to_string()),
+            exchange_type_mask: Some(exchange_type_flags::SPOT | exchange_type_flags::FUTURES),
+            dex_name: Some("Dex".to_string()),
+            base_currency_name: Some("USDT".to_string()),
+            base_currency_code: Some(1),
+            server_version: Some(763),
+            moonproto_version: Some(3),
+        };
+
+        let payload = encode_full(&original);
+        let parsed = parse_base_check_response(&payload);
+        assert_eq!(parsed.server_name, Some("S".to_string()));
+        assert_eq!(parsed.exchange_code, Some(3));
+        assert_eq!(parsed.moonproto_version, Some(3));
     }
 
     #[test]
