@@ -7,7 +7,7 @@
 //! - 1 — TStratSnapshotRequest (empty, S→C)
 //! - 2 — TStratSnapshot (both directions, Sliced, UK_StratSnapshot)
 //! - 3 — TStratDelete (S↔C)
-//! - 4 — TStratSellPriceUpdate (S↔C, UK_StratSellPriceUpdate)
+//! - 4 — TStratSellPriceUpdate (C→S, UK_StratSellPriceUpdate)
 //! - 5 — TStratCheckedSync (S↔C, Sliced)
 //! - 6 — TStratCheckedEcho (C→S ACK на дельту Checked)
 //!
@@ -54,7 +54,8 @@ pub struct StratDelete {
     pub folder_path: String,
 }
 
-/// `TStratSellPriceUpdate` (CmdId=4). UKey=UK_StratSellPriceUpdate (UID = strategy_id).
+/// `TStratSellPriceUpdate` (CmdId=4). Client→server command.
+/// UKey=UK_StratSellPriceUpdate (UID = strategy_id).
 #[derive(Debug, Clone, Copy)]
 pub struct StratSellPriceUpdate {
     pub strategy_id: u64,
