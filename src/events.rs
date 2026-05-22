@@ -191,6 +191,10 @@ pub struct EventDispatcher {
     pub(crate) strats: StratsState,
     pub(crate) settings: SettingsState,
     pub(crate) markets: MarketsState,
+    /// Delphi `cfg.ServerStratEpoch` for snapshots sent by this client.
+    /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
+    /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
+    local_strategy_epoch: u64,
     /// Последний известный `ServerToken` — для детектирования hard reconnect.
     /// При смене токена `dispatch_into_active` сбрасывает per-token state
     /// (`trades.full_reset()`, `order_books.clear()`) до применения нового пакета.
@@ -286,6 +290,25 @@ impl EventDispatcher {
     /// Read-only strategy state and decoded strategy snapshots.
     pub fn strats(&self) -> &StratsState {
         &self.strats
+    }
+
+    /// Set Delphi `cfg.ServerStratEpoch` analogue for local strategy snapshots.
+    ///
+    /// Use this when loading persisted local strategy state before init. The
+    /// value is written into `TStratSnapshot.ServerEpoch` when the dispatcher
+    /// answers a server `TStratSnapshotRequest`.
+    pub fn set_local_strategy_epoch(&mut self, epoch: u64) {
+        self.local_strategy_epoch = epoch;
+    }
+
+    pub fn local_strategy_epoch(&self) -> u64 {
+        self.local_strategy_epoch
+    }
+
+    /// Delphi local strategy edit: `Inc(cfg.ServerStratEpoch)`.
+    pub fn mark_local_strategies_changed(&mut self) -> u64 {
+        self.local_strategy_epoch = self.local_strategy_epoch.saturating_add(1);
+        self.local_strategy_epoch
     }
 
     /// Replace the library-owned strategy list before init.
@@ -492,7 +515,7 @@ impl EventDispatcher {
             .and_then(|provider| provider(request_uid))
             .unwrap_or_else(|| {
                 StrategySnapshotReply::from_strategies(
-                    self.strats.last_server_epoch,
+                    self.local_strategy_epoch,
                     true,
                     &self.strats.snapshot_vec(),
                 )
@@ -2285,6 +2308,7 @@ mod tests {
         };
 
         let mut d = EventDispatcher::new();
+        d.set_local_strategy_epoch(55);
         d.set_local_strategies(std::slice::from_ref(&strategy));
         assert_eq!(
             d.strategy_snapshot(strategy.strategy_id).unwrap().last_date,
@@ -2318,6 +2342,7 @@ mod tests {
                 let batch =
                     crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
                         .expect("local strategy batch must parse");
+                assert_eq!(snapshot.server_epoch, 55);
                 assert_eq!(snapshot.client_max_last_date, 1234);
                 assert_eq!(batch.strategies.len(), 1);
                 assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
@@ -2329,6 +2354,41 @@ mod tests {
             }
         }
         assert!(found, "local strategy snapshot must be sent");
+    }
+
+    #[test]
+    fn snapshot_reply_uses_local_epoch_not_remote_server_epoch_like_delphi() {
+        let mut d = EventDispatcher::new();
+        d.strats.last_server_epoch = 7;
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let payload = crate::commands::strat::build_snapshot_request(101);
+        let mut actions = Vec::new();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        apply_active_actions_for_test(&client, &mut actions);
+
+        let sent = drain_client_send_items(&client);
+        let snapshot = sent
+            .iter()
+            .find(|item| item.cmd == Command::Strat as u8)
+            .and_then(|item| crate::commands::strat::StratCommand::parse(&item.data))
+            .and_then(|cmd| match cmd {
+                crate::commands::strat::StratCommand::Snapshot(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .expect("snapshot reply must be sent");
+
+        assert_eq!(snapshot.server_epoch, 0);
     }
 
     #[test]

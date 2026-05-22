@@ -97,12 +97,20 @@ use moonproto::commands::strategy_serializer::StrategySnapshot;
 
 // Before connect_and_init:
 let strategies: Vec<StrategySnapshot> = load_current_strategies();
+dispatcher.set_local_strategy_epoch(load_local_strategy_epoch());
 dispatcher.set_local_strategies(&strategies);
 
 // Later, read the current active-library view:
 let all: Vec<StrategySnapshot> = dispatcher.strategy_snapshot_vec();
 let one = dispatcher.strategy_snapshot(strategy_id);
 ```
+
+`set_local_strategy_epoch` is Delphi `cfg.ServerStratEpoch` for this local
+client's strategy list. It is the value written into outgoing
+`TStratSnapshot.ServerEpoch` when answering `TStratSnapshotRequest`; it is not
+the remote server epoch learned from incoming snapshots. When user code edits
+local strategies, call `mark_local_strategies_changed()` to mirror Delphi
+`Inc(cfg.ServerStratEpoch)`.
 
 ## Snapshot Decoder
 
@@ -163,6 +171,7 @@ dispatcher answer server snapshot requests:
 use moonproto::commands::strategy_serializer::StrategySnapshot;
 
 let strategies: Vec<StrategySnapshot> = load_current_strategies();
+dispatcher.set_local_strategy_epoch(load_local_strategy_epoch());
 dispatcher.set_local_strategies(&strategies);
 connect_and_init(&mut client, &mut dispatcher, connect_cfg)?;
 ```
@@ -213,11 +222,11 @@ use moonproto::commands::strategy_serializer::StrategySnapshot;
 
 dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
     let strategies: Vec<StrategySnapshot> = load_current_strategies();
-    let server_epoch = current_server_epoch();
+    let server_epoch = load_local_strategy_epoch();
     Some(StrategySnapshotReply::from_strategies(server_epoch, true, &strategies))
 });
 ```
 
 The provider must return current application-owned strategies. The dispatcher
 falls back to its owned strategy list when the provider is absent or returns
-`None`.
+`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`.
