@@ -1620,6 +1620,22 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: SellReason description strings
+
+Done:
+
+- Fixed `SellReason::description()` to match Delphi
+  `SellReasonCodeToStr(TSellReasonCode)` exactly. The byte-code mapping was
+  already correct, but several UI strings had Rust-only spaces (`Panic Sell`,
+  `Stop Loss`, `Take Profit`) instead of Delphi's compact names.
+- API docs now state that `description()` returns Delphi strings.
+- Added a unit test covering every `TSellReasonCode` value.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining order state/API
+  helpers against Delphi.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

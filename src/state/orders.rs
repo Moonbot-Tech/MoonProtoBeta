@@ -96,17 +96,17 @@ impl SellReason {
             Self::SellPrice => "Sell Price",
             Self::AutoPriceDown => "Auto Price Down",
             Self::SellLevel => "Sell Level",
-            Self::SellSpread => "Sell Spread",
-            Self::SellShot => "Sell Shot",
-            Self::PanicSell => "Panic Sell",
-            Self::StopLoss => "Stop Loss",
-            Self::Trailing => "Trailing Stop",
+            Self::SellSpread => "SellSpread",
+            Self::SellShot => "SellShot",
+            Self::PanicSell => "PanicSell",
+            Self::StopLoss => "StopLoss",
+            Self::Trailing => "Trailing",
             Self::MarketStop => "Market Stop",
             Self::ManualSell => "Manual Sell",
-            Self::JoinedSell => "Joined Sell",
-            Self::SellFromAssets => "Sell From Assets",
+            Self::JoinedSell => "JoinedSell",
+            Self::SellFromAssets => "SellFromAssets",
             Self::BvSvStop => "BV/SV Stop",
-            Self::TakeProfit => "Take Profit",
+            Self::TakeProfit => "TakeProfit",
         }
     }
 }
@@ -968,6 +968,31 @@ mod tests {
 
     fn order_status_cmd(status: OrderStatus) -> TradeCommand {
         TradeCommand::OrderStatus(Box::new(status))
+    }
+
+    #[test]
+    fn sell_reason_descriptions_match_delphi_sell_reason_code_to_str() {
+        let cases = [
+            (SellReason::Unknown, "Unknown"),
+            (SellReason::SellPrice, "Sell Price"),
+            (SellReason::AutoPriceDown, "Auto Price Down"),
+            (SellReason::SellLevel, "Sell Level"),
+            (SellReason::SellSpread, "SellSpread"),
+            (SellReason::SellShot, "SellShot"),
+            (SellReason::PanicSell, "PanicSell"),
+            (SellReason::StopLoss, "StopLoss"),
+            (SellReason::Trailing, "Trailing"),
+            (SellReason::MarketStop, "Market Stop"),
+            (SellReason::ManualSell, "Manual Sell"),
+            (SellReason::JoinedSell, "JoinedSell"),
+            (SellReason::SellFromAssets, "SellFromAssets"),
+            (SellReason::BvSvStop, "BV/SV Stop"),
+            (SellReason::TakeProfit, "TakeProfit"),
+        ];
+
+        for (reason, expected) in cases {
+            assert_eq!(reason.description(), expected);
+        }
     }
 
     fn order_replace_response_cmd(response: OrderReplaceResponse) -> TradeCommand {

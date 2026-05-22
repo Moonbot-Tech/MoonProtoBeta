@@ -103,6 +103,9 @@ pub struct Order {
 ```
 
 Use `order.sell_reason()` to convert `sell_reason_code` into `SellReason`.
+`SellReason::description()` returns the same strings as Delphi
+`SellReasonCodeToStr`, including compact names such as `PanicSell`,
+`StopLoss`, and `TakeProfit`.
 Incoming `TOrderStatusUpdate` changes this code only when the wire
 `SellReasonCode` is non-zero, matching Delphi's `FPrevSellReasonCode` guard.
 A later update with `SellReasonCode = 0` leaves the previous reason visible.
