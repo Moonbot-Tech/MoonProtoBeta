@@ -1106,3 +1106,35 @@ Still not done:
   background writer thread.
 - Reader-side handshake/Ping writer-visible state placement remains unresolved
   against strict Delphi `UDPRead`.
+
+### 2026-05-22 - Phase 1 partial: reader-owned transport state mirror
+
+Done:
+
+- Added a shared reader-owned transport state mirror for Delphi fields mutated
+  inside `UDPRead`: recv accounting/online status, auth status, reconnect flags,
+  handshake tokens/keys, Ping RTT/PMTU/rate fields, and Hello retry timestamps.
+- Production reader paths now write that mirror immediately after successful
+  packet unpack and inside the Ping/handshake branches. Queued
+  `ReaderDecodedMsg` records from the real reader no longer re-apply recv
+  side effects; they wake writer/user delivery after the reader already made
+  the Delphi `UDPRead` state transition.
+- Writer runtime synchronizes the mirror before lifecycle and reconnect writer
+  ticks, and writer-side reconnect changes publish back into the mirror so
+  reader decisions such as `NeedHelloAgain` see the current writer state.
+- `MPC_WantNewHello` now also resets reader-owned protocol pieces immediately
+  in the reader path: decode/replay sliders, Ping session flag, incoming Sliced
+  receiver, and shared receive byte counter.
+- Tests now assert the reader-owned state before any writer tick for Ping,
+  `WhoAreYou`, `Fine`, `WrongHello`, `WantNewHello`, `NeedHelloAgain`, PMTU
+  service commands, regular data, SlicedACK, and ErrEmu drop.
+
+Still not done:
+
+- This is still the caller-thread writer/orchestrator runtime, not a spawned
+  background writer thread.
+- `MPC_WantNewHello` still relies on the writer-side queued update to run the
+  remaining writer-owned reset (`sending`, pending API/candles, writer
+  `recvd_slider`, etc.). Delphi calls `FClient.Reset` from `UDPRead`; the next
+  strict block must split or share those remaining reset-owned structures so
+  the reset placement is exact too.

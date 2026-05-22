@@ -512,6 +512,7 @@ struct ReaderRuntime {
     reader_wake_pending: Arc<AtomicBool>,
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
     reader_ping_state: Arc<Mutex<ReaderPingState>>,
+    reader_transport_state: Arc<Mutex<ReaderTransportState>>,
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
     slicer: Arc<Mutex<slicing::SlicingReceiver>>,
     total_sent: Arc<AtomicU64>,
@@ -575,6 +576,10 @@ impl ReaderRuntime {
                 .fetch_add(n as u64, Ordering::Relaxed)
                 + n as u64;
             let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
+            self.reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_recv_side_effects(n as u64, timestamp_ms);
 
             if err_emu_should_drop(hdr.cmd) {
                 self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
@@ -676,6 +681,7 @@ impl ReaderRuntime {
             recv_bytes,
             timestamp_ms,
             self.epoch,
+            false,
         );
     }
 
@@ -689,6 +695,7 @@ impl ReaderRuntime {
             recv_bytes,
             timestamp_ms,
             self.epoch,
+            false,
         );
         self.pending_reader_decoded.lock().unwrap().extend(decoded);
     }
@@ -718,6 +725,7 @@ impl ReaderRuntime {
             recv_bytes,
             timestamp_ms,
             self.epoch,
+            false,
         );
     }
 
@@ -746,10 +754,25 @@ impl ReaderRuntime {
             recv_bytes,
             timestamp_ms,
             self.epoch,
+            false,
         );
     }
 
     fn on_handshake_control(&self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
+        let update = Client::simple_handshake_update(cmd);
+        if cmd == Command::WantNewHello {
+            self.reader_protocol.lock().unwrap().reset();
+            self.reader_ping_state
+                .lock()
+                .unwrap()
+                .reset_protocol_session();
+            *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
+            self.total_recv_shared.store(0, Ordering::Relaxed);
+        }
+        self.reader_transport_state
+            .lock()
+            .unwrap()
+            .apply_handshake_update(&update, timestamp_ms);
         self.pending_reader_decoded
             .lock()
             .unwrap()
@@ -761,10 +784,10 @@ impl ReaderRuntime {
                 recv_bytes,
                 timestamp_ms,
                 epoch: self.epoch,
-                apply_recv_effects: true,
+                apply_recv_effects: false,
                 sliced_stats: None,
                 ping_update: None,
-                handshake_update: Some(Client::simple_handshake_update(cmd)),
+                handshake_update: Some(update),
             });
     }
 
@@ -779,6 +802,10 @@ impl ReaderRuntime {
                 &mut self.reader_client_token,
                 hello,
             );
+            self.reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_handshake_update(&update, timestamp_ms);
             self.reader_protocol
                 .lock()
                 .unwrap()
@@ -823,7 +850,7 @@ impl ReaderRuntime {
                     recv_bytes,
                     timestamp_ms,
                     epoch: self.epoch,
-                    apply_recv_effects: true,
+                    apply_recv_effects: false,
                     sliced_stats: None,
                     ping_update: None,
                     handshake_update: Some(update),
@@ -835,12 +862,18 @@ impl ReaderRuntime {
                 recv_bytes,
                 timestamp_ms,
                 self.epoch,
+                false,
             );
         }
     }
 
     fn on_fine(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
         if Client::decode_handshake_hello(&self.master_key, self.client_id, payload).is_some() {
+            let update = Client::fine_handshake_update();
+            self.reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_handshake_update(&update, timestamp_ms);
             self.pending_reader_decoded
                 .lock()
                 .unwrap()
@@ -852,10 +885,10 @@ impl ReaderRuntime {
                     recv_bytes,
                     timestamp_ms,
                     epoch: self.epoch,
-                    apply_recv_effects: true,
+                    apply_recv_effects: false,
                     sliced_stats: None,
                     ping_update: None,
-                    handshake_update: Some(Client::fine_handshake_update()),
+                    handshake_update: Some(update),
                 });
         } else {
             Client::push_reader_recv_side_effect(
@@ -864,6 +897,7 @@ impl ReaderRuntime {
                 recv_bytes,
                 timestamp_ms,
                 self.epoch,
+                false,
             );
         }
     }
@@ -927,7 +961,7 @@ impl ReaderRuntime {
                     recv_bytes,
                     timestamp_ms,
                     epoch: self.epoch,
-                    apply_recv_effects: true,
+                    apply_recv_effects: false,
                     sliced_stats: Some(ReaderSlicedStats {
                         dup_count,
                         blocks_count,
@@ -942,6 +976,7 @@ impl ReaderRuntime {
                 recv_bytes,
                 timestamp_ms,
                 self.epoch,
+                false,
             );
         }
 
@@ -958,6 +993,7 @@ impl ReaderRuntime {
             recv_bytes,
             timestamp_ms,
             self.epoch,
+            false,
         );
     }
 
@@ -980,6 +1016,10 @@ impl ReaderRuntime {
             self.total_sent.load(Ordering::Relaxed),
             total_recv_after,
         ) {
+            self.reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_ping_update(&ping_update);
             // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
             // Ping response immediately from the reader stack.
             Client::reader_send_raw_packet(
@@ -1005,7 +1045,7 @@ impl ReaderRuntime {
                     recv_bytes,
                     timestamp_ms,
                     epoch: self.epoch,
-                    apply_recv_effects: true,
+                    apply_recv_effects: false,
                     sliced_stats: None,
                     ping_update: Some(ping_update),
                     handshake_update: None,
@@ -1017,6 +1057,7 @@ impl ReaderRuntime {
                 recv_bytes,
                 timestamp_ms,
                 self.epoch,
+                false,
             );
         }
     }
@@ -2527,6 +2568,8 @@ impl WriterRuntime<'_> {
             }
             let cur_tm = self.client.now_ms();
 
+            self.client.sync_transport_state_from_reader();
+
             // Emit lifecycle events on auth_status transitions.
             self.client.check_lifecycle_transition();
 
@@ -2607,9 +2650,11 @@ impl WriterRuntime<'_> {
         self.client.total_recv += recv_bytes;
         self.client.track_recv(recv_bytes, timestamp_ms);
         self.client.last_online = timestamp_ms;
+        self.client.publish_transport_state_from_client();
     }
 
     fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        self.client.sync_transport_state_from_reader();
         self.client
             .reader_wake_pending
             .store(false, Ordering::Release);
@@ -2632,6 +2677,7 @@ impl WriterRuntime<'_> {
         cur_tm: i64,
         mode: &mut RunMode<'_>,
     ) {
+        self.client.sync_transport_state_from_reader();
         if msg.epoch != self.client.current_reader_epoch {
             if self.client.should_log("stale_reader_decoded_epoch", 5000) {
                 warn!(target: "moonproto::client",
@@ -2687,6 +2733,7 @@ impl WriterRuntime<'_> {
         self.client.net_lag_ping = update.net_lag_ping;
         self.client.can_send_rate = update.can_send_rate;
         self.client.used_sliced_limit = update.used_sliced_limit;
+        self.client.publish_transport_state_from_client();
     }
 
     fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
@@ -2750,6 +2797,7 @@ impl WriterRuntime<'_> {
             }
             _ => {}
         }
+        self.client.publish_transport_state_from_client();
     }
 
     fn process_decoded_data_read_int(
@@ -3349,6 +3397,7 @@ impl WriterRuntime<'_> {
         if bytes_sent_at_once >= used_limit_threshold {
             client.used_sliced_limit = true;
             client.reader_ping_state.lock().unwrap().used_sliced_limit = true;
+            client.publish_transport_state_from_client();
         }
 
         // Аудит #2: отправляем по индексу из self.sending — никаких clone.
@@ -3689,6 +3738,155 @@ impl ReaderPingState {
     }
 }
 
+#[derive(Clone)]
+struct ReaderTransportState {
+    seq: u64,
+    connected: bool,
+    authorized: bool,
+    last_online: i64,
+    total_recv: u64,
+    recv_bps_pending: u64,
+    auth_status: AuthStatus,
+    need_connect: bool,
+    soft_reconnect: bool,
+    waiting_hello: bool,
+    client_token: u64,
+    server_token: u64,
+    peer_app_token: u64,
+    encode_key: MoonKey,
+    decode_key: MoonKey,
+    round_trip_delay: i64,
+    actual_pmtu: u16,
+    rs: f64,
+    overheat: u8,
+    server_time_delta: f64,
+    global_timing_orders: u16,
+    net_lag_ping: i64,
+    can_send_rate: i32,
+    used_sliced_limit: bool,
+    ping_count: u32,
+    last_sent_hello: i64,
+    waiting_hello_start: i64,
+    last_need_hello_again: i64,
+}
+
+impl ReaderTransportState {
+    fn new() -> Self {
+        Self {
+            seq: 0,
+            connected: false,
+            authorized: false,
+            last_online: 0,
+            total_recv: 0,
+            recv_bps_pending: 0,
+            auth_status: AuthStatus::Base,
+            need_connect: true,
+            soft_reconnect: false,
+            waiting_hello: false,
+            client_token: 0,
+            server_token: 0,
+            peer_app_token: 0,
+            encode_key: [0; 16],
+            decode_key: [0; 16],
+            round_trip_delay: 0,
+            actual_pmtu: 508,
+            rs: 1.0,
+            overheat: 0,
+            server_time_delta: 0.0,
+            global_timing_orders: 0,
+            net_lag_ping: 0,
+            can_send_rate: 2 * 1024 * 1024,
+            used_sliced_limit: false,
+            ping_count: 0,
+            last_sent_hello: NEVER_SENT_MS,
+            waiting_hello_start: 0,
+            last_need_hello_again: i64::MIN / 2,
+        }
+    }
+
+    fn bump(&mut self) {
+        self.seq = self.seq.wrapping_add(1);
+    }
+
+    fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
+        self.connected = true;
+        if self.auth_status == AuthStatus::Base {
+            self.auth_status = AuthStatus::Connected;
+        }
+        self.total_recv = self.total_recv.wrapping_add(recv_bytes);
+        self.recv_bps_pending = self.recv_bps_pending.wrapping_add(recv_bytes);
+        self.last_online = timestamp_ms;
+        self.bump();
+    }
+
+    fn reset_protocol_session(&mut self) {
+        self.total_recv = 0;
+        self.rs = 1.0;
+        self.used_sliced_limit = false;
+        self.last_online = 0;
+        self.last_sent_hello = NEVER_SENT_MS;
+    }
+
+    fn apply_ping_update(&mut self, update: &ReaderPingUpdate) {
+        self.ping_count = update.ping_count;
+        self.round_trip_delay = update.round_trip_delay;
+        self.actual_pmtu = update.actual_pmtu;
+        self.global_timing_orders = update.global_timing_orders;
+        self.overheat = update.overheat;
+        self.rs = update.rs;
+        self.need_connect = false;
+        self.server_time_delta = update.server_time_delta;
+        self.net_lag_ping = update.net_lag_ping;
+        self.can_send_rate = update.can_send_rate;
+        self.used_sliced_limit = update.used_sliced_limit;
+        self.bump();
+    }
+
+    fn apply_handshake_update(&mut self, update: &ReaderHandshakeUpdate, timestamp_ms: i64) {
+        match update.cmd {
+            Command::WrongHello => {
+                self.waiting_hello = false;
+                self.auth_status = AuthStatus::Connected;
+            }
+            Command::WantNewHello => {
+                self.waiting_hello = false;
+                self.reset_protocol_session();
+                self.auth_status = AuthStatus::Connected;
+                self.authorized = false;
+                self.need_connect = true;
+                self.soft_reconnect = false;
+            }
+            Command::NeedHelloAgain => {
+                if (timestamp_ms - self.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS
+                {
+                    self.last_need_hello_again = timestamp_ms;
+                    if !self.waiting_hello {
+                        self.waiting_hello_start = timestamp_ms;
+                    }
+                    self.waiting_hello = true;
+                    self.last_sent_hello = NEVER_SENT_MS;
+                }
+            }
+            Command::WhoAreYou => {
+                self.waiting_hello = false;
+                self.server_token = update.server_token;
+                self.peer_app_token = update.peer_app_token;
+                self.client_token = update.client_token;
+                self.encode_key = update.encode_key;
+                self.decode_key = update.decode_key;
+            }
+            Command::Fine => {
+                self.need_connect = false;
+                self.waiting_hello = false;
+                self.auth_status = AuthStatus::AuthDone;
+                self.authorized = true;
+            }
+            _ => {}
+        }
+        self.bump();
+    }
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -3796,6 +3994,10 @@ pub struct Client {
     // Reader-owned Ping block state used to send `MPC_Ping` replies from
     // UDPRead order before main/writer observes the packet.
     reader_ping_state: Arc<Mutex<ReaderPingState>>,
+    // Reader-owned mirror of Delphi fields mutated directly inside UDPRead.
+    // Writer copies it back into `Client` before writer/reconnect ticks.
+    reader_transport_state: Arc<Mutex<ReaderTransportState>>,
+    reader_transport_seen_seq: u64,
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
@@ -3996,6 +4198,7 @@ impl Client {
         let reader_wake_pending = Arc::new(AtomicBool::new(false));
         let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
         let reader_ping_state = Arc::new(Mutex::new(ReaderPingState::new()));
+        let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
         let total_recv_shared = Arc::new(AtomicU64::new(0));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
@@ -4077,6 +4280,8 @@ impl Client {
             tmp_send_size: 0,
             reader_protocol,
             reader_ping_state,
+            reader_transport_state,
+            reader_transport_seen_seq: 0,
             recvd_slider: Slider::new(),
             slicer: Arc::new(Mutex::new(slicing::SlicingReceiver::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
@@ -4274,6 +4479,98 @@ impl Client {
         if let Some(ev) = new_ev {
             self.fire_lifecycle(ev);
         }
+    }
+
+    fn publish_transport_state_from_client(&mut self) {
+        let seq = {
+            let mut state = self.reader_transport_state.lock().unwrap();
+            state.connected = self.connected;
+            state.authorized = self.authorized;
+            state.last_online = self.last_online;
+            state.total_recv = self.total_recv;
+            state.auth_status = self.auth_status;
+            state.need_connect = self.need_connect;
+            state.soft_reconnect = self.soft_reconnect;
+            state.waiting_hello = self.waiting_hello;
+            state.client_token = self.client_token;
+            state.server_token = self.server_token;
+            state.peer_app_token = self.peer_app_token;
+            state.encode_key = self.encode_key;
+            state.decode_key = self.decode_key;
+            state.round_trip_delay = self.round_trip_delay;
+            state.actual_pmtu = self.actual_pmtu;
+            state.rs = self.rs;
+            state.overheat = self.overheat;
+            state.server_time_delta = self.server_time_delta;
+            state.global_timing_orders = self.global_timing_orders;
+            state.net_lag_ping = self.net_lag_ping;
+            state.can_send_rate = self.can_send_rate;
+            state.used_sliced_limit = self.used_sliced_limit;
+            state.ping_count = self.ping_count;
+            state.last_sent_hello = self.last_sent_hello;
+            state.waiting_hello_start = self.waiting_hello_start;
+            state.last_need_hello_again = self.last_need_hello_again;
+            state.bump();
+            state.seq
+        };
+        self.reader_transport_seen_seq = seq;
+    }
+
+    fn sync_transport_state_from_reader(&mut self) {
+        let (state, recv_bps_pending) = {
+            let mut state = self.reader_transport_state.lock().unwrap();
+            let recv_bps_pending = state.recv_bps_pending;
+            state.recv_bps_pending = 0;
+            (state.clone(), recv_bps_pending)
+        };
+        if state.seq == self.reader_transport_seen_seq {
+            if recv_bps_pending != 0 {
+                self.track_recv(recv_bps_pending, state.last_online);
+            }
+            return;
+        }
+        self.reader_transport_seen_seq = state.seq;
+
+        self.connected = state.connected;
+        self.total_recv = state.total_recv;
+        self.last_online = state.last_online;
+        if recv_bps_pending != 0 {
+            self.track_recv(recv_bps_pending, state.last_online);
+        }
+        self.auth_status = state.auth_status;
+        self.authorized = state.authorized;
+        self.need_connect = state.need_connect;
+        self.soft_reconnect = state.soft_reconnect;
+        self.waiting_hello = state.waiting_hello;
+        self.client_token = state.client_token;
+        self.server_token = state.server_token;
+        let prev_app_token = self.peer_app_token;
+        self.peer_app_token = state.peer_app_token;
+        if prev_app_token != 0 && prev_app_token != state.peer_app_token {
+            self.indexes_fetch_in_flight = false;
+            self.tracked_indexes_peer_app_token = 0;
+            self.fire_lifecycle(LifecycleEvent::ServerRestart);
+        }
+        self.encode_key = state.encode_key;
+        self.decode_key = state.decode_key;
+        self.encode_cipher =
+            (self.encode_key != [0; 16]).then(|| crate::crypto::cipher_from_key(&self.encode_key));
+        self.round_trip_delay = state.round_trip_delay;
+        self.actual_pmtu = state.actual_pmtu;
+        self.global_timing_orders = state.global_timing_orders;
+        self.overheat = state.overheat;
+        self.rs = state.rs;
+        self.server_time_delta = state.server_time_delta;
+        self.server_time_delta_handle
+            .store(state.server_time_delta.to_bits(), Ordering::Relaxed);
+        set_server_time_delta_global(state.server_time_delta);
+        self.net_lag_ping = state.net_lag_ping;
+        self.can_send_rate = state.can_send_rate;
+        self.used_sliced_limit = state.used_sliced_limit;
+        self.ping_count = state.ping_count;
+        self.last_sent_hello = state.last_sent_hello;
+        self.waiting_hello_start = state.waiting_hello_start;
+        self.last_need_hello_again = state.last_need_hello_again;
     }
 
     /// Public API: queue a command for sending through the owning client loop.
@@ -6012,6 +6309,7 @@ impl Client {
         self.force_disconnect = true;
         self.authorized = false;
         self.auth_status = AuthStatus::Base;
+        self.publish_transport_state_from_client();
     }
 
     /// Active-library entry point: run the client with an integrated
@@ -6264,6 +6562,8 @@ impl Client {
         let reader_wake_pending = Arc::clone(&self.reader_wake_pending);
         let reader_protocol = Arc::clone(&self.reader_protocol);
         let reader_ping_state = Arc::clone(&self.reader_ping_state);
+        self.publish_transport_state_from_client();
+        let reader_transport_state = Arc::clone(&self.reader_transport_state);
         let server_time_delta_handle = Arc::clone(&self.server_time_delta_handle);
         let slicer = Arc::clone(&self.slicer);
         let total_sent = Arc::clone(&self.total_sent);
@@ -6304,6 +6604,7 @@ impl Client {
                     reader_wake_pending,
                     reader_protocol,
                     reader_ping_state,
+                    reader_transport_state,
                     server_time_delta_handle,
                     slicer,
                     total_sent,
@@ -6347,6 +6648,7 @@ impl Client {
         recv_bytes: u64,
         timestamp_ms: i64,
         epoch: u32,
+        apply_recv_effects_first: bool,
     ) {
         pending.lock().unwrap().push(ReaderDecodedMsg {
             cmd,
@@ -6356,7 +6658,7 @@ impl Client {
             recv_bytes,
             timestamp_ms,
             epoch,
-            apply_recv_effects: true,
+            apply_recv_effects: apply_recv_effects_first,
             sliced_stats: None,
             ping_update: None,
             handshake_update: None,
@@ -6810,10 +7112,11 @@ impl Client {
         recv_bytes: u64,
         timestamp_ms: i64,
         epoch: u32,
+        apply_recv_effects_first: bool,
     ) -> Vec<ReaderDecodedMsg> {
         let mut out = Vec::new();
         let mut push_decoded = |raw_cmd: u8, data: &[u8]| {
-            let apply_recv_effects = out.is_empty();
+            let apply_recv_effects = apply_recv_effects_first && out.is_empty();
             let decoded = Self::decode_data_read_int_payload_shared(reader_protocol, raw_cmd, data);
             let (cmd, payload) = decoded
                 .map(|(cmd, payload)| (cmd, Some(payload)))
@@ -6874,7 +7177,7 @@ impl Client {
                     recv_bytes,
                     timestamp_ms,
                     epoch,
-                    apply_recv_effects: true,
+                    apply_recv_effects: apply_recv_effects_first,
                     sliced_stats: None,
                     ping_update: None,
                     handshake_update: None,
@@ -7280,6 +7583,7 @@ impl Client {
         self.last_sent_hello = cur_tm;
         self.waiting_hello = true;
         self.waiting_hello_start = cur_tm;
+        self.publish_transport_state_from_client();
     }
 
     fn check_offline_reconnect(&mut self, cur_tm: i64) {
@@ -7305,6 +7609,7 @@ impl Client {
         self.waiting_hello = true;
         self.send_hello_again();
         self.last_sent_hello = cur_tm;
+        self.publish_transport_state_from_client();
     }
 
     fn check_reconnect_timeout(&mut self, cur_tm: i64) {
@@ -7317,6 +7622,7 @@ impl Client {
             self.force_disconnect = true;
             self.need_connect = true;
             self.waiting_hello = false;
+            self.publish_transport_state_from_client();
         }
     }
 
@@ -7327,6 +7633,7 @@ impl Client {
             self.soft_reconnect = false;
             self.force_disconnect = true;
             self.need_connect = true;
+            self.publish_transport_state_from_client();
         }
     }
 
@@ -7345,6 +7652,7 @@ impl Client {
         self.connected = false;
         self.authorized = false;
         self.force_disconnect = false;
+        self.publish_transport_state_from_client();
     }
 
     /// Matches TMoonProtoClient.Reset (IntStruct.pas:972-1000)
@@ -7386,6 +7694,7 @@ impl Client {
         // `Err(Disconnected)` → потребитель делает re-request с новым UID. Иначе
         // зависнут до DEFAULT_PENDING_CANDLES_TIMEOUT_MS.
         self.pending_candles.lock().unwrap().clear();
+        self.publish_transport_state_from_client();
     }
 
     fn bind_socket(&mut self, cur_tm: i64) {
@@ -8529,6 +8838,7 @@ mod api_pending_dispatch_tests {
             64,
             123,
             client.current_reader_epoch,
+            true,
         );
 
         assert_eq!(decoded.len(), 1);
@@ -8637,6 +8947,7 @@ mod api_pending_dispatch_tests {
             64,
             10,
             client.current_reader_epoch,
+            true,
         );
         assert_eq!(decoded0.len(), 1);
         assert!(
@@ -8657,6 +8968,7 @@ mod api_pending_dispatch_tests {
             64,
             20,
             client.current_reader_epoch,
+            true,
         );
         assert_eq!(decoded1.len(), 1);
         assert!(decoded1[0].candles_chunk_consumed);
@@ -11842,6 +12154,7 @@ mod event_loop_fairness_tests {
             77,
             456,
             client.current_reader_epoch,
+            true,
         );
         assert_eq!(decoded.len(), 2);
         assert!(decoded[0].apply_recv_effects);
@@ -11996,6 +12309,10 @@ mod service_cmd_tests {
             matches!(client.event_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
             "reader wake must be coalesced and must not carry user/send data"
         );
+    }
+
+    fn reader_transport_snapshot(client: &Client) -> ReaderTransportState {
+        client.reader_transport_state.lock().unwrap().clone()
     }
 
     fn service_ping_payload(
@@ -12194,7 +12511,11 @@ mod service_cmd_tests {
         assert_eq!(ack.flags[0], 0b1010_0101);
         assert_eq!(decoded.cmd, Command::SlicedACK as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        assert_eq!(
+            reader_transport_snapshot(&client).total_recv,
+            packet.len() as u64
+        );
         expect_single_reader_wake(&client);
     }
 
@@ -12249,7 +12570,11 @@ mod service_cmd_tests {
         );
         assert_eq!(decoded.cmd, Command::Sliced as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        assert_eq!(
+            reader_transport_snapshot(&client).total_recv,
+            packet.len() as u64
+        );
         expect_single_reader_wake(&client);
     }
 
@@ -12300,7 +12625,11 @@ mod service_cmd_tests {
         );
         assert_eq!(decoded.cmd, Command::SizeTest as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        assert_eq!(
+            reader_transport_snapshot(&client).total_recv,
+            packet.len() as u64
+        );
         expect_single_reader_wake(&client);
     }
 
@@ -12344,7 +12673,11 @@ mod service_cmd_tests {
         assert_eq!(&ack_payload[3..5], &test_size.to_le_bytes());
         assert_eq!(decoded.cmd, Command::ProbeMTU as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        assert_eq!(
+            reader_transport_snapshot(&client).total_recv,
+            packet.len() as u64
+        );
         expect_single_reader_wake(&client);
     }
 
@@ -12394,8 +12727,19 @@ mod service_cmd_tests {
         );
         assert_eq!(decoded.cmd, Command::Ping as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&ping[..]));
-        assert!(decoded.apply_recv_effects);
+        assert!(
+            !decoded.apply_recv_effects,
+            "production reader already applied UDPRead recv side effects into shared transport state"
+        );
         assert!(decoded.ping_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert_eq!(reader_state.round_trip_delay, 123);
+        assert_eq!(reader_state.actual_pmtu, 8_224);
+        assert_eq!(reader_state.global_timing_orders, 456);
+        assert_eq!(reader_state.ping_count, 1);
+        assert_eq!(reader_state.total_recv, packet.len() as u64);
+        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
+        assert!(!reader_state.need_connect);
         expect_single_reader_wake(&client);
 
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -12475,8 +12819,14 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::WhoAreYou as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
         assert!(decoded.handshake_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert_eq!(reader_state.server_token, server_token);
+        assert_eq!(reader_state.peer_app_token, peer_app_token);
+        assert_eq!(reader_state.client_token, token_before.wrapping_add(1));
+        assert_eq!(reader_state.encode_key, encode_key);
+        assert_eq!(reader_state.decode_key, decode_key);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
@@ -12521,8 +12871,13 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::Fine as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
         assert!(decoded.handshake_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert!(reader_state.authorized);
+        assert_eq!(reader_state.auth_status, AuthStatus::AuthDone);
+        assert!(!reader_state.need_connect);
+        assert!(!reader_state.waiting_hello);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
@@ -12552,6 +12907,9 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::WrongHello as u8);
         assert!(decoded.handshake_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
+        assert!(!reader_state.waiting_hello);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
@@ -12581,6 +12939,12 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::WantNewHello as u8);
         assert!(decoded.handshake_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert_eq!(reader_state.last_sent_hello, NEVER_SENT_MS);
+        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
+        assert!(!reader_state.authorized);
+        assert!(reader_state.need_connect);
+        assert!(!reader_state.soft_reconnect);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
@@ -12612,6 +12976,11 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::NeedHelloAgain as u8);
         assert!(decoded.handshake_update.is_some());
+        let reader_state = reader_transport_snapshot(&client);
+        assert!(reader_state.waiting_hello);
+        assert_eq!(reader_state.waiting_hello_start, decoded.timestamp_ms);
+        assert_eq!(reader_state.last_need_hello_again, decoded.timestamp_ms);
+        assert_eq!(reader_state.last_sent_hello, NEVER_SENT_MS);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
@@ -12656,7 +13025,11 @@ mod service_cmd_tests {
         let decoded = client.pending_reader_decoded.lock().unwrap().pop().unwrap();
         assert_eq!(decoded.cmd, Command::UI as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&[0xAA, 0xBB][..]));
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        assert_eq!(
+            reader_transport_snapshot(&client).total_recv,
+            packet.len() as u64
+        );
         expect_single_reader_wake(&client);
     }
 
@@ -12685,7 +13058,12 @@ mod service_cmd_tests {
 
         assert_eq!(decoded.cmd, Command::UI as u8);
         assert!(decoded.payload.is_none());
-        assert!(decoded.apply_recv_effects);
+        assert!(!decoded.apply_recv_effects);
+        let reader_state = reader_transport_snapshot(&client);
+        assert!(reader_state.connected);
+        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
+        assert_eq!(reader_state.total_recv, decoded.recv_bytes);
+        assert_eq!(reader_state.last_online, decoded.timestamp_ms);
         expect_single_reader_wake(&client);
 
         let mut mode = RunMode::Callback {
