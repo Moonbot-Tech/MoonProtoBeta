@@ -507,7 +507,7 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
     ) {
         match cmd {
-            Command::Order => self.client_new_data_order(payload, out),
+            Command::Order => self.client_new_data_order(payload, now_ms, out),
             Command::OrderBook => self.client_new_data_order_book(payload, now_ms, out),
             Command::TradesStream => self.client_new_data_trades_stream(payload, now_ms, out),
             Command::TradesResendResponse => {
@@ -525,10 +525,10 @@ impl EventDispatcher {
         }
     }
 
-    fn client_new_data_order(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+    fn client_new_data_order(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
         match TradeCommand::parse(payload) {
-            Some(TradeCommand::AllStatuses(snap)) => self.process_all_statuses(snap, out),
-            Some(tc) => self.process_command_order(tc, out),
+            Some(TradeCommand::AllStatuses(snap)) => self.process_all_statuses(snap, now_ms, out),
+            Some(tc) => self.process_command_order(tc, now_ms, out),
             None => out.push(Event::ParseFailed {
                 cmd: Command::Order,
                 len: payload.len(),
@@ -537,16 +537,16 @@ impl EventDispatcher {
     }
 
     /// Delphi equivalent: `ClientNewData(MPC_Order)` / `TAllStatuses` branch.
-    fn process_all_statuses(&mut self, snap: AllStatuses, out: &mut Vec<Event>) {
+    fn process_all_statuses(&mut self, snap: AllStatuses, now_ms: i64, out: &mut Vec<Event>) {
         self.orders.begin_snapshot();
         for status in snap.orders {
-            self.process_command_order(TradeCommand::OrderStatus(Box::new(status)), out);
+            self.process_command_order(TradeCommand::OrderStatus(Box::new(status)), now_ms, out);
         }
         out.push(Event::Order(OrderEvent::Snapshot));
     }
 
     /// Delphi equivalent: `TMoonProtoNetClient.ProcessCommandOrder`.
-    fn process_command_order(&mut self, tc: TradeCommand, out: &mut Vec<Event>) {
+    fn process_command_order(&mut self, tc: TradeCommand, now_ms: i64, out: &mut Vec<Event>) {
         if self.drop_new_order_status_without_worker(&tc) {
             return;
         }
@@ -559,8 +559,20 @@ impl EventDispatcher {
         // См. DEVIATION #23.
         self.orders
             .set_server_time_delta(self.current_server_time_delta());
-        let (_apply_result, ev) = self.orders.apply(tc);
+        let (_apply_result, ev) = self.orders.apply_at(tc, now_ms);
         out.push(Event::Order(ev));
+    }
+
+    pub fn tick_orders(&mut self, now_ms: i64) -> Vec<Event> {
+        let mut out = Vec::new();
+        self.tick_orders_into(now_ms, &mut out);
+        out
+    }
+
+    pub(crate) fn tick_orders_into(&mut self, now_ms: i64, out: &mut Vec<Event>) {
+        for ev in self.orders.tick_bulk_replace_timeouts(now_ms) {
+            out.push(Event::Order(ev));
+        }
     }
 
     /// Delphi `ProcessCommandOrder` first tries `WCache.TryFind(TaskUID)`.
@@ -1014,9 +1026,9 @@ mod tests {
     use crate::commands::strat::build_snapshot_request;
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
-        build_all_statuses_request, BaseCommandHeader, MarketCommandHeader, OrderCompact,
-        OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, StopSettings, TradeCommand,
-        TradeCtx, TradeEpochHeader,
+        build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
+        OrderCompact, OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, StopSettings,
+        TradeCommand, TradeCtx, TradeEpochHeader,
     };
 
     static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1261,6 +1273,7 @@ mod tests {
                 9,
                 OrderWorkerStatus::SellSet,
             ))),
+            1000,
             &mut out,
         );
         d.process_command_order(
@@ -1271,6 +1284,7 @@ mod tests {
                 9,
                 OrderWorkerStatus::SelLDone,
             ))),
+            1001,
             &mut out,
         );
         d.process_command_order(
@@ -1292,6 +1306,7 @@ mod tests {
                 ord_type: OrderType::Sell,
                 flags: trace_flags::IS_FINISH,
             }),
+            1002,
             &mut out,
         );
 
@@ -1324,6 +1339,7 @@ mod tests {
                 9,
                 OrderWorkerStatus::BuySet,
             ))),
+            1000,
             &mut out,
         );
 
@@ -1340,10 +1356,58 @@ mod tests {
         let mut status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
         status.from_cache = true;
 
-        d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), &mut out);
+        d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), 1000, &mut out);
 
         assert!(out.is_empty());
         assert!(d.orders.get(uid).is_none());
+    }
+
+    #[test]
+    fn dispatcher_tick_orders_clears_bulk_replace_timeout_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x79;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            1000,
+            &mut out,
+        );
+        d.process_command_order(
+            TradeCommand::BulkReplaceNotify(BulkReplaceNotify {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 28,
+                        ver: 3,
+                        uid: 0,
+                    },
+                    currency: 7,
+                    platform: 9,
+                    market_name: "BTCUSDT".to_string(),
+                },
+                order_type: OrderType::Buy,
+                uids: vec![uid],
+            }),
+            1100,
+            &mut out,
+        );
+        assert!(d.orders.get(uid).unwrap().bulk_replace_buy);
+
+        assert!(d.tick_orders(6100).is_empty());
+        let events = d.tick_orders(6101);
+
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Order(OrderEvent::Updated(found))] if *found == uid
+        ));
+        assert!(!d.orders.get(uid).unwrap().bulk_replace_buy);
     }
 
     #[test]

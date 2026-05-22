@@ -24,6 +24,7 @@ use crate::commands::trade::*;
 use std::collections::{HashMap, VecDeque};
 
 const PRICE_EPS: f64 = 0.000000009;
+const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
@@ -208,6 +209,8 @@ pub struct Order {
     server_latest_epoch: [u16; 10],
     /// Snapshot flag — обновляется при TAllStatuses.
     pub(crate) snapshot_flag: u8,
+    bulk_replace_buy_sent_ms: i64,
+    bulk_replace_sell_sent_ms: i64,
     last_buy_actual_price: f64,
     last_sell_actual_price: f64,
 }
@@ -262,6 +265,8 @@ impl Order {
             sell_reason_code: 0,
             server_latest_epoch: [0; 10],
             snapshot_flag: 0,
+            bulk_replace_buy_sent_ms: 0,
+            bulk_replace_sell_sent_ms: 0,
             last_buy_actual_price: 0.0,
             last_sell_actual_price: 0.0,
         }
@@ -392,6 +397,10 @@ impl Orders {
     /// **Замечание**: команды-запросы от клиента (AllStatusesRequest, OrderStatusRequest)
     /// возвращают `Ignored / NotApplicable` — это **исходящие** команды, не входящие.
     pub fn apply(&mut self, cmd: TradeCommand) -> (ApplyResult, OrderEvent) {
+        self.apply_at(cmd, 0)
+    }
+
+    pub(crate) fn apply_at(&mut self, cmd: TradeCommand, now_ms: i64) -> (ApplyResult, OrderEvent) {
         let uid = cmd.uid();
         match cmd {
             // --- Full status (создание или обновление) ---
@@ -540,9 +549,11 @@ impl Orders {
                 if rr.order_type == OrderType::Sell {
                     entry.sell_price = rr.price;
                     entry.bulk_replace_sell = false;
+                    entry.bulk_replace_sell_sent_ms = 0;
                 } else {
                     entry.buy_price = rr.price;
                     entry.bulk_replace_buy = false;
+                    entry.bulk_replace_buy_sent_ms = 0;
                 }
 
                 (ApplyResult::Applied, OrderEvent::Updated(uid))
@@ -625,8 +636,10 @@ impl Orders {
                     if let Some(entry) = self.map.get_mut(&uid_replaced) {
                         if brn.order_type == OrderType::Sell {
                             entry.bulk_replace_sell = true;
+                            entry.bulk_replace_sell_sent_ms = now_ms.max(1);
                         } else {
                             entry.bulk_replace_buy = true;
+                            entry.bulk_replace_buy_sent_ms = now_ms.max(1);
                         }
                     }
                 }
@@ -803,6 +816,38 @@ impl Orders {
             }
         }
         removed
+    }
+
+    /// Delphi `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` clears a pending
+    /// replace flag when no replace response arrived for 5000 ms.
+    pub(crate) fn tick_bulk_replace_timeouts(&mut self, now_ms: i64) -> Vec<OrderEvent> {
+        let mut events = Vec::new();
+        for entry in self.map.values_mut() {
+            let mut changed = false;
+
+            if entry.bulk_replace_buy
+                && entry.bulk_replace_buy_sent_ms > 0
+                && (now_ms - entry.bulk_replace_buy_sent_ms).abs() > BULK_REPLACE_TIMEOUT_MS
+            {
+                entry.bulk_replace_buy = false;
+                entry.bulk_replace_buy_sent_ms = 0;
+                changed = true;
+            }
+
+            if entry.bulk_replace_sell
+                && entry.bulk_replace_sell_sent_ms > 0
+                && (now_ms - entry.bulk_replace_sell_sent_ms).abs() > BULK_REPLACE_TIMEOUT_MS
+            {
+                entry.bulk_replace_sell = false;
+                entry.bulk_replace_sell_sent_ms = 0;
+                changed = true;
+            }
+
+            if changed {
+                events.push(OrderEvent::Updated(entry.uid));
+            }
+        }
+        events
     }
 
     /// После TAllStatuses найти ордера, которых **нет** в свежем snapshot.
@@ -1317,6 +1362,34 @@ mod tests {
         let quantity_base = orders.get(1).unwrap().buy_order.quantity_base;
         assert_eq!(quantity_base, 12.5);
         assert_eq!(orders.get(1).unwrap().buy_price, 123.0);
+    }
+
+    #[test]
+    fn bulk_replace_timeout_clears_flag_after_5000ms_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::Buy,
+            uids: vec![1],
+        };
+        let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+        assert!(orders.get(1).unwrap().bulk_replace_buy);
+
+        assert!(orders.tick_bulk_replace_timeouts(6000).is_empty());
+        assert!(orders.get(1).unwrap().bulk_replace_buy);
+
+        let events = orders.tick_bulk_replace_timeouts(6001);
+        assert!(matches!(events.as_slice(), [OrderEvent::Updated(1)]));
+        assert!(!orders.get(1).unwrap().bulk_replace_buy);
     }
 
     #[test]

@@ -1510,6 +1510,26 @@ Still not done:
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` body.
 
+### 2026-05-22 - Phase 1 partial: BulkReplaceNotify timeout
+
+Done:
+
+- Fixed `TBulkReplaceNotify` worker-loop parity. Delphi sets
+  `p*Order.OrderReplace := true` and `ReplaceSentTime := GetTimeMS`; later
+  `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` clears the flag if no
+  `TOrderReplaceResponse` arrived for more than 5000 ms.
+- Rust now stores per-side bulk-replace sent timestamps, sets them from the
+  dispatcher `now_ms`, clears them on `OrderReplaceResponse`, and periodically
+  clears stale flags through the dispatcher/order tick.
+- The active client run loop now calls the order tick in dispatcher mode, next
+  to the existing trades tick.
+- Added state and dispatcher tests for the 5000 ms timeout.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / virtual-worker side effects.
+
 ### 2026-05-22 - Phase 1 partial: new OrderStatus market guard
 
 Done:

@@ -2597,6 +2597,7 @@ impl WriterRuntime<'_> {
                 // В Callback mode TradesEvent попадает к потребителю напрямую,
                 // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
                 self.periodic_trades_tick(cur_tm, mode);
+                self.periodic_orders_tick(cur_tm, mode);
 
                 self.transport_reconnect_tail_tick(cur_tm);
             } else {
@@ -3009,6 +3010,20 @@ impl WriterRuntime<'_> {
                 event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
                 on_event.drain_events(event_buf, dispatcher);
             }
+        }
+    }
+
+    fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if let RunMode::Dispatcher {
+            dispatcher,
+            on_event,
+            event_buf,
+            ..
+        } = mode
+        {
+            event_buf.clear();
+            dispatcher.tick_orders_into(cur_tm, event_buf);
+            on_event.drain_events(event_buf, dispatcher);
         }
     }
 

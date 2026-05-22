@@ -57,6 +57,10 @@ Terminal statuses and `TOrderNotFound` are removed in a deferred flush after the
 current reader batch. This matches Delphi's `ProcessCommandOrder`: the worker
 remains addressable long enough for immediately following visual packets such as
 `TOrderTracePoint`, then `OrderEvent::Removed` is emitted.
+`TBulkReplaceNotify` sets `bulk_replace_buy` / `bulk_replace_sell` for found
+orders. `TOrderReplaceResponse` clears the matching flag; if no response arrives,
+the active dispatcher clears the flag after 5000 ms, matching Delphi's
+`ReplaceSentTime` timeout.
 
 ## `Order`
 
