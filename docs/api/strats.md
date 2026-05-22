@@ -148,10 +148,14 @@ Single(f32)
 Prefer `Client` wrappers when the caller owns the client thread:
 
 ```rust
-client.strat_snapshot_request();
 client.strat_sell_price_update(strategy_id, sell_price);
 client.strat_delete(strategy_id, folder_path);
 ```
+
+`strat_snapshot_request()` exists only as an explicit protocol/testing tool.
+Delphi server ignores `TStratSnapshotRequest` received from a client; normal
+active-library code should not call it. The real flow is the reverse: the server
+sends `TStratSnapshotRequest`, and the dispatcher answers automatically.
 
 `strat_sell_price_update` is the Delphi client-to-server command. The server
 applies it to its local strategy if the strategy exists; the active client does

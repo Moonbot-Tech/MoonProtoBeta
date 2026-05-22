@@ -2170,6 +2170,10 @@ impl ClientSender {
     }
 
     /// Send `TStratSnapshotRequest`.
+    ///
+    /// Protocol/testing tool only: Delphi server ignores this command when it
+    /// is received from a client. Normal active-library flow answers the server
+    /// request through `EventDispatcher`.
     pub fn strat_snapshot_request(&self) {
         let raw = crate::commands::strat::build_snapshot_request(rand::random());
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
@@ -6736,8 +6740,11 @@ impl Client {
     //  Аудит docs_api B-02: было 5 build_* функций без Client-обёрток.
     // ====================================================================
 
-    /// Send `TStratSnapshotRequest` (Strat CmdId=1, High) to request a strategy
-    /// snapshot from the server.
+    /// Send `TStratSnapshotRequest` (Strat CmdId=1, High).
+    ///
+    /// Protocol/testing tool only: Delphi server ignores this command when it
+    /// is received from a client. Normal active-library flow answers the server
+    /// request through `EventDispatcher`.
     pub fn strat_snapshot_request(&self) {
         let raw = crate::commands::strat::build_snapshot_request(rand::random());
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
