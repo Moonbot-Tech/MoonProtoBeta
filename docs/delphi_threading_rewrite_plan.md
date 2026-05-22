@@ -1908,3 +1908,29 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining outgoing order/UI
   actions: join/split/close/sell and per-order cancel/replace/panic.
+
+### 2026-05-22 - Phase 1 partial: typed outgoing domain gate before Init
+
+Done:
+
+- Fixed the typed/high-level outgoing domain API so it cannot put domain wire
+  commands into send queues before the one-time Init opens `domain_ready`.
+- Added a shared `domain_ready` mirror for `ClientSender`; `Client` and sender
+  now use the same gate.
+- Registry-aware subscriptions still record the latest user intent before Init,
+  but they send no Engine API/UI subscription packet until Init flushes the
+  registry or a later post-Init call changes the intent.
+- Stateful order helpers that mutate `Orders` are now gated before the local
+  mutation, so pre-Init replace/cancel/stop/VStop/immune calls leave the local
+  cache unchanged and queue nothing.
+- Raw `send_cmd`, `send_cmd_keyed`, and raw Engine API helpers remain advanced
+  tools and intentionally bypass this typed-domain gate.
+- Added tests proving pre-Init subscription intent has no wire send,
+  pre-Init stateful order actions do not mutate local orders, and Init flushes
+  pre-Init registry subscriptions once.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining outgoing
+  order/UI/strategy/balance command wrappers against the Delphi active-client
+  call sites.

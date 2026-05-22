@@ -14,22 +14,23 @@ client.unsubscribe_orderbooks(["SOLUSDT"]);
 client.unsubscribe_all_orderbooks();
 ```
 
-Subscriptions are stored in the client registry. Before Init, reconnect does not
-emit subscription traffic. After the one-time Init completes, reconnect replays
-the registry automatically and refetches indexes when needed. Unsubscribe
-removes that market from the registry and sends `emk_UnsubscribeOrderBook` when
-the client loop is running.
+Subscriptions are stored in the client registry. Before Init, public subscribe
+and unsubscribe calls update only that registry and send no Engine API wire
+packet. The one-time Init flushes the current registry once. After Init,
+reconnect replays the registry automatically and refetches indexes when needed.
+Unsubscribe removes that market from the registry and sends
+`emk_UnsubscribeOrderBook` only after `domain_ready`.
 Use the batched helpers when a UI toggles several markets at once; they preserve
 one registry update and one batched Engine API request. Use
 `unsubscribe_all_orderbooks` to clear the registry and send the protocol's
 empty-market-list unsubscribe request.
 
-The public call updates the reconnect registry immediately and appends the wire
-Engine API request to the Delphi-style send queues. On the wire,
-`emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` are Engine API requests
-and their success or failure is reported as a later `Event::EngineResponse`.
-Orderbook snapshots and diffs then arrive asynchronously on the `MPC_OrderBook`
-stream.
+The public call always updates the reconnect registry immediately. Once Init is
+open, changed subscriptions also append the wire Engine API request to the
+Delphi-style send queues. On the wire, `emk_SubscribeOrderBook` /
+`emk_UnsubscribeOrderBook` are Engine API requests and their success or failure
+is reported as a later `Event::EngineResponse`. Orderbook snapshots and diffs
+then arrive asynchronously on the `MPC_OrderBook` stream.
 
 The server subscription is per market name. `OrderBookKind` is not part of the
 subscribe request; it is carried by incoming orderbook packets and by full-book

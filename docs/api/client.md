@@ -86,10 +86,12 @@ keep callbacks short and move slow UI/work to another queue or thread.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
-packets and reader-decoded delivery. Subscription methods update the reconnect
-registry immediately and append their Engine API/UI wire commands to the same
-send queues. The public guarantee is no local capacity cap: dense incoming
-streams do not drop queued user commands or Engine API requests.
+packets and reader-decoded delivery. Typed domain helpers are gated by Init:
+before `domain_ready`, subscriptions update only the reconnect registry and
+order/UI/strategy/balance wrappers queue no wire command. After Init, the same
+typed helpers append their Engine API/UI/domain wire commands to the send
+queues. The public guarantee is no local capacity cap: dense incoming streams
+do not drop queued user commands or Engine API requests.
 
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`:
@@ -204,6 +206,14 @@ dispatcher sends the current local strategy list; an empty list is a valid
 reply. `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value independent from `subscribe_trades`.
+
+Typed outgoing domain helpers use the same Init gate. Before Init:
+`subscribe_*` / `unsubscribe_*` record the latest registry intent but do not put
+subscription packets on the wire; trade wrappers, UI wrappers, strategy
+wrappers, and `balance_request_refresh` queue nothing. Stateful order helpers
+such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
+cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers are
+advanced escape hatches and can bypass this typed-domain gate.
 
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
 needs custom progress UI between connection readiness and the one-time init
@@ -355,10 +365,11 @@ client.unsubscribe_all_orderbooks();
 client.unsubscribe_all_trades();
 ```
 
-The registry records the latest subscription intent. Before Init, transport
-`Fine` does not replay it. After the one-time Init completes, reconnect replays
-the registry automatically, so streams continue without the application running
-Init again.
+The registry records the latest subscription intent. Before Init, public
+subscription calls update that registry but do not send Engine API/UI
+subscription packets. The one-time Init flushes the pre-init registry once, and
+later reconnects replay the registry automatically, so streams continue without
+the application running Init again.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.
@@ -379,10 +390,11 @@ std::thread::spawn(move || {
 });
 ```
 
-Fire-and-forget command methods append into the same unbounded send queues as
-`Client::send_cmd`. Subscription methods update the shared reconnect registry
-immediately and append the resulting wire commands into those send queues.
-Neither path has a local capacity cap. Use `try_*` methods
+Fire-and-forget typed command methods append into the same unbounded send queues
+as `Client::send_cmd` after Init. Before Init, typed domain methods are gated:
+subscription methods update the shared reconnect registry only, and trade/UI/
+strategy/balance wrappers queue nothing. Neither path has a local capacity cap.
+Use `try_*` methods
 when the UI needs explicit feedback that the client is still alive:
 
 ```rust
@@ -413,9 +425,11 @@ intent there before calling the matching `Client`/`ClientSender` helper.
 
 The sender also exposes raw `send_cmd`, `send_cmd_keyed`, and
 `send_api_request` methods for tools that already have a serialized payload
-from `commands::*` builders. `send_api_request` is fire-and-forget: it does not
-register a pending receiver, so the response is delivered through the running
-dispatcher as `Event::EngineResponse`.
+from `commands::*` builders. These raw methods do not update typed library
+state and do not wait for `domain_ready`; normal applications should prefer the
+typed helpers. `send_api_request` is fire-and-forget: it does not register a
+pending receiver, so the response is delivered through the running dispatcher as
+`Event::EngineResponse`.
 
 ```rust
 use moonproto::{Command, SendPriority};

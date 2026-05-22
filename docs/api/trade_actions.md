@@ -4,6 +4,14 @@
 instead of manually building `commands::trade::*` payloads: the wrappers set the
 correct command class, encryption, priority, retry count, and UKey dedup.
 
+Trade wrappers are typed domain API and are gated by Init. Before
+`run_init_sequence` / `connect_and_init` opens `domain_ready`, market-level
+wrappers queue no wire command, boolean wrappers return `false`, and
+market-level multi-order wrappers return `0` where applicable. Stateful helpers
+that require `&mut Orders` also do not mutate the local order cache before Init.
+Raw `send_cmd` / `send_cmd_keyed` can bypass this gate only for advanced tools
+that intentionally own the protocol consequences.
+
 ## Trade Context
 
 ```rust
@@ -214,9 +222,10 @@ std::thread::spawn(move || {
 take the same `&mut Orders` argument as `Client`. Boolean helpers return
 `false` and queue nothing when the Delphi active-client gate does not find a
 matching local order or when a send-if-changed/replace-in-flight check
-suppresses the packet. Market-level `turn_panic_sell` returns the number of
-queued per-order commands; `switch_panic_sell_by_market` returns the resulting
-button state.
+suppresses the packet. They also return `false` before Init, without mutating
+`Orders`. Market-level `turn_panic_sell` returns the number of queued per-order
+commands, or `0` before Init; `switch_panic_sell_by_market` returns the
+resulting button state after Init and `false` before Init.
 Because `Orders` is the local Delphi-equivalent order-state owner, call these
 state-aware helpers on the code path that owns mutable dispatcher state. If UI
 code runs on another thread, marshal the intent to that owner instead of
@@ -229,7 +238,8 @@ One-shot helpers that must wait for an applied state change, such as
 Raw `ClientSender::send_cmd` / `send_cmd_keyed` remain available for advanced
 tools that intentionally build custom payloads with `commands::*`. These calls
 append directly into the client's Delphi-style send queues; they do not wait
-behind accepted UDP packets or subscription-control events.
+behind accepted UDP packets or subscription-control events and do not enforce
+the typed-domain Init gate.
 
 ## UKey Dedup
 

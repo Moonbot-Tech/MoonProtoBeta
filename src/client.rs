@@ -1138,6 +1138,7 @@ impl std::error::Error for SubscribeError {}
 #[derive(Clone)]
 pub struct ClientSender {
     app_queue_alive: Arc<AtomicBool>,
+    domain_ready: Arc<AtomicBool>,
     send_queues: Arc<Mutex<SendQueues>>,
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
@@ -1145,6 +1146,11 @@ pub struct ClientSender {
 }
 
 impl ClientSender {
+    #[inline]
+    fn domain_ready_for_typed_send(&self) -> bool {
+        self.app_queue_alive.load(Ordering::Relaxed) && self.domain_ready.load(Ordering::Relaxed)
+    }
+
     /// Subscribe to an orderbook stream and remember the intent for reconnect
     /// restore.
     pub fn subscribe_orderbook(&self, market_name: &str) {
@@ -1229,7 +1235,7 @@ impl ClientSender {
             .unwrap()
             .orderbook_subs
             .insert(market_name.clone());
-        if newly_added {
+        if newly_added && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::subscribe_order_book(&[
                 &market_name,
             ]))?;
@@ -1249,7 +1255,7 @@ impl ClientSender {
             .unwrap()
             .orderbook_subs
             .remove(&market_name);
-        if removed {
+        if removed && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[
                 &market_name,
             ]))?;
@@ -1282,7 +1288,7 @@ impl ClientSender {
                 }
             }
         }
-        if !new_names.is_empty() {
+        if !new_names.is_empty() && self.domain_ready_for_typed_send() {
             let refs: Vec<&str> = new_names.iter().map(String::as_str).collect();
             self.try_send_api_request(crate::commands::engine_request::subscribe_order_book(
                 &refs,
@@ -1316,7 +1322,7 @@ impl ClientSender {
                 }
             }
         }
-        if !removed_names.is_empty() {
+        if !removed_names.is_empty() && self.domain_ready_for_typed_send() {
             let refs: Vec<&str> = removed_names.iter().map(String::as_str).collect();
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(
                 &refs,
@@ -1335,6 +1341,9 @@ impl ClientSender {
             .unwrap()
             .orderbook_subs
             .clear();
+        if !self.domain_ready_for_typed_send() {
+            return Ok(());
+        }
         self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[]))
     }
 
@@ -1343,10 +1352,16 @@ impl ClientSender {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        {
+        let changed = {
             let mut registry = self.subscription_registry.lock().unwrap();
+            let new_sub = Some(TradesSubscription { want_mm });
+            let changed = registry.trades_sub != new_sub || registry.mm_orders_sub != Some(want_mm);
             registry.trades_sub = Some(TradesSubscription { want_mm });
             registry.mm_orders_sub = Some(want_mm);
+            changed
+        };
+        if !changed || !self.domain_ready_for_typed_send() {
+            return Ok(());
         }
         self.try_send_api_request(crate::commands::engine_request::subscribe_all_trades(
             want_mm,
@@ -1365,7 +1380,7 @@ impl ClientSender {
             .trades_sub
             .take()
             .is_some();
-        if had_subscription {
+        if had_subscription && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_all_trades())?;
         }
         Ok(())
@@ -1471,7 +1486,56 @@ impl ClientSender {
         self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6)
     }
 
-    fn send_trade(&self, payload: Vec<u8>, max_retries: i32) {
+    fn send_domain_cmd(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        priority: SendPriority,
+        encrypted: bool,
+        max_retries: i32,
+    ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
+        self.send_cmd(data, cmd, priority, encrypted, max_retries);
+        true
+    }
+
+    fn send_domain_cmd_keyed(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        priority: SendPriority,
+        encrypted: bool,
+        max_retries: i32,
+        u_key: UniqueKey,
+    ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
+        self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key);
+        true
+    }
+
+    fn try_send_domain_cmd_keyed(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        priority: SendPriority,
+        encrypted: bool,
+        max_retries: i32,
+        u_key: UniqueKey,
+    ) -> Result<(), SubscribeError> {
+        if !self.domain_ready_for_typed_send() {
+            return Ok(());
+        }
+        self.try_send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key)
+    }
+
+    fn send_trade(&self, payload: Vec<u8>, max_retries: i32) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         self.send_cmd(
             payload,
             Command::Order,
@@ -1479,9 +1543,13 @@ impl ClientSender {
             true,
             max_retries,
         );
+        true
     }
 
-    fn send_trade_keyed(&self, payload: Vec<u8>, max_retries: i32, u_key: UniqueKey) {
+    fn send_trade_keyed(&self, payload: Vec<u8>, max_retries: i32, u_key: UniqueKey) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         self.send_cmd_keyed(
             payload,
             Command::Order,
@@ -1490,6 +1558,7 @@ impl ClientSender {
             max_retries,
             u_key,
         );
+        true
     }
 
     fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
@@ -1565,6 +1634,9 @@ impl ClientSender {
         uid: u64,
         new_price: f64,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, order_type, price)) =
             orders.send_replace_if_requested(uid, new_price, self.now_ms())
         else {
@@ -1596,6 +1668,9 @@ impl ClientSender {
 
     /// Apply Delphi cancel request locally and send `TOrderCancelCommand`.
     pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some(request) = orders.send_cancel_if_requested(uid) else {
             return false;
         };
@@ -1658,6 +1733,9 @@ impl ClientSender {
         market: &str,
         params: crate::commands::trade::MoveAllSellsParams,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         if !orders.has_move_all_sells_candidate(market, params) {
             return false;
         }
@@ -1730,6 +1808,9 @@ impl ClientSender {
         uid: u64,
         stops: &crate::commands::trade::StopSettings,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, status, stops)) = orders.send_stops_if_changed(uid, stops) else {
             return false;
         };
@@ -1756,6 +1837,9 @@ impl ClientSender {
         market_name: &str,
         turn_on: bool,
     ) -> usize {
+        if !self.domain_ready_for_typed_send() {
+            return 0;
+        }
         let requests = orders.turn_panic_sell_by_market(market_name, turn_on);
         let queued = requests.len();
         for request in requests {
@@ -1771,6 +1855,9 @@ impl ClientSender {
         market_name: &str,
         turn_on: bool,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let (panic_sell_on, requests) = orders.switch_panic_sell_by_market(market_name, turn_on);
         for request in requests {
             self.send_panic_sell_request(request);
@@ -1785,6 +1872,9 @@ impl ClientSender {
         uid: u64,
         turn_on: bool,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some(request) = orders.send_panic_sell_if_changed(uid, turn_on) else {
             return false;
         };
@@ -1810,6 +1900,9 @@ impl ClientSender {
         uid: u64,
         items: &[crate::commands::trade::ImmuneItem],
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let applied = orders.set_immune_clicks(items);
         if applied.is_empty() {
             return false;
@@ -1833,6 +1926,9 @@ impl ClientSender {
         price: f64,
         side: crate::commands::trade::FixedPosition,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         if !orders.has_move_all_buys_candidate(market, cmd_type, move_kind, side) {
             return false;
         }
@@ -1853,6 +1949,9 @@ impl ClientSender {
         vstop_level: f64,
         vstop_vol: f64,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, params)) =
             orders.send_vstop_if_changed(uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
         else {
@@ -1906,7 +2005,7 @@ impl ClientSender {
         let mut wire_settings = settings.clone();
         wire_settings.uid = rand::random();
         let raw = crate::commands::ui::build_client_settings(&wire_settings);
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::Sliced,
@@ -1919,13 +2018,13 @@ impl ClientSender {
     /// Send `TSettingsRequest`.
     pub fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TStratStartStopCommand`.
     pub fn ui_strat_start_stop(&self, is_start: bool) {
         let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TStratStartStopCommandV2` with checked strategy items.
@@ -1935,7 +2034,7 @@ impl ClientSender {
         items: &[crate::commands::strat::StratCheckedItem],
     ) {
         let raw = crate::commands::ui::build_strat_start_stop_v2(rand::random(), is_start, items);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TMMOrdersSubscribeCommand`.
@@ -1960,7 +2059,7 @@ impl ClientSender {
         }
         let uid = rand::random();
         let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);
-        self.try_send_cmd_keyed(
+        self.try_send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::High,
@@ -1974,8 +2073,9 @@ impl ClientSender {
     pub fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
             crate::commands::ui::build_update_version(rand::random(), version_name, is_release);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
-        self.mark_server_update_sent();
+        if self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3) {
+            self.mark_server_update_sent();
+        }
     }
 
     /// Send `TEmuTradesCommand`.
@@ -1986,20 +2086,20 @@ impl ClientSender {
         points: &[crate::commands::ui::EmuTradePoint],
     ) {
         let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
-        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TNewMarketNotifyCommand`.
     pub fn ui_new_market_notify(&self) {
         let raw = crate::commands::ui::build_new_market_notify(rand::random());
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TLevManageCommand`.
     pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
         let raw = crate::commands::ui::build_lev_manage(uid, cmd);
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::Sliced,
@@ -2018,59 +2118,61 @@ impl ClientSender {
             markets,
             keys,
         );
-        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TResetProfitCommand`.
     pub fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TArbActivateNotify`.
     pub fn ui_arb_activate_notify(&self, arb_valid: f64) {
         let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TSwitchDexCommand` and mark Delphi `ServerUpdateSent`.
     pub fn ui_switch_dex(&self, dex_name: &str) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_dex(uid, dex_name);
-        self.send_cmd_keyed(
+        if self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::High,
             true,
             3,
             UniqueKey::dex_switch_for(uid),
-        );
-        self.mark_server_update_sent();
+        ) {
+            self.mark_server_update_sent();
+        }
     }
 
     /// Send `TSwitchSpotCommand` and mark Delphi `ServerUpdateSent`.
     pub fn ui_switch_spot(&self, spot_index: u8) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_spot(uid, spot_index);
-        self.send_cmd_keyed(
+        if self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::High,
             true,
             3,
             UniqueKey::spot_switch_for(uid),
-        );
-        self.mark_server_update_sent();
+        ) {
+            self.mark_server_update_sent();
+        }
     }
 
     /// Send `TStratSnapshotRequest`.
     pub fn strat_snapshot_request(&self) {
         let raw = crate::commands::strat::build_snapshot_request(rand::random());
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::Strat,
             SendPriority::Sliced,
@@ -2119,7 +2221,7 @@ impl ClientSender {
     /// Send `TStratDelete` for one strategy or folder.
     pub fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
         let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     /// Send `TStratSellPriceUpdate` for one strategy.
@@ -2129,7 +2231,7 @@ impl ClientSender {
             strategy_id,
             sell_price,
         );
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::Strat,
             SendPriority::High,
@@ -2146,19 +2248,19 @@ impl ClientSender {
         is_delta: bool,
     ) {
         let raw = crate::commands::strat::build_checked_sync(rand::random(), items, is_delta);
-        self.send_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TStratCheckedEcho`.
     pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
         let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     /// Send `TRequestBalanceRefresh`.
     pub fn balance_request_refresh(&self) {
         let raw = crate::commands::balance::build_request_balance_refresh(rand::random());
-        self.send_cmd(raw, Command::Balance, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Balance, SendPriority::High, true, 3);
     }
 
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
@@ -4422,6 +4524,13 @@ pub struct Client {
     /// сам восстанавливает registry через текущие keys / market mapping.
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
 
+    /// Shared mirror of [`Self::domain_ready`] for [`ClientSender`].
+    ///
+    /// Typed/high-level domain APIs use this gate to record pre-init intent
+    /// without putting domain wire commands into send queues before the single
+    /// Init pass opens the Delphi `InitDone` gate.
+    domain_ready_flag: Arc<AtomicBool>,
+
     /// Сохранённый intent первого и единственного init-прохода. Нужен для
     /// post-reconnect restore без повторного `run_init_sequence`.
     domain_restore: DomainRestoreIntent,
@@ -4582,6 +4691,7 @@ impl Client {
         let reader_ping_state = Arc::new(Mutex::new(ReaderPingState::new()));
         let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
         let total_recv_shared = Arc::new(AtomicU64::new(0));
+        let domain_ready_flag = Arc::new(AtomicBool::new(false));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
         // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
@@ -4675,6 +4785,7 @@ impl Client {
             current_reader_epoch: 0,
             cached_server_addr: None,
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
+            domain_ready_flag,
             domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
             pending_candles: Arc::new(Mutex::new(HashMap::new())),
@@ -4765,9 +4876,19 @@ impl Client {
         self.server_token = token;
     }
 
+    fn set_domain_ready(&mut self, ready: bool) {
+        self.domain_ready = ready;
+        self.domain_ready_flag.store(ready, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn domain_ready_for_typed_send(&self) -> bool {
+        self.domain_ready
+    }
+
     #[cfg(test)]
     pub(crate) fn testing_set_domain_ready(&mut self, ready: bool) {
-        self.domain_ready = ready;
+        self.set_domain_ready(ready);
     }
 
     #[cfg(test)]
@@ -5600,6 +5721,7 @@ impl Client {
     pub fn sender(&self) -> ClientSender {
         ClientSender {
             app_queue_alive: Arc::clone(&self.app_queue_alive),
+            domain_ready: Arc::clone(&self.domain_ready_flag),
             send_queues: Arc::clone(&self.send_queues),
             subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
@@ -5786,6 +5908,40 @@ impl Client {
         }
     }
 
+    /// Flush subscription intents collected before the one-time Init opened
+    /// `domain_ready`.
+    ///
+    /// `send_post_init_resync` already sends the current MM-orders flag, so this
+    /// helper sends only stream subscriptions: all-trades and orderbooks.
+    fn send_registry_subscriptions_after_init(&mut self) {
+        if !self.domain_ready {
+            return;
+        }
+
+        let (trades_sub, mm_orders_sub, orderbook_subs) = {
+            let registry = self.subscription_registry.lock().unwrap();
+            (
+                registry.trades_sub,
+                registry.mm_orders_sub,
+                registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
+            )
+        };
+
+        if let Some(sub) = trades_sub {
+            let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
+            self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
+                want_mm,
+            ));
+        }
+
+        let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
+        if !refs.is_empty() {
+            self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
+                &refs,
+            ));
+        }
+    }
+
     // ====================================================================
     //  Init helper УБРАН: дизайн `run_init_sequence` конфликтовал с
     //  `&mut Client` который держит `run()` — метод не мог быть вызван из
@@ -5801,7 +5957,41 @@ impl Client {
     //  Кроме DoClose/DoLimitClose/DoSplit/DoSellOrder/DoMarketSplit — MaxRetries=1.
     // ====================================================================
 
-    fn send_trade(&self, payload: Vec<u8>, max_retries: i32) {
+    fn send_domain_cmd(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        priority: SendPriority,
+        encrypted: bool,
+        max_retries: i32,
+    ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
+        self.send_cmd(data, cmd, priority, encrypted, max_retries);
+        true
+    }
+
+    fn send_domain_cmd_keyed(
+        &self,
+        data: Vec<u8>,
+        cmd: Command,
+        priority: SendPriority,
+        encrypted: bool,
+        max_retries: i32,
+        u_key: UniqueKey,
+    ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
+        self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key);
+        true
+    }
+
+    fn send_trade(&self, payload: Vec<u8>, max_retries: i32) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         self.send_cmd(
             payload,
             Command::Order,
@@ -5809,12 +5999,16 @@ impl Client {
             true,
             max_retries,
         );
+        true
     }
 
     /// `send_trade` с UniqueKey — для команд имеющих `[MoonCmdUnique(UK_*)]` атрибут.
     /// Старые pending команды с тем же UKey удаляются из `self.sending`/`self.pending_h`
     /// (matches Delphi SendCmdInt:780-785 + CheckSendingData).
-    fn send_trade_keyed(&self, payload: Vec<u8>, max_retries: i32, u_key: UniqueKey) {
+    fn send_trade_keyed(&self, payload: Vec<u8>, max_retries: i32, u_key: UniqueKey) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         self.send_cmd_keyed(
             payload,
             Command::Order,
@@ -5823,6 +6017,7 @@ impl Client {
             max_retries,
             u_key,
         );
+        true
     }
 
     fn send_order_cancel_request(&self, request: crate::state::orders::OrderCancelSend) {
@@ -5895,6 +6090,9 @@ impl Client {
         uid: u64,
         new_price: f64,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, order_type, price)) =
             orders.send_replace_if_requested(uid, new_price, self.now_ms())
         else {
@@ -5963,6 +6161,9 @@ impl Client {
     /// Requires the local `Orders` read model. The wrapper derives current
     /// status from the local order and clears the local request after queueing.
     pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some(request) = orders.send_cancel_if_requested(uid) else {
             return false;
         };
@@ -6028,6 +6229,9 @@ impl Client {
         market: &str,
         params: crate::commands::trade::MoveAllSellsParams,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         if !orders.has_move_all_sells_candidate(market, params) {
             return false;
         }
@@ -6104,6 +6308,9 @@ impl Client {
         uid: u64,
         stops: &crate::commands::trade::StopSettings,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, status, stops)) = orders.send_stops_if_changed(uid, stops) else {
             return false;
         };
@@ -6130,6 +6337,9 @@ impl Client {
         market_name: &str,
         turn_on: bool,
     ) -> usize {
+        if !self.domain_ready_for_typed_send() {
+            return 0;
+        }
         let requests = orders.turn_panic_sell_by_market(market_name, turn_on);
         let queued = requests.len();
         for request in requests {
@@ -6145,6 +6355,9 @@ impl Client {
         market_name: &str,
         turn_on: bool,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let (panic_sell_on, requests) = orders.switch_panic_sell_by_market(market_name, turn_on);
         for request in requests {
             self.send_panic_sell_request(request);
@@ -6160,6 +6373,9 @@ impl Client {
         uid: u64,
         turn_on: bool,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some(request) = orders.send_panic_sell_if_changed(uid, turn_on) else {
             return false;
         };
@@ -6189,6 +6405,9 @@ impl Client {
         uid: u64,
         items: &[crate::commands::trade::ImmuneItem],
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let applied = orders.set_immune_clicks(items);
         if applied.is_empty() {
             return false;
@@ -6212,6 +6431,9 @@ impl Client {
         price: f64,
         side: crate::commands::trade::FixedPosition,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         if !orders.has_move_all_buys_candidate(market, cmd_type, move_kind, side) {
             return false;
         }
@@ -6236,6 +6458,9 @@ impl Client {
         vstop_level: f64,
         vstop_vol: f64,
     ) -> bool {
+        if !self.domain_ready_for_typed_send() {
+            return false;
+        }
         let Some((ctx, market, params)) =
             orders.send_vstop_if_changed(uid, vstop_on, vstop_fixed, vstop_level, vstop_vol)
         else {
@@ -6297,7 +6522,7 @@ impl Client {
         let mut wire_settings = settings.clone();
         wire_settings.uid = rand::random();
         let raw = crate::commands::ui::build_client_settings(&wire_settings);
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::Sliced,
@@ -6310,7 +6535,7 @@ impl Client {
     /// Send `TSettingsRequest` (UI CmdId=2, High) to request current settings.
     pub fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Request the current UI settings snapshot and wait for the next
@@ -6356,7 +6581,7 @@ impl Client {
     /// strategies.
     pub fn ui_strat_start_stop(&self, is_start: bool) {
         let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TStratStartStopCommandV2` (UI CmdId=4, High) with checked strategy
@@ -6367,7 +6592,7 @@ impl Client {
         items: &[crate::commands::strat::StratCheckedItem],
     ) {
         let raw = crate::commands::ui::build_strat_start_stop_v2(rand::random(), is_start, items);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TMMOrdersSubscribeCommand` (UI CmdId=5, High,
@@ -6390,8 +6615,9 @@ impl Client {
     pub fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
             crate::commands::ui::build_update_version(rand::random(), version_name, is_release);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
-        self.mark_server_update_sent();
+        if self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3) {
+            self.mark_server_update_sent();
+        }
     }
 
     /// Send `TEmuTradesCommand` (UI CmdId=7, Sliced) with emulated trades for a
@@ -6403,14 +6629,14 @@ impl Client {
         points: &[crate::commands::ui::EmuTradePoint],
     ) {
         let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
-        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TNewMarketNotifyCommand` (UI CmdId=8, High) to notify about a new
     /// market.
     pub fn ui_new_market_notify(&self) {
         let raw = crate::commands::ui::build_new_market_notify(rand::random());
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TLevManageCommand` (UI CmdId=9, Sliced,
@@ -6418,7 +6644,7 @@ impl Client {
     pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
         let raw = crate::commands::ui::build_lev_manage(uid, cmd);
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::Sliced,
@@ -6438,20 +6664,20 @@ impl Client {
             markets,
             keys,
         );
-        self.send_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TResetProfitCommand` (UI CmdId=11, High) to reset profit counters.
     pub fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TArbActivateNotify` (UI CmdId=12, High) with an arbitration-valid
     /// timestamp.
     pub fn ui_arb_activate_notify(&self, arb_valid: f64) {
         let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
-        self.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TSwitchDexCommand` (UI CmdId=13, High, `UK_DexSwitch`).
@@ -6460,15 +6686,16 @@ impl Client {
     pub fn ui_switch_dex(&self, dex_name: &str) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_dex(uid, dex_name);
-        self.send_cmd_keyed(
+        if self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::High,
             true,
             3,
             UniqueKey::dex_switch_for(uid),
-        );
-        self.mark_server_update_sent();
+        ) {
+            self.mark_server_update_sent();
+        }
     }
 
     /// Send `TSwitchSpotCommand` (UI CmdId=14, High, `UK_SpotSwitch`) to select
@@ -6476,15 +6703,16 @@ impl Client {
     pub fn ui_switch_spot(&self, spot_index: u8) {
         let uid = rand::random();
         let raw = crate::commands::ui::build_switch_spot(uid, spot_index);
-        self.send_cmd_keyed(
+        if self.send_domain_cmd_keyed(
             raw,
             Command::UI,
             SendPriority::High,
             true,
             3,
             UniqueKey::spot_switch_for(uid),
-        );
-        self.mark_server_update_sent();
+        ) {
+            self.mark_server_update_sent();
+        }
     }
 
     // ====================================================================
@@ -6497,11 +6725,11 @@ impl Client {
     /// snapshot from the server.
     pub fn strat_snapshot_request(&self) {
         let raw = crate::commands::strat::build_snapshot_request(rand::random());
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::Strat,
             SendPriority::Sliced,
@@ -6561,7 +6789,7 @@ impl Client {
     /// Send `TStratDelete` (Strat CmdId=3, High) for one strategy or folder.
     pub fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
         let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     /// Send `TStratSellPriceUpdate` (Strat CmdId=4, High,
@@ -6574,7 +6802,7 @@ impl Client {
             strategy_id,
             sell_price,
         );
-        self.send_cmd_keyed(
+        self.send_domain_cmd_keyed(
             raw,
             Command::Strat,
             SendPriority::High,
@@ -6594,13 +6822,13 @@ impl Client {
         is_delta: bool,
     ) {
         let raw = crate::commands::strat::build_checked_sync(rand::random(), items, is_delta);
-        self.send_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
     }
 
     /// Send `TStratCheckedEcho` (Strat CmdId=6, High).
     pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
         let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
-        self.send_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     // ====================================================================
@@ -6615,7 +6843,7 @@ impl Client {
     /// normal balance channel.
     pub fn balance_request_refresh(&self) {
         let raw = crate::commands::balance::build_request_balance_refresh(rand::random());
-        self.send_cmd(raw, Command::Balance, SendPriority::High, true, 3);
+        self.send_domain_cmd(raw, Command::Balance, SendPriority::High, true, 3);
     }
 
     /// Request a fresh full balance snapshot and wait until it is applied to
@@ -6729,6 +6957,7 @@ impl Client {
         self.force_disconnect = true;
         self.authorized = false;
         self.auth_status = AuthStatus::Base;
+        self.set_domain_ready(false);
         self.publish_transport_state_from_client();
     }
 
@@ -6889,6 +7118,9 @@ impl Client {
     where
         I: IntoIterator<Item = crate::events::ActiveAction>,
     {
+        if !self.domain_ready_for_typed_send() {
+            return;
+        }
         for action in actions {
             match action {
                 crate::events::ActiveAction::RequestOrderBookFull {
@@ -8726,8 +8958,9 @@ pub fn run_init_sequence(
     client.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
-    client.domain_ready = true;
+    client.set_domain_ready(true);
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
+    client.send_registry_subscriptions_after_init();
 
     // === 7. SubscribeAllTrades === optional; registry update + direct wire enqueue.
     if let Some(want_mm) = cfg.subscribe_trades {
@@ -8950,7 +9183,8 @@ mod api_pending_dispatch_tests {
 
     #[test]
     fn server_update_ui_commands_mark_delphi_base_check_flag() {
-        let client = Client::new(dummy_cfg());
+        let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
 
         assert!(!client.server_update_sent());
         client.ui_update_version("MoonBot-1", true);
@@ -9419,6 +9653,7 @@ mod api_pending_dispatch_tests {
     #[test]
     fn post_init_resync_enqueues_delphi_commands() {
         let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
         let mut dispatcher = EventDispatcher::new();
         dispatcher.set_strategy_snapshot_provider(|_| {
             Some(crate::events::StrategySnapshotReply::from_payload(
@@ -9489,6 +9724,7 @@ mod api_pending_dispatch_tests {
     #[test]
     fn post_init_resync_without_strategy_provider_sends_empty_strategy_snapshot() {
         let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
         let mut dispatcher = EventDispatcher::new();
         let cfg = InitConfig::default();
         let mut result = InitResult::default();
@@ -9532,14 +9768,17 @@ mod client_sender_tests {
         Arc<Mutex<SendQueues>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
+        Arc<AtomicBool>,
     ) {
         let subscription_registry = Arc::new(Mutex::new(SubscriptionRegistry::default()));
         let send_queues = Arc::new(Mutex::new(SendQueues::default()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
+        let domain_ready = Arc::new(AtomicBool::new(true));
         let server_update_sent = Arc::new(AtomicBool::new(false));
         (
             ClientSender {
                 app_queue_alive: Arc::clone(&app_queue_alive),
+                domain_ready: Arc::clone(&domain_ready),
                 send_queues: Arc::clone(&send_queues),
                 subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
@@ -9549,6 +9788,7 @@ mod client_sender_tests {
             send_queues,
             app_queue_alive,
             server_update_sent,
+            domain_ready,
         )
     }
 
@@ -9619,7 +9859,7 @@ mod client_sender_tests {
 
     #[test]
     fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         sender.subscribe_orderbook("BTCUSDT");
         assert!(registry.lock().unwrap().orderbook_subs.contains("BTCUSDT"));
         let sent = take_send_items(&send_q);
@@ -9632,8 +9872,29 @@ mod client_sender_tests {
     }
 
     #[test]
+    fn pre_init_sender_subscription_records_intent_without_wire() {
+        let (sender, registry, send_q, _, _, domain_ready) = make_sender();
+        domain_ready.store(false, Ordering::Relaxed);
+
+        sender.subscribe_orderbook("BTCUSDT");
+        sender.subscribe_all_trades(true);
+        sender.ui_mm_subscribe(false);
+
+        {
+            let registry = registry.lock().unwrap();
+            assert!(registry.orderbook_subs.contains("BTCUSDT"));
+            assert_eq!(
+                registry.trades_sub,
+                Some(TradesSubscription { want_mm: false })
+            );
+            assert_eq!(registry.mm_orders_sub, Some(false));
+        }
+        assert!(take_send_items(&send_q).is_empty());
+    }
+
+    #[test]
     fn unsubscribe_orderbook_updates_registry_and_sends_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         registry
             .lock()
             .unwrap()
@@ -9651,7 +9912,7 @@ mod client_sender_tests {
 
     #[test]
     fn subscribe_orderbooks_sends_one_batched_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         sender.subscribe_orderbooks(["BTCUSDT", "ETHUSDT"]);
         let registry = registry.lock().unwrap();
         assert!(registry.orderbook_subs.contains("BTCUSDT"));
@@ -9667,7 +9928,7 @@ mod client_sender_tests {
 
     #[test]
     fn unsubscribe_orderbooks_sends_one_batched_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         registry
             .lock()
             .unwrap()
@@ -9685,7 +9946,7 @@ mod client_sender_tests {
 
     #[test]
     fn unsubscribe_all_orderbooks_clears_registry_and_sends_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         registry
             .lock()
             .unwrap()
@@ -9703,7 +9964,7 @@ mod client_sender_tests {
 
     #[test]
     fn subscribe_all_trades_carries_want_mm_flag() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         sender.subscribe_all_trades(true);
         sender.subscribe_all_trades(false);
         let registry = registry.lock().unwrap();
@@ -9722,7 +9983,7 @@ mod client_sender_tests {
 
     #[test]
     fn unsubscribe_all_trades_clears_registry_and_sends_wire_request() {
-        let (sender, registry, send_q, _, _) = make_sender();
+        let (sender, registry, send_q, _, _, _) = make_sender();
         registry.lock().unwrap().trades_sub = Some(TradesSubscription { want_mm: true });
         sender.unsubscribe_all_trades();
         assert!(registry.lock().unwrap().trades_sub.is_none());
@@ -9736,7 +9997,7 @@ mod client_sender_tests {
 
     #[test]
     fn try_subscribe_returns_ok() {
-        let (sender, _, _, _, _) = make_sender();
+        let (sender, _, _, _, _, _) = make_sender();
         assert!(sender.try_subscribe_orderbook("BTC").is_ok());
         assert!(sender.try_subscribe_orderbooks(["BTC", "ETH"]).is_ok());
         assert!(sender.try_subscribe_all_trades(true).is_ok());
@@ -9744,7 +10005,7 @@ mod client_sender_tests {
 
     #[test]
     fn try_subscribe_has_no_capacity_cap() {
-        let (sender, _, _, _, _) = make_sender();
+        let (sender, _, _, _, _, _) = make_sender();
         for i in 0..4096 {
             assert!(
                 sender.try_subscribe_orderbook(&format!("M{i}")).is_ok(),
@@ -9755,15 +10016,30 @@ mod client_sender_tests {
 
     #[test]
     fn try_subscribe_returns_disconnected_when_receiver_dropped() {
-        let (sender, _, _, alive, _) = make_sender();
+        let (sender, _, _, alive, _, _) = make_sender();
         alive.store(false, Ordering::Relaxed);
         let err = sender.try_unsubscribe_all_trades().unwrap_err();
         assert_eq!(err, SubscribeError::Disconnected);
     }
 
     #[test]
+    fn disconnected_sender_stateful_action_does_not_mutate_or_send() {
+        use crate::commands::trade::OrderWorkerStatus;
+
+        let (sender, _, send_q, alive, _, _) = make_sender();
+        alive.store(false, Ordering::Relaxed);
+        let uid = 0x7777;
+        let mut orders =
+            tracked_orders_for_sender(uid, 17, 9, "DOGEUSDT", OrderWorkerStatus::SellSet);
+
+        assert!(!sender.replace_order(&mut orders, uid, 50100.0));
+        assert_eq!(orders.get(uid).unwrap().sell_price, 0.0);
+        assert!(take_send_items(&send_q).is_empty());
+    }
+
+    #[test]
     fn sender_try_send_cmd_keyed_queues_send_item() {
-        let (sender, _, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _, _) = make_sender();
         let payload = vec![1, 2, 3, 4];
         let key = UniqueKey::order_move(42);
 
@@ -9791,7 +10067,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_try_send_api_request_uses_sliced_api_defaults() {
-        let (sender, _, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _, _) = make_sender();
         let payload = crate::commands::engine_request::base_check();
 
         sender
@@ -9811,7 +10087,7 @@ mod client_sender_tests {
 
     #[test]
     fn cloned_sender_updates_same_registry_and_send_queues() {
-        let (sender_a, registry, send_q, _, _) = make_sender();
+        let (sender_a, registry, send_q, _, _, _) = make_sender();
         let sender_b = sender_a.clone();
         sender_a.subscribe_orderbook("A");
         sender_b.subscribe_orderbook("B");
@@ -9828,7 +10104,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_replace_order_uses_client_wrapper_wire_defaults() {
-        let (sender, _, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _, _) = make_sender();
         let uid = 42;
         let mut orders = tracked_orders_for_sender(
             uid,
@@ -9865,7 +10141,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_ui_switches_mark_server_update_sent_and_keep_delphi_u_key_uid() {
-        let (sender, _, send_q, _, server_update_sent) = make_sender();
+        let (sender, _, send_q, _, server_update_sent, _) = make_sender();
 
         sender.ui_switch_dex("MainDex");
         sender.ui_switch_spot(1);
@@ -9888,7 +10164,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_strat_snapshot_payload_uses_sliced_snapshot_u_key() {
-        let (sender, _, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _, _) = make_sender();
 
         sender.strat_send_snapshot_payload(1, 2, true, &[1, 2, 3]);
 
@@ -9904,7 +10180,7 @@ mod client_sender_tests {
 
     #[test]
     fn sender_balance_request_refresh_uses_balance_channel_defaults() {
-        let (sender, _, send_q, _, _) = make_sender();
+        let (sender, _, send_q, _, _, _) = make_sender();
 
         sender.balance_request_refresh();
 
@@ -9947,6 +10223,12 @@ mod client_subscribe_integration_tests {
                 check_tags_every: None,
             },
         }
+    }
+
+    fn ready_client() -> Client {
+        let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
+        client
     }
 
     fn command_uid(payload: &[u8]) -> Option<u64> {
@@ -10020,9 +10302,93 @@ mod client_subscribe_integration_tests {
         orders
     }
 
+    fn assert_no_queued_wire(client: &Client) {
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
+    }
+
+    #[test]
+    fn pre_init_subscription_intents_update_registry_without_wire() {
+        let client = Client::new(dummy_cfg());
+
+        client.subscribe_orderbook("BTCUSDT");
+        client.subscribe_all_trades(true);
+        client.ui_mm_subscribe(false);
+
+        client.with_subscription_registry(|registry| {
+            assert!(registry.orderbook_subs.contains("BTCUSDT"));
+            assert_eq!(
+                registry.trades_sub,
+                Some(TradesSubscription { want_mm: false })
+            );
+            assert_eq!(registry.mm_orders_sub, Some(false));
+        });
+        assert_no_queued_wire(&client);
+    }
+
+    #[test]
+    fn pre_init_stateful_order_actions_do_not_mutate_or_send() {
+        use crate::commands::trade::{OrderWorkerStatus, StopSettings};
+
+        let client = Client::new(dummy_cfg());
+        let uid = 0x5151;
+        let mut orders = tracked_orders(
+            uid,
+            17,
+            9,
+            "DOGEUSDT",
+            OrderWorkerStatus::SellSet,
+            false,
+            false,
+        );
+
+        assert!(!client.replace_order(&mut orders, uid, 50100.0));
+        assert!(!client.update_order_stops(
+            &mut orders,
+            uid,
+            &StopSettings {
+                stop_loss_on: 1,
+                sl_level: 12.5,
+                ..StopSettings::default()
+            }
+        ));
+
+        let order = orders.get(uid).expect("local order remains");
+        assert_eq!(order.sell_price, 0.0);
+        assert_eq!(order.stops, StopSettings::default());
+        assert_no_queued_wire(&client);
+    }
+
+    #[test]
+    fn post_init_flush_sends_pre_init_registry_subscriptions_once() {
+        let mut client = Client::new(dummy_cfg());
+
+        client.subscribe_orderbook("BTCUSDT");
+        client.subscribe_all_trades(true);
+        assert_no_queued_wire(&client);
+
+        client.set_domain_ready(true);
+        client.send_registry_subscriptions_after_init();
+        let sent = drain_api_requests(&client);
+        let methods: Vec<_> = sent
+            .iter()
+            .filter_map(|payload| method_id(payload))
+            .collect();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.contains(&(EngineMethod::SubscribeAllTrades as u8)));
+        assert!(methods.contains(&(EngineMethod::SubscribeOrderBook as u8)));
+
+        client.subscribe_all_trades(true);
+        let sent = drain_api_requests(&client);
+        assert!(
+            sent.is_empty(),
+            "same all-trades intent after init must not duplicate the pre-init flush"
+        );
+    }
+
     #[test]
     fn client_subscribe_orderbook_updates_registry_and_wire_queue_through_sender() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbook("BTCUSDT");
         assert!(client
             .with_subscription_registry(|registry| registry.orderbook_subs.contains("BTCUSDT")));
@@ -10038,7 +10404,7 @@ mod client_subscribe_integration_tests {
     fn client_sender_can_be_held_independently_of_client() {
         // Sender держит clone; даже если client держится по `&` ссылке — sender
         // независим. Это база для multi-thread субскрайба без app-event backlog.
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         let sender = client.sender();
         sender.subscribe_all_trades(true);
         assert_eq!(
@@ -10067,7 +10433,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(client.cancel_tracked_order(&mut orders, uid));
 
@@ -10106,7 +10472,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(client.cancel_order(&mut orders, uid));
         assert!(
@@ -10147,7 +10513,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(client.replace_order(&mut orders, uid, 50100.0));
         assert_eq!(orders.get(uid).unwrap().sell_price, 50100.0);
@@ -10191,7 +10557,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(
             !client.turn_order_panic_sell(&mut orders, uid, false),
@@ -10268,7 +10634,7 @@ mod client_subscribe_integration_tests {
             }))
         };
         let _ = orders.apply(status_cmd);
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(client.switch_panic_sell_by_market(&mut orders, "DOGEUSDT", true));
         let (_, high, _) = client.take_send_queues_for_test();
@@ -10312,7 +10678,7 @@ mod client_subscribe_integration_tests {
             side: FixedPosition::Long,
         };
         let ctx = TradeCtx::with_route(0xCAFE, 17, 9);
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         let empty_orders = crate::state::Orders::new();
 
         assert!(
@@ -10356,7 +10722,7 @@ mod client_subscribe_integration_tests {
         };
 
         let ctx = TradeCtx::with_route(0xBEEF, 17, 9);
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         let immune_orders =
             tracked_orders(8, 17, 9, "DOGEUSDT", OrderWorkerStatus::BuySet, false, true);
 
@@ -10411,7 +10777,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         let items = [
             ImmuneItem {
                 uid: 0x100,
@@ -10468,7 +10834,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(
             !client.update_order_stops(&mut orders, uid, &StopSettings::default()),
@@ -10525,7 +10891,7 @@ mod client_subscribe_integration_tests {
             false,
             false,
         );
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         assert!(
             !client.update_vstop(&mut orders, uid, false, false, 0.0, 0.0),
@@ -10569,7 +10935,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn client_ui_mm_subscribe_updates_registry_and_pushes_keyed_send() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.ui_mm_subscribe(true);
 
         assert_eq!(
@@ -10589,7 +10955,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn ui_switches_use_delphi_command_uid_in_u_key() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         client.ui_switch_dex("MainDex");
         client.ui_switch_spot(1);
@@ -10610,7 +10976,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn ui_single_slot_commands_use_delphi_fixed_u_key_uid() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
 
         let settings = crate::commands::ui::ClientSettingsCommand::default();
         client.ui_send_settings(&settings);
@@ -10639,7 +11005,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn subscribe_orderbook_inserts_into_registry() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbook("BTC");
         assert!(
             client.with_subscription_registry(|registry| registry.orderbook_subs.contains("BTC"))
@@ -10648,7 +11014,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn subscribe_orderbooks_inserts_batched_orderbooks_into_registry() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbooks(["BTC", "ETH", "BTC"]);
         client.with_subscription_registry(|registry| {
             assert_eq!(registry.orderbook_subs.len(), 2);
@@ -10659,7 +11025,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn unsubscribe_orderbook_removes_from_registry() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbook("BTC");
         client.unsubscribe_orderbook("BTC");
         assert!(
@@ -10681,7 +11047,7 @@ mod client_subscribe_integration_tests {
 
     #[test]
     fn unsubscribe_all_orderbooks_clears_registry() {
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbooks(["BTC", "ETH"]);
         let _ = drain_api_requests(&client);
         client.unsubscribe_all_orderbooks();
@@ -10699,7 +11065,7 @@ mod client_subscribe_integration_tests {
     fn subscribe_orderbook_is_idempotent() {
         // Двойной subscribe для одной пары не должен иметь побочных эффектов
         // в registry (HashSet dedup) и не должен слать второй wire-запрос.
-        let client = Client::new(dummy_cfg());
+        let client = ready_client();
         client.subscribe_orderbook("ETH");
         client.subscribe_orderbook("ETH");
         assert_eq!(
@@ -12095,7 +12461,7 @@ mod active_library_helpers_tests {
         // PeerAppToken расходится, но единственный Init ещё не заказывал индексы.
         client.peer_app_token = 0xABC;
         client.tracked_indexes_peer_app_token = 0xDEF;
-        client.domain_ready = true;
+        client.set_domain_ready(true);
         writer(&mut client).check_indexes_fetch_timeout(13_000);
         assert!(
             !client.indexes_fetch_in_flight,
@@ -12116,7 +12482,7 @@ mod active_library_helpers_tests {
         client.indexes_fetch_started_ms = 0;
         client.peer_app_token = 0xABC;
         client.tracked_indexes_peer_app_token = 0xDEF;
-        client.domain_ready = true;
+        client.set_domain_ready(true);
         client.domain_restore.fetch_indexes = true;
 
         writer(&mut client).check_indexes_fetch_timeout(13_000);
@@ -14321,7 +14687,7 @@ mod reconnect_timing_tests {
     #[test]
     fn first_fine_before_init_does_not_send_engine_api_or_restore_subscriptions() {
         let mut client = dummy_client();
-        client.domain_ready = false;
+        client.set_domain_ready(false);
         client.peer_app_token = 0xABCD;
         client.tracked_indexes_peer_app_token = 0;
         client.with_subscription_registry_mut(|registry| {
@@ -14355,7 +14721,7 @@ mod reconnect_timing_tests {
         let mut client = dummy_client();
 
         // Simulate a Client that already connected once and completed its single Init.
-        client.domain_ready = true;
+        client.set_domain_ready(true);
         client.was_ever_connected = true;
         client.auth_status = AuthStatus::AuthDone;
         client.prev_auth_status = AuthStatus::AuthDone;

@@ -12,10 +12,11 @@ client.subscribe_all_trades(false); // false = trades only, true = include MM or
 client.unsubscribe_all_trades();
 ```
 
-The subscription is registry-aware. Before Init, reconnect does not replay it.
-After the one-time Init completes, reconnect replays it automatically.
-Unsubscribe removes the registry intent and sends `emk_UnsubscribeAllTrades`
-when the client loop is running.
+The subscription is registry-aware. Before Init, subscribe and unsubscribe calls
+update only the registry and send no Engine API wire packet. The one-time Init
+flushes the current registry once. After Init, reconnect replays it
+automatically. Unsubscribe removes the registry intent and sends
+`emk_UnsubscribeAllTrades` only after `domain_ready`.
 
 Unlike Delphi MoonBot, the Rust library does not subscribe to all-trades unless
 the application asks for it. This is an accepted author decision for the public
@@ -23,11 +24,12 @@ library API. If no all-trades intent is present in the registry, incoming
 `MPC_TradesStream` and `MPC_TradesResendResponse` packets are considered
 unexpected and are dropped instead of being emitted as public events.
 
-The public call updates the reconnect registry immediately and appends the wire
-Engine API request to the Delphi-style send queues. On the wire,
-`emk_SubscribeAllTrades` / `emk_UnsubscribeAllTrades` are Engine API requests
-and their success or failure is reported as a later `Event::EngineResponse`.
-Trades packets then arrive asynchronously on the `MPC_TradesStream` channel.
+The public call always updates the reconnect registry immediately. Once Init is
+open, changed subscription intent also appends the wire Engine API request to
+the Delphi-style send queues. On the wire, `emk_SubscribeAllTrades` /
+`emk_UnsubscribeAllTrades` are Engine API requests and their success or failure
+is reported as a later `Event::EngineResponse`. Trades packets then arrive
+asynchronously on the `MPC_TradesStream` channel.
 
 ## Events
 

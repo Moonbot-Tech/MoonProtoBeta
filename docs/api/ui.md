@@ -87,10 +87,11 @@ std::thread::spawn(move || {
 ```
 
 `ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in
-the reconnect registry immediately and appends the wire
-`TMMOrdersSubscribeCommand` to the High send queue. Before Init, reconnect does
-not replay that flag. After the one-time Init completes, reconnect restores the
-latest MM-orders intent automatically.
+the reconnect registry immediately. Before Init it sends no wire command; the
+one-time Init uses the latest registry value for the post-init
+`TMMOrdersSubscribeCommand`. After Init, `ui_mm_subscribe` appends the wire
+command to the High send queue, and reconnect restores the latest MM-orders
+intent automatically.
 
 ### Version Update
 
@@ -112,9 +113,10 @@ updater flow. The Rust library does not download or restart the application; it
 only sends/parses the wire command and exposes the inbound command as a
 `SettingsEvent::VersionUpdate`.
 
-`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` also mark the
-Delphi `ServerUpdateSent` state inside `Client`. The next `run_init_sequence`
-will consume that marker and use the Delphi BaseCheck update retry path:
+`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` are typed UI domain
+commands and are gated by Init. After Init they also mark the Delphi
+`ServerUpdateSent` state inside `Client`. The next `run_init_sequence` will
+consume that marker and use the Delphi BaseCheck update retry path:
 `34 * 300ms` auth wait, then one BaseCheck plus up to 10 retries with `2000ms`
 pauses and the normal 12s `SendAndWait` timeout per attempt. If a tool sends the
 same raw UI payload through lower-level APIs, call

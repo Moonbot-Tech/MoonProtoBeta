@@ -97,11 +97,13 @@ ui_thread.spawn(move || {
 });
 ```
 
-These subscriptions are per-client. Before Init, reconnect is transport-only.
-After each client's one-time Init completes, reconnect replays that client's
-registry automatically. Typed sender wrappers for trade, UI, strategy, and
-balance commands append into that client's own Delphi-style send queues, so a
-command sent through one session cannot leak into another connection.
+These subscriptions are per-client. Before Init, subscribe calls update only
+that client's registry and reconnect is transport-only. After each client's
+one-time Init completes, Init flushes the registry once and reconnect replays it
+automatically. Typed sender wrappers for trade, UI, strategy, and balance
+commands append into that client's own Delphi-style send queues only after that
+client's `domain_ready` gate is open, so a command sent through one session
+cannot leak into another connection.
 
 ## Exchange Type Flags
 
