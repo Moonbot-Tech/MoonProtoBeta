@@ -1369,3 +1369,28 @@ Still not done:
   `DataReadInt -> OnNewData`.
 - The per-command bodies under `ClientNewData` still need exact
   block-by-block split and reverse-equivalence checks.
+
+### 2026-05-22 - Phase 1 partial: named dispatcher ClientNewData branches
+
+Done:
+
+- Split `EventDispatcher::dispatch_into` into named `client_new_data_*`
+  branches for `Order`, `OrderBook`, `TradesStream`,
+  `TradesResendResponse`, `Balance`, `Strat`, `UI`, `API`, and `LogMsg`.
+- Extracted Rust equivalents of Delphi methods:
+  `process_command_order`, `process_strat_command`, and
+  `process_api_command`.
+- This pass is behavior-preserving: it only names the current active-library
+  parser/apply blocks so the next strict-porting passes can compare each block
+  against `MoonProtoClient.pas → ClientNewData`,
+  `ProcessCommandOrder`, `ProcessStratCommand`, and `ProcessApiCommand`
+  directly.
+
+Still not done:
+
+- `client_new_data_*` blocks still run from the writer/orchestrator through
+  `pending_reader_decoded`, not from the reader stack like Delphi
+  `DataReadInt -> OnNewData`.
+- The bodies now have stable names, but exact reverse-equivalence is still open
+  per block: first priority is `Order` / `ProcessCommandOrder`, then `Strat`,
+  `Balance`, `Trades`, `OrderBook`, `UI`, and API market/candles handling.

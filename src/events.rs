@@ -494,273 +494,293 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
     ) {
         match cmd {
-            Command::Order => {
-                match TradeCommand::parse(payload) {
-                    Some(tc) => {
-                        // audit_responsibility A5 / active library: автоматически подхватываем
-                        // server_time_delta. При наличии per-Client `server_time_delta_source`
-                        // (multi-Client) — читаем оттуда. Иначе fallback на global для raw
-                        // dispatch без Client source. Без этого Orders::apply применяет AdjustTime со старым
-                        // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
-                        // См. DEVIATION #23.
-                        self.orders
-                            .set_server_time_delta(self.current_server_time_delta());
-                        let (_apply_result, ev) = self.orders.apply(tc);
-                        out.push(Event::Order(ev));
-                    }
-                    None => out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    }),
-                }
-            }
-
-            Command::OrderBook => {
-                // Active library: блокируем обработку OrderBook если markets indexes не sync.
-                // Соответствует Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
-                // PeerAppToken then exit`. Без этого: потеряем пакеты от первых апдейтов
-                // после server restart до получения свежих индексов (market_idx по новой
-                // нумерации применился бы к старому by_index → silent data corruption).
-                if !self.markets.indexes_synchronized {
-                    return;
-                }
-                match parse_order_book_packet(payload) {
-                    Some(pkt) => {
-                        if !self.markets.has_server_market_index(pkt.market_index) {
-                            return;
-                        }
-                        for ev in self.order_books.on_packet(pkt, now_ms) {
-                            out.push(Event::OrderBook(ev));
-                        }
-                    }
-                    None => out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    }),
-                }
-            }
-
-            Command::TradesStream => {
-                // Active library: блокируем обработку TradesStream пока markets indexes не sync.
-                if !self.markets.indexes_synchronized {
-                    return;
-                }
-                match parse_trades_packet(payload) {
-                    Some(pkt) => {
-                        // Flatten: каждое TradesEvent пушится в out отдельно — без nested Vec.
-                        for ev in self.trades.on_packet(pkt, now_ms) {
-                            out.push(Event::Trade(ev));
-                        }
-                    }
-                    None => out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    }),
-                }
-            }
-
+            Command::Order => self.client_new_data_order(payload, out),
+            Command::OrderBook => self.client_new_data_order_book(payload, now_ms, out),
+            Command::TradesStream => self.client_new_data_trades_stream(payload, now_ms, out),
             Command::TradesResendResponse => {
-                let inner_payloads = parse_trades_resend_response(payload);
-                for inner in inner_payloads {
-                    match parse_trades_packet(&inner) {
-                        Some(pkt) => {
-                            for ev in self.trades.on_packet_resend(pkt) {
-                                out.push(Event::Trade(ev));
-                            }
-                        }
-                        None => out.push(Event::ParseFailed {
-                            cmd,
-                            len: inner.len(),
-                        }),
-                    }
-                }
+                self.client_new_data_trades_resend_response(payload, out)
             }
-
-            Command::Balance => {
-                if payload.len() < 11 {
-                    out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    });
-                    return;
-                }
-                let sub_cmd_id = payload[0];
-                let body = &payload[11..];
-                match sub_cmd_id {
-                    2 => {
-                        if parse_balance(sub_cmd_id, body).is_none() {
-                            out.push(Event::ParseFailed {
-                                cmd,
-                                len: payload.len(),
-                            });
-                        }
-                    }
-                    3 | 4 => match parse_balance(sub_cmd_id, body) {
-                        Some(upd) => {
-                            let known_markets = &self.markets.by_name;
-                            let ev = self
-                                .balances
-                                .apply_filtered(upd, |name| known_markets.contains_key(name));
-                            out.push(Event::Balance(ev));
-                        }
-                        None => out.push(Event::ParseFailed {
-                            cmd,
-                            len: payload.len(),
-                        }),
-                    },
-                    6 => match parse_arb_prices(payload) {
-                        Some(arb) => {
-                            if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
-                                out.push(Event::Arb {
-                                    uid: arb.uid,
-                                    payload: parsed,
-                                });
-                            }
-                        }
-                        None => out.push(Event::ParseFailed {
-                            cmd,
-                            len: payload.len(),
-                        }),
-                    },
-                    _ => out.push(Event::Raw {
-                        cmd,
-                        payload: payload.to_vec(),
-                    }),
-                }
-            }
-
-            Command::Strat => {
-                match StratCommand::parse(payload) {
-                    Some(cmd_v) => {
-                        let ev = self.strats.apply(cmd_v);
-                        // Active library: auto-decode strategy snapshot raw bytes
-                        // в `StratsState`. Раньше app должен был сам вызывать
-                        // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
-                        // делает это сама на SnapshotFull/Partial event'ах.
-                        match &ev {
-                            crate::state::StratEvent::SnapshotFull { raw_data, .. } => {
-                                if self
-                                    .strats
-                                    .apply_snapshot_decoded_with_mode(raw_data, true)
-                                    .is_none()
-                                {
-                                    log::warn!(
-                                        target: "moonproto::events",
-                                        "failed to decode full strategy snapshot payload ({} bytes)",
-                                        raw_data.len()
-                                    );
-                                }
-                            }
-                            crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
-                                if self
-                                    .strats
-                                    .apply_snapshot_decoded_with_mode(raw_data, false)
-                                    .is_none()
-                                {
-                                    log::warn!(
-                                        target: "moonproto::events",
-                                        "failed to decode partial strategy snapshot payload ({} bytes)",
-                                        raw_data.len()
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                        out.push(Event::Strat(ev));
-                    }
-                    None => out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    }),
-                }
-            }
-
-            Command::UI => match UICommand::parse(payload) {
-                Some(cmd_v) => {
-                    let ev = self.settings.apply(cmd_v);
-                    out.push(Event::Settings(ev));
-                }
-                None => out.push(Event::ParseFailed {
-                    cmd,
-                    len: payload.len(),
-                }),
-            },
-
-            Command::API => match parse_engine_response(payload) {
-                Some(resp) => {
-                    const ASSUMED_VER: u16 = 2;
-                    let extra_event: Option<Event> = if resp.success {
-                        match resp.method {
-                            EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
-                                if resp.method == EngineMethod::GetMarketsList {
-                                    if let Some(list) =
-                                        parse_markets_list_response(&resp.data, ASSUMED_VER)
-                                    {
-                                        let ev = self.markets.apply_markets_list(list);
-                                        Some(Event::Markets(ev))
-                                    } else {
-                                        None
-                                    }
-                                } else if let Some(prices) =
-                                    parse_markets_prices_response(&resp.data)
-                                {
-                                    let ev = self.markets.apply_markets_prices(prices);
-                                    Some(Event::Markets(ev))
-                                } else {
-                                    None
-                                }
-                            }
-                            EngineMethod::GetMarketsIndexes => {
-                                if let Some(names) = parse_markets_indexes_response(&resp.data) {
-                                    let ev = self.markets.apply_markets_indexes(names);
-                                    Some(Event::Markets(ev))
-                                } else {
-                                    None
-                                }
-                            }
-                            EngineMethod::CheckBinanceTags => {
-                                if let Some(items) = parse_token_tags_response(&resp.data) {
-                                    let ev = self.markets.apply_token_tags(items);
-                                    Some(Event::Markets(ev))
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-
-                    if let Some(ev) = extra_event {
-                        out.push(ev);
-                    }
-                    out.push(Event::EngineResponse(resp));
-                }
-                None => out.push(Event::ParseFailed {
-                    cmd,
-                    len: payload.len(),
-                }),
-            },
-
-            Command::LogMsg => {
-                if payload.len() < 8 {
-                    out.push(Event::ParseFailed {
-                        cmd,
-                        len: payload.len(),
-                    });
-                    return;
-                }
-                let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
-                let msg = String::from_utf8_lossy(&payload[8..]).to_string();
-                out.push(Event::ServerLog { time, msg });
-            }
-
+            Command::Balance => self.client_new_data_balance(payload, out),
+            Command::Strat => self.client_new_data_strat(payload, out),
+            Command::UI => self.client_new_data_ui(payload, out),
+            Command::API => self.client_new_data_api(payload, out),
+            Command::LogMsg => self.client_new_data_log_msg(payload, out),
             _ => out.push(Event::Raw {
                 cmd,
                 payload: payload.to_vec(),
             }),
         }
+    }
+
+    fn client_new_data_order(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        match TradeCommand::parse(payload) {
+            Some(tc) => self.process_command_order(tc, out),
+            None => out.push(Event::ParseFailed {
+                cmd: Command::Order,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    /// Delphi equivalent: `TMoonProtoNetClient.ProcessCommandOrder`.
+    fn process_command_order(&mut self, tc: TradeCommand, out: &mut Vec<Event>) {
+        // audit_responsibility A5 / active library: автоматически подхватываем
+        // server_time_delta. При наличии per-Client `server_time_delta_source`
+        // (multi-Client) — читаем оттуда. Иначе fallback на global для raw
+        // dispatch без Client source. Без этого Orders::apply применяет AdjustTime со старым
+        // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
+        // См. DEVIATION #23.
+        self.orders
+            .set_server_time_delta(self.current_server_time_delta());
+        let (_apply_result, ev) = self.orders.apply(tc);
+        out.push(Event::Order(ev));
+    }
+
+    fn client_new_data_order_book(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
+        // Active library: блокируем обработку OrderBook если markets indexes не sync.
+        // Соответствует Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
+        // PeerAppToken then exit`. Без этого: потеряем пакеты от первых апдейтов
+        // после server restart до получения свежих индексов (market_idx по новой
+        // нумерации применился бы к старому by_index → silent data corruption).
+        if !self.markets.indexes_synchronized {
+            return;
+        }
+        match parse_order_book_packet(payload) {
+            Some(pkt) => {
+                if !self.markets.has_server_market_index(pkt.market_index) {
+                    return;
+                }
+                for ev in self.order_books.on_packet(pkt, now_ms) {
+                    out.push(Event::OrderBook(ev));
+                }
+            }
+            None => out.push(Event::ParseFailed {
+                cmd: Command::OrderBook,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    fn client_new_data_trades_stream(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
+        // Active library: блокируем обработку TradesStream пока markets indexes не sync.
+        if !self.markets.indexes_synchronized {
+            return;
+        }
+        match parse_trades_packet(payload) {
+            Some(pkt) => {
+                // Flatten: каждое TradesEvent пушится в out отдельно — без nested Vec.
+                for ev in self.trades.on_packet(pkt, now_ms) {
+                    out.push(Event::Trade(ev));
+                }
+            }
+            None => out.push(Event::ParseFailed {
+                cmd: Command::TradesStream,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    fn client_new_data_trades_resend_response(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        let inner_payloads = parse_trades_resend_response(payload);
+        for inner in inner_payloads {
+            match parse_trades_packet(&inner) {
+                Some(pkt) => {
+                    for ev in self.trades.on_packet_resend(pkt) {
+                        out.push(Event::Trade(ev));
+                    }
+                }
+                None => out.push(Event::ParseFailed {
+                    cmd: Command::TradesResendResponse,
+                    len: inner.len(),
+                }),
+            }
+        }
+    }
+
+    fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        if payload.len() < 11 {
+            out.push(Event::ParseFailed {
+                cmd: Command::Balance,
+                len: payload.len(),
+            });
+            return;
+        }
+        let sub_cmd_id = payload[0];
+        let body = &payload[11..];
+        match sub_cmd_id {
+            2 => {
+                if parse_balance(sub_cmd_id, body).is_none() {
+                    out.push(Event::ParseFailed {
+                        cmd: Command::Balance,
+                        len: payload.len(),
+                    });
+                }
+            }
+            3 | 4 => match parse_balance(sub_cmd_id, body) {
+                Some(upd) => {
+                    let known_markets = &self.markets.by_name;
+                    let ev = self
+                        .balances
+                        .apply_filtered(upd, |name| known_markets.contains_key(name));
+                    out.push(Event::Balance(ev));
+                }
+                None => out.push(Event::ParseFailed {
+                    cmd: Command::Balance,
+                    len: payload.len(),
+                }),
+            },
+            6 => match parse_arb_prices(payload) {
+                Some(arb) => {
+                    if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
+                        out.push(Event::Arb {
+                            uid: arb.uid,
+                            payload: parsed,
+                        });
+                    }
+                }
+                None => out.push(Event::ParseFailed {
+                    cmd: Command::Balance,
+                    len: payload.len(),
+                }),
+            },
+            _ => out.push(Event::Raw {
+                cmd: Command::Balance,
+                payload: payload.to_vec(),
+            }),
+        }
+    }
+
+    fn client_new_data_strat(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        match StratCommand::parse(payload) {
+            Some(cmd_v) => self.process_strat_command(cmd_v, out),
+            None => out.push(Event::ParseFailed {
+                cmd: Command::Strat,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    /// Delphi equivalent: `TMoonProtoNetClient.ProcessStratCommand`.
+    fn process_strat_command(&mut self, cmd_v: StratCommand, out: &mut Vec<Event>) {
+        let ev = self.strats.apply(cmd_v);
+        // Active library: auto-decode strategy snapshot raw bytes
+        // в `StratsState`. Раньше app должен был сам вызывать
+        // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
+        // делает это сама на SnapshotFull/Partial event'ах.
+        match &ev {
+            crate::state::StratEvent::SnapshotFull { raw_data, .. } => {
+                if self
+                    .strats
+                    .apply_snapshot_decoded_with_mode(raw_data, true)
+                    .is_none()
+                {
+                    log::warn!(
+                        target: "moonproto::events",
+                        "failed to decode full strategy snapshot payload ({} bytes)",
+                        raw_data.len()
+                    );
+                }
+            }
+            crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
+                if self
+                    .strats
+                    .apply_snapshot_decoded_with_mode(raw_data, false)
+                    .is_none()
+                {
+                    log::warn!(
+                        target: "moonproto::events",
+                        "failed to decode partial strategy snapshot payload ({} bytes)",
+                        raw_data.len()
+                    );
+                }
+            }
+            _ => {}
+        }
+        out.push(Event::Strat(ev));
+    }
+
+    fn client_new_data_ui(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        match UICommand::parse(payload) {
+            Some(cmd_v) => {
+                let ev = self.settings.apply(cmd_v);
+                out.push(Event::Settings(ev));
+            }
+            None => out.push(Event::ParseFailed {
+                cmd: Command::UI,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    fn client_new_data_api(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        match parse_engine_response(payload) {
+            Some(resp) => self.process_api_command(resp, out),
+            None => out.push(Event::ParseFailed {
+                cmd: Command::API,
+                len: payload.len(),
+            }),
+        }
+    }
+
+    /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.
+    fn process_api_command(&mut self, resp: EngineResponse, out: &mut Vec<Event>) {
+        const ASSUMED_VER: u16 = 2;
+        let extra_event: Option<Event> = if resp.success {
+            match resp.method {
+                EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
+                    if resp.method == EngineMethod::GetMarketsList {
+                        if let Some(list) = parse_markets_list_response(&resp.data, ASSUMED_VER) {
+                            let ev = self.markets.apply_markets_list(list);
+                            Some(Event::Markets(ev))
+                        } else {
+                            None
+                        }
+                    } else if let Some(prices) = parse_markets_prices_response(&resp.data) {
+                        let ev = self.markets.apply_markets_prices(prices);
+                        Some(Event::Markets(ev))
+                    } else {
+                        None
+                    }
+                }
+                EngineMethod::GetMarketsIndexes => {
+                    if let Some(names) = parse_markets_indexes_response(&resp.data) {
+                        let ev = self.markets.apply_markets_indexes(names);
+                        Some(Event::Markets(ev))
+                    } else {
+                        None
+                    }
+                }
+                EngineMethod::CheckBinanceTags => {
+                    if let Some(items) = parse_token_tags_response(&resp.data) {
+                        let ev = self.markets.apply_token_tags(items);
+                        Some(Event::Markets(ev))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(ev) = extra_event {
+            out.push(ev);
+        }
+        out.push(Event::EngineResponse(resp));
+    }
+
+    fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        if payload.len() < 8 {
+            out.push(Event::ParseFailed {
+                cmd: Command::LogMsg,
+                len: payload.len(),
+            });
+            return;
+        }
+        let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
+        let msg = String::from_utf8_lossy(&payload[8..]).to_string();
+        out.push(Event::ServerLog { time, msg });
     }
 
     /// Active-library parser step used by `Client::run_with_dispatcher`.
