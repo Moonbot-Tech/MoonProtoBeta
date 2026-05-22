@@ -82,6 +82,10 @@ Delphi model по факту:
   CheckSeningData`.
 - `src/client.rs` - `spawn_reader` handles service commands, Sliced/SlicedACK,
   handshake, Ping, SizeTest/ProbeMTU, and data `DataReadInt` core in reader.
+- `src/client.rs` - production reader data path is now named like Delphi:
+  `ReaderRuntime::data_read` handles `MPC_Grouped` and calls
+  `ReaderRuntime::data_read_int`; completed Sliced datagrams call
+  `data_read_int` before `Receiving` removal.
 - `src/client.rs` - ping handling writes shared `TmpSlider`; writer later copies
   it and runs `ApplyRegularHLAck`.
 - `src/events.rs:753` - `EventDispatcher::dispatch_into_active` требует `&mut Client` и может сам слать API через `client.send_api_request`.
@@ -1221,3 +1225,21 @@ Still not done:
   delivery. The next strict parity step is to decide, block-by-block, which
   `OnNewData`/active-library handlers must move to reader-thread execution and
   which Delphi handlers intentionally queue work elsewhere.
+
+### 2026-05-22 - Phase 1 partial: named reader DataRead/DataReadInt blocks
+
+Done:
+
+- Production `ReaderRuntime` now owns `data_read` and `data_read_int` blocks
+  corresponding to Delphi `TMoonProtoBaseNet.DataRead` and `DataReadInt`.
+- Regular data packets call `ReaderRuntime::data_read`.
+- `MPC_Grouped` is split inside `data_read`, with receive side effects attached
+  only to the first emitted sub-packet, matching the previous machine effect.
+- Completed incoming Sliced datagrams call `data_read_int`, then remove
+  `Receiving[DatagramNum]`, preserving Delphi order at the named block level.
+
+Still not done:
+
+- `data_read_int` still queues `ReaderDecodedMsg` for public/active delivery
+  instead of calling the full Delphi `OnNewData` body inline. That is the next
+  block-by-block parity decision.

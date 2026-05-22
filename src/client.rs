@@ -680,18 +680,104 @@ impl ReaderRuntime {
     }
 
     fn on_data_packet(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        let decoded = Client::reader_decode_data_packets(
-            &self.reader_protocol,
-            Some(self.api_pending.as_ref()),
-            Some(self.pending_candles.as_ref()),
-            raw_cmd,
-            payload,
-            recv_bytes,
-            timestamp_ms,
-            self.epoch,
-            false,
-        );
-        self.pending_reader_decoded.lock().unwrap().extend(decoded);
+        self.data_read(raw_cmd, payload, recv_bytes, timestamp_ms, false);
+    }
+
+    fn data_read(
+        &self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        apply_recv_effects_first: bool,
+    ) {
+        if Command::from_byte(raw_cmd) != Command::Grouped {
+            self.data_read_int(
+                raw_cmd,
+                payload,
+                recv_bytes,
+                timestamp_ms,
+                apply_recv_effects_first,
+                None,
+            );
+            return;
+        }
+
+        let mut pos = 0;
+        let mut emitted = false;
+        while pos + 3 <= payload.len() {
+            let sub_cmd = payload[pos];
+            pos += 1;
+            let sz = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+            pos += 2;
+            if pos + sz > payload.len() {
+                break;
+            }
+            self.data_read_int(
+                sub_cmd,
+                &payload[pos..pos + sz],
+                recv_bytes,
+                timestamp_ms,
+                apply_recv_effects_first && !emitted,
+                None,
+            );
+            emitted = true;
+            pos += sz;
+        }
+
+        if !emitted {
+            Client::push_reader_recv_side_effect(
+                &self.pending_reader_decoded,
+                raw_cmd,
+                recv_bytes,
+                timestamp_ms,
+                self.epoch,
+                apply_recv_effects_first,
+            );
+        }
+    }
+
+    fn data_read_int(
+        &self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        apply_recv_effects: bool,
+        sliced_stats: Option<ReaderSlicedStats>,
+    ) {
+        let decoded =
+            Client::decode_data_read_int_payload_shared(&self.reader_protocol, raw_cmd, payload);
+        let (cmd, payload) = decoded
+            .map(|(cmd, payload)| (cmd, Some(payload)))
+            .unwrap_or((raw_cmd, None));
+        let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
+            Client::dispatch_api_pending_from_reader(self.api_pending.as_ref(), cmd, payload)
+        });
+        let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
+            Client::dispatch_candles_chunk_from_reader(
+                self.pending_candles.as_ref(),
+                cmd,
+                payload,
+                timestamp_ms,
+            )
+        });
+        self.pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd,
+                payload,
+                api_pending_consumed,
+                candles_chunk_consumed,
+                recv_bytes,
+                timestamp_ms,
+                epoch: self.epoch,
+                apply_recv_effects,
+                sliced_stats,
+                ping_update: None,
+                handshake_update: None,
+            });
     }
 
     fn on_new_size_test(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
@@ -930,42 +1016,18 @@ impl ReaderRuntime {
         );
 
         if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
-            let decoded =
-                Client::decode_data_read_int_payload_shared(&self.reader_protocol, cmd, &payload);
+            self.data_read_int(
+                cmd,
+                &payload,
+                recv_bytes,
+                timestamp_ms,
+                false,
+                Some(ReaderSlicedStats {
+                    dup_count,
+                    blocks_count,
+                }),
+            );
             self.slicer.lock().unwrap().receiving.remove(&datagram_num);
-            let (cmd, payload) = decoded
-                .map(|(cmd, payload)| (cmd, Some(payload)))
-                .unwrap_or((cmd, None));
-            let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
-                Client::dispatch_api_pending_from_reader(self.api_pending.as_ref(), cmd, payload)
-            });
-            let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
-                Client::dispatch_candles_chunk_from_reader(
-                    self.pending_candles.as_ref(),
-                    cmd,
-                    payload,
-                    timestamp_ms,
-                )
-            });
-            self.pending_reader_decoded
-                .lock()
-                .unwrap()
-                .push(ReaderDecodedMsg {
-                    cmd,
-                    payload,
-                    api_pending_consumed,
-                    candles_chunk_consumed,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch: self.epoch,
-                    apply_recv_effects: false,
-                    sliced_stats: Some(ReaderSlicedStats {
-                        dup_count,
-                        blocks_count,
-                    }),
-                    ping_update: None,
-                    handshake_update: None,
-                });
         } else {
             Client::push_reader_recv_side_effect(
                 &self.pending_reader_decoded,
@@ -7045,6 +7107,7 @@ impl Client {
         Self::handle_candles_chunk_in_map(pending_candles, &resp, now_ms)
     }
 
+    #[cfg(test)]
     fn reader_decode_data_packets(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
         api_pending: Option<&ApiPending>,
