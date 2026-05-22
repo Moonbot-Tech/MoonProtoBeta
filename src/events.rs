@@ -639,7 +639,7 @@ impl EventDispatcher {
         self.orders
             .set_server_time_delta(self.current_server_time_delta());
         let (apply_result, ev) = self.orders.apply_at(tc, now_ms);
-        if apply_result != ApplyResult::NotApplicable {
+        if apply_result == ApplyResult::Applied {
             out.push(Event::Order(ev));
         }
     }
@@ -1109,8 +1109,9 @@ mod tests {
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
-        OrderCompact, OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, SetImmuneCommand,
-        StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
+        OrderCompact, OrderStatus, OrderStatusUpdate, OrderTracePoint, OrderType, OrderUpdateData,
+        OrderWorkerStatus, SetImmuneCommand, StopSettings, TradeCommand, TradeCtx,
+        TradeEpochHeader,
     };
 
     static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1511,6 +1512,127 @@ mod tests {
 
         assert!(out.is_empty());
         assert!(!d.orders.get(uid).unwrap().immune_for_clicks);
+    }
+
+    #[test]
+    fn dispatcher_drops_skipped_order_updates_without_event_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+
+        d.process_command_order(
+            TradeCommand::OrderStatusUpdate(OrderStatusUpdate {
+                epoch_header: TradeEpochHeader {
+                    market: MarketCommandHeader {
+                        base: BaseCommandHeader {
+                            cmd_id: 5,
+                            ver: 3,
+                            uid: 0x7B,
+                        },
+                        currency: 7,
+                        platform: 9,
+                        market_name: "BTCUSDT".to_string(),
+                    },
+                    epoch: 1,
+                    status: OrderWorkerStatus::BuySet,
+                },
+                update_data: OrderUpdateData::default(),
+                sell_reason_code: 0,
+            }),
+            1000,
+            &mut out,
+        );
+        assert!(out.is_empty());
+        assert!(d.orders.get(0x7B).is_none());
+
+        let uid_stale = 0x7C;
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid_stale,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            1010,
+            &mut out,
+        );
+        out.clear();
+        let accepted_update = OrderStatusUpdate {
+            epoch_header: TradeEpochHeader {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 5,
+                        ver: 3,
+                        uid: uid_stale,
+                    },
+                    currency: 7,
+                    platform: 9,
+                    market_name: "BTCUSDT".to_string(),
+                },
+                epoch: 2,
+                status: OrderWorkerStatus::BuySet,
+            },
+            update_data: OrderUpdateData::default(),
+            sell_reason_code: 0,
+        };
+        d.process_command_order(
+            TradeCommand::OrderStatusUpdate(accepted_update.clone()),
+            1020,
+            &mut out,
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [Event::Order(OrderEvent::Updated(found))] if *found == uid_stale
+        ));
+        out.clear();
+        d.process_command_order(
+            TradeCommand::OrderStatusUpdate(accepted_update),
+            1030,
+            &mut out,
+        );
+        assert!(out.is_empty());
+
+        let uid_rollback = 0x7D;
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid_rollback,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::SellSet,
+            ))),
+            1040,
+            &mut out,
+        );
+        out.clear();
+        d.process_command_order(
+            TradeCommand::OrderStatusUpdate(OrderStatusUpdate {
+                epoch_header: TradeEpochHeader {
+                    market: MarketCommandHeader {
+                        base: BaseCommandHeader {
+                            cmd_id: 5,
+                            ver: 3,
+                            uid: uid_rollback,
+                        },
+                        currency: 7,
+                        platform: 9,
+                        market_name: "BTCUSDT".to_string(),
+                    },
+                    epoch: 3,
+                    status: OrderWorkerStatus::BuySet,
+                },
+                update_data: OrderUpdateData::default(),
+                sell_reason_code: 0,
+            }),
+            1050,
+            &mut out,
+        );
+        assert!(out.is_empty());
+        assert_eq!(
+            d.orders.get(uid_rollback).unwrap().status,
+            OrderWorkerStatus::SellSet
+        );
     }
 
     #[test]

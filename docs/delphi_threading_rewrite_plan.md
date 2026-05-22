@@ -1981,3 +1981,21 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` branches that do have server-state side effects.
+
+### 2026-05-22 - Phase 1 partial: skipped order packets are silent on receive
+
+Done:
+
+- Tightened dispatcher-level order delivery one step further: only
+  `ApplyResult::Applied` becomes an active `Event::Order`.
+- This matches Delphi receive behavior for unknown-UID updates, stale epoch
+  packets, phase rollbacks, and bulk-replace notifications with no local
+  affected worker: Delphi logs or frees/exits, but does not raise a user-facing
+  order event.
+- Low-level `Orders::apply` keeps `OrderEvent::Ignored` for direct diagnostic
+  callers; the active `EventDispatcher` suppresses it.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining applied
+  `HandleServerCommand` state mutations and virtual-worker tick side effects.

@@ -32,7 +32,6 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
             }
             OrderEvent::Removed(uid) => remove_order_from_ui(*uid),
             OrderEvent::Snapshot => redraw_all_orders(state.orders().iter()),
-            OrderEvent::Ignored { uid, reason } => log_ignored_order(*uid, *reason),
             _ => {}
         }
     }
@@ -60,6 +59,11 @@ flow they are not server state updates. For outgoing UI clicks,
 `Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
 `immune_for_clicks` on found active orders, and then queues `TSetImmuneCommand`.
 Later `TOrderStatus` snapshots can refresh the same field from the server.
+Skipped server-state packets also do not emit active dispatcher events: unknown
+UID updates, stale epoch packets, phase rollbacks, and empty `TBulkReplaceNotify`
+effects match Delphi's log/free/exit receive path. The diagnostic
+`OrderEvent::Ignored` value is returned only by direct low-level
+`Orders::apply` calls.
 Terminal statuses and `TOrderNotFound` are removed in a deferred flush after the
 current reader batch. `SelLDone` has an additional 400 ms grace window matching
 Delphi `DoTheJobVirtual`, which runs two `Sleep(200); ProcessCommands` passes
@@ -212,6 +216,8 @@ For `TAllStatuses`, expect zero or more per-order events before the final
 `Snapshot` marker. For terminal order updates, expect an `Updated` event first
 and a later deferred `Removed` event after the receive batch is drained; for
 `SelLDone`, removal is delayed by the Delphi 400 ms final-trace grace window.
+`Ignored` is a low-level diagnostic from `Orders::apply`; `EventDispatcher`
+does not emit it as an active order event.
 
 ## Time Correction
 
