@@ -198,6 +198,8 @@ pub struct Order {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
+    /// Delphi `BOrderWorker.IsMoonShot`, raised by `TCorridorUpdate`.
+    pub is_moon_shot: bool,
     /// Корридор цен (последний апдейт).
     pub corridor_price_down: f32,
     pub corridor_price_up: f32,
@@ -272,6 +274,7 @@ impl Order {
             vstop_fixed: false,
             vstop_level: 0.0,
             vstop_vol: 0.0,
+            is_moon_shot: false,
             corridor_price_down: 0.0,
             corridor_price_up: 0.0,
             strat_id: status_cmd.strat_id,
@@ -649,6 +652,7 @@ impl Orders {
                         },
                     );
                 };
+                entry.is_moon_shot = true;
                 entry.corridor_price_down = cu.price_down;
                 entry.corridor_price_up = cu.price_up;
                 (ApplyResult::Applied, OrderEvent::CorridorChanged(uid))
@@ -1586,6 +1590,31 @@ mod tests {
         };
         orders.apply(TradeCommand::OrderStatusUpdate(buy_set_update));
         assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, None);
+    }
+
+    #[test]
+    fn corridor_update_marks_order_as_moon_shot_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        assert!(!orders.get(1).unwrap().is_moon_shot);
+
+        let (res, ev) = orders.apply(TradeCommand::CorridorUpdate(CorridorUpdate {
+            market: make_market(1, 3, "X"),
+            price_down: 10.5,
+            price_up: 12.25,
+        }));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::CorridorChanged(1)));
+        let order = orders.get(1).unwrap();
+        assert!(order.is_moon_shot);
+        assert_eq!(order.corridor_price_down, 10.5);
+        assert_eq!(order.corridor_price_up, 12.25);
     }
 
     #[test]

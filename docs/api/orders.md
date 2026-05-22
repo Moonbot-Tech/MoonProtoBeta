@@ -91,6 +91,7 @@ pub struct Order {
     pub vstop_fixed: bool,
     pub vstop_level: f64,
     pub vstop_vol: f64,
+    pub is_moon_shot: bool,
     pub corridor_price_down: f32,
     pub corridor_price_up: f32,
     pub strat_id: u64,
@@ -121,6 +122,9 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in
 `TOrderCompact` wire data.
+`TCorridorUpdate` mirrors Delphi `HandleServerCommand`: it sets
+`is_moon_shot = true` and stores `corridor_price_down` /
+`corridor_price_up` as Delphi `TestPriceDown` / `TestPriceUp`.
 `pending_buy_cond_price` mirrors Delphi `vOrder.BuyCondPrice` for pending
 `OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
 `UpdateData.MeanPrice` without applying the rest of `UpdateData` to

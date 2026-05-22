@@ -1753,3 +1753,25 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for the remaining
   `ProcessCommandOrder` / `DoTheJobVirtual` body.
+
+### 2026-05-22 - Phase 1 partial: `TCorridorUpdate` marks MoonShot state
+
+Done:
+
+- Fixed `TCorridorUpdate` read-model parity. Delphi
+  `BOrderWorker.HandleServerCommand` sets `IsMoonShot := true` before updating
+  `TestPriceDown` / `TestPriceUp`, and also mirrors those values into
+  `PresaveMarketData`.
+- Rust previously stored only `corridor_price_down` / `corridor_price_up`,
+  losing the worker-level MoonShot flag.
+- Added `Order::is_moon_shot` as the read-model counterpart of Delphi
+  `BOrderWorker.IsMoonShot`; it starts `false` on `TOrderStatus` creation and
+  becomes `true` on `TCorridorUpdate`.
+- Updated API docs and added a unit test proving `TCorridorUpdate` sets the flag
+  and stores both corridor prices.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` / `DoTheJobVirtual` body, including visual trace side
+  effects that are still represented only as stored trace points.
