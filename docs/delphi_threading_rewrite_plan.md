@@ -1450,6 +1450,30 @@ Still not done:
 
 - `TOrderStatus` / `TOrderStatusUpdate` terminal-status removal timing and
   `TOrderNotFound` handling still need reverse-equivalence against the
-  `BOrderWorker` command queue / worker-loop cleanup. Rust currently removes
-  entries synchronously inside `Orders::apply`; Delphi queues commands to the
-  worker and removes from `WCache` later.
+  `BOrderWorker` command queue / worker-loop cleanup.
+
+### 2026-05-22 - Phase 1 partial: deferred terminal order removal
+
+Done:
+
+- Fixed `ProcessCommandOrder` lifetime parity for terminal statuses and
+  `TOrderNotFound`.
+- Rust no longer removes an order entry synchronously inside `Orders::apply`
+  when terminal status / `TOrderNotFound` arrives. It marks `job_is_done` /
+  `server_forced_remove`, keeps the entry addressable for the rest of the
+  receive batch, then removes it through deferred flush.
+- `EventDispatcher::drain_deferred_order_removals` emits the delayed
+  `OrderEvent::Removed` after the reader-decoded batch, matching Delphi's
+  "queue command into worker now, remove from WCache later" machine effect.
+- Added tests proving `TOrderTracePoint` after terminal status is still applied
+  before deferred removal.
+- Removed Rust-only `max_trace_points` cap after the test exposed
+  `EventDispatcher::default()` had effectively capped stored trace points at
+  zero. Delphi `ApplyServerTrace` has no equivalent fixed cap in this block.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for the remaining
+  `ProcessCommandOrder` body: price field side effects in
+  `HandleServerCommand`, `OrderReplaceResponse` exact semantics, and which
+  epoch/visual classes are accepted or dropped.

@@ -14,10 +14,10 @@
 //! - Snapshot flag mechanism (`current_snapshot_flag` инкрементируется при TAllStatuses,
 //!   ордера без свежего флага → запрашиваются через `missing_after_snapshot()`).
 //! - BulkReplace tracking (set replace-pending flag на UID'ах).
-//! - Trace points accumulation (последние N точек).
+//! - Trace points accumulation.
 //! - Corridor state.
 //! - VStop state.
-//! - Auto-removal на терминальном статусе.
+//! - Deferred removal на терминальном статусе / TOrderNotFound.
 //! - ServerTimeDelta correction для всех TDateTime полей.
 
 use crate::commands::trade::*;
@@ -189,11 +189,8 @@ pub struct Order {
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     /// Trace points (визуализация решения сервера).
-    /// Ring-buffer trace points (audit_rust_quality #5 + audit_robustness M5):
-    /// `VecDeque` вместо `Vec` чтобы `pop_front()` был O(1) вместо O(N) при превышении лимита.
-    /// При 100 ордерах × 10 trace_points/sec этот O(N) был 250K memmove ops/sec.
     pub trace_points: VecDeque<OrderTracePoint>,
-    /// True если ордер терминален (закроется при очередном tick).
+    /// True если ордер терминален и ожидает deferred removal.
     pub job_is_done: bool,
     /// Server-forced removal (TOrderNotFound пришёл).
     pub server_forced_remove: bool,
@@ -286,7 +283,7 @@ pub enum OrderEvent {
     Created(u64),
     /// Существующий ордер обновился (status / update / replace_response).
     Updated(u64),
-    /// Ордер удалён — terminal status, TOrderNotFound или server_forced_remove.
+    /// Ордер удалён после deferred cleanup terminal status / TOrderNotFound.
     Removed(u64),
     /// Bulk replace notification.
     BulkReplaced {
@@ -322,21 +319,22 @@ impl From<&Order> for TradeCtx {
 #[derive(Debug, Default)]
 pub struct Orders {
     map: HashMap<u64, Order>,
+    /// UID'ы, которые Delphi worker уже пометил бы как завершающиеся, но ещё
+    /// не удалил бы из `WCache` прямо внутри `ProcessCommandOrder`.
+    pending_removals: Vec<u64>,
     /// Инкрементируется при каждом TAllStatuses (CurrentSnapshotFlag в Delphi).
     current_snapshot_flag: u8,
     /// ServerTimeDelta = InitialTime(server) - Now(client). Применяется к временам в командах.
     pub server_time_delta: f64,
-    /// Max количество trace points на ордер (ring buffer).
-    pub max_trace_points: usize,
 }
 
 impl Orders {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            pending_removals: Vec::new(),
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
-            max_trace_points: 256,
         }
     }
 
@@ -377,7 +375,7 @@ impl Orders {
     /// 2. Проверка phase rollback.
     /// 3. Применение к Order (или создание нового).
     /// 4. ServerTimeDelta correction для TDateTime полей.
-    /// 5. Снятие job_is_done / удаление при terminal status / TOrderNotFound.
+    /// 5. Deferred removal при terminal status / TOrderNotFound.
     /// 6. Snapshot flag mechanics (CleanupMissing).
     /// 7. Генерация события.
     ///
@@ -391,12 +389,18 @@ impl Orders {
                 let new_flag = self.begin_snapshot();
                 for st in &snap.orders {
                     let order_uid = st.epoch_header.market.base.uid;
-                    let entry = self
-                        .map
-                        .entry(order_uid)
-                        .or_insert_with(|| Order::from_status(st));
-                    Self::apply_status_inner(entry, st, self.server_time_delta);
-                    entry.snapshot_flag = new_flag;
+                    let is_done = {
+                        let entry = self
+                            .map
+                            .entry(order_uid)
+                            .or_insert_with(|| Order::from_status(st));
+                        Self::apply_status_inner(entry, st, self.server_time_delta);
+                        entry.snapshot_flag = new_flag;
+                        entry.job_is_done
+                    };
+                    if is_done {
+                        self.mark_pending_removal(order_uid);
+                    }
                 }
                 (ApplyResult::Applied, OrderEvent::Snapshot)
             }
@@ -413,23 +417,28 @@ impl Orders {
                         },
                     );
                 }
-                let entry = self
-                    .map
-                    .entry(uid)
-                    .or_insert_with(|| Order::from_status(&st));
+                let is_done = {
+                    let entry = self
+                        .map
+                        .entry(uid)
+                        .or_insert_with(|| Order::from_status(&st));
 
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
+                    if let Err(reason) = Self::accept_epoch_and_phase(entry, &st.epoch_header) {
+                        return (reason, OrderEvent::Ignored { uid, reason });
+                    }
+
+                    Self::apply_status_inner(entry, &st, self.server_time_delta);
+                    entry.snapshot_flag = self.current_snapshot_flag;
+                    entry.job_is_done
+                };
+                if is_done {
+                    self.mark_pending_removal(uid);
                 }
 
-                Self::apply_status_inner(entry, &st, self.server_time_delta);
-                entry.snapshot_flag = self.current_snapshot_flag;
-
-                if entry.job_is_done {
-                    self.map.remove(&uid);
-                    (ApplyResult::Applied, OrderEvent::Removed(uid))
-                } else if new_order {
+                if new_order {
                     (ApplyResult::Applied, OrderEvent::Created(uid))
+                } else if is_done {
+                    (ApplyResult::Applied, OrderEvent::Updated(uid))
                 } else {
                     (ApplyResult::Applied, OrderEvent::Updated(uid))
                 }
@@ -437,56 +446,62 @@ impl Orders {
 
             // --- Delta-update ---
             TradeCommand::OrderStatusUpdate(up) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
-                    return (
-                        ApplyResult::OrderNotFound,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::OrderNotFound,
-                        },
-                    );
-                };
+                let is_terminal = up.epoch_header.status.is_terminal();
+                {
+                    let Some(entry) = self.map.get_mut(&uid) else {
+                        return (
+                            ApplyResult::OrderNotFound,
+                            OrderEvent::Ignored {
+                                uid,
+                                reason: ApplyResult::OrderNotFound,
+                            },
+                        );
+                    };
 
-                if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
-                    return (reason, OrderEvent::Ignored { uid, reason });
+                    if let Err(reason) = Self::accept_epoch_and_phase(entry, &up.epoch_header) {
+                        return (reason, OrderEvent::Ignored { uid, reason });
+                    }
+
+                    // Apply delta-update.
+                    let mut data = up.update_data;
+                    data.adjust_time(self.server_time_delta);
+
+                    // Routing по status — какой ордер обновлять.
+                    let target = if matches!(
+                        up.epoch_header.status,
+                        OrderWorkerStatus::SellSet
+                            | OrderWorkerStatus::SelLAlmostDone
+                            | OrderWorkerStatus::SelLDone
+                            | OrderWorkerStatus::SellCancel
+                            | OrderWorkerStatus::SellFail
+                    ) {
+                        &mut entry.sell_order
+                    } else {
+                        &mut entry.buy_order
+                    };
+
+                    target.int_id = data.int_id;
+                    target.actual_price = data.actual_price;
+                    target.open_time = data.open_time;
+                    target.quantity = data.quantity;
+                    target.quantity_remaining = data.quantity_remaining;
+                    target.actual_q = data.actual_q;
+                    target.total_btc = data.total_btc;
+                    target.mean_price = data.mean_price;
+                    target.partial_done = data.partial_done;
+                    target.stop_flag = data.stop_flag;
+
+                    entry.status = up.epoch_header.status;
+                    entry.sell_reason_code = up.sell_reason_code;
+
+                    if is_terminal {
+                        entry.job_is_done = true;
+                    }
                 }
 
-                // Apply delta-update.
-                let mut data = up.update_data;
-                data.adjust_time(self.server_time_delta);
-
-                // Routing по status — какой ордер обновлять.
-                let target = if matches!(
-                    up.epoch_header.status,
-                    OrderWorkerStatus::SellSet
-                        | OrderWorkerStatus::SelLAlmostDone
-                        | OrderWorkerStatus::SelLDone
-                        | OrderWorkerStatus::SellCancel
-                        | OrderWorkerStatus::SellFail
-                ) {
-                    &mut entry.sell_order
-                } else {
-                    &mut entry.buy_order
-                };
-
-                target.int_id = data.int_id;
-                target.actual_price = data.actual_price;
-                target.open_time = data.open_time;
-                target.quantity = data.quantity;
-                target.quantity_remaining = data.quantity_remaining;
-                target.actual_q = data.actual_q;
-                target.total_btc = data.total_btc;
-                target.mean_price = data.mean_price;
-                target.partial_done = data.partial_done;
-                target.stop_flag = data.stop_flag;
-
-                entry.status = up.epoch_header.status;
-                entry.sell_reason_code = up.sell_reason_code;
-
-                if up.epoch_header.status.is_terminal() {
-                    entry.job_is_done = true;
-                    self.map.remove(&uid);
-                    return (ApplyResult::Applied, OrderEvent::Removed(uid));
+                if is_terminal {
+                    self.mark_pending_removal(uid);
+                    return (ApplyResult::Applied, OrderEvent::Updated(uid));
                 }
 
                 (ApplyResult::Applied, OrderEvent::Updated(uid))
@@ -608,9 +623,6 @@ impl Orders {
                 };
                 tp.adjust_time(self.server_time_delta);
                 entry.trace_points.push_back(tp);
-                if entry.trace_points.len() > self.max_trace_points {
-                    entry.trace_points.pop_front();
-                }
                 (ApplyResult::Applied, OrderEvent::TracePoint { uid })
             }
 
@@ -637,10 +649,16 @@ impl Orders {
             // --- Order not found (server forced remove) ---
             TradeCommand::OrderNotFound(h) => {
                 let uid = h.market.base.uid;
-                if let Some(mut entry) = self.map.remove(&uid) {
+                let found = if let Some(entry) = self.map.get_mut(&uid) {
                     entry.server_forced_remove = true;
                     entry.job_is_done = true;
-                    (ApplyResult::Applied, OrderEvent::Removed(uid))
+                    true
+                } else {
+                    false
+                };
+                if found {
+                    self.mark_pending_removal(uid);
+                    (ApplyResult::Applied, OrderEvent::Updated(uid))
                 } else {
                     (
                         ApplyResult::OrderNotFound,
@@ -761,6 +779,33 @@ impl Orders {
         entry.job_is_done = st.epoch_header.status.is_terminal();
     }
 
+    fn mark_pending_removal(&mut self, uid: u64) {
+        if !self.pending_removals.contains(&uid) {
+            self.pending_removals.push(uid);
+        }
+    }
+
+    /// Remove orders whose worker would leave `WCache` after the current
+    /// `ProcessCommandOrder`/worker-loop batch, and return removed UID's.
+    ///
+    /// Delphi does not remove the worker from `WCache` inside
+    /// `TMoonProtoNetClient.ProcessCommandOrder` when a terminal status or
+    /// `TOrderNotFound` arrives. It marks/queues the worker command, and
+    /// `BOrderWorker.DoTheJobVirtual` removes it later. This deferred drain is
+    /// the Rust active-library counterpart: callers should run it after a
+    /// reader-decoded batch so visual commands that arrived immediately after
+    /// the terminal packet can still target the same order.
+    pub fn drain_pending_removals(&mut self) -> Vec<u64> {
+        let pending = std::mem::take(&mut self.pending_removals);
+        let mut removed = Vec::with_capacity(pending.len());
+        for uid in pending {
+            if self.map.remove(&uid).is_some() {
+                removed.push(uid);
+            }
+        }
+        removed
+    }
+
     /// После TAllStatuses найти ордера, которых **нет** в свежем snapshot.
     /// Эти UID'ы нужно явно запросить через `build_order_status_request`.
     /// Соответствует `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
@@ -787,6 +832,7 @@ impl Orders {
     /// Очистить весь state (при reconnect / WantNewHello).
     pub fn clear(&mut self) {
         self.map.clear();
+        self.pending_removals.clear();
         self.current_snapshot_flag = 0;
     }
 }
@@ -850,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn create_then_remove_on_terminal() {
+    fn terminal_status_marks_done_then_deferred_removal() {
         let mut orders = Orders::new();
         let s1 = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
         let (res, ev) = orders.apply(order_status_cmd(s1));
@@ -860,7 +906,11 @@ mod tests {
 
         let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLDone, 1);
         let (_, ev) = orders.apply(order_status_cmd(s2));
-        assert!(matches!(ev, OrderEvent::Removed(42)));
+        assert!(matches!(ev, OrderEvent::Updated(42)));
+        assert!(orders.get(42).unwrap().job_is_done);
+
+        let removed = orders.drain_pending_removals();
+        assert_eq!(removed, vec![42]);
         assert!(orders.get(42).is_none());
     }
 
@@ -926,7 +976,94 @@ mod tests {
         let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLAlmostDone, 2);
         let (res, ev) = orders.apply(order_status_cmd(s2));
         assert_eq!(res, ApplyResult::Applied);
-        assert!(matches!(ev, OrderEvent::Removed(42)));
+        assert!(matches!(ev, OrderEvent::Updated(42)));
+        assert!(orders.get(42).unwrap().job_is_done);
+        assert_eq!(orders.drain_pending_removals(), vec![42]);
+        assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SelLDone,
+            2,
+        )));
+
+        let trace = OrderTracePoint {
+            market: make_market(42, 3, "BTCUSDT"),
+            trace_time: 45_000.0,
+            trace_price: 101.0,
+            base_price: 100.0,
+            stop_price: 0.0,
+            ord_type: OrderType::Sell,
+            flags: trace_flags::IS_FINISH,
+        };
+        let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
+        assert_eq!(orders.get(42).unwrap().trace_points.len(), 1);
+        assert_eq!(orders.drain_pending_removals(), vec![42]);
+        assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn trace_points_are_not_capped_like_former_rust_ring_buffer() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        for n in 0..300 {
+            let trace = OrderTracePoint {
+                market: make_market(42, 3, "BTCUSDT"),
+                trace_time: 45_000.0 + n as f64,
+                trace_price: 100.0 + n as f32,
+                base_price: 100.0,
+                stop_price: 0.0,
+                ord_type: OrderType::Sell,
+                flags: 0,
+            };
+            let (res, ev) = orders.apply(TradeCommand::OrderTracePoint(trace));
+            assert_eq!(res, ApplyResult::Applied);
+            assert!(matches!(ev, OrderEvent::TracePoint { uid: 42 }));
+        }
+
+        assert_eq!(orders.get(42).unwrap().trace_points.len(), 300);
+    }
+
+    #[test]
+    fn order_not_found_marks_server_forced_then_deferred_removal_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+
+        let not_found = make_epoch(42, 3, "BTCUSDT", 0, OrderWorkerStatus::None);
+        let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(42)));
+        let order = orders.get(42).unwrap();
+        assert!(order.server_forced_remove);
+        assert!(order.job_is_done);
+        assert_eq!(orders.drain_pending_removals(), vec![42]);
         assert!(orders.get(42).is_none());
     }
 
@@ -965,8 +1102,10 @@ mod tests {
             OrderWorkerStatus::BuyCancel,
             6,
         )));
-        // BuyCancel terminal → removed
+        // BuyCancel terminal → marked for deferred removal.
         assert_eq!(res, ApplyResult::Applied);
+        assert!(orders.get(1).unwrap().job_is_done);
+        assert_eq!(orders.drain_pending_removals(), vec![1]);
     }
 
     #[test]

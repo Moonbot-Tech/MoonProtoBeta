@@ -236,6 +236,19 @@ impl EventDispatcher {
         &self.orders
     }
 
+    /// Drain deferred order removals after a reader-decoded batch.
+    ///
+    /// Delphi queues terminal/order-not-found effects into `BOrderWorker` and
+    /// removes the worker from `WCache` later, not inside
+    /// `ProcessCommandOrder` itself. The dispatcher mirrors that by letting
+    /// terminal orders remain addressable for the rest of the current receive
+    /// batch, then emitting `OrderEvent::Removed` from this flush step.
+    pub fn drain_deferred_order_removals(&mut self, out: &mut Vec<Event>) {
+        for uid in self.orders.drain_pending_removals() {
+            out.push(Event::Order(OrderEvent::Removed(uid)));
+        }
+    }
+
     /// Read-only orderbook state, including per-market/per-kind recovery
     /// caches and the latest applied books.
     pub fn order_books(&self) -> &OrderBooks {
@@ -964,9 +977,11 @@ mod tests {
     use crate::commands::market::{BaseCurrency, Market, MarketsListResponse};
     use crate::commands::registry::write_string;
     use crate::commands::strat::build_snapshot_request;
+    use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, MarketCommandHeader, OrderCompact,
-        OrderStatus, OrderWorkerStatus, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
+        OrderStatus, OrderTracePoint, OrderType, OrderWorkerStatus, StopSettings, TradeCommand,
+        TradeCtx, TradeEpochHeader,
     };
 
     static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1186,6 +1201,69 @@ mod tests {
         assert!(matches!(events[1], Event::Order(OrderEvent::Snapshot)));
         assert_eq!(d.orders.current_snapshot_flag(), 1);
         assert!(d.orders.get(uid).is_some());
+    }
+
+    #[test]
+    fn dispatcher_defers_terminal_order_removal_until_flush() {
+        let mut d = EventDispatcher::new();
+        let mut out = Vec::new();
+        let uid = 0x42;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::SellSet,
+            ))),
+            &mut out,
+        );
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::SelLDone,
+            ))),
+            &mut out,
+        );
+        d.process_command_order(
+            TradeCommand::OrderTracePoint(OrderTracePoint {
+                market: MarketCommandHeader {
+                    base: BaseCommandHeader {
+                        cmd_id: 25,
+                        ver: 3,
+                        uid,
+                    },
+                    currency: 7,
+                    platform: 9,
+                    market_name: "BTCUSDT".to_string(),
+                },
+                trace_time: 45_000.0,
+                trace_price: 101.0,
+                base_price: 100.0,
+                stop_price: 0.0,
+                ord_type: OrderType::Sell,
+                flags: trace_flags::IS_FINISH,
+            }),
+            &mut out,
+        );
+
+        assert!(matches!(
+            out.last(),
+            Some(Event::Order(OrderEvent::TracePoint { uid: found })) if *found == uid
+        ));
+        assert_eq!(d.orders().get(uid).unwrap().trace_points.len(), 1);
+
+        out.clear();
+        d.drain_deferred_order_removals(&mut out);
+        assert!(matches!(
+            out.as_slice(),
+            [Event::Order(OrderEvent::Removed(found))] if *found == uid
+        ));
+        assert!(d.orders().get(uid).is_none());
     }
 
     #[test]

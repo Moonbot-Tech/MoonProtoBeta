@@ -132,7 +132,7 @@ the `Orders` sync state. Consumers receive `Event::Order(OrderEvent)` through
 `OrderEvent` variants (see `state::orders::OrderEvent`):
 - `Created` — new order after the first `OrderStatus` for this `task_id`
 - `Updated` — field update from `OrderStatusUpdate` or a repeated `OrderStatus`
-- `Removed` — removed by `OrderNotFound`, a terminal status, or an explicit server removal
+- `Removed` — emitted after deferred cleanup for `OrderNotFound`, a terminal status, or an explicit server removal
 - `TracePoint` — received `OrderTracePoint`
 - ... see the full list in `state/orders.rs`
 

@@ -2639,6 +2639,17 @@ impl WriterRuntime<'_> {
         for msg in decoded {
             self.process_reader_decoded(msg, cur_tm, mode);
         }
+        if let RunMode::Dispatcher {
+            dispatcher,
+            on_event,
+            event_buf,
+            ..
+        } = mode
+        {
+            event_buf.clear();
+            dispatcher.drain_deferred_order_removals(event_buf);
+            on_event.drain_events(event_buf, dispatcher);
+        }
     }
 
     fn process_reader_decoded(

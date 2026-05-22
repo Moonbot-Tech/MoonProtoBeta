@@ -50,6 +50,10 @@ order; they do not create a new active order entry when the UID is unknown.
 Incoming `TSetImmuneCommand` packets are not applied to this read model: in the
 Delphi flow `SetImmune` is a client-to-server UI action, while the client-side
 order state learns `immune_for_clicks` from `TOrderStatus`.
+Terminal statuses and `TOrderNotFound` are removed in a deferred flush after the
+current reader batch. This matches Delphi's `ProcessCommandOrder`: the worker
+remains addressable long enough for immediately following visual packets such as
+`TOrderTracePoint`, then `OrderEvent::Removed` is emitted.
 
 ## `Order`
 
@@ -128,7 +132,8 @@ pub enum OrderEvent {
 ```
 
 For `TAllStatuses`, expect zero or more per-order events before the final
-`Snapshot` marker.
+`Snapshot` marker. For terminal order updates, expect an `Updated` event first
+and a later deferred `Removed` event after the receive batch is drained.
 
 ## Time Correction
 
