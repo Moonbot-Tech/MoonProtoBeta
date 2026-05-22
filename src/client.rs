@@ -5268,29 +5268,6 @@ impl Client {
                 let total_recv_after =
                     total_recv_shared.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
                 let err_emu_drop = err_emu_should_drop(hdr.cmd);
-                if err_emu_drop {
-                    if trace_io_enabled() {
-                        eprintln!(
-                            "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
-                            Command::from_byte(hdr.cmd),
-                            hdr.cmd,
-                            payload.len()
-                        );
-                    }
-                    if slicing::trace_enabled() && Command::from_byte(hdr.cmd) == Command::Sliced {
-                        if let Some(sh) = slicing::SliceHeader::from_bytes(&payload) {
-                            eprintln!(
-                                "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
-                                sh.datagram_num,
-                                sh.block_num,
-                                sh.max_block_num,
-                                payload.len()
-                            );
-                        } else {
-                            eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
-                        }
-                    }
-                }
 
                 // B-V3-02 fix: монотонный timestamp через Instant вместо SystemTime
                 // (~20x faster, не подвержен NTP-корректировкам). Reader thread
@@ -5299,9 +5276,10 @@ impl Client {
                 let timestamp_ms = start_time.elapsed().as_millis() as i64;
                 let cmd = Command::from_byte(hdr.cmd);
                 if err_emu_drop {
-                    Client::push_reader_recv_side_effect(
+                    Client::reader_on_err_emu_drop(
                         &pending_reader_decoded,
                         hdr.cmd,
+                        &payload,
                         n as u64,
                         timestamp_ms,
                         my_epoch,
@@ -5447,17 +5425,17 @@ impl Client {
                             }
                         }
                         _ => {
-                            let decoded = Client::reader_decode_data_packets(
+                            Client::reader_on_data_packet(
                                 &reader_protocol,
-                                Some(&api_pending),
-                                Some(&pending_candles),
+                                &api_pending,
+                                &pending_candles,
+                                &pending_reader_decoded,
                                 hdr.cmd,
                                 &payload,
                                 n as u64,
                                 timestamp_ms,
                                 my_epoch,
                             );
-                            pending_reader_decoded.lock().unwrap().extend(decoded);
                         }
                     }
                 }
@@ -5473,6 +5451,71 @@ impl Client {
             error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
             self.force_disconnect = true;
         }
+    }
+
+    fn reader_on_err_emu_drop(
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
+                Command::from_byte(raw_cmd),
+                raw_cmd,
+                payload.len()
+            );
+        }
+        if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
+            if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
+                eprintln!(
+                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
+                    sh.datagram_num,
+                    sh.block_num,
+                    sh.max_block_num,
+                    payload.len()
+                );
+            } else {
+                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
+            }
+        }
+
+        // Delphi ErrEmu exits after packet accounting / LastOnline side effects;
+        // it does not deliver the packet into protocol/user handlers.
+        Self::push_reader_recv_side_effect(
+            pending_reader_decoded,
+            raw_cmd,
+            recv_bytes,
+            timestamp_ms,
+            epoch,
+        );
+    }
+
+    fn reader_on_data_packet(
+        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        api_pending: &Arc<ApiPending>,
+        pending_candles: &Arc<Mutex<HashMap<u64, PartialCandles>>>,
+        pending_reader_decoded: &Arc<Mutex<Vec<ReaderDecodedMsg>>>,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        epoch: u32,
+    ) {
+        let decoded = Self::reader_decode_data_packets(
+            reader_protocol,
+            Some(api_pending.as_ref()),
+            Some(pending_candles.as_ref()),
+            raw_cmd,
+            payload,
+            recv_bytes,
+            timestamp_ms,
+            epoch,
+        );
+        pending_reader_decoded.lock().unwrap().extend(decoded);
     }
 
     fn reader_on_new_size_test(

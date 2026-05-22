@@ -787,3 +787,23 @@ Still not done:
   The next architecture step is moving those fields/state transitions behind
   shared transport ownership so reader and writer runtimes can operate without
   `run_inner` as the protocol motor.
+
+### 2026-05-22 - Phase 1 partial: named reader data/drop blocks
+
+Done:
+
+- ErrEmu-drop handling is now isolated as `reader_on_err_emu_drop`.
+- Regular non-service data packet handling is now isolated as
+  `reader_on_data_packet`.
+- The production reader command match now delegates every protocol branch to a
+  named block: Ping, handshake control/auth, PMTU probes, SlicedACK, Sliced,
+  ErrEmu-drop, and regular data.
+- Targeted tests passed:
+  `reader_err_emu_drop_updates_stats_without_recv_event_backlog`,
+  `reader_decodes_regular_data_without_recv_event_backlog`.
+
+Still not done:
+
+- These named blocks still live as `Client` helpers called by the reader thread
+  closure. The next structural step is packaging the closure state into a
+  `ReaderRuntime` owner.
