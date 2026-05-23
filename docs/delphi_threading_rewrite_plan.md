@@ -2123,6 +2123,36 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining protocol paths after
   the full verification pass.
 
+### 2026-05-24 - Phase 1 partial: OS_SelLDone SetDoneFlags side effects
+
+Done:
+
+- Fixed a `DoTheJobVirtual.SetDoneFlags` parity bug for `OS_SelLDone`.
+- Delphi does not only mark the virtual worker done. Before the final trace
+  grace/removal window it sets `pSellOrder.IsClosed := true`,
+  `pSellOrder.IsOpened := false`, clears both order replace flags, sets
+  `pBuyOrder.IsOpened := false`, and marks buy canceled only if buy was not
+  already closed.
+- Rust previously marked terminal/deferred removal but left those compact-order
+  flags and bulk replace flags unchanged during the grace window.
+- Rust now applies the exact `SetDoneFlags` sell-done branch for both full
+  `TOrderStatus(Status=OS_SelLDone)` and
+  `TOrderStatusUpdate(Status=OS_SelLDone)`.
+- Recorded `spec_pipeline/work/хуйня.md §X.118`.
+
+Verification:
+
+- Added state tests for full status and status-update `OS_SelLDone`.
+- `cargo test sell_done --quiet` OK: `3 passed`.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `565 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:

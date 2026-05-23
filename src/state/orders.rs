@@ -1112,6 +1112,9 @@ impl Orders {
                     if is_terminal {
                         entry.job_is_done = true;
                     }
+                    if status == OrderWorkerStatus::SelLDone {
+                        Self::apply_sell_done_flags(entry);
+                    }
                 }
 
                 if is_terminal {
@@ -1477,6 +1480,23 @@ impl Orders {
                 entry.sell_price = entry.sell_order.actual_price;
                 entry.last_sell_actual_price = entry.sell_order.actual_price;
             }
+        }
+
+        if st.epoch_header.status == OrderWorkerStatus::SelLDone {
+            Self::apply_sell_done_flags(entry);
+        }
+    }
+
+    fn apply_sell_done_flags(entry: &mut Order) {
+        // Delphi `BOrderWorker.SetDoneFlags` branch for `Status = OS_SelLDone`.
+        entry.sell_order.is_closed = 1;
+        entry.sell_order.is_opened = 0;
+        entry.bulk_replace_sell = false;
+
+        entry.buy_order.is_opened = 0;
+        entry.bulk_replace_buy = false;
+        if entry.buy_order.is_closed == 0 {
+            entry.buy_order.canceled = 1;
         }
     }
 
@@ -2890,6 +2910,88 @@ mod tests {
         assert_eq!(sell_mean, 0.0);
         assert_eq!(order.sell_reason_code, 14);
         assert!(order.job_is_done);
+    }
+
+    #[test]
+    fn sell_done_status_update_applies_set_done_flags_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
+        status.buy_order.is_opened = 1;
+        status.buy_order.is_closed = 0;
+        status.buy_order.canceled = 0;
+        status.sell_order.is_opened = 1;
+        status.sell_order.is_closed = 0;
+        status.sell_order.canceled = 0;
+        orders.apply(order_status_cmd(status));
+
+        {
+            let order = orders.map.get_mut(&1).unwrap();
+            order.bulk_replace_buy = true;
+            order.bulk_replace_sell = true;
+        }
+
+        let terminal_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SelLDone),
+            update_data: Default::default(),
+            sell_reason_code: 0,
+        };
+        let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(terminal_update));
+
+        assert_eq!(res, ApplyResult::Applied);
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.sell_order.is_opened, 0);
+        assert_eq!(order.sell_order.is_closed, 1);
+        assert_eq!(
+            order.sell_order.canceled, 0,
+            "SetDoneFlags does not mark sell side canceled"
+        );
+        assert_eq!(order.buy_order.is_opened, 0);
+        assert_eq!(order.buy_order.is_closed, 0);
+        assert_eq!(
+            order.buy_order.canceled, 1,
+            "SetDoneFlags cancels buy side only when it was not already closed"
+        );
+        assert!(!order.bulk_replace_buy);
+        assert!(!order.bulk_replace_sell);
+    }
+
+    #[test]
+    fn sell_done_full_status_applies_set_done_flags_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            10,
+        )));
+
+        {
+            let order = orders.map.get_mut(&1).unwrap();
+            order.bulk_replace_buy = true;
+            order.bulk_replace_sell = true;
+        }
+
+        let mut done = make_status(1, "X", OrderWorkerStatus::SelLDone, 11);
+        done.buy_order.is_opened = 1;
+        done.buy_order.is_closed = 1;
+        done.buy_order.canceled = 0;
+        done.sell_order.is_opened = 1;
+        done.sell_order.is_closed = 0;
+        done.sell_order.canceled = 0;
+        let (res, _) = orders.apply(order_status_cmd(done));
+
+        assert_eq!(res, ApplyResult::Applied);
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.sell_order.is_opened, 0);
+        assert_eq!(order.sell_order.is_closed, 1);
+        assert_eq!(order.sell_order.canceled, 0);
+        assert_eq!(order.buy_order.is_opened, 0);
+        assert_eq!(
+            order.buy_order.canceled, 0,
+            "already closed buy side is not marked canceled by SetDoneFlags"
+        );
+        assert!(!order.bulk_replace_buy);
+        assert!(!order.bulk_replace_sell);
     }
 
     #[test]
