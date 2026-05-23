@@ -2153,6 +2153,33 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
+### 2026-05-24 - Phase 1 partial: CheckBinanceTags clears missing markets
+
+Done:
+
+- Fixed an `emk_CheckBinanceTags` state parity bug.
+- Delphi `TMoonProtoEngine.CheckBinanceTags` sets `FTokenTagsSeen := false` for
+  every market, applies tags for response rows found by market name, then clears
+  `m.TokenTags := []` for every market not seen in the latest response.
+- Rust previously merged known tags into `MarketsState::token_tags` and kept
+  old tags for markets absent from a later response.
+- Rust now clears the token-tags map before applying the latest response, so
+  absent or unknown markets read back as empty tags.
+- Recorded `spec_pipeline/work/хуйня.md §X.119`.
+
+Verification:
+
+- Updated token-tags state test to assert missing markets are cleared.
+- `cargo test token_tags --quiet` OK: `2 passed`.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `565 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `Balance`,
+  `Trades`, `OrderBook`, `UI`, and API/market domain details.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:

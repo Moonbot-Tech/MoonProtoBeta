@@ -214,10 +214,11 @@ impl MarketsState {
 
     /// Применить ответ `emk_CheckBinanceTags`.
     ///
-    /// Delphi `TMoonProtoEngine.CheckBinanceTags` обновляет только рынки,
-    /// перечисленные в response и найденные в текущем `Markets`; отсутствующие
-    /// в response рынки сохраняют прежние tags.
+    /// Delphi `TMoonProtoEngine.CheckBinanceTags` clears seen state for all
+    /// markets, applies tags for markets present in the response, then clears
+    /// tags for every market not seen in that response.
     pub fn apply_token_tags(&mut self, items: Vec<MarketTokenTags>) -> MarketsEvent {
+        self.token_tags.clear();
         let mut count = 0usize;
         for it in items {
             if self.by_name.contains_key(&it.market_name) {
@@ -878,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_token_tags_merges_known_markets_only() {
+    fn apply_token_tags_clears_missing_markets_like_delphi_check_binance_tags() {
         let mut st = MarketsState::new();
         st.apply_markets_list(MarketsListResponse {
             markets: vec![
@@ -915,7 +916,10 @@ mod tests {
             },
         ]);
         assert!(matches!(ev, MarketsEvent::TokenTagsUpdated { count: 1 }));
-        assert!(st.tags("BTCUSDT").contains(TokenTags::MONITORING));
+        assert!(
+            st.tags("BTCUSDT").is_empty(),
+            "Delphi clears TokenTags for markets not seen in the latest response"
+        );
         assert!(st.tags("ETHUSDT").contains(TokenTags::ALPHA));
         assert!(st.tags("UNKNOWN").is_empty());
     }
