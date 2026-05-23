@@ -2087,6 +2087,34 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
+### 2026-05-23 - Phase 1 partial: ProcessCommandOrder JobIsDone cleanup parity
+
+Done:
+
+- Fixed `CleanupMissingWorkers` parity. Delphi adds a missing
+  `TOrderStatusRequest` only for `(Worker <> nil) and not Worker.JobIsDone and
+  stale SnapshotFlag`. Rust previously treated terminal entries waiting for
+  deferred removal as missing candidates.
+- Rust `Orders::missing_after_snapshot` now skips `job_is_done` entries.
+- Fixed `TOrderNotFound` parity for done workers. Delphi logs the not-found but
+  sets `CancellRequest` / `ServerForcedRemove` only inside
+  `If not Worker.JobIsDone`; Rust now leaves an already terminal entry
+  untouched instead of forcing immediate removal.
+- Added tests for both invariants and updated API docs.
+
+Verification:
+
+- Targeted tests for `missing_after_snapshot`, normal `TOrderNotFound`, and
+  done-worker `TOrderNotFound` passed.
+- `cargo fmt` OK.
+- `cargo test` OK: `549 passed`; live/fire tests ignored by default.
+- `cargo check --examples` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
 ### 2026-05-23 - Phase 1 partial: OrderBook reconnect retry token parity
 
 Done:
