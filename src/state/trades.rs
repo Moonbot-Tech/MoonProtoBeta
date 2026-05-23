@@ -34,8 +34,8 @@
 //!     }
 //! }
 //!
-//! // 3. Периодический tick (раз в ~100ms) для проверки retry:
-//! if let Some(resend_payload) = trades.tick(rtt_ms, now_ms) {
+//! // 3. Delphi-equivalent tail check after a successfully parsed trades packet:
+//! for resend_payload in trades.tick(rtt_ms, now_ms) {
 //!     client.send_api_request(&resend_payload);  // отправит emk_TradesResend
 //! }
 //! ```
@@ -60,6 +60,7 @@ struct GapBucket {
     created_ms: i64,
     last_retry_ms: i64,
     retry_count: u8,
+    refund_used: bool,
     /// Битовая маска полученных packets внутри диапазона (recvd[i] = packet (start_num+i) получен).
     recvd: Vec<bool>,
 }
@@ -73,6 +74,7 @@ impl Default for GapBucket {
             created_ms: 0,
             last_retry_ms: 0,
             retry_count: 0,
+            refund_used: false,
             recvd: vec![false; DEFAULT_RECVD_SIZE],
         }
     }
@@ -98,7 +100,7 @@ fn is_packet_in_range(packet: u16, start: u16, end: u16) -> bool {
 pub enum TradesEvent {
     /// Пакет применён — потребитель должен раздать trades по маркетам.
     Apply(TradesPacket),
-    /// Обнаружен gap: пропущены packet_num в `[start..=end]`. Bucket создан, retry начнётся через tick().
+    /// Обнаружен gap: пропущены packet_num в `[start..=end]`. Bucket создан, retry проверяется через `tick()`.
     GapDetected { start: u16, end: u16 },
     /// Пакет был фактически дубликат (packet_num == last).
     /// Delphi не двигает gap-state для него, но всё равно применяет payload дальше.
@@ -110,6 +112,12 @@ pub enum TradesEvent {
         packet_num: u16,
         bucket_seq_range: (u16, u16),
     },
+    /// Recovery tick requested these packet numbers through `emk_TradesResend`.
+    ///
+    /// This is diagnostic only. The active client sends the request
+    /// automatically; applications must not send their own duplicate request
+    /// because they saw this event.
+    ResendRequested { packet_nums: Vec<u16> },
     /// Bucket закрыт: получены все trades или исчерпан retry лимит.
     BucketClosed {
         start: u16,
@@ -177,6 +185,7 @@ impl TradesState {
                 b.created_ms = now_ms;
                 b.last_retry_ms = now_ms;
                 b.retry_count = 0;
+                b.refund_used = false;
                 if b.recvd.len() < gap_size {
                     b.recvd.resize(gap_size, false);
                 } else {
@@ -203,6 +212,7 @@ impl TradesState {
         b.created_ms = now_ms;
         b.last_retry_ms = now_ms;
         b.retry_count = 0;
+        b.refund_used = false;
         if b.recvd.len() < gap_size {
             b.recvd.resize(gap_size, false);
         } else {
@@ -313,6 +323,9 @@ impl TradesState {
             if b.end_num != target_end {
                 continue;
             }
+            if b.retry_count >= 2 {
+                continue;
+            }
             let new_size = new_gap_end.wrapping_sub(b.start_num) as usize + 1;
             if new_size > MAX_RECVD_SIZE {
                 continue;
@@ -333,6 +346,10 @@ impl TradesState {
                 }
             }
             b.end_num = new_gap_end;
+            if b.retry_count >= 1 && !b.refund_used {
+                b.retry_count = b.retry_count.saturating_sub(1);
+                b.refund_used = true;
+            }
             extended = true;
             events.push(TradesEvent::GapDetected {
                 start: new_gap_start,
@@ -416,7 +433,12 @@ impl TradesState {
         (payloads, events)
     }
 
-    /// Periodic tick — проверка просроченных bucket'ов + сборка resend payload.
+    /// Tail tick — проверка просроченных bucket'ов + сборка resend payload.
+    ///
+    /// Delphi вызывает `CheckMissingTradesPackets` только в хвосте успешного
+    /// `ProcessTradesStream`, под внешним `LastCheckMissingTime` throttle 100мс.
+    /// Поэтому active library вызывает этот метод после valid live/resend
+    /// trades-пакета, а не по независимому таймеру в тишине канала.
     /// Возвращает `Some(payload)` если нужно отправить `emk_TradesResend` (через `client.send_api_request`).
     /// `rtt_ms` — текущий RoundTripDelay в миллисекундах.
     /// Delphi `CheckMissingTradesPackets` MoonProtoEngine.pas:1483-1549.
@@ -431,16 +453,18 @@ impl TradesState {
         now_ms: i64,
         events: &mut Vec<TradesEvent>,
     ) -> Vec<Vec<u8>> {
-        // Early-exit без throttle (соответствует Delphi MoonProtoEngine.pas:1494-1495 —
-        // `If UsedBuckets = 0 then exit;` СНАЧАЛА, throttle на стороне caller'а).
-        if self.used_buckets == 0 {
-            return Vec::new();
-        }
-        // Throttle: не чаще 1 раза в 100мс (между реальными проверками).
-        if (now_ms - self.last_check_missing_ms).abs() < 100 {
+        // Delphi caller:
+        // `If (NowTimeX - LastCheckMissingTime) > 100/MSecsPerDay then begin
+        //    CheckMissingTradesPackets;
+        //    LastCheckMissingTime := NowTimeX;
+        //  end;`
+        if now_ms - self.last_check_missing_ms <= 100 {
             return Vec::new();
         }
         self.last_check_missing_ms = now_ms;
+        if self.used_buckets == 0 {
+            return Vec::new();
+        }
 
         let retry_delay_ms: f64 = rtt_ms.max(250) as f64;
         let min_delay_ms: f64 = 300.0;
@@ -452,12 +476,16 @@ impl TradesState {
             }
             let gap_size = b.gap_size();
             let all_recvd = b.recvd.iter().take(gap_size).all(|&r| r);
+            // PathDelay = min(1800, max(MinDelay, RetryDelay * (1.2 + retry*0.7)))
+            let path_delay_ms: f64 = (retry_delay_ms * (1.2 + b.retry_count as f64 * 0.7))
+                .max(min_delay_ms)
+                .min(1800.0);
 
-            if all_recvd || b.retry_count >= MAX_RETRY_COUNT {
+            if all_recvd {
                 events.push(TradesEvent::BucketClosed {
                     start: b.start_num,
                     end: b.end_num,
-                    all_received: all_recvd,
+                    all_received: true,
                     retry_count: b.retry_count,
                 });
                 b.active = false;
@@ -465,10 +493,19 @@ impl TradesState {
                 continue;
             }
 
-            // PathDelay = min(1800, max(MinDelay, RetryDelay * (1.2 + retry*0.7)))
-            let path_delay_ms: f64 = (retry_delay_ms * (1.2 + b.retry_count as f64 * 0.7))
-                .max(min_delay_ms)
-                .min(1800.0);
+            if b.retry_count >= MAX_RETRY_COUNT {
+                if ((now_ms - b.last_retry_ms).abs() as f64) > path_delay_ms {
+                    events.push(TradesEvent::BucketClosed {
+                        start: b.start_num,
+                        end: b.end_num,
+                        all_received: false,
+                        retry_count: b.retry_count,
+                    });
+                    b.active = false;
+                    self.used_buckets = self.used_buckets.saturating_sub(1);
+                }
+                continue;
+            }
 
             if ((now_ms - b.last_retry_ms).abs() as f64) > path_delay_ms {
                 for j in 0..gap_size {
@@ -484,6 +521,9 @@ impl TradesState {
         if packet_nums.is_empty() {
             return Vec::new();
         }
+        events.push(TradesEvent::ResendRequested {
+            packet_nums: packet_nums.clone(),
+        });
         engine_request::trades_resend_batches(&packet_nums)
     }
 
@@ -705,15 +745,34 @@ mod tests {
     }
 
     #[test]
+    fn tick_updates_last_check_even_without_buckets_like_delphi_caller() {
+        let mut s = TradesState::new();
+
+        let payloads = s.tick(250, 1000);
+
+        assert!(payloads.is_empty());
+        assert_eq!(
+            s.last_check_missing_ms, 1000,
+            "Delphi caller writes LastCheckMissingTime after CheckMissingTradesPackets even when UsedBuckets=0"
+        );
+    }
+
+    #[test]
     fn bucket_closes_after_max_retries() {
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(100), 1000);
         let _ = s.on_packet(make_pkt(105), 1010);
-        // 3 retry — после 4-го tick'а bucket должен быть закрыт.
-        for i in 0..MAX_RETRY_COUNT as i64 + 1 {
+        // После третьего resend bucket ждёт ещё PathDelay на ответ и только потом закрывается.
+        for i in 0..MAX_RETRY_COUNT as i64 {
             let _ = s.tick(250, 1500 + i * 5000);
         }
-        // Bucket должен быть закрыт.
+        assert_eq!(
+            s.used_buckets(),
+            1,
+            "bucket не должен закрываться в тот же момент, когда исчерпал retry budget"
+        );
+
+        let _ = s.tick(250, 16500);
         assert_eq!(s.used_buckets(), 0);
     }
 
@@ -763,6 +822,68 @@ mod tests {
             "packet 105 (sequential между gap'ами) должен быть помечен как received"
         );
         // Запросы resend пойдут только за [101..104, 106..109] (8 packets).
+    }
+
+    #[test]
+    fn extending_bucket_refunds_one_retry_once_like_delphi() {
+        let mut s = TradesState::new();
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010);
+        let _ = s.tick(250, 1500);
+
+        {
+            let bucket = s.buckets.iter().find(|b| b.active).unwrap();
+            assert_eq!(bucket.retry_count, 1);
+            assert!(!bucket.refund_used);
+        }
+
+        let _ = s.on_packet(make_pkt(110), 1600);
+        {
+            let bucket = s.buckets.iter().find(|b| b.active).unwrap();
+            assert_eq!(bucket.start_num, 101);
+            assert_eq!(bucket.end_num, 109);
+            assert_eq!(bucket.retry_count, 0);
+            assert!(bucket.refund_used);
+            assert_eq!(
+                bucket.last_retry_ms, 1500,
+                "Delphi refund does not move LastRetryTime"
+            );
+        }
+
+        let _ = s.tick(250, 2500);
+        let _ = s.on_packet(make_pkt(115), 2600);
+        let bucket = s.buckets.iter().find(|b| b.active).unwrap();
+        assert_eq!(
+            bucket.retry_count, 1,
+            "second extend must not refund the same bucket again"
+        );
+        assert_eq!(bucket.end_num, 114);
+    }
+
+    #[test]
+    fn bucket_with_retry_count_two_is_not_extended_like_delphi() {
+        let mut s = TradesState::new();
+        let _ = s.on_packet(make_pkt(100), 1000);
+        let _ = s.on_packet(make_pkt(105), 1010);
+        let _ = s.tick(250, 1500);
+        let _ = s.tick(250, 2500);
+        assert_eq!(s.buckets.iter().find(|b| b.active).unwrap().retry_count, 2);
+
+        let _ = s.on_packet(make_pkt(110), 2600);
+
+        assert_eq!(
+            s.used_buckets(),
+            2,
+            "RetryCount >= 2 forbids extend; the new gap becomes a fresh bucket"
+        );
+        assert!(s
+            .buckets
+            .iter()
+            .any(|b| b.active && b.start_num == 101 && b.end_num == 104));
+        assert!(s
+            .buckets
+            .iter()
+            .any(|b| b.active && b.start_num == 106 && b.end_num == 109));
     }
 
     #[test]

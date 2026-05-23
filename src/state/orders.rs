@@ -21,7 +21,7 @@
 //! - ServerTimeDelta correction для всех TDateTime полей.
 
 use crate::commands::trade::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 const PRICE_EPS: f64 = 0.000000009;
@@ -156,6 +156,38 @@ fn terminal_removal_delay_ms(status: OrderWorkerStatus) -> i64 {
     } else {
         0
     }
+}
+
+fn command_marks_existing_worker_snapshot_flag(cmd: &TradeCommand) -> bool {
+    matches!(
+        cmd,
+        TradeCommand::OrderStatus(_)
+            | TradeCommand::OrderStatusUpdate(_)
+            | TradeCommand::OrderReplace(_)
+            | TradeCommand::OrderReplaceResponse(_)
+            | TradeCommand::OrderCancel(_)
+            | TradeCommand::JoinOrders(_)
+            | TradeCommand::SplitOrder(_)
+            | TradeCommand::MoveAllSells(_)
+            | TradeCommand::DoClosePosition(_)
+            | TradeCommand::DoLimitClosePosition(_)
+            | TradeCommand::DoSplitPosition(_)
+            | TradeCommand::DoSellOrder(_)
+            | TradeCommand::OrderStatusRequest(_)
+            | TradeCommand::OrderNotFound(_)
+            | TradeCommand::OrderStopsUpdate(_)
+            | TradeCommand::TurnPanicSell(_)
+            | TradeCommand::Penalty(_)
+            | TradeCommand::TradeVisual(_)
+            | TradeCommand::OrderTracePoint(_)
+            | TradeCommand::CorridorUpdate(_)
+            | TradeCommand::MoveAllBuys(_)
+            | TradeCommand::VStopUpdate(_)
+            | TradeCommand::DoMarketSplitPosition(_)
+            | TradeCommand::BaseMarket(_)
+            | TradeCommand::TradeEpoch(_)
+            | TradeCommand::NewOrder(_)
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -313,6 +345,12 @@ pub struct Order {
     pub emulator_mode: bool,
     /// True если UI клики должны игнорироваться (server-forced).
     pub immune_for_clicks: bool,
+    /// Rust read-model marker for Delphi `BOrderWorker.vOrder <> nil`.
+    ///
+    /// Stop/VStop outgoing worker actions require this marker, because Delphi
+    /// `SendStopsIfChanged` / `SendVStopIfChanged` exit immediately when no
+    /// visual order is attached to the worker.
+    pub has_local_visual_order: bool,
     /// Delphi `vOrder.BuyCondPrice` for pending `OS_None` orders.
     pub pending_buy_cond_price: Option<f64>,
     /// Delphi `vOrder.PendingCancel` for pending `OS_None` orders.
@@ -394,6 +432,7 @@ impl Order {
             from_cache: status_cmd.from_cache,
             emulator_mode: status_cmd.emulator_mode,
             immune_for_clicks: status_cmd.immune_for_clicks,
+            has_local_visual_order: false,
             pending_buy_cond_price: None,
             pending_cancel: false,
             bulk_replace_buy: false,
@@ -476,6 +515,9 @@ impl From<&Order> for TradeCtx {
 #[derive(Debug, Default)]
 pub struct Orders {
     map: HashMap<u64, Order>,
+    /// Local/UI visual-order markers registered before the first server
+    /// `TOrderStatus` creates the read-model entry.
+    pending_local_visual_orders: HashSet<u64>,
     /// UID'ы, которые Delphi worker уже пометил бы как завершающиеся, но ещё
     /// не удалил бы из `WCache` прямо внутри `ProcessCommandOrder`.
     pending_removals: Vec<PendingRemoval>,
@@ -489,6 +531,7 @@ impl Orders {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            pending_local_visual_orders: HashSet::new(),
             pending_removals: Vec::new(),
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
@@ -517,6 +560,22 @@ impl Orders {
     /// Текущее значение snapshot flag.
     pub fn current_snapshot_flag(&self) -> u8 {
         self.current_snapshot_flag
+    }
+
+    /// Mark an order UID as having a Delphi local `vOrder`.
+    ///
+    /// This is the public counterpart of UI/local order paths that assign
+    /// `NewOrder.vOrder := vo` before worker-side stop/VStop actions can send.
+    /// If the server order has not arrived yet, the marker is stored and applied
+    /// to the first `TOrderStatus` with the same UID.
+    pub fn mark_local_visual_order(&mut self, uid: u64) -> bool {
+        if let Some(order) = self.map.get_mut(&uid) {
+            order.has_local_visual_order = true;
+            true
+        } else {
+            self.pending_local_visual_orders.insert(uid);
+            false
+        }
     }
 
     fn is_proper(order: &Order, market_name: &str, side: FixedPosition) -> bool {
@@ -599,7 +658,7 @@ impl Orders {
             let Some(order) = self.map.get_mut(&item.uid) else {
                 continue;
             };
-            if order.status.is_terminal() || order.job_is_done {
+            if order.status.is_terminal() {
                 continue;
             }
             order.immune_for_clicks = item.value;
@@ -619,6 +678,9 @@ impl Orders {
         stops: &StopSettings,
     ) -> Option<(TradeCtx, String, OrderWorkerStatus, StopSettings)> {
         let order = self.map.get_mut(&uid)?;
+        if !order.has_local_visual_order {
+            return None;
+        }
         if order.stops == *stops {
             return None;
         }
@@ -645,6 +707,9 @@ impl Orders {
         vstop_vol: f64,
     ) -> Option<(TradeCtx, String, VStopUpdateParams)> {
         let order = self.map.get_mut(&uid)?;
+        if !order.has_local_visual_order {
+            return None;
+        }
         if order.vstop_on == vstop_on
             && order.vstop_fixed == vstop_fixed
             && order.vstop_level == vstop_level
@@ -878,6 +943,11 @@ impl Orders {
 
     pub(crate) fn apply_at(&mut self, cmd: TradeCommand, now_ms: i64) -> (ApplyResult, OrderEvent) {
         let uid = cmd.uid();
+        if command_marks_existing_worker_snapshot_flag(&cmd) {
+            if let Some(entry) = self.map.get_mut(&uid) {
+                entry.snapshot_flag = self.current_snapshot_flag;
+            }
+        }
         match cmd {
             // --- Full status (создание или обновление) ---
             TradeCommand::OrderStatus(st) => {
@@ -892,6 +962,7 @@ impl Orders {
                         },
                     );
                 }
+                let pending_local_visual_order = self.pending_local_visual_orders.remove(&uid);
                 let is_done = {
                     let entry = self
                         .map
@@ -908,7 +979,13 @@ impl Orders {
                         }
                     }
 
-                    Self::apply_status_inner(entry, &st, self.server_time_delta);
+                    Self::apply_status_inner(
+                        entry,
+                        &st,
+                        self.server_time_delta,
+                        new_order,
+                        pending_local_visual_order,
+                    );
                     entry.snapshot_flag = self.current_snapshot_flag;
                     entry.job_is_done
                 };
@@ -974,7 +1051,12 @@ impl Orders {
                     }
 
                     if up.epoch_header.status == OrderWorkerStatus::None {
-                        entry.pending_buy_cond_price = Some(up.update_data.mean_price);
+                        // Delphi updates vOrder.BuyCondPrice only in the
+                        // pending-worker branch: `(Status = OS_None) and
+                        // IsPending and (vOrder <> nil)`.
+                        if entry.pending_buy_cond_price.is_some() {
+                            entry.pending_buy_cond_price = Some(up.update_data.mean_price);
+                        }
                     } else {
                         entry.pending_buy_cond_price = None;
                         entry.pending_cancel = false;
@@ -1191,11 +1273,13 @@ impl Orders {
             ),
 
             // --- Client-originated команды (исходящие) — игнорируются в state ---
-            TradeCommand::OrderReplace(_)
-            | TradeCommand::OrderCancel(_)
-            | TradeCommand::AllStatusesRequest(_)
-            | TradeCommand::OrderStatusRequest(_)
-            | TradeCommand::TurnPanicSell(_)
+            TradeCommand::OrderReplace(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
+            TradeCommand::OrderCancel(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
+            TradeCommand::OrderStatusRequest(h) => self.apply_noop_trade_epoch(uid, &h),
+            TradeCommand::TurnPanicSell(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
+            TradeCommand::TradeEpoch(h) => self.apply_noop_trade_epoch(uid, &h),
+
+            TradeCommand::AllStatusesRequest(_)
             | TradeCommand::JoinOrders(_)
             | TradeCommand::SplitOrder(_)
             | TradeCommand::MoveAllSells(_)
@@ -1217,8 +1301,7 @@ impl Orders {
             // --- Прочие ---
             TradeCommand::Penalty(_)
             | TradeCommand::TradeVisual(_)
-            | TradeCommand::BaseMarket(_)
-            | TradeCommand::TradeEpoch(_) => (
+            | TradeCommand::BaseMarket(_) => (
                 ApplyResult::NotApplicable,
                 OrderEvent::Ignored {
                     uid,
@@ -1234,6 +1317,34 @@ impl Orders {
                 },
             ),
         }
+    }
+
+    fn apply_noop_trade_epoch(
+        &mut self,
+        uid: u64,
+        header: &TradeEpochHeader,
+    ) -> (ApplyResult, OrderEvent) {
+        let Some(entry) = self.map.get_mut(&uid) else {
+            return (
+                ApplyResult::OrderNotFound,
+                OrderEvent::Ignored {
+                    uid,
+                    reason: ApplyResult::OrderNotFound,
+                },
+            );
+        };
+
+        if let Err(reason) = Self::accept_epoch_and_phase(entry, header) {
+            return (reason, OrderEvent::Ignored { uid, reason });
+        }
+
+        (
+            ApplyResult::NotApplicable,
+            OrderEvent::Ignored {
+                uid,
+                reason: ApplyResult::NotApplicable,
+            },
+        )
     }
 
     fn accept_epoch_and_phase(
@@ -1257,12 +1368,19 @@ impl Orders {
         Ok(())
     }
 
-    fn apply_status_inner(entry: &mut Order, st: &OrderStatus, server_time_delta: f64) {
+    fn apply_status_inner(
+        entry: &mut Order,
+        st: &OrderStatus,
+        server_time_delta: f64,
+        new_order: bool,
+        pending_local_visual_order: bool,
+    ) {
         let mut buy = st.buy_order;
         let mut sell = st.sell_order;
         buy.adjust_time(server_time_delta);
         sell.adjust_time(server_time_delta);
 
+        let had_pending_vorder = entry.pending_buy_cond_price.is_some();
         let was_status_changed = st.epoch_header.status != entry.status;
         entry.status = st.epoch_header.status;
         entry.market_name = st.epoch_header.market.market_name.clone();
@@ -1278,8 +1396,16 @@ impl Orders {
         entry.emulator_mode = st.emulator_mode;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
+        if pending_local_visual_order {
+            entry.has_local_visual_order = true;
+        }
         if st.epoch_header.status == OrderWorkerStatus::None {
-            entry.pending_buy_cond_price = Some(entry.buy_order.mean_price);
+            if new_order {
+                entry.has_local_visual_order = true;
+                entry.pending_buy_cond_price = Some(entry.buy_order.mean_price);
+            } else if !had_pending_vorder {
+                entry.pending_buy_cond_price = None;
+            }
         } else {
             entry.pending_buy_cond_price = None;
             entry.pending_cancel = false;
@@ -1458,12 +1584,14 @@ impl Orders {
 
     /// Принудительно удалить ордер по UID (например, по решению UI).
     pub fn remove(&mut self, uid: u64) -> Option<Order> {
+        self.pending_local_visual_orders.remove(&uid);
         self.map.remove(&uid)
     }
 
     /// Очистить весь state (при reconnect / WantNewHello).
     pub fn clear(&mut self) {
         self.map.clear();
+        self.pending_local_visual_orders.clear();
         self.pending_removals.clear();
         self.current_snapshot_flag = 0;
     }
@@ -1708,6 +1836,11 @@ mod tests {
             trailing_level: -0.0,
             ..StopSettings::default()
         };
+        assert!(
+            orders.send_stops_if_changed(42, &stops).is_none(),
+            "Delphi exits when worker.vOrder is nil even if stops changed"
+        );
+        assert!(orders.mark_local_visual_order(42));
         let (ctx, market, status, sent_stops) = orders
             .send_stops_if_changed(42, &stops)
             .expect("changed stops should be sent");
@@ -1737,6 +1870,30 @@ mod tests {
     }
 
     #[test]
+    fn local_visual_order_marker_can_be_registered_before_first_status() {
+        let mut orders = Orders::new();
+        assert!(
+            !orders.mark_local_visual_order(42),
+            "no read-model entry exists yet, marker is stored for the first status"
+        );
+
+        let mut cached = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        cached.from_cache = true;
+        let (res, _) = orders.apply(order_status_cmd(cached));
+        assert_eq!(res, ApplyResult::OrderNotFound);
+        assert!(orders.get(42).is_none());
+
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            2,
+        )));
+
+        assert!(orders.get(42).unwrap().has_local_visual_order);
+    }
+
+    #[test]
     fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
         let mut orders = Orders::new();
         orders.apply(order_status_cmd(make_status(
@@ -1759,6 +1916,13 @@ mod tests {
             "Delphi exits when VStop fields equal FPrevVStop*"
         );
 
+        assert!(
+            orders
+                .send_vstop_if_changed(42, true, false, 12.5, 100.0)
+                .is_none(),
+            "Delphi exits when worker.vOrder is nil even if VStop changed"
+        );
+        assert!(orders.mark_local_visual_order(42));
         let (ctx, market, params) = orders
             .send_vstop_if_changed(42, true, false, 12.5, 100.0)
             .expect("changed VStop should be sent");
@@ -2005,6 +2169,42 @@ mod tests {
             }
         ));
         assert_eq!(orders.get(42).unwrap().status, OrderWorkerStatus::SellSet);
+    }
+
+    #[test]
+    fn incoming_noop_trade_epoch_still_updates_epoch_like_delphi_accept_server_command() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::SellSet,
+            1,
+        )));
+
+        let turn = TurnPanicSellCommand {
+            epoch_header: make_epoch(42, 3, "BTCUSDT", 2, OrderWorkerStatus::SellSet),
+            turn_on: true,
+        };
+        let (res, _) = orders.apply(TradeCommand::TurnPanicSell(turn));
+        assert_eq!(res, ApplyResult::NotApplicable);
+
+        let stale_update = OrderStatusUpdate {
+            epoch_header: make_epoch(42, 3, "BTCUSDT", 1, OrderWorkerStatus::SellSet),
+            update_data: OrderUpdateData {
+                actual_price: 123.0,
+                ..OrderUpdateData::default()
+            },
+            sell_reason_code: 0,
+        };
+        let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(stale_update));
+
+        assert_eq!(
+            res,
+            ApplyResult::OutOfOrder,
+            "Delphi AcceptServerCommand updates FServerLatestEpoch even for no-op TTradeEpochCommand receive"
+        );
+        let sell_actual = orders.get(42).unwrap().sell_order.actual_price;
+        assert_eq!(sell_actual, 0.0);
     }
 
     #[test]
@@ -2696,6 +2896,89 @@ mod tests {
     }
 
     #[test]
+    fn os_none_update_without_pending_vorder_does_not_create_pending_price_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.mean_price = 10.0;
+        orders.apply(order_status_cmd(status));
+
+        let non_pending_none = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::None),
+            update_data: OrderUpdateData {
+                mean_price: 77.0,
+                actual_price: 88.0,
+                ..Default::default()
+            },
+            sell_reason_code: 0,
+        };
+        let (res, ev) = orders.apply(TradeCommand::OrderStatusUpdate(non_pending_none));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.status, OrderWorkerStatus::None);
+        assert_eq!(
+            order.pending_buy_cond_price, None,
+            "Delphi changes vOrder.BuyCondPrice only when IsPending and vOrder exists"
+        );
+        let buy_mean_price = order.buy_order.mean_price;
+        assert_eq!(
+            buy_mean_price, 10.0,
+            "OS_None update still must not ApplyTo(pBuyOrder)"
+        );
+    }
+
+    #[test]
+    fn full_os_none_status_for_existing_pending_keeps_vorder_price_like_delphi() {
+        let mut orders = Orders::new();
+        let mut pending = make_status(1, "X", OrderWorkerStatus::None, 10);
+        pending.buy_order.mean_price = 10.0;
+        orders.apply(order_status_cmd(pending));
+        assert_eq!(orders.get(1).unwrap().pending_buy_cond_price, Some(10.0));
+
+        let mut full_status = make_status(1, "X", OrderWorkerStatus::None, 11);
+        full_status.buy_order.mean_price = 77.0;
+        let (res, ev) = orders.apply(order_status_cmd(full_status));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        assert_eq!(
+            order.pending_buy_cond_price,
+            Some(10.0),
+            "Delphi TOrderStatus does not copy BuyOrder.MeanPrice into existing vOrder.BuyCondPrice"
+        );
+        let buy_mean = order.buy_order.mean_price;
+        assert_eq!(
+            buy_mean, 77.0,
+            "Delphi still applies Cmd.BuyOrder to pBuyOrder"
+        );
+    }
+
+    #[test]
+    fn full_os_none_status_for_existing_non_pending_does_not_create_vorder_like_delphi() {
+        let mut orders = Orders::new();
+        let mut status = make_status(1, "X", OrderWorkerStatus::BuySet, 10);
+        status.buy_order.mean_price = 10.0;
+        orders.apply(order_status_cmd(status));
+
+        let mut full_none = make_status(1, "X", OrderWorkerStatus::None, 11);
+        full_none.buy_order.mean_price = 88.0;
+        let (res, ev) = orders.apply(order_status_cmd(full_none));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(1)));
+        let order = orders.get(1).unwrap();
+        assert_eq!(order.status, OrderWorkerStatus::None);
+        assert_eq!(
+            order.pending_buy_cond_price, None,
+            "Delphi creates pending vOrder only on the new OnMServerOrder path"
+        );
+        let buy_mean = order.buy_order.mean_price;
+        assert_eq!(buy_mean, 88.0);
+    }
+
+    #[test]
     fn corridor_update_marks_order_as_moon_shot_like_delphi() {
         let mut orders = Orders::new();
         orders.apply(order_status_cmd(make_status(
@@ -2945,6 +3228,85 @@ mod tests {
 
         let missing = orders.missing_after_snapshot();
         assert_eq!(missing, vec![2]);
+    }
+
+    #[test]
+    fn existing_order_command_refreshes_snapshot_flag_before_epoch_guard_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        let (res, _) = orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+        assert_eq!(res, ApplyResult::Applied);
+
+        orders.begin_snapshot();
+        let duplicate_update = OrderStatusUpdate {
+            epoch_header: make_epoch(1, 3, "X", 10, OrderWorkerStatus::BuySet),
+            update_data: OrderUpdateData::default(),
+            sell_reason_code: 0,
+        };
+        let (res, _) = orders.apply(TradeCommand::OrderStatusUpdate(duplicate_update));
+
+        assert_eq!(res, ApplyResult::OutOfOrder);
+        assert!(
+            orders.missing_after_snapshot().is_empty(),
+            "Delphi sets Worker.SnapshotFlag before AcceptServerCommand can reject the command"
+        );
+    }
+
+    #[test]
+    fn bulk_replace_notify_does_not_refresh_snapshot_flag_like_delphi_special_branch() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        orders.begin_snapshot();
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::Buy,
+            uids: vec![1],
+        };
+        let (res, _) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert_eq!(
+            orders.missing_after_snapshot(),
+            vec![1],
+            "Delphi TBulkReplaceNotify exits before the general WCache SnapshotFlag assignment"
+        );
+    }
+
+    #[test]
+    fn non_base_market_trade_command_does_not_refresh_snapshot_flag_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        orders.begin_snapshot();
+        let (res, _) = orders.apply(TradeCommand::AllStatusesRequest(make_base(1, 3)));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert_eq!(
+            orders.missing_after_snapshot(),
+            vec![1],
+            "Delphi ClientNewData calls ProcessCommandOrder only for TBaseMarketCommand descendants"
+        );
     }
 
     #[test]

@@ -243,7 +243,13 @@ Already done before this doc:
 - committed current Rust fixes in nested `moonproto`;
 - committed root working rules/docs;
 - `cargo test`: 360 passed before this architecture doc;
-- live FireTest after Sliced parity still does not fully pass under `err_emu=10%`: outgoing candle request is sent and ACKed, server sends chunks, but only chunk `6/6` reaches full EngineResponse while large sliced chunks remain incomplete. Это не закрыто.
+- live FireTest after Sliced parity still depends on the Sliced retry/server
+  ACK issue under `err_emu=10%`. On 2026-05-23 the Delphi server fix was
+  changed again: ACK-progress resets `FRetryCount` and removes ACKed pieces, but
+  preserves remaining pieces' `LastChecked` clocks. Rust
+  `Client::apply_sliced_ack` mirrors that current machine effect.
+  Budget/adaptive rate math remains test-pinned to Delphi. Full FireTest under
+  the rebuilt live server still needs a fresh verification run.
 
 ### Phase 1 - extract pure Delphi-named blocks without changing behavior
 
@@ -366,6 +372,8 @@ self.apply_active_actions(actions.drain(..));
 Rules:
 
 - active state owns markets/indexes/balances/orders/strats/settings state;
+- post-init resync sends `TStratSnapshot.CreateFromStrats` equivalent from
+  library-owned strats state between `TAllStatusesReq` and settings request;
 - strategy snapshot request is answered from library-owned strats state;
 - reconnect maintenance actions are produced by active/transport state and queued to writer;
 - user-visible events go to `PublicEventQueue`;
@@ -374,6 +382,7 @@ Rules:
 Tests:
 
 - `TStratSnapshotRequest` produces snapshot reply from local strats state;
+- post-init resync enqueues the full local strategy snapshot;
 - `OrderBookEvent::RequestFullNeeded` queues `RequestOrderBookFull`;
 - token change invalidates/rebuilds market indexes as Delphi does;
 - public callback can stall without stopping transport receive/send.
@@ -1302,20 +1311,58 @@ Still not done:
 - The actual socket, send buffer, byte accounting, and log throttling storage
   still live on `Client`. Moving those requires the larger `ClientShared` split.
 
+### 2026-05-22 - Live Sliced ACK diagnostic under ErrEmu
+
+Done:
+
+- Ran a temporary diagnostic experiment behind `diagnostic-trace`: duplicate
+  immediate partial `MPC_SlicedACK` sends and repeated last partial ACK sends
+  for incomplete incoming datagrams. This alter-wire path remains feature-gated
+  and off by default; production wire behavior stays Delphi-shaped.
+- Live `request_candles_data` without client loss still receives the full
+  snapshot. With client-side `err_emu=1%`, the request still times out even
+  when the diagnostic repeated ACK is enabled.
+- Trace proves repeated ACKs are actually sent for remaining holes such as
+  `d=16 missing=240`, `d=17 missing=161,218`, and `d=19 missing=248`, but the
+  live server does not resend those blocks before timeout.
+
+Still not done:
+
+- This does not justify a Rust protocol deviation. The remaining blocker needs
+  server-side evidence: whether the live server receives those ACKs, whether its
+  ACK queue/backlog drops the newest cumulative ACKs, or whether
+  `CheckSeningData`/max-retry plus per-client `ClientLimit` drops the outgoing
+  Sliced datagram before reaching the tail blocks. The budget itself is
+  Delphi-identical in Rust: start `2MiB/s` per client, `8/15/22` full-size
+  slices per tick at `5/10/15ms`, adaptive rate only after `UsedSlicedLimit` and
+  ping feedback. This is a design red flag for the protocol/server algorithm,
+  not a Rust-only deviation.
+
+### 2026-05-23 - Superseded: SlicedACK progress resets remaining retry clocks
+
+Superseded:
+
+- This entry documented an intermediate Delphi/Rust experiment where
+  ACK-progress reset clocks of remaining unACKed slices to `0`.
+- The current Delphi diff later removed that clock reset. The current target is:
+  ACK-progress resets `FRetryCount`, removes/ignores ACKed pieces, and preserves
+  remaining pieces' `LastChecked`.
+- Rust was updated to the current target in
+  "current Delphi TradesStream/Sliced retry fixes ported" below.
+
 ### 2026-05-22 - Phase 1 partial: moved writer periodic helpers into WriterRuntime
 
 Done:
 
 - Moved the remaining writer tick helper bodies from `Client` into
   `WriterRuntime`: `tick_periodic_refresh`, `tick_periodic_refresh_at`,
-  `check_indexes_fetch_timeout`, `check_clock_jump`, and
-  `periodic_trades_tick`.
+  `check_indexes_fetch_timeout`, and `periodic_trades_tick`.
 - `transport_writer_maintenance_tick` now calls these same-runtime methods.
 - The method bodies were moved without changing the queue/send side effects:
-  markets-index timeout retry, periodic market/tag refresh, clock-jump forced
-  reconnect, and dispatcher-only trades tick keep the same state transitions and
+  markets-index timeout retry, periodic market/tag refresh, and
+  dispatcher-only trades tick keep the same state transitions and
   packet enqueue points.
-- Unit tests for clock-jump/index timeout and periodic refresh now instantiate
+- Unit tests for index timeout and periodic refresh now instantiate
   `WriterRuntime` directly, so they verify the writer/orchestrator owner rather
   than a `Client` shortcut.
 
@@ -1904,6 +1951,19 @@ Done:
 - Added tests for the local send-if-changed predicates and queue-level wrapper
   behavior.
 
+- Rechecked and tightened the previously missed `vOrder = nil` gate:
+  `SendStopsIfChanged` and `SendVStopIfChanged` now require
+  `Order::has_local_visual_order`, the Rust marker for Delphi
+  `BOrderWorker.vOrder <> nil`.
+- New pending `TOrderStatus(Status=None)` sets this marker automatically,
+  matching `OnMServerOrder` creating a pending visual order. Other tracked
+  orders do not infer it from status; local/UI paths can mark it explicitly with
+  `Orders::mark_local_visual_order(uid)` after creating their own visual-order
+  equivalent.
+- Tests now prove changed stop/VStop values do not send without the marker and
+  do send after the marker exists. API docs were updated for the marker and
+  stop/VStop gate.
+
 Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining outgoing order/UI
@@ -1923,8 +1983,15 @@ Done:
 - Stateful order helpers that mutate `Orders` are now gated before the local
   mutation, so pre-Init replace/cancel/stop/VStop/immune calls leave the local
   cache unchanged and queue nothing.
-- Raw `send_cmd`, `send_cmd_keyed`, and raw Engine API helpers remain advanced
-  tools and intentionally bypass this typed-domain gate.
+- Follow-up 2026-05-23: raw `send_cmd`, `send_cmd_keyed`, and raw Engine API
+  helpers no longer bypass the Init gate. Before `domain_ready`, the raw path
+  accepts only mandatory init Engine API methods (`BaseCheck`, `AuthCheck`,
+  `GetMarketsList`, `GetMarketsIndexes`, `UpdateMarketsList`); all other raw
+  sends are rejected as `SubscribeError::DomainNotReady`.
+- Follow-up 2026-05-23: removed Rust-only init send of
+  `emk_GetMarketsBalanceFull`. Delphi `TMoonProtoEngine.GetMarketsBalanceFull`
+  returns `true` without a MoonProto wire request; active balance bootstrap is
+  the post-InitDone `TRequestBalanceRefresh`.
 - Added tests proving pre-Init subscription intent has no wire send,
   pre-Init stateful order actions do not mutate local orders, and Init flushes
   pre-Init registry subscriptions once.
@@ -1999,3 +2066,378 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining applied
   `HandleServerCommand` state mutations and virtual-worker tick side effects.
+
+### 2026-05-23 - Phase 1 partial: OS_None update pending-vOrder gate
+
+Done:
+
+- Fixed a `HandleServerCommand(TOrderStatusUpdate)` parity bug. Delphi changes
+  `vOrder.BuyCondPrice := UpdateData.MeanPrice` only in the exact branch
+  `(cmd.Status = OS_None) and IsPending and (vOrder <> nil)`.
+- Rust previously created `pending_buy_cond_price` for any incoming
+  `OrderStatusUpdate(Status=None)`, even when the local tracked order was not a
+  pending visual order. That invented a Rust-only pending state.
+- Rust now updates `pending_buy_cond_price` only when it already exists, which
+  is the read-model equivalent of Delphi's local `vOrder` being present.
+- Added a regression test for non-pending `OS_None` updates and updated the API
+  docs for `pending_buy_cond_price`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: StrategySerializer field order and default-skip parity
+
+Done:
+
+- Re-checked `StrategySerializer` against Delphi source.
+- `DELPHI_STRATEGY_FIELD_ORDER` and `DELPHI_STRATEGY_FIELD_TYPES` were compared
+  against `Strategies.pas:TStrategy` public fields: `477/477`, no order/type
+  mismatches.
+- Confirmed Rust writer now emits known fields in Delphi public-field order, not
+  the old alphabetical `HashMap` order.
+- Fixed the separate parity risk from `spec_pipeline/work/хуйня.md §X.90`:
+  typed `StrategyBatchBuilder` now filters back to Delphi `SaveStrategyToCompact`
+  semantics before writing. Unknown fields, wrong TypeID values, and values equal
+  to `TStrategy.Create` defaults are not wire-visible. The only runtime-default
+  caveat is `SellOrderColor`/`BuyOrderColor`: Delphi reads those defaults from
+  current `Vars` color state, so Rust callers should omit them unless they are
+  explicit overrides.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `ProcessStratCommand`
+  branches and then `Balance`, `Trades`, `OrderBook`, `UI`, and API domain
+  handling.
+
+### 2026-05-23 - Phase 1 partial: full balance snapshot missing-market reset
+
+Done:
+
+- Fixed a `TMoonProtoEngine.OnBalanceSnapshot` parity bug.
+- Delphi full balance snapshot does not delete a market object when it is absent
+  from `cmd.Items`. It resets balance/position/PNL fields to defaults, but
+  preserves `BalanceHash`, `bnMaxValue`, and `LastBalanceEpoch`.
+- Rust previously replaced `BalancesState::by_market` with only incoming items,
+  which lost those preserved fields and could make a later incremental with
+  `bnMaxValue=0` or stale epoch behave differently.
+- Rust now keeps previous missing rows as reset/default rows while preserving
+  `balance_hash`, `max_value`, and per-market epoch. Unknown markets that are
+  not present in current `MarketsState` are still ignored like Delphi
+  `Markets.MarketByNameFast`.
+- Added a regression test and recorded `spec_pipeline/work/хуйня.md §X.91`.
+- API docs now describe the missing-market reset semantics.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `Balance` parser/state
+  details, then `Trades`, `OrderBook`, `UI`, and API domain handling.
+
+### 2026-05-23 - Phase 1 partial: balance command version gate
+
+Done:
+
+- Fixed a balance dispatcher parser parity bug.
+- Delphi balance packets go through `TCommandRegistry.FromStream`, which skips
+  any command with `ver > Current_Proto_CmdVer` before concrete class parsing.
+- Rust `client_new_data_balance` previously ignored the common command `ver` and
+  could apply a future-version full snapshot.
+- Rust now skips future-version balance packets before `parse_balance`, matching
+  registry behavior.
+- Added a regression test and recorded `spec_pipeline/work/хуйня.md §X.92`.
+- API docs now mention the balance version gate.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `Balance` parser/state
+  details, then `Trades`, `OrderBook`, `UI`, and API domain handling.
+
+### 2026-05-23 - Phase 1 partial: OrderBook recovery and reconnect replay order
+
+Done:
+
+- Fixed `TOrderBookCache.TryRequestFull` parity.
+- Delphi initializes `FLastFullRequestTime := 0` and still applies
+  `abs(GetTimeMS - FLastFullRequestTime) <= BOOK_FULL_REQUEST_THROTTLE`.
+  Rust previously special-cased `0` as "never requested"; that branch is gone.
+- Added regression coverage for the first 0..5000 ms throttle window and updated
+  the synthetic orderbook tests to use `GetTimeMS`-like timestamps.
+- Fixed post-reconnect orderbook replay order. Delphi `CheckBookTopics` exits
+  while `FLastServerAppToken <> PeerAppToken`, so `SubscribeOrderBook` replay
+  cannot run before fresh `GetMarketsIndexes`.
+- Rust now delays only orderbook registry replay until successful fresh indexes.
+  After that it sends `UpdateMarketsList` first and then batch
+  `SubscribeOrderBook`, matching Delphi `UpdateMarketsList` + later
+  `CheckBookTopics` order.
+- Recorded `spec_pipeline/work/хуйня.md §X.93` and `§X.94`; API docs now state
+  the delayed orderbook replay rule.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `OrderBook` parser
+  edge cases and then `Trades`, `UI`, and API domain handling.
+
+### 2026-05-23 - Phase 1 partial: AllTrades reconnect sequence
+
+Done:
+
+- Fixed a reconnect replay parity bug for all-trades. Delphi
+  `BMarketHistoryWorker.Execute` does not simply replay `SubscribeAllTrades`.
+  When `NeedReconnectAllTrades` fires, it runs
+  `UnSubscribeAllTrades -> ClearSenderState -> Sleep(100) ->
+  DoSubscribeAllTrades(false)`.
+- Rust reconnect restore no longer sends immediate `SubscribeAllTrades` from
+  `Fine`. The active maintenance tick now tracks a Delphi-style
+  `FTradesServerToken` analogue: it is updated only when a `TradesStream` packet
+  reaches the parser for the current `ServerToken`.
+- Until that happens, the library sends `UnsubscribeAllTrades`, waits 100 ms,
+  sends `SubscribeAllTrades(want_mm)`, and retries the pair no more often than
+  every 5000 ms. This applies only when the Rust opt-in all-trades registry has
+  an active subscription intent.
+- Added tests for delayed subscribe and 5000 ms retry throttle.
+
+Still not done:
+
+- Continue strict `TradesState` / `ProcessTradesStream` reverse-equivalence for
+  resend buckets and remaining section side effects.
+
+### 2026-05-23 - Phase 1 partial: TStratSnapshot epoch after successful apply
+
+Done:
+
+- Fixed a `ProcessStratCommand(TStratSnapshot)` order bug.
+- Delphi applies the snapshot serializer first and only then assigns
+  `cfg.LocalStratEpoch := cmd.ServerEpoch`. If `cmd.Data=nil` or the serializer
+  fails, epoch is not advanced.
+- Rust previously set `StratsState::last_server_epoch` as soon as the
+  `StratCommand::Snapshot` was parsed, before dispatcher decode/apply.
+- Rust now advances `last_server_epoch` only after
+  `apply_snapshot_decoded_with_mode` succeeds. Malformed snapshots are logged
+  and do not emit `SnapshotFull` / `SnapshotPartial`.
+- Added dispatcher tests for a valid empty serializer snapshot and for invalid
+  wire `Size=0`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessStratCommand` branches and their state/UI side effects.
+
+### 2026-05-23 - Phase 1 partial: no-op incoming TTradeEpochCommand epoch side effect
+
+Done:
+
+- Fixed another `ProcessCommandOrder` parity bug in the "silent on receive"
+  command group.
+- Delphi still routes existing-worker no-op `TTradeEpochCommand` packets through
+  `AcceptServerCommand`: epoch is checked and `FServerLatestEpoch[Status]` is
+  updated before the later `HandleServerCommand` body finds no state branch.
+- Rust previously returned `NotApplicable` for incoming `TOrderReplaceCommand`,
+  `TOrderCancelCommand`, `TOrderStatusRequest`, `TTurnPanicSellCommand`, and raw
+  `TTradeEpochCommand` without that epoch side effect.
+- Rust now applies the Delphi epoch/phase side effect for those no-op incoming
+  epoch commands and remains silent to public events.
+- Added a regression test proving `TTurnPanicSellCommand(epoch=2)` makes a later
+  `TOrderStatusUpdate(epoch=1)` stale, as Delphi would.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: TAllStatuses nested command dispatch
+
+Done:
+
+- Fixed a `TAllStatuses` parser parity bug found during the order-block audit.
+- Delphi `TAllStatuses.CreateFromStream` reads each nested item through
+  `TBaseTradeCommand.FromStream(ms)` and then casts the result to
+  `TOrderStatus`. Therefore every nested item must carry `CmdId=4`.
+- Rust previously called `OrderStatus::read` directly and could accept a
+  status-shaped nested payload whose header carried another `CmdId`.
+- Rust now rejects `TAllStatuses` when any nested item is not `CmdId=4`.
+- Added a unit test with a status-shaped nested `CmdId=5` payload.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Author decision: TradesStream full-bucket wipe is intended
+
+Author decision recorded in `spec_pipeline/work/INVARIANT.md` §1.7:
+
+- Full wipe of all `MAX_GAP_BUCKETS = 50` gap buckets when the cap is reached is
+  not a bug.
+- Reaching the cap means the channel is already very bad; old recovery debt is
+  competing with live flow.
+- In that mode the library should free recovery state and spend channel bytes on
+  new trades instead of continuing to resend old buckets.
+
+This closes the temporary red-flag note about changing Rust to Delphi oldest
+eviction. Do not "fix" Rust full-cap behavior to oldest eviction unless the
+author changes this invariant.
+
+### 2026-05-23 - Phase 1 partial: current Delphi TradesStream/Sliced retry fixes ported
+
+Source diff checked manually:
+
+- `X:\proj-X\MoonBot\src\MoonProto\bak\MoonProtoEngine.pas` ->
+  `X:\proj-X\MoonBot\src\MoonProto\MoonProtoEngine.pas`
+- `X:\proj-X\MoonBot\src\MoonProto\bak\MoonProtoCommon.pas` ->
+  `X:\proj-X\MoonBot\src\MoonProto\MoonProtoCommon.pas`
+- `X:\proj-X\MoonBot\src\MoonProto\bak\MoonProtoIntStruct.pas` ->
+  `X:\proj-X\MoonBot\src\MoonProto\MoonProtoIntStruct.pas`
+
+Delphi fixes to port to Rust exactly:
+
+1. `TGapBucket` now has `RefundUsed: Boolean`.
+2. `CreateGapBucket` initializes `RetryCount := 0`,
+   `RefundUsed := False`, `LastRetryTime := NowTimeX`.
+3. `FindBucketForPacket(... WantExtend=True ...)` extends only when
+   `RetryCount < 2` and `EndNum = Word(NewGapStart - 2)`.
+4. On extend with `RetryCount >= 1` and `not RefundUsed`, do exactly one retry
+   budget refund: `Dec(RetryCount); RefundUsed := True`. Do not change
+   `LastRetryTime`.
+5. If `RetryCount >= 2`, do not extend; let caller create a fresh bucket or hit
+   the intentional full-cap reset policy.
+6. `CheckMissingTradesPackets` computes `PathDelay` before close decisions.
+   `allReceived` closes immediately. If `RetryCount >= MAX_RETRY_COUNT`, do not
+   send more resend requests and do not close immediately; close only after
+   `abs(NowTimeX - LastRetryTime) > PathDelay`.
+7. Sliced retry-counter: `TMoonProtoSlicedData` now has `FLastRetryInc`.
+   `CheckSeningData` sets `SentOnPathDelay := True` only when a piece with
+   `Piece.LastChecked > 0` is actually resent. Increment `FRetryCount` only when
+   a timestamp group advanced, a real retry was sent, and
+   `abs(FLastRetryInc - CurTm) > PathDelay`; then set `FLastRetryInc := CurTm`.
+   Initial sends of a large sliced datagram must not burn retry budget.
+8. `ApplyACK` still resets `FRetryCount := 0` on ACK progress, deletes ACKed
+   pieces, and preserves remaining pieces' `LastChecked` values.
+
+Review result: Delphi changes look mechanically correct for the intended
+protocol behavior. One non-functional stale comment remains in Delphi
+(`RetryCount: Byte; // сколько раз запрашивали (макс 2)`) while
+`MAX_RETRY_COUNT = 3`; do not copy that comment into Rust docs.
+
+Done:
+
+- Ported all eight items into Rust:
+  - `TradesState::GapBucket` has `refund_used`.
+  - bucket creation resets `retry_count`, `refund_used`, and `last_retry_ms`.
+  - extend is allowed only while `retry_count < 2`.
+  - extend performs the one-time retry refund without moving `last_retry_ms`.
+  - `retry_count >= 2` forces a fresh bucket or the intentional full-cap reset.
+  - bucket close waits `PathDelay` after the final retry.
+  - outgoing Sliced has `last_retry_inc`; primary timestamp groups no longer
+    burn retry budget.
+  - Sliced ACK-progress resets retry count and preserves remaining
+    `LastChecked` clocks.
+- Updated `stress_client` loss gate: TradesStream under configured loss is
+  checked against the measured `p^3` model, not against impossible absolute
+  zero packet loss.
+- Verification:
+  - `cargo fmt --check` OK.
+  - `cargo test --lib` OK: `509 passed`.
+  - `cargo check --example stress_client` OK.
+  - prod `err_emu=0 pre_connect`, `180s`:
+    - A `observed_live_loss=0.070%`, `fact_lost_at_close=0%`.
+    - B `observed_live_loss=0.884%`, `fact_lost_at_close=0%`.
+    - API `494/494`, candles `14/14`, verdict PASS.
+  - prod `err_emu=10 pre_connect`, `180s` after gate update:
+    - A `observed_live_loss=12.314%`, `theory_3req_observed=0.1867%`,
+      `fact_lost_at_close=0.397%`, `fact_over_theory=2.1x`,
+      `expected_lost_3req=0.94`, actual final lost `2`, gate OK.
+    - B `observed_live_loss=13.226%`, `theory_3req_observed=0.2314%`,
+      `fact_lost_at_close=0%`, `expected_lost_3req=1.25`, actual final lost
+      `0`, gate OK.
+    - API `494/494`, candles `14/14`, verdict PASS.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: SnapshotFlag is refreshed before command guards
+
+Done:
+
+- Fixed a `ProcessCommandOrder` snapshot-flag parity bug. Delphi sets
+  `Worker.SnapshotFlag := CurrentSnapshotFlag` immediately after a successful
+  `WCache.TryFind(TaskUID)`, before `TOrderNotFound`, time correction,
+  `JobIsDone`, type filtering, and `AcceptServerCommand` epoch/phase checks.
+- Rust previously refreshed `snapshot_flag` only for applied `TOrderStatus`.
+  A live `TOrderStatusUpdate` / `TOrderReplaceResponse` / visual command during
+  a fresh snapshot window could therefore still leave the order marked missing
+  in Rust, even though Delphi would mark the worker as present.
+- Rust now refreshes the read-model snapshot mark for every incoming
+  `TBaseMarketCommand`/`ProcessCommandOrder` equivalent that finds an existing
+  entry before later guards can reject or ignore the command.
+- Preserved the Delphi exclusions: `TAllStatusesReq` / `TSetImmuneCommand` are
+  not `TBaseMarketCommand`, and `TBulkReplaceNotify` is handled in an early
+  branch before the general `Worker.SnapshotFlag` assignment.
+- Added tests proving a duplicate/stale `TOrderStatusUpdate` still refreshes
+  snapshot presence before being rejected, while `TBulkReplaceNotify` and a
+  non-`TBaseMarketCommand` request do not.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: full OS_None status creates pending vOrder only on new order path
+
+Done:
+
+- Fixed a second pending-vOrder parity bug around full `TOrderStatus`.
+- Delphi new-order path for `TOrderStatus(Status=OS_None)` is special:
+  `ProcessCommandOrder` creates the worker, queues `OnMServerOrder`, and
+  `OnMServerOrder` creates a visual pending order with
+  `vo.BuyCondPrice := Cmd.BuyOrder.MeanPrice`.
+- Existing-worker full `TOrderStatus(Status=OS_None)` does not create or update
+  `vOrder.BuyCondPrice`; `HandleServerCommand(TOrderStatus)` only applies
+  `Cmd.BuyOrder` / `Cmd.SellOrder`, stops, immune flag, and `Status`.
+- Rust previously set `pending_buy_cond_price = BuyOrder.MeanPrice` for every
+  full `OS_None` status. It now does that only for the new-order path. Existing
+  pending entries keep their current visual price, and existing non-pending
+  entries do not invent pending state.
+- Added tests for both existing-pending and existing-non-pending full
+  `OS_None` statuses and updated API docs.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: Trades resend check is a ProcessTradesStream tail effect
+
+Done:
+
+- Fixed a `TradesStream` recovery scheduling parity bug. Delphi does not have a
+  free-running trades-gap resend timer: `MoonProtoEngine.pas:1914-1918` calls
+  `CheckMissingTradesPackets` only at the tail of `ProcessTradesStream`, after a
+  successfully parsed live or resend trades packet.
+- Rust active mode previously called `dispatcher.trades.tick_with_events(...)`
+  from writer-loop every 100 ms. That could send `emk_TradesResend` during
+  channel silence, where Delphi would send nothing.
+- Rust now checks recovery from `EventDispatcher::dispatch_into_active_actions`
+  only after a valid `TradesStream` / `TradesResendResponse` produced
+  `TradesEvent::Apply`. Generated `emk_TradesResend` payloads are sent through
+  the same active action outbox as other protocol-owned sends.
+- `TradesState::tick` now mirrors the Delphi caller throttle: if
+  `now_ms - last_check_missing_ms <= 100`, it exits; otherwise it updates
+  `last_check_missing_ms` first, then exits on `used_buckets=0` or runs the
+  bucket retry/close pass.
+- Added tests for active tail-check generation and for the no-bucket
+  `LastCheckMissingTime` update. API docs/examples no longer describe active
+  recovery as a periodic writer-loop tick.
+
+Verification:
+
+- `cargo fmt` OK.
+- `cargo test --lib --quiet` OK: `533 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

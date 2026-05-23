@@ -36,11 +36,12 @@ use crate::commands::market::{
     parse_token_tags_response,
 };
 use crate::commands::order_book::parse_order_book_packet;
+use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
 use crate::commands::trades_stream::parse_trades_packet;
-use crate::commands::ui::UICommand;
+use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
@@ -54,8 +55,9 @@ use crate::state::{
 ///
 /// Normal active-library flow: the application gives strategies to
 /// [`EventDispatcher::set_local_strategies`] before init, and the dispatcher
-/// answers from its owned `StratsState`. This provider is only an advanced
-/// escape hatch for callers that need to rebuild payload bytes themselves.
+/// uses its owned `StratsState` for the post-init snapshot and request replies.
+/// This provider is only an advanced escape hatch for callers that need to
+/// rebuild payload bytes themselves.
 pub struct StrategySnapshotReply {
     pub server_epoch: u64,
     pub client_max_last_date: u64,
@@ -65,12 +67,22 @@ pub struct StrategySnapshotReply {
 
 impl StrategySnapshotReply {
     /// Build a reply from an already serialized `TStrategySerializer` payload.
+    ///
+    /// Empty `data` is treated as an empty strategy list and normalized to a
+    /// valid non-empty serializer payload. This matches Delphi
+    /// `TStratSnapshot.CreateFromStrats([])` and prevents a normal provider from
+    /// sending malformed `Size=0` snapshot data.
     pub fn from_payload(
         server_epoch: u64,
         client_max_last_date: u64,
         full: bool,
         data: Vec<u8>,
     ) -> Self {
+        let data = if data.is_empty() {
+            crate::commands::strategy_serializer::StrategyBatchBuilder::new().finalize()
+        } else {
+            data
+        };
         Self {
             server_epoch,
             client_max_last_date,
@@ -141,6 +153,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) peer_app_token: u64,
     pub(crate) market_indexes_current_for_peer: bool,
     pub(crate) server_token: u64,
+    pub(crate) round_trip_delay_ms: i64,
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) domain_ready: bool,
 }
@@ -151,6 +164,7 @@ impl ActiveDispatchContext {
             peer_app_token: client.peer_app_token(),
             market_indexes_current_for_peer: client.market_indexes_current_for_peer(),
             server_token: client.server_token(),
+            round_trip_delay_ms: client.round_trip_delay_ms(),
             server_time_delta_source: client.server_time_delta_handle(),
             domain_ready: client.is_domain_ready(),
         }
@@ -171,6 +185,9 @@ pub(crate) enum ActiveAction {
     RequestOrderStatus {
         ctx: TradeCtx,
         market_name: String,
+    },
+    TradesResend {
+        payload: Vec<u8>,
     },
 }
 
@@ -206,6 +223,11 @@ pub struct EventDispatcher {
     /// Init=0 (никогда не подключались) → первый non-zero token не триггерит сброс.
     /// См. audit_responsibility_hints #1, #2.
     last_known_server_token: u64,
+    /// Delphi `FTradesServerToken`: updated only when a `TradesStream` packet
+    /// reaches the trades parser after the market-index gate. Reconnect restore
+    /// uses this to decide whether `SubscribeAllTrades` actually produced a
+    /// stream for the current `Client.ServerToken`.
+    trades_server_token: u64,
     /// Per-Client `ServerTimeDelta` source. Если `Some` — `dispatch_into` для
     /// `Command::Order` читает delta отсюда (multi-Client safe). Если `None` —
     /// fallback на global `SERVER_TIME_DELTA_DAYS` для raw `dispatch_into`
@@ -282,6 +304,10 @@ impl EventDispatcher {
         &self.trades
     }
 
+    pub(crate) fn trades_server_token(&self) -> u64 {
+        self.trades_server_token
+    }
+
     /// Read-only balance state for account totals and per-market balances.
     pub fn balances(&self) -> &BalancesState {
         &self.balances
@@ -314,8 +340,9 @@ impl EventDispatcher {
     /// Replace the library-owned strategy list before init.
     ///
     /// This is the normal active-library path. The dispatcher stores the full
-    /// decoded snapshots, answers server `TStratSnapshotRequest` automatically,
-    /// and keeps the list current when server strategy snapshots/deltas arrive.
+    /// decoded snapshots, feeds the post-init strategy snapshot, answers server
+    /// `TStratSnapshotRequest` automatically, and keeps the list current when
+    /// server strategy snapshots/deltas arrive.
     pub fn set_local_strategies(&mut self, strategies: &[StrategySnapshot]) {
         self.strats.replace_with_snapshots(strategies);
     }
@@ -390,6 +417,16 @@ impl EventDispatcher {
         &self.settings
     }
 
+    /// Seed Delphi `cfg` fallback for old `TClientSettingsCommand` packets.
+    ///
+    /// Current servers send the full v3 settings snapshot. This matters for
+    /// historical/append-only packets: Delphi keeps existing `cfg` values for
+    /// missing soft-tail fields, so the active dispatcher needs the same current
+    /// settings snapshot before parsing.
+    pub fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
+        self.settings.set_client_settings_fallback(fallback);
+    }
+
     /// Read-only markets state: market catalog, server indexes, prices, and
     /// token tags.
     ///
@@ -432,16 +469,17 @@ impl EventDispatcher {
         self.queued_events.extend(events);
     }
 
-    /// Periodic trades-gap recovery tick.
+    /// Trades-gap recovery tail check.
     ///
     /// It returns serialized `TradesResend` Engine API requests for missing
     /// packet numbers and closes expired gap buckets. Applications do not need
     /// to call this when using [`crate::client::Client::run_with_dispatcher`],
-    /// which ticks trades recovery automatically about every 100 ms.
+    /// which calls the check after successfully parsed trades packets.
     ///
-    /// Custom loops that bypass `run_with_dispatcher` should call it with the
-    /// current RTT and monotonic timestamp, then send each returned request
-    /// through the client.
+    /// Custom loops that bypass `run_with_dispatcher` should call it after a
+    /// valid `TradesStream`/`TradesResendResponse` packet, with the current RTT
+    /// and monotonic timestamp, then send each returned request through the
+    /// client.
     pub fn tick_trades(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
         self.trades.tick(rtt_ms, now_ms)
     }
@@ -494,45 +532,19 @@ impl EventDispatcher {
         self.strategy_snapshot_provider = None;
     }
 
-    pub(crate) fn send_strategy_snapshot_reply(
-        &mut self,
-        request_uid: u64,
-        client: &crate::client::Client,
-    ) -> bool {
-        let snapshot = self.strategy_snapshot_reply(request_uid);
-        client.strat_send_snapshot_payload(
-            snapshot.server_epoch,
-            snapshot.client_max_last_date,
-            snapshot.full,
-            &snapshot.data,
-        );
-        true
-    }
-
     fn strategy_snapshot_reply(&mut self, request_uid: u64) -> StrategySnapshotReply {
         self.strategy_snapshot_provider
             .as_mut()
             .and_then(|provider| provider(request_uid))
-            .unwrap_or_else(|| {
-                StrategySnapshotReply::from_strategies(
-                    self.local_strategy_epoch,
-                    true,
-                    &self.strats.snapshot_vec(),
-                )
-            })
+            .unwrap_or_else(|| self.local_strategy_snapshot_reply())
     }
 
-    pub(crate) fn send_or_queue_strategy_snapshot_request(
-        &mut self,
-        request_uid: u64,
-        client: &crate::client::Client,
-    ) -> bool {
-        self.send_strategy_snapshot_reply(request_uid, client);
-        self.queued_events
-            .push(Event::Strat(crate::state::StratEvent::SnapshotRequested {
-                uid: request_uid,
-            }));
-        true
+    pub(crate) fn local_strategy_snapshot_reply(&self) -> StrategySnapshotReply {
+        StrategySnapshotReply::from_strategies(
+            self.local_strategy_epoch,
+            true,
+            &self.strats.snapshot_vec(),
+        )
     }
 
     /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
@@ -758,6 +770,10 @@ impl EventDispatcher {
             return;
         }
         let sub_cmd_id = payload[0];
+        let ver = u16::from_le_bytes([payload[1], payload[2]]);
+        if ver > crate::commands::registry::CURRENT_PROTO_CMD_VER {
+            return;
+        }
         let body = &payload[11..];
         match sub_cmd_id {
             2 => {
@@ -820,7 +836,10 @@ impl EventDispatcher {
         // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
         // делает это сама на SnapshotFull/Partial event'ах.
         match &ev {
-            crate::state::StratEvent::SnapshotFull { raw_data, .. } => {
+            crate::state::StratEvent::SnapshotFull {
+                server_epoch,
+                raw_data,
+            } => {
                 if self
                     .strats
                     .apply_snapshot_decoded_with_mode(raw_data, true)
@@ -831,9 +850,14 @@ impl EventDispatcher {
                         "failed to decode full strategy snapshot payload ({} bytes)",
                         raw_data.len()
                     );
+                    return;
                 }
+                self.strats.last_server_epoch = *server_epoch;
             }
-            crate::state::StratEvent::SnapshotPartial { raw_data, .. } => {
+            crate::state::StratEvent::SnapshotPartial {
+                server_epoch,
+                raw_data,
+            } => {
                 if self
                     .strats
                     .apply_snapshot_decoded_with_mode(raw_data, false)
@@ -844,7 +868,9 @@ impl EventDispatcher {
                         "failed to decode partial strategy snapshot payload ({} bytes)",
                         raw_data.len()
                     );
+                    return;
                 }
+                self.strats.last_server_epoch = *server_epoch;
             }
             _ => {}
         }
@@ -852,7 +878,10 @@ impl EventDispatcher {
     }
 
     fn client_new_data_ui(&mut self, payload: &[u8], out: &mut Vec<Event>) {
-        match UICommand::parse(payload) {
+        match UICommand::parse_with_client_settings_fallback(
+            payload,
+            Some(self.settings.client_settings_parse_fallback()),
+        ) {
             Some(cmd_v) => {
                 let ev = self.settings.apply(cmd_v);
                 out.push(Event::Settings(ev));
@@ -931,7 +960,7 @@ impl EventDispatcher {
             return;
         }
         let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
-        let msg = String::from_utf8_lossy(&payload[8..]).to_string();
+        let msg = decode_utf8_delphi(&payload[8..]);
         out.push(Event::ServerLog { time, msg });
     }
 
@@ -945,9 +974,8 @@ impl EventDispatcher {
     ///
     /// At most one full-book request is produced per `(market_index, book_kind)`
     /// in one dispatch call, even when a grouped payload contains several
-    /// matching control events. Trades gap resend is owned by the periodic
-    /// trades tick in the client loop so a single packet cannot trigger
-    /// duplicate resend batches.
+    /// matching control events. Trades gap resend is checked after a successful
+    /// trades packet, matching Delphi `ProcessTradesStream`.
     pub(crate) fn dispatch_into_active_actions(
         &mut self,
         cmd: Command,
@@ -1001,10 +1029,31 @@ impl EventDispatcher {
             return;
         }
 
+        // Delphi `ProcessTradesStream`: after the PeerAppToken/index gate, but
+        // before packet parsing, a changed ServerToken resets gap buckets and
+        // stores `FTradesServerToken`. This is separate from generic hard-reset
+        // bookkeeping above because reconnect retry checks whether the stream
+        // itself has resumed for the new token.
+        if cmd == Command::TradesStream
+            && self.markets.indexes_synchronized
+            && current_token != 0
+            && self.trades_server_token != current_token
+        {
+            self.trades.full_reset();
+            self.trades_server_token = current_token;
+        }
+
         let start_len = out.len();
         self.dispatch_into(cmd, payload, now_ms, out);
-        // now_ms прокинут в dispatch_into для state.on_packet(now_ms); auto-actions
-        // ниже не зависят от времени.
+        // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
+        // Delphi `ProcessTradesStream` в конце вызывает `CheckMissingTradesPackets`;
+        // значит recovery resend — последействие успешного trades-пакета, а не
+        // независимый timer в тишине канала.
+        let processed_trades_packet =
+            matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
+                && out[start_len..]
+                    .iter()
+                    .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_))));
 
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
@@ -1068,6 +1117,15 @@ impl EventDispatcher {
         }
         if order_snapshot_applied {
             self.cleanup_missing_workers(actions);
+        }
+        if processed_trades_packet {
+            let (payloads, tick_events) = self
+                .trades
+                .tick_with_events(ctx.round_trip_delay_ms, now_ms);
+            out.extend(tick_events.into_iter().map(Event::Trade));
+            for payload in payloads {
+                actions.push(ActiveAction::TradesResend { payload });
+            }
         }
     }
 
@@ -1144,6 +1202,18 @@ mod tests {
         out
     }
 
+    fn old_v1_client_settings_without_soft_tail(uid: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(1); // TClientSettingsCommand
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&uid.to_le_bytes());
+        out.extend_from_slice(&[0u8; 41]);
+        write_string(&mut out, "");
+        out.push(0); // UseCoinsBlackList
+        out.extend_from_slice(&0i32.to_le_bytes()); // TempBLCount
+        out
+    }
+
     fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {
         let mut out = Vec::new();
         BaseCommandHeader {
@@ -1170,6 +1240,41 @@ mod tests {
             out.push(st.immune_for_clicks as u8);
         }
         out
+    }
+
+    #[test]
+    fn dispatcher_parses_old_client_settings_with_cfg_fallback_like_delphi() {
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_client_settings_fallback(ClientSettingsCommand {
+            sign_orders: false,
+            free_position_check: true,
+            vol_drop_level: 42,
+            use_stop_market: true,
+            s_price: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            sb_num: 6,
+            join_sell_kind: 2,
+            ..ClientSettingsCommand::default()
+        });
+
+        let events = dispatcher.dispatch(
+            Command::UI,
+            &old_v1_client_settings_without_soft_tail(123),
+            0,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Settings(SettingsEvent::ClientSettingsUpdated)]
+        ));
+        let settings = dispatcher.settings().client_settings.as_ref().unwrap();
+        assert_eq!(settings.uid, 123);
+        assert!(!settings.sign_orders);
+        assert!(settings.free_position_check);
+        assert_eq!(settings.vol_drop_level, 42);
+        assert!(settings.use_stop_market);
+        assert_eq!(settings.s_price, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        assert_eq!(settings.sb_num, 6);
+        assert_eq!(settings.join_sell_kind, 2);
     }
 
     fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {
@@ -1728,6 +1833,19 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_logmsg_invalid_utf8_uses_delphi_question_mark_fallback() {
+        let mut d = EventDispatcher::new();
+        let mut payload = 45678.5f64.to_le_bytes().to_vec();
+        payload.extend_from_slice(&[b'L', 0xFF, b'g']);
+        let events = d.dispatch(Command::LogMsg, &payload, 1000);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::ServerLog { msg, .. } => assert_eq!(msg, "L?g"),
+            other => panic!("expected ServerLog, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn dispatcher_routes_arb_to_typed_event() {
         let mut d = EventDispatcher::new();
         let mut compact = vec![2u8];
@@ -1767,6 +1885,23 @@ mod tests {
 
         let exact_base = balance_payload(2, 11, 2, 99.0);
         let events = d.dispatch(Command::Balance, &exact_base, 1001);
+
+        assert!(events.is_empty());
+        assert_eq!(d.balances.global.btc_balance_total, 1.0);
+        assert_eq!(d.balances.last_epoch, 1);
+    }
+
+    #[test]
+    fn dispatcher_skips_future_version_balance_command_like_delphi_registry() {
+        let mut d = EventDispatcher::new();
+
+        let full = balance_payload(3, 10, 1, 1.0);
+        let _ = d.dispatch(Command::Balance, &full, 1000);
+        assert_eq!(d.balances.global.btc_balance_total, 1.0);
+
+        let mut future_version = balance_payload(3, 11, 2, 99.0);
+        future_version[1..3].copy_from_slice(&99u16.to_le_bytes());
+        let events = d.dispatch(Command::Balance, &future_version, 1001);
 
         assert!(events.is_empty());
         assert_eq!(d.balances.global.btc_balance_total, 1.0);
@@ -1985,7 +2120,7 @@ mod tests {
             &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 1, true),
-            1000,
+            10_000,
             &mut out,
             &client,
             &mut actions,
@@ -1997,7 +2132,7 @@ mod tests {
             &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 10, false),
-            1010,
+            10_010,
             &mut out,
             &client,
             &mut actions,
@@ -2009,7 +2144,7 @@ mod tests {
             &mut d,
             Command::OrderBook,
             &order_book_payload_with(0, 11, false),
-            2000,
+            10_900,
             &mut out,
             &client,
             &mut actions,
@@ -2189,6 +2324,90 @@ mod tests {
         actions: &mut Vec<ActiveAction>,
     ) {
         client.apply_active_actions(actions.drain(..));
+    }
+
+    fn minimal_trades_payload(packet_num: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&packet_num.to_le_bytes());
+        payload.push(0); // packet flags: uncompressed, no taker flag.
+        payload
+    }
+
+    #[test]
+    fn active_trades_resend_check_runs_after_valid_trades_packet_like_delphi() {
+        let mut d = EventDispatcher::new();
+        d.markets.indexes_synchronized = true;
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &minimal_trades_payload(100),
+            1000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(actions.is_empty());
+
+        out.clear();
+        actions.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &minimal_trades_payload(105),
+            1010,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(
+            out.iter().any(|ev| matches!(
+                ev,
+                Event::Trade(TradesEvent::GapDetected {
+                    start: 101,
+                    end: 104
+                })
+            )),
+            "second packet creates the gap bucket"
+        );
+        assert!(
+            actions.is_empty(),
+            "bucket LastRetryTime is now=1010, so Delphi tail check cannot resend before PathDelay"
+        );
+
+        out.clear();
+        actions.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &minimal_trades_payload(106),
+            1500,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert!(
+            out.iter().any(|ev| {
+                matches!(
+                    ev,
+                    Event::Trade(TradesEvent::ResendRequested { packet_nums })
+                        if packet_nums == &vec![101, 102, 103, 104]
+                )
+            }),
+            "Delphi tail check after the next valid trades packet requests missing packets"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, ActiveAction::TradesResend { .. })),
+            "active path must send the emk_TradesResend request from the trades-packet tail"
+        );
     }
 
     #[test]
@@ -2455,6 +2674,87 @@ mod tests {
             )
         });
         assert!(has_event);
+    }
+
+    fn raw_strat_snapshot_payload(uid: u64, server_epoch: u64, full: bool, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(2);
+        out.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+        out.extend_from_slice(&uid.to_le_bytes());
+        out.extend_from_slice(&server_epoch.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.push(full as u8);
+        out.extend_from_slice(data);
+        out
+    }
+
+    #[test]
+    fn valid_strategy_snapshot_advances_server_epoch_after_decode_like_delphi() {
+        let mut d = EventDispatcher::new();
+        d.strats.last_server_epoch = 7;
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = crate::commands::strat::build_snapshot(42, 99, 0, true, &[]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert_eq!(d.strats.last_server_epoch, 99);
+        assert!(out.iter().any(|ev| matches!(
+            ev,
+            Event::Strat(crate::state::StratEvent::SnapshotFull {
+                server_epoch: 99,
+                ..
+            })
+        )));
+    }
+
+    #[test]
+    fn invalid_strategy_snapshot_does_not_advance_server_epoch_like_delphi() {
+        let mut d = EventDispatcher::new();
+        d.strats.last_server_epoch = 7;
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = raw_strat_snapshot_payload(42, 99, true, &[]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert_eq!(
+            d.strats.last_server_epoch, 7,
+            "Delphi cfg.LocalStratEpoch is assigned only after ApplyStratSnapshot succeeds"
+        );
+        assert!(
+            !out.iter().any(|ev| matches!(
+                ev,
+                Event::Strat(
+                    crate::state::StratEvent::SnapshotFull { .. }
+                        | crate::state::StratEvent::SnapshotPartial { .. }
+                )
+            )),
+            "invalid snapshot must not be reported as applied"
+        );
     }
 
     #[test]

@@ -13,6 +13,11 @@ The sync state is `BalancesState`. The key is `market_name: String`, for example
 When using `EventDispatcher`, balance rows are applied only for markets present
 in the current `MarketsState`, matching Delphi `Markets.MarketByNameFast`.
 Unknown market names are ignored.
+For a market already known to `BalancesState`, a full snapshot that omits that
+market keeps a zero/default row instead of deleting all state. This matches
+Delphi's missing-market branch: balances and positions are reset, while
+`balance_hash`, `max_value` (`bnMaxValue`), and the per-market last balance epoch
+are preserved.
 
 For the common one-shot flow, use `Client::request_balance_snapshot`:
 
@@ -78,7 +83,10 @@ println!("BTC total: {}, locked: {}, full: {}", g.btc_balance_total, g.btc_balan
 Each update carries `epoch: u16`, a wrapping counter. Incremental updates use
 per-market epoch protection, matching Delphi `m.LastBalanceEpoch`: stale items
 are skipped, while newer items from the same packet can still be applied. Full
-snapshots are not rejected by a global epoch gate.
+snapshots are not rejected by a global epoch gate. For markets missing from a
+full snapshot, Delphi does not update `LastBalanceEpoch`; Rust keeps the same
+per-market epoch as well, so a later stale incremental for that market is still
+rejected.
 
 `BalancesState::apply` uses `epoch_is_ok(last, new)` matching Delphi
 `MoonProtoFunc.pas:188-203`: duplicate epochs are rejected, and a wrapped
@@ -176,6 +184,9 @@ TBalanceCommand family:
     flags:              u32       [bitmask of fields present in this item]
     [field values selected by flags bits]
 ```
+
+Commands whose `ver` is greater than the current MoonProto command version are
+skipped before balance parsing, matching Delphi `TCommandRegistry.FromStream`.
 
 `cmd_id=2` shares the full-snapshot wire layout, but `EventDispatcher` ignores
 it after parsing because Delphi `ProcessBalanceCommand` only applies exact

@@ -5,15 +5,21 @@ delete, sell-price update, checked-state sync, and snapshot requests.
 
 `EventDispatcher` maintains `StratsState` and emits `Event::Strat`. Snapshot
 payloads are decoded automatically into both the lightweight `StrategyInfo`
-state and the full `StrategySnapshot` map.
+state and the full `StrategySnapshot` map. `last_server_epoch` advances only
+after the snapshot serializer payload is decoded and applied successfully,
+matching Delphi's `ApplyStratSnapshot` → `cfg.LocalStratEpoch := ServerEpoch`
+order. A malformed snapshot is logged and is not reported as `SnapshotFull` /
+`SnapshotPartial`.
 
 Before init, user code may give the library its current local strategies with
 `EventDispatcher::set_local_strategies`. The dispatcher owns that list after
-that point: it answers server `TStratSnapshotRequest` automatically and applies
-strategy snapshots/deletes/checked updates received from the server. If user
-code does not provide local strategies, the list starts empty and is filled only
-by server snapshots; the current server snapshot is still available through the
-same read API.
+that point: `run_init_sequence` sends it as the Delphi post-init
+`TStratSnapshot.CreateFromStrats(...)`, the dispatcher answers server
+`TStratSnapshotRequest` automatically, and it applies strategy
+snapshots/deletes/checked updates received from the server. If user code does
+not provide local strategies, the list starts empty and is filled only by server
+snapshots; the current server snapshot is still available through the same read
+API.
 
 ## Reading Strategy State
 
@@ -110,10 +116,10 @@ let one = dispatcher.strategy_snapshot(strategy_id);
 
 `set_local_strategy_epoch` is Delphi `cfg.ServerStratEpoch` for this local
 client's strategy list. It is the value written into outgoing
-`TStratSnapshot.ServerEpoch` when answering `TStratSnapshotRequest`; it is not
-the remote server epoch learned from incoming snapshots. When user code edits
-local strategies, call `mark_local_strategies_changed()` to mirror Delphi
-`Inc(cfg.ServerStratEpoch)`.
+`TStratSnapshot.ServerEpoch` for both post-init strategy snapshot send and
+answers to `TStratSnapshotRequest`; it is not the remote server epoch learned
+from incoming snapshots. When user code edits local strategies, call
+`mark_local_strategies_changed()` to mirror Delphi `Inc(cfg.ServerStratEpoch)`.
 
 ## Snapshot Decoder
 
@@ -154,8 +160,9 @@ client.strat_delete(strategy_id, folder_path);
 
 `strat_snapshot_request()` exists only as an explicit protocol/testing tool.
 Delphi server ignores `TStratSnapshotRequest` received from a client; normal
-active-library code should not call it. The real flow is the reverse: the server
-sends `TStratSnapshotRequest`, and the dispatcher answers automatically.
+active-library code should not call it. The real flows are: post-init sends the
+current local strategy list as `TStratSnapshot`, and later the server may send
+`TStratSnapshotRequest`, which the dispatcher answers automatically.
 
 `strat_sell_price_update` is the Delphi client-to-server command. The server
 applies it to its local strategy if the strategy exists; the active client does
@@ -224,10 +231,28 @@ client.strat_send_snapshot_batch(server_epoch, true, &strategies);
 Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write
 only that declared number of UTF-8 bytes; string field values use a `Word`
-length and write only that declared number of UTF-8 bytes.
+length and write only that declared number of UTF-8 bytes. Known strategy fields
+are emitted in Delphi `TStrategy` public field declaration order, matching
+`GetStrategyPropMask` iteration for the fields present in the snapshot.
+
+The typed writer applies the same field filter as Delphi `SaveStrategyToCompact`.
+It writes only known public `TStrategy` fields, only when the value has the
+expected Delphi TypeID, and skips values equal to the default `TStrategy.Create`
+value. `SellOrderColor` and `BuyOrderColor` defaults come from Delphi runtime
+`Vars` color state; omit those fields unless they are explicit overrides. If a
+caller already has the exact compressed Delphi serializer bytes, prefer
+`strat_send_snapshot_payload(...)`.
+
+When decoding a snapshot, known Delphi strategy fields also keep Delphi
+`ReadField` type checks: if the wire TypeID does not match the expected RTTI
+field type, the value is skipped instead of being exposed as a wrongly typed
+field.
 
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
+Passing an empty `data` slice means an empty strategy list; the library encodes
+it as a valid non-empty `TStrategySerializer` payload instead of sending
+wire `Size=0`.
 
 For advanced override replies, register a fresh snapshot provider on the
 dispatcher:
@@ -245,4 +270,6 @@ dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
 
 The provider must return current application-owned strategies. The dispatcher
 falls back to its owned strategy list when the provider is absent or returns
-`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`.
+`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`. A provider
+that returns `StrategySnapshotReply::from_payload(..., Vec::new())` gets the
+same empty-list normalization as `strat_send_snapshot_payload`.

@@ -8,7 +8,7 @@
 //! - блокировку indexed `TradesStream`/`OrderBook` пакетов до синхронизации indexes;
 //! - auto-send `emk_RequestOrderBookFull` при corrupted orderbook cache /
 //!   missing Full snapshot — потребитель НЕ должен это вызывать сам
-//! - periodic `trades.tick()` каждые ~100мс для resend missing TradesStream пакетов
+//! - Delphi-style trades resend tail-check после valid TradesStream packets
 //! - timeout protection для init/API indexes request marker (UDP-loss recovery, см.
 //!   `check_indexes_fetch_timeout`)
 //! - ServerTimeDelta application через глобальный atomic
@@ -147,10 +147,11 @@ fn main() {
     // дождаться в этом же потоке между phase 2 и phase 4.
     let markets_rx = client.api_get_markets_list();
 
-    // Settings + balance + strats — initial sync (после Connected{fresh:true}).
+    // Settings + balance — explicit UI refreshes после Connected{fresh:true}.
+    // Strategy snapshot sync is part of Delphi-compatible post-init resync:
+    // the library sends local `TStratSnapshot` automatically after InitDone.
     client.ui_settings_request();
     client.balance_request_refresh();
-    client.strat_snapshot_request();
 
     // UI команды.
     client.ui_mm_subscribe(true);
@@ -222,8 +223,8 @@ fn main() {
     // В этом цикле:
     //   - dispatch_into_active авто-отправит emk_RequestOrderBookFull при
     //     corrupted orderbook cache
-    //   - periodic trades.tick() каждые 100мс автоматически восстановит
-    //     потерянные TradesStream пакеты через emk_TradesResend
+    //   - trades tail-check автоматически восстановит потерянные TradesStream
+    //     пакеты через emk_TradesResend после valid trades packets
     //   - check_indexes_fetch_timeout раз за тик защитит от UDP-потери ответа
     //     emk_GetMarketsIndexes
     println!("\n[phase 5] passive monitoring for 60s — active library в действии...");

@@ -46,9 +46,42 @@ pub fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
     if *pos + len > data.len() {
         return None;
     }
-    let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
+    let s = decode_utf8_delphi(&data[*pos..*pos + len]);
     *pos += len;
     Some(s)
+}
+
+/// Decode UTF-8 with Delphi `TEncoding.UTF8.GetString` replacement semantics.
+///
+/// Rust `from_utf8_lossy` inserts U+FFFD for invalid input, but Delphi's default
+/// replacement fallback inserts ASCII `?`. Protocol parsers use this for every
+/// wire string so damaged bytes produce the same machine effect as Delphi.
+pub fn decode_utf8_delphi(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            let mut out = String::with_capacity(bytes.len());
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                match std::str::from_utf8(rest) {
+                    Ok(s) => {
+                        out.push_str(s);
+                        break;
+                    }
+                    Err(err) => {
+                        let valid_up_to = err.valid_up_to();
+                        if valid_up_to > 0 {
+                            out.push_str(std::str::from_utf8(&rest[..valid_up_to]).unwrap());
+                        }
+                        out.push('?');
+                        let invalid_len = err.error_len().unwrap_or(rest.len() - valid_up_to);
+                        rest = &rest[valid_up_to + invalid_len..];
+                    }
+                }
+            }
+            out
+        }
+    }
 }
 
 /// Write a UTF-8 string with 2-byte LE length prefix.
@@ -76,5 +109,21 @@ mod tests {
         let mut pos = 0;
         assert_eq!(read_string(&buf, &mut pos).unwrap(), "a");
         assert_eq!(pos, buf.len());
+    }
+
+    #[test]
+    fn read_string_replaces_invalid_utf8_with_question_mark_like_delphi() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(&[b'a', 0xFF, b'b', 0x80]);
+
+        let mut pos = 0;
+        assert_eq!(read_string(&buf, &mut pos).unwrap(), "a?b?");
+        assert_eq!(pos, buf.len());
+    }
+
+    #[test]
+    fn decode_utf8_delphi_replaces_incomplete_sequence_with_single_question_mark() {
+        assert_eq!(decode_utf8_delphi(&[b'a', 0xE2, 0x82]), "a?");
     }
 }

@@ -46,7 +46,12 @@ through the same order-command path as live updates, emits the per-order events,
 then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup. Cleanup
 treats every order still present in the read model as a Delphi `WCache` worker:
 terminal entries waiting for deferred removal can still produce a follow-up
-`TOrderStatusRequest` when they are absent from the fresh snapshot.
+`TOrderStatusRequest` when they are absent from the fresh snapshot. Any incoming
+`TBaseMarketCommand` descendant that reaches Delphi `ProcessCommandOrder` and
+finds an existing local worker refreshes that worker's snapshot mark before
+epoch/phase checks. `TAllStatusesReq` and `TSetImmuneCommand` do not do this,
+and the special `TBulkReplaceNotify` branch only touches the UIDs listed in the
+notify without refreshing snapshot presence.
 `TOrderStatus` responses marked `FromCache=true` update only an already tracked
 order; they do not create a new active order entry when the UID is unknown.
 For a new non-cache `TOrderStatus`, the dispatcher also requires the market
@@ -55,10 +60,16 @@ creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
 Incoming client-originated order commands such as `TSetImmuneCommand`,
 `TTurnPanicSellCommand`, join/split/close/sell/move commands, and raw request
 commands are not applied and do not emit `OrderEvent`: in the Delphi receive
-flow they are not server state updates. For outgoing UI clicks,
+flow they are not server state updates. If such a received command is a
+`TTradeEpochCommand` descendant and the order exists, `Orders::apply` still
+performs Delphi's hidden `AcceptServerCommand` epoch/phase side effect before
+returning `NotApplicable`; this can make a later lower-epoch server update
+stale. Non-epoch commands remain a pure silent no-op. For outgoing UI clicks,
 `Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
 `immune_for_clicks` on found active orders, and then queues `TSetImmuneCommand`.
-Later `TOrderStatus` snapshots can refresh the same field from the server.
+The command header UID is generated internally like Delphi `TBaseCommand.Create`;
+the target order UIDs are the command items. Later `TOrderStatus` snapshots can
+refresh the same field from the server.
 Skipped server-state packets also do not emit active dispatcher events: unknown
 UID updates, stale epoch packets, phase rollbacks, and empty `TBulkReplaceNotify`
 effects match Delphi's log/free/exit receive path. The diagnostic
@@ -109,6 +120,7 @@ pub struct Order {
     pub from_cache: bool,
     pub emulator_mode: bool,
     pub immune_for_clicks: bool,
+    pub has_local_visual_order: bool,
     pub pending_buy_cond_price: Option<f64>,
     pub pending_cancel: bool,
     pub bulk_replace_buy: bool,
@@ -151,6 +163,12 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in
 `TOrderCompact` wire data.
+`has_local_visual_order` mirrors Delphi `BOrderWorker.vOrder <> nil`. It is set
+automatically for a new server-created pending `TOrderStatus(Status=None)`.
+Applications that create their own local visual-order equivalent before sending
+a new order should call `Orders::mark_local_visual_order(uid)` once the server
+UID is known. Stop/VStop outgoing helpers require this marker because Delphi
+`SendStopsIfChanged` and `SendVStopIfChanged` exit when `vOrder = nil`.
 `panic_sell` mirrors Delphi `BOrderWorker.FPanicSell`, the local outgoing
 panic-sell intent used by market-level `turn_panic_sell` /
 `switch_panic_sell_by_market` and per-order `turn_order_panic_sell`.
@@ -164,9 +182,14 @@ non-initial traces without an existing line do not create one, temporary points
 are stored as the line temp point, and finish traces mutate the last drawable
 point only when Delphi `CanFinish` would allow it.
 `pending_buy_cond_price` mirrors Delphi `vOrder.BuyCondPrice` for pending
-`OS_None` orders. `TOrderStatusUpdate(Status=None)` updates this field from
-`UpdateData.MeanPrice` without applying the rest of `UpdateData` to
-`buy_order`, matching Delphi's pending visual-order branch.
+`OS_None` orders. A new server-created `TOrderStatus(Status=None)` creates this
+pending value from `BuyOrder.MeanPrice`, matching Delphi `OnMServerOrder`
+creating a visual pending order. For an already tracked order, full
+`TOrderStatus(Status=None)` updates `buy_order` but does not create or overwrite
+the pending visual price. `TOrderStatusUpdate(Status=None)` updates this field
+from `UpdateData.MeanPrice` only while the local entry already represents
+Delphi's pending `vOrder`; it does not create pending state for a non-pending
+worker and does not apply the rest of `UpdateData` to `buy_order`.
 `pending_cancel` mirrors Delphi `vOrder.PendingCancel`. Calling
 `cancel_order` for a pending `OS_None` order sets this flag and follows
 Delphi's `CheckReplaceFlag` pending path.
@@ -224,6 +247,8 @@ does not emit it as an active order event.
 Order timestamps arrive as Delphi `TDateTime` values in server-local time. The
 client updates a per-client `ServerTimeDelta` from Ping packets; `EventDispatcher`
 links that value into `Orders` automatically when using `run_with_dispatcher`.
+For `TOrderCompact` and `TOrderUpdateData`, only valid Delphi dates (`> 1`) are
+shifted, matching Delphi `AdjustTime`; zero/missing timestamps stay zero.
 
 For custom loops, call:
 

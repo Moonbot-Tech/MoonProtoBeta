@@ -7,9 +7,9 @@
 /// Response: server → client (CmdId=001)
 use std::time::{Duration, SystemTime};
 
-use super::registry::read_string;
 #[cfg(test)]
 use super::registry::write_string;
+use super::registry::{decode_utf8_delphi, read_string};
 use flate2::read::DeflateDecoder;
 
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
@@ -614,7 +614,7 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
             // Защита: name_len по контракту ≤ 15. Если больше — corrupt, используем 15.
             let effective_len = name_len.min(15);
             let name_bytes = &data[pos + 1..pos + 1 + effective_len];
-            let name = String::from_utf8_lossy(name_bytes).into_owned();
+            let name = decode_utf8_delphi(name_bytes);
             let collateral_token = u16::from_le_bytes([data[pos + 16], data[pos + 17]]);
             pos += DEX_INFO_SIZE;
             known_dexes.push(DexInfo {
@@ -1355,7 +1355,7 @@ mod base_check_tests {
     #[test]
     fn parse_does_not_panic_on_random_garbage() {
         // Стресс: рандом-байты не должны вызвать panic.
-        // (utf8_lossy подменит невалидные байты на U+FFFD — это OK для UI.)
+        // Delphi-style decoder подменит невалидные байты на '?'.
         let garbage: Vec<u8> = (0..200).map(|i| ((i * 7) ^ 0xA5) as u8).collect();
         let _info = parse_base_check_response(&garbage);
         // Парсер выживает; конкретные значения зависят от random pattern.
@@ -1419,5 +1419,27 @@ mod auth_check_tests {
         assert_eq!(resp.known_dexes[1].collateral_token, 360);
         assert_eq!(resp.hl_dex_market, Some(7));
         assert_eq!(resp.hl_spot_market, Some(3));
+    }
+
+    #[test]
+    fn parse_dex_invalid_utf8_uses_delphi_question_mark_fallback() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0i64).to_le_bytes());
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(0i32).to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(1024i32).to_le_bytes());
+        data.push(1);
+
+        let mut dex = vec![0u8; 18];
+        dex[0] = 3;
+        dex[1..4].copy_from_slice(&[b'd', 0xFF, b'x']);
+        dex[16..18].copy_from_slice(&(7u16).to_le_bytes());
+        data.extend_from_slice(&dex);
+
+        let resp = parse_auth_check_response(&data).unwrap();
+        assert_eq!(resp.known_dexes[0].name, "d?x");
+        assert_eq!(resp.known_dexes[0].collateral_token, 7);
     }
 }

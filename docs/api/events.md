@@ -62,7 +62,9 @@ dropped.
 - sends `RequestOrderBookFull` when an orderbook gap requires a full snapshot;
 - emits strategy snapshot requests and, when a strategy snapshot provider is
   registered, sends a fresh application-owned snapshot reply;
-- cooperates with the client loop's periodic trades-gap tick.
+- checks trades-gap recovery after successfully parsed `TradesStream` /
+  `TradesResendResponse` packets and sends generated `emk_TradesResend`
+  requests.
 
 ## Event Enum
 
@@ -139,7 +141,7 @@ directly to its callback.
 | `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Apply` after `OutOfOrder`. |
 | `Balance` | Parses subcommand `2` but does not mutate state; applies subcommands `3/4`; subcommand `6` becomes typed `Event::Arb`. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. |
-| `UI` | Applies settings state and emits `Event::Settings`. |
+| `UI` | Applies settings state and emits `Event::Settings`. Old append-only `TClientSettingsCommand` packets are parsed with the current settings snapshot as Delphi `cfg` fallback. |
 | `API` | Parses `EngineResponse`; applies markets responses when the method is markets-related. |
 | `LogMsg` | Emits `Event::ServerLog`. |
 
@@ -159,9 +161,22 @@ particular, direct `EventDispatcher::dispatch` / `dispatch_into` calls do not
 know `Client::domain_ready` or the subscription registry. In normal
 applications, prefer `Client::run_with_dispatcher`.
 
+For historical or truncated `TClientSettingsCommand` payloads, seed the
+dispatcher's local settings fallback before dispatching:
+
+```rust
+dispatcher.set_client_settings_fallback(local_settings.clone());
+```
+
+The fallback mirrors Delphi `cfg`: missing soft-tail fields keep the current
+local values instead of being reset to Rust defaults. Each received full settings
+snapshot becomes the next fallback automatically.
+
 ## Trades Tick
 
 `tick_trades` and `tick_trades_with_events` are low-level hooks for custom loops.
-`Client::run_with_dispatcher` calls the tick automatically about every 100 ms.
-Gap lifecycle events are diagnostics for logging/telemetry; the library performs
-recovery without requiring the application to react to them.
+Call them after a valid `TradesStream` / `TradesResendResponse` packet, using
+the packet timestamp and current RTT. `Client::run_with_dispatcher` does this
+tail-check automatically. Gap lifecycle events are diagnostics for
+logging/telemetry; the library performs recovery without requiring the
+application to react to them.

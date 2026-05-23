@@ -17,7 +17,7 @@
 //! Эти Delphi structures — `packed record` без выравнивания. В Rust они представлены
 //! как `#[repr(C, packed)]` структуры с тем же layout (см. `types.rs`).
 
-use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
+use super::registry::{decode_utf8_delphi, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
 
 // ============================================================================
@@ -387,11 +387,17 @@ impl OrderCompact {
     }
 
     /// Применить временное смещение к временным полям. ServerTimeDelta = InitialTime - Now.
-    /// Все TDateTime поля корректируются.
+    /// Delphi корректирует только валидные `TDateTime` values (`> 1`).
     pub fn adjust_time(&mut self, delta: f64) {
-        self.open_time -= delta;
-        self.close_time -= delta;
-        self.create_time -= delta;
+        if self.open_time > 1.0 {
+            self.open_time -= delta;
+        }
+        if self.close_time > 1.0 {
+            self.close_time -= delta;
+        }
+        if self.create_time > 1.0 {
+            self.create_time -= delta;
+        }
     }
 }
 
@@ -538,7 +544,9 @@ impl OrderUpdateData {
     }
 
     pub fn adjust_time(&mut self, delta: f64) {
-        self.open_time -= delta;
+        if self.open_time > 1.0 {
+            self.open_time -= delta;
+        }
     }
 }
 
@@ -655,7 +663,7 @@ fn read_str(r: &mut &[u8]) -> Option<String> {
     if r.len() < 2 + len {
         return None;
     }
-    let s = String::from_utf8_lossy(&r[2..2 + len]).to_string();
+    let s = decode_utf8_delphi(&r[2..2 + len]);
     *r = &r[2 + len..];
     Some(s)
 }
@@ -1124,8 +1132,16 @@ impl AllStatuses {
         for _ in 0..count {
             // Каждый order пишется через `o.StoreToStream(Stream)` — то есть **сам** включает
             // свой CmdId(1) + ver(2) + UID(8) + ... header. Используем тот же parser.
-            // Нужно прочитать TBaseTradeCommand.FromStream(ms) — он сам читает CmdId и dispatch.
-            // Здесь каждый order гарантированно TOrderStatus (CmdId=4).
+            // Delphi читает через `TBaseTradeCommand.FromStream(ms)` и затем cast'ит
+            // результат к `TOrderStatus`; значит nested CmdId обязан быть 4.
+            if r.first().copied() != Some(4) {
+                log::warn!(
+                    target: "moonproto::trade",
+                    "AllStatuses: nested command is not TOrderStatus (cmd_id={:?})",
+                    r.first().copied()
+                );
+                return None;
+            }
             let order = OrderStatus::read(r)?;
             orders.push(order);
         }
@@ -2039,6 +2055,95 @@ mod tests {
         let mut roundtrip = Vec::new();
         parsed.write_to(&mut roundtrip);
         assert_eq!(roundtrip, expected);
+    }
+
+    #[test]
+    fn order_compact_adjust_time_skips_zero_dates_like_delphi() {
+        let mut order = OrderCompact {
+            open_time: 0.0,
+            close_time: 0.5,
+            create_time: 2.0,
+            ..OrderCompact::default()
+        };
+
+        order.adjust_time(0.25);
+
+        let open_time = order.open_time;
+        let close_time = order.close_time;
+        let create_time = order.create_time;
+        assert_eq!(open_time, 0.0);
+        assert_eq!(close_time, 0.5);
+        assert_eq!(create_time, 1.75);
+    }
+
+    #[test]
+    fn order_update_data_adjust_time_skips_zero_dates_like_delphi() {
+        let mut missing_time = OrderUpdateData {
+            open_time: 0.0,
+            ..OrderUpdateData::default()
+        };
+        missing_time.adjust_time(0.25);
+        let missing_open_time = missing_time.open_time;
+        assert_eq!(missing_open_time, 0.0);
+
+        let mut valid_time = OrderUpdateData {
+            open_time: 2.0,
+            ..OrderUpdateData::default()
+        };
+        valid_time.adjust_time(0.25);
+        let valid_open_time = valid_time.open_time;
+        assert_eq!(valid_open_time, 1.75);
+    }
+
+    fn minimal_order_status_payload(cmd_id: u8, uid: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_base_command_header(&mut out, cmd_id, uid);
+        out.push(1);
+        out.push(2);
+        write_string(&mut out, "BTCUSDT");
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(OrderWorkerStatus::None as u8);
+        OrderCompact::default().write_to(&mut out);
+        OrderCompact::default().write_to(&mut out);
+        StopSettings::default().write_to(&mut out);
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.push(0);
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out
+    }
+
+    #[test]
+    fn all_statuses_rejects_nested_non_order_status_cmd_id_like_delphi_dispatch() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 8, 0xAA);
+        raw.extend_from_slice(&1i32.to_le_bytes());
+        raw.extend_from_slice(&minimal_order_status_payload(5, 0xBB));
+
+        assert!(
+            TradeCommand::parse(&raw).is_none(),
+            "TAllStatuses must dispatch each nested TBaseTradeCommand and accept only CmdId=4"
+        );
+    }
+
+    #[test]
+    fn market_header_invalid_utf8_uses_delphi_question_mark_fallback() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 23, 77);
+        raw.push(1);
+        raw.push(2);
+        raw.extend_from_slice(&3u16.to_le_bytes());
+        raw.extend_from_slice(&[b'A', 0xFF, b'B']);
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::Penalty(header) => {
+                assert_eq!(header.base.uid, 77);
+                assert_eq!(header.market_name, "A?B");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

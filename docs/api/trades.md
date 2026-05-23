@@ -15,8 +15,13 @@ client.unsubscribe_all_trades();
 The subscription is registry-aware. Before Init, subscribe and unsubscribe calls
 update only the registry and send no Engine API wire packet. The one-time Init
 flushes the current registry once. After Init, reconnect replays it
-automatically. Unsubscribe removes the registry intent and sends
-`emk_UnsubscribeAllTrades` only after `domain_ready`.
+automatically using the Delphi reconnect sequence: if the current `ServerToken`
+has not yet been observed on `MPC_TradesStream`, the maintenance tick sends
+`emk_UnsubscribeAllTrades`, waits 100 ms, then sends
+`emk_SubscribeAllTrades`. The sequence is retried no more often than once per
+5000 ms until a trades packet for the current `ServerToken` reaches the parser.
+Unsubscribe removes the registry intent and sends `emk_UnsubscribeAllTrades`
+only after `domain_ready`.
 
 Unlike Delphi MoonBot, the Rust library does not subscribe to all-trades unless
 the application asks for it. This is an accepted author decision for the public
@@ -64,6 +69,7 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
             TradesEvent::Duplicate => log_duplicate_packet(),
             TradesEvent::OutOfOrder { packet_num } => log_out_of_order(*packet_num),
             TradesEvent::GapFilled { packet_num, .. } => log_gap_filled(*packet_num),
+            TradesEvent::ResendRequested { packet_nums } => log_resend(packet_nums),
             TradesEvent::BucketClosed { .. } => {}
         }
     }
@@ -83,12 +89,14 @@ decode it through `TradeSection::watcher_fill_records()` or
 `parse_watcher_fills(data)` and handle typed `WatcherFill` records together with
 the section-level `market_index` and `user` address.
 
-`GapDetected`, `GapFilled`, `BucketClosed`, `Duplicate`, and resend-side
-`OutOfOrder` are diagnostic events. They are useful for logging/telemetry, but
-applications must not drive recovery from them: `Client::run_with_dispatcher`
-sends resend requests and maintains buckets automatically. The dispatcher still
-emits `Apply(packet)` for duplicate/resend payloads when Delphi would parse the
-payload.
+`GapDetected`, `ResendRequested`, `GapFilled`, `BucketClosed`, `Duplicate`, and
+resend-side `OutOfOrder` are diagnostic events. They are useful for
+logging/telemetry, but applications must not drive recovery from them:
+`Client::run_with_dispatcher` sends resend requests and maintains buckets
+automatically. `ResendRequested` means the Delphi-style tail check after a
+valid trades packet queued `emk_TradesResend` for the listed packet numbers.
+The dispatcher still emits `Apply(packet)` for duplicate/resend payloads when
+Delphi would parse the payload.
 
 ## Public Types
 
@@ -137,8 +145,17 @@ numbers up to three times with the Delphi delay formula:
 PathDelay = min(1800, max(300, RTT * (1.2 + retry * 0.7))) ms
 ```
 
-`Client::run_with_dispatcher` calls the trades tick about every 100 ms and sends
-the generated `emk_TradesResend` requests automatically.
+`Client::run_with_dispatcher` calls the trades recovery check after successfully
+parsed live/resend trades packets, under the same 100 ms `LastCheckMissingTime`
+throttle as Delphi, and sends the generated `emk_TradesResend` requests
+automatically.
+
+Recovery is best-effort, matching Delphi. Missing packet numbers are requested
+for up to three bucket retry cycles. If the bucket is still incomplete after the
+retry budget, it is closed and the live stream continues; the library does not
+keep flooding the channel for old trades. A late resend packet can still be
+parsed and emitted as `Apply(packet)`, but it no longer reopens the closed
+bucket.
 
 `EventDispatcher` also drops trades packets while market indexes are not
 synchronized after a server restart.
@@ -155,6 +172,8 @@ let mut trades = TradesState::new();
 let packet = parse_trades_packet(payload).expect("bad trades packet");
 let events = trades.on_packet(packet, now_ms);
 
+// Delphi-equivalent: call after a successfully parsed trades packet, not from
+// an independent timer while no trades packets are arriving.
 for resend_request in trades.tick(rtt_ms, now_ms) {
     client.send_api_request(&resend_request);
 }
@@ -162,6 +181,9 @@ for resend_request in trades.tick(rtt_ms, now_ms) {
 for raw_packet in parse_trades_resend_response(resend_response_payload) {
     if let Some(packet) = parse_trades_packet(&raw_packet) {
         let historical_events = trades.on_packet_resend(packet);
+        for resend_request in trades.tick(rtt_ms, now_ms) {
+            client.send_api_request(&resend_request);
+        }
     }
 }
 ```

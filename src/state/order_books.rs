@@ -141,9 +141,9 @@ struct OrderBookCache {
     expected_seq: u16,
     /// Последний применённый seq. Аналог Delphi `m.MoonProtoBookSeq[bookKind]`.
     /// Начальное значение 0 важно: normal-mode применяет первый Diff без Full
-    /// (Delphi `MoonProtoEngine.pas:2042-2048`). Раньше использовалось `has_full: bool`,
+    /// (Delphi `MoonProtoEngine.pas:2066-2071`). Раньше использовалось `has_full: bool`,
     /// что заставляло клиента отправлять лишний `RequestOrderBookFull` и
-    /// terminale не показывали degraded diff-view. См. DEVIATION #24.
+    /// terminale не показывали degraded diff-view.
     last_applied_seq: u16,
     /// Сортированный по seq список накопленных out-of-order пакетов.
     /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` чтобы `pop_front()` в `drain_cache`
@@ -201,14 +201,11 @@ impl OrderBookCache {
     }
 
     /// `MoonProtoOrderBook.pas:532-539 TryRequestFull` — true если надо отправить запрос.
-    /// `last_full_request_ms == 0` означает "никогда не запрашивали" — пропускаем throttle.
     fn try_request_full(&mut self, now_ms: i64) -> bool {
         if !self.corrupted {
             return false;
         }
-        if self.last_full_request_ms != 0
-            && (now_ms - self.last_full_request_ms).abs() <= BOOK_FULL_REQUEST_THROTTLE
-        {
+        if (now_ms - self.last_full_request_ms).abs() <= BOOK_FULL_REQUEST_THROTTLE {
             return false;
         }
         self.last_full_request_ms = now_ms;
@@ -232,8 +229,8 @@ pub enum ApplyResult {
     Cached,
     /// Пакет stale (seq < expected) — отброшен.
     Stale,
-    /// Legacy reason: больше не эмитится после фикса DEVIATION #24.
-    /// Delphi `MoonProtoEngine.pas:2042-2048` применяет первый Diff если
+    /// Legacy reason: больше не эмитится после strict Delphi parity fix.
+    /// Delphi `MoonProtoEngine.pas:2066-2071` применяет первый Diff если
     /// `MoonProtoBookSeq = 0`. Сохранено для backwards-compat enum match'ей.
     NoFullYet,
 }
@@ -344,8 +341,8 @@ impl OrderBooks {
 
         let cmp = compare_seq(pkt.seq, cache.expected_seq);
 
-        // === 3. In-order OR первый Diff без Full (DEVIATION #24) ===
-        // Delphi `MoonProtoEngine.pas:2042-2048`: если `MoonProtoBookSeq = 0`
+        // === 3. In-order OR первый Diff без Full ===
+        // Delphi `MoonProtoEngine.pas:2066-2071`: если `MoonProtoBookSeq = 0`
         // (последний применённый seq = 0) — применяет первый Diff без ожидания
         // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
         if cmp == 0 || cache.last_applied_seq == 0 {
@@ -656,7 +653,7 @@ mod tests {
 
     #[test]
     fn first_diff_without_full_is_applied_like_delphi() {
-        // DEVIATION #24 / Delphi MoonProtoEngine.pas:2042-2048:
+        // Delphi MoonProtoEngine.pas:2066-2071:
         // Если `last_applied_seq = 0` (никогда ещё не применяли) — применяем
         // первый Diff без ожидания Full. Раньше отбрасывали + просили Full.
         let mut ob = OrderBooks::new();
@@ -725,18 +722,18 @@ mod tests {
         // Throttle RequestFullNeeded после cache.is_expired() триггерит corrupted.
         let mut ob = OrderBooks::new();
         // Full + gap → cache.add, не corrupted ещё.
-        let _ = ob.on_packet(make_pkt(5, 0, 1, true), 1000);
-        let _ = ob.on_packet(make_pkt(5, 0, 10, false), 1010); // cache_not_empty_since=1010
-                                                               // 990ms прошло — is_expired (>800ms) → corrupted=true → первый RequestFullNeeded.
-        let events = ob.on_packet(make_pkt(5, 0, 11, false), 2000);
+        let _ = ob.on_packet(make_pkt(5, 0, 1, true), 10_000);
+        let _ = ob.on_packet(make_pkt(5, 0, 10, false), 10_010); // cache_not_empty_since=10010
+                                                                 // 890ms прошло — is_expired (>800ms) → corrupted=true → первый RequestFullNeeded.
+        let events = ob.on_packet(make_pkt(5, 0, 11, false), 10_900);
         assert!(
             events
                 .iter()
                 .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-            "is_expired (990>800ms) → corrupted=true → первый RequestFullNeeded"
+            "is_expired (890>800ms) → corrupted=true → первый RequestFullNeeded"
         );
         // Через 100мс в corrupted ветке — НЕ должен отправить (throttle 5000мс).
-        let events = ob.on_packet(make_pkt(5, 0, 12, false), 2100);
+        let events = ob.on_packet(make_pkt(5, 0, 12, false), 11_000);
         assert!(
             !events
                 .iter()
@@ -744,7 +741,7 @@ mod tests {
             "throttle 5000ms блокирует второй RequestFullNeeded"
         );
         // Через >5000ms с момента первого запроса — throttle снимается.
-        let events = ob.on_packet(make_pkt(5, 0, 13, false), 7200);
+        let events = ob.on_packet(make_pkt(5, 0, 13, false), 16_001);
         assert!(
             events
                 .iter()
@@ -754,21 +751,47 @@ mod tests {
     }
 
     #[test]
+    fn initial_full_request_throttle_matches_delphi_zero_timestamp() {
+        // Delphi `TOrderBookCache.Create` sets FLastFullRequestTime = 0, and
+        // TryRequestFull still applies the same <=5000ms throttle against that
+        // zero. Rust must not special-case 0 as "never requested".
+        let mut ob = OrderBooks::new();
+        let _ = ob.on_packet(make_pkt(15, 0, 1, true), 0);
+        let _ = ob.on_packet(make_pkt(15, 0, 10, false), 10);
+
+        let events = ob.on_packet(make_pkt(15, 0, 11, false), 900);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            "0..5000ms after process start must be throttled exactly like Delphi"
+        );
+
+        let events = ob.on_packet(make_pkt(15, 0, 12, false), 5001);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
+            ">5000ms releases the first RequestOrderBookFull"
+        );
+    }
+
+    #[test]
     fn corrupted_mode_applies_diffs_while_waiting_for_full() {
         // Delphi MoonProtoEngine.pas:2021-2039: в corrupted режиме клиент
         // применяет diff'ы as-is для degraded live view, а не замораживает UI.
         let mut ob = OrderBooks::new();
         // Full + Diff в order, потом gap → corrupted.
-        let _ = ob.on_packet(make_pkt(6, 0, 10, true), 1000);
-        let _ = ob.on_packet(make_pkt(6, 0, 12, false), 1010); // gap [11]
-                                                               // Через 990ms is_expired → corrupted.
-        let events = ob.on_packet(make_pkt(6, 0, 13, false), 1900);
+        let _ = ob.on_packet(make_pkt(6, 0, 10, true), 10_000);
+        let _ = ob.on_packet(make_pkt(6, 0, 12, false), 10_010); // gap [11]
+                                                                 // Через 890ms is_expired → corrupted.
+        let events = ob.on_packet(make_pkt(6, 0, 13, false), 10_900);
         assert!(events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })));
 
         // Следующий Diff в corrupted — должен примениться (degraded view).
-        let events = ob.on_packet(make_pkt(6, 0, 14, false), 1910);
+        let events = ob.on_packet(make_pkt(6, 0, 14, false), 10_910);
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -844,11 +867,11 @@ mod tests {
     #[test]
     fn normal_gap_overflow_enters_corrupted_without_clearing_cache() {
         let mut ob = OrderBooks::new();
-        let _ = ob.on_packet(make_pkt(11, 0, 1, true), 1000);
+        let _ = ob.on_packet(make_pkt(11, 0, 1, true), 10_000);
 
         let mut request_full_seen = false;
         for seq in 3..=67 {
-            let events = ob.on_packet(make_pkt(11, 0, seq, false), 1000 + seq as i64);
+            let events = ob.on_packet(make_pkt(11, 0, seq, false), 10_000 + seq as i64);
             request_full_seen |= events
                 .iter()
                 .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. }));

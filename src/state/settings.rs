@@ -29,6 +29,14 @@ use crate::commands::ui::{
 pub struct SettingsState {
     /// Последний полученный snapshot настроек клиента (None до первого `SettingsRequest` ответа).
     pub client_settings: Option<ClientSettingsCommand>,
+    /// Текущий `cfg`-эквивалент для append-only soft-read хвоста `TClientSettingsCommand`.
+    ///
+    /// Delphi `CreateFromStream` подставляет значения из текущего `cfg`, если
+    /// старый packet не содержит хвостовые поля. После каждого полного settings
+    /// snapshot этот fallback обновляется автоматически; до первого snapshot
+    /// application может заполнить его через
+    /// [`SettingsState::set_client_settings_fallback`].
+    pub client_settings_fallback: ClientSettingsCommand,
     /// Текущие настройки leverage management (None если ни одного `TLevManageCommand` не получено).
     pub lev_manage: Option<LevManage>,
     /// Активна ли подписка на market-maker ордера (изменяется через `ui_mm_subscribe`).
@@ -84,11 +92,23 @@ impl SettingsState {
         Self::default()
     }
 
+    /// Seed Delphi `cfg` fallback used while parsing old `TClientSettingsCommand`
+    /// payloads with missing append-only tail fields.
+    pub fn set_client_settings_fallback(&mut self, fallback: ClientSettingsCommand) {
+        self.client_settings_fallback = fallback;
+    }
+
+    pub(crate) fn client_settings_parse_fallback(&self) -> &ClientSettingsCommand {
+        &self.client_settings_fallback
+    }
+
     /// Применить входящую UI-команду к state. Возвращает event для прикладного слоя.
     pub fn apply(&mut self, cmd: UICommand) -> SettingsEvent {
         match cmd {
             UICommand::ClientSettings(c) => {
-                self.client_settings = Some(*c);
+                let settings = *c;
+                self.client_settings_fallback = settings.clone();
+                self.client_settings = Some(settings);
                 SettingsEvent::ClientSettingsUpdated
             }
             UICommand::SettingsRequest { uid } => SettingsEvent::SettingsRequested { uid },

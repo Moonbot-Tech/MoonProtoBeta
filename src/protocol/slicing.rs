@@ -32,13 +32,13 @@ pub(crate) fn trace_enabled() -> bool {
     false
 }
 
-fn acked_count(flags: &[u8; 32], blocks_count: usize) -> usize {
+pub(crate) fn acked_count(flags: &[u8; 32], blocks_count: usize) -> usize {
     (0..blocks_count)
         .filter(|block| flags[block / 8] & (1 << (block % 8)) != 0)
         .count()
 }
 
-fn missing_preview(flags: &[u8; 32], blocks_count: usize) -> String {
+pub(crate) fn missing_preview(flags: &[u8; 32], blocks_count: usize) -> String {
     let mut out = String::new();
     let mut shown = 0usize;
     for block in 0..blocks_count {

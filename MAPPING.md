@@ -17,7 +17,7 @@
 | 9 | 543 | DoCleanUp (clear old Receiving) | ✅ client.rs: slicer.clear_old() every 5s |
 | 10 | 545-546 | Handshake cmds → FWaitingHello := false | client.rs handle_handshake sets waiting_hello=false | ✅ |
 | 11 | 548-553 | MPC_WrongHello → MPS_Connected | client.rs:294 | ✅ |
-| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect + `LastSentHello := 0` как немедленный retry sentinel | client.rs: full_reset() + flags + `NEVER_SENT_MS`; `Sending` cleanup отличается, см. DEVIATION #27 | DEVIATION |
+| 12 | 555-565 | MPC_WantNewHello → Reset + NeedConnect + `LastSentHello := 0` как немедленный retry sentinel | client.rs: full_reset() + flags + `NEVER_SENT_MS`; `Sending`/`pending_h`/API slots сохраняются как в Delphi | ✅ |
 | 13 | 567-576 | MPC_NeedHelloAgain (700ms throttle) + `LastSentHello := 0` как немедленный retry sentinel | client.rs: last_need_hello_again + 700ms check + `NEVER_SENT_MS` | ✅ |
 | 14 | 578-581 | WhoAreYou/Fine → HandleHandShake | client.rs handle_handshake | ✅ |
 | 15 | 583-591 | MPC_SizeTest → SendSizeAck | client.rs handle_size_test | ✅ |
@@ -57,7 +57,7 @@
 | 32 | 772-785 | Offline detection → HelloAgain | client.rs: check_offline_reconnect | ✅ |
 | 33 | 789-796 | HelloAgain timeout 7s → socket recreate | client.rs check_reconnect_timeout | ✅ |
 | 34 | 799-804 | Dead zone (5s) → force reconnect | client.rs check_dead_zone | ✅ |
-| 35 | 806-822 | ForceDisconnect: LogOff, close socket, Reset | client.rs: do_force_disconnect + full_reset; `Sending`/pending API cleanup отличается, см. DEVIATION #27 | DEVIATION |
+| 35 | 806-822 | ForceDisconnect: LogOff, close socket, Reset | client.rs: do_force_disconnect + full_reset; `Sending`/`pending_h`/API slots сохраняются как в Delphi | ✅ |
 | 36 | 826 | Sleep(DefaultNetThreadSleepTime = 5ms) | client.rs: sleep(5ms) | ✅ |
 
 ## SendPing (MoonProtoUDPClient.pas:213-232) → client.rs handle_ping (response)
@@ -172,7 +172,7 @@
 | O5 | :235 | TOrderStatusUpdate (CmdId=5) — epoch_header + UpdateData(66б) + (soft) sell_reason_code | TradeCommand::OrderStatusUpdate | ✅ |
 | O6 | :291; :532-540 | TOrderReplaceCommand (CmdId=6) — epoch_header + order_type + new_price; C→S constructor forces `Epoch=0`, `Status=OS_None` | TradeCommand::OrderReplace + `build_order_replace` | ✅ |
 | O7 | :308 | TOrderReplaceResponse (CmdId=7) — epoch_header + order_type + price + UpdateData + qty_base | TradeCommand::OrderReplaceResponse | ✅ |
-| O8 | :350 | TAllStatuses (CmdId=8) — base_header + count:i32 + orders[]:OrderStatus | TradeCommand::AllStatuses | ✅ |
+| O8 | :350 | TAllStatuses (CmdId=8) — base_header + count:i32 + orders[]:TBaseTradeCommand dispatch, every nested item must be TOrderStatus/CmdId=4 | TradeCommand::AllStatuses | ✅ |
 | O9 | :385 | TAllStatusesReq (CmdId=9) — base_header only | TradeCommand::AllStatusesReq | ✅ |
 | O10 | :395 | TOrderCancelCommand (CmdId=10) — epoch_header | TradeCommand::OrderCancel | ✅ |
 | O11 | :411 | TJoinOrdersCommand (CmdId=11) — market_header + is_short | TradeCommand::JoinOrders | ✅ |
@@ -203,11 +203,11 @@
 | O-A1 | TaskWorkers.pas:1450-1666 ProcessCommandOrder | OrderStatus → create/update worker by UID | state/orders.rs:apply OrderStatus | ✅ |
 | O-A2 | MoonProtoFunc.pas:188 EpochIsOK | `LastEpoch = NewEpoch` reject; `Word(LastEpoch - NewEpoch) <= 100` reject; otherwise accept | state/epoch.rs:epoch_is_ok | ✅ |
 | O-A3 | TaskWorkers.pas:546 StatusPhase | Status → phase для rollback protection | state/orders.rs:status_phase | ✅ |
-| O-A4 | MoonProtoClient.pas:553-555 | Filter not.FromCache AND m≠nil | DEVIATION #6 — Rust сохраняет все | DEVIATION |
-| O-A5 | TaskWorkers.pas:1475-1666 setters | ApplyTo/Stops/VStop с побочными эффектами | DEVIATION #5 — Rust observer | DEVIATION |
-| O-A6 | TaskWorkers.pas:7836-8167 TOrderNotFound | Сначала flag, удаление позже | DEVIATION #7 — Rust удаляет сразу + флаг | DEVIATION |
+| O-A4 | MoonProtoClient.pas:553-555 | Filter not.FromCache AND m≠nil | events.rs/orders.rs: unknown `FromCache=true` and unknown no-market `TOrderStatus` are dropped | ✅ |
+| O-A5 | TaskWorkers.pas:1475-1666 setters | ApplyTo/Stops/VStop/Trace/Corridor mutate worker state before event/render | state/orders.rs mirrors protocol/read-model effects: local Price vs ActualPrice, Stops/VStop prev fields, SellReason guard, trace-line state, MoonShot flag | ✅ |
+| O-A6 | TaskWorkers.pas:7836-8167 TOrderNotFound | Сначала flag, удаление позже | orders.rs: sets `cancel_request` + `server_forced_remove`, deferred removal later | ✅ |
 | O-A7 | MoonProtoClient.pas:570-590 CleanupMissingWorkers | После AllStatuses запросить статусы worker'ов, не пришедших в snapshot | state/orders.rs:missing_after_snapshot + events.rs:dispatch_into_active auto `request_order_status` | ✅ |
-| O-A8 | server_time_delta correction | Ping.InitialTime - Now → applied к TDateTime fields | state/orders.rs:apply через server_time_delta | ✅ |
+| O-A8 | server_time_delta correction | Ping.InitialTime - Now → applied to valid TDateTime fields; `TOrderCompact`/`TOrderUpdateData` skip values `<= 1` | state/orders.rs + trade.rs `adjust_time` with Delphi `> 1` guard | ✅ |
 | O-A9 | TBulkReplaceNotify | Set flag на upcoming order replaces | state/orders.rs:apply BulkReplaceNotify | ✅ |
 | O-A10 | TaskWorkers.pas:7836-8155,7400-7445 | Terminal order statuses remove worker/cache; `OS_SelLAlmostDone` is terminal like sell-done paths | commands/trade.rs:`OrderWorkerStatus::is_terminal`, state/orders.rs removal on terminal status | ✅ |
 
@@ -295,7 +295,7 @@
 | S-A3 | TStratSnapshot.Data RTTI decode | bin → fields | state/strats.rs:apply_snapshot_decoded → strategy_serializer | ✅ |
 | S-A4 | StrategySerializer.pas:635-705 LoadStrategyFromCompact | existing strategy skips stale snapshot when local LastDate and Ver are both >= incoming | state/strats.rs:upsert_from_snapshot rollback guard | ✅ |
 | S-A5 | MoonProtoClient.pas:757-769 ProcessStratCommand CheckedSync | CheckedSync updates only existing strategies; unknown StrategyID is ignored | state/strats.rs:apply CheckedSync ignores missing id | ✅ |
-| S-A6 | MoonProtoClient.pas:ProcessStratCommand ветка TStratSnapshotRequest | ответ всегда fresh `TStratSnapshot.CreateFromStrats(Strats)`, без кеша последнего server snapshot | events.rs:dispatch_into_active вызывает app-provided `strategy_snapshot_provider`; без provider только эмитит SnapshotRequested для ручного fresh-ответа | ✅ |
+| S-A6 | MoonProtoClient.pas:ProcessStratCommand ветка TStratSnapshotRequest | ответ всегда fresh `TStratSnapshot.CreateFromStrats(Strats)`, без кеша последнего server snapshot | events.rs:dispatch_into_active_actions отвечает автоматически из library-owned `StratsState`; provider optional override для fresh application-owned списка | ✅ |
 
 ---
 
@@ -316,8 +316,8 @@
 | SS11 | :746 TDecompressionStream(-15) | DEFLATE raw, no zlib header | flate2::read::DeflateDecoder | ✅ |
 | SS12 | :839 TCompressionStream(zcDefault, -15) | DEFLATE raw compress | flate2::write::DeflateEncoder | ✅ |
 | SS13 | :160-161 MBClassic backfill | If empty → = MarketName | (применимо к Market.pas, не Serializer) | N/A |
-| SS14 | :615 RTTI propmask iteration | RTTI order | DEVIATION #15 (writer alphabetical) | DEVIATION |
-| SS15 | :513-516 ReadField type mismatch skip | Schema check | Rust читает по wire TypeID (no schema) | DEVIATION (by design) |
+| SS14 | :614-625 RTTI propmask iteration | fields are written in `TStrategy` public declaration order after `PropMask` filtering | writer orders known fields by extracted Delphi declaration order; unknown extension fields after known fields | ✅ |
+| SS15 | :510-515 ReadField type mismatch skip | known field type must match RTTI `GetFieldTypeID`; mismatch skips value | parser checks known `TStrategy` fields against extracted Delphi type table and skips mismatches with `SkipFieldByTypeID` semantics | ✅ |
 | SS16 | :746-750 LoadStrategiesFromStream | Decompressed.CopyFrom(TDecompressionStream, 0) без верхнего лимита распакованного snapshot | parse_strategy_batch читает DeflateDecoder до EOF без `.take()` cap | ✅ |
 | SS17 | :760-783 LoadStrategiesFromStream | Count:Word стратегий; новые стратегии добавляются через Strats.Add без cap | StratsState добавляет все новые strategy_id без `MAX_STRATEGIES` cap | ✅ |
 
@@ -358,7 +358,8 @@
 | U18 | ArbTypes.pas:25 ARB_CONFIG_VER=1 | ArbConfig version | const ARB_CONFIG_VER | ✅ |
 | U19 | ArbConfig compact: wantedSet(32 байта set of byte) + flags(byte) + colorCount + skip | bitmask format | ArbConfigCompact + bit ops | ✅ |
 | U20 | InitArbConfigDefaults (ArbTypes.pas:87) ShowLines=true, ShowPercent=true | defaults | ArbConfigCompact::default | ✅ |
-| U21 | :326-336 soft-read UseManualStrategy/etc | использовать cfg.* как fallback | DEVIATION #14 — Rust = false/0/[] | DEVIATION |
+| U21 | :326-366 soft-read settings tail | missing tail keeps current cfg values; `UseManualStrategy` itself stays zero if absent | `UICommand::parse_with_client_settings_fallback` + `SettingsState.client_settings_fallback`; dispatcher passes fallback automatically | ✅ |
+| U22 | :316-323 TempBLCount exact-read loop | negative/impossible `TempBLCount` is corrupt stream, no silent truncate | `parse_client_settings` rejects negative count and count that cannot fit even minimal TempBL items | ✅ |
 
 ---
 
@@ -423,7 +424,7 @@
 | E-W7 | bind_socket failure → BindFailed event + retry | client.rs:bind_socket failure path | ✅ |
 | E-W8 | TEngineRequest effective `MPS_Sliced` + `MaxRetries=6` | client.rs:send_api_request sends `SendPriority::Sliced`, `max_retries=6` | ✅ |
 | E-W9 | Однопоточный SendAndWait-style Engine API flow без ручного `Receiver` wait/parsing | client.rs:`request_engine_response` + typed `request_*` helpers | ✅ |
-| E-W10 | Unit1.pas:5055-5093 InitInt: BaseCheck → AuthCheck → GetMarketsList → UpdateMarketsList → balance; `TMoonProtoEngine.UpdateMarketsList` синхронизирует indexes при PeerAppToken mismatch | client.rs:`connect_and_init` waits for ready client, then `run_init_sequence` always runs BaseCheck/AuthCheck/GetMarketsList/GetMarketsIndexes/UpdateMarketsList/GetMarketsBalanceFull before opening `domain_ready` | ✅ |
+| E-W10 | Unit1.pas:5055-5093 InitInt: BaseCheck → AuthCheck → GetMarketsList → UpdateMarketsList → balance; `TMoonProtoEngine.UpdateMarketsList` синхронизирует indexes при PeerAppToken mismatch; MoonProto `GetMarketsBalanceFull` returns true without wire send | client.rs:`connect_and_init` waits for ready client, then `run_init_sequence` runs BaseCheck/AuthCheck/GetMarketsList/GetMarketsIndexes/UpdateMarketsList before opening `domain_ready`; balance snapshot is requested by post-init `TRequestBalanceRefresh` | ✅ |
 | E-W11 | Rust active API: one-shot ожидания не теряют typed events, пришедшие пока helper крутит loop | events.rs:`EventDispatcher::queued_events`/`take_queued_events`; client.rs:`run_with_dispatcher_queued` используется `run_until_response` и one-shot helpers | ✅ |
 | E-W12 | Unit1.pas:5946-5950 post-InitDone ActiveClient resync: TAllStatusesReq, TStratSnapshot.CreateFromStrats, TSettingsRequest, TMMOrdersSubscribeCommand, TRequestBalanceRefresh | client.rs:`run_init_sequence` после bootstrap вызывает `send_post_init_resync`; strategy snapshot берётся из fresh provider или ставит queued `SnapshotRequested`, затем отправляются пользовательские trades/orderbook подписки | ✅ |
 | E-W13 | Reconnect после Init: Delphi transport `Fine` только меняет auth state; server `SrvConnect` шлёт orders/settings/strategy-request; market streams восстанавливаются через `UpdateMarketsList → GetMarketsIndexes`, `NeedReconnectAllTrades`, `NeedResubscribeOrderBooks` | client.rs:`restore_domain_after_reconnect` после `Fine` не повторяет Init/post-init resync; шлёт fresh `GetMarketsIndexes`, после ответа `UpdateMarketsList`, и replay registry subscriptions; стратегии клиент сам не перезапрашивает | ✅ |
@@ -496,14 +497,19 @@
 
 ## Связанные DEVIATION'ы
 
-- #1-9: архитектурные отклонения (mpsc vs FastLock, observer-model, sync apply, etc.) — ПОДТВЕРЖДЕНО
+- #1: FastLock/mpsc channel-cap drift — ИСПРАВЛЕНО
+- #2, #4: API/app-threading boundary (callback thread, app read-model apply timing) — ПОДТВЕРЖДЕНО
+- #3: MPSlider/TmpSlider/RecvdSlider split — ИСПРАВЛЕНО
+- #5: app-local order worker/UI persistence hooks outside protocol read-model — ПОДТВЕРЖДЕНО
+- #6-8: order-state расхождения — ИСПРАВЛЕНО
+- #9: order trace-line state machine — ИСПРАВЛЕНО
 - #10: AES-GCM IV mask + RDTSC — ИСПРАВЛЕНО
 - #11: H/L auto-compression — ИСПРАВЛЕНО
 - #12: NTP background thread — ИСПРАВЛЕНО
-- #13: moonext ABI sync — ПОДТВЕРЖДЕНО (CLAUDE.md spec упрощённая, реальная ABI extended)
-- #14: UI soft-read defaults — ПОДТВЕРЖДЕНО
-- #15: strategy_serializer writer field order — ПОДТВЕРЖДЕНО
-- #16: from_utf8_lossy vs UTF8 fallback '?' — ПОДТВЕРЖДЕНО
+- #13: moonext ABI spec-vs-code mismatch — ИСПРАВЛЕНО/УСТАРЕЛО
+- #14: UI soft-read defaults — ИСПРАВЛЕНО
+- #15: strategy_serializer writer field order — ИСПРАВЛЕНО
+- #16: Delphi UTF-8 replacement fallback '?' — ИСПРАВЛЕНО
 - #17: cpu_timestamp non-x86 fallback — ПОДТВЕРЖДЕНО
 - #18: LifecycleEvent abstraction (Stage 3 high-level API) — ПОДТВЕРЖДЕНО
 - #19: cross-platform DontFragment — ИСПРАВЛЕНО
@@ -513,3 +519,8 @@
 - #23: per-Client ServerTimeDelta — ИСПРАВЛЕНО
 - #24: first OrderBook Diff with local seq 0 + corrupted-mode diffs — ИСПРАВЛЕНО
 - #25: PMTU clamp in `handle_ping` / `handle_probe_mtu` — ИСПРАВЛЕНО
+- #26: `EpochIsOK` rollback window — ИСПРАВЛЕНО
+- #27: `full_reset` preserves outgoing queues/API slots like Delphi `Reset` — ИСПРАВЛЕНО
+- #28: hourly Binance tags burst — ИСПРАВЛЕНО
+- #29: Engine API Sliced retry count — ИСПРАВЛЕНО
+- #30: `run_until_response` queued events — ИСПРАВЛЕНО

@@ -147,8 +147,8 @@ logs.
 
 For the common setup path, call `connect_and_init`. The Delphi init contract is
 mandatory: BaseCheck, AuthCheck, markets list, market indexes, price refresh,
-balance refresh, order snapshot, strategy sync, and settings sync. `InitConfig`
-only adds optional stream subscriptions and timing:
+balance refresh, order snapshot, client strategy snapshot, and settings sync.
+`InitConfig` only adds optional stream subscriptions and timing:
 
 ```rust
 use std::time::Duration;
@@ -199,11 +199,12 @@ mode, including the raw `Client::run` callback. This matches the Delphi
 `TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
 transport service packets are not part of this domain gate, because Init itself
 depends on Engine API. Once init succeeds, the helper sends the Delphi post-init
-refresh set: order snapshot request, strategy snapshot reply from the
-dispatcher-owned strategy list, settings request, MM-orders subscription state,
-and balance refresh request. If no strategy provider is registered, the
-dispatcher sends the current local strategy list; an empty list is a valid
-reply. `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
+refresh set in Delphi order: order snapshot request, full client strategy
+snapshot from the dispatcher-owned local strategy list, settings request,
+MM-orders subscription state, and balance refresh request. When the server later
+sends `TStratSnapshotRequest`, the dispatcher replies from the same current
+local strategy list; an empty list is a valid non-empty serializer payload.
+`SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value independent from `subscribe_trades`.
 
@@ -212,8 +213,13 @@ Typed outgoing domain helpers use the same Init gate. Before Init:
 subscription packets on the wire; trade wrappers, UI wrappers, strategy
 wrappers, and `balance_request_refresh` queue nothing. Stateful order helpers
 such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
-cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers are
-advanced escape hatches and can bypass this typed-domain gate.
+cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers do
+not bypass this gate: until Init opens the domain, the only Engine API requests
+accepted by the raw path are the mandatory init primitives `BaseCheck`,
+`AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`, and `UpdateMarketsList`.
+Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
+MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
+wire request.
 
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
 needs custom progress UI between connection readiness and the one-time init
@@ -316,6 +322,13 @@ let settings = client.request_client_settings(
 println!("xSell={}", settings.x_sell);
 ```
 
+If an application already has local UI settings before connecting, pass them to
+the dispatcher with `set_client_settings_fallback`. This preserves Delphi
+soft-read behavior for old `TClientSettingsCommand` packets: missing tail fields
+keep the current `cfg` values (`FreePositionCheck`, `VolDropLevel`,
+`UseStopMarket`, auto-start blobs, hotkey prices, `JoinSellKind`, and
+`SignOrders` for `ver<2`) instead of being reset to Rust defaults.
+
 ## Order Snapshot Request
 
 Use `request_order_snapshot` when the application needs the current active
@@ -369,7 +382,14 @@ The registry records the latest subscription intent. Before Init, public
 subscription calls update that registry but do not send Engine API/UI
 subscription packets. The one-time Init flushes the pre-init registry once, and
 later reconnects replay the registry automatically, so streams continue without
-the application running Init again.
+the application running Init again. After a server restart, orderbook replay is
+delayed until fresh market indexes have been received for the current
+`PeerAppToken`; this prevents new server `market_index` values from racing the
+old local index map.
+All-trades reconnect follows Delphi `NeedReconnectAllTrades`: until a
+`TradesStream` packet is seen with the current `ServerToken`, the library sends
+`UnsubscribeAllTrades`, waits 100 ms, then sends `SubscribeAllTrades`, retrying
+that sequence no more often than once per 5000 ms.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.
@@ -426,10 +446,14 @@ intent there before calling the matching `Client`/`ClientSender` helper.
 The sender also exposes raw `send_cmd`, `send_cmd_keyed`, and
 `send_api_request` methods for tools that already have a serialized payload
 from `commands::*` builders. These raw methods do not update typed library
-state and do not wait for `domain_ready`; normal applications should prefer the
-typed helpers. `send_api_request` is fire-and-forget: it does not register a
-pending receiver, so the response is delivered through the running dispatcher as
-`Event::EngineResponse`.
+state, but they still obey `domain_ready`; before Init, fallible raw methods
+return `SubscribeError::DomainNotReady` for non-init commands. Normal
+applications should prefer the typed helpers. `send_api_request` is
+fire-and-forget: it does not register a pending receiver, so the response is
+delivered through the running dispatcher as `Event::EngineResponse`.
+`Client::send_api_request_async` is non-fallible; before Init it queues only
+mandatory Init Engine API requests, and for other methods returns a closed
+receiver without registering `api_pending`.
 
 ```rust
 use moonproto::{Command, SendPriority};

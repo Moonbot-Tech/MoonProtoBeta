@@ -227,6 +227,11 @@ pub fn build_snapshot_request(uid: u64) -> Vec<u8> {
 /// `data` is the compressed `TStrategySerializer` payload (`TStratSnapshot.Data`),
 /// not the full command body. This builder adds the Delphi fields
 /// `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
+///
+/// An empty `data` slice is normalized to the valid Delphi meaning "empty
+/// strategy list": a non-empty `TStrategySerializer` payload with zero
+/// dictionaries and zero strategies. A wire `Size=0` snapshot is malformed for
+/// normal client sends.
 pub fn build_snapshot(
     uid: u64,
     server_epoch: u64,
@@ -234,6 +239,14 @@ pub fn build_snapshot(
     full: bool,
     data: &[u8],
 ) -> Vec<u8> {
+    let empty_payload;
+    let data = if data.is_empty() {
+        empty_payload = StrategyBatchBuilder::new().finalize();
+        empty_payload.as_slice()
+    } else {
+        data
+    };
+
     let mut out = Vec::with_capacity(11 + 8 + 8 + 4 + 1 + data.len());
     write_header(&mut out, CMD_SNAPSHOT, uid);
     out.extend_from_slice(&server_epoch.to_le_bytes());
@@ -492,6 +505,52 @@ mod tests {
                 let batch = crate::commands::strategy_serializer::parse_strategy_batch(&s.data)
                     .expect("strategy payload must parse");
                 assert_eq!(batch.strategies.len(), 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn build_empty_snapshot_from_strategies_keeps_nonzero_serializer_payload() {
+        let raw = build_snapshot_from_strategies(79, 0, true, &[]);
+        let cmd = StratCommand::parse(&raw).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 0);
+                assert_eq!(s.client_max_last_date, 0);
+                assert!(s.full);
+                assert!(
+                    !s.data.is_empty(),
+                    "empty strategy list still serializes as a valid TStrategySerializer payload"
+                );
+                let batch = crate::commands::strategy_serializer::parse_strategy_batch(&s.data)
+                    .expect("empty strategy payload must parse");
+                assert!(batch.names.is_empty());
+                assert!(batch.paths.is_empty());
+                assert!(batch.strategies.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn build_snapshot_normalizes_empty_raw_payload_to_empty_serializer() {
+        let raw = build_snapshot(79, 3, 0, true, &[]);
+        let cmd = StratCommand::parse(&raw).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 3);
+                assert_eq!(s.client_max_last_date, 0);
+                assert!(s.full);
+                assert!(
+                    !s.data.is_empty(),
+                    "public raw snapshot builder must not emit Size=0"
+                );
+                let batch = crate::commands::strategy_serializer::parse_strategy_batch(&s.data)
+                    .expect("normalized empty payload must parse");
+                assert!(batch.names.is_empty());
+                assert!(batch.paths.is_empty());
+                assert!(batch.strategies.is_empty());
             }
             _ => panic!("wrong variant"),
         }

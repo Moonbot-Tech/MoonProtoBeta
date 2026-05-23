@@ -18,6 +18,9 @@ Subscriptions are stored in the client registry. Before Init, public subscribe
 and unsubscribe calls update only that registry and send no Engine API wire
 packet. The one-time Init flushes the current registry once. After Init,
 reconnect replays the registry automatically and refetches indexes when needed.
+Orderbook replay waits until fresh `GetMarketsIndexes` has completed for the
+current `PeerAppToken`, matching Delphi `CheckBookTopics`: packets using new
+server indexes are not allowed to race old local index mappings.
 Unsubscribe removes that market from the registry and sends
 `emk_UnsubscribeOrderBook` only after `domain_ready`.
 Use the batched helpers when a UI toggles several markets at once; they preserve

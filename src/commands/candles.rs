@@ -293,7 +293,7 @@ fn parse_request_candles_data_response_with_local_shift(
 }
 
 #[cfg(unix)]
-fn current_local_time_shift_minutes() -> f64 {
+pub(crate) fn current_local_time_shift_minutes() -> f64 {
     unsafe {
         let now = libc::time(std::ptr::null_mut());
         if now == -1 {
@@ -319,7 +319,7 @@ fn current_local_time_shift_minutes() -> f64 {
 }
 
 #[cfg(windows)]
-fn current_local_time_shift_minutes() -> f64 {
+pub(crate) fn current_local_time_shift_minutes() -> f64 {
     #[repr(C)]
     struct SystemTime {
         year: u16,
@@ -367,7 +367,7 @@ fn current_local_time_shift_minutes() -> f64 {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn current_local_time_shift_minutes() -> f64 {
+pub(crate) fn current_local_time_shift_minutes() -> f64 {
     0.0
 }
 

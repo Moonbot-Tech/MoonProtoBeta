@@ -9,8 +9,8 @@ Trade wrappers are typed domain API and are gated by Init. Before
 wrappers queue no wire command, boolean wrappers return `false`, and
 market-level multi-order wrappers return `0` where applicable. Stateful helpers
 that require `&mut Orders` also do not mutate the local order cache before Init.
-Raw `send_cmd` / `send_cmd_keyed` can bypass this gate only for advanced tools
-that intentionally own the protocol consequences.
+Raw `send_cmd` / `send_cmd_keyed` obey the same gate; before Init they reject
+non-init commands instead of queueing wire.
 
 ## Trade Context
 
@@ -65,7 +65,7 @@ state, or explicit protocol-tool input.
 | `switch_panic_sell_by_market(&mut orders, market, turn_on)` | Delphi `TOrdersWorkers.SwitchPanicSellByMarket`: button toggle semantics. Returns whether panic sell is now on. |
 | `turn_order_panic_sell(&mut orders, uid, turn_on)` | Apply Delphi per-worker `FPanicSell`/`PrevPanicSell` gate for one local sell order. Returns `true` when a command was queued. |
 | `turn_tracked_order_panic_sell(&mut orders, uid, turn_on)` | Same per-order panic-sell helper for tracked-order call sites. |
-| `set_immune(&mut orders, uid, items)` | Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand` for found active orders. Returns `true` when a command was queued. |
+| `set_immune(&mut orders, items)` | Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand` for found active orders. Returns `true` when a command was queued. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(&orders, ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
 | `update_vstop(&mut orders, uid, on, fixed, level, vol)` | Apply Delphi `SendVStopIfChanged` and update volume stop if changed. Returns `true` when a command was queued. |
@@ -108,14 +108,20 @@ order worker.
 `TOrdersWorkers.SetImmuneClicks` sets `Worker.ImmuneForClicks` before sending the
 wire command, and sends nothing if no local active worker is found. Rust repeats
 that: pass `&mut Orders`, and the wrapper mutates found active orders before
-queueing `TSetImmuneCommand`.
+queueing `TSetImmuneCommand`. The command header UID is generated internally,
+matching Delphi `TBaseCommand.Create`; target order UIDs live in
+`TSetImmuneCommand.Items`.
 
 `update_order_stops` and `update_vstop` are also state-aware outgoing actions.
 They require `&mut Orders` and a local order UID, because Delphi does not expose
 raw stop/VStop sends from UI code: `BOrderWorker.SendStopsIfChanged` and
 `SendVStopIfChanged` first require a local `vOrder`, compare the new values with
-`FPrevStops` / `FPrevVStop*`, update the local cache, then send. Rust returns
-`false` and queues nothing when the local order is absent or the values did not
+`FPrevStops` / `FPrevVStop*`, update the local cache, then send. Rust represents
+that `vOrder <> nil` gate as `Order::has_local_visual_order`; server-created
+pending orders set it automatically, and callers with their own local
+visual-order equivalent can set it through `Orders::mark_local_visual_order(uid)`
+after the server UID is known. Rust returns `false` and queues nothing when the
+local order is absent, has no local visual-order marker, or the values did not
 change. The wire `status`, market name, currency/platform route, and UKey are
 derived from the local order.
 
@@ -184,7 +190,7 @@ let items = [
     ImmuneItem { uid: 100, value: true },
     ImmuneItem { uid: 200, value: true },
 ];
-client.set_immune(dispatcher.orders_mut(), rand::random(), &items);
+client.set_immune(dispatcher.orders_mut(), &items);
 
 let mut stops = dispatcher
     .orders()
@@ -193,6 +199,7 @@ let mut stops = dispatcher
     .stops;
 stops.stop_loss_on = 1;
 stops.sl_level = 49500.0;
+dispatcher.orders_mut().mark_local_visual_order(order_uid);
 client.update_order_stops(dispatcher.orders_mut(), order_uid, &stops);
 
 client.update_vstop(dispatcher.orders_mut(), order_uid, true, false, 50000.0, 12.0);
@@ -265,7 +272,8 @@ current status, and order type from `Orders` before queueing, matching Delphi
 active-client order workers.
 
 `set_immune` uses `UK_ImmuneClicks(sum(found_items[].uid))`; items whose local
-active order is not found are not sent.
+active order is not found are not sent. Its header UID is random like Delphi
+`TSetImmuneCommand.Create`; it is not the target order UID.
 
 ## Retry Counts
 

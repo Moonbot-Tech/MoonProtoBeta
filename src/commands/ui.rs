@@ -28,7 +28,7 @@
 //! Не raw record! На проводе: `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte
 //! + colorCount*5 bytes`. `wantedSet` — Delphi `set of byte` (32 байта = 256 битовая маска).
 
-use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
+use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
 
 // --- CmdId constants ---
@@ -109,7 +109,9 @@ pub struct EmuTradePoint {
 /// CmdId=1 `TClientSettingsCommand` — большой snapshot настроек MoonBot UI.
 ///
 /// Многие поля append-only soft-read: в зависимости от версии сервера часть полей
-/// может отсутствовать (читается до конца payload, недостающие = дефолты).
+/// может отсутствовать. Delphi `CreateFromStream` берёт часть недостающего хвоста
+/// из текущего `cfg`; в active path это делает
+/// [`UICommand::parse_with_client_settings_fallback`].
 ///
 /// B-01 (docs_api iter-2): `#[derive(Default)]` для удобства потребителя.
 /// Из Delphi `TClientSettingsCommand.Create` пользователь получал готовую структуру
@@ -322,6 +324,22 @@ impl UICommand {
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
     /// Version gate: ver > 3 → Unknown.
     pub fn parse(payload: &[u8]) -> Option<Self> {
+        Self::parse_with_client_settings_fallback(payload, None)
+    }
+
+    /// Parse with Delphi `cfg` fallback for old/truncated `TClientSettingsCommand`
+    /// soft-tail fields.
+    ///
+    /// Delphi `TClientSettingsCommand.CreateFromStream` reads old packets
+    /// append-only: if `FreePositionCheck`, `VolDropLevel`, `UseStopMarket`,
+    /// `AutoStartConfig`, hotkey prices, or `JoinSellKind` are absent, the command
+    /// keeps the current local `cfg` values. The active dispatcher passes its
+    /// current settings snapshot here; low-level callers can pass the same value
+    /// when decoding historical payloads.
+    pub fn parse_with_client_settings_fallback(
+        payload: &[u8],
+        client_settings_fallback: Option<&ClientSettingsCommand>,
+    ) -> Option<Self> {
         if payload.len() < 11 {
             return None;
         }
@@ -334,8 +352,10 @@ impl UICommand {
         let mut pos = 11usize;
 
         match cmd_id {
-            CMD_CLIENT_SETTINGS => parse_client_settings(payload, &mut pos, uid, ver)
-                .map(|settings| UICommand::ClientSettings(Box::new(settings))),
+            CMD_CLIENT_SETTINGS => {
+                parse_client_settings(payload, &mut pos, uid, ver, client_settings_fallback)
+                    .map(|settings| UICommand::ClientSettings(Box::new(settings)))
+            }
 
             CMD_SETTINGS_REQUEST => Some(UICommand::SettingsRequest { uid }),
 
@@ -526,7 +546,7 @@ impl UICommand {
                 let len = payload[pos] as usize;
                 let len = len.min(15);
                 let name_bytes = &payload[pos + 1..pos + 1 + len];
-                let dex_name = String::from_utf8_lossy(name_bytes).to_string();
+                let dex_name = decode_utf8_delphi(name_bytes);
                 Some(UICommand::SwitchDex(SwitchDex { uid, dex_name }))
             }
 
@@ -552,6 +572,7 @@ fn parse_client_settings(
     pos: &mut usize,
     uid: u64,
     ver: u16,
+    fallback: Option<&ClientSettingsCommand>,
 ) -> Option<ClientSettingsCommand> {
     // Fixed mandatory block: 4+4+1+1+8+4+4+8+1+4+1+1 = 41 bytes
     if *pos + 41 > data.len() {
@@ -595,7 +616,11 @@ fn parse_client_settings(
         *pos += 1;
         (b, s, so)
     } else {
-        (false, false, true) // дефолт SignOrders=true (Config.pas:6230, 7567)
+        (
+            false,
+            false,
+            fallback.map(|f| f.sign_orders).unwrap_or(true),
+        )
     };
 
     let coins_black_list_text = read_string(data, pos)?;
@@ -610,12 +635,16 @@ fn parse_client_settings(
     }
     let temp_bl_count_raw = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
     *pos += 4;
-    // Sanity check: каждый item занимает минимум 2 (string length prefix) + 8 (TDateTime)
-    // = 10 байт. Cap по реально доступным байтам. Без этой защиты malicious
-    // `temp_bl_count = i32::MAX` запросил бы `Vec::with_capacity(2_147_483_647)` →
-    // ~50 GB heap → OOM panic от одного UI пакета. См. robustness audit C5.
-    let max_items_by_payload = (data.len() - *pos) / 10;
-    let temp_bl_count = (temp_bl_count_raw.max(0) as usize).min(max_items_by_payload);
+    if temp_bl_count_raw < 0 {
+        return None;
+    }
+    let temp_bl_count = temp_bl_count_raw as usize;
+    // Каждый TempBL item занимает минимум string length prefix (2) + TDateTime (8).
+    // Если count физически не помещается в payload, Delphi stream read would fail;
+    // Rust must fail too, not silently truncate and parse tail at a wrong offset.
+    if temp_bl_count > (data.len() - *pos) / 10 {
+        return None;
+    }
     let mut temp_bl_symbols = Vec::with_capacity(temp_bl_count);
     let mut temp_bl_times = Vec::with_capacity(temp_bl_count);
     for _ in 0..temp_bl_count {
@@ -650,7 +679,7 @@ fn parse_client_settings(
         *pos += 1;
         b
     } else {
-        false
+        fallback.map(|f| f.free_position_check).unwrap_or(false)
     };
 
     let vol_drop_level = if *pos < data.len() {
@@ -661,7 +690,7 @@ fn parse_client_settings(
         *pos += 4;
         v
     } else {
-        0
+        fallback.map(|f| f.vol_drop_level).unwrap_or(0)
     };
 
     let use_stop_market = if *pos < data.len() {
@@ -672,16 +701,35 @@ fn parse_client_settings(
         *pos += 1;
         b
     } else {
-        false
+        fallback.map(|f| f.use_stop_market).unwrap_or(false)
     };
 
     // ASCfg: `if pos + sizeof(Word) < size`  → Delphi `<`, не `<=`, чтобы было что-то ЗА размером.
-    let as_cfg = read_sized_blob(data, pos);
-    let as_cfg2 = read_sized_blob(data, pos);
+    let as_cfg = if can_read_sized_blob(data, *pos) {
+        read_sized_blob_with_fallback(
+            data,
+            pos,
+            AS_CFG_SIZE,
+            fallback.map(|f| f.as_cfg.as_slice()),
+        )
+    } else {
+        fallback.map(|f| f.as_cfg.clone()).unwrap_or_default()
+    };
+    let as_cfg2 = if can_read_sized_blob(data, *pos) {
+        read_sized_blob_with_fallback(
+            data,
+            pos,
+            AS_CFG2_SIZE,
+            fallback.map(|f| f.as_cfg2.as_slice()),
+        )
+    } else {
+        fallback.map(|f| f.as_cfg2.clone()).unwrap_or_default()
+    };
 
     // SPrice/sbNum block: `if pos + 25 <= size`
-    let mut s_price = [0.0f32; 6];
-    let mut sb_num = 0u8;
+    let (mut s_price, mut sb_num) = fallback
+        .map(|f| (f.s_price, f.sb_num))
+        .unwrap_or(([0.0f32; 6], 0u8));
     if *pos + 25 <= data.len() {
         for slot in s_price.iter_mut() {
             *slot = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
@@ -696,7 +744,7 @@ fn parse_client_settings(
         *pos += 1;
         v
     } else {
-        0
+        fallback.map(|f| f.join_sell_kind).unwrap_or(0)
     };
 
     // ArbConfig compact (defaults out of InitArbConfigDefaults if absent or arbVer < 1).
@@ -775,18 +823,38 @@ fn parse_client_settings(
 }
 
 /// Read `sz:Word + bytes(min(sz, len_of_destination))`. Trailing `(sz - destination_size)` bytes
-/// are skipped if larger. Returns the full raw blob actually present on wire (truncated to MS bounds).
+/// are skipped if larger.
+///
+/// Delphi first assigns `ASCfg := cfg.AutoStartConfig` and then reads only the
+/// prefix that exists in the stream. Missing tail bytes therefore keep fallback
+/// values; they are not zeroed and not truncated.
 /// Delphi гвард: `pos + SizeOf(Word) < size` — оставляем как `<`.
-fn read_sized_blob(data: &[u8], pos: &mut usize) -> Vec<u8> {
-    if *pos + 2 >= data.len() {
-        return Vec::new();
+fn read_sized_blob_with_fallback(
+    data: &[u8],
+    pos: &mut usize,
+    destination_size: usize,
+    fallback: Option<&[u8]>,
+) -> Vec<u8> {
+    if !can_read_sized_blob(data, *pos) {
+        return fallback.map(Vec::from).unwrap_or_default();
     }
     let sz = u16::from_le_bytes([data[*pos], data[*pos + 1]]) as usize;
     *pos += 2;
-    let take = sz.min(data.len().saturating_sub(*pos));
-    let blob = data[*pos..*pos + take].to_vec();
-    *pos += take;
+    let mut blob = vec![0u8; destination_size];
+    if let Some(fallback) = fallback {
+        let copy = fallback.len().min(destination_size);
+        blob[..copy].copy_from_slice(&fallback[..copy]);
+    }
+
+    let available = data.len().saturating_sub(*pos);
+    let to_copy = sz.min(destination_size).min(available);
+    blob[..to_copy].copy_from_slice(&data[*pos..*pos + to_copy]);
+    *pos += sz.min(available);
     blob
+}
+
+fn can_read_sized_blob(data: &[u8], pos: usize) -> bool {
+    pos + 2 < data.len()
 }
 
 fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
@@ -1306,6 +1374,20 @@ mod tests {
     }
 
     #[test]
+    fn switch_dex_invalid_utf8_uses_delphi_question_mark_fallback() {
+        let mut raw = Vec::new();
+        write_header(&mut raw, CMD_SWITCH_DEX, 16);
+        raw.push(4);
+        raw.extend_from_slice(&[b'D', 0xFF, b'X', 0x80]);
+        raw.extend_from_slice(&[0; 11]);
+
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::SwitchDex(s) => assert_eq!(s.dex_name, "D?X?"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn switch_spot_roundtrip() {
         let raw = build_switch_spot(15, 1);
         match UICommand::parse(&raw).unwrap() {
@@ -1405,6 +1487,118 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn client_settings_soft_tail_uses_delphi_cfg_fallback() {
+        let mut raw = Vec::new();
+        raw.push(CMD_CLIENT_SETTINGS);
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 41]);
+        write_string(&mut raw, "");
+        raw.push(0);
+        raw.extend_from_slice(&0i32.to_le_bytes());
+
+        let fallback = ClientSettingsCommand {
+            sign_orders: false,
+            free_position_check: true,
+            vol_drop_level: 77,
+            use_stop_market: true,
+            as_cfg: vec![0xAA, 0xAB],
+            as_cfg2: vec![0xBA, 0xBB],
+            s_price: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            sb_num: 9,
+            join_sell_kind: 2,
+            ..ClientSettingsCommand::default()
+        };
+
+        match UICommand::parse_with_client_settings_fallback(&raw, Some(&fallback)).unwrap() {
+            UICommand::ClientSettings(p) => {
+                assert_eq!(p.uid, 7);
+                assert!(!p.sign_orders, "ver<2 keeps Delphi cfg SignOrders");
+                assert!(!p.use_manual_strategy);
+                assert_eq!(p.manual_strategy_id, 0);
+                assert!(p.free_position_check);
+                assert_eq!(p.vol_drop_level, 77);
+                assert!(p.use_stop_market);
+                assert_eq!(p.as_cfg, vec![0xAA, 0xAB]);
+                assert_eq!(p.as_cfg2, vec![0xBA, 0xBB]);
+                assert_eq!(p.s_price, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+                assert_eq!(p.sb_num, 9);
+                assert_eq!(p.join_sell_kind, 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_settings_short_ascfg_overlays_delphi_cfg_fallback() {
+        let mut raw = Vec::new();
+        raw.push(CMD_CLIENT_SETTINGS);
+        raw.extend_from_slice(&3u16.to_le_bytes());
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 41]);
+        raw.extend_from_slice(&[0u8; 3]); // BuyIceberg, SellIceberg, SignOrders
+        write_string(&mut raw, "");
+        raw.push(0);
+        raw.extend_from_slice(&0i32.to_le_bytes());
+        raw.push(0); // UseManualStrategy
+        raw.extend_from_slice(&0u64.to_le_bytes());
+        raw.push(0); // FreePositionCheck
+        raw.extend_from_slice(&0i32.to_le_bytes());
+        raw.push(0); // UseStopMarket
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&[0x11, 0x22]);
+
+        let fallback_as_cfg: Vec<u8> = (0..AS_CFG_SIZE).map(|i| i as u8).collect();
+        let fallback_as_cfg2: Vec<u8> = (0..AS_CFG2_SIZE).map(|i| 255u8 - i as u8).collect();
+        let fallback = ClientSettingsCommand {
+            as_cfg: fallback_as_cfg.clone(),
+            as_cfg2: fallback_as_cfg2.clone(),
+            ..ClientSettingsCommand::default()
+        };
+
+        match UICommand::parse_with_client_settings_fallback(&raw, Some(&fallback)).unwrap() {
+            UICommand::ClientSettings(p) => {
+                assert_eq!(p.as_cfg.len(), AS_CFG_SIZE);
+                assert_eq!(&p.as_cfg[..2], &[0x11, 0x22]);
+                assert_eq!(&p.as_cfg[2..], &fallback_as_cfg[2..]);
+                assert_eq!(p.as_cfg2, fallback_as_cfg2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    fn client_settings_v1_prefix_with_temp_bl_count(count: i32) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.push(CMD_CLIENT_SETTINGS);
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 41]);
+        write_string(&mut raw, "");
+        raw.push(0);
+        raw.extend_from_slice(&count.to_le_bytes());
+        raw
+    }
+
+    #[test]
+    fn client_settings_rejects_impossible_temp_bl_count_without_silent_truncate() {
+        let mut raw = client_settings_v1_prefix_with_temp_bl_count(2);
+        write_string(&mut raw, "A");
+        raw.extend_from_slice(&1.0f64.to_le_bytes());
+
+        assert!(
+            UICommand::parse(&raw).is_none(),
+            "Delphi reads exactly TempBLCount items; Rust must not truncate count and parse tail at a wrong offset"
+        );
+    }
+
+    #[test]
+    fn client_settings_rejects_negative_temp_bl_count_like_corrupt_stream() {
+        let raw = client_settings_v1_prefix_with_temp_bl_count(-1);
+
+        assert!(UICommand::parse(&raw).is_none());
     }
 
     #[test]

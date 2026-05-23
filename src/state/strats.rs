@@ -53,12 +53,12 @@ impl StrategyInfo {
 
 #[derive(Debug, Clone)]
 pub enum StratEvent {
-    /// Применён полный snapshot (`Full=true`).
+    /// Полный snapshot (`Full=true`) успешно применён dispatcher'ом.
     SnapshotFull {
         server_epoch: u64,
         raw_data: Vec<u8>,
     },
-    /// Применён частичный snapshot (`Full=false`).
+    /// Частичный snapshot (`Full=false`) успешно применён dispatcher'ом.
     SnapshotPartial {
         server_epoch: u64,
         raw_data: Vec<u8>,
@@ -207,10 +207,14 @@ impl StratsState {
     }
 
     /// Применить распарсенную команду.
+    ///
+    /// For `TStratSnapshot`, this returns the raw snapshot event; the active
+    /// dispatcher performs the serializer decode/apply and advances
+    /// `last_server_epoch` only after that succeeds, matching Delphi
+    /// `ProcessStratCommand`.
     pub fn apply(&mut self, cmd: StratCommand) -> StratEvent {
         match cmd {
             StratCommand::Snapshot(snap) => {
-                self.last_server_epoch = snap.server_epoch;
                 if snap.full {
                     StratEvent::SnapshotFull {
                         server_epoch: snap.server_epoch,
@@ -500,7 +504,10 @@ mod tests {
     fn delete_removes_entry() {
         let mut s = StratsState::new();
         let mut fields = HashMap::new();
-        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("A".to_string()),
+        );
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 1,
@@ -695,7 +702,7 @@ mod tests {
         let mut b = StrategyBatchBuilder::new();
         let mut fields1 = HashMap::new();
         fields1.insert(
-            "Name".to_string(),
+            "StrategyName".to_string(),
             FieldValue::String("Strat-A".to_string()),
         );
         b.write_strategy(&StrategySnapshot {
@@ -709,7 +716,7 @@ mod tests {
         });
         let mut fields2 = HashMap::new();
         fields2.insert(
-            "Name".to_string(),
+            "StrategyName".to_string(),
             FieldValue::String("Strat-B".to_string()),
         );
         b.write_strategy(&StrategySnapshot {
@@ -734,7 +741,8 @@ mod tests {
         assert!(info100.checked);
         assert!(info100.prev_checked);
         assert_eq!(
-            s.snapshot(100).and_then(|snap| snap.fields.get("Name")),
+            s.snapshot(100)
+                .and_then(|snap| snap.fields.get("StrategyName")),
             Some(&FieldValue::String("Strat-A".to_string()))
         );
 
@@ -745,7 +753,7 @@ mod tests {
 
         // Поля стратегий доступны через возвращённый batch
         assert_eq!(
-            batch.strategies[0].fields.get("Name"),
+            batch.strategies[0].fields.get("StrategyName"),
             Some(&FieldValue::String("Strat-A".to_string()))
         );
     }
@@ -764,7 +772,10 @@ mod tests {
         use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
         let mut old_fields = HashMap::new();
-        old_fields.insert("Name".to_string(), FieldValue::String("Old".to_string()));
+        old_fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("Old".to_string()),
+        );
         let mut s = StratsState::new();
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 1,
@@ -777,7 +788,10 @@ mod tests {
         });
 
         let mut new_fields = HashMap::new();
-        new_fields.insert("Name".to_string(), FieldValue::String("New".to_string()));
+        new_fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("New".to_string()),
+        );
         let mut builder = StrategyBatchBuilder::new();
         builder.write_strategy(&StrategySnapshot {
             strategy_id: 2,
@@ -795,7 +809,8 @@ mod tests {
         assert!(s.get(1).is_some());
         assert!(s.snapshot(1).is_some());
         assert_eq!(
-            s.snapshot(1).and_then(|snap| snap.fields.get("Name")),
+            s.snapshot(1)
+                .and_then(|snap| snap.fields.get("StrategyName")),
             Some(&FieldValue::String("Old".to_string()))
         );
         assert!(s.get(2).is_some());
@@ -871,7 +886,10 @@ mod tests {
 
         let mut s = StratsState::new();
         let mut fields = HashMap::new();
-        fields.insert("Name".to_string(), FieldValue::String("Old".to_string()));
+        fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("Old".to_string()),
+        );
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 7,
@@ -906,7 +924,10 @@ mod tests {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
 
         let mut fields = HashMap::new();
-        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("A".to_string()),
+        );
         let mut s = StratsState::new();
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
@@ -988,7 +1009,10 @@ mod tests {
 
         let mut s = StratsState::new();
         let mut fields = HashMap::new();
-        fields.insert("Name".to_string(), FieldValue::String("Zero".to_string()));
+        fields.insert(
+            "StrategyName".to_string(),
+            FieldValue::String("Zero".to_string()),
+        );
 
         let changed = s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,

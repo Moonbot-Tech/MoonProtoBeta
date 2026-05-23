@@ -117,10 +117,12 @@ pub struct RequestCandlesMarket {
 }
 ```
 
-Stale pending candles slots are auto-cleaned —
-`DEFAULT_PENDING_CANDLES_TIMEOUT_MS = 15_000` (15 seconds) from the last
-received chunk, matching Delphi `Markets.LastChunkTime`. A slot is freed either
-when all chunks have arrived or on timeout.
+Pending candles slots are not auto-cancelled by an internal timer. A slot is
+freed when all chunks arrive, when the server returns an error, when a one-shot
+`request_candles_data` caller timeout removes it, when the session is reset, or
+when another request with the same UID replaces it. This matches Delphi's
+protocol collector: the UI wait loop may stop after `Markets.LastChunkTime`,
+but `CandlesRequestUID` and stored chunks are not cleared by that wait timeout.
 
 ### Async Receiver API
 

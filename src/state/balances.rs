@@ -101,6 +101,16 @@ impl BalancesState {
         true
     }
 
+    fn reset_missing_snapshot_item(previous: BalanceItem) -> BalanceItem {
+        BalanceItem {
+            market_name: previous.market_name,
+            balance_hash: previous.balance_hash,
+            max_value: previous.max_value,
+            leverage_x: 1,
+            ..Default::default()
+        }
+    }
+
     fn apply_incremental_item(&mut self, item: BalanceItem, epoch: u16) -> bool {
         if let Some(last) = self.last_epoch_by_market.get(&item.market_name).copied() {
             if !epoch_is_ok(last, epoch) {
@@ -155,8 +165,10 @@ impl BalancesState {
             special_coin_balance: upd.special_coin_balance,
         };
 
-        // Replace state — маркеты НЕ в snapshot сбрасываются в default.
-        // Default для leverage_x = 1, остальные 0.
+        // Replace state — маркеты НЕ в snapshot сбрасываются в default, but
+        // Delphi does not touch BalanceHash/bnMaxValue/LastBalanceEpoch in that
+        // reset branch.
+        let previous_map = std::mem::take(&mut self.by_market);
         let mut new_map: HashMap<String, BalanceItem> = HashMap::new();
         let mut count = 0;
         for it in upd.items {
@@ -166,16 +178,18 @@ impl BalancesState {
             let previous_max_value = new_map
                 .get(&it.market_name)
                 .map(|prev| prev.max_value)
-                .or_else(|| {
-                    self.by_market
-                        .get(&it.market_name)
-                        .map(|prev| prev.max_value)
-                });
+                .or_else(|| previous_map.get(&it.market_name).map(|prev| prev.max_value));
             let it = Self::preserve_max_value(it, previous_max_value);
             self.last_epoch_by_market
                 .insert(it.market_name.clone(), upd.epoch);
             new_map.insert(it.market_name.clone(), it);
             count += 1;
+        }
+        for (market_name, previous) in previous_map {
+            if new_map.contains_key(&market_name) || !is_known_market(&market_name) {
+                continue;
+            }
+            new_map.insert(market_name, Self::reset_missing_snapshot_item(previous));
         }
         self.by_market = new_map;
         self.last_epoch = upd.epoch;
@@ -281,11 +295,13 @@ mod tests {
             vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)],
         ));
         assert_eq!(s.len(), 2);
-        // Новый snapshot — только BTC. ETH должен пропасть.
+        // Новый snapshot — только BTC. В Delphi ETH market remains but balance
+        // fields reset to default.
         s.apply(upd(3, 2, vec![make_item("BTCUSDT", 200.0)]));
-        assert_eq!(s.len(), 1);
+        assert_eq!(s.len(), 2);
         assert!(s.get("BTCUSDT").is_some());
-        assert!(s.get("ETHUSDT").is_none());
+        assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 0.0);
+        assert_eq!(s.get("ETHUSDT").unwrap().leverage_x, 1);
     }
 
     #[test]
@@ -482,5 +498,40 @@ mod tests {
         s.apply(upd(4, 2, vec![second]));
 
         assert_eq!(s.get("BTCUSDT").unwrap().max_value, 600.0);
+    }
+
+    #[test]
+    fn full_snapshot_missing_market_preserves_hash_max_and_epoch_like_delphi() {
+        let mut s = BalancesState::new();
+        let mut eth = make_item("ETHUSDT", 50.0);
+        eth.balance_hash = 77;
+        eth.max_value = 500.0;
+        s.apply(upd(3, 50, vec![eth]));
+
+        s.apply_filtered(upd(3, 100, vec![make_item("BTCUSDT", 1.0)]), |name| {
+            name == "BTCUSDT" || name == "ETHUSDT"
+        });
+
+        let eth_after_full = s.get("ETHUSDT").unwrap();
+        assert_eq!(eth_after_full.initial_balance, 0.0);
+        assert_eq!(eth_after_full.balance_hash, 77);
+        assert_eq!(eth_after_full.max_value, 500.0);
+        assert_eq!(eth_after_full.leverage_x, 1);
+
+        // Delphi does not update LastBalanceEpoch in the missing-market reset
+        // branch, so a stale incremental is still rejected against epoch 50.
+        let ev = s.apply(upd(4, 45, vec![make_item("ETHUSDT", 90.0)]));
+        assert!(matches!(
+            ev,
+            BalanceEvent::IncrementalApplied { count: 0, .. }
+        ));
+        assert_eq!(s.get("ETHUSDT").unwrap().initial_balance, 0.0);
+
+        // A fresh incremental with bnMaxValue=0 preserves the previous
+        // bnMaxValue, matching `If item.bnMaxValue > _eps then ...`.
+        s.apply(upd(4, 60, vec![make_item("ETHUSDT", 90.0)]));
+        let eth_after_incremental = s.get("ETHUSDT").unwrap();
+        assert_eq!(eth_after_incremental.initial_balance, 90.0);
+        assert_eq!(eth_after_incremental.max_value, 500.0);
     }
 }

@@ -72,7 +72,8 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
   subscriptions after reconnect without requiring a second Init.
 - Blocks indexed streams while market indexes are stale.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
-- Detects trades gaps and sends `TradesResend` requests on periodic ticks.
+- Detects trades gaps and sends `TradesResend` requests from the
+  Delphi-equivalent tail check after valid trades packets.
 - Routes Engine API responses into one-shot `request_*` helpers or the
   `Receiver` returned by lower-level `api_*` calls.
 - Provides typed helpers for common Engine API reads including balances,
@@ -95,6 +96,10 @@ shape: UTF-8 bytes, `Word` length prefix, and exactly that declared number of
 bytes in the packet body. If an input string is longer than `65535` bytes, the
 wire length wraps to the low 16 bits and only that many leading bytes are sent,
 matching Delphi.
+
+String fields received from the wire use Delphi `TEncoding.UTF8.GetString`
+replacement semantics: invalid UTF-8 bytes become ASCII `?`, not Unicode
+replacement character `U+FFFD`.
 
 Applications use lifecycle events for UI status and alerting, not for recovery.
 

@@ -23,7 +23,7 @@ pub struct MarketPrice {
     pub ask: f64,
     /// Funding rate (для perpetual futures), дробь — например `0.0001` = 0.01%.
     pub funding_rate: f64,
-    /// UTC unix time момента следующего funding взимания (в днях, как Delphi TDateTime).
+    /// Client-local Delphi `TDateTime` момента следующего funding взимания.
     pub funding_time_utc: f64,
     /// Mark price (используется биржей для PnL/liquidation расчётов, может отличаться от last/bid/ask).
     pub mark_price: f64,

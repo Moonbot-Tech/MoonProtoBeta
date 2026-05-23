@@ -334,6 +334,12 @@ fn main() {
                                     ));
                                 }
                             }
+                            TradesEvent::ResendRequested { packet_nums } => {
+                                events_to_log.push(format!(
+                                    "[TRADES-RESEND-REQUESTED] packets={}",
+                                    packet_nums.len()
+                                ));
+                            }
                             TradesEvent::Duplicate => {
                                 counters_cb.trades_dup.fetch_add(1, Ordering::Relaxed);
                             }

@@ -93,6 +93,24 @@ fn trace_io_enabled() -> bool {
     })
 }
 
+#[cfg(feature = "diagnostic-trace")]
+fn diagnostic_duplicate_sliced_acks() -> usize {
+    static COUNT: OnceLock<usize> = OnceLock::new();
+    *COUNT.get_or_init(|| {
+        std::env::var("MOONPROTO_DIAG_DUP_SLICED_ACKS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(16)
+    })
+}
+
+#[cfg(not(feature = "diagnostic-trace"))]
+#[inline(always)]
+fn diagnostic_duplicate_sliced_acks() -> usize {
+    0
+}
+
 #[cfg(not(feature = "diagnostic-trace"))]
 #[inline(always)]
 fn trace_io_enabled() -> bool {
@@ -181,6 +199,36 @@ fn engine_request_uid(request_payload: &[u8]) -> Option<u64> {
 }
 
 #[inline]
+fn engine_request_method(request_payload: &[u8]) -> Option<EngineMethod> {
+    request_payload
+        .get(11)
+        .copied()
+        .map(EngineMethod::from_byte)
+}
+
+#[inline]
+fn engine_method_allowed_before_domain_ready(method: EngineMethod) -> bool {
+    matches!(
+        method,
+        EngineMethod::BaseCheck
+            | EngineMethod::AuthCheck
+            | EngineMethod::GetMarketsList
+            | EngineMethod::GetMarketsIndexes
+            | EngineMethod::UpdateMarketsList
+    )
+}
+
+#[inline]
+fn outgoing_allowed_before_domain_ready(cmd: u8, data: &[u8]) -> bool {
+    matches!(
+        Command::from_byte(cmd),
+        Command::API
+            if engine_request_method(data)
+                .is_some_and(engine_method_allowed_before_domain_ready)
+    )
+}
+
+#[inline]
 fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
     let elapsed = start.elapsed();
     if elapsed >= timeout {
@@ -202,7 +250,6 @@ const RECONNECT_THROTTLE_MS: i64 = 15000; // MoonProtoUDPClient.pas:89
 const OFFLINE_BASE_MS: i64 = 2300; // MoonProtoUDPClient.pas:772
 const DEAD_ZONE_MS: i64 = 5000; // MoonProtoUDPClient.pas:799
 const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
-const CLEANUP_INTERVAL_MS: i64 = 5000; // MoonProtoIntStruct.pas:828
 const COMPRESSED_FLAG: u8 = 0x80; // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64; // MoonProtoDataStruct.pas:31
 const IMFRIEND_DUPLICATE_DELAY_MS: u64 = 32; // MoonProtoUDPClient.pas:433-436
@@ -210,6 +257,8 @@ const NEVER_SENT_MS: i64 = i64::MIN / 2; // Эквивалент Delphi LastSent
 const NEVER_TIME_MS: i64 = i64::MIN / 2;
 const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
 const BIND_FAILED_REPEAT_EVENT_MS: i64 = 50_000;
+const TRADES_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedReconnectAllTrades
+const TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS: i64 = 100; // BWorks.pas Sleep(100)
 
 /// Send priority matching Delphi `TMoonProtoSendPriority`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -536,7 +585,7 @@ struct ReaderRuntime {
     slicer: Arc<Mutex<slicing::SlicingReceiver>>,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
-    debug_outgoing_blackhole: bool,
+    debug_outgoing_blackhole: Arc<AtomicBool>,
     start_time: Instant,
     shutdown_flag: Arc<AtomicBool>,
     epoch: u32,
@@ -663,7 +712,7 @@ impl ReaderRuntime {
         true
     }
 
-    fn on_err_emu_drop(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+    fn on_err_emu_drop(&self, raw_cmd: u8, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         if trace_io_enabled() {
             eprintln!(
                 "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
@@ -686,16 +735,10 @@ impl ReaderRuntime {
             }
         }
 
-        // Delphi ErrEmu exits after packet accounting / LastOnline side effects;
-        // it does not deliver the packet into protocol/user handlers.
-        Client::push_reader_recv_side_effect(
-            &self.pending_reader_decoded,
-            raw_cmd,
-            recv_bytes,
-            timestamp_ms,
-            self.epoch,
-            false,
-        );
+        // Delphi ErrEmu exits after packet accounting / LastOnline side
+        // effects; it does not deliver anything into protocol/user handlers.
+        // Reader transport state was already updated before this call, and the
+        // writer loop synchronizes it directly from `reader_transport_state`.
     }
 
     fn on_data_packet(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
@@ -713,7 +756,7 @@ impl ReaderRuntime {
             payload,
             self.mask_ver,
             &self.total_sent,
-            self.debug_outgoing_blackhole,
+            &self.debug_outgoing_blackhole,
         );
     }
 
@@ -814,7 +857,7 @@ impl ReaderRuntime {
             });
     }
 
-    fn on_new_size_test(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+    fn on_new_size_test(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         if let Some(ack) = Client::build_size_ack_payload(&self.reader_protocol, payload) {
             // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
             // `MPC_SizeAck` of requested size, then turn DontFragment off.
@@ -822,17 +865,9 @@ impl ReaderRuntime {
             self.send_command(Command::SizeAck, &ack);
             set_dont_fragment_for_socket(&self.sock, false);
         }
-        Client::push_reader_recv_side_effect(
-            &self.pending_reader_decoded,
-            Command::SizeTest as u8,
-            recv_bytes,
-            timestamp_ms,
-            self.epoch,
-            false,
-        );
     }
 
-    fn on_new_probe_mtu(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+    fn on_new_probe_mtu(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
             // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
             // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
@@ -840,14 +875,6 @@ impl ReaderRuntime {
             self.send_command(Command::ProbeMTUAck, &ack);
             set_dont_fragment_for_socket(&self.sock, false);
         }
-        Client::push_reader_recv_side_effect(
-            &self.pending_reader_decoded,
-            Command::ProbeMTU as u8,
-            recv_bytes,
-            timestamp_ms,
-            self.epoch,
-            false,
-        );
     }
 
     fn on_handshake_control(&self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
@@ -890,6 +917,7 @@ impl ReaderRuntime {
         if let Some(hello) =
             Client::decode_handshake_hello(&self.master_key, self.client_id, payload)
         {
+            self.reader_client_token = self.reader_transport_state.lock().unwrap().client_token;
             let (update, encrypted) = Client::build_who_are_you_imfriend(
                 &self.master_key,
                 self.client_id,
@@ -992,7 +1020,36 @@ impl ReaderRuntime {
         // Delphi `OnNewSliced`: every received slice gets an immediate
         // `MPC_SlicedACK` from the reader stack before any complete datagram is
         // passed into `DataReadInt`.
+        if slicing::trace_enabled() {
+            if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {
+                let mut flags = [0u8; 32];
+                flags.copy_from_slice(&ack[..32]);
+                let total = hdr.max_block_num as usize + 1;
+                eprintln!(
+                    "[slice-ack-tx] d={} after_b={}/{} acked={}/{} missing={}",
+                    u16::from_le_bytes([ack[32], ack[33]]),
+                    hdr.block_num,
+                    hdr.max_block_num,
+                    slicing::acked_count(&flags, total),
+                    total,
+                    slicing::missing_preview(&flags, total)
+                );
+            }
+        }
+        let partial_sliced = assembled.is_none();
         self.send_command(Command::SlicedACK, &ack);
+        if partial_sliced {
+            for duplicate_idx in 0..diagnostic_duplicate_sliced_acks() {
+                if slicing::trace_enabled() {
+                    eprintln!(
+                        "[slice-ack-tx-duplicate] d={} duplicate_idx={}",
+                        u16::from_le_bytes([ack[32], ack[33]]),
+                        duplicate_idx + 1
+                    );
+                }
+                self.send_command(Command::SlicedACK, &ack);
+            }
+        }
 
         if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
             self.data_read_int(
@@ -1008,31 +1065,18 @@ impl ReaderRuntime {
             );
             self.slicer.lock().unwrap().receiving.remove(&datagram_num);
         } else {
-            Client::push_reader_recv_side_effect(
-                &self.pending_reader_decoded,
-                Command::Sliced as u8,
-                recv_bytes,
-                timestamp_ms,
-                self.epoch,
-                false,
-            );
+            // Delphi `OnNewSliced` stops here for partial datagrams: ACK was
+            // sent, but `DataReadInt` is called only after `Sliced.Received`.
+            // Do not enqueue a Rust-only no-op reader event per slice.
         }
 
         true
     }
 
-    fn on_new_sliced_ack(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+    fn on_new_sliced_ack(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
         // Applying it is writer/`CheckSeningData` work.
         Client::push_sliced_ack(&self.incoming_sliced_acks, payload);
-        Client::push_reader_recv_side_effect(
-            &self.pending_reader_decoded,
-            Command::SlicedACK as u8,
-            recv_bytes,
-            timestamp_ms,
-            self.epoch,
-            false,
-        );
     }
 
     fn on_new_ping(
@@ -1093,19 +1137,25 @@ impl ReaderRuntime {
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
 /// Send/control queues are intentionally unbounded to preserve the Delphi
-/// no-local-cap behavior of `SendCmdInt`. The only normal failure is that the
-/// owning `Client` has been dropped or its run loop has shut down.
+/// no-local-cap behavior of `SendCmdInt`. Queueing can still be rejected if
+/// the owning `Client` is gone, or if the caller tries to bypass the Delphi
+/// `InitDone`/domain gate before the one-time init sequence completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
     /// The owning `Client` was dropped or the main loop exited, so this sender
     /// can no longer enqueue work.
     Disconnected,
+    /// Domain gate is still closed. Only the mandatory init Engine API methods
+    /// (`BaseCheck`, `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`,
+    /// `UpdateMarketsList`) are allowed before Init.
+    DomainNotReady,
 }
 
 impl std::fmt::Display for SubscribeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected => write!(f, "Client queues disconnected"),
+            Self::DomainNotReady => write!(f, "Client domain gate is not ready"),
         }
     }
 }
@@ -1897,7 +1947,6 @@ impl ClientSender {
     pub fn set_immune(
         &self,
         orders: &mut crate::state::Orders,
-        uid: u64,
         items: &[crate::commands::trade::ImmuneItem],
     ) -> bool {
         if !self.domain_ready_for_typed_send() {
@@ -1907,7 +1956,7 @@ impl ClientSender {
         if applied.is_empty() {
             return false;
         }
-        let raw = crate::commands::trade::build_set_immune(uid, &applied);
+        let raw = crate::commands::trade::build_set_immune(rand::random(), &applied);
         let items_uid_sum: u64 = applied
             .iter()
             .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
@@ -2281,6 +2330,11 @@ impl ClientSender {
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
+        }
+        if !self.domain_ready.load(Ordering::Relaxed)
+            && !outgoing_allowed_before_domain_ready(item.cmd, &item.data)
+        {
+            return Err(SubscribeError::DomainNotReady);
         }
         self.send_queues.lock().unwrap().push_send_cmd_int(item);
         Ok(())
@@ -2712,7 +2766,7 @@ impl<'a> DispatchSink<'a> {
 }
 
 /// Режим работы main loop — определяет как доставлять входящие data-пакеты
-/// и нужны ли active-library auto-actions (periodic trades tick).
+/// и нужны ли active-library auto-actions.
 ///
 /// `Callback` — low-level raw path для `Client::run`. Потребитель получает
 /// сырые `(Command, &[u8])` и сам решает что с ними делать (обычно — свой
@@ -2720,7 +2774,7 @@ impl<'a> DispatchSink<'a> {
 ///
 /// `Dispatcher` — active-library path для `Client::run_with_dispatcher`. Liба
 /// сама пропускает data-пакеты через `EventDispatcher::dispatch_into_active_actions`,
-/// делает auto-actions (RequestOrderBookFull, periodic trades.tick, indexes
+/// делает auto-actions (RequestOrderBookFull, trades resend tail-check, indexes
 /// sync gate), потребитель получает уже разобранные типизированные `Event`.
 pub(crate) enum RunMode<'a> {
     Callback {
@@ -2820,10 +2874,10 @@ impl WriterRuntime<'_> {
 
                 self.transport_writer_maintenance_tick(cur_tm);
 
-                // Active library: periodic trades.tick — только в Dispatcher mode.
-                // В Callback mode TradesEvent попадает к потребителю напрямую,
-                // он сам управляет gap recovery (если нужно — через свой EventDispatcher).
-                self.periodic_trades_tick(cur_tm, mode);
+                // Active library: all-trades reconnect sequence lives on the
+                // writer tick. Gap recovery itself is checked only after
+                // successful trades packets, like Delphi `ProcessTradesStream`.
+                self.periodic_trades_reconnect_tick(cur_tm, mode);
                 self.periodic_orders_tick(cur_tm, mode);
 
                 self.transport_reconnect_tail_tick(cur_tm);
@@ -3087,25 +3141,6 @@ impl WriterRuntime<'_> {
     fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
         self.copy_send_ack_and_check_sening_data(cur_tm);
 
-        // Cleanup periodic (pending_candles). `Receiving` cleanup belongs
-        // to the reader-side UDPRead path (`FClient.DoCleanUp` before
-        // command handling in Delphi), so it is not driven by writer ticks.
-        if (cur_tm - self.client.last_cleanup).abs() > CLEANUP_INTERVAL_MS {
-            let mut pending_candles = self.client.pending_candles.lock().unwrap();
-            let candles_before = pending_candles.len();
-            pending_candles.retain(|_uid, partial| {
-                (cur_tm - partial.last_activity_ms) < DEFAULT_PENDING_CANDLES_TIMEOUT_MS
-            });
-            let candles_removed = candles_before - pending_candles.len();
-            drop(pending_candles);
-            if candles_removed > 0 {
-                log::debug!(target: "moonproto::client",
-                    "pending_candles: cleaned up {} stale aggregators (>{}ms old)",
-                    candles_removed, DEFAULT_PENDING_CANDLES_TIMEOUT_MS);
-            }
-            self.client.last_cleanup = cur_tm;
-        }
-
         // Timeout protection для init/API markets-index request marker.
         self.check_indexes_fetch_timeout(cur_tm);
 
@@ -3115,11 +3150,6 @@ impl WriterRuntime<'_> {
         if matches!(self.client.auth_status, AuthStatus::AuthDone) && self.client.domain_ready {
             self.tick_periodic_refresh(cur_tm);
         }
-
-        // audit_robustness H5: после clock-jump (NTP step / mobile suspend-resume)
-        // handshake timestamp устарел и сервер reject'нёт hello. Force reconnect
-        // чтобы full_reset + новый Hello с актуальным временем.
-        self.check_clock_jump();
     }
 
     /// F6/F7: проверка пора ли слать periodic refresh-команды.
@@ -3202,40 +3232,16 @@ impl WriterRuntime<'_> {
         }
     }
 
-    /// audit_robustness H5: process-global clock-jump generation -> force_disconnect.
-    fn check_clock_jump(&mut self) {
-        use std::sync::atomic::Ordering;
-        let generation = CLOCK_JUMP_GENERATION.load(Ordering::Relaxed);
-        if generation != self.client.seen_clock_jump_generation {
-            self.client.seen_clock_jump_generation = generation;
-            log::warn!(target: "moonproto::client",
-                "clock jump -> force_disconnect; reconnect will refresh handshake timestamp");
-            self.client.force_disconnect = true;
-        }
-    }
-
-    /// Periodic trades.tick (только в Dispatcher mode). Throttle 100мс — соответствует
-    /// Delphi `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`. Сам tick также
-    /// имеет internal throttle 100мс, наш guard здесь только чтобы не дёргать его
-    /// на каждом packet (он всё равно вернёт пустой Vec).
-    fn periodic_trades_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher {
-            dispatcher,
-            on_event,
-            event_buf,
-            ..
-        } = mode
-        {
+    /// Periodic all-trades reconnect sequence (только в Dispatcher mode).
+    /// Trades gap recovery is not here: Delphi calls `CheckMissingTradesPackets`
+    /// from the tail of `ProcessTradesStream`, and Rust mirrors that in
+    /// `EventDispatcher::dispatch_into_active_actions`.
+    fn periodic_trades_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if let RunMode::Dispatcher { dispatcher, .. } = mode {
             if cur_tm - self.client.last_trades_tick_ms >= 100 {
                 self.client.last_trades_tick_ms = cur_tm;
-                let rtt = self.client.round_trip_delay;
-                let (payloads, tick_events) = dispatcher.trades.tick_with_events(rtt, cur_tm);
-                for p in payloads {
-                    self.client.send_api_request(&p);
-                }
-                event_buf.clear();
-                event_buf.extend(tick_events.into_iter().map(crate::events::Event::Trade));
-                on_event.drain_events(event_buf, dispatcher);
+                self.client
+                    .tick_trades_reconnect_sequence(cur_tm, dispatcher.trades_server_token());
             }
         }
     }
@@ -3290,6 +3296,7 @@ impl WriterRuntime<'_> {
             self.client.app_token,
             delphi_now(),
         );
+        self.client.publish_transport_state_from_client();
         self.send_command(Command::Hello, &payload);
     }
 
@@ -3312,6 +3319,7 @@ impl WriterRuntime<'_> {
 
     fn send_hello_again(&mut self) {
         let encrypted = self.build_hello_again_packet();
+        self.client.publish_transport_state_from_client();
         self.send_command(Command::HelloAgain, &encrypted);
     }
 
@@ -3345,6 +3353,13 @@ impl WriterRuntime<'_> {
                 && !self.client.need_connect
                 && (cur_tm - last_online).abs() > OFFLINE_BASE_MS + self.client.round_trip_delay);
         if !should {
+            return;
+        }
+        if self.client.waiting_hello
+            && !self.client.soft_reconnect
+            && !authorized
+            && self.client.last_sent_hello != NEVER_SENT_MS
+        {
             return;
         }
         if (cur_tm - self.client.last_sent_hello).abs() <= throttle {
@@ -3676,6 +3691,7 @@ impl WriterRuntime<'_> {
             sent_count: 0,
             last_checked: 0,
             retry_count: 0,
+            last_retry_inc: 0,
             max_retry_count: item.max_retries,
             u_key: item.u_key,
         };
@@ -3840,6 +3856,7 @@ impl WriterRuntime<'_> {
             }
 
             let prev_last_checked = sliced.last_checked;
+            let mut sent_on_path_delay = false;
             sliced.last_checked = cur_tm;
 
             for (block_num, slice_data) in sliced.slices.iter().enumerate() {
@@ -3870,6 +3887,9 @@ impl WriterRuntime<'_> {
                         client_limit
                     );
                 }
+                if sliced.piece_last_checked[block_num] > 0 {
+                    sent_on_path_delay = true;
+                }
                 to_send_indices.push((idx, block_num));
                 sliced.piece_last_checked[block_num] = cur_tm;
                 sliced.sent_count += 1;
@@ -3881,8 +3901,12 @@ impl WriterRuntime<'_> {
             sliced.refresh_last_checked_from_unacked(cur_tm);
 
             // Conditional increment (matches :998-999)
-            if prev_last_checked != sliced.last_checked {
+            if prev_last_checked != sliced.last_checked
+                && sent_on_path_delay
+                && (sliced.last_retry_inc - cur_tm).abs() > path_delay
+            {
                 sliced.retry_count += 1;
+                sliced.last_retry_inc = cur_tm;
             }
             client.last_checked_slices = client.last_checked_slices.min(sliced.last_checked);
 
@@ -4109,15 +4133,7 @@ struct PartialCandles {
     aggregator: CandlesAggregator,
     /// Sender который будет уведомлён когда aggregator вернёт merged.
     sender: mpsc::Sender<MergedCandles>,
-    /// Timestamp регистрации / последнего сохранённого нового chunk.
-    last_activity_ms: i64,
 }
-
-/// Timeout for pending candle aggregation, measured from the last accepted chunk.
-///
-/// Delphi `DataUpdaters.pas -> CheckGlass` waits 15 seconds from
-/// `Markets.LastChunkTime`.
-pub const DEFAULT_PENDING_CANDLES_TIMEOUT_MS: i64 = 15_000;
 
 /// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
 struct SentSliced {
@@ -4129,6 +4145,7 @@ struct SentSliced {
     sent_count: usize,
     last_checked: i64, // Min of all piece_last_checked
     retry_count: i32,
+    last_retry_inc: i64,
     max_retry_count: i32,
     u_key: UniqueKey, // for UKey dedup (matches TMoonProtoSlicedData.UKey)
 }
@@ -4437,7 +4454,6 @@ pub struct Client {
     waiting_hello_start: i64,
     last_socket_recreate: i64,
     last_need_hello_again: i64,
-    last_cleanup: i64,
     prev_cycle_tm: i64, // for ActualSleepTime EMA
 
     crypt_msg_counter: Arc<AtomicU64>,
@@ -4579,11 +4595,26 @@ pub struct Client {
     /// синхронизирует индексы, затем обновляет prices/funding.
     update_markets_after_indexes: bool,
 
+    /// После reconnect restore: отложенный replay orderbook registry до fresh
+    /// `GetMarketsIndexes`. Delphi `CheckBookTopics` выходит, пока
+    /// `FLastServerAppToken <> PeerAppToken`; подписки стаканов нельзя replay'ить
+    /// до синхронизации индексов новой server app session.
+    restore_orderbooks_after_indexes: bool,
+
+    /// Delphi `TMoonProtoEngine.LastReconnectCheck` for AllTrades reconnect.
+    /// `NeedReconnectAllTrades` spends this throttle before it runs the
+    /// unsubscribe/sleep/subscribe sequence again.
+    last_trades_reconnect_check_ms: i64,
+
+    /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
+    /// `BMarketHistoryWorker.Execute` reconnect branch.
+    pending_trades_resubscribe_after_ms: Option<i64>,
+
     /// FireTest-only hook: drop every outgoing datagram before socket send.
     /// This lets the live health test force a real server-side disconnect and
     /// then verify the library reconnect path. It is deliberately hidden from
     /// public API docs.
-    debug_outgoing_blackhole: bool,
+    debug_outgoing_blackhole: Arc<AtomicBool>,
 
     /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
     /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
@@ -4605,11 +4636,6 @@ pub struct Client {
     bind_failure_streak: u32,
     first_bind_failure_ms: i64,
     last_bind_failed_event_ms: i64,
-
-    /// Последнее process-global поколение clock-jump, обработанное этим Client.
-    /// В multi-server процессе один скачок часов должен быть виден каждому
-    /// соединению, поэтому глобальный сигнал нельзя consume'ить через AtomicBool.
-    seen_clock_jump_generation: u64,
 
     /// Guard for the shared process-level NTP syncer (if `cfg.ntp_host = Some`).
     /// Dropping the last guard stops the worker. This matches Delphi's single
@@ -4756,7 +4782,6 @@ impl Client {
             waiting_hello_start: 0,
             last_socket_recreate: i64::MIN / 2,
             last_need_hello_again: i64::MIN / 2,
-            last_cleanup: i64::MIN / 2,
             prev_cycle_tm: 0,
             crypt_msg_counter: Arc::new(AtomicU64::new(0)),
             send_datagram_num: 0,
@@ -4807,13 +4832,15 @@ impl Client {
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
             update_markets_after_indexes: false,
-            debug_outgoing_blackhole: false,
+            restore_orderbooks_after_indexes: false,
+            last_trades_reconnect_check_ms: 0,
+            pending_trades_resubscribe_after_ms: None,
+            debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
             first_bind_failure_ms: NEVER_TIME_MS,
             last_bind_failed_event_ms: NEVER_TIME_MS,
-            seen_clock_jump_generation: CLOCK_JUMP_GENERATION.load(Ordering::Relaxed),
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
@@ -5154,16 +5181,28 @@ impl Client {
         // Delphi `SendCmdInt`: append into DataToSend/DataToSendH/DataToSendL
         // under SendLock. The writer tick later copies those lists; raw sends do
         // not wait behind reader delivery.
-        if self.enqueue_send_item(item).is_err() {
-            log::error!(target: "moonproto::client",
-                "send_cmd: send queues closed (client dropped?) — packet cmd={:?} priority={:?} dropped",
-                cmd, priority);
+        if let Err(err) = self.enqueue_send_item(item) {
+            match err {
+                SubscribeError::Disconnected => {
+                    log::error!(target: "moonproto::client",
+                        "send_cmd: send queues closed (client dropped?) — packet cmd={:?} priority={:?} dropped",
+                        cmd, priority);
+                }
+                SubscribeError::DomainNotReady => {
+                    log::warn!(target: "moonproto::client",
+                        "send_cmd: domain gate is closed before InitDone — packet cmd={:?} priority={:?} dropped",
+                        cmd, priority);
+                }
+            }
         }
     }
 
     fn enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
+        }
+        if !self.domain_ready && !outgoing_allowed_before_domain_ready(item.cmd, &item.data) {
+            return Err(SubscribeError::DomainNotReady);
         }
         self.send_queues.lock().unwrap().push_send_cmd_int(item);
         Ok(())
@@ -5227,6 +5266,11 @@ impl Client {
     /// timeout expires. Raw receiver users should keep pumping the client until
     /// the response arrives or use [`Self::request_engine_response`] when they
     /// need timeout-owned cleanup.
+    ///
+    /// Before `domain_ready`, only the mandatory Init Engine API requests are
+    /// queued. Other raw Engine API requests are rejected before `api_pending`
+    /// registration; because this method is non-fallible, it returns a closed
+    /// receiver in that case.
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
         // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
         // паниковала при len<11 — public API не должен валить процесс из-за плохого input'а.
@@ -5237,6 +5281,16 @@ impl Client {
             let (_tx, rx) = mpsc::channel();
             return rx;
         };
+        if !self.domain_ready
+            && !outgoing_allowed_before_domain_ready(Command::API as u8, request_payload)
+        {
+            log::warn!(target: "moonproto::client",
+                "send_api_request_async: domain gate is closed before InitDone — Engine API request uid={} method={:?} not queued",
+                uid,
+                engine_request_method(request_payload).unwrap_or(EngineMethod::None));
+            let (_tx, rx) = mpsc::channel();
+            return rx;
+        }
         let rx = self.api_pending.register(uid);
         self.send_api_request(request_payload);
         rx
@@ -5653,7 +5707,6 @@ impl Client {
         let partial = PartialCandles {
             aggregator: CandlesAggregator::new(),
             sender: tx,
-            last_activity_ms: self.now_ms(),
         };
         // Замещение существующего slot'а допустимо — старый sender дропнется, его
         // receiver получит Err(Disconnected) (что корректно при двойном вызове).
@@ -5672,9 +5725,10 @@ impl Client {
     /// через `CandlesAggregator`, парсит через `parse_request_candles_data_response`,
     /// уведомляет sender → потребитель получает `MergedCandles`.
     ///
-    /// Auto-cleanup: pending slot удаляется автоматически если финальный chunk не пришёл
-    /// в течение `DEFAULT_PENDING_CANDLES_TIMEOUT_MS` от последнего принятого chunk —
-    /// sender дропается, receiver получает `Err(Disconnected)`.
+    /// Pending slot lives until complete/error, session reset, another request
+    /// with the same UID replaces it, or a one-shot caller timeout removes it.
+    /// Delphi likewise does not cancel `CandlesRequestUID` when the UI wait
+    /// loop stops after `Markets.LastChunkTime` timeout.
     pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
         self.api_request_candles_data_async_registered().1
     }
@@ -5751,7 +5805,8 @@ impl Client {
     /// library reconnects and restores subscriptions after the flag is cleared.
     #[doc(hidden)]
     pub fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
-        self.debug_outgoing_blackhole = enabled;
+        self.debug_outgoing_blackhole
+            .store(enabled, Ordering::Relaxed);
     }
 
     /// Subscribe to the orderbook stream for one market name.
@@ -5765,9 +5820,11 @@ impl Client {
     ///
     /// The subscription is stored in the registry. Before init, reconnect does
     /// not send it. After init, reconnect restores it automatically without a
-    /// second init. The server resolves `market_name -> market_idx`, so callers
-    /// may subscribe before `emk_GetMarketsList` has completed. The call is
-    /// idempotent; futures and spot books are distinguished by incoming
+    /// second init; after a server restart, replay waits for fresh
+    /// `GetMarketsIndexes` for the current `PeerAppToken`, matching Delphi
+    /// `CheckBookTopics`. The server resolves `market_name -> market_idx`, so
+    /// callers may subscribe before `emk_GetMarketsList` has completed. The
+    /// call is idempotent; futures and spot books are distinguished by incoming
     /// `book_kind`, not by the subscribe request.
     pub fn subscribe_orderbook(&self, market_name: &str) {
         self.sender().subscribe_orderbook(market_name);
@@ -5886,18 +5943,38 @@ impl Client {
             return;
         }
 
+        let orderbooks_need_fresh_indexes = {
+            let registry = self.subscription_registry.lock().unwrap();
+            !registry.orderbook_subs.is_empty() && !self.market_indexes_current_for_peer()
+        };
+        if orderbooks_need_fresh_indexes {
+            self.restore_orderbooks_after_indexes = true;
+        }
+
         if self.domain_restore_needs_indexes() {
             self.send_markets_indexes_restore_request(self.now_ms());
         }
 
-        self.restore_registry_subscriptions();
+        self.restore_registry_subscriptions_without_delayed_orderbooks(
+            orderbooks_need_fresh_indexes,
+            true,
+        );
     }
 
     /// Batch restore helper for the subscription registry.
     ///
     /// OrderBook подписки отправляются одним `emk_SubscribeOrderBook` batch'ем:
     /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
+    #[cfg(test)]
     fn restore_registry_subscriptions(&mut self) {
+        self.restore_registry_subscriptions_without_delayed_orderbooks(false, false);
+    }
+
+    fn restore_registry_subscriptions_without_delayed_orderbooks(
+        &mut self,
+        delay_orderbooks: bool,
+        delay_trades: bool,
+    ) {
         let (trades_sub, mm_orders_sub, orderbook_subs) = {
             let registry = self.subscription_registry.lock().unwrap();
             (
@@ -5908,19 +5985,85 @@ impl Client {
         };
 
         if let Some(sub) = trades_sub {
-            let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
-            self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
-                want_mm,
-            ));
+            if delay_trades {
+                // Reconnect path is handled by `tick_trades_reconnect_sequence`:
+                // Delphi does not just replay SubscribeAllTrades; it first sends
+                // UnsubscribeAllTrades, waits 100ms, then subscribes again.
+            } else {
+                let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
+                self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
+                    want_mm,
+                ));
+            }
         } else if let Some(subscribe) = mm_orders_sub {
             self.send_mm_orders_subscribe_cmd(subscribe);
         }
+        if delay_orderbooks {
+            return;
+        }
+        self.restore_orderbook_subscriptions(orderbook_subs);
+    }
+
+    fn registry_trades_want_mm(&self) -> Option<bool> {
+        let registry = self.subscription_registry.lock().unwrap();
+        let sub = registry.trades_sub?;
+        Some(registry.mm_orders_sub.unwrap_or(sub.want_mm))
+    }
+
+    fn start_trades_reconnect_sequence(&mut self, now_ms: i64) {
+        if self.registry_trades_want_mm().is_none() {
+            return;
+        }
+        self.last_trades_reconnect_check_ms = now_ms;
+        self.send_api_request(&crate::commands::engine_request::unsubscribe_all_trades());
+        self.pending_trades_resubscribe_after_ms =
+            Some(now_ms + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
+    }
+
+    fn tick_trades_reconnect_sequence(&mut self, now_ms: i64, trades_server_token: u64) {
+        if !self.domain_ready {
+            return;
+        }
+
+        if let Some(due_ms) = self.pending_trades_resubscribe_after_ms {
+            if now_ms >= due_ms {
+                self.pending_trades_resubscribe_after_ms = None;
+                if let Some(want_mm) = self.registry_trades_want_mm() {
+                    self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
+                        want_mm,
+                    ));
+                }
+            }
+            return;
+        }
+
+        if self.registry_trades_want_mm().is_none() || self.server_token == 0 {
+            return;
+        }
+        if self.server_token == trades_server_token {
+            return;
+        }
+        if (now_ms - self.last_trades_reconnect_check_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
+            return;
+        }
+        self.start_trades_reconnect_sequence(now_ms);
+    }
+
+    fn restore_orderbook_subscriptions(&mut self, orderbook_subs: Vec<String>) {
         let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
         if !refs.is_empty() {
             self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
                 &refs,
             ));
         }
+    }
+
+    fn restore_orderbook_subscriptions_from_registry(&mut self) {
+        let orderbook_subs = {
+            let registry = self.subscription_registry.lock().unwrap();
+            registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
+        };
+        self.restore_orderbook_subscriptions(orderbook_subs);
     }
 
     /// Flush subscription intents collected before the one-time Init opened
@@ -6417,7 +6560,6 @@ impl Client {
     pub fn set_immune(
         &self,
         orders: &mut crate::state::Orders,
-        uid: u64,
         items: &[crate::commands::trade::ImmuneItem],
     ) -> bool {
         if !self.domain_ready_for_typed_send() {
@@ -6427,7 +6569,7 @@ impl Client {
         if applied.is_empty() {
             return false;
         }
-        let raw = crate::commands::trade::build_set_immune(uid, &applied);
+        let raw = crate::commands::trade::build_set_immune(rand::random(), &applied);
         let items_uid_sum: u64 = applied
             .iter()
             .fold(0u64, |acc, it| acc.wrapping_add(it.uid));
@@ -6971,7 +7113,7 @@ impl Client {
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
         // Тонкий wrapper над унифицированным `run_inner`. Low-level raw API для
         // потребителей которым НЕ нужны active-library
-        // auto-actions (RequestOrderBookFull, periodic trades.tick, и т.п.).
+        // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).
         // **Для большинства случаев предпочтительнее `run_with_dispatcher`** —
         // см. его doc-comment.
         let mode = RunMode::Callback { on_data };
@@ -6996,8 +7138,8 @@ impl Client {
     /// `dispatcher.dispatch_into_active` and performs active-library work:
     ///   - orderbook corrupted-cache recovery sends `RequestOrderBookFull`
     ///     without surfacing a separate callback event;
-    ///   - trades gap recovery ticks and sends `TradesResend` batches;
-    ///   - `TradesState::tick` runs about every 100 ms from the main loop;
+    ///   - trades gap recovery checks after valid trades packets and sends
+    ///     `TradesResend` batches;
     ///   - market-index gating and per-client server-time delta are applied by
     ///     the dispatcher.
     ///
@@ -7025,7 +7167,7 @@ impl Client {
         on_event: EventFn,
     ) {
         // Тонкий wrapper над унифицированным `run_inner`. Все active-library
-        // auto-actions (RequestOrderBookFull, periodic trades.tick, indexes
+        // auto-actions (RequestOrderBookFull, trades resend tail-check, indexes
         // sync gate, ServerTimeDelta apply, server-token state reset) живут
         // в `dispatch_into_active_actions` + `run_inner`.
         let mode = RunMode::Dispatcher {
@@ -7130,9 +7272,9 @@ impl Client {
     ///   - `process_reader_decoded(...)` — куда доставлять decoded payload
     ///     (Callback sink для `run`; Buffer sink +
     ///     dispatcher.dispatch_into_active для `run_with_dispatcher`).
-    ///   - В конце iter: для Dispatcher mode дополнительно — periodic
-    ///     `trades.tick()` каждые 100мс. Для Callback mode tick не нужен (callback
-    ///     потребитель сам решает что делать с TradesEvent).
+    ///   - В Dispatcher mode `dispatch_into_active_actions` делает trades
+    ///     resend tail-check после valid trades packets. Для Callback mode
+    ///     потребитель сам решает что делать с TradesEvent.
     fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
         thread::scope(|scope| {
             let handle = scope.spawn(|| {
@@ -7177,6 +7319,9 @@ impl Client {
                 }
                 crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
                     self.request_order_status(ctx, &market_name);
+                }
+                crate::events::ActiveAction::TradesResend { payload } => {
+                    self.send_api_request(&payload);
                 }
             }
         }
@@ -7227,7 +7372,7 @@ impl Client {
         let slicer = Arc::clone(&self.slicer);
         let total_sent = Arc::clone(&self.total_sent);
         let total_recv_shared = Arc::clone(&self.total_recv_shared);
-        let debug_outgoing_blackhole = self.debug_outgoing_blackhole;
+        let debug_outgoing_blackhole = Arc::clone(&self.debug_outgoing_blackhole);
         // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
         let start_time = self._start;
 
@@ -7525,7 +7670,7 @@ impl Client {
         payload: &[u8],
         mask_ver: u8,
         total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: bool,
+        debug_outgoing_blackhole: &AtomicBool,
     ) {
         let Some(addr) = addr else {
             return;
@@ -7541,7 +7686,7 @@ impl Client {
             mask_ver,
         );
 
-        if debug_outgoing_blackhole {
+        if debug_outgoing_blackhole.load(Ordering::Relaxed) {
             if trace_io_enabled() {
                 eprintln!(
                     "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
@@ -7596,7 +7741,7 @@ impl Client {
         Self::push_sliced_ack(&self.incoming_sliced_acks, payload);
     }
 
-    fn apply_sliced_ack(&mut self, ack: SlicedAck, now_ms: i64) {
+    fn apply_sliced_ack(&mut self, ack: SlicedAck, _now_ms: i64) {
         // Matches TMoonProtoClient.ApplyACK (MoonProtoIntStruct.pas:1200-1218):
         // find first matching Sending datagram, apply, maybe remove, then stop.
         let mut completed_ratio = None;
@@ -7617,6 +7762,9 @@ impl Client {
                 changed |= before != *dst;
             }
             if changed {
+                // Delphi server/client fix: ACK progress proves the peer is
+                // alive, so the datagram retry budget starts over.
+                s.retry_count = 0;
                 let complete = (0..s.blocks_count).all(|block| s.is_block_acked(block));
                 if complete {
                     if s.blocks_count > 0 {
@@ -7631,10 +7779,11 @@ impl Client {
                     }
                     completed_idx = Some(idx);
                 } else {
-                    // Delphi ApplyACK frees ACKed pieces before retry. Rust keeps
-                    // arrays indexed by block number, so recompute over unACKed
-                    // pieces only.
-                    s.refresh_last_checked_from_unacked(now_ms);
+                    // Current Delphi keeps the retry clocks of remaining holes:
+                    // ACK-progress only removes ACKed pieces and resets FRetryCount.
+                    // Rust keeps arrays indexed by block number, so recompute the
+                    // datagram clock from unACKed blocks instead of zeroing them.
+                    s.refresh_last_checked_from_unacked(_now_ms);
                     if trace_io_enabled() {
                         let acked = (0..s.blocks_count)
                             .filter(|&block| s.is_block_acked(block))
@@ -7921,6 +8070,10 @@ impl Client {
                             &crate::commands::engine_request::update_markets_list(),
                         );
                     }
+                    if self.restore_orderbooks_after_indexes {
+                        self.restore_orderbooks_after_indexes = false;
+                        self.restore_orderbook_subscriptions_from_registry();
+                    }
                 }
             }
 
@@ -7952,7 +8105,7 @@ impl Client {
     fn handle_candles_chunk_in_map(
         pending_candles: &Mutex<HashMap<u64, PartialCandles>>,
         resp: &EngineResponse,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> bool {
         // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
         if !resp.success {
@@ -7977,7 +8130,10 @@ impl Client {
                 chunk_result,
                 CandlesChunkResult::Stored | CandlesChunkResult::Complete(_)
             ) {
-                partial.last_activity_ms = now_ms;
+                // Delphi updates `Markets.LastChunkTime` for the UI waiting
+                // thread, but does not cancel the protocol-side collector on
+                // that timeout. Rust keeps the pending slot until explicit
+                // complete/error/reset/caller timeout.
             }
             chunk_result
         };
@@ -8075,7 +8231,7 @@ impl Client {
     /// но не меняют reconnect-state: Delphi `DoSendPacket` возвращает false и не ставит
     /// `ForceDisconnect`.
     fn dispatch_send(&mut self, cmd: u8, packet: &[u8], extra: Option<&[u8]>, addr: SocketAddr) {
-        if self.debug_outgoing_blackhole {
+        if self.debug_outgoing_blackhole.load(Ordering::Relaxed) {
             if trace_io_enabled() {
                 eprintln!(
                     "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
@@ -8464,7 +8620,7 @@ impl Client {
 //
 //  Логически единственный init-проход после `Connected{fresh:true}`:
 //  `BaseCheck → AuthCheck → GetMarketsList → GetMarketsIndexes → UpdateMarketsList
-//   → GetMarketsBalanceFull → Delphi post-init resync → optional subscriptions`.
+//   → Delphi post-init resync → optional subscriptions`.
 //  Аналог Delphi `TCryptoPumpTool.InitInt` (`Unit1.pas:4987-5150`).
 //
 //  Почему free function, а не `Client::run_init_sequence`:
@@ -8485,9 +8641,9 @@ impl Client {
 /// Configuration for [`run_init_sequence`].
 ///
 /// Delphi-critical init steps are not configurable: BaseCheck, AuthCheck,
-/// GetMarketsList, GetMarketsIndexes, UpdateMarketsList, balance refresh, orders,
-/// strategy snapshot, and settings sync are the init contract itself. This config
-/// only carries optional stream subscriptions and timing.
+/// GetMarketsList, GetMarketsIndexes, UpdateMarketsList, balance refresh,
+/// orders, strategy snapshot sync, and settings sync are the init contract
+/// itself. This config only carries optional stream subscriptions and timing.
 #[derive(Debug, Clone, Default)]
 pub struct InitConfig {
     /// Value for the post-init `TMMOrdersSubscribeCommand`.
@@ -8528,13 +8684,8 @@ pub struct InitResult {
     pub indexes_response_bytes: usize,
     /// Payload size in bytes for the `UpdateMarketsList` response.
     pub update_markets_response_bytes: usize,
-    /// Payload size in bytes for the `GetMarketsBalanceFull` response.
-    pub balances_response_bytes: usize,
     /// Whether post-init resync commands were enqueued.
     pub post_init_resync_sent: bool,
-    /// Whether a strategy snapshot reply was sent or queued from dispatcher
-    /// state.
-    pub strategy_snapshot_sent: bool,
     /// Whether init requested the all-trades subscription.
     pub trades_subscribed: bool,
     /// Number of orderbook subscriptions requested during init.
@@ -8687,16 +8838,17 @@ pub fn connect_and_init(
 }
 
 /// Run the full init sequence: BaseCheck → AuthCheck → GetMarketsList →
-/// GetMarketsIndexes → UpdateMarketsList → GetMarketsBalanceFull →
+/// GetMarketsIndexes → UpdateMarketsList →
 /// Delphi post-init resync → optional subscriptions.
 ///
 /// Until this function completes successfully,
 /// `EventDispatcher::dispatch_into_active` drops domain pushes
 /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`), matching Delphi
 /// `ClientNewData` under `not InitDone`. After a successful bootstrap, the
-/// library sends `TAllStatusesReq`, a fresh `TStratSnapshot` through the
-/// registered strategy provider, `TSettingsRequest`, `TMMOrdersSubscribeCommand`,
-/// and `TRequestBalanceRefresh`.
+/// library sends `TAllStatusesReq`, `TSettingsRequest`,
+/// `TMMOrdersSubscribeCommand`, and `TRequestBalanceRefresh`. Strategy snapshots
+/// are not fabricated by init; the dispatcher answers a real server
+/// `TStratSnapshotRequest` from its library-owned strategy list.
 ///
 /// The mutable `EventDispatcher` is required because the helper keeps pumping
 /// the client loop while it waits. Engine API responses are also applied to
@@ -8882,8 +9034,10 @@ fn run_required_engine_step(
 /// Call this after transport authorization, or use [`connect_and_init`] to wait
 /// for authorization and init in one helper. A successful run opens the
 /// dispatcher domain gate and sends the Delphi post-init refresh set:
-/// order snapshot, strategy snapshot reply, settings request, MM-orders
+/// order snapshot, client strategy snapshot, settings request, MM-orders
 /// subscription flag, balance refresh, and optional stream subscriptions.
+/// Incoming `TStratSnapshotRequest` is still answered from the same
+/// library-owned strategy state.
 ///
 /// Do not call this again after a reconnect in the same [`Client`] session.
 /// Reconnect restore is owned by the library once init has succeeded.
@@ -8970,19 +9124,6 @@ pub fn run_init_sequence(
     )?;
     result.update_markets_response_bytes = resp.data.len();
 
-    // === 6. GetMarketsBalanceFull === критический full-balance refresh.
-    // Delphi server currently refreshes balances server-side but does not serialize a
-    // balance snapshot in the EngineResponse (`WriteBalancesToStream` is TODO).
-    let resp = run_required_engine_step(
-        client,
-        dispatcher,
-        &mut result,
-        "GetMarketsBalanceFull",
-        crate::commands::engine_request::get_markets_balance_full(),
-        timeout,
-    )?;
-    result.balances_response_bytes = resp.data.len();
-
     client.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
@@ -8990,19 +9131,19 @@ pub fn run_init_sequence(
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
     client.send_registry_subscriptions_after_init();
 
-    // === 7. SubscribeAllTrades === optional; registry update + direct wire enqueue.
+    // === 6. SubscribeAllTrades === optional; registry update + direct wire enqueue.
     if let Some(want_mm) = cfg.subscribe_trades {
         client.subscribe_all_trades(want_mm);
         result.trades_subscribed = true;
     }
 
-    // === 8. Subscribe orderbooks === optional; fire-and-forget через registry
+    // === 7. Subscribe orderbooks === optional; fire-and-forget через registry
     for name in &cfg.subscribe_orderbooks {
         client.subscribe_orderbook(name);
         result.orderbooks_subscribed += 1;
     }
 
-    // === 9. Pump queued post-init wire commands ===
+    // === 8. Pump queued post-init wire commands ===
     // post-init resync and optional subscriptions have already appended wire
     // commands to Delphi-style send queues; run a short tick so they are flushed
     // before the helper returns.
@@ -9018,13 +9159,18 @@ pub fn run_init_sequence(
 
 fn send_post_init_resync(
     client: &mut Client,
-    dispatcher: &mut crate::events::EventDispatcher,
+    dispatcher: &crate::events::EventDispatcher,
     cfg: &InitConfig,
     result: &mut InitResult,
 ) {
     client.request_all_statuses(rand::random());
-    result.strategy_snapshot_sent =
-        dispatcher.send_or_queue_strategy_snapshot_request(rand::random(), client);
+    let snapshot = dispatcher.local_strategy_snapshot_reply();
+    client.strat_send_snapshot_payload(
+        snapshot.server_epoch,
+        snapshot.client_max_last_date,
+        snapshot.full,
+        &snapshot.data,
+    );
     client.ui_settings_request();
     let registry_mm_orders = client.subscription_registry.lock().unwrap().mm_orders_sub;
     let mm_orders = cfg
@@ -9155,7 +9301,9 @@ mod api_pending_dispatch_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
     use crate::commands::market::build_markets_indexes_response;
+    use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
     use crate::events::EventDispatcher;
+    use std::collections::HashMap;
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -9682,25 +9830,32 @@ mod api_pending_dispatch_tests {
     fn post_init_resync_enqueues_delphi_commands() {
         let mut client = Client::new(dummy_cfg());
         client.set_domain_ready(true);
-        let mut dispatcher = EventDispatcher::new();
-        dispatcher.set_strategy_snapshot_provider(|_| {
-            Some(crate::events::StrategySnapshotReply::from_payload(
-                7,
-                99,
-                true,
-                vec![0xAA, 0xBB],
-            ))
-        });
         let cfg = InitConfig {
             mm_orders_subscribe: Some(true),
             ..Default::default()
         };
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_local_strategy_epoch(55);
+        let mut fields = HashMap::new();
+        fields.insert(
+            "Comment".to_string(),
+            FieldValue::String("post-init".to_string()),
+        );
+        let strategy = StrategySnapshot {
+            strategy_id: 0x5157,
+            strategy_ver: 3,
+            last_date: 1234,
+            checked: true,
+            kind: 1,
+            path: "Init".to_string(),
+            fields,
+        };
+        dispatcher.set_local_strategies(std::slice::from_ref(&strategy));
         let mut result = InitResult::default();
 
-        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
+        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
 
         assert!(result.post_init_resync_sent);
-        assert!(result.strategy_snapshot_sent);
 
         let mut seen_order_req = false;
         let mut seen_strat_snapshot = false;
@@ -9716,6 +9871,19 @@ mod api_pending_dispatch_tests {
                     seen_order_req = true;
                 }
                 Command::Strat if data.first().copied() == Some(2) => {
+                    let cmd = crate::commands::strat::StratCommand::parse(&data)
+                        .expect("post-init strategy snapshot must parse");
+                    let crate::commands::strat::StratCommand::Snapshot(snapshot) = cmd else {
+                        panic!("expected TStratSnapshot");
+                    };
+                    assert_eq!(snapshot.server_epoch, 55);
+                    assert_eq!(snapshot.client_max_last_date, 1234);
+                    assert!(snapshot.full);
+                    let batch =
+                        crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
+                            .expect("post-init strategy batch must parse");
+                    assert_eq!(batch.strategies.len(), 1);
+                    assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
                     seen_strat_snapshot = true;
                 }
                 Command::UI if data.first().copied() == Some(2) => {
@@ -9736,7 +9904,7 @@ mod api_pending_dispatch_tests {
         assert!(seen_order_req, "post-init must request TAllStatuses");
         assert!(
             seen_strat_snapshot,
-            "post-init must send fresh TStratSnapshot when provider exists"
+            "post-init must send TStratSnapshot.CreateFromStrats equivalent"
         );
         assert!(seen_settings_req, "post-init must request settings");
         assert!(
@@ -9746,41 +9914,6 @@ mod api_pending_dispatch_tests {
         assert!(
             seen_balance_refresh,
             "post-init must request balance refresh"
-        );
-    }
-
-    #[test]
-    fn post_init_resync_without_strategy_provider_sends_empty_strategy_snapshot() {
-        let mut client = Client::new(dummy_cfg());
-        client.set_domain_ready(true);
-        let mut dispatcher = EventDispatcher::new();
-        let cfg = InitConfig::default();
-        let mut result = InitResult::default();
-
-        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
-
-        assert!(result.post_init_resync_sent);
-        assert!(result.strategy_snapshot_sent);
-
-        let mut seen_strat_snapshot = false;
-        let (sliced, high, low) = client.take_send_queues_for_test();
-        for item in sliced.into_iter().chain(high).chain(low) {
-            if Command::from_byte(item.cmd) == Command::Strat
-                && item.data.first().copied() == Some(2)
-            {
-                seen_strat_snapshot = true;
-            }
-        }
-        assert!(
-            seen_strat_snapshot,
-            "without provider, init must still send an empty strategy snapshot"
-        );
-        assert!(
-            dispatcher.queued_events().iter().any(|event| matches!(
-                event,
-                crate::events::Event::Strat(crate::state::StratEvent::SnapshotRequested { .. })
-            )),
-            "init still surfaces SnapshotRequested for app/UI awareness"
         );
     }
 }
@@ -10111,6 +10244,52 @@ mod client_sender_tests {
         assert_eq!(sent[0].max_retries, 6);
         assert_eq!(sent[0].retry_left, 5);
         assert_eq!(sent[0].u_key, UniqueKey::none());
+    }
+
+    #[test]
+    fn pre_init_raw_sender_send_cmd_is_gated() {
+        let (sender, _, send_q, _, _, domain_ready) = make_sender();
+        domain_ready.store(false, Ordering::Relaxed);
+
+        let err = sender
+            .try_send_cmd_keyed(
+                vec![1, 2, 3, 4],
+                Command::Order,
+                SendPriority::High,
+                true,
+                3,
+                UniqueKey::order_move(42),
+            )
+            .unwrap_err();
+
+        assert_eq!(err, SubscribeError::DomainNotReady);
+        assert!(take_send_items(&send_q).is_empty());
+    }
+
+    #[test]
+    fn pre_init_raw_sender_api_allows_only_init_methods() {
+        let (sender, _, send_q, _, _, domain_ready) = make_sender();
+        domain_ready.store(false, Ordering::Relaxed);
+
+        let subscribe = crate::commands::engine_request::subscribe_all_trades(false);
+        let err = sender.try_send_api_request(subscribe).unwrap_err();
+        assert_eq!(err, SubscribeError::DomainNotReady);
+        assert!(take_send_items(&send_q).is_empty());
+
+        let balance_full = crate::commands::engine_request::get_markets_balance_full();
+        let err = sender.try_send_api_request(balance_full).unwrap_err();
+        assert_eq!(err, SubscribeError::DomainNotReady);
+        assert!(take_send_items(&send_q).is_empty());
+
+        let base_check = crate::commands::engine_request::base_check();
+        sender
+            .try_send_api_request(base_check.clone())
+            .expect("BaseCheck is an Init primitive and must pass the pre-Init gate");
+
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].data, base_check);
+        assert_eq!(sent[0].cmd, Command::API as u8);
     }
 
     #[test]
@@ -10817,7 +10996,7 @@ mod client_subscribe_integration_tests {
             },
         ];
 
-        assert!(client.set_immune(&mut orders, 0xABCD, &items));
+        assert!(client.set_immune(&mut orders, &items));
         assert!(orders.get(0x100).unwrap().immune_for_clicks);
 
         let (_, high, _) = client.take_send_queues_for_test();
@@ -10825,7 +11004,6 @@ mod client_subscribe_integration_tests {
         assert_eq!(high[0].u_key, UniqueKey::immune_clicks(0x100));
         match TradeCommand::parse(&high[0].data).expect("valid set immune") {
             TradeCommand::SetImmune(cmd) => {
-                assert_eq!(cmd.header.uid, 0xABCD);
                 assert_eq!(cmd.items.len(), 1);
                 assert_eq!(cmd.items[0].uid, 0x100);
                 assert!(cmd.items[0].value);
@@ -10836,7 +11014,6 @@ mod client_subscribe_integration_tests {
         assert!(
             !client.set_immune(
                 &mut orders,
-                0xABCE,
                 &[ImmuneItem {
                     uid: 0x200,
                     value: false,
@@ -10878,6 +11055,14 @@ mod client_subscribe_integration_tests {
             take_profit: 15.0,
             ..StopSettings::default()
         };
+        assert!(
+            !client.update_order_stops(&mut orders, uid, &stops),
+            "Delphi SendStopsIfChanged exits when worker.vOrder is nil"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        assert!(orders.mark_local_visual_order(uid));
         assert!(client.update_order_stops(&mut orders, uid, &stops));
         assert_eq!(orders.get(uid).unwrap().stops, stops);
 
@@ -10928,6 +11113,14 @@ mod client_subscribe_integration_tests {
         let (_, high, _) = client.take_send_queues_for_test();
         assert!(high.is_empty());
 
+        assert!(
+            !client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0),
+            "Delphi SendVStopIfChanged exits when worker.vOrder is nil"
+        );
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert!(high.is_empty());
+
+        assert!(orders.mark_local_visual_order(uid));
         assert!(client.update_vstop(&mut orders, uid, true, false, 12.5, 100.0));
         let order = orders.get(uid).unwrap();
         assert!(order.vstop_on);
@@ -11233,6 +11426,7 @@ mod pmtu_tests {
             sent_count: lengths.len(),
             last_checked,
             retry_count: 0,
+            last_retry_inc: 0,
             max_retry_count: 6,
             u_key: UniqueKey::none(),
         }
@@ -11357,6 +11551,82 @@ mod pmtu_tests {
         assert_eq!(client.actual_pmtu(), 8_224);
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].0, Command::Ping);
+    }
+
+    #[test]
+    fn ping_adaptive_can_send_rate_uses_delphi_used_limit_gate() {
+        let client = Client::new(dummy_cfg());
+        let payload = ping_payload_with_pmtu(508);
+
+        {
+            let mut state = client.reader_ping_state.lock().unwrap();
+            state.can_send_rate = 2 * 1024 * 1024;
+            state.used_sliced_limit = false;
+        }
+        let (update, _) = Client::reader_build_ping_update_and_response(
+            &client.reader_protocol,
+            &client.reader_ping_state,
+            &client.server_time_delta_handle,
+            &payload,
+            0.0,
+            0.0,
+            0,
+            50,
+        )
+        .expect("valid ping");
+        assert_eq!(
+            update.can_send_rate,
+            2 * 1024 * 1024,
+            "Delphi changes CanSendRate only after UsedSlicedLimit"
+        );
+
+        {
+            let mut state = client.reader_ping_state.lock().unwrap();
+            state.can_send_rate = 2 * 1024 * 1024;
+            state.used_sliced_limit = true;
+        }
+        let (update, _) = Client::reader_build_ping_update_and_response(
+            &client.reader_protocol,
+            &client.reader_ping_state,
+            &client.server_time_delta_handle,
+            &payload,
+            0.0,
+            0.0,
+            0,
+            50,
+        )
+        .expect("valid ping");
+        assert_eq!(
+            update.can_send_rate, 2_160_067,
+            "Delphi raises healthy channel by max(round(rate*0.03), 32KB/s)"
+        );
+        assert!(
+            !update.used_sliced_limit,
+            "Delphi clears UsedSlicedLimit after the adaptive update"
+        );
+
+        let mut congested = payload;
+        congested[41] = 0;
+        {
+            let mut state = client.reader_ping_state.lock().unwrap();
+            state.can_send_rate = 1_000_000;
+            state.used_sliced_limit = true;
+        }
+        let (update, _) = Client::reader_build_ping_update_and_response(
+            &client.reader_protocol,
+            &client.reader_ping_state,
+            &client.server_time_delta_handle,
+            &congested,
+            0.0,
+            0.0,
+            0,
+            50,
+        )
+        .expect("valid ping");
+        assert_eq!(
+            update.can_send_rate, 850_000,
+            "Delphi cuts congested channel by round(rate*0.85)"
+        );
     }
 
     #[test]
@@ -11939,6 +12209,36 @@ mod pmtu_tests {
     }
 
     #[test]
+    fn sliced_retry_start_budget_sends_delphi_full_slice_counts() {
+        for (cycle_time_ms, expected_sends) in [(5.0, 8), (10.0, 15), (15.0, 22)] {
+            let mut client = Client::new(dummy_cfg());
+            client.round_trip_delay = 100;
+            client.trip_delay_k = 1.1;
+            client.actual_sleep_time = cycle_time_ms;
+            client.can_send_rate = 2 * 1024 * 1024;
+            client
+                .sending
+                .push(sent_sliced_with_lengths(&vec![1442; 64], 0));
+
+            writer(&mut client).retry_sliced(1000);
+
+            assert_eq!(
+                client.sending[0].sent_count,
+                64 + expected_sends,
+                "Delphi checks BytesSentAtOnce < ClientLimit before sending the next slice"
+            );
+            assert_eq!(
+                client.sending[0].retry_count, 0,
+                "primary timestamp groups must not burn Sliced retry budget"
+            );
+            assert!(
+                client.used_sliced_limit,
+                "Delphi marks UsedSlicedLimit when the tick reaches 80% of ClientLimit"
+            );
+        }
+    }
+
+    #[test]
     fn sliced_retry_used_limit_threshold_is_rounded_like_delphi() {
         let mut client = Client::new(dummy_cfg());
         client.round_trip_delay = 100;
@@ -12010,9 +12310,9 @@ mod pmtu_tests {
         client.trip_delay_k = 1.1;
         client.actual_sleep_time = 5.0;
         client.can_send_rate = 1_000_000;
-        client
-            .sending
-            .push(sent_sliced_with_lengths(&[10, 10, 10], 100));
+        let mut sliced = sent_sliced_with_lengths(&[10, 10, 10], 100);
+        sliced.retry_count = 5;
+        client.sending.push(sliced);
 
         let mut ack = [0u8; 34];
         ack[0] = 0b0000_0011; // blocks 0 and 1 ACKed; block 2 still pending.
@@ -12025,6 +12325,36 @@ mod pmtu_tests {
             let copy_acks = writer.get_copy_acks();
             writer.apply_copy_acks(copy_acks, 300);
         }
+        assert_eq!(
+            client.sending[0].retry_count, 0,
+            "Delphi TMoonProtoSlicedData.ApplyACK resets FRetryCount when ACK adds new bits"
+        );
+        assert_eq!(
+            client.sending[0].last_checked, 100,
+            "current Delphi ApplyACK preserves retry clocks of remaining holes"
+        );
+        assert_eq!(
+            client.sending[0].piece_last_checked[2], 100,
+            "current Delphi ApplyACK preserves LastChecked for remaining unACKed pieces"
+        );
+
+        client.sending[0].retry_count = 4;
+        client.on_new_sliced_ack(&ack);
+        {
+            let mut writer = WriterRuntime {
+                client: &mut client,
+            };
+            let copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(copy_acks, 300);
+        }
+        assert_eq!(
+            client.sending[0].retry_count, 4,
+            "duplicate ACK without progress must be a no-op like Delphi ACK.ApplyACK=false"
+        );
+        assert_eq!(
+            client.sending[0].piece_last_checked[2], 100,
+            "duplicate ACK must not rebuild or reset the remaining retry group"
+        );
 
         writer(&mut client).retry_sliced(300);
         assert_eq!(client.sending[0].sent_count, 4);
@@ -12172,7 +12502,8 @@ mod api_retry_tests {
 
     #[test]
     fn engine_api_sliced_requests_use_delphi_retry_count() {
-        let client = Client::new(dummy_cfg());
+        let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
         let raw = crate::commands::engine_request::query_hedge_mode();
 
         client.send_api_request(&raw);
@@ -12266,7 +12597,6 @@ mod send_queue_dedup_tests {
 mod active_library_helpers_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
-    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     fn dummy_cfg() -> ClientConfig {
@@ -12287,106 +12617,6 @@ mod active_library_helpers_tests {
 
     fn writer(client: &mut Client) -> WriterRuntime<'_> {
         WriterRuntime { client }
-    }
-
-    /// Сериализует тесты которые трогают `CLOCK_JUMP_GENERATION` (process-global atomic).
-    /// Cargo test запускает тесты в параллельных thread'ах — без этой блокировки
-    /// race на generation даёт flaky failures.
-    static CLOCK_JUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    // =====================================================================
-    //  check_clock_jump
-    // =====================================================================
-
-    #[test]
-    fn clock_jump_check_triggers_force_disconnect() {
-        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed); // reset
-        let mut client = Client::new(dummy_cfg());
-        assert!(!client.force_disconnect);
-        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        writer(&mut client).check_clock_jump();
-        assert!(
-            client.force_disconnect,
-            "clock jump flag → force_disconnect = true"
-        );
-        assert_eq!(client.seen_clock_jump_generation, 1);
-    }
-
-    #[test]
-    fn clock_jump_check_noop_when_flag_clear() {
-        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed);
-        let mut client = Client::new(dummy_cfg());
-        writer(&mut client).check_clock_jump();
-        assert!(!client.force_disconnect, "без флага — никаких изменений");
-    }
-
-    #[test]
-    fn clock_jump_check_idempotent_after_swap() {
-        // Двойной вызов в том же generation — второй раз должен быть no-op.
-        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed); // reset
-        let mut client = Client::new(dummy_cfg());
-        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        writer(&mut client).check_clock_jump();
-        assert!(
-            client.force_disconnect,
-            "первый вызов с flag=true → force_disconnect"
-        );
-        client.force_disconnect = false; // reset для второй проверки
-        writer(&mut client).check_clock_jump();
-        assert!(
-            !client.force_disconnect,
-            "тот же generation — второй вызов no-op"
-        );
-    }
-
-    #[test]
-    fn clock_jump_generation_is_seen_by_each_client() {
-        let _lock = CLOCK_JUMP_TEST_LOCK.lock().unwrap();
-        CLOCK_JUMP_GENERATION.store(0, Ordering::Relaxed);
-        let mut a = Client::new(dummy_cfg());
-        let mut b = Client::new(dummy_cfg());
-
-        CLOCK_JUMP_GENERATION.store(1, Ordering::Relaxed);
-        writer(&mut a).check_clock_jump();
-        writer(&mut b).check_clock_jump();
-
-        assert!(
-            a.force_disconnect,
-            "первый Client должен увидеть generation"
-        );
-        assert!(
-            b.force_disconnect,
-            "второй Client не должен терять global signal"
-        );
-        assert_eq!(a.seen_clock_jump_generation, 1);
-        assert_eq!(b.seen_clock_jump_generation, 1);
-    }
-
-    #[test]
-    fn clock_jump_detector_ignores_normal_elapsed_time() {
-        let base = Instant::now();
-        let prev_wall = 45_000.0;
-        let now_wall = prev_wall + 120.0 / 86_400.0;
-
-        assert!(
-            !is_clock_jump(prev_wall, base, now_wall, base + Duration::from_secs(120)),
-            "обычные 120 секунд elapsed не являются скачком wall-clock",
-        );
-    }
-
-    #[test]
-    fn clock_jump_detector_catches_wall_clock_step() {
-        let base = Instant::now();
-        let prev_wall = 45_000.0;
-        let now_wall = prev_wall + 180.0 / 86_400.0;
-
-        assert!(
-            is_clock_jump(prev_wall, base, now_wall, base + Duration::from_secs(10)),
-            "wall-clock ушёл на 180с при 10с monotonic elapsed",
-        );
     }
 
     #[test]
@@ -12609,9 +12839,14 @@ mod registry_subscription_restore_tests {
         sliced
     }
 
+    fn mark_post_init(client: &mut Client) {
+        client.set_domain_ready(true);
+    }
+
     #[test]
     fn restore_with_empty_registry_sends_nothing() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.server_token = 0xCAFE;
         client.restore_registry_subscriptions();
         let sent = drain_api_requests(&client);
@@ -12621,6 +12856,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_trades_only_sends_single_subscribe_all_trades() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             registry.trades_sub = Some(TradesSubscription { want_mm: true });
         });
@@ -12638,6 +12874,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_trades_uses_latest_mm_orders_flag() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             registry.trades_sub = Some(TradesSubscription { want_mm: false });
             registry.mm_orders_sub = Some(true);
@@ -12656,6 +12893,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_mm_orders_without_trades_sends_ui_subscription() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             registry.mm_orders_sub = Some(true);
         });
@@ -12674,6 +12912,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_orderbooks_are_batched_into_single_request() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             registry.orderbook_subs.insert("BTC".to_string());
             registry.orderbook_subs.insert("ETH".to_string());
@@ -12693,6 +12932,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_orderbooks_dedup_by_market_name() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             assert!(registry.orderbook_subs.insert("BTC".to_string()));
             assert!(!registry.orderbook_subs.insert("BTC".to_string()));
@@ -12710,6 +12950,7 @@ mod registry_subscription_restore_tests {
     #[test]
     fn restore_combined_sends_trades_plus_orderbook_batches() {
         let mut client = Client::new(dummy_cfg());
+        mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
             registry.trades_sub = Some(TradesSubscription { want_mm: false });
             registry.orderbook_subs.insert("BTC".to_string());
@@ -12899,6 +13140,7 @@ mod refresh_tick_tests {
             update_markets_every: None,
             check_tags_every: Some(Duration::from_millis(200)),
         }));
+        client.set_domain_ready(true);
         let was_markets = client.last_update_markets_ms;
         writer(&mut client).tick_periodic_refresh(1_000_000);
         assert_eq!(
@@ -12917,6 +13159,7 @@ mod refresh_tick_tests {
             update_markets_every: None,
             check_tags_every: Some(Duration::from_secs(60)),
         }));
+        client.set_domain_ready(true);
         assert_eq!(client.check_tags_hour_slot, i64::MIN);
 
         writer(&mut client).tick_periodic_refresh_at(0, 42);
@@ -12941,6 +13184,7 @@ mod refresh_tick_tests {
             update_markets_every: Some(Duration::from_millis(100)),
             check_tags_every: Some(Duration::from_millis(500)),
         }));
+        client.set_domain_ready(true);
         client.last_update_markets_ms = 0;
         client.last_check_tags_ms = 0;
 
@@ -12961,6 +13205,7 @@ mod refresh_tick_tests {
             update_markets_every: None,
             check_tags_every: Some(Duration::from_secs(60)),
         }));
+        client.set_domain_ready(true);
         client.check_tags_hour_slot = 10;
         client.last_check_tags_ms = 1_000;
         client.check_tags_burst_sent = CHECK_TAGS_BURST_COUNT;
@@ -13181,6 +13426,7 @@ mod event_loop_fairness_tests {
     #[test]
     fn send_phase_runs_with_ready_send_queue() {
         let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
         let mut dispatcher = EventDispatcher::new();
 
         client.send_cmd(
@@ -13197,6 +13443,49 @@ mod event_loop_fairness_tests {
             !client.sending.is_empty(),
             "writer must copy direct Delphi-style send queues without app-event bridge"
         );
+    }
+
+    #[test]
+    fn pre_init_raw_client_send_cmd_is_gated_but_init_api_is_allowed() {
+        let client = Client::new(dummy_cfg());
+
+        client.send_cmd(vec![1, 2, 3, 4], Command::UI, SendPriority::High, true, 3);
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty());
+        assert!(high.is_empty());
+        assert!(low.is_empty());
+
+        client.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
+            false,
+        ));
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty());
+        assert!(high.is_empty());
+        assert!(low.is_empty());
+
+        let base_check = crate::commands::engine_request::base_check();
+        client.send_api_request(&base_check);
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert_eq!(sliced.len(), 1);
+        assert_eq!(sliced[0].data, base_check);
+        assert_eq!(sliced[0].cmd, Command::API as u8);
+        assert!(high.is_empty());
+        assert!(low.is_empty());
+    }
+
+    #[test]
+    fn pre_init_async_api_does_not_register_pending_for_gated_methods() {
+        let client = Client::new(dummy_cfg());
+        let subscribe = crate::commands::engine_request::subscribe_all_trades(false);
+
+        let rx = client.send_api_request_async(&subscribe);
+
+        assert_eq!(client.api_pending.pending_count(), 0);
+        assert!(rx.recv_timeout(Duration::from_millis(1)).is_err());
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty());
+        assert!(high.is_empty());
+        assert!(low.is_empty());
     }
 
     #[test]
@@ -13245,6 +13534,7 @@ mod event_loop_fairness_tests {
     #[test]
     fn app_send_queue_is_not_blocked_by_pending_reader_decode() {
         let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
         let mut dispatcher = EventDispatcher::new();
 
         client
@@ -13690,6 +13980,22 @@ mod service_cmd_tests {
         client.pending_reader_decoded.lock().unwrap().pop().unwrap()
     }
 
+    fn assert_no_reader_decoded(client: &Client, why: &str) {
+        thread::sleep(Duration::from_millis(30));
+        assert!(
+            client.pending_reader_decoded.lock().unwrap().is_empty(),
+            "{why}"
+        );
+    }
+
+    fn wait_reader_total_recv(client: &Client, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while reader_transport_snapshot(client).total_recv < expected && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(reader_transport_snapshot(client).total_recv, expected);
+    }
+
     fn reader_transport_snapshot(client: &Client) -> ReaderTransportState {
         client.reader_transport_state.lock().unwrap().clone()
     }
@@ -13899,14 +14205,15 @@ mod service_cmd_tests {
             thread::sleep(Duration::from_millis(1));
         }
         let ack = client.incoming_sliced_acks.lock().unwrap().pop().unwrap();
-        let decoded = pop_reader_decoded(&client);
+        wait_reader_total_recv(&client, packet.len() as u64);
+        assert_no_reader_decoded(
+            &client,
+            "Delphi OnNewSlicedACK only queues ACK; no DataReadInt/no reader event",
+        );
         client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(ack.datagram_num, datagram_num);
         assert_eq!(ack.flags[0], 0b1010_0101);
-        assert_eq!(decoded.cmd, Command::SlicedACK as u8);
-        assert!(decoded.payload.is_none());
-        assert!(!decoded.apply_recv_effects);
         assert_eq!(
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
@@ -13946,7 +14253,11 @@ mod service_cmd_tests {
         server_sock.send_to(&packet, client_addr).unwrap();
 
         let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
+        wait_reader_total_recv(&client, packet.len() as u64);
+        assert_no_reader_decoded(
+            &client,
+            "partial Sliced must only ACK and stay in Receiving; no DataReadInt before completion",
+        );
         client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::SlicedACK as u8);
@@ -13962,9 +14273,6 @@ mod service_cmd_tests {
                 .contains_key(&datagram_num),
             "partial Sliced datagram must stay in Receiving until completed or cleaned"
         );
-        assert_eq!(decoded.cmd, Command::Sliced as u8);
-        assert!(decoded.payload.is_none());
-        assert!(!decoded.apply_recv_effects);
         assert_eq!(
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
@@ -14001,7 +14309,11 @@ mod service_cmd_tests {
         server_sock.send_to(&packet, client_addr).unwrap();
 
         let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
+        wait_reader_total_recv(&client, packet.len() as u64);
+        assert_no_reader_decoded(
+            &client,
+            "SizeTest sends SizeAck immediately and does not enqueue DataReadInt",
+        );
         client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::SizeAck as u8);
@@ -14016,9 +14328,6 @@ mod service_cmd_tests {
                 .data_size_ack_series_num,
             series
         );
-        assert_eq!(decoded.cmd, Command::SizeTest as u8);
-        assert!(decoded.payload.is_none());
-        assert!(!decoded.apply_recv_effects);
         assert_eq!(
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
@@ -14055,7 +14364,11 @@ mod service_cmd_tests {
         server_sock.send_to(&packet, client_addr).unwrap();
 
         let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
+        wait_reader_total_recv(&client, packet.len() as u64);
+        assert_no_reader_decoded(
+            &client,
+            "ProbeMTU sends ProbeMTUAck immediately and does not enqueue DataReadInt",
+        );
         client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::ProbeMTUAck as u8);
@@ -14063,9 +14376,6 @@ mod service_cmd_tests {
         assert_eq!(&ack_payload[0..2], &probe_id.to_le_bytes());
         assert_eq!(ack_payload[2], probe_index);
         assert_eq!(&ack_payload[3..5], &test_size.to_le_bytes());
-        assert_eq!(decoded.cmd, Command::ProbeMTU as u8);
-        assert!(decoded.payload.is_none());
-        assert!(!decoded.apply_recv_effects);
         assert_eq!(
             reader_transport_snapshot(&client).total_recv,
             packet.len() as u64
@@ -14230,6 +14540,80 @@ mod service_cmd_tests {
         assert_eq!(client.client_token, token_before.wrapping_add(1));
         assert_eq!(client.encode_key, encode_key);
         assert_eq!(client.decode_key, decode_key);
+    }
+
+    #[test]
+    fn reader_who_are_you_uses_writer_updated_hello_token() {
+        let _err_emu_guard = err_emu_test_guard();
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_sock
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let client_addr = client_sock.local_addr().unwrap();
+
+        let mut client = Client::new(dummy_cfg_for_server(server_addr));
+        let token_before = client.client_token;
+        let server_token = 0x2222_3333_4444_5555;
+        let peer_app_token = 0xAAAA_BBBB_CCCC_DDDD;
+        client.socket = Some(client_sock);
+        client.spawn_reader();
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_hello_send(100);
+
+        let (hello_hdr, hello_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
+        assert_eq!(hello_hdr.cmd, Command::Hello as u8);
+        let aad = client.cfg.client_id.to_le_bytes();
+        let hello = crypto::decrypt(&client.cfg.master_key, &hello_payload, &aad)
+            .and_then(|payload| handshake::Hello::from_bytes(&payload))
+            .expect("sent Hello decrypts with master key");
+        assert_eq!(hello.mix_ts, token_before.wrapping_add(1));
+
+        let who = encrypted_server_hello(
+            &client.cfg.master_key,
+            client.cfg.client_id,
+            server_token,
+            peer_app_token,
+        );
+        let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, &who);
+        server_sock.send_to(&packet, client_addr).unwrap();
+
+        let (hdr1, imfriend1) = recv_client_packet(&server_sock, &client.cfg.mac_key);
+        let (hdr2, _imfriend2) = recv_client_packet(&server_sock, &client.cfg.mac_key);
+        let decoded = pop_reader_decoded(&client);
+        client.reader_shutdown.store(true, Ordering::Relaxed);
+
+        assert_eq!(hdr1.cmd, Command::ImFriend as u8);
+        assert_eq!(hdr2.cmd, Command::ImFriend as u8);
+        let (encode_key, _decode_key) =
+            crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+        let im = crypto::decrypt(&encode_key, &imfriend1, &aad)
+            .and_then(|payload| handshake::Hello::from_bytes(&payload))
+            .expect("ImFriend decrypts with client encode key");
+        assert_eq!(
+            im.mix_ts,
+            token_before.wrapping_add(2),
+            "Delphi server requires ImFriend.MixTS > original Hello.MixTS",
+        );
+        let reader_state = reader_transport_snapshot(&client);
+        assert_eq!(reader_state.client_token, token_before.wrapping_add(2));
+
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(|_, _| panic!("WhoAreYou must not deliver user payload")),
+        };
+        WriterRuntime {
+            client: &mut client,
+        }
+        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        assert_eq!(client.client_token, token_before.wrapping_add(2));
     }
 
     #[test]
@@ -14443,29 +14827,24 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let decoded = pop_reader_decoded(&client);
+        wait_reader_total_recv(&client, packet.len() as u64);
+        assert_no_reader_decoded(
+            &client,
+            "Delphi ErrEmu exits after stats side effects; no protocol/user event",
+        );
         client.reader_shutdown.store(true, Ordering::Relaxed);
 
-        assert_eq!(decoded.cmd, Command::UI as u8);
-        assert!(decoded.payload.is_none());
-        assert!(!decoded.apply_recv_effects);
         let reader_state = reader_transport_snapshot(&client);
         assert!(reader_state.connected);
         assert_eq!(reader_state.auth_status, AuthStatus::Connected);
-        assert_eq!(reader_state.total_recv, decoded.recv_bytes);
-        assert_eq!(reader_state.last_online, decoded.timestamp_ms);
+        assert_eq!(reader_state.total_recv, packet.len() as u64);
+        assert!(reader_state.last_online >= 0);
 
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(|_, _| panic!("ErrEmu drop must not deliver user payload")),
-        };
-        WriterRuntime {
-            client: &mut client,
-        }
-        .process_reader_decoded(decoded.clone(), decoded.timestamp_ms, &mut mode);
+        client.sync_transport_state_from_reader();
         assert!(client.connected);
         assert_eq!(client.auth_status, AuthStatus::Connected);
-        assert_eq!(client.total_recv, decoded.recv_bytes);
-        assert_eq!(client.last_online, decoded.timestamp_ms);
+        assert_eq!(client.total_recv, packet.len() as u64);
+        assert_eq!(client.last_online, reader_state.last_online);
     }
 
     #[test]
@@ -14791,12 +15170,12 @@ mod reconnect_timing_tests {
             "subscriptions need fresh indexes after reconnect"
         );
         assert!(
-            methods.contains(&(EngineMethod::SubscribeAllTrades as u8)),
-            "trades subscription must be replayed by the library"
+            !methods.contains(&(EngineMethod::SubscribeAllTrades as u8)),
+            "trades reconnect is not raw replay; Delphi runs unsubscribe + 100ms delay + subscribe from the maintenance tick"
         );
         assert!(
-            methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
-            "orderbook subscription must be replayed by the library"
+            !methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            "orderbook subscription must wait for fresh market indexes like Delphi CheckBookTopics"
         );
         assert!(
             !methods.contains(&(EngineMethod::BaseCheck as u8))
@@ -14813,6 +15192,36 @@ mod reconnect_timing_tests {
                     && item.cmd != Command::Strat as u8
             }),
             "Delphi post-init resync is not repeated by the client on reconnect"
+        );
+
+        client.tick_trades_reconnect_sequence(10_000, 0);
+        let trades_reconnect_sent = drain_send_items(&client);
+        let trades_reconnect_methods = api_methods(&trades_reconnect_sent);
+        assert_eq!(
+            trades_reconnect_methods,
+            vec![EngineMethod::UnsubscribeAllTrades as u8],
+            "NeedReconnectAllTrades starts with UnSubscribeAllTrades"
+        );
+
+        client.tick_trades_reconnect_sequence(10_050, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "Delphi Sleep(100): SubscribeAllTrades must not be immediate"
+        );
+
+        client.tick_trades_reconnect_sequence(10_100, 0);
+        let trades_subscribe_sent = drain_send_items(&client);
+        let trades_subscribe_methods = api_methods(&trades_subscribe_sent);
+        assert_eq!(
+            trades_subscribe_methods,
+            vec![EngineMethod::SubscribeAllTrades as u8],
+            "after 100ms delay reconnect sends DoSubscribeAllTrades(false)"
+        );
+
+        client.tick_trades_reconnect_sequence(10_200, client.server_token);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "once TradesStream has observed the current ServerToken, reconnect retry stops"
         );
 
         let response_data = build_markets_indexes_response(&["BTCUSDT".to_string()]);
@@ -14836,6 +15245,10 @@ mod reconnect_timing_tests {
         assert!(
             after_indexes_methods.contains(&(EngineMethod::UpdateMarketsList as u8)),
             "after reconnect index sync, library must refresh market prices like Delphi UpdateMarketsList"
+        );
+        assert!(
+            after_indexes_methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            "after reconnect index sync, library must replay orderbook subscriptions"
         );
 
         let mut dispatcher = EventDispatcher::new();
@@ -14882,7 +15295,52 @@ mod reconnect_timing_tests {
     }
 
     #[test]
-    fn initial_waiting_hello_sends_hello_again_like_delphi() {
+    fn trades_reconnect_retries_every_five_seconds_until_stream_token_is_seen() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.server_token = 0x2222;
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        });
+
+        client.tick_trades_reconnect_sequence(10_000, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::UnsubscribeAllTrades as u8]
+        );
+        client.tick_trades_reconnect_sequence(10_100, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeAllTrades as u8]
+        );
+
+        client.tick_trades_reconnect_sequence(14_999, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "NeedReconnectAllTrades throttle is strict < 5000ms"
+        );
+        client.tick_trades_reconnect_sequence(15_000, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::UnsubscribeAllTrades as u8]
+        );
+
+        client.tick_trades_reconnect_sequence(15_100, client.server_token);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeAllTrades as u8],
+            "once UnSubscribeAllTrades ran, the paired delayed SubscribeAllTrades still completes"
+        );
+
+        client.tick_trades_reconnect_sequence(20_100, client.server_token);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "observed current FTradesServerToken stops further retries"
+        );
+    }
+
+    #[test]
+    fn primary_hard_handshake_does_not_send_hello_again_before_session_exists() {
         let mut client = dummy_client();
         let token_before = client.client_token;
 
@@ -14898,15 +15356,46 @@ mod reconnect_timing_tests {
         }
         .check_offline_reconnect(350);
 
-        assert_eq!(client.auth_status, AuthStatus::Offline);
         assert_eq!(
-            client.last_sent_hello, 350,
-            "Delphi sends HelloAgain 200ms after the first waiting Hello even before WhoAreYou",
+            client.last_sent_hello, 100,
+            "before Fine the server has no FClients entry; retry HelloAgain would make it answer WantNewHello",
         );
         assert_eq!(
             client.client_token,
+            token_before + 1,
+            "only the first Hello may increment token in primary hard handshake",
+        );
+        assert_eq!(client.auth_status, AuthStatus::Base);
+    }
+
+    #[test]
+    fn soft_reconnect_waiting_hello_still_retries_hello_again() {
+        let mut client = dummy_client();
+        install_session_key(&mut client);
+        client.server_token = 0x1234;
+        client.soft_reconnect = true;
+        client.need_connect = true;
+        let token_before = client.client_token;
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_hello_send(100);
+        assert_eq!(client.last_sent_hello, 100);
+        assert!(client.waiting_hello);
+        assert_eq!(client.client_token, token_before + 1);
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_offline_reconnect(350);
+
+        assert_eq!(client.auth_status, AuthStatus::Offline);
+        assert_eq!(client.last_sent_hello, 350);
+        assert_eq!(
+            client.client_token,
             token_before + 2,
-            "first Hello increments token once; early HelloAgain increments it again",
+            "soft reconnect keeps the Delphi HelloAgain retry behavior",
         );
     }
 
@@ -15012,65 +15501,9 @@ fn delphi_now_raw() -> f64 {
 /// Delphi TDateTime corrected by NTP offset.
 /// Matches: `Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset`.
 /// We use UTC directly (no timezone offset needed — TDateTime in MoonProto = UTC).
-///
-/// **Clock-jump sanity check** (audit_robustness H6): SystemTime подвержен NTP step и
-/// suspend/resume скачкам. Если wall-clock уходит от monotonic elapsed больше чем
-/// на 60 секунд — поднимается process-wide generation; каждый Client выполнит
-/// force reconnect один раз на это поколение. Сам результат возвращаем как есть —
-/// иначе handshake/order timestamps будут противоречить серверу.
 fn delphi_now() -> f64 {
-    let now = delphi_now_raw() + get_ntp_offset_days();
-
-    // Детектор скачка: сравниваем wall-clock delta с монотонным elapsed.
-    // Обычный простой клиента >60с не считается clock-jump; NTP step и suspend,
-    // где wall-clock ушёл относительно monotonic, поднимают process-wide generation.
-    let mono_now = Instant::now();
-    if let Ok(mut state) = CLOCK_JUMP_STATE.lock() {
-        if let Some((prev_now, prev_mono)) = *state {
-            if is_clock_jump(prev_now, prev_mono, now, mono_now) {
-                let delta_secs = clock_jump_drift_secs(prev_now, prev_mono, now, mono_now);
-                log::warn!(target: "moonproto::client",
-                    "delphi_now clock jump detected: {:.1}s — forcing reconnect to re-sync handshake timestamps",
-                    delta_secs);
-                // audit_robustness H5: при clock-jump (NTP step / suspend-resume на mobile)
-                // прежний handshake timestamp устарел; сервер reject'нёт hello по
-                // anti-replay window. Без сброса клиент впадает в permanent retry loop с тем
-                // же stale timestamp. Generation читается каждым Client отдельно, чтобы
-                // multi-server процесс не терял сигнал после первого обработчика.
-                CLOCK_JUMP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        *state = Some((now, mono_now));
-    }
-    now
+    delphi_now_raw() + get_ntp_offset_days()
 }
-
-fn clock_jump_drift_secs(
-    prev_wall_days: f64,
-    prev_mono: Instant,
-    now_wall_days: f64,
-    now_mono: Instant,
-) -> f64 {
-    let wall_delta_secs = (now_wall_days - prev_wall_days) * 86400.0;
-    let mono_delta_secs = now_mono.saturating_duration_since(prev_mono).as_secs_f64();
-    wall_delta_secs - mono_delta_secs
-}
-
-fn is_clock_jump(
-    prev_wall_days: f64,
-    prev_mono: Instant,
-    now_wall_days: f64,
-    now_mono: Instant,
-) -> bool {
-    clock_jump_drift_secs(prev_wall_days, prev_mono, now_wall_days, now_mono).abs() > 60.0
-}
-
-/// Последнее wall-clock/monotonic значение `delphi_now` для детектора скачка часов.
-static CLOCK_JUMP_STATE: std::sync::Mutex<Option<(f64, Instant)>> = std::sync::Mutex::new(None);
-
-/// Process-global поколение скачка системных часов. Каждый Client хранит последнее
-/// обработанное значение и делает force reconnect один раз на поколение.
-static CLOCK_JUMP_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
 /// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").

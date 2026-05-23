@@ -45,7 +45,7 @@ use moonproto::{
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
 const FIRETEST_STRATEGY_ID: u64 = 0xF17E_5737_0000_0001;
 const DEFAULT_WAIT_SECS: u64 = 5;
-const DEFAULT_CANDLES_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_CANDLES_TIMEOUT_SECS: u64 = 90;
 const DEFAULT_DISCONNECT_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_RECONNECT_TIMEOUT_SECS: u64 = 30;
 const PUMP_SLICE: Duration = Duration::from_millis(50);
@@ -243,6 +243,8 @@ struct SessionStats {
     candles_requested: bool,
     candles_chunks: u64,
     candles_ignored: u64,
+    candles_payload_bytes: usize,
+    candles_seen_chunks: Vec<bool>,
     candles_last_progress: (usize, usize),
     candles_complete: Option<CandlesSnapshotSummary>,
     candles_aggregator: CandlesAggregator,
@@ -271,6 +273,8 @@ impl Clone for SessionStats {
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
             candles_ignored: self.candles_ignored,
+            candles_payload_bytes: self.candles_payload_bytes,
+            candles_seen_chunks: self.candles_seen_chunks.clone(),
             candles_last_progress: self.candles_last_progress,
             candles_complete: self.candles_complete.clone(),
             candles_aggregator: CandlesAggregator::new(),
@@ -287,12 +291,15 @@ impl SessionStats {
             .as_ref()
             .map(CandlesSnapshotSummary::summary)
             .unwrap_or_else(|| {
+                let missing = missing_chunk_indexes(&self.candles_seen_chunks);
                 format!(
-                    "incomplete chunks={} ignored={} progress={}/{}",
+                    "incomplete chunks={} ignored={} payload_bytes={} progress={}/{} missing=[{}]",
                     self.candles_chunks,
                     self.candles_ignored,
+                    self.candles_payload_bytes,
                     self.candles_last_progress.0,
-                    self.candles_last_progress.1
+                    self.candles_last_progress.1,
+                    missing
                 )
             });
         format!(
@@ -438,6 +445,8 @@ impl Session {
             st.candles_requested = true;
             st.candles_chunks = 0;
             st.candles_ignored = 0;
+            st.candles_payload_bytes = 0;
+            st.candles_seen_chunks.clear();
             st.candles_last_progress = (0, 0);
             st.candles_complete = None;
             st.candles_aggregator.reset();
@@ -679,11 +688,20 @@ fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineRes
     if resp.method == EngineMethod::RequestCandlesData {
         st.candles_chunks += 1;
         if let Some((chunk_index, chunk_total, payload_len)) = candles_chunk_info(&resp.data) {
+            st.candles_payload_bytes += payload_len;
+            if st.candles_seen_chunks.len() != chunk_total {
+                st.candles_seen_chunks.clear();
+                st.candles_seen_chunks.resize(chunk_total, false);
+            }
+            if let Some(seen) = st.candles_seen_chunks.get_mut(chunk_index) {
+                *seen = true;
+            }
             detail.push_str(&format!(
-                " candle_chunk={}/{} payload_len={}",
+                " candle_chunk={}/{} payload_len={} seen_missing=[{}]",
                 chunk_index + 1,
                 chunk_total,
-                payload_len
+                payload_len,
+                missing_chunk_indexes(&st.candles_seen_chunks)
             ));
         } else {
             detail.push_str(" candle_chunk=malformed");
@@ -777,6 +795,22 @@ fn candles_chunk_info(data: &[u8]) -> Option<(usize, usize, usize)> {
     let chunk_index = u16::from_le_bytes([data[0], data[1]]) as usize;
     let chunk_total = u16::from_le_bytes([data[2], data[3]]) as usize;
     Some((chunk_index, chunk_total, data.len() - 4))
+}
+
+fn missing_chunk_indexes(seen_chunks: &[bool]) -> String {
+    if seen_chunks.is_empty() {
+        return String::new();
+    }
+    let missing = seen_chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, seen)| (!*seen).then_some((idx + 1).to_string()))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        "none".to_string()
+    } else {
+        missing.join(",")
+    }
 }
 
 fn should_log_stream_count(count: u64) -> bool {
