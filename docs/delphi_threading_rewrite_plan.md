@@ -2087,27 +2087,31 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
-### 2026-05-23 - Phase 1 partial: ProcessCommandOrder JobIsDone cleanup parity
+### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
-Done:
+Correction:
 
-- Fixed `CleanupMissingWorkers` parity. Delphi adds a missing
-  `TOrderStatusRequest` only for `(Worker <> nil) and not Worker.JobIsDone and
-  stale SnapshotFlag`. Rust previously treated terminal entries waiting for
-  deferred removal as missing candidates.
-- Rust `Orders::missing_after_snapshot` now skips `job_is_done` entries.
-- Fixed `TOrderNotFound` parity for done workers. Delphi logs the not-found but
-  sets `CancellRequest` / `ServerForcedRemove` only inside
-  `If not Worker.JobIsDone`; Rust now leaves an already terminal entry
-  untouched instead of forcing immediate removal.
-- Added tests for both invariants and updated API docs.
+- The first reading of `MoonProtoClient.pas:589-666` was too literal:
+  Delphi checks `not Worker.JobIsDone`, but MoonProto virtual workers do not
+  set `JobIsDone` when status becomes terminal. `JobIsDone` is set only in
+  `DoFinalSynCall`, after `DoTheJobVirtual` returns; `RemoveWorkerFromCache`
+  happens before that.
+- Therefore Rust `Order.job_is_done` is a read-model terminal marker, not the
+  Delphi thread-lifetime flag. While a terminal Rust entry waits for deferred
+  removal, it still represents a Delphi worker physically present in `WCache`.
+- Kept/restored the correct behavior: terminal entries waiting for deferred
+  removal can still be `CleanupMissingWorkers` candidates, and `TOrderNotFound`
+  still sets `cancel_request` / `server_forced_remove` while the entry exists.
+- Updated API docs to make this distinction explicit.
 
 Verification:
 
-- Targeted tests for `missing_after_snapshot`, normal `TOrderNotFound`, and
-  done-worker `TOrderNotFound` passed.
+- Targeted tests passed:
+  `missing_after_snapshot_keeps_terminal_entry_until_deferred_removal_like_delphi_wcache`,
+  `order_not_found_marks_server_forced_then_deferred_removal_like_delphi`,
+  `visual_trace_after_terminal_status_is_accepted_before_deferred_removal_like_delphi`.
 - `cargo fmt` OK.
-- `cargo test` OK: `549 passed`; live/fire tests ignored by default.
+- Full `cargo test` OK: `548 passed`; live/fire tests ignored by default.
 - `cargo check --examples` OK.
 
 Still not done:

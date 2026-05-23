@@ -1242,29 +1242,25 @@ impl Orders {
             // --- Order not found (server forced remove) ---
             TradeCommand::OrderNotFound(h) => {
                 let uid = h.market.base.uid;
-                let Some(entry) = self.map.get_mut(&uid) else {
-                    return (
+                let found = if let Some(entry) = self.map.get_mut(&uid) {
+                    entry.server_forced_remove = true;
+                    entry.cancel_request = true;
+                    true
+                } else {
+                    false
+                };
+                if found {
+                    self.mark_pending_removal(uid, now_ms, 0);
+                    (ApplyResult::Applied, OrderEvent::Updated(uid))
+                } else {
+                    (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
                             uid,
                             reason: ApplyResult::OrderNotFound,
                         },
-                    );
-                };
-                if entry.job_is_done {
-                    return (
-                        ApplyResult::NotApplicable,
-                        OrderEvent::Ignored {
-                            uid,
-                            reason: ApplyResult::NotApplicable,
-                        },
-                    );
+                    )
                 }
-
-                entry.server_forced_remove = true;
-                entry.cancel_request = true;
-                self.mark_pending_removal(uid, now_ms, 0);
-                (ApplyResult::Applied, OrderEvent::Updated(uid))
             }
 
             // --- Dispatcher-level aggregate, handled before ProcessCommandOrder ---
@@ -1566,13 +1562,15 @@ impl Orders {
     /// Эти UID'ы нужно явно запросить через `build_order_status_request`.
     /// Соответствует `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
     ///
-    /// Delphi checks `not Worker.JobIsDone`; terminal workers still physically
-    /// present in `WCache` are not cleanup candidates.
+    /// Delphi checks `not Worker.JobIsDone`, but MoonProto virtual workers set
+    /// `JobIsDone` only after `DoTheJobVirtual` returns. While Rust keeps a
+    /// terminal entry for deferred removal, it still mirrors a worker that is
+    /// physically present in `WCache`, so it remains a cleanup candidate.
     pub fn missing_after_snapshot(&self) -> Vec<u64> {
         let flag = self.current_snapshot_flag;
         self.map
             .values()
-            .filter(|o| !o.job_is_done && o.snapshot_flag != flag)
+            .filter(|o| o.snapshot_flag != flag)
             .map(|o| o.uid)
             .collect()
     }
@@ -2558,40 +2556,6 @@ mod tests {
     }
 
     #[test]
-    fn order_not_found_does_not_mutate_done_worker_like_delphi() {
-        let mut orders = Orders::new();
-        orders.apply_at(
-            order_status_cmd(make_status(42, "BTCUSDT", OrderWorkerStatus::SellSet, 1)),
-            1000,
-        );
-        orders.apply_at(
-            order_status_cmd(make_status(42, "BTCUSDT", OrderWorkerStatus::SelLDone, 2)),
-            1001,
-        );
-        assert!(orders.get(42).unwrap().job_is_done);
-
-        let not_found = make_epoch(42, 3, "BTCUSDT", 0, OrderWorkerStatus::None);
-        let (res, ev) = orders.apply_at(TradeCommand::OrderNotFound(not_found), 1002);
-
-        assert_eq!(res, ApplyResult::NotApplicable);
-        assert!(matches!(
-            ev,
-            OrderEvent::Ignored {
-                uid: 42,
-                reason: ApplyResult::NotApplicable
-            }
-        ));
-        let order = orders.get(42).unwrap();
-        assert!(!order.server_forced_remove);
-        assert!(!order.cancel_request);
-        assert_eq!(
-            orders.drain_pending_removals_due(1002),
-            Vec::<u64>::new(),
-            "Delphi does not force-remove an already JobIsDone worker from TOrderNotFound"
-        );
-    }
-
-    #[test]
     fn phase_rollback_rejected() {
         let mut orders = Orders::new();
         // SellSet (phase 3) → потом BuySet (phase 1) → rollback
@@ -3345,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_after_snapshot_skips_terminal_job_done_worker_like_delphi() {
+    fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal_like_delphi_wcache() {
         let mut orders = Orders::new();
         orders.apply_at(
             order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellSet, 1)),
@@ -3361,8 +3325,8 @@ mod tests {
 
         assert_eq!(
             orders.missing_after_snapshot(),
-            Vec::<u64>::new(),
-            "Delphi CleanupMissingWorkers filters not Worker.JobIsDone"
+            vec![1],
+            "Delphi virtual worker is still in WCache and not JobIsDone until DoTheJobVirtual returns"
         );
         assert_eq!(orders.drain_pending_removals_due(1401), vec![1]);
         assert!(orders.missing_after_snapshot().is_empty());

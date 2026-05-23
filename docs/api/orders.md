@@ -45,15 +45,16 @@ order: it advances the snapshot flag, applies each contained `TOrderStatus`
 through the same order-command path as live updates, emits the per-order events,
 then emits `OrderEvent::Snapshot` for redraw / missing-order cleanup. Cleanup
 treats every order still present in the read model as a Delphi `WCache` worker:
-only non-terminal entries (`job_is_done == false`) can produce a follow-up
-`TOrderStatusRequest` when absent from the fresh snapshot. Terminal entries
-waiting for deferred removal are skipped, matching Delphi
-`not Worker.JobIsDone`. Any incoming `TBaseMarketCommand` descendant that
-reaches Delphi `ProcessCommandOrder` and finds an existing local worker
-refreshes that worker's snapshot mark before epoch/phase checks.
-`TAllStatusesReq` and `TSetImmuneCommand` do not do this, and the special
-`TBulkReplaceNotify` branch only touches the UIDs listed in the notify without
-refreshing snapshot presence.
+terminal entries waiting for deferred removal can still produce a follow-up
+`TOrderStatusRequest` when they are absent from the fresh snapshot. This matches
+MoonProto virtual workers: Delphi `JobIsDone` becomes true only after
+`DoTheJobVirtual` returns, while `RemoveWorkerFromCache` happens before that.
+Any incoming `TBaseMarketCommand` descendant that reaches Delphi
+`ProcessCommandOrder` and finds an existing local worker refreshes that
+worker's snapshot mark before epoch/phase checks. `TAllStatusesReq` and
+`TSetImmuneCommand` do not do this, and the special `TBulkReplaceNotify` branch
+only touches the UIDs listed in the notify without refreshing snapshot
+presence.
 `TOrderStatus` responses marked `FromCache=true` update only an already tracked
 order; they do not create a new active order entry when the UID is unknown.
 For a new non-cache `TOrderStatus`, the dispatcher also requires the market
@@ -195,11 +196,11 @@ worker and does not apply the rest of `UpdateData` to `buy_order`.
 `pending_cancel` mirrors Delphi `vOrder.PendingCancel`. Calling
 `cancel_order` for a pending `OS_None` order sets this flag and follows
 Delphi's `CheckReplaceFlag` pending path.
-`TOrderNotFound` sets `cancel_request` and `server_forced_remove` only while the
-entry is not `job_is_done`; a late not-found for an already terminal worker is a
-state no-op, matching Delphi's `If not Worker.JobIsDone`.
-`job_is_done` mirrors Delphi `BOrderWorker.JobIsDone` for missing-order cleanup:
-done entries are skipped even while they are still waiting for deferred removal.
+`TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately
+while the entry is still present. `job_is_done` is a read-model terminal marker,
+not Delphi's thread-lifetime `BOrderWorker.JobIsDone`; during the deferred
+removal window the Rust entry still corresponds to a virtual worker that has
+not returned from `DoTheJobVirtual`.
 
 ## Status Values
 
