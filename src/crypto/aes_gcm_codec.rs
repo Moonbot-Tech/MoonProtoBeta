@@ -3,8 +3,20 @@ use aes_gcm::aead::AeadInPlace;
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce, Tag};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use zerocopy::byteorder::little_endian::{U32 as LeU32, U64 as LeU64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 static IV_COUNTER: AtomicU64 = AtomicU64::new(1);
+const IV_SIZE: usize = 12;
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct WireMoonProtoIv {
+    r1: LeU64,
+    r2: LeU32,
+}
+
+const _: () = assert!(core::mem::size_of::<WireMoonProtoIv>() == IV_SIZE);
 
 /// `GlobalAESIVMask` — random u64 заводится при первом encrypt'е (≡ Delphi
 /// initialization секция MoonProtoFunc.pas:834 `GlobalAESIVMask := random64`).
@@ -51,9 +63,12 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);
     let r1 = counter ^ iv_mask();
     let r2 = (cpu_timestamp() & 0xFFFF_FFFF) as u32;
-    let mut iv_bytes = [0u8; 12];
-    iv_bytes[0..8].copy_from_slice(&r1.to_le_bytes());
-    iv_bytes[8..12].copy_from_slice(&r2.to_le_bytes());
+    let wire_iv = WireMoonProtoIv {
+        r1: LeU64::new(r1),
+        r2: LeU32::new(r2),
+    };
+    let mut iv_bytes = [0u8; IV_SIZE];
+    iv_bytes.copy_from_slice(wire_iv.as_bytes());
     let nonce = Nonce::from_slice(&iv_bytes);
 
     // PKCS7 padding
@@ -70,7 +85,7 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
         .expect("AES-GCM payload < 16 EiB — invariant satisfied by MTU");
 
     // Output: IV(12) + Tag(16) + Ciphertext
-    let mut output = Vec::with_capacity(12 + 16 + padded.len());
+    let mut output = Vec::with_capacity(IV_SIZE + 16 + padded.len());
     output.extend_from_slice(&iv_bytes);
     output.extend_from_slice(tag.as_slice());
     output.extend_from_slice(&padded);
@@ -80,13 +95,13 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
 /// AES-128-GCM decrypt с переиспользуемым cipher — hot path версия.
 /// См. `encrypt_with_cipher` для контекста B-V2-03.
 pub fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 28 {
+    if data.len() < IV_SIZE + 16 {
         return None;
     }
 
-    let iv_bytes = &data[0..12];
-    let tag_bytes = &data[12..28];
-    let ciphertext = &data[28..];
+    let iv_bytes = &data[0..IV_SIZE];
+    let tag_bytes = &data[IV_SIZE..IV_SIZE + 16];
+    let ciphertext = &data[IV_SIZE + 16..];
 
     if ciphertext.is_empty() {
         return None;
@@ -164,5 +179,23 @@ mod tests {
         let key: MoonKey = [1; 16];
         let encrypted = encrypt(&key, b"secret", &[1, 2, 3]);
         assert!(decrypt(&key, &encrypted, &[4, 5, 6]).is_none());
+    }
+
+    #[test]
+    fn moonproto_iv_wire_layout_is_fixed() {
+        let wire = WireMoonProtoIv {
+            r1: LeU64::new(0x8877_6655_4433_2211),
+            r2: LeU32::new(0xccbb_aa99),
+        };
+
+        let bytes = wire.as_bytes();
+        assert_eq!(
+            bytes,
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc]
+        );
+
+        let parsed = WireMoonProtoIv::read_from_bytes(bytes).unwrap();
+        assert_eq!(parsed.r1.get(), 0x8877_6655_4433_2211);
+        assert_eq!(parsed.r2.get(), 0xccbb_aa99);
     }
 }

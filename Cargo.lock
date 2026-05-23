@@ -246,6 +246,7 @@ dependencies = [
  "libloading",
  "log",
  "rand",
+ "zerocopy",
 ]
 
 [[package]]

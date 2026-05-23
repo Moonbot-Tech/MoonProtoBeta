@@ -2286,6 +2286,10 @@ Current status:
   `EmuTradePoint` to private zerocopy-backed `Wire*` structs.
 - Converted 9-byte packed array items `StratCheckedItem` and `ImmuneItem` to
   private zerocopy-backed `Wire*` structs.
+- Converted opaque fixed UI setting blobs `TAutoStartConfig` and
+  `TAutoStartConfig2` to private zerocopy-backed `Wire*` wrappers. They remain
+  raw `Vec<u8>` in public API because Rust does not own those Delphi config
+  fields, but the wire sizes are now mechanically checked.
 - Converted candle fixed records `DeepPrice`, `DeepPricePack`, and
   `DeepPricePackOLD` to private zerocopy-backed `Wire*` structs.
 - Converted trades-stream fixed rows/header (`TradesPacketHeader`, 10-byte
@@ -2295,6 +2299,21 @@ Current status:
   ACK256 payloads to private zerocopy-backed `Wire*` structs.
 - Converted service packed records `Ping`, `SizeTest`, `ProbeMTU`, and
   `ProbeMTUAck` to private zerocopy-backed `Wire*` structs.
+- Converted AES-GCM IV record `TMoonProtoIV` to a private zerocopy-backed
+  `Wire*` struct.
+- Converted transport packed headers in nested `moonproto-transport`
+  (`ServerMsgHeader` 7 bytes and `ClientMsgHeader` 15 bytes) to private
+  zerocopy-backed `Wire*` structs while keeping public header structs plain.
+- Checked `TBalanceItem`: despite `packed record`, it is not written/read as
+  fixed `SizeOf(TBalanceItem)` wire. Its wire format is UTF-8 string + hash +
+  flags + bitmask-controlled scalar fields, so it stays in the variable-format
+  parser path.
+- Checked `TTradesPacketMapEntry`: it is an obsolete commented-out Delphi cache
+  record, not live wire format.
+- Checked `TMoonProtoEchoSTUN`: open Rust transport has no direct STUN-echo
+  record to convert; mask modes 1/2 are delegated to `moonext`. If direct
+  STUN-echo handling is ever moved into open Rust, it must be added as a
+  private fixed wire struct with the same 20-byte layout.
 - Public API/state structs still expose plain Rust fields; endian-aware wrappers
   are private to the wire layer.
 - Added/kept tests for compile-time sizes and byte-for-byte roundtrip.

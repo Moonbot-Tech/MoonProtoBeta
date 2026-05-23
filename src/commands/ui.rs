@@ -56,6 +56,37 @@ pub const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
 pub const AS_CFG2_SIZE: usize = 168;
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireAutoStartConfig {
+    bytes: [u8; AS_CFG_SIZE],
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireAutoStartConfig2 {
+    bytes: [u8; AS_CFG2_SIZE],
+}
+
+const _: () = assert!(core::mem::size_of::<WireAutoStartConfig>() == AS_CFG_SIZE);
+const _: () = assert!(core::mem::size_of::<WireAutoStartConfig2>() == AS_CFG2_SIZE);
+
+impl WireAutoStartConfig {
+    fn from_blob(blob: &[u8]) -> Self {
+        let mut bytes = [0u8; AS_CFG_SIZE];
+        copy_blob_prefix(&mut bytes, blob);
+        Self { bytes }
+    }
+}
+
+impl WireAutoStartConfig2 {
+    fn from_blob(blob: &[u8]) -> Self {
+        let mut bytes = [0u8; AS_CFG2_SIZE];
+        copy_blob_prefix(&mut bytes, blob);
+        Self { bytes }
+    }
+}
+
 /// ArbConfig wire version byte (ArbTypes.pas:25 `ARB_CONFIG_VER = 1`).
 pub const ARB_CONFIG_VER: u8 = 1;
 
@@ -745,20 +776,14 @@ fn parse_client_settings(
 
     // ASCfg: `if pos + sizeof(Word) < size`  → Delphi `<`, не `<=`, чтобы было что-то ЗА размером.
     let as_cfg = if can_read_sized_blob(data, *pos) {
-        read_sized_blob_with_fallback(
-            data,
-            pos,
-            AS_CFG_SIZE,
-            fallback.map(|f| f.as_cfg.as_slice()),
-        )
+        read_sized_autostart_config_with_fallback(data, pos, fallback.map(|f| f.as_cfg.as_slice()))
     } else {
         fallback.map(|f| f.as_cfg.clone()).unwrap_or_default()
     };
     let as_cfg2 = if can_read_sized_blob(data, *pos) {
-        read_sized_blob_with_fallback(
+        read_sized_autostart_config2_with_fallback(
             data,
             pos,
-            AS_CFG2_SIZE,
             fallback.map(|f| f.as_cfg2.as_slice()),
         )
     } else {
@@ -868,25 +893,45 @@ fn parse_client_settings(
 /// prefix that exists in the stream. Missing tail bytes therefore keep fallback
 /// values; they are not zeroed and not truncated.
 /// Delphi гвард: `pos + SizeOf(Word) < size` — оставляем как `<`.
-fn read_sized_blob_with_fallback(
+fn read_sized_autostart_config_with_fallback(
     data: &[u8],
     pos: &mut usize,
-    destination_size: usize,
     fallback: Option<&[u8]>,
 ) -> Vec<u8> {
+    let bytes = read_sized_fixed_blob_with_fallback::<AS_CFG_SIZE>(data, pos, fallback);
+    WireAutoStartConfig { bytes }.as_bytes().to_vec()
+}
+
+fn read_sized_autostart_config2_with_fallback(
+    data: &[u8],
+    pos: &mut usize,
+    fallback: Option<&[u8]>,
+) -> Vec<u8> {
+    let bytes = read_sized_fixed_blob_with_fallback::<AS_CFG2_SIZE>(data, pos, fallback);
+    WireAutoStartConfig2 { bytes }.as_bytes().to_vec()
+}
+
+fn read_sized_fixed_blob_with_fallback<const N: usize>(
+    data: &[u8],
+    pos: &mut usize,
+    fallback: Option<&[u8]>,
+) -> [u8; N] {
     if !can_read_sized_blob(data, *pos) {
-        return fallback.map(Vec::from).unwrap_or_default();
+        let mut blob = [0u8; N];
+        if let Some(fallback) = fallback {
+            copy_blob_prefix(&mut blob, fallback);
+        }
+        return blob;
     }
     let sz = u16::from_le_bytes([data[*pos], data[*pos + 1]]) as usize;
     *pos += 2;
-    let mut blob = vec![0u8; destination_size];
+    let mut blob = [0u8; N];
     if let Some(fallback) = fallback {
-        let copy = fallback.len().min(destination_size);
-        blob[..copy].copy_from_slice(&fallback[..copy]);
+        copy_blob_prefix(&mut blob, fallback);
     }
 
     let available = data.len().saturating_sub(*pos);
-    let to_copy = sz.min(destination_size).min(available);
+    let to_copy = sz.min(N).min(available);
     blob[..to_copy].copy_from_slice(&data[*pos..*pos + to_copy]);
     *pos += sz.min(available);
     blob
@@ -958,10 +1003,10 @@ pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
 
     // ASCfg / ASCfg2: всегда пишем фиксированный sz = SizeOf(record).
     out.extend_from_slice(&(AS_CFG_SIZE as u16).to_le_bytes());
-    write_blob_fixed(&mut out, &cmd.as_cfg, AS_CFG_SIZE);
+    write_autostart_config(&mut out, &cmd.as_cfg);
 
     out.extend_from_slice(&(AS_CFG2_SIZE as u16).to_le_bytes());
-    write_blob_fixed(&mut out, &cmd.as_cfg2, AS_CFG2_SIZE);
+    write_autostart_config2(&mut out, &cmd.as_cfg2);
 
     for v in cmd.s_price.iter() {
         out.extend_from_slice(&v.to_le_bytes());
@@ -1001,13 +1046,17 @@ pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     out
 }
 
-fn write_blob_fixed(out: &mut Vec<u8>, blob: &[u8], target_size: usize) {
-    if blob.len() >= target_size {
-        out.extend_from_slice(&blob[..target_size]);
-    } else {
-        out.extend_from_slice(blob);
-        out.extend(std::iter::repeat_n(0u8, target_size - blob.len()));
-    }
+fn write_autostart_config(out: &mut Vec<u8>, blob: &[u8]) {
+    out.extend_from_slice(WireAutoStartConfig::from_blob(blob).as_bytes());
+}
+
+fn write_autostart_config2(out: &mut Vec<u8>, blob: &[u8]) {
+    out.extend_from_slice(WireAutoStartConfig2::from_blob(blob).as_bytes());
+}
+
+fn copy_blob_prefix<const N: usize>(dst: &mut [u8; N], blob: &[u8]) {
+    let copy = blob.len().min(N);
+    dst[..copy].copy_from_slice(&blob[..copy]);
 }
 
 /// CmdId=2 `TSettingsRequest` (empty body).
