@@ -2180,6 +2180,36 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining `Balance`,
   `Trades`, `OrderBook`, `UI`, and API/market domain details.
 
+### 2026-05-24 - Phase 1 partial: UpdateMarketsList out-of-range mIndex
+
+Done:
+
+- Fixed an `emk_UpdateMarketsList` state parity bug.
+- Delphi handles every price row through `SrvMarkets.FindByServerIndex(mIndex)`;
+  if it returns `nil`, including out-of-range index, it sets
+  `NewMarketFound := true` and does not apply that row to any local market.
+- Rust already handled the "mapped name exists but is missing locally" case, but
+  did not set `markets_list_refresh_needed` when `mIndex` was outside the
+  current `emk_GetMarketsIndexes` vector.
+- Rust now treats out-of-range indexed price rows as missing-market rows and
+  sets the refresh flag.
+- Also corrected the `MarketsState` module comment: `UpdateMarketsList` cadence
+  is ~2 seconds; ~60 seconds belongs to `CheckBinanceTags`.
+- Recorded `spec_pipeline/work/хуйня.md §X.120`.
+
+Verification:
+
+- Added state coverage for out-of-range `mIndex`.
+- `cargo test apply_prices_marks_refresh_needed --quiet` OK: `2 passed`.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `566 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining market/API and
+  protocol-domain details.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:

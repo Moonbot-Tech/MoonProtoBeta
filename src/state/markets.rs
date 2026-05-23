@@ -4,9 +4,9 @@
 //!
 //! ## Поток обновлений
 //! - При запуске клиент шлёт `emk_GetMarketsList` → получает полный список (Markets + CorrMarkets).
-//! - Периодически (1 раз в минуту по серверной логике) `emk_UpdateMarketsList` → обновление цен/funding.
+//! - Периодически (~2 секунды по Delphi worker cadence) `emk_UpdateMarketsList` → обновление цен/funding.
 //! - `emk_GetMarketsIndexes` → имена в порядке индексов (mIndex).
-//! - `emk_CheckBinanceTags` → теги монет.
+//! - Периодически (~60 секунд + hourly burst) `emk_CheckBinanceTags` → теги монет.
 
 use std::collections::HashMap;
 
@@ -330,7 +330,7 @@ impl MarketsState {
             return self
                 .market_indexes
                 .get(server_pos)
-                .is_some_and(|name| !self.by_name.contains_key(name));
+                .is_none_or(|name| !self.by_name.contains_key(name));
         }
         self.market_indexes.is_empty() && server_pos >= self.prices.len()
     }
@@ -745,6 +745,37 @@ mod tests {
             st.price("BTCUSDT").unwrap().bid == 0.0,
             "unknown market row must not be applied to a wrong local market"
         );
+    }
+
+    #[test]
+    fn apply_prices_marks_refresh_needed_for_out_of_range_index_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 2,
+                bid: 0.1,
+                ask: 0.2,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 0.15,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+
+        assert!(
+            st.markets_list_refresh_needed(),
+            "Delphi SrvMarkets.FindByServerIndex(out-of-range) returns nil and sets NewMarketFound"
+        );
+        assert_eq!(st.price("BTCUSDT").unwrap().bid, 0.0);
     }
 
     #[test]
