@@ -30,6 +30,8 @@
 
 use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
+use zerocopy::byteorder::little_endian::{F32 as LeF32, U16 as LeU16};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 // --- CmdId constants ---
 const CMD_CLIENT_SETTINGS: u8 = 1;
@@ -100,6 +102,45 @@ pub struct EmuTradePoint {
     pub time_delta_ms: u16,
     /// Цена. Знак отрицательный = Sell.
     pub price: f32,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireEmuTradePoint {
+    time_delta_ms: LeU16,
+    price: LeF32,
+}
+
+const EMU_TRADE_POINT_SIZE: usize = std::mem::size_of::<WireEmuTradePoint>();
+const _: [(); 6] = [(); EMU_TRADE_POINT_SIZE];
+
+impl EmuTradePoint {
+    fn from_wire(wire: WireEmuTradePoint) -> Self {
+        Self {
+            time_delta_ms: wire.time_delta_ms.get(),
+            price: wire.price.get(),
+        }
+    }
+
+    fn to_wire(self) -> WireEmuTradePoint {
+        WireEmuTradePoint {
+            time_delta_ms: LeU16::new(self.time_delta_ms),
+            price: LeF32::new(self.price),
+        }
+    }
+
+    fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < EMU_TRADE_POINT_SIZE {
+            return None;
+        }
+        Some(Self::from_wire(
+            WireEmuTradePoint::read_from_bytes(&data[..EMU_TRADE_POINT_SIZE]).ok()?,
+        ))
+    }
+
+    fn write_to(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
+    }
 }
 
 // =============================================================================
@@ -420,19 +461,15 @@ impl UICommand {
                 pos += 8;
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut points = Vec::with_capacity(count.min((payload.len() - pos) / 6));
+                let mut points =
+                    Vec::with_capacity(count.min((payload.len() - pos) / EMU_TRADE_POINT_SIZE));
                 for _ in 0..count {
-                    if pos + 6 > payload.len() {
+                    if let Some(point) = EmuTradePoint::from_bytes(&payload[pos..]) {
+                        pos += EMU_TRADE_POINT_SIZE;
+                        points.push(point);
+                    } else {
                         break;
                     }
-                    let time_delta_ms = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
-                    pos += 2;
-                    let price = f32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
-                    pos += 4;
-                    points.push(EmuTradePoint {
-                        time_delta_ms,
-                        price,
-                    });
                 }
                 Some(UICommand::EmuTrades(EmuTrades {
                     uid,
@@ -1042,8 +1079,7 @@ pub fn build_emu_trades(
     out.extend_from_slice(&base_time.to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
     for p in points.iter().take(count_usize) {
-        out.extend_from_slice(&p.time_delta_ms.to_le_bytes());
-        out.extend_from_slice(&p.price.to_le_bytes());
+        p.write_to(&mut out);
     }
     out
 }
@@ -1217,6 +1253,28 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn emu_trade_point_uses_private_wire_struct() {
+        assert_eq!(std::mem::size_of::<WireEmuTradePoint>(), 6);
+        assert_eq!(EMU_TRADE_POINT_SIZE, 6);
+
+        let point = EmuTradePoint {
+            time_delta_ms: 65535,
+            price: -0.0,
+        };
+        let mut bytes = Vec::new();
+        point.write_to(&mut bytes);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&65535u16.to_le_bytes());
+        expected.extend_from_slice(&(-0.0f32).to_le_bytes());
+        assert_eq!(bytes, expected);
+
+        let parsed = EmuTradePoint::from_bytes(&bytes).expect("valid TEmuTradePoint");
+        assert_eq!(parsed.time_delta_ms, 65535);
+        assert_eq!(parsed.price.to_bits(), (-0.0f32).to_bits());
     }
 
     #[test]
