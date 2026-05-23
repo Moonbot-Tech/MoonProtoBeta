@@ -150,11 +150,8 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     }
     let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
-    // DoS guard: BalanceItem минимум ~14 байт (string-prefix u16 + hash 8 + flags 4).
-    // count * 14 > remaining → malformed/adversarial.
-    if count_raw < 0 || (count_raw as usize).saturating_mul(14) > data.len().saturating_sub(pos) {
-        log::warn!(target: "moonproto::balance",
-            "BalanceUpdate: invalid count={} (remaining={})", count_raw, data.len() - pos);
+
+    if count_raw <= 0 {
         return Some(result);
     }
     let count = count_raw as usize;
@@ -240,6 +237,52 @@ fn read_flagged_i32(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32, def
         v
     } else {
         default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full_balance_payload_with_count(count: i32, item_bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&7u16.to_le_bytes());
+        for v in [1.0_f64, 2.0, 3.0, 4.0] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(item_bytes);
+        out
+    }
+
+    fn zero_flags_item(name: &str, hash: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        super::super::registry::write_string(&mut out, name);
+        out.extend_from_slice(&hash.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn balance_parser_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+        let item = zero_flags_item("BTCUSDT", 99);
+        let payload = full_balance_payload_with_count(2, &item);
+
+        let parsed = parse_balance(3, &payload).unwrap();
+
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].market_name, "BTCUSDT");
+        assert_eq!(parsed.items[0].balance_hash, 99);
+        assert_eq!(parsed.items[0].leverage_x, 1);
+    }
+
+    #[test]
+    fn balance_parser_negative_count_has_no_items_like_delphi_count_guard() {
+        let payload = full_balance_payload_with_count(-1, &[]);
+
+        let parsed = parse_balance(3, &payload).unwrap();
+
+        assert!(parsed.items.is_empty());
     }
 }
 

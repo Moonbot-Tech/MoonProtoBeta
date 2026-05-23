@@ -2223,6 +2223,29 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining `Balance` parser/state
   details, then `Trades`, `OrderBook`, `UI`, and API domain handling.
 
+### 2026-05-24 - Phase 1 partial: balance Count parser loop
+
+Done:
+
+- Fixed a `TBalanceCommand.CreateFromStream` / `TBalanceIncrUpdate.CreateFromStream`
+  parser parity bug.
+- Delphi reads `Count`; if it is positive, it iterates items in order. It does
+  not pre-drop the whole item list because `Count * min_item_size` exceeds the
+  remaining bytes.
+- Rust previously had a balance-only DoS guard that returned an empty item list
+  before trying to parse any item. That changed malformed/partial packet machine
+  effect from "keep already present readable items until parsing stops" to
+  "drop all items".
+- Rust now treats `Count <= 0` as no items and otherwise parses items in order
+  until the first item cannot be read, matching the Delphi loop shape while
+  still avoiding pre-allocation from untrusted `Count`.
+- Added regression tests and recorded `spec_pipeline/work/хуйня.md §X.112`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `Balance` parser/state
+  details, then `Trades`, `OrderBook`, `UI`, and API domain handling.
+
 ### 2026-05-23 - Phase 1 partial: OrderBook recovery and reconnect replay order
 
 Done:
