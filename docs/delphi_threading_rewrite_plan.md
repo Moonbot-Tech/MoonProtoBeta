@@ -2286,6 +2286,9 @@ Current status:
   `EmuTradePoint` to private zerocopy-backed `Wire*` structs.
 - Converted candle fixed records `DeepPrice`, `DeepPricePack`, and
   `DeepPricePackOLD` to private zerocopy-backed `Wire*` structs.
+- Converted trades-stream fixed rows/header (`TradesPacketHeader`, 10-byte
+  trade/MM/liquidation rows, and 20-byte watcher-fill rows) to private
+  zerocopy-backed `Wire*` structs.
 - Converted core fixed wire headers `Hello`, `CryptoHeader`, `SliceHeader`, and
   ACK256 payloads to private zerocopy-backed `Wire*` structs.
 - Public API/state structs still expose plain Rust fields; endian-aware wrappers

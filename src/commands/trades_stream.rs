@@ -6,6 +6,8 @@
 //! [`crate::state::TradesState`].
 
 use crate::compression;
+use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I16 as LeI16, U16 as LeU16};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 // Flags byte (last byte of raw packet)
 const TRADES_FLAG_COMPRESSED: u8 = 0x01;
@@ -13,7 +15,39 @@ const TRADES_FLAG_HAS_TAKER: u8 = 0x02;
 
 /// Size in bytes of one Delphi watcher-fill record inside a watcher-fills
 /// extended section.
-pub const WATCHER_FILL_RECORD_SIZE: usize = 20;
+pub const WATCHER_FILL_RECORD_SIZE: usize = std::mem::size_of::<WireWatcherFill>();
+const _: [(); 20] = [(); WATCHER_FILL_RECORD_SIZE];
+const TRADES_PACKET_HEADER_SIZE: usize = std::mem::size_of::<WireTradesPacketHeader>();
+const _: [(); 10] = [(); TRADES_PACKET_HEADER_SIZE];
+const TRADE_ROW_SIZE: usize = std::mem::size_of::<WireTradeRow>();
+const _: [(); 10] = [(); TRADE_ROW_SIZE];
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+struct WireTradesPacketHeader {
+    base_time: LeF64,
+    packet_num: LeU16,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+struct WireTradeRow {
+    time_delta_ms: LeI16,
+    a: LeF32,
+    b: LeF32,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+struct WireWatcherFill {
+    time_delta_ms: LeI16,
+    price: LeF32,
+    qty: LeF32,
+    z_btc: LeF32,
+    position: LeF32,
+    order_type: u8,
+    flags: u8,
+}
 
 /// Flags stored in a watcher-fill record.
 pub mod watcher_fill_flags {
@@ -157,6 +191,22 @@ pub struct TradesPacket {
     pub sections: Vec<TradeSection>,
 }
 
+fn read_trades_packet_header(data: &[u8]) -> Option<WireTradesPacketHeader> {
+    if data.len() < TRADES_PACKET_HEADER_SIZE {
+        return None;
+    }
+    WireTradesPacketHeader::read_from_bytes(&data[..TRADES_PACKET_HEADER_SIZE]).ok()
+}
+
+fn read_trade_row(data: &[u8], pos: &mut usize) -> Option<WireTradeRow> {
+    if *pos + TRADE_ROW_SIZE > data.len() {
+        return None;
+    }
+    let row = WireTradeRow::read_from_bytes(&data[*pos..*pos + TRADE_ROW_SIZE]).ok()?;
+    *pos += TRADE_ROW_SIZE;
+    Some(row)
+}
+
 /// Parse a raw MPC_TradesStream payload.
 /// Returns parsed packet or None on error.
 pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
@@ -183,12 +233,10 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
     let data: &[u8] = &decompressed;
 
     // Header: BaseTime(8) + PacketNum(2)
-    if data.len() < 10 {
-        return None;
-    }
-    let base_time = f64::from_le_bytes(data[0..8].try_into().unwrap());
-    let packet_num = u16::from_le_bytes(data[8..10].try_into().unwrap());
-    let mut pos = 10usize;
+    let header = read_trades_packet_header(data)?;
+    let base_time = header.base_time.get();
+    let packet_num = header.packet_num.get();
+    let mut pos = TRADES_PACKET_HEADER_SIZE;
 
     let mut sections = Vec::new();
 
@@ -220,20 +268,16 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
                 let mut trades = Vec::with_capacity(count);
 
                 for _ in 0..count {
-                    if pos + 10 > data.len() {
+                    let Some(row) = read_trade_row(data, &mut pos) else {
                         break;
-                    }
-                    let time_delta = i16::from_le_bytes([data[pos], data[pos + 1]]);
-                    let price = f32::from_le_bytes(data[pos + 2..pos + 6].try_into().unwrap());
-                    let qty = f32::from_le_bytes(data[pos + 6..pos + 10].try_into().unwrap());
-                    pos += 10;
+                    };
 
                     trades.push(Trade {
                         market_index: market_idx,
                         is_spot,
-                        time_delta_ms: time_delta,
-                        price,
-                        qty,
+                        time_delta_ms: row.time_delta_ms.get(),
+                        price: row.a.get(),
+                        qty: row.b.get(),
                     });
                 }
                 sections.push(TradeSection::Trades(trades));
@@ -246,17 +290,14 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
                 let count = data[pos] as usize;
                 pos += 1;
 
-                let bytes_per_order = 10 + if has_taker { 20 } else { 0 };
+                let bytes_per_order = TRADE_ROW_SIZE + if has_taker { 20 } else { 0 };
                 let mut orders = Vec::with_capacity(count);
 
                 for _ in 0..count {
                     if pos + bytes_per_order > data.len() {
                         break;
                     }
-                    let time_delta = i16::from_le_bytes([data[pos], data[pos + 1]]);
-                    let vol = f32::from_le_bytes(data[pos + 2..pos + 6].try_into().unwrap());
-                    let q = f32::from_le_bytes(data[pos + 6..pos + 10].try_into().unwrap());
-                    pos += 10;
+                    let row = read_trade_row(data, &mut pos)?;
 
                     let taker = if has_taker {
                         let mut t = [0u8; 20];
@@ -269,9 +310,9 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
 
                     orders.push(MMOrder {
                         market_index: market_idx,
-                        time_delta_ms: time_delta,
-                        vol,
-                        q,
+                        time_delta_ms: row.time_delta_ms.get(),
+                        vol: row.a.get(),
+                        q: row.b.get(),
                         taker,
                     });
                 }
@@ -296,20 +337,14 @@ pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
 
                         let mut orders = Vec::with_capacity(count);
                         for _ in 0..count {
-                            if pos + 10 > data.len() {
+                            let Some(row) = read_trade_row(data, &mut pos) else {
                                 break;
-                            }
-                            let time_delta = i16::from_le_bytes([data[pos], data[pos + 1]]);
-                            let price =
-                                f32::from_le_bytes(data[pos + 2..pos + 6].try_into().unwrap());
-                            let qty =
-                                f32::from_le_bytes(data[pos + 6..pos + 10].try_into().unwrap());
-                            pos += 10;
+                            };
                             orders.push(LiqOrder {
                                 market_index: market_idx,
-                                time_delta_ms: time_delta,
-                                price,
-                                qty,
+                                time_delta_ms: row.time_delta_ms.get(),
+                                price: row.a.get(),
+                                qty: row.b.get(),
                             });
                         }
                         sections.push(TradeSection::LiqOrders(orders));
@@ -369,14 +404,15 @@ pub fn parse_watcher_fills(data: &[u8]) -> Option<Vec<WatcherFill>> {
 
     let mut fills = Vec::with_capacity(data.len() / WATCHER_FILL_RECORD_SIZE);
     for chunk in data.chunks_exact(WATCHER_FILL_RECORD_SIZE) {
+        let wire = WireWatcherFill::read_from_bytes(chunk).ok()?;
         fills.push(WatcherFill {
-            time_delta_ms: i16::from_le_bytes(chunk[0..2].try_into().unwrap()),
-            price: f32::from_le_bytes(chunk[2..6].try_into().unwrap()),
-            qty: f32::from_le_bytes(chunk[6..10].try_into().unwrap()),
-            z_btc: f32::from_le_bytes(chunk[10..14].try_into().unwrap()),
-            position: f32::from_le_bytes(chunk[14..18].try_into().unwrap()),
-            order_type: chunk[18],
-            flags: chunk[19],
+            time_delta_ms: wire.time_delta_ms.get(),
+            price: wire.price.get(),
+            qty: wire.qty.get(),
+            z_btc: wire.z_btc.get(),
+            position: wire.position.get(),
+            order_type: wire.order_type,
+            flags: wire.flags,
         });
     }
     Some(fills)
@@ -400,6 +436,33 @@ mod tests {
                 | watcher_fill_flags::IS_TAKER,
         );
         data
+    }
+
+    #[test]
+    fn trades_stream_rows_use_private_wire_structs() {
+        assert_eq!(std::mem::size_of::<WireTradesPacketHeader>(), 10);
+        assert_eq!(TRADES_PACKET_HEADER_SIZE, 10);
+        assert_eq!(std::mem::size_of::<WireTradeRow>(), 10);
+        assert_eq!(TRADE_ROW_SIZE, 10);
+        assert_eq!(std::mem::size_of::<WireWatcherFill>(), 20);
+        assert_eq!(WATCHER_FILL_RECORD_SIZE, 20);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&45_000.0f64.to_le_bytes());
+        packet.extend_from_slice(&7u16.to_le_bytes());
+        let header = read_trades_packet_header(&packet).expect("header");
+        assert_eq!(header.base_time.get(), 45_000.0);
+        assert_eq!(header.packet_num.get(), 7);
+
+        packet.extend_from_slice(&(-12i16).to_le_bytes());
+        packet.extend_from_slice(&123.5f32.to_le_bytes());
+        packet.extend_from_slice(&(-0.25f32).to_le_bytes());
+        let mut pos = TRADES_PACKET_HEADER_SIZE;
+        let row = read_trade_row(&packet, &mut pos).expect("trade row");
+        assert_eq!(pos, TRADES_PACKET_HEADER_SIZE + TRADE_ROW_SIZE);
+        assert_eq!(row.time_delta_ms.get(), -12);
+        assert_eq!(row.a.get(), 123.5);
+        assert_eq!(row.b.get(), -0.25);
     }
 
     #[test]
