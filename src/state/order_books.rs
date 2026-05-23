@@ -78,6 +78,11 @@ const BOOK_FULL_REQUEST_THROTTLE: i64 = 5000;
 /// Лимит размера кэша. Соответствует `MoonProtoOrderBook.pas:11` `BOOK_CACHE_MAX_PACKETS = 64`.
 const BOOK_CACHE_MAX_PACKETS: usize = 64;
 
+/// Максимум уровней после применения diff. Соответствует
+/// `EngineBase.pas:TMarketEngine.ApplyOrderBookDiffKeepZero`:
+/// `N := Min(5000, N); SetLength(NewBook, N); SetLength(ABook, N)`.
+const ORDER_BOOK_DIFF_MAX_LEVELS: usize = 5000;
+
 /// Ключ кэша: `(market_index, book_kind)`. `book_kind`: 0=Futures, 1=Spot.
 pub type BookKey = (u16, u8);
 
@@ -609,6 +614,10 @@ fn apply_order_book_diff_keep_zero(
         }
     }
 
+    if new_book.len() > ORDER_BOOK_DIFF_MAX_LEVELS {
+        new_book.truncate(ORDER_BOOK_DIFF_MAX_LEVELS);
+    }
+
     *book = new_book;
 }
 
@@ -1103,6 +1112,30 @@ mod tests {
                     quantity: 1.0
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn diff_truncates_to_5000_levels_like_delphi_apply_order_book_diff_keep_zero() {
+        let mut book: Vec<OrderBookLevel> = (0..5001)
+            .map(|i| OrderBookLevel {
+                rate: 10_000.0 - i as f64,
+                quantity: 1.0,
+            })
+            .collect();
+
+        apply_order_book_diff_keep_zero(&mut book, &[level(4_000.0, 2.0)], &[], true);
+
+        assert_eq!(
+            book.len(),
+            ORDER_BOOK_DIFF_MAX_LEVELS,
+            "Delphi clamps NewBook/ABook to Min(5000, N) after applying a non-empty diff"
+        );
+        assert_eq!(book[0].rate, 10_000.0);
+        assert_eq!(
+            book.last().map(|level| level.rate),
+            Some(5_001.0),
+            "truncate keeps the first N levels, matching Delphi SetLength(NewBook, N)"
         );
     }
 
