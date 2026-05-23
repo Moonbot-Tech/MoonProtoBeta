@@ -381,8 +381,7 @@ pub struct Order {
     server_latest_epoch: [u16; 10],
     /// Snapshot flag — обновляется при TAllStatuses.
     pub(crate) snapshot_flag: u8,
-    bulk_replace_buy_sent_ms: i64,
-    bulk_replace_sell_sent_ms: i64,
+    replace_sent_time_ms: i64,
     prev_panic_sell: bool,
     last_buy_actual_price: f64,
     last_sell_actual_price: f64,
@@ -446,8 +445,7 @@ impl Order {
             sell_reason_code: 0,
             server_latest_epoch: [0; 10],
             snapshot_flag: 0,
-            bulk_replace_buy_sent_ms: 0,
-            bulk_replace_sell_sent_ms: 0,
+            replace_sent_time_ms: 0,
             prev_panic_sell: false,
             last_buy_actual_price: 0.0,
             last_sell_actual_price: 0.0,
@@ -760,28 +758,28 @@ impl Orders {
             }
             OrderWorkerStatus::BuySet => {
                 let order_type = OrderType::from_byte(order.buy_order.order_type)?;
-                if order.bulk_replace_buy_sent_ms > 0 && !order.bulk_replace_buy {
-                    order.bulk_replace_buy_sent_ms = 0;
+                if order.replace_sent_time_ms > 0 && !order.bulk_replace_buy {
+                    order.replace_sent_time_ms = 0;
                 }
                 order.buy_price = new_price;
-                if order.bulk_replace_buy && order.bulk_replace_buy_sent_ms > 0 {
+                order.bulk_replace_buy = true;
+                if order.replace_sent_time_ms > 0 {
                     return None;
                 }
-                order.bulk_replace_buy = true;
-                order.bulk_replace_buy_sent_ms = now_ms.max(1);
+                order.replace_sent_time_ms = now_ms.max(1);
                 order_type
             }
             OrderWorkerStatus::SellSet => {
                 let order_type = OrderType::from_byte(order.sell_order.order_type)?;
-                if order.bulk_replace_sell_sent_ms > 0 && !order.bulk_replace_sell {
-                    order.bulk_replace_sell_sent_ms = 0;
+                if order.replace_sent_time_ms > 0 && !order.bulk_replace_sell {
+                    order.replace_sent_time_ms = 0;
                 }
                 order.sell_price = new_price;
-                if order.bulk_replace_sell && order.bulk_replace_sell_sent_ms > 0 {
+                order.bulk_replace_sell = true;
+                if order.replace_sent_time_ms > 0 {
                     return None;
                 }
-                order.bulk_replace_sell = true;
-                order.bulk_replace_sell_sent_ms = now_ms.max(1);
+                order.replace_sent_time_ms = now_ms.max(1);
                 order_type
             }
             _ => return None,
@@ -1123,11 +1121,9 @@ impl Orders {
                 if order_type_uses_buy_side(rr.order_type) {
                     entry.buy_price = rr.price;
                     entry.bulk_replace_buy = false;
-                    entry.bulk_replace_buy_sent_ms = 0;
                 } else {
                     entry.sell_price = rr.price;
                     entry.bulk_replace_sell = false;
-                    entry.bulk_replace_sell_sent_ms = 0;
                 }
 
                 (ApplyResult::Applied, OrderEvent::Updated(uid))
@@ -1213,11 +1209,10 @@ impl Orders {
                     if let Some(entry) = self.map.get_mut(&uid_replaced) {
                         if order_type_uses_buy_side(brn.order_type) {
                             entry.bulk_replace_buy = true;
-                            entry.bulk_replace_buy_sent_ms = now_ms.max(1);
                         } else {
                             entry.bulk_replace_sell = true;
-                            entry.bulk_replace_sell_sent_ms = now_ms.max(1);
                         }
+                        entry.replace_sent_time_ms = now_ms.max(1);
                         affected.push(uid_replaced);
                     }
                 }
@@ -1531,27 +1526,25 @@ impl Orders {
     pub(crate) fn tick_bulk_replace_timeouts(&mut self, now_ms: i64) -> Vec<OrderEvent> {
         let mut events = Vec::new();
         for entry in self.map.values_mut() {
-            let mut changed = false;
+            let Some(current_replace_flag) = (match entry.status {
+                OrderWorkerStatus::BuySet => Some(&mut entry.bulk_replace_buy),
+                OrderWorkerStatus::SellSet => Some(&mut entry.bulk_replace_sell),
+                _ => None,
+            }) else {
+                continue;
+            };
 
-            if entry.bulk_replace_buy
-                && entry.bulk_replace_buy_sent_ms > 0
-                && (now_ms - entry.bulk_replace_buy_sent_ms).abs() > BULK_REPLACE_TIMEOUT_MS
-            {
-                entry.bulk_replace_buy = false;
-                entry.bulk_replace_buy_sent_ms = 0;
-                changed = true;
+            if entry.replace_sent_time_ms > 0 && !*current_replace_flag {
+                entry.replace_sent_time_ms = 0;
+                continue;
             }
 
-            if entry.bulk_replace_sell
-                && entry.bulk_replace_sell_sent_ms > 0
-                && (now_ms - entry.bulk_replace_sell_sent_ms).abs() > BULK_REPLACE_TIMEOUT_MS
+            if *current_replace_flag
+                && entry.replace_sent_time_ms > 0
+                && (now_ms - entry.replace_sent_time_ms).abs() > BULK_REPLACE_TIMEOUT_MS
             {
-                entry.bulk_replace_sell = false;
-                entry.bulk_replace_sell_sent_ms = 0;
-                changed = true;
-            }
-
-            if changed {
+                *current_replace_flag = false;
+                entry.replace_sent_time_ms = 0;
                 events.push(OrderEvent::Updated(entry.uid));
             }
         }
@@ -1969,7 +1962,7 @@ mod tests {
         let order = orders.get(42).unwrap();
         assert_eq!(order.buy_price, 10.5);
         assert!(order.bulk_replace_buy);
-        assert_eq!(order.bulk_replace_buy_sent_ms, 1000);
+        assert_eq!(order.replace_sent_time_ms, 1000);
 
         assert!(
             orders.send_replace_if_requested(42, 10.7, 1001).is_none(),
@@ -3087,6 +3080,74 @@ mod tests {
         let events = orders.tick_bulk_replace_timeouts(6001);
         assert!(matches!(events.as_slice(), [OrderEvent::Updated(1)]));
         assert!(!orders.get(1).unwrap().bulk_replace_buy);
+    }
+
+    #[test]
+    fn replace_response_clears_flag_then_tick_clears_shared_sent_time_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        assert!(orders.send_replace_if_requested(1, 123.0, 1000).is_some());
+        assert!(orders.get(1).unwrap().bulk_replace_buy);
+        assert_eq!(orders.get(1).unwrap().replace_sent_time_ms, 1000);
+
+        let rr = OrderReplaceResponse {
+            epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::BuySet),
+            order_type: OrderType::Buy,
+            price: 123.0,
+            update_data: OrderUpdateData::default(),
+            quantity_base: 0.0,
+        };
+        let (res, _) = orders.apply(order_replace_response_cmd(rr));
+        assert_eq!(res, ApplyResult::Applied);
+
+        let order = orders.get(1).unwrap();
+        assert!(!order.bulk_replace_buy);
+        assert_eq!(
+            order.replace_sent_time_ms, 1000,
+            "Delphi TOrderReplaceResponse clears p*Order.OrderReplace, not ReplaceSentTime"
+        );
+
+        assert!(orders.tick_bulk_replace_timeouts(1001).is_empty());
+        assert_eq!(
+            orders.get(1).unwrap().replace_sent_time_ms,
+            0,
+            "Delphi CheckReplaceFlag clears ReplaceSentTime when current FOrder flag is false"
+        );
+    }
+
+    #[test]
+    fn bulk_replace_tick_checks_only_current_side_like_delphi_forder() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::BuyStop,
+            uids: vec![1],
+        };
+        let (res, _) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(orders.get(1).unwrap().bulk_replace_sell);
+        assert_eq!(orders.get(1).unwrap().replace_sent_time_ms, 1000);
+
+        assert!(orders.tick_bulk_replace_timeouts(6001).is_empty());
+        let order = orders.get(1).unwrap();
+        assert!(order.bulk_replace_sell);
+        assert_eq!(
+            order.replace_sent_time_ms, 0,
+            "Delphi current FOrder=buy clears only ReplaceSentTime; opposite side flag is untouched"
+        );
     }
 
     #[test]

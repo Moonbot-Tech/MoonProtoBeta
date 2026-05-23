@@ -86,9 +86,10 @@ enough for immediately following visual packets such as `TOrderTracePoint`,
 then `OrderEvent::Removed` is emitted.
 `TBulkReplaceNotify` sets `bulk_replace_buy` / `bulk_replace_sell` for found
 orders only; its `BulkReplaced.uids` event lists only those actually found
-locally. `TOrderReplaceResponse` clears the matching flag; if no response
-arrives, the active dispatcher clears the flag after 5000 ms, matching Delphi's
-`ReplaceSentTime` timeout.
+locally. The in-flight timer is Delphi's single worker-level `ReplaceSentTime`,
+not a separate timer per side. `TOrderReplaceResponse` clears only the matching
+flag; the active dispatcher clears `ReplaceSentTime` or the current-side flag
+from the worker tick, matching Delphi `CheckReplaceFlag`.
 For replace-response and bulk-replace side selection, Delphi treats only
 `OrderType::Buy` (`O_BUY`) as the buy side; `Sell`, `BuyStop`, and `BuyLimit`
 all use the sell side in the order read model.

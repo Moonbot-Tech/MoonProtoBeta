@@ -1596,9 +1596,10 @@ Done:
   `p*Order.OrderReplace := true` and `ReplaceSentTime := GetTimeMS`; later
   `BOrderWorker.DoTheJobVirtual.CheckReplaceFlag` clears the flag if no
   `TOrderReplaceResponse` arrived for more than 5000 ms.
-- Rust now stores per-side bulk-replace sent timestamps, sets them from the
-  dispatcher `now_ms`, clears them on `OrderReplaceResponse`, and periodically
-  clears stale flags through the dispatcher/order tick.
+- Rust stores Delphi's single worker-level `ReplaceSentTime`, sets it from the
+  dispatcher `now_ms`, clears it only through the current-side
+  `CheckReplaceFlag` analogue, and periodically clears stale flags through the
+  dispatcher/order tick.
 - The active client run loop now calls the order tick in dispatcher mode, next
   to the existing trades tick.
 - Added state and dispatcher tests for the 5000 ms timeout.
@@ -2502,6 +2503,36 @@ Verification:
 - `cargo fmt` OK.
 - `cargo test --lib --quiet` OK: `533 passed`.
 - `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: ReplaceSentTime is worker-level, not per-side
+
+Done:
+
+- Fixed another `DoTheJobVirtual.CheckReplaceFlag` parity bug.
+- Delphi has one `ReplaceSentTime` per `BOrderWorker`; `pBuyOrder.OrderReplace`
+  and `pSellOrder.OrderReplace` are side flags, but the in-flight clock is not
+  per-side.
+- Rust previously stored `bulk_replace_buy_sent_ms` /
+  `bulk_replace_sell_sent_ms`, cleared the side timer in
+  `TOrderReplaceResponse`, and timed out both sides independently.
+- Rust now stores one `replace_sent_time_ms`: `TBulkReplaceNotify` sets side
+  flag + shared timer, `TOrderReplaceResponse` clears only the side flag, and
+  `tick_bulk_replace_timeouts` mirrors current-side `CheckReplaceFlag`.
+- Recorded `spec_pipeline/work/хуйня.md §X.108`.
+
+Verification:
+
+- Targeted replace/bulk tests OK, including
+  `replace_response_clears_flag_then_tick_clears_shared_sent_time_like_delphi`
+  and `bulk_replace_tick_checks_only_current_side_like_delphi_forder`.
+- `cargo fmt` OK.
+- Full `cargo test` OK: `550 passed`; live/fire tests ignored by default.
+- `cargo check --examples` OK.
 
 Still not done:
 
