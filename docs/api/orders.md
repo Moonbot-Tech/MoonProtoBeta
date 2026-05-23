@@ -198,10 +198,13 @@ worker and does not apply the rest of `UpdateData` to `buy_order`.
 `cancel_order` for a pending `OS_None` order sets this flag and follows
 Delphi's `CheckReplaceFlag` pending path.
 `TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately
-while the entry is still present. `job_is_done` is a read-model terminal marker,
-not Delphi's thread-lifetime `BOrderWorker.JobIsDone`; during the deferred
-removal window the Rust entry still corresponds to a virtual worker that has
-not returned from `DoTheJobVirtual`.
+while the entry is still present. It also mirrors Delphi virtual-worker
+`finally`: both compact orders are marked closed+canceled with local close time,
+and replace flags are cleared before deferred removal. `job_is_done` is a
+read-model terminal marker, not Delphi's thread-lifetime
+`BOrderWorker.JobIsDone`; during the deferred removal window the Rust entry
+still corresponds to a virtual worker that has not returned from
+`DoTheJobVirtual`.
 
 ## Status Values
 

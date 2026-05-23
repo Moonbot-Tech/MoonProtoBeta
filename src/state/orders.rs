@@ -158,6 +158,14 @@ fn terminal_removal_delay_ms(status: OrderWorkerStatus) -> i64 {
     }
 }
 
+fn delphi_now_days() -> f64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    25569.0 + secs / 86400.0
+}
+
 fn command_marks_existing_worker_snapshot_flag(cmd: &TradeCommand) -> bool {
     matches!(
         cmd,
@@ -1240,6 +1248,18 @@ impl Orders {
                 let found = if let Some(entry) = self.map.get_mut(&uid) {
                     entry.server_forced_remove = true;
                     entry.cancel_request = true;
+                    let close_time = delphi_now_days();
+                    entry.buy_order.is_opened = 0;
+                    entry.buy_order.canceled = 1;
+                    entry.buy_order.is_closed = 1;
+                    entry.buy_order.close_time = close_time;
+                    entry.bulk_replace_buy = false;
+                    entry.sell_order.is_opened = 0;
+                    entry.sell_order.canceled = 1;
+                    entry.sell_order.is_closed = 1;
+                    entry.sell_order.close_time = close_time;
+                    entry.bulk_replace_sell = false;
+                    entry.replace_sent_time_ms = 0;
                     true
                 } else {
                     false
@@ -2531,6 +2551,12 @@ mod tests {
             OrderWorkerStatus::BuySet,
             1,
         )));
+        {
+            let order = orders.map.get_mut(&42).unwrap();
+            order.bulk_replace_buy = true;
+            order.bulk_replace_sell = true;
+            order.replace_sent_time_ms = 1000;
+        }
 
         let not_found = make_epoch(42, 3, "BTCUSDT", 0, OrderWorkerStatus::None);
         let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
@@ -2540,6 +2566,20 @@ mod tests {
         let order = orders.get(42).unwrap();
         assert!(order.server_forced_remove);
         assert!(order.cancel_request);
+        let buy_is_opened = order.buy_order.is_opened;
+        let buy_canceled = order.buy_order.canceled;
+        let buy_is_closed = order.buy_order.is_closed;
+        let buy_close_time = order.buy_order.close_time;
+        let sell_is_opened = order.sell_order.is_opened;
+        let sell_canceled = order.sell_order.canceled;
+        let sell_is_closed = order.sell_order.is_closed;
+        let sell_close_time = order.sell_order.close_time;
+        assert_eq!((buy_is_opened, buy_canceled, buy_is_closed), (0, 1, 1));
+        assert_eq!((sell_is_opened, sell_canceled, sell_is_closed), (0, 1, 1));
+        assert!(buy_close_time > 1.0);
+        assert_eq!(buy_close_time, sell_close_time);
+        assert!(!order.bulk_replace_buy);
+        assert!(!order.bulk_replace_sell);
         assert!(
             !order.job_is_done,
             "Delphi TOrderNotFound sets CancellRequest, not JobIsDone, inside ProcessCommandOrder"

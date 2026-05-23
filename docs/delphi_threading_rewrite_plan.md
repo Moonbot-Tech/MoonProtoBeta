@@ -2538,3 +2538,30 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-23 - Phase 1 partial: ServerForcedRemove final cleanup
+
+Done:
+
+- Fixed a `DoTheJobVirtual finally` parity bug after `TOrderNotFound`.
+- Delphi `ProcessCommandOrder` sets `CancellRequest` /
+  `ServerForcedRemove`; then virtual-worker `finally` marks both `pBuyOrder`
+  and `pSellOrder` as closed+canceled, sets `CloseTime := Now`, and clears
+  `OrderReplace`.
+- Rust `OrderNotFound` now performs that final cleanup before deferred removal:
+  both compact orders get `is_opened=0`, `canceled=1`, `is_closed=1`, local
+  Delphi `TDateTime` close-time, and both replace flags are cleared.
+- Recorded `spec_pipeline/work/хуйня.md §X.109`.
+
+Verification:
+
+- Targeted `order_not_found_marks_server_forced_then_deferred_removal_like_delphi`
+  OK.
+- `cargo fmt` OK.
+- Full `cargo test` OK: `550 passed`; live/fire tests ignored by default.
+- `cargo check --examples` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
