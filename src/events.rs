@@ -43,6 +43,7 @@ use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
 use crate::commands::trades_stream::parse_trades_packet;
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
+use crate::state::orders::OrderCancelSend;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
     ApplyResult, BalanceEvent, BalancesState, MarketsEvent, MarketsState, OrderBookEvent,
@@ -186,6 +187,9 @@ pub(crate) enum ActiveAction {
     RequestOrderStatus {
         ctx: TradeCtx,
         market_name: String,
+    },
+    OrderCancel {
+        request: OrderCancelSend,
     },
     TradesResend {
         payload: Vec<u8>,
@@ -675,6 +679,18 @@ impl EventDispatcher {
             out.push(Event::Order(ev));
         }
         self.drain_deferred_order_removals_due(now_ms, out);
+    }
+
+    pub(crate) fn tick_orders_active_actions(
+        &mut self,
+        now_ms: i64,
+        out: &mut Vec<Event>,
+        actions: &mut Vec<ActiveAction>,
+    ) {
+        self.tick_orders_into(now_ms, out);
+        for request in self.orders.tick_pending_cancel_resends(now_ms) {
+            actions.push(ActiveAction::OrderCancel { request });
+        }
     }
 
     /// Delphi `ProcessCommandOrder` first tries `WCache.TryFind(TaskUID)`.
@@ -1802,6 +1818,48 @@ mod tests {
             [Event::Order(OrderEvent::Updated(found))] if *found == uid
         ));
         assert!(!d.orders.get(uid).unwrap().bulk_replace_buy);
+    }
+
+    #[test]
+    fn dispatcher_tick_orders_repeats_pending_cancel_like_delphi_worker_loop() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x7B;
+        let mut status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::None);
+        status.buy_order.mean_price = 9.25;
+        d.process_command_order(TradeCommand::OrderStatus(Box::new(status)), 1000, &mut out);
+
+        let first = d
+            .orders
+            .send_cancel_if_requested(uid, 1000)
+            .expect("first pending cancel should send immediately");
+        assert!(matches!(
+            first,
+            OrderCancelSend::PendingReplaceThenCancel { .. }
+        ));
+
+        let mut actions = Vec::new();
+        out.clear();
+        d.tick_orders_active_actions(1031, &mut out, &mut actions);
+        assert!(out.is_empty());
+        assert!(
+            actions.is_empty(),
+            "Delphi pending cancel worker loop sleeps 32 ms"
+        );
+
+        d.tick_orders_active_actions(1032, &mut out, &mut actions);
+        assert_eq!(actions.len(), 1);
+        match actions.pop().unwrap() {
+            ActiveAction::OrderCancel {
+                request: OrderCancelSend::PendingReplaceThenCancel { ctx, market, price },
+            } => {
+                assert_eq!(ctx.uid, uid);
+                assert_eq!(market, "BTCUSDT");
+                assert_eq!(price, 9.25);
+            }
+            _ => panic!("expected pending cancel resend action"),
+        }
     }
 
     #[test]

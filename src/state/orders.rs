@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
 const PRICE_EPS: f64 = 0.000000009;
 const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
+const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 
 /// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
 ///
@@ -390,6 +391,7 @@ pub struct Order {
     /// Snapshot flag — обновляется при TAllStatuses.
     pub(crate) snapshot_flag: u8,
     replace_sent_time_ms: i64,
+    pending_cancel_sent_ms: i64,
     prev_panic_sell: bool,
     last_buy_actual_price: f64,
     last_sell_actual_price: f64,
@@ -454,6 +456,7 @@ impl Order {
             server_latest_epoch: [0; 10],
             snapshot_flag: 0,
             replace_sent_time_ms: 0,
+            pending_cancel_sent_ms: 0,
             prev_panic_sell: false,
             last_buy_actual_price: 0.0,
             last_sell_actual_price: 0.0,
@@ -806,12 +809,17 @@ impl Orders {
     /// Active buy/sell orders use local `FOrder.CancelRequest` and clear it
     /// after queueing. Pending `OS_None` orders use `vOrder.PendingCancel` and
     /// keep that flag set like Delphi.
-    pub(crate) fn send_cancel_if_requested(&mut self, uid: u64) -> Option<OrderCancelSend> {
+    pub(crate) fn send_cancel_if_requested(
+        &mut self,
+        uid: u64,
+        now_ms: i64,
+    ) -> Option<OrderCancelSend> {
         let order = self.map.get_mut(&uid)?;
         match order.status {
             OrderWorkerStatus::None => {
                 let price = order.pending_buy_cond_price?;
                 order.pending_cancel = true;
+                order.pending_cancel_sent_ms = now_ms.max(1);
                 let out = OrderCancelSend::PendingReplaceThenCancel {
                     ctx: order.trade_ctx(),
                     market: order.market_name.clone(),
@@ -831,6 +839,35 @@ impl Orders {
         };
         order.cancel_request = false;
         Some(out)
+    }
+
+    /// Delphi `DoTheJobVirtual.CheckReplaceFlag` pending cancel branch.
+    ///
+    /// Once `vOrder.PendingCancel` is true, Delphi keeps sending the
+    /// replace-then-cancel pair from the 32 ms worker loop until status leaves
+    /// `OS_None`.
+    pub(crate) fn tick_pending_cancel_resends(&mut self, now_ms: i64) -> Vec<OrderCancelSend> {
+        let mut sends = Vec::new();
+        for order in self.map.values_mut() {
+            if order.status != OrderWorkerStatus::None || !order.pending_cancel {
+                continue;
+            }
+            let Some(price) = order.pending_buy_cond_price else {
+                continue;
+            };
+            if order.pending_cancel_sent_ms > 0
+                && (now_ms - order.pending_cancel_sent_ms).abs() < PENDING_CANCEL_REPEAT_MS
+            {
+                continue;
+            }
+            order.pending_cancel_sent_ms = now_ms.max(1);
+            sends.push(OrderCancelSend::PendingReplaceThenCancel {
+                ctx: order.trade_ctx(),
+                market: order.market_name.clone(),
+                price,
+            });
+        }
+        sends
     }
 
     /// Delphi `CheckReplaceFlag` panic-sell part.
@@ -2021,11 +2058,11 @@ mod tests {
             1,
         )));
 
-        assert!(orders.send_cancel_if_requested(404).is_none());
-        assert!(orders.send_cancel_if_requested(43).is_none());
+        assert!(orders.send_cancel_if_requested(404, 1000).is_none());
+        assert!(orders.send_cancel_if_requested(43, 1000).is_none());
 
         let send = orders
-            .send_cancel_if_requested(42)
+            .send_cancel_if_requested(42, 1000)
             .expect("sell-set cancel should be sent");
         match send {
             OrderCancelSend::Cancel {
@@ -2048,7 +2085,7 @@ mod tests {
         pending.buy_order.mean_price = 9.25;
         orders.apply(order_status_cmd(pending));
         let send = orders
-            .send_cancel_if_requested(44)
+            .send_cancel_if_requested(44, 1000)
             .expect("pending cancel should be sent");
         match send {
             OrderCancelSend::PendingReplaceThenCancel { ctx, market, price } => {
@@ -2062,6 +2099,20 @@ mod tests {
             orders.get(44).unwrap().pending_cancel,
             "Delphi leaves vOrder.PendingCancel set on the pending order"
         );
+        assert!(
+            orders.tick_pending_cancel_resends(1031).is_empty(),
+            "Delphi worker loop sleeps 32 ms between pending cancel sends"
+        );
+        let sends = orders.tick_pending_cancel_resends(1032);
+        assert_eq!(sends.len(), 1);
+        match &sends[0] {
+            OrderCancelSend::PendingReplaceThenCancel { ctx, market, price } => {
+                assert_eq!(ctx.uid, 44);
+                assert_eq!(market, "BTCUSDT");
+                assert_eq!(*price, 9.25);
+            }
+            other => panic!("unexpected pending cancel resend: {other:?}"),
+        }
     }
 
     #[test]

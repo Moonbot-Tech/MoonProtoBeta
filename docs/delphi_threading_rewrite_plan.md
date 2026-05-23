@@ -2565,3 +2565,31 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: pending cancel repeats from worker loop
+
+Done:
+
+- Fixed a `DoTheJobVirtual.CheckReplaceFlag` pending-cancel parity bug.
+- Delphi pending `OS_None` cancel is not a one-shot UI send. `CancelOrder` sets
+  `vOrder.PendingCancel`, then the worker loop keeps sending
+  `replace O_BUY BuyCondPrice` plus `cancel OS_None` after each 32 ms sleep
+  while the order remains pending.
+- Rust previously sent the pending replace-then-cancel pair only once from
+  `Client::cancel_order`, leaving `pending_cancel=true` but with no active
+  resend loop.
+- Rust now records the first send time and `EventDispatcher` active order tick
+  emits an `OrderCancel` active action every 32 ms or later while
+  `pending_cancel && status == OS_None && pending_buy_cond_price.is_some()`.
+- Recorded `spec_pipeline/work/хуйня.md §X.110`.
+
+Verification:
+
+- Added state-level coverage for the 32 ms pending resend gate.
+- Added dispatcher-level coverage proving active order ticks emit the resend
+  action, not only the first public wrapper call.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

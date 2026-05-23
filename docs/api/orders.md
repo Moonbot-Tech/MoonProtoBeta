@@ -196,7 +196,9 @@ Delphi's pending `vOrder`; it does not create pending state for a non-pending
 worker and does not apply the rest of `UpdateData` to `buy_order`.
 `pending_cancel` mirrors Delphi `vOrder.PendingCancel`. Calling
 `cancel_order` for a pending `OS_None` order sets this flag and follows
-Delphi's `CheckReplaceFlag` pending path.
+Delphi's `CheckReplaceFlag` pending path. While the order stays pending,
+`run_with_dispatcher` keeps repeating the replace-then-cancel pair from its
+active order tick no more often than Delphi's 32 ms worker loop.
 `TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately
 while the entry is still present. It also mirrors Delphi virtual-worker
 `finally`: both compact orders are marked closed+canceled with local close time,

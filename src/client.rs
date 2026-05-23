@@ -1722,7 +1722,7 @@ impl ClientSender {
         if !self.domain_ready_for_typed_send() {
             return false;
         }
-        let Some(request) = orders.send_cancel_if_requested(uid) else {
+        let Some(request) = orders.send_cancel_if_requested(uid, self.now_ms()) else {
             return false;
         };
         self.send_order_cancel_request(request);
@@ -3261,11 +3261,15 @@ impl WriterRuntime<'_> {
             dispatcher,
             on_event,
             event_buf,
+            active_actions_buf,
             ..
         } = mode
         {
             event_buf.clear();
-            dispatcher.tick_orders_into(cur_tm, event_buf);
+            active_actions_buf.clear();
+            dispatcher.tick_orders_active_actions(cur_tm, event_buf, active_actions_buf);
+            self.client
+                .apply_active_actions(active_actions_buf.drain(..));
             on_event.drain_events(event_buf, dispatcher);
         }
     }
@@ -6386,7 +6390,7 @@ impl Client {
         if !self.domain_ready_for_typed_send() {
             return false;
         }
-        let Some(request) = orders.send_cancel_if_requested(uid) else {
+        let Some(request) = orders.send_cancel_if_requested(uid, self.now_ms()) else {
             return false;
         };
         self.send_order_cancel_request(request);
@@ -7386,6 +7390,9 @@ impl Client {
                 }
                 crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
                     self.request_order_status(ctx, &market_name);
+                }
+                crate::events::ActiveAction::OrderCancel { request } => {
+                    self.send_order_cancel_request(request);
                 }
                 crate::events::ActiveAction::TradesResend { payload } => {
                     self.send_api_request(&payload);

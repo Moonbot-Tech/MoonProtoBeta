@@ -93,7 +93,10 @@ updates the local desired price but queues no second packet, matching Delphi.
 the same two Delphi sends from `CheckReplaceFlag`: `TOrderReplaceCommand(O_BUY,
 BuyCondPrice)` followed by `TOrderCancelCommand(OS_None)`. Both commands use
 `UK_OrderMove(uid)`, so if the writer has not copied the first command yet,
-Delphi-style send-queue dedup leaves the final cancel in the queue.
+Delphi-style send-queue dedup leaves the final cancel in the queue. In active
+dispatcher mode the library then repeats this pending replace-then-cancel pair
+from the order tick every 32 ms or later until the order leaves `OS_None`,
+matching Delphi's worker loop.
 
 `turn_panic_sell` is market-level like Delphi `TOrdersWorkers.TurnPanicSell`:
 it sets `FPanicSell` for all local active `OS_SellSet` orders in the market, and
