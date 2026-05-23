@@ -235,6 +235,7 @@ dependencies = [
  "rand",
  "sha3",
  "socket2",
+ "zerocopy",
 ]
 
 [[package]]

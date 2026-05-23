@@ -14,11 +14,14 @@
 //!
 //! ## Замечание о POrder / TOrderCompact / TStopSettings / TOrderUpdateData
 //!
-//! Эти Delphi structures — `packed record` без выравнивания. В Rust они представлены
-//! как `#[repr(C, packed)]` структуры с тем же layout (см. `types.rs`).
+//! Эти Delphi structures — `packed record` без выравнивания. Публичные Rust-типы
+//! держат обычные поля API/state, а приватные `Wire*` structs ниже зеркалят
+//! fixed wire layout с compile-time проверкой размера.
 
 use super::registry::{decode_utf8_delphi, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
+use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 // ============================================================================
 //  Базовые типы (соответствуют Vars.pas / MarketsU.pas packed records)
@@ -232,11 +235,49 @@ impl ReplaceMultiKind {
 }
 
 /// TPriceZone (Vars.pas:73) — packed record: `MinP, MaxP: double`.
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PriceZone {
     pub min_p: f64,
     pub max_p: f64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WirePriceZone {
+    min_p: LeF64,
+    max_p: LeF64,
+}
+
+const PRICE_ZONE_SIZE: usize = std::mem::size_of::<WirePriceZone>();
+const _: [(); 16] = [(); PRICE_ZONE_SIZE];
+
+impl PriceZone {
+    fn from_wire(wire: WirePriceZone) -> Self {
+        Self {
+            min_p: wire.min_p.get(),
+            max_p: wire.max_p.get(),
+        }
+    }
+
+    fn to_wire(self) -> WirePriceZone {
+        WirePriceZone {
+            min_p: LeF64::new(self.min_p),
+            max_p: LeF64::new(self.max_p),
+        }
+    }
+
+    fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < PRICE_ZONE_SIZE {
+            return None;
+        }
+        Some(Self::from_wire(
+            WirePriceZone::read_from_bytes(&data[..PRICE_ZONE_SIZE]).ok()?,
+        ))
+    }
+
+    fn write_to(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
+    }
 }
 
 /// Parameters for `TMoveAllSellsCommand`.
@@ -269,9 +310,8 @@ pub struct VStopUpdateParams {
 
 /// TOrderCompact (MarketsU.pas:180, 117 байт packed).
 /// Этот тип сериализуется через `ms.Read/Write(BuyOrder, SizeOf(BuyOrder))` —
-/// то есть **прямой memcpy** packed struct. В Rust используем `#[repr(C, packed)]`
-/// с теми же типами и порядком полей.
-#[repr(C, packed)]
+/// то есть **прямой memcpy** packed struct. Public struct keeps normal Rust
+/// fields; private `WireOrderCompact` below owns the Delphi packed layout.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderCompact {
     pub int_id: i64,             // 8
@@ -299,91 +339,107 @@ pub struct OrderCompact {
     pub is_short: u8,            // 1
 }
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireOrderCompact {
+    int_id: LeI64,
+    quantity: LeF64,
+    quantity_remaining: LeF64,
+    total_btc: LeF64,
+    spent_btc: LeF64,
+    open_time: LeF64,
+    close_time: LeF64,
+    actual_price: LeF64,
+    mean_price: LeF64,
+    quantity_base: LeF64,
+    actual_q: LeF64,
+    tmp_btc: LeF64,
+    create_time: LeF64,
+    panic_sell_down: LeF32,
+    order_type: u8,
+    sub_type: u8,
+    stop_flag: u8,
+    partial_done: u8,
+    leverage: u8,
+    is_opened: u8,
+    is_closed: u8,
+    canceled: u8,
+    is_short: u8,
+}
+
 /// Размер `TOrderCompact` в байтах wire-format'а.
 /// 13×8 + 4 + 9×1 = 117 байт (matches Delphi комментарий "~117 байт").
-pub const ORDER_COMPACT_SIZE: usize = 13 * 8 + 4 + 9;
+pub const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
+const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
 
 impl OrderCompact {
+    fn from_wire(wire: WireOrderCompact) -> Self {
+        Self {
+            int_id: wire.int_id.get(),
+            quantity: wire.quantity.get(),
+            quantity_remaining: wire.quantity_remaining.get(),
+            total_btc: wire.total_btc.get(),
+            spent_btc: wire.spent_btc.get(),
+            open_time: wire.open_time.get(),
+            close_time: wire.close_time.get(),
+            actual_price: wire.actual_price.get(),
+            mean_price: wire.mean_price.get(),
+            quantity_base: wire.quantity_base.get(),
+            actual_q: wire.actual_q.get(),
+            tmp_btc: wire.tmp_btc.get(),
+            create_time: wire.create_time.get(),
+            panic_sell_down: wire.panic_sell_down.get(),
+            order_type: wire.order_type,
+            sub_type: wire.sub_type,
+            stop_flag: wire.stop_flag,
+            partial_done: wire.partial_done,
+            leverage: wire.leverage,
+            is_opened: wire.is_opened,
+            is_closed: wire.is_closed,
+            canceled: wire.canceled,
+            is_short: wire.is_short,
+        }
+    }
+
+    fn to_wire(self) -> WireOrderCompact {
+        WireOrderCompact {
+            int_id: LeI64::new(self.int_id),
+            quantity: LeF64::new(self.quantity),
+            quantity_remaining: LeF64::new(self.quantity_remaining),
+            total_btc: LeF64::new(self.total_btc),
+            spent_btc: LeF64::new(self.spent_btc),
+            open_time: LeF64::new(self.open_time),
+            close_time: LeF64::new(self.close_time),
+            actual_price: LeF64::new(self.actual_price),
+            mean_price: LeF64::new(self.mean_price),
+            quantity_base: LeF64::new(self.quantity_base),
+            actual_q: LeF64::new(self.actual_q),
+            tmp_btc: LeF64::new(self.tmp_btc),
+            create_time: LeF64::new(self.create_time),
+            panic_sell_down: LeF32::new(self.panic_sell_down),
+            order_type: self.order_type,
+            sub_type: self.sub_type,
+            stop_flag: self.stop_flag,
+            partial_done: self.partial_done,
+            leverage: self.leverage,
+            is_opened: self.is_opened,
+            is_closed: self.is_closed,
+            canceled: self.canceled,
+            is_short: self.is_short,
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_COMPACT_SIZE {
             return None;
         }
-        // Делаем побайтовую распаковку, потому что packed struct в Rust имеет
-        // ограничения на reference-based доступ к полям.
-        let mut o = OrderCompact::default();
-        let mut p = 0usize;
-        o.int_id = i64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.quantity = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.quantity_remaining = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.total_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.spent_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.open_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.close_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.actual_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.mean_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.quantity_base = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.actual_q = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.tmp_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.create_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        o.panic_sell_down = f32::from_le_bytes(data[p..p + 4].try_into().unwrap());
-        p += 4;
-        o.order_type = data[p];
-        p += 1;
-        o.sub_type = data[p];
-        p += 1;
-        o.stop_flag = data[p];
-        p += 1;
-        o.partial_done = data[p];
-        p += 1;
-        o.leverage = data[p];
-        p += 1;
-        o.is_opened = data[p];
-        p += 1;
-        o.is_closed = data[p];
-        p += 1;
-        o.canceled = data[p];
-        p += 1;
-        o.is_short = data[p];
-        Some(o)
+        Some(Self::from_wire(
+            WireOrderCompact::read_from_bytes(&data[..ORDER_COMPACT_SIZE]).ok()?,
+        ))
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.int_id.to_le_bytes());
-        out.extend_from_slice(&self.quantity.to_le_bytes());
-        out.extend_from_slice(&self.quantity_remaining.to_le_bytes());
-        out.extend_from_slice(&self.total_btc.to_le_bytes());
-        out.extend_from_slice(&self.spent_btc.to_le_bytes());
-        out.extend_from_slice(&self.open_time.to_le_bytes());
-        out.extend_from_slice(&self.close_time.to_le_bytes());
-        out.extend_from_slice(&self.actual_price.to_le_bytes());
-        out.extend_from_slice(&self.mean_price.to_le_bytes());
-        out.extend_from_slice(&self.quantity_base.to_le_bytes());
-        out.extend_from_slice(&self.actual_q.to_le_bytes());
-        out.extend_from_slice(&self.tmp_btc.to_le_bytes());
-        out.extend_from_slice(&self.create_time.to_le_bytes());
-        out.extend_from_slice(&self.panic_sell_down.to_le_bytes());
-        out.push(self.order_type);
-        out.push(self.sub_type);
-        out.push(self.stop_flag);
-        out.push(self.partial_done);
-        out.push(self.leverage);
-        out.push(self.is_opened);
-        out.push(self.is_closed);
-        out.push(self.canceled);
-        out.push(self.is_short);
+        out.extend_from_slice(self.to_wire().as_bytes());
     }
 
     /// Применить временное смещение к временным полям. ServerTimeDelta = InitialTime - Now.
@@ -402,7 +458,6 @@ impl OrderCompact {
 }
 
 /// TStopSettings (MarketsU.pas:215, packed record, 46 байт).
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
     pub stop_loss_on: u8,        // 1
@@ -419,7 +474,24 @@ pub struct StopSettings {
 }
 
 /// Wire-size TStopSettings: 6 + 5*8 = 46 байт.
-pub const STOP_SETTINGS_SIZE: usize = 6 + 5 * 8;
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireStopSettings {
+    stop_loss_on: u8,
+    sl_fixed: u8,
+    sl_level: LeF64,
+    sl_spread: LeF64,
+    trailing_on: u8,
+    trailing_fixed: u8,
+    trailing_level: LeF64,
+    ts_spread: LeF64,
+    use_take_profit: u8,
+    take_profit: LeF64,
+    take_profit_changed: u8,
+}
+
+pub const STOP_SETTINGS_SIZE: usize = std::mem::size_of::<WireStopSettings>();
+const _: [(); 46] = [(); STOP_SETTINGS_SIZE];
 
 impl PartialEq for StopSettings {
     fn eq(&self, other: &Self) -> bool {
@@ -438,53 +510,53 @@ impl PartialEq for StopSettings {
 }
 
 impl StopSettings {
+    fn from_wire(wire: WireStopSettings) -> Self {
+        Self {
+            stop_loss_on: wire.stop_loss_on,
+            sl_fixed: wire.sl_fixed,
+            sl_level: wire.sl_level.get(),
+            sl_spread: wire.sl_spread.get(),
+            trailing_on: wire.trailing_on,
+            trailing_fixed: wire.trailing_fixed,
+            trailing_level: wire.trailing_level.get(),
+            ts_spread: wire.ts_spread.get(),
+            use_take_profit: wire.use_take_profit,
+            take_profit: wire.take_profit.get(),
+            take_profit_changed: wire.take_profit_changed,
+        }
+    }
+
+    fn to_wire(self) -> WireStopSettings {
+        WireStopSettings {
+            stop_loss_on: self.stop_loss_on,
+            sl_fixed: self.sl_fixed,
+            sl_level: LeF64::new(self.sl_level),
+            sl_spread: LeF64::new(self.sl_spread),
+            trailing_on: self.trailing_on,
+            trailing_fixed: self.trailing_fixed,
+            trailing_level: LeF64::new(self.trailing_level),
+            ts_spread: LeF64::new(self.ts_spread),
+            use_take_profit: self.use_take_profit,
+            take_profit: LeF64::new(self.take_profit),
+            take_profit_changed: self.take_profit_changed,
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < STOP_SETTINGS_SIZE {
             return None;
         }
-        let mut s = StopSettings::default();
-        let mut p = 0usize;
-        s.stop_loss_on = data[p];
-        p += 1;
-        s.sl_fixed = data[p];
-        p += 1;
-        s.sl_level = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        s.sl_spread = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        s.trailing_on = data[p];
-        p += 1;
-        s.trailing_fixed = data[p];
-        p += 1;
-        s.trailing_level = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        s.ts_spread = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        s.use_take_profit = data[p];
-        p += 1;
-        s.take_profit = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        s.take_profit_changed = data[p];
-        Some(s)
+        Some(Self::from_wire(
+            WireStopSettings::read_from_bytes(&data[..STOP_SETTINGS_SIZE]).ok()?,
+        ))
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.push(self.stop_loss_on);
-        out.push(self.sl_fixed);
-        out.extend_from_slice(&self.sl_level.to_le_bytes());
-        out.extend_from_slice(&self.sl_spread.to_le_bytes());
-        out.push(self.trailing_on);
-        out.push(self.trailing_fixed);
-        out.extend_from_slice(&self.trailing_level.to_le_bytes());
-        out.extend_from_slice(&self.ts_spread.to_le_bytes());
-        out.push(self.use_take_profit);
-        out.extend_from_slice(&self.take_profit.to_le_bytes());
-        out.push(self.take_profit_changed);
+        out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
 
 /// TOrderUpdateData (MarketsU.pas:263, packed record, 66 байт).
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderUpdateData {
     pub int_id: i64,             // 8
@@ -499,48 +571,66 @@ pub struct OrderUpdateData {
     pub stop_flag: u8,           // 1
 }
 
-pub const ORDER_UPDATE_DATA_SIZE: usize = 8 * 8 + 2;
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireOrderUpdateData {
+    int_id: LeI64,
+    actual_price: LeF64,
+    open_time: LeF64,
+    quantity: LeF64,
+    quantity_remaining: LeF64,
+    actual_q: LeF64,
+    total_btc: LeF64,
+    mean_price: LeF64,
+    partial_done: u8,
+    stop_flag: u8,
+}
+
+pub const ORDER_UPDATE_DATA_SIZE: usize = std::mem::size_of::<WireOrderUpdateData>();
+const _: [(); 66] = [(); ORDER_UPDATE_DATA_SIZE];
 
 impl OrderUpdateData {
+    fn from_wire(wire: WireOrderUpdateData) -> Self {
+        Self {
+            int_id: wire.int_id.get(),
+            actual_price: wire.actual_price.get(),
+            open_time: wire.open_time.get(),
+            quantity: wire.quantity.get(),
+            quantity_remaining: wire.quantity_remaining.get(),
+            actual_q: wire.actual_q.get(),
+            total_btc: wire.total_btc.get(),
+            mean_price: wire.mean_price.get(),
+            partial_done: wire.partial_done,
+            stop_flag: wire.stop_flag,
+        }
+    }
+
+    fn to_wire(self) -> WireOrderUpdateData {
+        WireOrderUpdateData {
+            int_id: LeI64::new(self.int_id),
+            actual_price: LeF64::new(self.actual_price),
+            open_time: LeF64::new(self.open_time),
+            quantity: LeF64::new(self.quantity),
+            quantity_remaining: LeF64::new(self.quantity_remaining),
+            actual_q: LeF64::new(self.actual_q),
+            total_btc: LeF64::new(self.total_btc),
+            mean_price: LeF64::new(self.mean_price),
+            partial_done: self.partial_done,
+            stop_flag: self.stop_flag,
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_UPDATE_DATA_SIZE {
             return None;
         }
-        let mut d = OrderUpdateData::default();
-        let mut p = 0usize;
-        d.int_id = i64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.actual_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.open_time = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.quantity = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.quantity_remaining = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.actual_q = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.total_btc = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.mean_price = f64::from_le_bytes(data[p..p + 8].try_into().unwrap());
-        p += 8;
-        d.partial_done = data[p];
-        p += 1;
-        d.stop_flag = data[p];
-        Some(d)
+        Some(Self::from_wire(
+            WireOrderUpdateData::read_from_bytes(&data[..ORDER_UPDATE_DATA_SIZE]).ok()?,
+        ))
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.int_id.to_le_bytes());
-        out.extend_from_slice(&self.actual_price.to_le_bytes());
-        out.extend_from_slice(&self.open_time.to_le_bytes());
-        out.extend_from_slice(&self.quantity.to_le_bytes());
-        out.extend_from_slice(&self.quantity_remaining.to_le_bytes());
-        out.extend_from_slice(&self.actual_q.to_le_bytes());
-        out.extend_from_slice(&self.total_btc.to_le_bytes());
-        out.extend_from_slice(&self.mean_price.to_le_bytes());
-        out.push(self.partial_done);
-        out.push(self.stop_flag);
+        out.extend_from_slice(self.to_wire().as_bytes());
     }
 
     pub fn adjust_time(&mut self, delta: f64) {
@@ -1252,7 +1342,7 @@ pub struct MoveAllSellsCommand {
 impl MoveAllSellsCommand {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 1 + 8 + 16 {
+        if r.len() < 1 + 1 + 8 + PRICE_ZONE_SIZE {
             return None;
         }
         let cmd_type = r[0];
@@ -1261,11 +1351,8 @@ impl MoveAllSellsCommand {
         *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
-        let min_p = f64::from_le_bytes(r[0..8].try_into().unwrap());
-        *r = &r[8..];
-        let max_p = f64::from_le_bytes(r[0..8].try_into().unwrap());
-        *r = &r[8..];
-        let price_zone = PriceZone { min_p, max_p };
+        let price_zone = PriceZone::from_bytes(&r[..PRICE_ZONE_SIZE])?;
+        *r = &r[PRICE_ZONE_SIZE..];
         // Soft-read like Delphi: when older payloads have no Side byte, use Both.
         let side = if !r.is_empty() {
             let v = FixedPosition::from_byte(r[0])?;
@@ -1808,8 +1895,7 @@ pub fn build_move_all_sells(
     out.push(params.cmd_type as u8);
     out.push(params.move_kind as u8);
     out.extend_from_slice(&params.price.to_le_bytes());
-    out.extend_from_slice(&params.price_zone.min_p.to_le_bytes());
-    out.extend_from_slice(&params.price_zone.max_p.to_le_bytes());
+    params.price_zone.write_to(&mut out);
     out.push(params.side as u8);
     out
 }
@@ -2054,6 +2140,7 @@ mod tests {
         let mut encoded = Vec::new();
         stops.write_to(&mut encoded);
 
+        assert_eq!(std::mem::size_of::<WireStopSettings>(), 46);
         assert_eq!(STOP_SETTINGS_SIZE, 46);
         assert_eq!(encoded, expected);
 
@@ -2083,6 +2170,84 @@ mod tests {
     }
 
     #[test]
+    fn order_compact_uses_private_wire_struct() {
+        assert_eq!(std::mem::size_of::<WireOrderCompact>(), 117);
+        assert_eq!(ORDER_COMPACT_SIZE, 117);
+
+        let order = OrderCompact {
+            int_id: -101,
+            quantity: 1.25,
+            quantity_remaining: 2.5,
+            total_btc: 3.75,
+            spent_btc: 4.125,
+            open_time: 45_000.5,
+            close_time: 45_001.25,
+            actual_price: 5.5,
+            mean_price: -0.0,
+            quantity_base: 6.75,
+            actual_q: 7.875,
+            tmp_btc: 8.25,
+            create_time: 45_002.5,
+            panic_sell_down: 9.5,
+            order_type: 1,
+            sub_type: 2,
+            stop_flag: 3,
+            partial_done: 4,
+            leverage: 5,
+            is_opened: 6,
+            is_closed: 7,
+            canceled: 8,
+            is_short: 9,
+        };
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(-101i64).to_le_bytes());
+        expected.extend_from_slice(&1.25f64.to_le_bytes());
+        expected.extend_from_slice(&2.5f64.to_le_bytes());
+        expected.extend_from_slice(&3.75f64.to_le_bytes());
+        expected.extend_from_slice(&4.125f64.to_le_bytes());
+        expected.extend_from_slice(&45_000.5f64.to_le_bytes());
+        expected.extend_from_slice(&45_001.25f64.to_le_bytes());
+        expected.extend_from_slice(&5.5f64.to_le_bytes());
+        expected.extend_from_slice(&(-0.0f64).to_le_bytes());
+        expected.extend_from_slice(&6.75f64.to_le_bytes());
+        expected.extend_from_slice(&7.875f64.to_le_bytes());
+        expected.extend_from_slice(&8.25f64.to_le_bytes());
+        expected.extend_from_slice(&45_002.5f64.to_le_bytes());
+        expected.extend_from_slice(&9.5f32.to_le_bytes());
+        expected.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let mut encoded = Vec::new();
+        order.write_to(&mut encoded);
+        assert_eq!(encoded, expected);
+
+        let parsed = OrderCompact::from_bytes(&expected).expect("valid TOrderCompact");
+        assert_eq!(parsed.int_id, order.int_id);
+        assert_eq!(parsed.quantity, order.quantity);
+        assert_eq!(parsed.quantity_remaining, order.quantity_remaining);
+        assert_eq!(parsed.total_btc, order.total_btc);
+        assert_eq!(parsed.spent_btc, order.spent_btc);
+        assert_eq!(parsed.open_time, order.open_time);
+        assert_eq!(parsed.close_time, order.close_time);
+        assert_eq!(parsed.actual_price, order.actual_price);
+        assert_eq!(parsed.mean_price.to_bits(), order.mean_price.to_bits());
+        assert_eq!(parsed.quantity_base, order.quantity_base);
+        assert_eq!(parsed.actual_q, order.actual_q);
+        assert_eq!(parsed.tmp_btc, order.tmp_btc);
+        assert_eq!(parsed.create_time, order.create_time);
+        assert_eq!(parsed.panic_sell_down, order.panic_sell_down);
+        assert_eq!(parsed.order_type, order.order_type);
+        assert_eq!(parsed.sub_type, order.sub_type);
+        assert_eq!(parsed.stop_flag, order.stop_flag);
+        assert_eq!(parsed.partial_done, order.partial_done);
+        assert_eq!(parsed.leverage, order.leverage);
+        assert_eq!(parsed.is_opened, order.is_opened);
+        assert_eq!(parsed.is_closed, order.is_closed);
+        assert_eq!(parsed.canceled, order.canceled);
+        assert_eq!(parsed.is_short, order.is_short);
+    }
+
+    #[test]
     fn order_update_data_adjust_time_skips_zero_dates_like_delphi() {
         let mut missing_time = OrderUpdateData {
             open_time: 0.0,
@@ -2099,6 +2264,53 @@ mod tests {
         valid_time.adjust_time(0.25);
         let valid_open_time = valid_time.open_time;
         assert_eq!(valid_open_time, 1.75);
+    }
+
+    #[test]
+    fn order_update_data_uses_private_wire_struct() {
+        assert_eq!(std::mem::size_of::<WireOrderUpdateData>(), 66);
+        assert_eq!(ORDER_UPDATE_DATA_SIZE, 66);
+
+        let data = OrderUpdateData {
+            int_id: -123456789,
+            actual_price: 1.25,
+            open_time: 45_000.5,
+            quantity: 2.5,
+            quantity_remaining: 3.75,
+            actual_q: 4.125,
+            total_btc: 5.5,
+            mean_price: -0.0,
+            partial_done: 7,
+            stop_flag: 0xA5,
+        };
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(-123456789i64).to_le_bytes());
+        expected.extend_from_slice(&1.25f64.to_le_bytes());
+        expected.extend_from_slice(&45_000.5f64.to_le_bytes());
+        expected.extend_from_slice(&2.5f64.to_le_bytes());
+        expected.extend_from_slice(&3.75f64.to_le_bytes());
+        expected.extend_from_slice(&4.125f64.to_le_bytes());
+        expected.extend_from_slice(&5.5f64.to_le_bytes());
+        expected.extend_from_slice(&(-0.0f64).to_le_bytes());
+        expected.push(7);
+        expected.push(0xA5);
+
+        let mut encoded = Vec::new();
+        data.write_to(&mut encoded);
+        assert_eq!(encoded, expected);
+
+        let parsed = OrderUpdateData::from_bytes(&expected).expect("valid TOrderUpdateData");
+        assert_eq!(parsed.int_id, data.int_id);
+        assert_eq!(parsed.actual_price, data.actual_price);
+        assert_eq!(parsed.open_time, data.open_time);
+        assert_eq!(parsed.quantity, data.quantity);
+        assert_eq!(parsed.quantity_remaining, data.quantity_remaining);
+        assert_eq!(parsed.actual_q, data.actual_q);
+        assert_eq!(parsed.total_btc, data.total_btc);
+        assert_eq!(parsed.mean_price.to_bits(), data.mean_price.to_bits());
+        assert_eq!(parsed.partial_done, data.partial_done);
+        assert_eq!(parsed.stop_flag, data.stop_flag);
     }
 
     fn minimal_order_status_payload(cmd_id: u8, uid: u64) -> Vec<u8> {
@@ -2303,5 +2515,27 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn price_zone_uses_private_wire_struct_without_public_endian_wrappers() {
+        assert_eq!(std::mem::size_of::<WirePriceZone>(), 16);
+        assert_eq!(PRICE_ZONE_SIZE, 16);
+
+        let zone = PriceZone {
+            min_p: 12.5,
+            max_p: -0.0,
+        };
+        let mut bytes = Vec::new();
+        zone.write_to(&mut bytes);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&12.5f64.to_le_bytes());
+        expected.extend_from_slice(&(-0.0f64).to_le_bytes());
+        assert_eq!(bytes, expected);
+
+        let parsed = PriceZone::from_bytes(&bytes).expect("valid TPriceZone");
+        assert_eq!(parsed.min_p, 12.5);
+        assert_eq!(parsed.max_p.to_bits(), (-0.0f64).to_bits());
     }
 }

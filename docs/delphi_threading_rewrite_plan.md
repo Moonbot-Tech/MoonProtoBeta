@@ -2280,6 +2280,14 @@ Work order:
 5. Run full `cargo fmt --check`, `cargo test --quiet`, and
    `cargo check --examples --quiet` after each meaningful slice.
 
+Current status:
+
+- Converted `PriceZone`, `OrderUpdateData`, `StopSettings`, and `OrderCompact`
+  to private zerocopy-backed `Wire*` structs.
+- Public API/state structs still expose plain Rust fields; endian-aware wrappers
+  are private to the wire layer.
+- Added/kept tests for compile-time sizes and byte-for-byte roundtrip.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:
