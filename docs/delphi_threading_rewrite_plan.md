@@ -2087,6 +2087,40 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
+### 2026-05-23 - Phase 1 partial: OrderBook reconnect retry token parity
+
+Done:
+
+- Fixed `NeedResubscribeOrderBooks` parity. Delphi keeps
+  `FSubscribedBookServerToken` and retries full `BookSubbed` batch subscribe
+  every 5000 ms until a successful `DoSubscribeOrderBooks` response confirms
+  the current `Client.ServerToken`.
+- Rust previously replayed registry orderbooks once after reconnect/index sync.
+  If the subscribe request or response was lost, the registry intent remained
+  but no later retry happened.
+- Rust now tracks `subscribed_book_server_token`,
+  `last_book_reconnect_check_ms`, and the UID of the current full-registry
+  replay. Only that replay response, or the first successful orderbook subscribe
+  when the token is still zero, advances the confirmed token.
+- Fixed `ResetOrderBookCaches` machine effect. Delphi clears out-of-order
+  caches and resets per-book seq, but does not wipe visible orderbook levels.
+  Rust now has `reset_caches_keep_books()` and uses it on ServerToken change
+  and before reconnect orderbook replay.
+- Added regression tests for 5000 ms retry throttle, wrong-UID subscribe
+  success not stopping replay, successful replay confirmation, and cache reset
+  preserving visible book snapshots. API docs updated.
+
+Verification:
+
+- `cargo fmt` OK.
+- `cargo test` OK: `548 passed`; live/fire tests ignored by default.
+- `cargo check --examples` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
 ### 2026-05-23 - Phase 1 partial: StrategySerializer field order and default-skip parity
 
 Done:

@@ -259,6 +259,7 @@ const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
 const BIND_FAILED_REPEAT_EVENT_MS: i64 = 50_000;
 const TRADES_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedReconnectAllTrades
 const TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS: i64 = 100; // BWorks.pas Sleep(100)
+const ORDERBOOK_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedResubscribeOrderBooks
 
 /// Send priority matching Delphi `TMoonProtoSendPriority`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2878,6 +2879,7 @@ impl WriterRuntime<'_> {
                 // writer tick. Gap recovery itself is checked only after
                 // successful trades packets, like Delphi `ProcessTradesStream`.
                 self.periodic_trades_reconnect_tick(cur_tm, mode);
+                self.periodic_orderbook_reconnect_tick(cur_tm, mode);
                 self.periodic_orders_tick(cur_tm, mode);
 
                 self.transport_reconnect_tail_tick(cur_tm);
@@ -3242,6 +3244,14 @@ impl WriterRuntime<'_> {
                 self.client.last_trades_tick_ms = cur_tm;
                 self.client
                     .tick_trades_reconnect_sequence(cur_tm, dispatcher.trades_server_token());
+            }
+        }
+    }
+
+    fn periodic_orderbook_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        if let RunMode::Dispatcher { dispatcher, .. } = mode {
+            if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
+                dispatcher.reset_orderbook_caches_keep_books();
             }
         }
     }
@@ -4606,6 +4616,19 @@ pub struct Client {
     /// unsubscribe/sleep/subscribe sequence again.
     last_trades_reconnect_check_ms: i64,
 
+    /// Delphi `TMoonProtoEngine.FSubscribedBookServerToken`: current
+    /// `ServerToken` confirmed by a successful full `BookSubbed` batch subscribe.
+    subscribed_book_server_token: u64,
+
+    /// Delphi `TMoonProtoEngine.LastBookReconnectCheck`: 5s throttle for
+    /// `NeedResubscribeOrderBooks`.
+    last_book_reconnect_check_ms: i64,
+
+    /// UID of the last full-registry `emk_SubscribeOrderBook` replay. A success
+    /// for this UID, unlike a normal one-market subscribe, is allowed to advance
+    /// `subscribed_book_server_token`.
+    pending_orderbook_resubscribe_uid: Option<u64>,
+
     /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
     /// `BMarketHistoryWorker.Execute` reconnect branch.
     pending_trades_resubscribe_after_ms: Option<i64>,
@@ -4834,6 +4857,9 @@ impl Client {
             update_markets_after_indexes: false,
             restore_orderbooks_after_indexes: false,
             last_trades_reconnect_check_ms: 0,
+            subscribed_book_server_token: 0,
+            last_book_reconnect_check_ms: 0,
+            pending_orderbook_resubscribe_uid: None,
             pending_trades_resubscribe_after_ms: None,
             debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
             indexes_fetch_started_ms: 0,
@@ -6001,7 +6027,7 @@ impl Client {
         if delay_orderbooks {
             return;
         }
-        self.restore_orderbook_subscriptions(orderbook_subs);
+        self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, self.now_ms());
     }
 
     fn registry_trades_want_mm(&self) -> Option<bool> {
@@ -6049,13 +6075,51 @@ impl Client {
         self.start_trades_reconnect_sequence(now_ms);
     }
 
-    fn restore_orderbook_subscriptions(&mut self, orderbook_subs: Vec<String>) {
+    fn tick_orderbook_reconnect_sequence(&mut self, now_ms: i64) -> bool {
+        if !self.domain_ready || self.server_token == 0 || !self.market_indexes_current_for_peer() {
+            return false;
+        }
+        if self.server_token == self.subscribed_book_server_token {
+            return false;
+        }
+        if (now_ms - self.last_book_reconnect_check_ms).abs() < ORDERBOOK_RECONNECT_THROTTLE_MS {
+            return false;
+        }
+        let orderbook_subs = {
+            let registry = self.subscription_registry.lock().unwrap();
+            registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
+        };
+        if orderbook_subs.is_empty() {
+            return false;
+        }
+
+        self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, now_ms)
+    }
+
+    fn restore_orderbook_subscriptions_as_reconnect_batch(
+        &mut self,
+        orderbook_subs: Vec<String>,
+        now_ms: i64,
+    ) -> bool {
+        self.last_book_reconnect_check_ms = now_ms;
+        match self.send_orderbook_subscribe_batch(orderbook_subs) {
+            Some(uid) => {
+                self.pending_orderbook_resubscribe_uid = Some(uid);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn send_orderbook_subscribe_batch(&self, orderbook_subs: Vec<String>) -> Option<u64> {
         let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
         if !refs.is_empty() {
-            self.send_api_request(&crate::commands::engine_request::subscribe_order_book(
-                &refs,
-            ));
+            let payload = crate::commands::engine_request::subscribe_order_book(&refs);
+            let uid = engine_request_uid(&payload);
+            self.send_api_request(&payload);
+            return uid;
         }
+        None
     }
 
     fn restore_orderbook_subscriptions_from_registry(&mut self) {
@@ -6063,7 +6127,7 @@ impl Client {
             let registry = self.subscription_registry.lock().unwrap();
             registry.orderbook_subs.iter().cloned().collect::<Vec<_>>()
         };
-        self.restore_orderbook_subscriptions(orderbook_subs);
+        self.restore_orderbook_subscriptions_as_reconnect_batch(orderbook_subs, self.now_ms());
     }
 
     /// Flush subscription intents collected before the one-time Init opened
@@ -8083,7 +8147,22 @@ impl Client {
                 }
             }
 
-            // 3. Pending registry (обычный async API).
+            // 3. Delphi `DoSubscribeOrderBooks`: только успешный ответ подтверждает
+            // текущий `ServerToken`. Для reconnect batch это полный `BookSubbed`
+            // replay; обычная точечная подписка может выставить token только в
+            // initial state, как Delphi `FSubscribedBookServerToken = 0`.
+            if resp.method == EngineMethod::SubscribeOrderBook {
+                let is_reconnect_batch =
+                    self.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
+                if resp.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
+                    self.subscribed_book_server_token = self.server_token;
+                }
+                if is_reconnect_batch {
+                    self.pending_orderbook_resubscribe_uid = None;
+                }
+            }
+
+            // 4. Pending registry (обычный async API).
             let pending_consumed =
                 api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
             if !pending_consumed || sink.is_buffer() {
@@ -15055,6 +15134,10 @@ mod reconnect_timing_tests {
         payload.get(11).copied()
     }
 
+    fn request_uid(payload: &[u8]) -> Option<u64> {
+        engine_request_uid(payload)
+    }
+
     fn drain_send_items(client: &Client) -> Vec<SendItem> {
         let (mut sliced, mut high, mut low) = client.take_send_queues_for_test();
         sliced.append(&mut high);
@@ -15380,6 +15463,116 @@ mod reconnect_timing_tests {
             )),
             "after index restore, orderbook packets reach parser instead of being silently gated"
         );
+    }
+
+    #[test]
+    fn orderbook_reconnect_retries_until_full_batch_response_confirms_server_token() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.server_token = 0x2222;
+        client.peer_app_token = 0x3333;
+        client.tracked_indexes_peer_app_token = 0x3333;
+        client.subscribed_book_server_token = 0x1111;
+        client.with_subscription_registry_mut(|registry| {
+            registry.orderbook_subs.insert("BTCUSDT".to_string());
+            registry.orderbook_subs.insert("ETHUSDT".to_string());
+        });
+
+        assert!(
+            client.tick_orderbook_reconnect_sequence(10_000),
+            "NeedResubscribeOrderBooks must send full BookSubbed batch when ServerToken changed"
+        );
+        let first_sent = drain_send_items(&client);
+        let first_methods = api_methods(&first_sent);
+        assert_eq!(
+            first_methods,
+            vec![EngineMethod::SubscribeOrderBook as u8],
+            "reconnect retry sends one batched SubscribeOrderBook"
+        );
+        let first_uid = request_uid(&first_sent[0].data).expect("request uid");
+        assert_eq!(client.pending_orderbook_resubscribe_uid, Some(first_uid));
+        assert_eq!(client.last_book_reconnect_check_ms, 10_000);
+
+        assert!(
+            !client.tick_orderbook_reconnect_sequence(14_999),
+            "Delphi LastBookReconnectCheck throttle blocks retries before 5000ms"
+        );
+        assert!(drain_send_items(&client).is_empty());
+
+        let normal_subscribe_response =
+            build_engine_response_payload(0xABCD, EngineMethod::SubscribeOrderBook, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                normal_subscribe_response,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        assert_eq!(
+            client.subscribed_book_server_token, 0x1111,
+            "non-reconnect SubscribeOrderBook success must not stop a pending full replay"
+        );
+
+        assert!(
+            client.tick_orderbook_reconnect_sequence(15_000),
+            "at exactly 5000ms Delphi allows the next retry"
+        );
+        let second_sent = drain_send_items(&client);
+        let second_uid = request_uid(&second_sent[0].data).expect("request uid");
+        assert_eq!(client.pending_orderbook_resubscribe_uid, Some(second_uid));
+
+        let response_payload =
+            build_engine_response_payload(second_uid, EngineMethod::SubscribeOrderBook, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        assert_eq!(client.subscribed_book_server_token, client.server_token);
+        assert_eq!(client.pending_orderbook_resubscribe_uid, None);
+        assert!(
+            !client.tick_orderbook_reconnect_sequence(20_000),
+            "after confirmed current ServerToken, NeedResubscribeOrderBooks stops"
+        );
+        assert!(drain_send_items(&client).is_empty());
+    }
+
+    #[test]
+    fn first_successful_orderbook_subscribe_sets_initial_book_server_token_like_delphi() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.server_token = 0x2222;
+        client.subscribed_book_server_token = 0;
+
+        let response_payload =
+            build_engine_response_payload(0xABCD, EngineMethod::SubscribeOrderBook, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+
+        assert_eq!(client.subscribed_book_server_token, 0x2222);
     }
 
     #[test]

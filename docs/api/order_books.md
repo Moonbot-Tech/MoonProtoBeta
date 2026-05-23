@@ -21,6 +21,12 @@ reconnect replays the registry automatically and refetches indexes when needed.
 Orderbook replay waits until fresh `GetMarketsIndexes` has completed for the
 current `PeerAppToken`, matching Delphi `CheckBookTopics`: packets using new
 server indexes are not allowed to race old local index mappings.
+After a reconnect, the library repeats the full registry
+`emk_SubscribeOrderBook` batch every 5 seconds until a successful response
+confirms the current `ServerToken`, matching Delphi
+`FSubscribedBookServerToken` / `LastBookReconnectCheck`. A normal one-market
+subscribe response does not stop this reconnect replay unless it is the first
+successful orderbook subscribe in the session.
 Unsubscribe removes that market from the registry and sends
 `emk_UnsubscribeOrderBook` only after `domain_ready`.
 Use the batched helpers when a UI toggles several markets at once; they preserve

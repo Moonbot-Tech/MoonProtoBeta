@@ -215,7 +215,7 @@ pub struct EventDispatcher {
     local_strategy_epoch: u64,
     /// Последний известный `ServerToken` — для детектирования hard reconnect.
     /// При смене токена `dispatch_into_active` сбрасывает per-token state
-    /// (`trades.full_reset()`, `order_books.clear()`) до применения нового пакета.
+    /// (`trades.full_reset()`, `order_books.reset_caches_keep_books()`) до применения нового пакета.
     /// Иначе stale `last_packet_num` / `expected_seq` в старой нумерации новой
     /// сессии порождает spurious `GapDetected` события и corrupted orderbook display
     /// в первые секунды. Аналог Delphi `MoonProtoEngine.pas:1586-1591`
@@ -300,6 +300,10 @@ impl EventDispatcher {
     /// caches and the latest applied books.
     pub fn order_books(&self) -> &OrderBooks {
         &self.order_books
+    }
+
+    pub(crate) fn reset_orderbook_caches_keep_books(&mut self) {
+        self.order_books.reset_caches_keep_books();
     }
 
     /// Read-only trades-stream state: packet counters, gap buckets, and resend
@@ -1020,9 +1024,9 @@ impl EventDispatcher {
             && self.last_known_server_token != current_token
         {
             self.trades.full_reset();
-            self.order_books.clear();
+            self.order_books.reset_caches_keep_books();
             log::info!(target: "moonproto::events",
-                "ServerToken changed ({:#x} -> {:#x}) — trades+order_books state reset",
+                "ServerToken changed ({:#x} -> {:#x}) — trades reset + orderbook caches reset",
                 self.last_known_server_token, current_token);
         }
         self.last_known_server_token = current_token;
@@ -2567,7 +2571,7 @@ mod tests {
             d.last_known_server_token, 0xBBB,
             "после смены токена — last_known обновлён"
         );
-        // Поведение TradesState.full_reset() и OrderBooks.clear() покрыто
+        // Поведение TradesState.full_reset() и OrderBooks.reset_caches_keep_books() покрыто
         // unit-тестами в соответствующих модулях (state::trades, state::order_books).
     }
 

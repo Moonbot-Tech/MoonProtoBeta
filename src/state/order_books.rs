@@ -442,6 +442,21 @@ impl OrderBooks {
         self.books.clear();
     }
 
+    /// Delphi `TMoonProtoEngine.ResetOrderBookCaches`: clear out-of-order
+    /// caches and reset per-book sequence state without wiping the visible book
+    /// levels. `BookSubbed` lives in `Client`'s subscription registry, so the
+    /// Rust analogue resets all local cache entries; absent entries will be
+    /// recreated with seq=0 on the next packet.
+    pub(crate) fn reset_caches_keep_books(&mut self) {
+        for (_, c) in self.caches.iter_mut() {
+            c.clear();
+            c.corrupted = false;
+            c.expected_seq = 0;
+            c.last_applied_seq = 0;
+        }
+        self.caches.clear();
+    }
+
     /// Количество активных кэшей.
     pub fn len(&self) -> usize {
         self.caches.len()
@@ -649,6 +664,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn reset_caches_keep_books_matches_delphi_reset_orderbook_caches() {
+        let mut ob = OrderBooks::new();
+        let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000);
+        let _ = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
+
+        assert!(ob.book_by_kind(1, 0).is_some());
+        assert_eq!(ob.len(), 1);
+
+        ob.reset_caches_keep_books();
+
+        assert!(
+            ob.book_by_kind(1, 0).is_some(),
+            "Delphi ResetOrderBookCaches resets seq/cache, not visible book levels"
+        );
+        assert_eq!(ob.len(), 0);
+
+        let events = ob.on_packet(make_pkt(1, 0, 50, false), 2000);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                OrderBookEvent::Apply {
+                    is_full: false,
+                    seq: 50,
+                    ..
+                }
+            )),
+            "after seq reset, the next diff is accepted as the new first diff"
+        );
     }
 
     #[test]

@@ -390,6 +390,11 @@ All-trades reconnect follows Delphi `NeedReconnectAllTrades`: until a
 `TradesStream` packet is seen with the current `ServerToken`, the library sends
 `UnsubscribeAllTrades`, waits 100 ms, then sends `SubscribeAllTrades`, retrying
 that sequence no more often than once per 5000 ms.
+Orderbook reconnect follows Delphi `NeedResubscribeOrderBooks`: until a
+successful full-registry `SubscribeOrderBook` response confirms the current
+`ServerToken`, the library repeats the batched subscribe no more often than
+once per 5000 ms. The retry resets local orderbook sequence/cache state but
+keeps the last visible snapshot levels, matching Delphi `ResetOrderBookCaches`.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.
