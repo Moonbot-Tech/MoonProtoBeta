@@ -2284,6 +2284,8 @@ Current status:
 
 - Converted `PriceZone`, `OrderUpdateData`, `StopSettings`, `OrderCompact`, and
   `EmuTradePoint` to private zerocopy-backed `Wire*` structs.
+- Converted candle fixed records `DeepPrice`, `DeepPricePack`, and
+  `DeepPricePackOLD` to private zerocopy-backed `Wire*` structs.
 - Converted core fixed wire headers `Hello`, `CryptoHeader`, `SliceHeader`, and
   ACK256 payloads to private zerocopy-backed `Wire*` structs.
 - Public API/state structs still expose plain Rust fields; endian-aware wrappers

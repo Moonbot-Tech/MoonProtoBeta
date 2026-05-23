@@ -30,6 +30,8 @@
 use std::io::Read;
 
 use flate2::read::ZlibDecoder;
+use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::engine_api::EngineMethod;
 use super::engine_request::build_engine_request_full;
@@ -46,44 +48,56 @@ pub struct DeepPrice {
     pub time: f64,
 }
 
-pub const DEEP_PRICE_SIZE: usize = 28;
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireDeepPrice {
+    open_p: LeF32,
+    close_p: LeF32,
+    max_p: LeF32,
+    min_p: LeF32,
+    vol: LeF32,
+    time: LeF64,
+}
+
+pub const DEEP_PRICE_SIZE: usize = std::mem::size_of::<WireDeepPrice>();
+const _: [(); 28] = [(); DEEP_PRICE_SIZE];
 const MINS_IN_DAY: f64 = 1440.0;
 
 impl DeepPrice {
+    fn from_wire(wire: WireDeepPrice) -> Self {
+        Self {
+            open_p: wire.open_p.get(),
+            close_p: wire.close_p.get(),
+            max_p: wire.max_p.get(),
+            min_p: wire.min_p.get(),
+            vol: wire.vol.get(),
+            time: wire.time.get(),
+        }
+    }
+
+    fn to_wire(self) -> WireDeepPrice {
+        WireDeepPrice {
+            open_p: LeF32::new(self.open_p),
+            close_p: LeF32::new(self.close_p),
+            max_p: LeF32::new(self.max_p),
+            min_p: LeF32::new(self.min_p),
+            vol: LeF32::new(self.vol),
+            time: LeF64::new(self.time),
+        }
+    }
+
     /// Прочитать один record из bytes.
     pub fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos + DEEP_PRICE_SIZE > data.len() {
             return None;
         }
-        let open_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        let close_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        let max_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        let min_p = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        let vol = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        let time = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-        *pos += 8;
-        Some(Self {
-            open_p,
-            close_p,
-            max_p,
-            min_p,
-            vol,
-            time,
-        })
+        let wire = WireDeepPrice::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_SIZE]).ok()?;
+        *pos += DEEP_PRICE_SIZE;
+        Some(Self::from_wire(wire))
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.open_p.to_le_bytes());
-        out.extend_from_slice(&self.close_p.to_le_bytes());
-        out.extend_from_slice(&self.max_p.to_le_bytes());
-        out.extend_from_slice(&self.min_p.to_le_bytes());
-        out.extend_from_slice(&self.vol.to_le_bytes());
-        out.extend_from_slice(&self.time.to_le_bytes());
+        out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
 
@@ -91,8 +105,28 @@ impl DeepPrice {
 ///
 /// Delphi writes this compact 20-byte record for each 5m candle and reconstructs
 /// `OpenP = MaxP`, `CloseP = MinP` on receive.
-pub const DEEP_PRICE_PACK_SIZE: usize = 20;
-pub const DEEP_PRICE_PACK_OLD_SIZE: usize = 32;
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireDeepPricePack {
+    max_p: LeF32,
+    min_p: LeF32,
+    vol: LeF32,
+    time: LeF64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+struct WireDeepPricePackOld {
+    max_p: LeF64,
+    min_p: LeF64,
+    vol: LeF64,
+    time: LeF64,
+}
+
+pub const DEEP_PRICE_PACK_SIZE: usize = std::mem::size_of::<WireDeepPricePack>();
+const _: [(); 20] = [(); DEEP_PRICE_PACK_SIZE];
+pub const DEEP_PRICE_PACK_OLD_SIZE: usize = std::mem::size_of::<WireDeepPricePackOld>();
+const _: [(); 32] = [(); DEEP_PRICE_PACK_OLD_SIZE];
 const WALL_ITEM_SIZE: usize = 8;
 const REQUEST_CANDLES_MARKET_MIN_SIZE: usize = 2 + 4 + WALL_ITEM_SIZE * 8;
 
@@ -426,32 +460,39 @@ fn read_delphi_utf16_string(data: &[u8], pos: &mut usize) -> Option<String> {
 }
 
 fn read_deep_price_pack(data: &[u8], pos: &mut usize) -> Option<DeepPrice> {
-    let max_p = read_f32(data, pos)?;
-    let min_p = read_f32(data, pos)?;
-    let vol = read_f32(data, pos)?;
-    let time = read_f64(data, pos)?;
+    if *pos + DEEP_PRICE_PACK_SIZE > data.len() {
+        return None;
+    }
+    let wire = WireDeepPricePack::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_PACK_SIZE]).ok()?;
+    *pos += DEEP_PRICE_PACK_SIZE;
+    let max_p = wire.max_p.get();
+    let min_p = wire.min_p.get();
     Some(DeepPrice {
         open_p: max_p,
         close_p: min_p,
         max_p,
         min_p,
-        vol,
-        time,
+        vol: wire.vol.get(),
+        time: wire.time.get(),
     })
 }
 
 fn read_deep_price_pack_old(data: &[u8], pos: &mut usize) -> Option<DeepPrice> {
-    let max_p = read_f64(data, pos)? as f32;
-    let min_p = read_f64(data, pos)? as f32;
-    let vol = read_f64(data, pos)? as f32;
-    let time = read_f64(data, pos)?;
+    if *pos + DEEP_PRICE_PACK_OLD_SIZE > data.len() {
+        return None;
+    }
+    let wire =
+        WireDeepPricePackOld::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_PACK_OLD_SIZE]).ok()?;
+    *pos += DEEP_PRICE_PACK_OLD_SIZE;
+    let max_p = wire.max_p.get() as f32;
+    let min_p = wire.min_p.get() as f32;
     Some(DeepPrice {
         open_p: max_p,
         close_p: min_p,
         max_p,
         min_p,
-        vol,
-        time,
+        vol: wire.vol.get() as f32,
+        time: wire.time.get(),
     })
 }
 
@@ -591,7 +632,12 @@ mod tests {
 
     #[test]
     fn deep_price_size_is_28() {
+        assert_eq!(std::mem::size_of::<WireDeepPrice>(), 28);
         assert_eq!(DEEP_PRICE_SIZE, 28);
+        assert_eq!(std::mem::size_of::<WireDeepPricePack>(), 20);
+        assert_eq!(DEEP_PRICE_PACK_SIZE, 20);
+        assert_eq!(std::mem::size_of::<WireDeepPricePackOld>(), 32);
+        assert_eq!(DEEP_PRICE_PACK_OLD_SIZE, 32);
     }
 
     #[test]
@@ -611,6 +657,48 @@ mod tests {
         let dp2 = DeepPrice::read_from(&buf, &mut pos).unwrap();
         assert_eq!(dp, dp2);
         assert_eq!(pos, 28);
+    }
+
+    #[test]
+    fn deep_price_pack_uses_private_wire_struct() {
+        let mut bytes = Vec::new();
+        write_deep_price_pack(&mut bytes, 101.0, -0.0, 12.5, 45_000.25);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&101.0f32.to_le_bytes());
+        expected.extend_from_slice(&(-0.0f32).to_le_bytes());
+        expected.extend_from_slice(&12.5f32.to_le_bytes());
+        expected.extend_from_slice(&45_000.25f64.to_le_bytes());
+        assert_eq!(bytes, expected);
+
+        let mut pos = 0;
+        let parsed = read_deep_price_pack(&bytes, &mut pos).expect("valid TDeepPricePack");
+        assert_eq!(pos, DEEP_PRICE_PACK_SIZE);
+        assert_eq!(parsed.open_p, 101.0);
+        assert_eq!(parsed.close_p.to_bits(), (-0.0f32).to_bits());
+        assert_eq!(parsed.max_p, 101.0);
+        assert_eq!(parsed.min_p.to_bits(), (-0.0f32).to_bits());
+        assert_eq!(parsed.vol, 12.5);
+        assert_eq!(parsed.time, 45_000.25);
+    }
+
+    #[test]
+    fn deep_price_pack_old_uses_private_wire_struct() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&101.0f64.to_le_bytes());
+        bytes.extend_from_slice(&99.5f64.to_le_bytes());
+        bytes.extend_from_slice(&12.5f64.to_le_bytes());
+        bytes.extend_from_slice(&45_000.25f64.to_le_bytes());
+
+        let mut pos = 0;
+        let parsed = read_deep_price_pack_old(&bytes, &mut pos).expect("valid TDeepPricePackOLD");
+        assert_eq!(pos, DEEP_PRICE_PACK_OLD_SIZE);
+        assert_eq!(parsed.open_p, 101.0);
+        assert_eq!(parsed.close_p, 99.5);
+        assert_eq!(parsed.max_p, 101.0);
+        assert_eq!(parsed.min_p, 99.5);
+        assert_eq!(parsed.vol, 12.5);
+        assert_eq!(parsed.time, 45_000.25);
     }
 
     #[test]
@@ -840,10 +928,13 @@ mod tests {
     }
 
     fn write_deep_price_pack(out: &mut Vec<u8>, max_p: f32, min_p: f32, vol: f32, time: f64) {
-        out.extend_from_slice(&max_p.to_le_bytes());
-        out.extend_from_slice(&min_p.to_le_bytes());
-        out.extend_from_slice(&vol.to_le_bytes());
-        out.extend_from_slice(&time.to_le_bytes());
+        let wire = WireDeepPricePack {
+            max_p: LeF32::new(max_p),
+            min_p: LeF32::new(min_p),
+            vol: LeF32::new(vol),
+            time: LeF64::new(time),
+        };
+        out.extend_from_slice(wire.as_bytes());
     }
 
     #[test]
