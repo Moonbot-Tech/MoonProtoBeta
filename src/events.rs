@@ -40,7 +40,7 @@ use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
-use crate::commands::trades_stream::parse_trades_packet;
+use crate::commands::trades_stream::{parse_trades_packet, TradeSection, TradesPacket};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
 use crate::state::orders::OrderCancelSend;
@@ -756,6 +756,7 @@ impl EventDispatcher {
         }
         match parse_trades_packet(payload) {
             Some(pkt) => {
+                let pkt = self.filter_trades_packet_to_known_markets(pkt);
                 // Flatten: каждое TradesEvent пушится в out отдельно — без nested Vec.
                 for ev in self.trades.on_packet(pkt, now_ms) {
                     out.push(Event::Trade(ev));
@@ -769,10 +770,16 @@ impl EventDispatcher {
     }
 
     fn client_new_data_trades_resend_response(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+        // Delphi `ProcessTradesResendBatch` feeds every inner packet back into
+        // `ProcessTradesStream(..., False)`, so the same fresh-index gate applies.
+        if !self.markets.indexes_synchronized {
+            return;
+        }
         let inner_payloads = parse_trades_resend_response(payload);
         for inner in inner_payloads {
             match parse_trades_packet(&inner) {
                 Some(pkt) => {
+                    let pkt = self.filter_trades_packet_to_known_markets(pkt);
                     for ev in self.trades.on_packet_resend(pkt) {
                         out.push(Event::Trade(ev));
                     }
@@ -783,6 +790,30 @@ impl EventDispatcher {
                 }),
             }
         }
+    }
+
+    fn filter_trades_packet_to_known_markets(&self, mut pkt: TradesPacket) -> TradesPacket {
+        pkt.sections.retain_mut(|section| match section {
+            TradeSection::Trades(trades) => {
+                let had_records = !trades.is_empty();
+                trades.retain(|trade| self.markets.has_server_market_index(trade.market_index));
+                !had_records || !trades.is_empty()
+            }
+            TradeSection::MMOrders(orders) => {
+                let had_records = !orders.is_empty();
+                orders.retain(|order| self.markets.has_server_market_index(order.market_index));
+                !had_records || !orders.is_empty()
+            }
+            TradeSection::LiqOrders(orders) => {
+                let had_records = !orders.is_empty();
+                orders.retain(|order| self.markets.has_server_market_index(order.market_index));
+                !had_records || !orders.is_empty()
+            }
+            TradeSection::WatcherFills { market_index, .. } => {
+                self.markets.has_server_market_index(*market_index)
+            }
+        });
+        pkt
     }
 
     fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
@@ -2102,6 +2133,62 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_blocks_trades_resend_until_indexes_sync_like_delphi_process_trades_stream() {
+        let mut d = EventDispatcher::new();
+        let inner = trades_payload_with_market_sections(777, &[0]);
+        let payload = trades_resend_response_payload(&inner);
+        let events = d.dispatch(Command::TradesResendResponse, &payload, 1000);
+        assert!(
+            events.is_empty(),
+            "Delphi ProcessTradesResendBatch вызывает ProcessTradesStream(..., False), а он выходит до fresh indexes"
+        );
+    }
+
+    #[test]
+    fn dispatcher_filters_unknown_trades_sections_like_delphi_find_by_server_index() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let events = d.dispatch(
+            Command::TradesStream,
+            &trades_payload_with_market_sections(777, &[0, 1]),
+            1000,
+        );
+
+        let pkt = first_trades_apply(&events);
+        assert_eq!(pkt.sections.len(), 1);
+        match &pkt.sections[0] {
+            TradeSection::Trades(trades) => {
+                assert_eq!(trades.len(), 1);
+                assert_eq!(trades[0].market_index, 0);
+            }
+            other => panic!("expected trades section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_filters_unknown_trades_resend_sections_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let inner = trades_payload_with_market_sections(778, &[0, 1]);
+        let payload = trades_resend_response_payload(&inner);
+        let events = d.dispatch(Command::TradesResendResponse, &payload, 1000);
+
+        let pkt = first_trades_apply(&events);
+        assert_eq!(pkt.sections.len(), 1);
+        match &pkt.sections[0] {
+            TradeSection::Trades(trades) => {
+                assert_eq!(trades.len(), 1);
+                assert_eq!(trades[0].market_index, 0);
+            }
+            other => panic!("expected trades section, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dispatcher_order_not_blocked_by_indexes_sync() {
         // Order channel не зависит от market_idx → не должен блокироваться indexes_sync.
         let mut d = EventDispatcher::new();
@@ -2429,6 +2516,39 @@ mod tests {
         payload.extend_from_slice(&packet_num.to_le_bytes());
         payload.push(0); // packet flags: uncompressed, no taker flag.
         payload
+    }
+
+    fn trades_payload_with_market_sections(packet_num: u16, market_indices: &[u16]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&packet_num.to_le_bytes());
+        for (i, market_index) in market_indices.iter().enumerate() {
+            payload.extend_from_slice(&market_index.to_le_bytes());
+            payload.push(1); // Count.
+            payload.extend_from_slice(&(i as i16).to_le_bytes());
+            payload.extend_from_slice(&(100.0f32 + i as f32).to_le_bytes());
+            payload.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        payload.push(0); // packet flags: uncompressed, no taker flag.
+        payload
+    }
+
+    fn trades_resend_response_payload(inner: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(1);
+        payload.extend_from_slice(&(inner.len() as u16).to_le_bytes());
+        payload.extend_from_slice(inner);
+        payload
+    }
+
+    fn first_trades_apply(events: &[Event]) -> &crate::commands::trades_stream::TradesPacket {
+        events
+            .iter()
+            .find_map(|ev| match ev {
+                Event::Trade(TradesEvent::Apply(pkt)) => Some(pkt),
+                _ => None,
+            })
+            .expect("TradesEvent::Apply")
     }
 
     #[test]

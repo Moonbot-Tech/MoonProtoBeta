@@ -2088,6 +2088,41 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
+### 2026-05-24 - Phase 1 partial: Trades market-index gate and section filtering
+
+Done:
+
+- Fixed a `TradesStream` / `TradesResendResponse` parity bug in
+  `EventDispatcher`.
+- Delphi `ProcessTradesStream` exits while fresh market indexes are not synced,
+  and `ProcessTradesResendBatch` feeds every inner packet back through
+  `ProcessTradesStream(..., False)`, so resend packets use the same gate.
+- Delphi also resolves each section through
+  `SrvMarkets.FindByServerIndex(MarketIdx)` and skips that section payload when
+  the server index is unknown.
+- Rust already gated live `TradesStream`, but did not gate
+  `TradesResendResponse` and could emit live/resend `TradeSection`s for unknown
+  `mIndex`.
+- Rust now filters parsed `TradesPacket.sections` through the current
+  `emk_GetMarketsIndexes` mapping before applying/emitting trades. Packet
+  numbers still reach `TradesState`, so gap/recovery tail behavior remains in
+  the Delphi position.
+- Recorded `spec_pipeline/work/хуйня.md §X.117`.
+
+Verification:
+
+- Added dispatcher tests for resend gating and live/resend unknown-section
+  filtering.
+- `cargo test trades --quiet` OK: `42 passed`.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `563 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining protocol paths after
+  the full verification pass.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:
