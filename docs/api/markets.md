@@ -131,6 +131,26 @@ pub struct MarketPrice {
 }
 ```
 
+`Market::futures_type` uses `BaseCurrency`, a raw Delphi `TBaseCurrency`
+ordinal wrapper:
+
+```rust
+pub struct BaseCurrency(pub u8);
+
+BaseCurrency::BTC;
+BaseCurrency::USDT;
+BaseCurrency::USDC;
+BaseCurrency::EMPTY;
+BaseCurrency::UNKNOWN;
+
+let wire_byte = market.futures_type.to_byte();
+let value = BaseCurrency::from_byte(wire_byte);
+```
+
+Known constants match `Vars.pas:TBaseCurrency`. Unknown future ordinals are
+preserved as their original byte instead of being collapsed to
+`BaseCurrency::UNKNOWN`, matching Delphi `TBaseCurrency(resp.ReadByte)`.
+
 Convenience methods:
 
 ```rust

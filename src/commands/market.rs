@@ -143,80 +143,64 @@ impl<'a> EngineStreamReader<'a> {
 }
 
 // =============================================================================
-//  TBaseCurrency enum (Vars.pas:40)
+//  TBaseCurrency ordinal (Vars.pas:40)
 // =============================================================================
 
-/// `TBaseCurrency` — базовая валюта рынка. Источник: `Vars.pas:40`.
-/// На проводе передаётся как 1 байт ordinal'а (см. `FuturesType` в `WriteMarketToStream`).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BaseCurrency {
-    BTC = 0,
-    USDT = 1,
-    ETH = 2,
-    BNB = 3,
-    AUD = 4,
-    TUSD = 5,
-    BRL = 6,
-    USDH = 7,
-    USDC = 8,
-    FDUSD = 9,
-    AEUR = 10,
-    USD = 11,
-    TRX = 12,
-    RUB = 13,
-    EUR = 14,
-    HTX = 15,
-    USDD = 16,
-    IDR = 17,
-    DOGE = 18,
-    TRY = 19,
-    USDE = 20,
-    Next2 = 21,
-    Next3 = 22,
-    Next4 = 23,
-    Next5 = 24,
-    EMPTY = 25,
-    Unknown = 26,
-}
+/// `TBaseCurrency` — raw ordinal of Delphi enum from `Vars.pas:40`.
+///
+/// Delphi stores this field as a one-byte enum ordinal and `WriteMarketToStream`
+/// writes `Ord(m.FuturesType)`. Keep the raw byte instead of collapsing unknown
+/// future ordinals to `BC_Unknown`, so parse + write preserves the exact wire
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BaseCurrency(pub u8);
 
 impl BaseCurrency {
-    /// `BaseCurrency` имеет типизированный `Unknown` вариант — сохраняем как есть
-    /// (не `Option<Self>` поскольку Unknown — это **известный** факт в системе типов).
-    /// При unknown byte логируем warn! для диагностики server-side расширений (A-02).
-    pub fn from_byte(b: u8) -> Self {
-        match b {
-            0 => Self::BTC,
-            1 => Self::USDT,
-            2 => Self::ETH,
-            3 => Self::BNB,
-            4 => Self::AUD,
-            5 => Self::TUSD,
-            6 => Self::BRL,
-            7 => Self::USDH,
-            8 => Self::USDC,
-            9 => Self::FDUSD,
-            10 => Self::AEUR,
-            11 => Self::USD,
-            12 => Self::TRX,
-            13 => Self::RUB,
-            14 => Self::EUR,
-            15 => Self::HTX,
-            16 => Self::USDD,
-            17 => Self::IDR,
-            18 => Self::DOGE,
-            19 => Self::TRY,
-            20 => Self::USDE,
-            21 => Self::Next2,
-            22 => Self::Next3,
-            23 => Self::Next4,
-            24 => Self::Next5,
-            25 => Self::EMPTY,
-            _ => {
-                log::warn!(target: "moonproto::market", "unknown BaseCurrency byte: {b} (server-side extension?)");
-                Self::Unknown
-            }
-        }
+    pub const BTC: Self = Self(0);
+    pub const USDT: Self = Self(1);
+    pub const ETH: Self = Self(2);
+    pub const BNB: Self = Self(3);
+    pub const AUD: Self = Self(4);
+    pub const TUSD: Self = Self(5);
+    pub const BRL: Self = Self(6);
+    pub const USDH: Self = Self(7);
+    pub const USDC: Self = Self(8);
+    pub const FDUSD: Self = Self(9);
+    pub const AEUR: Self = Self(10);
+    pub const USD: Self = Self(11);
+    pub const TRX: Self = Self(12);
+    pub const RUB: Self = Self(13);
+    pub const EUR: Self = Self(14);
+    pub const HTX: Self = Self(15);
+    pub const USDD: Self = Self(16);
+    pub const IDR: Self = Self(17);
+    pub const DOGE: Self = Self(18);
+    pub const TRY: Self = Self(19);
+    pub const USDE: Self = Self(20);
+    pub const NEXT2: Self = Self(21);
+    pub const NEXT3: Self = Self(22);
+    pub const NEXT4: Self = Self(23);
+    pub const NEXT5: Self = Self(24);
+    pub const EMPTY: Self = Self(25);
+    pub const UNKNOWN: Self = Self(26);
+
+    #[allow(non_upper_case_globals)]
+    pub const Next2: Self = Self::NEXT2;
+    #[allow(non_upper_case_globals)]
+    pub const Next3: Self = Self::NEXT3;
+    #[allow(non_upper_case_globals)]
+    pub const Next4: Self = Self::NEXT4;
+    #[allow(non_upper_case_globals)]
+    pub const Next5: Self = Self::NEXT5;
+    #[allow(non_upper_case_globals)]
+    pub const Unknown: Self = Self::UNKNOWN;
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
     }
 }
 
@@ -341,7 +325,7 @@ fn read_market_with_local_shift(
     let futures_type = if ver >= 2 {
         BaseCurrency::from_byte(r.read_byte()?)
     } else {
-        BaseCurrency::Unknown
+        BaseCurrency::UNKNOWN
     };
 
     // Backfill MBClassic (см. ReadMarketFromStream MoonProtoSerialization.pas:160).
@@ -470,7 +454,7 @@ fn write_market_with_local_shift(
     out.push(m.bn_only_isolated as u8);
 
     // Delphi: WriteMarketToStream пишет FuturesType всегда (без guard ver).
-    out.push(m.futures_type as u8);
+    out.push(m.futures_type.to_byte());
 }
 
 fn remove_delphi_local_funding_shift(local_funding_time: f64, local_shift_minutes: f64) -> f64 {
@@ -1166,13 +1150,17 @@ mod tests {
     }
 
     #[test]
-    fn base_currency_byte_mapping() {
+    fn base_currency_preserves_raw_delphi_ordinal_byte() {
         assert_eq!(BaseCurrency::from_byte(0), BaseCurrency::BTC);
         assert_eq!(BaseCurrency::from_byte(1), BaseCurrency::USDT);
         assert_eq!(BaseCurrency::from_byte(8), BaseCurrency::USDC);
         assert_eq!(BaseCurrency::from_byte(25), BaseCurrency::EMPTY);
-        assert_eq!(BaseCurrency::from_byte(26), BaseCurrency::Unknown);
-        // Out-of-range
-        assert_eq!(BaseCurrency::from_byte(99), BaseCurrency::Unknown);
+        assert_eq!(BaseCurrency::from_byte(26), BaseCurrency::UNKNOWN);
+        assert_eq!(BaseCurrency::from_byte(99).to_byte(), 99);
+        assert_ne!(
+            BaseCurrency::from_byte(99),
+            BaseCurrency::UNKNOWN,
+            "Delphi stores the raw enum ordinal; Rust must not collapse unknown wire bytes"
+        );
     }
 }
