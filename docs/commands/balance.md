@@ -13,6 +13,10 @@ Server → Client. Balance snapshots and incremental updates with bitmask optimi
 | 005 | RequestRefresh | C→S | Trigger server to send fresh snapshot |
 | 006 | ArbPrices | S→C | Compact arb price/isolation relay (low priority) |
 
+`CmdId=006` carries server `mIndex` values. The raw parser decodes the payload as
+sent. The active `EventDispatcher` path filters decoded price/isolation records
+through the current server-index map, matching Delphi `SrvMarkets.FindByServerIndex`.
+
 ## Balance Snapshot/Command (CmdId 002/003)
 
 ```

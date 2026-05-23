@@ -208,6 +208,9 @@ previous `max_value` when the decoded value is zero or otherwise not greater tha
 It follows the same server-side balance-subscription filter as balance
 snapshots, so an initialized active client sees it through `Event::Arb`, while a
 raw pre-init transport connection should not expect arb broadcasts yet.
+On the `EventDispatcher` active path, arb price/isolation records are filtered
+through the current server `mIndex` map; unknown market indexes are consumed but
+not exposed, matching Delphi `SrvMarkets.FindByServerIndex`.
 `balance_usdt` calculation needs prices from `MarketsState`.
 `request_balance_snapshot` is the high-level full-snapshot helper.
 `request_balance` requests one-currency balance through Engine API.

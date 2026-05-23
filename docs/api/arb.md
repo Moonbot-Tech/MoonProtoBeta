@@ -12,6 +12,11 @@ should not expect `Event::Arb` yet.
 
 ## EventDispatcher Path
 
+`EventDispatcher` is the active-library path. It matches the Delphi client:
+price blocks and isolation entries whose `market_index` is not present in the
+current server-index map are consumed but not exposed in `Event::Arb`.
+Use `parse_arb_payload_compact` directly when you need raw wire inspection.
+
 ```rust
 use moonproto::Event;
 use moonproto::commands::arb::ArbPayload;

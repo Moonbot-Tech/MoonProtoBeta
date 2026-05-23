@@ -853,6 +853,7 @@ impl EventDispatcher {
             6 => match parse_arb_prices(payload) {
                 Some(arb) => {
                     if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
+                        let parsed = self.filter_arb_payload_to_known_markets(parsed);
                         out.push(Event::Arb {
                             uid: arb.uid,
                             payload: parsed,
@@ -868,6 +869,25 @@ impl EventDispatcher {
                 cmd: Command::Balance,
                 payload: payload.to_vec(),
             }),
+        }
+    }
+
+    fn filter_arb_payload_to_known_markets(&self, payload: ArbPayload) -> ArbPayload {
+        match payload {
+            ArbPayload::Price {
+                version,
+                mut blocks,
+            } => {
+                blocks.retain(|block| self.markets.has_server_market_index(block.market_index));
+                ArbPayload::Price { version, blocks }
+            }
+            ArbPayload::Isolation {
+                version,
+                mut entries,
+            } => {
+                entries.retain(|entry| self.markets.has_server_market_index(entry.market_index));
+                ArbPayload::Isolation { version, entries }
+            }
         }
     }
 
@@ -1951,8 +1971,10 @@ mod tests {
     #[test]
     fn dispatcher_routes_arb_to_typed_event() {
         let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
         let mut compact = vec![2u8];
-        compact.extend_from_slice(&42u16.to_le_bytes());
+        compact.extend_from_slice(&0u16.to_le_bytes());
         compact.push(1);
         compact.push(7);
         compact.extend_from_slice(&123.25f32.to_le_bytes());
@@ -1966,13 +1988,79 @@ mod tests {
                     assert_eq!(*uid, 9);
                     assert_eq!(*version, 2);
                     assert_eq!(blocks.len(), 1);
-                    assert_eq!(blocks[0].market_index, 42);
+                    assert_eq!(blocks[0].market_index, 0);
                     assert_eq!(blocks[0].prices[0].platform_code, 7);
                     assert_eq!(blocks[0].prices[0].price, 123.25);
                 }
                 other => panic!("expected ArbPayload::Price, got {:?}", other),
             },
             other => panic!("expected typed Arb event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatcher_filters_unknown_arb_price_blocks_like_delphi_find_by_server_index() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut compact = vec![2u8];
+        compact.extend_from_slice(&0u16.to_le_bytes());
+        compact.push(1);
+        compact.push(7);
+        compact.extend_from_slice(&123.25f32.to_le_bytes());
+        compact.extend_from_slice(&1u16.to_le_bytes());
+        compact.push(1);
+        compact.push(8);
+        compact.extend_from_slice(&99.5f32.to_le_bytes());
+
+        let payload = build_arb_prices(10, &compact);
+        let events = d.dispatch(Command::Balance, &payload, 1000);
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Arb {
+                payload: ArbPayload::Price { blocks, .. },
+                ..
+            } => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].market_index, 0);
+                assert_eq!(blocks[0].prices[0].platform_code, 7);
+            }
+            other => panic!("expected filtered Arb price event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatcher_filters_unknown_arb_isolation_entries_like_delphi_find_by_server_index() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut compact = vec![3u8, 2u8]; // version=3, CMD_ISOL.
+        compact.extend_from_slice(&2u16.to_le_bytes());
+        compact.extend_from_slice(&0u16.to_le_bytes());
+        compact.push(7);
+        compact.push(0b01);
+        compact.extend_from_slice(&1u16.to_le_bytes());
+        compact.push(8);
+        compact.push(0b10);
+
+        let payload = build_arb_prices(11, &compact);
+        let events = d.dispatch(Command::Balance, &payload, 1000);
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Arb {
+                payload: ArbPayload::Isolation { entries, .. },
+                ..
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].market_index, 0);
+                assert_eq!(entries[0].platform_code, 7);
+                assert_eq!(entries[0].flags, 0b01);
+            }
+            other => panic!("expected filtered Arb isolation event, got {other:?}"),
         }
     }
 

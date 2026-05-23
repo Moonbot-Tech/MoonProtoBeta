@@ -2210,6 +2210,76 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining market/API and
   protocol-domain details.
 
+### 2026-05-24 - Phase 1 partial: Arb market-index filtering
+
+Done:
+
+- Fixed an `MPC_Balance` / `TArbPricesCommand` active-dispatch parity bug.
+- Delphi `MoonProtoClient.pas` sends `TArbPricesCommand.Payload` to
+  `ParseArbPayloadCompact`. `ArbClientU.pas` then resolves every compact
+  price/isolation `idx` through `SrvMarkets.FindByServerIndex`; if the market is
+  missing, the bytes are consumed but the record is not applied.
+- Rust raw arb parsers remain raw, but `EventDispatcher` now filters
+  `Event::Arb` price blocks and isolation entries through the current server
+  `mIndex` mapping before exposing them to user code.
+- Recorded `spec_pipeline/work/хуйня.md §X.121`.
+
+Verification:
+
+- Added dispatcher tests for unknown arb price blocks and unknown isolation
+  entries.
+- `cargo test arb --quiet` OK: `16 passed`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining `Balance`, `UI`,
+  `OrderBook`, order worker, and reconnect/maintenance protocol details.
+
+### 2026-05-24 - Refactor-red-flag: fixed packed records need private wire structs
+
+Decision:
+
+- Fixed packed records must be represented as fixed wire structs with
+  compile-time layout checks. This improves Delphi identity and removes
+  boilerplate without changing behavior.
+- Fixed Delphi packed records should use a private wire layer, not long
+  hand-written `from_le_bytes` cursor blocks.
+- Public/state structs such as `OrderCompact`, `StopSettings`, and
+  `OrderUpdateData` must keep normal Rust field types (`i64`, `f64`, `u8`) for
+  API/state ergonomics. Do not expose endian-wrapper fields such as
+  `F64<LittleEndian>` in the public read model.
+- Add private `Wire*` structs for wire parsing/writing, e.g.
+  `WireOrderCompact`, `WireStopSettings`, `WireOrderUpdateData`, and
+  `WirePriceZone`. These structs mirror Delphi `packed record` layout and use
+  endian-aware field wrappers.
+- Parse path: read one private `Wire*` from bytes, then convert to the public
+  struct. Write path: convert public struct to private `Wire*`, then write the
+  exact bytes.
+- This applies only to fixed-size packed records that Delphi reads/writes with
+  `ms.Read(X, SizeOf(X))` / `ms.Write(X, SizeOf(X))`. Do not apply it to
+  variable formats: strings, arrays, count loops, bitmask fields, compressed
+  payloads, or variant tails.
+
+Rationale:
+
+- The machine-effect invariant is stronger with an explicit wire struct:
+  field order, size, and layout are checked mechanically instead of being
+  implied by many repeated byte slices.
+- The public API stays clean: user/state code continues to write
+  `order.quantity`, not `order.quantity.get()`.
+
+Work order:
+
+1. Add the wire-struct dependency and prove it builds on the current Windows
+   GNU toolchain.
+2. Convert `PriceZone` first as the smallest fixed record.
+3. Convert `OrderUpdateData`, then `StopSettings`, then `OrderCompact`.
+4. For every converted record add/keep tests for size, parser roundtrip, writer
+   roundtrip, and Delphi-specific bit semantics such as `StopSettings` bitwise
+   equality.
+5. Run full `cargo fmt --check`, `cargo test --quiet`, and
+   `cargo check --examples --quiet` after each meaningful slice.
+
 ### 2026-05-23 - Correction: ProcessCommandOrder JobIsDone is not terminal status
 
 Correction:
