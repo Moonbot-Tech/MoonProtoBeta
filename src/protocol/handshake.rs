@@ -1,12 +1,15 @@
 use crate::crypto;
 use crate::MoonKey;
 use rand::Rng;
+use zerocopy::byteorder::little_endian::U64 as LeU64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 // Hello timestamp is set by caller (client.rs::delphi_now adds NTP offset).
 
 /// TMoonProtoHello — 56 bytes packed record
 /// Layout: Rnd(16) + MixTS(8) + TimeStamp(8) + ServerToken(8) + PeerMix(8) + AppToken(8)
-pub const HELLO_SIZE: usize = 56;
+pub const HELLO_SIZE: usize = std::mem::size_of::<WireHello>();
+const _: [(); 56] = [(); HELLO_SIZE];
 
 #[derive(Debug, Clone)]
 pub struct Hello {
@@ -16,6 +19,17 @@ pub struct Hello {
     pub server_token: u64,
     pub peer_mix: u64,
     pub app_token: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireHello {
+    rnd: [u8; 16],
+    mix_ts: LeU64,
+    timestamp_packed: LeU64,
+    server_token: LeU64,
+    peer_mix: LeU64,
+    app_token: LeU64,
 }
 
 impl Hello {
@@ -34,46 +48,46 @@ impl Hello {
         }
     }
 
-    /// Pack: TimeStamp XOR'd with MixTS (as u64 overlay on f64 bits)
+    fn to_wire(&self) -> WireHello {
+        let ts_bits = self.timestamp.to_bits();
+        WireHello {
+            rnd: self.rnd,
+            mix_ts: LeU64::new(self.mix_ts),
+            timestamp_packed: LeU64::new(ts_bits.wrapping_add(self.mix_ts)),
+            server_token: LeU64::new(self.server_token),
+            peer_mix: LeU64::new(self.peer_mix),
+            app_token: LeU64::new(self.app_token),
+        }
+    }
+
+    fn from_wire(wire: WireHello) -> Self {
+        let mix_ts = wire.mix_ts.get();
+        let ts_bits = wire.timestamp_packed.get().wrapping_sub(mix_ts);
+        Self {
+            rnd: wire.rnd,
+            mix_ts,
+            timestamp: f64::from_bits(ts_bits),
+            server_token: wire.server_token.get(),
+            peer_mix: wire.peer_mix.get(),
+            app_token: wire.app_token.get(),
+        }
+    }
+
+    /// Pack: TimeStamp bits plus MixTS, matching `TMoonProtoHello.pack`.
     pub fn to_bytes_packed(&self) -> [u8; HELLO_SIZE] {
         let mut buf = [0u8; HELLO_SIZE];
-        buf[0..16].copy_from_slice(&self.rnd);
-        buf[16..24].copy_from_slice(&self.mix_ts.to_le_bytes());
-
-        // Pack timestamp: raw f64 bits XOR'd with MixTS
-        let ts_bits = self.timestamp.to_bits();
-        let packed_ts = ts_bits.wrapping_add(self.mix_ts);
-        buf[24..32].copy_from_slice(&packed_ts.to_le_bytes());
-
-        buf[32..40].copy_from_slice(&self.server_token.to_le_bytes());
-        buf[40..48].copy_from_slice(&self.peer_mix.to_le_bytes());
-        buf[48..56].copy_from_slice(&self.app_token.to_le_bytes());
+        buf.copy_from_slice(self.to_wire().as_bytes());
         buf
     }
 
-    /// Unpack from bytes (reverses timestamp packing)
+    /// Unpack from bytes (reverses timestamp packing).
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < HELLO_SIZE {
             return None;
         }
-        let mut rnd = [0u8; 16];
-        rnd.copy_from_slice(&data[0..16]);
-        let mix_ts = u64::from_le_bytes(data[16..24].try_into().unwrap());
-        let packed_ts = u64::from_le_bytes(data[24..32].try_into().unwrap());
-        let ts_bits = packed_ts.wrapping_sub(mix_ts);
-        let timestamp = f64::from_bits(ts_bits);
-        let server_token = u64::from_le_bytes(data[32..40].try_into().unwrap());
-        let peer_mix = u64::from_le_bytes(data[40..48].try_into().unwrap());
-        let app_token = u64::from_le_bytes(data[48..56].try_into().unwrap());
-
-        Some(Self {
-            rnd,
-            mix_ts,
-            timestamp,
-            server_token,
-            peer_mix,
-            app_token,
-        })
+        Some(Self::from_wire(
+            WireHello::read_from_bytes(&data[..HELLO_SIZE]).ok()?,
+        ))
     }
 }
 
@@ -93,4 +107,44 @@ pub fn build_hello_packet(
     let packed = hello.to_bytes_packed();
     let aad = client_id.to_le_bytes();
     crypto::encrypt(master_key, &packed, &aad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_uses_private_wire_struct() {
+        assert_eq!(std::mem::size_of::<WireHello>(), 56);
+        assert_eq!(HELLO_SIZE, 56);
+
+        let hello = Hello {
+            rnd: [0xAB; 16],
+            mix_ts: 0x0102_0304_0506_0708,
+            timestamp: 45_000.25,
+            server_token: 0x1112_1314_1516_1718,
+            peer_mix: 0x2122_2324_2526_2728,
+            app_token: 0x3132_3334_3536_3738,
+        };
+        let bytes = hello.to_bytes_packed();
+
+        assert_eq!(&bytes[0..16], &[0xAB; 16]);
+        assert_eq!(&bytes[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(
+            &bytes[24..32],
+            &hello
+                .timestamp
+                .to_bits()
+                .wrapping_add(hello.mix_ts)
+                .to_le_bytes()
+        );
+
+        let parsed = Hello::from_bytes(&bytes).expect("valid TMoonProtoHello");
+        assert_eq!(parsed.rnd, hello.rnd);
+        assert_eq!(parsed.mix_ts, hello.mix_ts);
+        assert_eq!(parsed.timestamp.to_bits(), hello.timestamp.to_bits());
+        assert_eq!(parsed.server_token, hello.server_token);
+        assert_eq!(parsed.peer_mix, hello.peer_mix);
+        assert_eq!(parsed.app_token, hello.app_token);
+    }
 }

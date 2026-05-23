@@ -3673,9 +3673,12 @@ impl WriterRuntime<'_> {
         let mut sent_slices = Vec::with_capacity(n_blocks);
         for block_num in 0..n_blocks {
             let mut slice = Vec::with_capacity(4 + pmtu);
-            slice.extend_from_slice(&datagram_num.to_le_bytes());
-            slice.push(block_num as u8);
-            slice.push(max_block_num);
+            slicing::SliceHeader {
+                datagram_num,
+                block_num: block_num as u8,
+                max_block_num,
+            }
+            .write_to(&mut slice);
 
             if block_num == 0 {
                 slice.push(wire_cmd);
@@ -7503,14 +7506,10 @@ impl Client {
     fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
         // Delphi OnNewSlicedACK reads Flags(32 bytes) + DatagramNum(2 bytes)
         // from the command payload after the transport header.
-        if payload.len() < 34 {
-            return None;
-        }
-        let mut flags = [0u8; 32];
-        flags.copy_from_slice(&payload[0..32]);
+        let (flags, datagram_num) = slicing::parse_ack_bytes(payload)?;
         Some(SlicedAck {
             flags,
-            datagram_num: u16::from_le_bytes([payload[32], payload[33]]),
+            datagram_num,
         })
     }
 

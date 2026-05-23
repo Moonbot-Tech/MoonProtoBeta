@@ -13,8 +13,11 @@ use crate::crypto::Aes128Gcm;
 ///     WantACK: u8 (1 byte, boolean)
 ///   Followed by the actual command payload.
 use log::warn;
+use zerocopy::byteorder::little_endian::{U16 as LeU16, U64 as LeU64};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
-pub const CRYPTO_HEADER_SIZE: usize = 12;
+pub const CRYPTO_HEADER_SIZE: usize = std::mem::size_of::<WireCryptoHeader>();
+const _: [(); 12] = [(); CRYPTO_HEADER_SIZE];
 
 /// TMoonProtoCryptoHeader — 12 bytes packed
 #[derive(Debug, Clone, Copy)]
@@ -25,17 +28,32 @@ pub struct CryptoHeader {
     pub want_ack: bool,
 }
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+struct WireCryptoHeader {
+    rnd: LeU16,
+    msg_num: LeU64,
+    cmd: u8,
+    want_ack: u8,
+}
+
 impl CryptoHeader {
+    fn from_wire(wire: WireCryptoHeader) -> Self {
+        Self {
+            rnd: wire.rnd.get(),
+            msg_num: wire.msg_num.get(),
+            cmd: wire.cmd,
+            want_ack: wire.want_ack != 0,
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < CRYPTO_HEADER_SIZE {
             return None;
         }
-        Some(Self {
-            rnd: u16::from_le_bytes(data[0..2].try_into().unwrap()),
-            msg_num: u64::from_le_bytes(data[2..10].try_into().unwrap()),
-            cmd: data[10],
-            want_ack: data[11] != 0,
-        })
+        Some(Self::from_wire(
+            WireCryptoHeader::read_from_bytes(&data[..CRYPTO_HEADER_SIZE]).ok()?,
+        ))
     }
 }
 
@@ -87,6 +105,9 @@ mod tests {
 
     #[test]
     fn crypto_header_parse() {
+        assert_eq!(std::mem::size_of::<WireCryptoHeader>(), 12);
+        assert_eq!(CRYPTO_HEADER_SIZE, 12);
+
         let data = [
             0x12, 0x34, // rnd
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // msg_num = 1
@@ -95,6 +116,7 @@ mod tests {
             0xDE, 0xAD, // payload
         ];
         let hdr = CryptoHeader::from_bytes(&data).unwrap();
+        assert_eq!(hdr.rnd, 0x3412);
         assert_eq!(hdr.msg_num, 1);
         assert_eq!(hdr.cmd, 0x0A);
         assert!(hdr.want_ack);

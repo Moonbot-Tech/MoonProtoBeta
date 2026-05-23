@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 #[cfg(feature = "diagnostic-trace")]
 use std::sync::OnceLock;
-
-pub const SLICE_HEADER_SIZE: usize = 4;
+use zerocopy::byteorder::little_endian::U16 as LeU16;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 #[cfg(feature = "diagnostic-trace")]
 pub(crate) fn trace_enabled() -> bool {
@@ -69,16 +69,45 @@ pub struct SliceHeader {
     pub max_block_num: u8,
 }
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireSliceHeader {
+    datagram_num: LeU16,
+    block_num: u8,
+    max_block_num: u8,
+}
+
+pub const SLICE_HEADER_SIZE: usize = std::mem::size_of::<WireSliceHeader>();
+const _: [(); 4] = [(); SLICE_HEADER_SIZE];
+
 impl SliceHeader {
+    fn from_wire(wire: WireSliceHeader) -> Self {
+        Self {
+            datagram_num: wire.datagram_num.get(),
+            block_num: wire.block_num,
+            max_block_num: wire.max_block_num,
+        }
+    }
+
+    fn to_wire(self) -> WireSliceHeader {
+        WireSliceHeader {
+            datagram_num: LeU16::new(self.datagram_num),
+            block_num: self.block_num,
+            max_block_num: self.max_block_num,
+        }
+    }
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < SLICE_HEADER_SIZE {
             return None;
         }
-        Some(Self {
-            datagram_num: u16::from_le_bytes(data[0..2].try_into().unwrap()),
-            block_num: data[2],
-            max_block_num: data[3],
-        })
+        Some(Self::from_wire(
+            WireSliceHeader::read_from_bytes(&data[..SLICE_HEADER_SIZE]).ok()?,
+        ))
+    }
+
+    pub fn write_to(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
     }
 }
 
@@ -179,16 +208,35 @@ impl SlicedData {
     }
 }
 
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireSlicedAck {
+    flags: [u8; 32],
+    datagram_num: LeU16,
+}
+
 /// ACK256 wire format: 32 bytes flags + 2 bytes DatagramNum = 34 bytes
-pub const ACK256_WIRE_SIZE: usize = 34;
+pub const ACK256_WIRE_SIZE: usize = std::mem::size_of::<WireSlicedAck>();
+const _: [(); 34] = [(); ACK256_WIRE_SIZE];
 pub type SlicedPayloadResult = Option<(u16, u8, Vec<u8>, u8, usize)>;
 pub type SlicedProcessResult = (SlicedPayloadResult, [u8; ACK256_WIRE_SIZE]);
 
 pub fn build_ack_bytes(flags: &[u8; 32], datagram_num: u16) -> [u8; ACK256_WIRE_SIZE] {
     let mut buf = [0u8; ACK256_WIRE_SIZE];
-    buf[0..32].copy_from_slice(flags);
-    buf[32..34].copy_from_slice(&datagram_num.to_le_bytes());
+    let wire = WireSlicedAck {
+        flags: *flags,
+        datagram_num: LeU16::new(datagram_num),
+    };
+    buf.copy_from_slice(wire.as_bytes());
     buf
+}
+
+pub fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
+    if payload.len() < ACK256_WIRE_SIZE {
+        return None;
+    }
+    let wire = WireSlicedAck::read_from_bytes(&payload[..ACK256_WIRE_SIZE]).ok()?;
+    Some((wire.flags, wire.datagram_num.get()))
 }
 
 /// Receiving state: tracks all in-progress datagrams.
@@ -411,6 +459,37 @@ impl SlicingReceiver {
 mod tests {
     use super::*;
     use crate::protocol::Command;
+
+    #[test]
+    fn slice_header_and_ack_use_private_wire_structs() {
+        assert_eq!(std::mem::size_of::<WireSliceHeader>(), 4);
+        assert_eq!(SLICE_HEADER_SIZE, 4);
+        assert_eq!(std::mem::size_of::<WireSlicedAck>(), 34);
+        assert_eq!(ACK256_WIRE_SIZE, 34);
+
+        let header = SliceHeader {
+            datagram_num: 0x1234,
+            block_num: 5,
+            max_block_num: 9,
+        };
+        let mut header_bytes = Vec::new();
+        header.write_to(&mut header_bytes);
+        assert_eq!(header_bytes, vec![0x34, 0x12, 5, 9]);
+        let parsed = SliceHeader::from_bytes(&header_bytes).expect("valid TMoonProtoSliceHeader");
+        assert_eq!(parsed.datagram_num, 0x1234);
+        assert_eq!(parsed.block_num, 5);
+        assert_eq!(parsed.max_block_num, 9);
+
+        let mut flags = [0u8; 32];
+        flags[0] = 0b0000_0011;
+        flags[31] = 0x80;
+        let ack = build_ack_bytes(&flags, 0xABCD);
+        assert_eq!(&ack[0..32], &flags);
+        assert_eq!(&ack[32..34], &0xABCDu16.to_le_bytes());
+        let (parsed_flags, parsed_datagram) = parse_ack_bytes(&ack).expect("valid ACK256");
+        assert_eq!(parsed_flags, flags);
+        assert_eq!(parsed_datagram, 0xABCD);
+    }
 
     #[test]
     fn single_block_datagram() {
