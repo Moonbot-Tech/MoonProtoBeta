@@ -2619,3 +2619,61 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: TAllStatuses Count parser loop
+
+Done:
+
+- Fixed another `TAllStatuses` parser parity bug found during the order-block
+  audit.
+- Delphi reads `N` and then loops `for k := 0 to N - 1`; there is no
+  `N * min_status_size <= remaining` precheck. `N <= 0` produces an empty
+  snapshot.
+- Rust previously rejected the whole command for `count_raw < 0` or
+  `count_raw * 11 > remaining`. That was the same class as the fixed balance
+  `Count` guard drift: a Rust-only drop-all before the Delphi item loop.
+- Rust now returns an empty `AllStatuses` for `Count <= 0`, and for positive
+  counts reads nested `TOrderStatus` items until the payload ends or the next
+  item cannot be parsed, preserving already parsed entries. The nested
+  `CmdId=4` check remains, because Delphi dispatch inside
+  `TBaseTradeCommand.FromStream` must produce a `TOrderStatus`.
+- Recorded `spec_pipeline/work/хуйня.md §X.113`.
+
+Verification:
+
+- Added parser tests for negative count and overstated count.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `558 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: TBulkReplaceNotify Count parser loop
+
+Done:
+
+- Fixed a `TBulkReplaceNotify` parser parity bug in the
+  `ProcessCommandOrder` early branch.
+- Delphi reads `Count`, allocates `UIDs`, and reads UID values in a loop. There
+  is no precheck that `Count * SizeOf(UInt64)` fits the remaining stream.
+- Rust previously rejected the whole command when `count * 8 > remaining`,
+  losing already present UID values.
+- Rust now reads UID values until fewer than 8 bytes remain, preserving the
+  complete UID entries that Delphi would already process in the notification
+  loop.
+- Recorded `spec_pipeline/work/хуйня.md §X.114`.
+
+Verification:
+
+- Added a parser test for overstated `Count`.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `558 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

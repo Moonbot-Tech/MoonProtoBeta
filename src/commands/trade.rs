@@ -1121,19 +1121,22 @@ impl AllStatuses {
         }
         let count_raw = i32::from_le_bytes(r[0..4].try_into().unwrap());
         *r = &r[4..];
-        // DoS guard: отрицательный count или явно нереалистичный → reject.
-        // OrderStatus минимум 11 байт (CommandHeader). Если count * 11 > remaining → malformed.
-        if count_raw < 0 || (count_raw as usize).saturating_mul(11) > r.len() {
-            log::warn!(target: "moonproto::trade", "AllStatuses: invalid count={} (remaining={})", count_raw, r.len());
-            return None;
+        if count_raw <= 0 {
+            return Some(Self {
+                header,
+                orders: Vec::new(),
+            });
         }
         let count = count_raw as usize;
-        let mut orders = Vec::with_capacity(count);
+        let mut orders = Vec::with_capacity(count.min(r.len() / 11));
         for _ in 0..count {
+            if r.is_empty() {
+                break;
+            }
             // Каждый order пишется через `o.StoreToStream(Stream)` — то есть **сам** включает
-            // свой CmdId(1) + ver(2) + UID(8) + ... header. Используем тот же parser.
-            // Delphi читает через `TBaseTradeCommand.FromStream(ms)` и затем cast'ит
-            // результат к `TOrderStatus`; значит nested CmdId обязан быть 4.
+            // свой CmdId(1) + ver(2) + UID(8) + ... header. Delphi читает через
+            // `TBaseTradeCommand.FromStream(ms)` и затем cast'ит результат к `TOrderStatus`;
+            // значит valid nested item обязан быть CmdId=4.
             if r.first().copied() != Some(4) {
                 log::warn!(
                     target: "moonproto::trade",
@@ -1142,8 +1145,11 @@ impl AllStatuses {
                 );
                 return None;
             }
-            let order = OrderStatus::read(r)?;
-            orders.push(order);
+            if let Some(order) = OrderStatus::read(r) {
+                orders.push(order);
+            } else {
+                break;
+            }
         }
         Some(Self { header, orders })
     }
@@ -1583,11 +1589,11 @@ impl BulkReplaceNotify {
         *r = &r[1..];
         let count = u16::from_le_bytes([r[0], r[1]]) as usize;
         *r = &r[2..];
-        if r.len() < count * 8 {
-            return None;
-        }
         let mut uids = Vec::with_capacity(count);
         for _ in 0..count {
+            if r.len() < 8 {
+                break;
+            }
             uids.push(u64::from_le_bytes(r[0..8].try_into().unwrap()));
             *r = &r[8..];
         }
@@ -2126,6 +2132,53 @@ mod tests {
             TradeCommand::parse(&raw).is_none(),
             "TAllStatuses must dispatch each nested TBaseTradeCommand and accept only CmdId=4"
         );
+    }
+
+    #[test]
+    fn all_statuses_negative_count_is_empty_snapshot_like_delphi_loop() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 8, 0xAA);
+        raw.extend_from_slice(&(-1i32).to_le_bytes());
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::AllStatuses(snap) => assert!(snap.orders.is_empty()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_statuses_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 8, 0xAA);
+        raw.extend_from_slice(&2i32.to_le_bytes());
+        raw.extend_from_slice(&minimal_order_status_payload(4, 0xBB));
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::AllStatuses(snap) => {
+                assert_eq!(snap.orders.len(), 1);
+                assert_eq!(snap.orders[0].epoch_header.market.base.uid, 0xBB);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bulk_replace_notify_keeps_present_uids_when_count_overstates_remaining_like_delphi_loop() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 28, 0xAA);
+        raw.push(1);
+        raw.push(2);
+        write_string(&mut raw, "BTCUSDT");
+        raw.push(OrderType::Buy as u8);
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::BulkReplaceNotify(cmd) => {
+                assert_eq!(cmd.uids, vec![0x1122_3344_5566_7788]);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
