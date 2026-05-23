@@ -1410,11 +1410,11 @@ impl SetImmuneCommand {
         }
         let n = r[0] as usize;
         *r = &r[1..];
-        if r.len() < n * 9 {
-            return None;
-        }
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
+            if r.len() < 9 {
+                break;
+            }
             let uid = u64::from_le_bytes(r[0..8].try_into().unwrap());
             *r = &r[8..];
             let value = r[0] != 0;
@@ -2176,6 +2176,24 @@ mod tests {
         match TradeCommand::parse(&raw).unwrap() {
             TradeCommand::BulkReplaceNotify(cmd) => {
                 assert_eq!(cmd.uids, vec![0x1122_3344_5566_7788]);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_immune_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 22, 0xAA);
+        raw.push(2);
+        raw.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        raw.push(1);
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::SetImmune(cmd) => {
+                assert_eq!(cmd.items.len(), 1);
+                assert_eq!(cmd.items[0].uid, 0x1122_3344_5566_7788);
+                assert!(cmd.items[0].value);
             }
             other => panic!("wrong variant: {other:?}"),
         }

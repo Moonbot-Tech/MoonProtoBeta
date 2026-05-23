@@ -371,10 +371,10 @@ impl UICommand {
                 }
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut items = Vec::with_capacity(count);
+                let mut items = Vec::with_capacity(count.min((payload.len() - pos) / 9));
                 for _ in 0..count {
                     if pos + 9 > payload.len() {
-                        return None;
+                        break;
                     }
                     let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
                     pos += 8;
@@ -420,11 +420,11 @@ impl UICommand {
                 pos += 8;
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                if pos + count * 6 > payload.len() {
-                    return None;
-                }
-                let mut points = Vec::with_capacity(count);
+                let mut points = Vec::with_capacity(count.min((payload.len() - pos) / 6));
                 for _ in 0..count {
+                    if pos + 6 > payload.len() {
+                        break;
+                    }
                     let time_delta_ms = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
                     pos += 2;
                     let price = f32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap());
@@ -489,24 +489,30 @@ impl UICommand {
                 pos += 1;
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                if pos + count * 2 > payload.len() {
-                    return None;
-                }
-                let mut markets = Vec::with_capacity(count);
+                let mut markets = Vec::with_capacity(count.min((payload.len() - pos) / 2));
                 for _ in 0..count {
+                    if pos + 2 > payload.len() {
+                        break;
+                    }
                     markets.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
                     pos += 2;
                 }
                 if pos + 2 > payload.len() {
-                    return None;
+                    return Some(UICommand::TriggerManage(TriggerManage {
+                        uid,
+                        action,
+                        all_markets,
+                        markets,
+                        keys: Vec::new(),
+                    }));
                 }
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                if pos + count * 2 > payload.len() {
-                    return None;
-                }
-                let mut keys = Vec::with_capacity(count);
+                let mut keys = Vec::with_capacity(count.min((payload.len() - pos) / 2));
                 for _ in 0..count {
+                    if pos + 2 > payload.len() {
+                        break;
+                    }
                     keys.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
                     pos += 2;
                 }
@@ -1280,6 +1286,74 @@ mod tests {
                 assert!(!t.all_markets);
                 assert_eq!(t.markets, markets);
                 assert_eq!(t.keys, keys);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ui_word_count_parsers_keep_present_items_when_count_overstates_remaining_like_delphi_loop() {
+        let mut raw = header_bytes(CMD_STRAT_START_STOP_V2, 42);
+        raw.push(1);
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&10u64.to_le_bytes());
+        raw.push(1);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::StratStartStopV2(s) => {
+                assert_eq!(
+                    s.items,
+                    vec![StratCheckedItem {
+                        strategy_id: 10,
+                        checked: true,
+                    }]
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_EMU_TRADES, 43);
+        raw.extend_from_slice(&7u16.to_le_bytes());
+        raw.extend_from_slice(&45123.5f64.to_le_bytes());
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&123u16.to_le_bytes());
+        raw.extend_from_slice(&(-77.5f32).to_le_bytes());
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::EmuTrades(e) => {
+                assert_eq!(
+                    e.points,
+                    vec![EmuTradePoint {
+                        time_delta_ms: 123,
+                        price: -77.5,
+                    }]
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_TRIGGER_MANAGE, 44);
+        raw.push(1);
+        raw.push(0);
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&123u16.to_le_bytes());
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::TriggerManage(t) => {
+                assert_eq!(t.markets, vec![123]);
+                assert!(t.keys.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_TRIGGER_MANAGE, 45);
+        raw.push(1);
+        raw.push(0);
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&123u16.to_le_bytes());
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(&9u16.to_le_bytes());
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::TriggerManage(t) => {
+                assert_eq!(t.markets, vec![123]);
+                assert_eq!(t.keys, vec![9]);
             }
             _ => panic!("wrong variant"),
         }

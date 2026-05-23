@@ -2670,7 +2670,61 @@ Verification:
 
 - Added a parser test for overstated `Count`.
 - `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `560 passed`.
+- `cargo check --examples --quiet` OK.
+- `cargo fmt --check` OK.
 - `cargo test --quiet` OK: `558 passed`.
+- `cargo check --examples --quiet` OK.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: TSetImmuneCommand Count parser loop
+
+Done:
+
+- Fixed a `TSetImmuneCommand` parser parity bug in the order-command parser.
+- Delphi reads `N: Byte`, allocates `Items`, and reads the packed item array
+  without a `N * SizeOf(TImmuneItem) <= remaining` precheck.
+- Rust previously rejected the whole command when `count * 9 > remaining`,
+  producing `ParseFailed` before the natural `ProcessCommandOrder` ignore path.
+- Rust now reads full 9-byte items until the payload tail is too short,
+  preserving already present entries.
+- Recorded `spec_pipeline/work/хуйня.md §X.115`.
+
+Verification:
+
+- Added a parser test for overstated `Count`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: UI word-count parser loops
+
+Done:
+
+- Fixed the same Rust-only precheck pattern in UI command parsers:
+  `TStratStartStopCommandV2`, `TEmuTradesCommand`, and
+  `TTriggerManageCommand`.
+- Delphi reads `Count: Word` and then reads item arrays from the stream without
+  a `Count * elem_size <= remaining` drop-all branch.
+- Rust previously returned `None` for the whole command if the declared count
+  did not fit the remaining payload.
+- Rust now preserves complete leading items and stops on short tails. For
+  `TriggerManage`, if the payload ends before `KeysCount`, the parser returns
+  the already read `markets` and an empty `keys` array.
+- Recorded `spec_pipeline/work/хуйня.md §X.116`.
+
+Verification:
+
+- Added a parser test covering overstated counts for all three UI command
+  families.
+- `cargo fmt --check` OK.
+- `cargo test --quiet` OK: `560 passed`.
 - `cargo check --examples --quiet` OK.
 
 Still not done:
