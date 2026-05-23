@@ -7293,6 +7293,9 @@ impl Client {
         }
         for action in actions {
             match action {
+                crate::events::ActiveAction::RequestMarketsList => {
+                    self.send_api_request(&crate::commands::engine_request::get_markets_list());
+                }
                 crate::events::ActiveAction::RequestOrderBookFull {
                     market_index,
                     book_kind,
@@ -8061,7 +8064,10 @@ impl Client {
             // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
             if resp.method == EngineMethod::GetMarketsIndexes {
                 self.indexes_fetch_in_flight = false;
-                if resp.success {
+                let indexes_payload_ok = resp.success
+                    && crate::commands::market::parse_markets_indexes_response(&resp.data)
+                        .is_some();
+                if indexes_payload_ok {
                     // Запоминаем что для текущего PeerAppToken индексы получены.
                     self.tracked_indexes_peer_app_token = self.peer_app_token;
                     if self.update_markets_after_indexes {
@@ -8706,7 +8712,7 @@ pub enum InitError {
     SendChannelClosed,
     /// BaseCheck or AuthCheck timed out after its configured wait.
     CriticalStepTimedOut(&'static str),
-    /// BaseCheck or AuthCheck returned server-side error.
+    /// A critical init step returned server-side error or malformed payload.
     CriticalStepFailed {
         /// Name of the failed init step.
         step: &'static str,
@@ -9029,6 +9035,16 @@ fn run_required_engine_step(
     }
 }
 
+fn malformed_required_engine_step(
+    result: &mut InitResult,
+    step: &'static str,
+    len: usize,
+) -> InitError {
+    let message = format!("malformed payload ({len} bytes)");
+    result.errors.push(format!("{step}: {message}"));
+    InitError::CriticalStepFailed { step, message }
+}
+
 /// Run the MoonBot-compatible one-time domain initialization sequence.
 ///
 /// Call this after transport authorization, or use [`connect_and_init`] to wait
@@ -9097,6 +9113,13 @@ pub fn run_init_sequence(
         crate::commands::engine_request::get_markets_list(),
         timeout,
     )?;
+    if crate::commands::market::parse_markets_list_response(&resp.data, 2).is_none() {
+        return Err(malformed_required_engine_step(
+            &mut result,
+            "GetMarketsList",
+            resp.data.len(),
+        ));
+    }
     result.markets_response_bytes = resp.data.len();
 
     // === 4. GetMarketsIndexes === критический: indexed streams stay gated
@@ -9109,6 +9132,13 @@ pub fn run_init_sequence(
         crate::commands::engine_request::get_markets_indexes(),
         timeout,
     )?;
+    if crate::commands::market::parse_markets_indexes_response(&resp.data).is_none() {
+        return Err(malformed_required_engine_step(
+            &mut result,
+            "GetMarketsIndexes",
+            resp.data.len(),
+        ));
+    }
     result.indexes_response_bytes = resp.data.len();
 
     // === 5. UpdateMarketsList === критический: Delphi InitInt does
@@ -9122,6 +9152,13 @@ pub fn run_init_sequence(
         crate::commands::engine_request::update_markets_list(),
         timeout,
     )?;
+    if crate::commands::market::parse_markets_prices_response(&resp.data).is_none() {
+        return Err(malformed_required_engine_step(
+            &mut result,
+            "UpdateMarketsList",
+            resp.data.len(),
+        ));
+    }
     result.update_markets_response_bytes = resp.data.len();
 
     client.domain_restore = DomainRestoreIntent {
@@ -14898,7 +14935,10 @@ mod service_cmd_tests {
 mod reconnect_timing_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
-    use crate::commands::market::build_markets_indexes_response;
+    use crate::commands::market::{
+        build_markets_indexes_response, build_markets_prices_response, BaseCurrency, Market,
+        MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse,
+    };
     use crate::events::{Event, EventDispatcher};
 
     fn dummy_client() -> Client {
@@ -14915,6 +14955,54 @@ mod reconnect_timing_tests {
                 check_tags_every: None,
             },
         })
+    }
+
+    fn test_market(name: &str) -> Market {
+        Market {
+            bn_market_name: name.to_string(),
+            market_currency: name.to_string(),
+            bn_market_currency: name.to_string(),
+            base_currency: "USDT".to_string(),
+            market_currency_long: name.to_string(),
+            market_currency_canonic: name.to_string(),
+            market_name: name.to_string(),
+            market_name_mb_classic: name.to_string(),
+            bn_status: "TRADING".to_string(),
+            leading1000: String::new(),
+            bn_price_precision: 2,
+            bn_quantity_precision: 5,
+            max_leverage: 50,
+            k1000: 1,
+            bn_iceberg_parts: 0,
+            bn_margin_table_id: 0,
+            bn_delivery_time: 0,
+            bn_tick_size: 0.01,
+            bn_step_size: 0.01,
+            bn_min_qty: 0.0,
+            bn_max_qty: 0.0,
+            bn_min_notional: 0.0,
+            bn_max_notional: 0.0,
+            bn_contract_size: 0.0,
+            bn_min_price: 0.0,
+            bn_max_price: 0.0,
+            bn_max_value: 0.0,
+            bn_multiplier_up: 0.0,
+            bn_multiplier_down: 0.0,
+            bid_multiplier_up: 0.0,
+            bid_multiplier_down: 0.0,
+            ask_multiplier_up: 0.0,
+            ask_multiplier_down: 0.0,
+            int_bn_max_qty: 0.0,
+            funding_rate: 0.0,
+            funding_time: 0.0,
+            volume: 0.0,
+            is_btc_market: false,
+            status_trading: true,
+            bn_is_fucking_shib: false,
+            bn_iceberg: false,
+            bn_only_isolated: false,
+            futures_type: BaseCurrency::USDT,
+        }
     }
 
     fn install_session_key(client: &mut Client) {
@@ -15291,6 +15379,152 @@ mod reconnect_timing_tests {
                 }
             )),
             "after index restore, orderbook packets reach parser instead of being silently gated"
+        );
+    }
+
+    #[test]
+    fn malformed_get_markets_indexes_response_does_not_reopen_stream_gate() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.peer_app_token = 0x2000;
+        client.tracked_indexes_peer_app_token = 0x1000;
+        client.indexes_fetch_in_flight = true;
+        client.update_markets_after_indexes = true;
+        client.restore_orderbooks_after_indexes = true;
+        client.with_subscription_registry_mut(|registry| {
+            registry.orderbook_subs.insert("BTCUSDT".to_string());
+        });
+
+        // count=1, first string declares len=3 but only one byte follows.
+        let mut malformed_indexes = Vec::new();
+        malformed_indexes.extend_from_slice(&1_i32.to_le_bytes());
+        malformed_indexes.extend_from_slice(&3_u16.to_le_bytes());
+        malformed_indexes.push(b'B');
+        let response_payload = build_engine_response_payload(
+            0x7777,
+            EngineMethod::GetMarketsIndexes,
+            &malformed_indexes,
+        );
+
+        let mut buffered = Vec::new();
+        {
+            let mut sink = DispatchSink::Buffer(&mut buffered);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+
+        assert!(
+            !client.indexes_fetch_in_flight,
+            "malformed response still finishes this in-flight attempt"
+        );
+        assert!(
+            !client.market_indexes_current_for_peer(),
+            "Delphi does not treat malformed GetMarketsIndexes as synchronized"
+        );
+        let sent = drain_send_items(&client);
+        let methods = api_methods(&sent);
+        assert!(
+            !methods.contains(&(EngineMethod::UpdateMarketsList as u8)),
+            "UpdateMarketsList must wait for valid indexes payload"
+        );
+        assert!(
+            !methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            "orderbook restore must wait for valid indexes payload"
+        );
+        assert!(
+            client.update_markets_after_indexes,
+            "retry after a later valid indexes response must still refresh markets"
+        );
+        assert!(
+            client.restore_orderbooks_after_indexes,
+            "retry after a later valid indexes response must still replay orderbooks"
+        );
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let (cmd, payload) = buffered.pop().expect("API response must reach dispatcher");
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
+            cmd,
+            &payload,
+            client.now_ms(),
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+        assert!(
+            !dispatcher.markets().indexes_synchronized,
+            "dispatcher must also keep stream gate closed on malformed indexes"
+        );
+    }
+
+    #[test]
+    fn unknown_indexed_market_price_requests_markets_list_like_delphi_new_market_found() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.peer_app_token = 0x2000;
+        client.tracked_indexes_peer_app_token = 0x2000;
+
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![test_market("BTCUSDT")],
+            corr_markets: vec![],
+        });
+        dispatcher
+            .markets
+            .apply_markets_indexes(vec!["DOGEUSDT".to_string()]);
+
+        let prices = build_markets_prices_response(&MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 0.1,
+                ask: 0.2,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 0.15,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        let response_payload =
+            build_engine_response_payload(0x7777, EngineMethod::UpdateMarketsList, &prices);
+
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
+            Command::API,
+            &response_payload,
+            client.now_ms(),
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, crate::events::ActiveAction::RequestMarketsList)),
+            "Delphi NewMarketFound path must become active GetMarketsList refresh"
+        );
+        client.apply_active_actions(actions.drain(..));
+        let sent = drain_send_items(&client);
+        let methods = api_methods(&sent);
+        assert!(
+            methods.contains(&(EngineMethod::GetMarketsList as u8)),
+            "active action must enqueue emk_GetMarketsList"
         );
     }
 

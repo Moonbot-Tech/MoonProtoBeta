@@ -412,6 +412,15 @@ fn apply_delphi_local_funding_shift(wire_funding_time: f64, local_shift_minutes:
 /// FuturesType пишется **всегда** (без gate ver), как в оригинале. `ver` оставлен
 /// в сигнатуре для зеркальности с `read_market`, но в writer'е не используется.
 pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
+    write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
+}
+
+fn write_market_with_local_shift(
+    out: &mut Vec<u8>,
+    m: &Market,
+    _ver: u16,
+    local_shift_minutes: f64,
+) {
     write_str(out, &m.bn_market_name);
     write_str(out, &m.market_currency);
     write_str(out, &m.bn_market_currency);
@@ -450,7 +459,8 @@ pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     out.extend_from_slice(&m.ask_multiplier_down.to_le_bytes());
     out.extend_from_slice(&m.int_bn_max_qty.to_le_bytes());
     out.extend_from_slice(&m.funding_rate.to_le_bytes());
-    out.extend_from_slice(&m.funding_time.to_le_bytes());
+    let wire_funding_time = remove_delphi_local_funding_shift(m.funding_time, local_shift_minutes);
+    out.extend_from_slice(&wire_funding_time.to_le_bytes());
     out.extend_from_slice(&m.volume.to_le_bytes());
 
     out.push(m.is_btc_market as u8);
@@ -461,6 +471,14 @@ pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
 
     // Delphi: WriteMarketToStream пишет FuturesType всегда (без guard ver).
     out.push(m.futures_type as u8);
+}
+
+fn remove_delphi_local_funding_shift(local_funding_time: f64, local_shift_minutes: f64) -> f64 {
+    if local_funding_time > 0.0 {
+        local_funding_time - local_shift_minutes.round() / MINS_IN_DAY
+    } else {
+        0.0
+    }
 }
 
 fn write_str(out: &mut Vec<u8>, s: &str) {
@@ -554,10 +572,18 @@ fn parse_markets_list_response_with_local_shift(
 
 /// Опциональный билдер для тестов.
 pub fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
+    build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())
+}
+
+fn build_markets_list_response_with_local_shift(
+    resp: &MarketsListResponse,
+    ver: u16,
+    local_shift_minutes: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     out.extend_from_slice(&(resp.markets.len() as i32).to_le_bytes());
     for m in &resp.markets {
-        write_market(&mut out, m, ver);
+        write_market_with_local_shift(&mut out, m, ver, local_shift_minutes);
     }
     out.extend_from_slice(&(resp.corr_markets.len() as i32).to_le_bytes());
     for c in &resp.corr_markets {
@@ -581,7 +607,7 @@ pub struct MarketPriceUpdate {
     pub funding_rate: f64,
     /// Delphi client-local `TDateTime` after adding local TZShift. If source
     /// `funding_time` was 0 → 0.
-    pub funding_time_utc: f64,
+    pub funding_time: f64,
     pub mark_price: f64,
     pub mark_price_found: bool,
 }
@@ -623,7 +649,7 @@ fn parse_markets_prices_response_with_local_shift(
         let m_index = r.read_word()?;
         let bid = r.read_double()?;
         let ask = r.read_double()?;
-        let (funding_rate, funding_time_utc) = if send_funding {
+        let (funding_rate, funding_time) = if send_funding {
             (
                 r.read_double()?,
                 apply_delphi_local_funding_shift(r.read_double()?, local_shift_minutes),
@@ -638,7 +664,7 @@ fn parse_markets_prices_response_with_local_shift(
             bid,
             ask,
             funding_rate,
-            funding_time_utc,
+            funding_time,
             mark_price,
             mark_price_found,
         });
@@ -667,6 +693,13 @@ fn parse_markets_prices_response_with_local_shift(
 }
 
 pub fn build_markets_prices_response(resp: &MarketsPricesResponse) -> Vec<u8> {
+    build_markets_prices_response_with_local_shift(resp, current_local_time_shift_minutes())
+}
+
+fn build_markets_prices_response_with_local_shift(
+    resp: &MarketsPricesResponse,
+    local_shift_minutes: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + resp.prices.len() * 50);
     out.push(resp.send_funding as u8);
     out.extend_from_slice(&(resp.prices.len() as i32).to_le_bytes());
@@ -676,7 +709,9 @@ pub fn build_markets_prices_response(resp: &MarketsPricesResponse) -> Vec<u8> {
         out.extend_from_slice(&p.ask.to_le_bytes());
         if resp.send_funding {
             out.extend_from_slice(&p.funding_rate.to_le_bytes());
-            out.extend_from_slice(&p.funding_time_utc.to_le_bytes());
+            let wire_funding_time =
+                remove_delphi_local_funding_shift(p.funding_time, local_shift_minutes);
+            out.extend_from_slice(&wire_funding_time.to_le_bytes());
         }
         out.extend_from_slice(&p.mark_price.to_le_bytes());
         out.push(p.mark_price_found as u8);
@@ -876,7 +911,7 @@ mod tests {
     fn market_roundtrip_v1() {
         let m = sample_market("BTC", false);
         let mut buf = Vec::new();
-        write_market(&mut buf, &m, 1);
+        write_market_with_local_shift(&mut buf, &m, 1, 0.0);
         let mut r = EngineStreamReader::new(&buf);
         let m2 = read_market_with_local_shift(&mut r, 1, 0.0).unwrap();
         assert_eq!(m, m2);
@@ -886,7 +921,7 @@ mod tests {
     fn market_roundtrip_v2_with_futures_type() {
         let m = sample_market("ETH", true);
         let mut buf = Vec::new();
-        write_market(&mut buf, &m, 2);
+        write_market_with_local_shift(&mut buf, &m, 2, 0.0);
         let mut r = EngineStreamReader::new(&buf);
         let m2 = read_market_with_local_shift(&mut r, 2, 0.0).unwrap();
         assert_eq!(m2.futures_type, BaseCurrency::USDT);
@@ -900,7 +935,7 @@ mod tests {
         m.market_name_mb_classic = String::new();
         m.market_name = "LTCUSDT".to_string();
         let mut buf = Vec::new();
-        write_market(&mut buf, &m, 2);
+        write_market_with_local_shift(&mut buf, &m, 2, 0.0);
         let mut r = EngineStreamReader::new(&buf);
         let m2 = read_market_with_local_shift(&mut r, 2, 0.0).unwrap();
         assert_eq!(m2.market_name_mb_classic, "LTCUSDT");
@@ -910,12 +945,27 @@ mod tests {
     fn market_reader_applies_delphi_local_funding_shift() {
         let m = sample_market("BTC", true);
         let mut buf = Vec::new();
-        write_market(&mut buf, &m, 2);
+        write_market_with_local_shift(&mut buf, &m, 2, 0.0);
         let mut r = EngineStreamReader::new(&buf);
 
         let m2 = read_market_with_local_shift(&mut r, 2, 180.0).unwrap();
 
         assert_eq!(m2.funding_time, m.funding_time + 180.0 / 1440.0);
+    }
+
+    #[test]
+    fn market_writer_removes_delphi_local_funding_shift() {
+        let m = sample_market("BTC", true);
+        let mut buf = Vec::new();
+        write_market_with_local_shift(&mut buf, &m, 2, 180.0);
+
+        let mut wire_reader = EngineStreamReader::new(&buf);
+        let wire_m = read_market_with_local_shift(&mut wire_reader, 2, 0.0).unwrap();
+        assert_eq!(wire_m.funding_time, m.funding_time - 180.0 / 1440.0);
+
+        let mut client_reader = EngineStreamReader::new(&buf);
+        let client_m = read_market_with_local_shift(&mut client_reader, 2, 180.0).unwrap();
+        assert_eq!(client_m.funding_time, m.funding_time);
     }
 
     #[test]
@@ -957,7 +1007,7 @@ mod tests {
                 base_currency_name: "BTC".to_string(),
             }],
         };
-        let buf = build_markets_list_response(&resp, 2);
+        let buf = build_markets_list_response_with_local_shift(&resp, 2, 0.0);
         let parsed = parse_markets_list_response(&buf, 2).unwrap();
         assert_eq!(parsed.markets.len(), 2);
         assert_eq!(parsed.markets[0].bn_market_name, "BTC");
@@ -976,7 +1026,7 @@ mod tests {
                     bid: 50000.0,
                     ask: 50001.0,
                     funding_rate: 0.0001,
-                    funding_time_utc: 45123.5,
+                    funding_time: 45123.5,
                     mark_price: 50000.5,
                     mark_price_found: true,
                 },
@@ -985,7 +1035,7 @@ mod tests {
                     bid: 3000.0,
                     ask: 3000.5,
                     funding_rate: -0.0002,
-                    funding_time_utc: 45123.5,
+                    funding_time: 45123.5,
                     mark_price: 3000.25,
                     mark_price_found: false,
                 },
@@ -996,7 +1046,7 @@ mod tests {
                 last_price: 0.0000001,
             }],
         };
-        let buf = build_markets_prices_response(&resp);
+        let buf = build_markets_prices_response_with_local_shift(&resp, 0.0);
         let parsed = parse_markets_prices_response_with_local_shift(&buf, 0.0).unwrap();
         assert!(parsed.send_funding);
         assert_eq!(parsed.prices.len(), 2);
@@ -1016,14 +1066,14 @@ mod tests {
                 bid: 100.0,
                 ask: 100.5,
                 funding_rate: 0.0,
-                funding_time_utc: 0.0,
+                funding_time: 0.0,
                 mark_price: 100.25,
                 mark_price_found: true,
             }],
             send_corr_markets: false,
             corr_prices: vec![],
         };
-        let buf = build_markets_prices_response(&resp);
+        let buf = build_markets_prices_response_with_local_shift(&resp, 0.0);
         let parsed = parse_markets_prices_response_with_local_shift(&buf, 0.0).unwrap();
         assert!(!parsed.send_funding);
         assert_eq!(parsed.prices.len(), 1);
@@ -1042,18 +1092,43 @@ mod tests {
                 bid: 1.0,
                 ask: 2.0,
                 funding_rate: 0.1,
-                funding_time_utc: 45123.0,
+                funding_time: 45123.0,
                 mark_price: 1.5,
                 mark_price_found: true,
             }],
             send_corr_markets: false,
             corr_prices: vec![],
         };
-        let buf = build_markets_prices_response(&resp);
+        let buf = build_markets_prices_response_with_local_shift(&resp, 0.0);
 
         let parsed = parse_markets_prices_response_with_local_shift(&buf, 180.0).unwrap();
 
-        assert_eq!(parsed.prices[0].funding_time_utc, 45123.0 + 180.0 / 1440.0);
+        assert_eq!(parsed.prices[0].funding_time, 45123.0 + 180.0 / 1440.0);
+    }
+
+    #[test]
+    fn market_prices_writer_removes_delphi_local_funding_shift() {
+        let resp = MarketsPricesResponse {
+            send_funding: true,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 1.0,
+                ask: 2.0,
+                funding_rate: 0.1,
+                funding_time: 45123.0,
+                mark_price: 1.5,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        };
+        let buf = build_markets_prices_response_with_local_shift(&resp, 180.0);
+
+        let wire = parse_markets_prices_response_with_local_shift(&buf, 0.0).unwrap();
+        assert_eq!(wire.prices[0].funding_time, 45123.0 - 180.0 / 1440.0);
+
+        let client = parse_markets_prices_response_with_local_shift(&buf, 180.0).unwrap();
+        assert_eq!(client.prices[0].funding_time, 45123.0);
     }
 
     #[test]

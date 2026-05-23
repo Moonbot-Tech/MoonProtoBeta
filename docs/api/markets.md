@@ -15,12 +15,31 @@ UTF-8 byte length followed by exactly that declared number of bytes.
 
 `CheckBinanceTags` follows the Delphi client: it updates only known markets that
 are present in the response. Markets absent from the response keep their previous
-token tags. A full `GetMarketsList` replacement prunes token tags for markets
-that no longer exist.
+token tags.
+
+`GetMarketsList` follows Delphi merge semantics. The first response populates
+the market list. Later responses update known markets by name, add new names,
+and leave old names present if they are absent from the response; live price
+slots and token tags for known markets are preserved.
+
+Correlation market price updates are also merge-style: prices present in
+`UpdateMarketsList` overwrite their entries, while absent correlation prices keep
+their previous value.
+
+If `UpdateMarketsList` refers to a server market index whose name is present in
+`GetMarketsIndexes` but absent from the current market list, the active
+dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
+`GetMarketsList` request automatically, throttled to roughly one request per
+30 seconds while the unknown market condition persists.
 
 `UpdateMarketsList` carries server `mIndex` values. Price updates and
 `price_by_index` resolve those indexes through the current `GetMarketsIndexes`
 mapping, so stale mappings after a server restart are not used.
+
+Funding timestamps match Delphi client state. The server serializes
+`FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
+so `Market::funding_time` and `MarketPrice::funding_time` are client-local
+Delphi `TDateTime` values. A zero funding time stays zero.
 
 ## Reading State
 
@@ -68,6 +87,7 @@ prices and tags from `EventDispatcher`.
 
 ```rust
 pub enum MarketsEvent {
+    // Historical name: emitted when a GetMarketsList response was applied.
     MarketsListReplaced { count: usize, corr_count: usize },
     PricesUpdated { count: usize, included_funding: bool, included_corr: bool },
     IndexesUpdated { count: usize },
@@ -96,6 +116,18 @@ pub struct MarketsState {
     pub token_tags: HashMap<String, TokenTags>,
     pub market_indexes: Vec<String>,
     pub indexes_synchronized: bool,
+    pub markets_list_refresh_needed: bool,
+}
+```
+
+```rust
+pub struct MarketPrice {
+    pub bid: f64,
+    pub ask: f64,
+    pub funding_rate: f64,
+    pub funding_time: f64,
+    pub mark_price: f64,
+    pub mark_price_found: bool,
 }
 ```
 

@@ -172,6 +172,7 @@ impl ActiveDispatchContext {
 }
 
 pub(crate) enum ActiveAction {
+    RequestMarketsList,
     RequestOrderBookFull {
         market_index: u16,
         book_kind: u8,
@@ -223,6 +224,9 @@ pub struct EventDispatcher {
     /// Init=0 (никогда не подключались) → первый non-zero token не триггерит сброс.
     /// См. audit_responsibility_hints #1, #2.
     last_known_server_token: u64,
+    /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
+    /// `NewMarketFound -> GetMarketsList` auto refresh.
+    last_markets_list_refresh_ms: i64,
     /// Delphi `FTradesServerToken`: updated only when a `TradesStream` packet
     /// reaches the trades parser after the market-index gate. Reconnect restore
     /// uses this to decide whether `SubscribeAllTrades` actually produced a
@@ -1045,6 +1049,14 @@ impl EventDispatcher {
 
         let start_len = out.len();
         self.dispatch_into(cmd, payload, now_ms, out);
+        if self.markets.markets_list_refresh_needed()
+            && (self.last_markets_list_refresh_ms == 0
+                || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000)
+        {
+            self.last_markets_list_refresh_ms = now_ms;
+            self.markets.clear_markets_list_refresh_needed();
+            actions.push(ActiveAction::RequestMarketsList);
+        }
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
         // Delphi `ProcessTradesStream` в конце вызывает `CheckMissingTradesPackets`;
         // значит recovery resend — последействие успешного trades-пакета, а не
@@ -2332,6 +2344,70 @@ mod tests {
         payload.extend_from_slice(&packet_num.to_le_bytes());
         payload.push(0); // packet flags: uncompressed, no taker flag.
         payload
+    }
+
+    #[test]
+    fn active_markets_list_refresh_is_throttled_like_delphi_new_market_found() {
+        let client = crate::client::Client::new(dummy_client_cfg());
+        let mut dispatcher = EventDispatcher::new();
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let log_payload = 45_000.0f64.to_le_bytes();
+
+        dispatcher.markets.markets_list_refresh_needed = true;
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::LogMsg,
+            &log_payload,
+            1_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, ActiveAction::RequestMarketsList)),
+            "first NewMarketFound refresh is immediate"
+        );
+
+        actions.clear();
+        out.clear();
+        dispatcher.markets.markets_list_refresh_needed = true;
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::LogMsg,
+            &log_payload,
+            2_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(
+            actions.is_empty(),
+            "Delphi LastAddedNewMarket gate prevents repeated listing checks inside 30s"
+        );
+        assert!(
+            dispatcher.markets.markets_list_refresh_needed(),
+            "refresh flag must remain set while throttled"
+        );
+
+        out.clear();
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::LogMsg,
+            &log_payload,
+            31_001,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, ActiveAction::RequestMarketsList)),
+            "after 30s the pending NewMarketFound refresh is sent"
+        );
     }
 
     #[test]
