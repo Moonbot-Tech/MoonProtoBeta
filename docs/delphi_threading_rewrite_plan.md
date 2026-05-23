@@ -2186,14 +2186,17 @@ Done:
 - Delphi full balance snapshot does not delete a market object when it is absent
   from `cmd.Items`. It resets balance/position/PNL fields to defaults, but
   preserves `BalanceHash`, `bnMaxValue`, and `LastBalanceEpoch`.
-- Rust previously replaced `BalancesState::by_market` with only incoming items,
-  which lost those preserved fields and could make a later incremental with
-  `bnMaxValue=0` or stale epoch behave differently.
-- Rust now keeps previous missing rows as reset/default rows while preserving
-  `balance_hash`, `max_value`, and per-market epoch. Unknown markets that are
-  not present in current `MarketsState` are still ignored like Delphi
-  `Markets.MarketByNameFast`.
-- Added a regression test and recorded `spec_pipeline/work/хуйня.md §X.91`.
+- Rust previously replaced `BalancesState::by_market` with only incoming items.
+  First pass fixed previous missing rows, preserving `balance_hash`,
+  `max_value`, and per-market epoch.
+- Second pass fixed the remaining machine-effect gap: Delphi iterates every
+  current `TMarket`, so a known market with no previous balance row also becomes
+  a visible zero/default balance after full snapshot. Rust active apply now
+  receives the full current `MarketsState` name list and creates those default
+  rows too. Unknown markets that are not present in current `MarketsState` are
+  still ignored like Delphi `Markets.MarketByNameFast`.
+- Added regression tests and recorded `spec_pipeline/work/хуйня.md §X.91` and
+  `§X.111`.
 - API docs now describe the missing-market reset semantics.
 
 Still not done:

@@ -810,10 +810,8 @@ impl EventDispatcher {
             }
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
-                    let known_markets = &self.markets.by_name;
-                    let ev = self
-                        .balances
-                        .apply_filtered(upd, |name| known_markets.contains_key(name));
+                    let known_markets = self.markets.by_name.keys().cloned().collect::<Vec<_>>();
+                    let ev = self.balances.apply_with_known_markets(upd, &known_markets);
                     out.push(Event::Balance(ev));
                 }
                 None => out.push(Event::ParseFailed {
@@ -2001,6 +1999,31 @@ mod tests {
         ));
         assert!(d.balances.get("BTCUSDT").is_some());
         assert!(d.balances.get("UNKNOWNUSDT").is_none());
+    }
+
+    #[test]
+    fn dispatcher_full_balance_creates_default_for_all_known_markets_like_delphi() {
+        let mut d = EventDispatcher::new();
+        d.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![event_market("BTCUSDT"), event_market("ETHUSDT")],
+            corr_markets: vec![],
+        });
+
+        let payload = balance_payload_with_items(3, 10, 1, &[("BTCUSDT", 100.0)]);
+        let events = d.dispatch(Command::Balance, &payload, 1000);
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            Event::Balance(BalanceEvent::SnapshotApplied { count: 1, epoch: 1 })
+        ));
+        assert_eq!(d.balances.get("BTCUSDT").unwrap().initial_balance, 100.0);
+        let eth = d
+            .balances
+            .get("ETHUSDT")
+            .expect("Delphi OnBalanceSnapshot resets every known TMarket");
+        assert_eq!(eth.initial_balance, 0.0);
+        assert_eq!(eth.leverage_x, 1);
     }
 
     #[test]

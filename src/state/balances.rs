@@ -18,7 +18,7 @@
 //! (`m.LastBalanceEpoch`), а full snapshot не проходит через общий epoch-gate.
 
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const BALANCE_EPS: f64 = 0.00000001;
 
@@ -111,6 +111,14 @@ impl BalancesState {
         }
     }
 
+    fn default_missing_snapshot_item(market_name: &str) -> BalanceItem {
+        BalanceItem {
+            market_name: market_name.to_string(),
+            leverage_x: 1,
+            ..Default::default()
+        }
+    }
+
     fn apply_incremental_item(&mut self, item: BalanceItem, epoch: u16) -> bool {
         if let Some(last) = self.last_epoch_by_market.get(&item.market_name).copied() {
             if !epoch_is_ok(last, epoch) {
@@ -139,12 +147,42 @@ impl BalancesState {
     where
         F: Fn(&str) -> bool,
     {
+        self.apply_internal(upd, is_known_market, None)
+    }
+
+    /// Active-library balance apply with the full known-market universe.
+    ///
+    /// Delphi full snapshot resets every `TMarket` not present in the snapshot,
+    /// including markets that had no previous balance item. A predicate can
+    /// filter unknown incoming items, but only the full known list can create
+    /// those missing default rows.
+    pub(crate) fn apply_with_known_markets(
+        &mut self,
+        upd: BalanceUpdate,
+        known_market_names: &[String],
+    ) -> BalanceEvent {
+        let known = known_market_names
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        self.apply_internal(upd, |name| known.contains(name), Some(&known))
+    }
+
+    fn apply_internal<F>(
+        &mut self,
+        upd: BalanceUpdate,
+        is_known_market: F,
+        full_known_markets: Option<&HashSet<&str>>,
+    ) -> BalanceEvent
+    where
+        F: Fn(&str) -> bool,
+    {
         match upd.cmd_id {
             2 => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
             },
-            3 => self.apply_full_snapshot(upd, &is_known_market),
+            3 => self.apply_full_snapshot(upd, &is_known_market, full_known_markets),
             4 => self.apply_incremental(upd, &is_known_market),
             _ => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
@@ -154,7 +192,12 @@ impl BalancesState {
     }
 
     /// Full snapshot (cmd_id=3): маркеты не в Items получают default (Delphi:1253-1275).
-    fn apply_full_snapshot<F>(&mut self, upd: BalanceUpdate, is_known_market: &F) -> BalanceEvent
+    fn apply_full_snapshot<F>(
+        &mut self,
+        upd: BalanceUpdate,
+        is_known_market: &F,
+        full_known_markets: Option<&HashSet<&str>>,
+    ) -> BalanceEvent
     where
         F: Fn(&str) -> bool,
     {
@@ -185,11 +228,37 @@ impl BalancesState {
             new_map.insert(it.market_name.clone(), it);
             count += 1;
         }
-        for (market_name, previous) in previous_map {
-            if new_map.contains_key(&market_name) || !is_known_market(&market_name) {
-                continue;
+
+        if let Some(known) = full_known_markets {
+            for market_name in known {
+                if new_map.contains_key(*market_name) {
+                    continue;
+                }
+                if let Some(previous) = previous_map.get(*market_name) {
+                    new_map.insert(
+                        (*market_name).to_string(),
+                        Self::reset_missing_snapshot_item(previous.clone()),
+                    );
+                } else {
+                    new_map.insert(
+                        (*market_name).to_string(),
+                        Self::default_missing_snapshot_item(market_name),
+                    );
+                    self.last_epoch_by_market
+                        .entry((*market_name).to_string())
+                        .or_insert(0);
+                }
             }
-            new_map.insert(market_name, Self::reset_missing_snapshot_item(previous));
+        } else {
+            for (market_name, previous) in &previous_map {
+                if new_map.contains_key(market_name) || !is_known_market(market_name) {
+                    continue;
+                }
+                new_map.insert(
+                    market_name.clone(),
+                    Self::reset_missing_snapshot_item(previous.clone()),
+                );
+            }
         }
         self.by_market = new_map;
         self.last_epoch = upd.epoch;
@@ -456,6 +525,40 @@ mod tests {
         ));
         assert!(s.get("ETHUSDT").is_some());
         assert!(s.get("UNKNOWNUSDT").is_none());
+    }
+
+    #[test]
+    fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_delphi() {
+        let mut s = BalancesState::new();
+        let known = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+
+        let ev = s.apply_with_known_markets(upd(3, 10, vec![make_item("BTCUSDT", 100.0)]), &known);
+
+        assert!(matches!(
+            ev,
+            BalanceEvent::SnapshotApplied {
+                count: 1,
+                epoch: 10
+            }
+        ));
+        assert_eq!(s.get("BTCUSDT").unwrap().initial_balance, 100.0);
+        let eth = s
+            .get("ETHUSDT")
+            .expect("Delphi resets every known market missing from full snapshot");
+        assert_eq!(eth.initial_balance, 0.0);
+        assert_eq!(eth.leverage_x, 1);
+        assert_eq!(eth.position_type, 0);
+
+        let stale = s.apply_with_known_markets(upd(4, 0, vec![make_item("ETHUSDT", 55.0)]), &known);
+        assert!(matches!(
+            stale,
+            BalanceEvent::IncrementalApplied { count: 0, .. }
+        ));
+        assert_eq!(
+            s.get("ETHUSDT").unwrap().initial_balance,
+            0.0,
+            "new default row has Delphi LastBalanceEpoch=0, so duplicate epoch 0 is stale"
+        );
     }
 
     #[test]

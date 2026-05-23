@@ -13,11 +13,12 @@ The sync state is `BalancesState`. The key is `market_name: String`, for example
 When using `EventDispatcher`, balance rows are applied only for markets present
 in the current `MarketsState`, matching Delphi `Markets.MarketByNameFast`.
 Unknown market names are ignored.
-For a market already known to `BalancesState`, a full snapshot that omits that
-market keeps a zero/default row instead of deleting all state. This matches
-Delphi's missing-market branch: balances and positions are reset, while
-`balance_hash`, `max_value` (`bnMaxValue`), and the per-market last balance epoch
-are preserved.
+In that active path, a full snapshot also creates or keeps a zero/default
+`BalanceItem` for every market known to `MarketsState` but absent from the
+snapshot. If that market already had a balance row, Delphi's preserved fields
+are kept: `balance_hash`, `max_value` (`bnMaxValue`), and the per-market last
+balance epoch. If the known market had no previous balance row, the default row
+uses `leverage_x=1` and zero balance/position/PNL fields.
 
 For the common one-shot flow, use `Client::request_balance_snapshot`:
 
@@ -85,8 +86,10 @@ per-market epoch protection, matching Delphi `m.LastBalanceEpoch`: stale items
 are skipped, while newer items from the same packet can still be applied. Full
 snapshots are not rejected by a global epoch gate. For markets missing from a
 full snapshot, Delphi does not update `LastBalanceEpoch`; Rust keeps the same
-per-market epoch as well, so a later stale incremental for that market is still
-rejected.
+per-market epoch for an existing row as well, so a later stale incremental for
+that market is still rejected. A newly created default row for a known market
+starts with epoch `0`, matching the machine effect of a market object that was
+reset by the snapshot but did not receive a balance item.
 
 `BalancesState::apply` uses `epoch_is_ok(last, new)` matching Delphi
 `MoonProtoFunc.pas:188-203`: duplicate epochs are rejected, and a wrapped
