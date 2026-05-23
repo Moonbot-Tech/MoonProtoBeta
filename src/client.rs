@@ -25,7 +25,7 @@ use crate::commands::engine_api::{
 };
 use crate::compression;
 use crate::crypto;
-use crate::protocol::{crypted, handshake, slicing, slider::Slider, Command};
+use crate::protocol::{control, crypted, handshake, slicing, slider::Slider, Command};
 use crate::MoonKey;
 use log::{debug, error, warn};
 // MoonProto UDP Client architecture follows the Delphi split:
@@ -7605,39 +7605,24 @@ impl Client {
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
-        if payload.len() < 6 {
-            return None;
-        }
-        let size = u16::from_le_bytes(payload[0..2].try_into().unwrap());
-        let series = u16::from_le_bytes(payload[4..6].try_into().unwrap());
+        let size_test = control::SizeTestData::read(payload)?;
+        let size = size_test.size;
         if (size as usize) < 6 {
             return None;
         }
         let series = reader_protocol
             .lock()
             .unwrap()
-            .update_data_size_ack_series_num(series);
-        let mut ack = vec![0u8; size as usize];
-        ack[0..2].copy_from_slice(&size.to_le_bytes());
-        ack[4..6].copy_from_slice(&series.to_le_bytes());
-        Some(ack)
+            .update_data_size_ack_series_num(size_test.series_num);
+        Some(control::SizeTestData::ack_bytes(size, series))
     }
 
     fn build_probe_mtu_ack_payload(payload: &[u8]) -> Option<Vec<u8>> {
-        if payload.len() < 5 {
+        let probe = control::ProbeMtu::read(payload)?;
+        if (probe.test_size as usize) < control::PROBE_MTU_ACK_SIZE {
             return None;
         }
-        let probe_id = u16::from_le_bytes(payload[0..2].try_into().unwrap());
-        let probe_index = payload[2];
-        let test_size = u16::from_le_bytes(payload[3..5].try_into().unwrap());
-        if (test_size as usize) < 5 {
-            return None;
-        }
-        let mut ack = vec![0u8; test_size as usize];
-        ack[0..2].copy_from_slice(&probe_id.to_le_bytes());
-        ack[2] = probe_index;
-        ack[3..5].copy_from_slice(&test_size.to_le_bytes());
-        Some(ack)
+        Some(probe.ack_bytes())
     }
 
     fn reader_build_ping_update_and_response(
@@ -7650,16 +7635,14 @@ impl Client {
         total_sent_before_ping: u64,
         total_recv_after_packet: u64,
     ) -> Option<(ReaderPingUpdate, Vec<u8>)> {
-        if payload.len() < 50 {
-            return None;
-        }
+        let ping = control::PingFrame::read(payload)?;
 
         // UDPRead Ping branch: update transport ping fields before DataRead.
-        let round_trip_delay = i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64;
-        let actual_pmtu = u16::from_le_bytes(payload[20..22].try_into().unwrap());
-        let global_timing_orders = u16::from_le_bytes(payload[22..24].try_into().unwrap());
-        let overheat = payload[24];
-        let rs = payload[41] as f64 * (1.0 / 255.0);
+        let round_trip_delay = ping.trip_delay as i64;
+        let actual_pmtu = ping.pmtu;
+        let global_timing_orders = ping.global_timing_orders;
+        let overheat = ping.overheat;
+        let rs = ping.rs();
 
         const COMFORTABLE_RS: f64 = 0.92;
         const CRITICAL_RS: f64 = 0.85;
@@ -7695,8 +7678,8 @@ impl Client {
             .apply_ping_ack_bitmap(payload);
 
         // ClientNewData(MPC_Ping): update wall-clock deltas before SendPing.
-        let initial_time = f64::from_le_bytes(payload[8..16].try_into().unwrap());
-        let server_time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
+        let initial_time = ping.initial_time;
+        let server_time = ping.time;
         let server_time_delta = initial_time - raw_now_dt;
         server_time_delta_handle.store(
             server_time_delta.to_bits(),
@@ -7706,12 +7689,13 @@ impl Client {
         let net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let mut response = payload[..50].to_vec();
-        response[0..8].copy_from_slice(&corrected_now_dt.to_le_bytes());
-        response[25..33].copy_from_slice(&total_sent_before_ping.to_le_bytes());
-        response[33..41].copy_from_slice(&total_recv_after_packet.to_le_bytes());
         let (ack_start, ack_words) = reader_protocol.lock().unwrap().build_ack_half();
-        response[42..50].copy_from_slice(&ack_start.to_le_bytes());
+        let mut response = ping.response_bytes(
+            corrected_now_dt,
+            total_sent_before_ping,
+            total_recv_after_packet,
+            ack_start,
+        );
         for word in &ack_words {
             response.extend_from_slice(&word.to_le_bytes());
         }

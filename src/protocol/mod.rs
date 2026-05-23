@@ -6,6 +6,7 @@
 //! `commands::*` builders unless you are writing protocol diagnostics or a
 //! custom transport tool.
 
+pub mod control;
 pub mod crypted;
 pub mod handshake;
 pub mod slicing;
