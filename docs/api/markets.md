@@ -22,6 +22,12 @@ the market list. Later responses update known markets by name, add new names,
 and leave old names present if they are absent from the response; live price
 slots and token tags for known markets are preserved.
 
+For existing markets, `max_leverage` is updated from `GetMarketsList` only when
+the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
+library path this is inferred from `BaseCheck`: currently only
+`Platform_FGate` (`exchange_code = 9`) enables it. New markets keep the value
+from the incoming list because Delphi inserts the whole `TMarket`.
+
 Correlation market price updates are also merge-style: prices present in
 `UpdateMarketsList` overwrite their entries, while absent correlation prices keep
 their previous value.

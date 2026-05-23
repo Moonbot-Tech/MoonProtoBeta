@@ -60,6 +60,11 @@ pub struct MarketsState {
     /// Delphi `NewMarketFound` analogue: set when a price row points at a server
     /// market index/name that is not present in the current market list.
     pub markets_list_refresh_needed: bool,
+    /// Delphi `ES_MaxLevInGetMarkets in EngineProp`: existing markets copy
+    /// `MaxLeverage` from `GetMarketsList` only for platforms that set this
+    /// support flag. New markets still receive the incoming value because they
+    /// are inserted as whole `TMarket` objects.
+    copy_max_leverage_from_markets_list: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +120,11 @@ impl MarketsState {
                 .unwrap_or_else(|| market_price_from_market(&market));
             if let Some(&incoming_idx) = incoming_by_name.get(&market.bn_market_name) {
                 let incoming = &resp.markets[incoming_idx];
-                merge_market_like_delphi_get_markets_list(&mut market, incoming);
+                merge_market_like_delphi_get_markets_list(
+                    &mut market,
+                    incoming,
+                    self.copy_max_leverage_from_markets_list,
+                );
                 price.funding_time = market.funding_time;
                 consumed.insert(market.bn_market_name.clone(), true);
             }
@@ -342,9 +351,17 @@ impl MarketsState {
     pub(crate) fn clear_markets_list_refresh_needed(&mut self) {
         self.markets_list_refresh_needed = false;
     }
+
+    pub(crate) fn set_copy_max_leverage_from_markets_list(&mut self, enabled: bool) {
+        self.copy_max_leverage_from_markets_list = enabled;
+    }
 }
 
-fn merge_market_like_delphi_get_markets_list(dst: &mut Market, src: &Market) {
+fn merge_market_like_delphi_get_markets_list(
+    dst: &mut Market,
+    src: &Market,
+    copy_max_leverage: bool,
+) {
     dst.bn_tick_size = src.bn_tick_size;
     dst.bn_step_size = src.bn_step_size;
     dst.bn_min_price = src.bn_min_price;
@@ -368,7 +385,9 @@ fn merge_market_like_delphi_get_markets_list(dst: &mut Market, src: &Market) {
     dst.bid_multiplier_down = src.bid_multiplier_down;
     dst.ask_multiplier_up = src.ask_multiplier_up;
     dst.ask_multiplier_down = src.ask_multiplier_down;
-    dst.max_leverage = src.max_leverage;
+    if copy_max_leverage {
+        dst.max_leverage = src.max_leverage;
+    }
     dst.funding_time = src.funding_time;
     dst.volume = src.volume;
 }
@@ -546,6 +565,51 @@ mod tests {
         assert_eq!(price.funding_rate, 0.0007);
         assert_eq!(price.funding_time, 46000.0);
         assert!(price.mark_price_found);
+    }
+
+    #[test]
+    fn apply_markets_list_keeps_existing_max_leverage_without_delphi_engine_flag() {
+        let mut st = MarketsState::new();
+        let mut old = mk_market("BTCUSDT", 1);
+        old.max_leverage = 25;
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![old],
+            corr_markets: vec![],
+        });
+
+        let mut incoming = mk_market("BTCUSDT", 2);
+        incoming.max_leverage = 125;
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![incoming],
+            corr_markets: vec![],
+        });
+
+        assert_eq!(
+            st.get("BTCUSDT").unwrap().max_leverage,
+            25,
+            "Delphi CopyFromMarket copies MaxLeverage only when ES_MaxLevInGetMarkets is set"
+        );
+    }
+
+    #[test]
+    fn apply_markets_list_copies_existing_max_leverage_with_delphi_engine_flag() {
+        let mut st = MarketsState::new();
+        st.set_copy_max_leverage_from_markets_list(true);
+        let mut old = mk_market("BTCUSDT", 1);
+        old.max_leverage = 25;
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![old],
+            corr_markets: vec![],
+        });
+
+        let mut incoming = mk_market("BTCUSDT", 2);
+        incoming.max_leverage = 125;
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![incoming],
+            corr_markets: vec![],
+        });
+
+        assert_eq!(st.get("BTCUSDT").unwrap().max_leverage, 125);
     }
 
     #[test]

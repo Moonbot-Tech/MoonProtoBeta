@@ -30,7 +30,9 @@ use std::sync::Arc;
 
 use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
 use crate::commands::balance::parse_balance;
-use crate::commands::engine_api::{parse_engine_response, EngineMethod, EngineResponse};
+use crate::commands::engine_api::{
+    parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse, ServerInfo,
+};
 use crate::commands::market::{
     parse_markets_indexes_response, parse_markets_list_response, parse_markets_prices_response,
     parse_token_tags_response,
@@ -157,6 +159,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) round_trip_delay_ms: i64,
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) domain_ready: bool,
+    pub(crate) copy_max_leverage_from_markets_list: bool,
 }
 
 impl ActiveDispatchContext {
@@ -168,8 +171,17 @@ impl ActiveDispatchContext {
             round_trip_delay_ms: client.round_trip_delay_ms(),
             server_time_delta_source: client.server_time_delta_handle(),
             domain_ready: client.is_domain_ready(),
+            copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
+                client.server_info(),
+            ),
         }
     }
+}
+
+const DELPHI_PLATFORM_FGATE: u8 = 9;
+
+fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
+    info.exchange_code == Some(DELPHI_PLATFORM_FGATE)
 }
 
 pub(crate) enum ActiveAction {
@@ -1012,6 +1024,13 @@ impl EventDispatcher {
                         None
                     }
                 }
+                EngineMethod::BaseCheck => {
+                    let info = parse_base_check_response(&resp.data);
+                    self.markets.set_copy_max_leverage_from_markets_list(
+                        copy_max_leverage_from_markets_list(&info),
+                    );
+                    None
+                }
                 _ => None,
             }
         } else {
@@ -1066,6 +1085,8 @@ impl EventDispatcher {
         if self.server_time_delta_source.is_none() {
             self.server_time_delta_source = Some(Arc::clone(&ctx.server_time_delta_source));
         }
+        self.markets
+            .set_copy_max_leverage_from_markets_list(ctx.copy_max_leverage_from_markets_list);
 
         // Server restart / PeerAppToken change: Delphi gates stream parsing with
         // `FLastServerAppToken <> PeerAppToken` until `GetMarketsIndexes` succeeds.
