@@ -19,6 +19,8 @@ use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strategy_serializer::{
     StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot,
 };
+use zerocopy::byteorder::little_endian::U64 as LeU64;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 const BASE_STRAT_CLASS_CMD_ID_BASE: u8 = 0; // TBaseStratCommand
 const CMD_SNAPSHOT_REQUEST: u8 = 1;
@@ -33,6 +35,47 @@ const CMD_CHECKED_ECHO: u8 = 6;
 pub struct StratCheckedItem {
     pub strategy_id: u64,
     pub checked: bool,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireStratCheckedItem {
+    strategy_id: LeU64,
+    checked: u8,
+}
+
+pub const STRAT_CHECKED_ITEM_SIZE: usize = std::mem::size_of::<WireStratCheckedItem>();
+const _: [(); 9] = [(); STRAT_CHECKED_ITEM_SIZE];
+
+impl StratCheckedItem {
+    fn from_wire(wire: WireStratCheckedItem) -> Self {
+        Self {
+            strategy_id: wire.strategy_id.get(),
+            checked: wire.checked != 0,
+        }
+    }
+
+    fn to_wire(self) -> WireStratCheckedItem {
+        WireStratCheckedItem {
+            strategy_id: LeU64::new(self.strategy_id),
+            checked: self.checked as u8,
+        }
+    }
+
+    pub(crate) fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
+        if *pos + STRAT_CHECKED_ITEM_SIZE > data.len() {
+            return None;
+        }
+        let wire =
+            WireStratCheckedItem::read_from_bytes(&data[*pos..*pos + STRAT_CHECKED_ITEM_SIZE])
+                .ok()?;
+        *pos += STRAT_CHECKED_ITEM_SIZE;
+        Some(Self::from_wire(wire))
+    }
+
+    pub(crate) fn write_to(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
+    }
 }
 
 /// `TStratSnapshot` (CmdId=2). Priority=Sliced. UKey=UK_StratSnapshot (UID всегда = 1, overlap).
@@ -190,17 +233,7 @@ fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratChecke
     pos += 2;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        if pos + 9 > payload.len() {
-            return None;
-        }
-        let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let checked = payload[pos] != 0;
-        pos += 1;
-        items.push(StratCheckedItem {
-            strategy_id,
-            checked,
-        });
+        items.push(StratCheckedItem::read_from(payload, &mut pos)?);
     }
     Some((items, pos))
 }
@@ -304,8 +337,7 @@ pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) 
     write_header(&mut out, CMD_CHECKED_SYNC, uid);
     out.extend_from_slice(&count.to_le_bytes());
     for it in items.iter().take(count_usize) {
-        out.extend_from_slice(&it.strategy_id.to_le_bytes());
-        out.push(it.checked as u8);
+        it.write_to(&mut out);
     }
     out.push(is_delta as u8);
     out
@@ -319,8 +351,7 @@ pub fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8> {
     write_header(&mut out, CMD_CHECKED_ECHO, uid);
     out.extend_from_slice(&count.to_le_bytes());
     for it in items.iter().take(count_usize) {
-        out.extend_from_slice(&it.strategy_id.to_le_bytes());
-        out.push(it.checked as u8);
+        it.write_to(&mut out);
     }
     out
 }
@@ -333,6 +364,29 @@ fn _silence_unused_const() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strat_checked_item_uses_private_wire_struct() {
+        assert_eq!(std::mem::size_of::<WireStratCheckedItem>(), 9);
+        assert_eq!(STRAT_CHECKED_ITEM_SIZE, 9);
+
+        let item = StratCheckedItem {
+            strategy_id: 0x0102_0304_0506_0708,
+            checked: true,
+        };
+        let mut bytes = Vec::new();
+        item.write_to(&mut bytes);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+        expected.push(1);
+        assert_eq!(bytes, expected);
+
+        let mut pos = 0;
+        let parsed = StratCheckedItem::read_from(&bytes, &mut pos).expect("valid item");
+        assert_eq!(pos, STRAT_CHECKED_ITEM_SIZE);
+        assert_eq!(parsed, item);
+    }
 
     #[test]
     fn parse_snapshot_request() {

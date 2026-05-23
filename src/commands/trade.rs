@@ -20,7 +20,7 @@
 
 use super::registry::{decode_utf8_delphi, write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
-use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64};
+use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 // ============================================================================
@@ -645,6 +645,45 @@ impl OrderUpdateData {
 pub struct ImmuneItem {
     pub uid: u64,
     pub value: bool,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+struct WireImmuneItem {
+    uid: LeU64,
+    value: u8,
+}
+
+const IMMUNE_ITEM_SIZE: usize = std::mem::size_of::<WireImmuneItem>();
+const _: [(); 9] = [(); IMMUNE_ITEM_SIZE];
+
+impl ImmuneItem {
+    fn from_wire(wire: WireImmuneItem) -> Self {
+        Self {
+            uid: wire.uid.get(),
+            value: wire.value != 0,
+        }
+    }
+
+    fn to_wire(self) -> WireImmuneItem {
+        WireImmuneItem {
+            uid: LeU64::new(self.uid),
+            value: self.value as u8,
+        }
+    }
+
+    fn read_from(r: &mut &[u8]) -> Option<Self> {
+        if r.len() < IMMUNE_ITEM_SIZE {
+            return None;
+        }
+        let wire = WireImmuneItem::read_from_bytes(&r[..IMMUNE_ITEM_SIZE]).ok()?;
+        *r = &r[IMMUNE_ITEM_SIZE..];
+        Some(Self::from_wire(wire))
+    }
+
+    fn write_to(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.to_wire().as_bytes());
+    }
 }
 
 // ============================================================================
@@ -1499,14 +1538,11 @@ impl SetImmuneCommand {
         *r = &r[1..];
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
-            if r.len() < 9 {
+            if let Some(item) = ImmuneItem::read_from(r) {
+                items.push(item);
+            } else {
                 break;
             }
-            let uid = u64::from_le_bytes(r[0..8].try_into().unwrap());
-            *r = &r[8..];
-            let value = r[0] != 0;
-            *r = &r[1..];
-            items.push(ImmuneItem { uid, value });
         }
         Some(Self { header, items })
     }
@@ -2002,8 +2038,7 @@ pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
     write_base_command_header(&mut out, 22, uid);
     out.push(wire_count);
     for it in wire_items {
-        out.extend_from_slice(&it.uid.to_le_bytes());
-        out.push(it.value as u8);
+        it.write_to(&mut out);
     }
     out
 }
@@ -2431,6 +2466,9 @@ mod tests {
 
     #[test]
     fn set_immune_wire_layout_matches_delphi_record() {
+        assert_eq!(std::mem::size_of::<WireImmuneItem>(), 9);
+        assert_eq!(IMMUNE_ITEM_SIZE, 9);
+
         let payload = build_set_immune(
             0x0102_0304_0506_0708,
             &[ImmuneItem {

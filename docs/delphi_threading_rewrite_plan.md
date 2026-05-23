@@ -2284,6 +2284,8 @@ Current status:
 
 - Converted `PriceZone`, `OrderUpdateData`, `StopSettings`, `OrderCompact`, and
   `EmuTradePoint` to private zerocopy-backed `Wire*` structs.
+- Converted 9-byte packed array items `StratCheckedItem` and `ImmuneItem` to
+  private zerocopy-backed `Wire*` structs.
 - Converted candle fixed records `DeepPrice`, `DeepPricePack`, and
   `DeepPricePackOLD` to private zerocopy-backed `Wire*` structs.
 - Converted trades-stream fixed rows/header (`TradesPacketHeader`, 10-byte

@@ -412,19 +412,15 @@ impl UICommand {
                 }
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut items = Vec::with_capacity(count.min((payload.len() - pos) / 9));
+                let mut items = Vec::with_capacity(
+                    count.min((payload.len() - pos) / super::strat::STRAT_CHECKED_ITEM_SIZE),
+                );
                 for _ in 0..count {
-                    if pos + 9 > payload.len() {
+                    if let Some(item) = StratCheckedItem::read_from(payload, &mut pos) {
+                        items.push(item);
+                    } else {
                         break;
                     }
-                    let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                    pos += 8;
-                    let checked = payload[pos] != 0;
-                    pos += 1;
-                    items.push(StratCheckedItem {
-                        strategy_id,
-                        checked,
-                    });
                 }
                 Some(UICommand::StratStartStopV2(StratStartStopV2 {
                     uid,
@@ -1038,8 +1034,7 @@ pub fn build_strat_start_stop_v2(uid: u64, is_start: bool, items: &[StratChecked
     out.push(is_start as u8);
     out.extend_from_slice(&count.to_le_bytes());
     for it in items.iter().take(count_usize) {
-        out.extend_from_slice(&it.strategy_id.to_le_bytes());
-        out.push(it.checked as u8);
+        it.write_to(&mut out);
     }
     out
 }
