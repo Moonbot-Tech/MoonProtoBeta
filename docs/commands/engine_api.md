@@ -74,6 +74,10 @@ common response payloads:
 | `RequestCandlesData` | [`Client::request_candles_data`](../api/candles.md#emk_requestcandlesdata--chunked-response-one-shot-helper-recommended) |
 | `GetMarketsIndexes` | Applied inline by `EventDispatcher` |
 
+`AuthCheckResponse.known_dexes` is a Delphi soft-read tail: the parser reads the
+declared DEX count, keeps every complete 18-byte `THLDexInfo` record, and does
+not drop the whole response when the optional DEX tail is truncated.
+
 ### BaseCheck Response - Multi-Server Identity
 
 When `Success=1`, newer servers append ten optional fields to `Data` in this

@@ -574,6 +574,9 @@ pub struct AuthCheckResponse {
 /// Returns `None` если payload corrupt или короче минимального размера для обязательных полей.
 /// Опциональные поля (Phase 2 расширения) парсятся `if !EOF`; их отсутствие = старый сервер,
 /// `parse_auth_check_response` всё равно возвращает `Some` с заполненными обязательными.
+/// DEX tail follows Delphi's soft stream-read shape: the declared `cnt` is read,
+/// complete `THLDexInfo` records are preserved, and a truncated tail does not
+/// reject the whole AuthCheck payload.
 ///
 /// Byte-exact с Delphi: `MoonProtoEngine.pas:610-633`.
 pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
@@ -618,16 +621,12 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     if recvd_max_payload.is_some() && pos < data.len() {
         let cnt = data[pos] as usize;
         pos += 1;
-        // DoS guard: каждый DEX = 18 байт, cnt * 18 не должно превышать remaining.
         const DEX_INFO_SIZE: usize = 18;
-        if cnt.saturating_mul(DEX_INFO_SIZE) > data.len().saturating_sub(pos) {
-            log::warn!(target: "moonproto::engine_api",
-                "AuthCheck: dex count {} requires {} bytes but only {} remain",
-                cnt, cnt * DEX_INFO_SIZE, data.len() - pos);
-            return None;
-        }
-        known_dexes.reserve(cnt);
+        known_dexes.reserve(cnt.min(data.len().saturating_sub(pos) / DEX_INFO_SIZE));
         for _ in 0..cnt {
+            if pos + DEX_INFO_SIZE > data.len() {
+                break;
+            }
             // THLDexInfo packed: [u8 length][15 bytes name][u16 collateral_token]
             let name_len = data[pos] as usize;
             // Защита: name_len по контракту ≤ 15. Если больше — corrupt, используем 15.
@@ -1457,6 +1456,31 @@ mod auth_check_tests {
         assert_eq!(resp.known_dexes[1].collateral_token, 360);
         assert_eq!(resp.hl_dex_market, Some(7));
         assert_eq!(resp.hl_spot_market, Some(3));
+    }
+
+    #[test]
+    fn auth_check_dex_count_keeps_complete_records_on_truncated_tail_like_delphi_loop() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0i64).to_le_bytes());
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(0i32).to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(1024i32).to_le_bytes());
+        data.push(2);
+
+        let mut dex0 = vec![0u8; 18];
+        dex0[0] = 4;
+        dex0[1..5].copy_from_slice(b"usdc");
+        dex0[16..18].copy_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&dex0);
+
+        let resp = parse_auth_check_response(&data).unwrap();
+        assert_eq!(resp.recvd_max_payload, Some(1024));
+        assert_eq!(resp.known_dexes.len(), 1);
+        assert_eq!(resp.known_dexes[0].name, "usdc");
+        assert_eq!(resp.hl_dex_market, None);
+        assert_eq!(resp.hl_spot_market, None);
     }
 
     #[test]

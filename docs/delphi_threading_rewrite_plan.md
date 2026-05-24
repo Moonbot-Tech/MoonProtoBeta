@@ -4562,3 +4562,28 @@ Still not done:
 - Corrupt `TMemoryStream.Read` partial-byte exactness is still not modeled:
   Delphi can leave unread bytes in local `Single` variables. That needs a
   separate decision instead of a hidden Rust-only cap.
+
+### 2026-05-24 - Phase 1 partial: AuthCheck DEX count guard removed
+
+Done:
+
+- Removed a Rust-only drop-all guard in
+  `parse_auth_check_response` for the optional AuthCheck DEX tail.
+- Delphi reads `cnt: Byte`, allocates `KnownDexes`, and loops through
+  `THLDexInfo` records with `TMemoryStream.Read`; there is no precheck that
+  `cnt * SizeOf(THLDexInfo)` fits the remaining stream.
+- Rust now preserves complete 18-byte `THLDexInfo` records and does not reject
+  the whole AuthCheck response when the optional DEX tail is truncated.
+- Recorded `spec_pipeline/work/хуйня.md §X.117`.
+
+Verification:
+
+- Added a parser test for declared count larger than the complete DEX records
+  present in the payload.
+
+Still not done:
+
+- Exact Delphi partial-record bytes are intentionally not invented here:
+  `TMemoryStream.Read` into a partially available `THLDexInfo` can leave
+  unread bytes in record storage. This remains a corrupt-tail decision, not a
+  hidden parser cap.

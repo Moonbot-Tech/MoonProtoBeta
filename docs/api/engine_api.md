@@ -271,6 +271,11 @@ let auth = client.request_auth_check(&mut dispatcher, Duration::from_secs(12))?;
 println!("account={}", auth.account_id);
 ```
 
+Mandatory fields are required. The optional Hyperliquid DEX tail is parsed like
+the Delphi client: if the declared DEX count is larger than the complete records
+present in the payload, complete records are kept and the truncated tail does not
+reject the whole AuthCheck response.
+
 ## Low-Level Builders
 
 `commands::engine_request` exposes byte-level builders such as
