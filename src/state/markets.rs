@@ -105,6 +105,14 @@ impl MarketsState {
         let allow_new_markets = first_create_markets || new_market_found;
         let incoming_count = resp.markets.len();
         let corr_count = resp.corr_markets.len();
+        let incoming_server_names = if allow_new_markets {
+            resp.markets
+                .iter()
+                .map(|m| m.bn_market_name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let old_markets = std::mem::take(&mut self.markets);
         let old_prices = std::mem::take(&mut self.prices);
@@ -166,6 +174,10 @@ impl MarketsState {
                 continue;
             }
             self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+        }
+        if allow_new_markets {
+            self.market_indexes = incoming_server_names;
+            self.indexes_synchronized = true;
         }
         self.markets_list_refresh_needed = false;
 
@@ -484,6 +496,7 @@ mod tests {
         assert_eq!(st.get("BTC").unwrap().bn_market_name, "BTC");
         assert_eq!(st.get("ETH").unwrap().bn_market_name, "ETH");
         assert!(st.get("DOGE").is_none());
+        assert_eq!(st.market_name_by_index(1), Some("ETH"));
     }
 
     #[test]
@@ -527,6 +540,7 @@ mod tests {
             markets: vec![mk_market("BTCUSDT", 0)],
             corr_markets: vec![],
         });
+        st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
 
         st.apply_markets_list(MarketsListResponse {
             markets: vec![mk_market("BTCUSDT", 0), mk_market("DOGEUSDT", 1)],
@@ -538,6 +552,10 @@ mod tests {
             st.get("DOGEUSDT").is_none(),
             "Delphi frees unknown TMarket when not FirstCreateMarkets and not NewMarketFound"
         );
+        assert!(
+            st.market_name_by_index(1).is_none(),
+            "Delphi does not rebuild SrvMarkets for a plain repeated GetMarketsList"
+        );
     }
 
     #[test]
@@ -547,6 +565,7 @@ mod tests {
             markets: vec![mk_market("BTCUSDT", 0)],
             corr_markets: vec![],
         });
+        st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
         st.markets_list_refresh_needed = true;
 
         st.apply_markets_list(MarketsListResponse {
@@ -559,6 +578,27 @@ mod tests {
             !st.markets_list_refresh_needed(),
             "Delphi clears NewMarketFound only after successful GetMarketsList apply"
         );
+        assert_eq!(
+            st.market_name_by_index(1),
+            Some("DOGEUSDT"),
+            "Delphi rebuilds SrvMarkets from GetMarketsList IndexMap when NewMarketFound"
+        );
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 1,
+                bid: 0.1,
+                ask: 0.2,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 0.15,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        assert_eq!(st.price("DOGEUSDT").unwrap().bid, 0.1);
     }
 
     #[test]

@@ -25,6 +25,11 @@ added only when the list refresh was triggered by Delphi-style
 `NewMarketFound`; otherwise they are ignored like Delphi frees the incoming
 `TMarket`.
 
+The server-index mapping is rebuilt from the `GetMarketsList` response order on
+the first list and on a `NewMarketFound` refresh. A plain later
+`GetMarketsList` updates known market fields but does not rewrite the current
+`mIndex -> market name` mapping.
+
 For existing markets, `max_leverage` is updated from `GetMarketsList` only when
 the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
 library path this is inferred from `BaseCheck`: currently only
