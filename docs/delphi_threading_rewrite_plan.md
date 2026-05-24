@@ -4821,3 +4821,34 @@ Still not done:
   broader trade/history state, not just `UpdateMarketsList` payload fields.
 - Continue heavier `NewMarkets` listing-strategy follow-ups and remaining
   active-lib public-state parity.
+
+### 2026-05-24 - Phase 1 check: NewMarkets heavier follow-ups classification
+
+Checked:
+
+- `Bworks.pas` after `Engine.NewMarkets.Count > 0` can call
+  `Engine.GetMarketsBalanceFull`, sleep+retry `Engine.UpdateMarketsList` for
+  active listing strategies, `Engine.GetBracketsInfo`, `ChangePositionType`,
+  and `SetLeverage`.
+- In the current `MoonProtoEngine.pas`, `GetMarketsBalanceFull` is a no-op
+  (`Result := true`) and does not send `TRequestBalanceRefresh`.
+- `GetBracketsInfo` is not a MoonProto Engine API method; `TMoonProtoEngine`
+  inherits the base `TMarketEngine.GetBracketsInfo`, which returns `true`.
+- `ChangePositionType` and `SetLeverage` are real synchronous MoonProto Engine
+  API wrappers, but the listing calls are Bworks trading automation driven by
+  user config (`AutoManageLev`, platform, futures mode), not automatic
+  active-lib state maintenance.
+- The sleep+retry price wait is gated by `strats.IsThereListingStrat`, which
+  uses Delphi `sg.Active`. `Active` is not a raw snapshot field; Delphi derives
+  it from `Checked`, `CanAutoBuy`, `RunDetectOnKernel`, current MoonProto mode,
+  and local UI start semantics.
+
+Conclusion:
+
+- The active-lib protocol/state fix for NewMarkets remains the already-modeled
+  immediate `UpdateMarketsList` after a listing refresh adds new markets.
+- Do not add Rust-only automatic balance refresh, brackets fetch, leverage, or
+  position-type changes from this Bworks block.
+- Do not guess listing-strategy extra sleep/retry from `checked` alone; it needs
+  a separate exact `sg.Active` model before any strategy-aware automation can be
+  ported.
