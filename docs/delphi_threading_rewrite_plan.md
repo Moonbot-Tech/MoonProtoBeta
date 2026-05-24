@@ -421,6 +421,33 @@ Exit gate: unit equivalence tests + `cargo test` + FireTest.
 Exit gate: тест, где user callback sleep/block не задерживает Ping/SlicedACK/API
 response/retry.
 
+Delphi classification checked on 2026-05-24:
+
+- `MoonProtoCommon.pas:DataReadInt` decrypts/decompresses, applies Ping ACK
+  bitmap, then calls `OnNewData` inline. This is still protocol/active state,
+  not app callback.
+- `MoonProtoClient.pas:ClientNewData` handles `MPC_Ping` inline and immediately
+  calls `Client.SendPing(Ping)`.
+- `MPC_TradesStream` and `MPC_TradesResendResponse` call
+  `MainEngine.ProcessTradesStream/ProcessTradesResendBatch` inline; gap buckets
+  and resend bookkeeping are protocol/domain state.
+- `MPC_OrderBook` calls `OnOrderBookPacket(AStream)` inline.
+- User/UI side effects go through `TThread.Queue`: server log UI,
+  `TClientSettingsCommand`, remote update command, leverage manager, arb
+  activation notification, new order worker UI callback
+  `CryptoPumpTool.OnMServerOrder`, `ProcessStratCommand`, status-change
+  callback, and orderbook predictor watch/unwatch.
+
+Rust Phase C boundary:
+
+- Keep protocol/domain machine effects inline with `ProtocolCore`: Ping,
+  SlicedACK, API pending delivery, trades gap buckets/resend, orderbook cache
+  recovery, order/balance/market state application.
+- Move user-facing callbacks/notifications to `AppQueue`: raw `run` callback,
+  `run_with_dispatcher` event callback, lifecycle callback, UI/log/status
+  notifications. Until Phase D, `run_with_dispatcher_queued` already exercises
+  the no-callback queued path.
+
 ### Phase D - switch live runtime to `ProtocolCore + AppQueue`
 
 - single owner владеет socket/protocol/active state;
