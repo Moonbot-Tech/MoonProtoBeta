@@ -59,6 +59,10 @@ pub struct MarketsState {
     pub indexes_synchronized: bool,
     /// Delphi `NewMarketFound` analogue: set when a price row points at a server
     /// market index/name that is not present in the current market list.
+    ///
+    /// It is intentionally kept true after scheduling `GetMarketsList` and is
+    /// cleared only by a successful list apply, matching Delphi's synchronous
+    /// `Engine.GetMarketsList()` path.
     pub markets_list_refresh_needed: bool,
     /// Delphi `ES_MaxLevInGetMarkets in EngineProp`: existing markets copy
     /// `MaxLeverage` from `GetMarketsList` only for platforms that set this
@@ -96,9 +100,11 @@ impl MarketsState {
     /// `CopyFromMarket`, old live price state is preserved, absent old markets
     /// stay in `Markets`, and CorrMarkets are add/update-only.
     pub fn apply_markets_list(&mut self, resp: MarketsListResponse) -> MarketsEvent {
+        let first_create_markets = self.markets.is_empty();
+        let new_market_found = self.markets_list_refresh_needed;
+        let allow_new_markets = first_create_markets || new_market_found;
         let incoming_count = resp.markets.len();
         let corr_count = resp.corr_markets.len();
-        self.markets_list_refresh_needed = false;
 
         let old_markets = std::mem::take(&mut self.markets);
         let old_prices = std::mem::take(&mut self.prices);
@@ -136,6 +142,9 @@ impl MarketsState {
             if consumed.contains_key(&market.bn_market_name) {
                 continue;
             }
+            if !allow_new_markets {
+                continue;
+            }
             prices.push(market_price_from_market(&market));
             markets.push(market);
         }
@@ -153,8 +162,12 @@ impl MarketsState {
         self.prices = prices;
 
         for cm in resp.corr_markets {
+            if cm.base_currency_name.is_empty() {
+                continue;
+            }
             self.corr_markets.insert(cm.bn_market_name.clone(), cm);
         }
+        self.markets_list_refresh_needed = false;
 
         MarketsEvent::MarketsListReplaced {
             count: self.markets.len(),
@@ -348,10 +361,6 @@ impl MarketsState {
         self.markets_list_refresh_needed
     }
 
-    pub(crate) fn clear_markets_list_refresh_needed(&mut self) {
-        self.markets_list_refresh_needed = false;
-    }
-
     pub(crate) fn set_copy_max_leverage_from_markets_list(&mut self, enabled: bool) {
         self.copy_max_leverage_from_markets_list = enabled;
     }
@@ -508,6 +517,47 @@ mod tests {
         assert!(
             st.tags("DOGEUSDT").contains(TokenTags::GAMING),
             "absent old markets keep their token tags because the market is still present"
+        );
+    }
+
+    #[test]
+    fn apply_markets_list_does_not_add_new_market_without_new_market_found_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("DOGEUSDT", 1)],
+            corr_markets: vec![],
+        });
+
+        assert!(st.get("BTCUSDT").is_some());
+        assert!(
+            st.get("DOGEUSDT").is_none(),
+            "Delphi frees unknown TMarket when not FirstCreateMarkets and not NewMarketFound"
+        );
+    }
+
+    #[test]
+    fn apply_markets_list_adds_new_market_and_clears_new_market_found_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+        st.markets_list_refresh_needed = true;
+
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("DOGEUSDT", 1)],
+            corr_markets: vec![],
+        });
+
+        assert!(st.get("DOGEUSDT").is_some());
+        assert!(
+            !st.markets_list_refresh_needed(),
+            "Delphi clears NewMarketFound only after successful GetMarketsList apply"
         );
     }
 
@@ -938,6 +988,26 @@ mod tests {
         // Не должно паниковать
         let _ = st.apply_markets_prices(prices);
         assert_eq!(st.price("BTC").unwrap().bid, 0.0); // не обновился
+    }
+
+    #[test]
+    fn apply_markets_list_skips_corr_market_with_empty_base_currency_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.0,
+                base_currency_name: String::new(),
+            }],
+        });
+
+        assert_eq!(
+            st.corr_count(),
+            0,
+            "Delphi calls AddOrSetCorrMarket only when BaseCur is not empty"
+        );
     }
 
     #[test]

@@ -1144,7 +1144,6 @@ impl EventDispatcher {
                 || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000)
         {
             self.last_markets_list_refresh_ms = now_ms;
-            self.markets.clear_markets_list_refresh_needed();
             actions.push(ActiveAction::RequestMarketsList);
         }
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
@@ -2683,6 +2682,10 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, ActiveAction::RequestMarketsList)),
             "first NewMarketFound refresh is immediate"
+        );
+        assert!(
+            dispatcher.markets.markets_list_refresh_needed(),
+            "Delphi keeps NewMarketFound true until GetMarketsList succeeds"
         );
 
         actions.clear();

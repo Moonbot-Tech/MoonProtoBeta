@@ -18,9 +18,12 @@ are present in the response. Markets absent from the response keep their previou
 token tags.
 
 `GetMarketsList` follows Delphi merge semantics. The first response populates
-the market list. Later responses update known markets by name, add new names,
-and leave old names present if they are absent from the response; live price
-slots and token tags for known markets are preserved.
+the market list. Later responses update known markets by name and leave old
+names present if they are absent from the response; live price slots and token
+tags for known markets are preserved. Unknown names from a later response are
+added only when the list refresh was triggered by Delphi-style
+`NewMarketFound`; otherwise they are ignored like Delphi frees the incoming
+`TMarket`.
 
 For existing markets, `max_leverage` is updated from `GetMarketsList` only when
 the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
@@ -28,9 +31,11 @@ library path this is inferred from `BaseCheck`: currently only
 `Platform_FGate` (`exchange_code = 9`) enables it. New markets keep the value
 from the incoming list because Delphi inserts the whole `TMarket`.
 
-Correlation market price updates are also merge-style: prices present in
-`UpdateMarketsList` overwrite their entries, while absent correlation prices keep
-their previous value.
+Correlation market definitions from `GetMarketsList` are inserted only when
+their `base_currency_name` is non-empty, matching Delphi's `If not
+BaseCur.IsEmpty then AddOrSetCorrMarket`. Correlation market price updates are
+merge-style: prices present in `UpdateMarketsList` overwrite their entries,
+while absent correlation prices keep their previous value.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
