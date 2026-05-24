@@ -625,6 +625,12 @@ struct ReaderRuntime {
     epoch: u32,
 }
 
+enum ReaderRecvOnce {
+    Datagram(usize),
+    Retry,
+    Stop,
+}
+
 impl ReaderRuntime {
     fn is_active_reader(&self) -> bool {
         self.reader_transport_state
@@ -635,83 +641,101 @@ impl ReaderRuntime {
 
     fn run(mut self) {
         let mut buf = [0u8; 65535];
-        let protocol_metrics = Arc::clone(&self.protocol_metrics);
         loop {
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let n = match self.sock.recv_from(&mut buf) {
-                Ok((n, _)) => n,
-                Err(e) => match e.kind() {
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                        continue;
-                    }
-                    _ => {
-                        if self.shutdown_flag.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
-                        thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                },
+            let n = match self.recv_drain_once(&mut buf) {
+                ReaderRecvOnce::Datagram(n) => n,
+                ReaderRecvOnce::Retry => continue,
+                ReaderRecvOnce::Stop => break,
             };
-            protocol_metrics.record_recv_packet();
-            let _protocol_timer = protocol_metrics.reader_protocol_timer();
-
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
-                &self.mac_ctx,
-                &self.mac_key,
-                &buf[..n],
-                self.mask_ver,
-            ) else {
-                continue;
-            };
-
-            if trace_io_enabled() {
-                eprintln!(
-                    "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
-                    Command::from_byte(hdr.cmd),
-                    hdr.cmd,
-                    n,
-                    payload.len()
-                );
-            }
-
-            let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
-            let reader_is_active = self
-                .reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_recv_side_effects(self.epoch, n as u64, timestamp_ms);
-            if !reader_is_active {
-                continue;
-            }
-            let total_recv_after = self
-                .total_recv_shared
-                .fetch_add(n as u64, Ordering::Relaxed)
-                + n as u64;
-
-            if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
-                self.err_emu_diagnostics
-                    .lock()
-                    .unwrap()
-                    .record_packet(hdr.cmd, &payload, decision);
-                if decision.dropped {
-                    self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
-                    continue;
-                }
-            }
-
-            if !self.handle_command(hdr.cmd, &payload, n as u64, total_recv_after, timestamp_ms) {
+            if !self.process_datagram(&buf[..n], n as u64) {
                 break;
             }
         }
+    }
+
+    fn recv_drain_once(&self, buf: &mut [u8]) -> ReaderRecvOnce {
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return ReaderRecvOnce::Stop;
+        }
+
+        match self.sock.recv_from(buf) {
+            Ok((n, _)) => ReaderRecvOnce::Datagram(n),
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                    ReaderRecvOnce::Retry
+                }
+                _ => {
+                    if self.shutdown_flag.load(Ordering::Relaxed) {
+                        return ReaderRecvOnce::Stop;
+                    }
+                    log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
+                    thread::sleep(Duration::from_millis(5));
+                    ReaderRecvOnce::Retry
+                }
+            },
+        }
+    }
+
+    fn process_datagram(&mut self, datagram: &[u8], recv_bytes: u64) -> bool {
+        let protocol_metrics = Arc::clone(&self.protocol_metrics);
+        protocol_metrics.record_recv_packet();
+        let _protocol_timer = protocol_metrics.reader_protocol_timer();
+
+        if self.shutdown_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
+            &self.mac_ctx,
+            &self.mac_key,
+            datagram,
+            self.mask_ver,
+        ) else {
+            return true;
+        };
+
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                Command::from_byte(hdr.cmd),
+                hdr.cmd,
+                datagram.len(),
+                payload.len()
+            );
+        }
+
+        let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
+        let reader_is_active = self
+            .reader_transport_state
+            .lock()
+            .unwrap()
+            .apply_recv_side_effects(self.epoch, recv_bytes, timestamp_ms);
+        if !reader_is_active {
+            return true;
+        }
+        let total_recv_after = self
+            .total_recv_shared
+            .fetch_add(recv_bytes, Ordering::Relaxed)
+            + recv_bytes;
+
+        if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+            self.err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_packet(hdr.cmd, &payload, decision);
+            if decision.dropped {
+                self.on_err_emu_drop(hdr.cmd, &payload, recv_bytes, timestamp_ms);
+                return true;
+            }
+        }
+
+        self.handle_command(
+            hdr.cmd,
+            &payload,
+            recv_bytes,
+            total_recv_after,
+            timestamp_ms,
+        )
     }
 
     fn handle_command(
@@ -2938,49 +2962,15 @@ impl WriterRuntime<'_> {
             }
             let cur_tm = self.client.now_ms();
 
-            self.client.sync_transport_state_from_reader();
+            self.writer_tick_prologue(cur_tm);
 
-            // Emit lifecycle events on auth_status transitions.
-            self.client.check_lifecycle_transition();
+            if self.ensure_socket_bound(cur_tm) {
+                self.drain_app_commands(cur_tm, mode);
 
-            // ActualSleepTime EMA (matches UDPClient.pas:725-734)
-            if self.client.prev_cycle_tm != 0 {
-                let raw = (cur_tm - self.client.prev_cycle_tm).abs();
-                if raw > 0 && raw < 100 {
-                    if self.client.actual_sleep_time <= 0.0 {
-                        self.client.actual_sleep_time = raw as f64;
-                    } else {
-                        self.client.actual_sleep_time =
-                            self.client.actual_sleep_time * 0.7 + raw as f64 * 0.3;
-                    }
-                }
-            }
-            self.client.prev_cycle_tm = cur_tm;
+                self.wait_5ms();
+                self.drain_app_commands(cur_tm, mode);
 
-            // Bind socket if needed
-            if self.client.socket.is_none() && self.client.need_connect {
-                self.client.bind_socket(cur_tm);
-                self.client.spawn_reader();
-            }
-
-            if self.client.socket.is_some() {
-                self.drain_reader_decoded(cur_tm, mode);
-
-                self.wait_for_reader_work_or_default_sleep();
-                self.drain_reader_decoded(cur_tm, mode);
-
-                let send_phase_start = Instant::now();
-                self.transport_writer_maintenance_tick(cur_tm);
-                protocol_metrics.record_send_phase(send_phase_start.elapsed());
-
-                // Active library: all-trades reconnect sequence lives on the
-                // writer tick. Gap recovery itself is checked only after
-                // successful trades packets, like Delphi `ProcessTradesStream`.
-                self.periodic_trades_reconnect_tick(cur_tm, mode);
-                self.periodic_orderbook_reconnect_tick(cur_tm, mode);
-                self.periodic_orders_tick(cur_tm, mode);
-
-                self.transport_reconnect_tail_tick(cur_tm);
+                self.send_maintenance_phase(cur_tm, mode, &protocol_metrics);
             } else {
                 // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
@@ -2988,13 +2978,66 @@ impl WriterRuntime<'_> {
         }
     }
 
-    fn wait_for_reader_work_or_default_sleep(&mut self) {
+    fn writer_tick_prologue(&mut self, cur_tm: i64) {
+        self.client.sync_transport_state_from_reader();
+
+        // Emit lifecycle events on auth_status transitions.
+        self.client.check_lifecycle_transition();
+
+        // ActualSleepTime EMA (matches UDPClient.pas:725-734)
+        if self.client.prev_cycle_tm != 0 {
+            let raw = (cur_tm - self.client.prev_cycle_tm).abs();
+            if raw > 0 && raw < 100 {
+                if self.client.actual_sleep_time <= 0.0 {
+                    self.client.actual_sleep_time = raw as f64;
+                } else {
+                    self.client.actual_sleep_time =
+                        self.client.actual_sleep_time * 0.7 + raw as f64 * 0.3;
+                }
+            }
+        }
+        self.client.prev_cycle_tm = cur_tm;
+    }
+
+    fn ensure_socket_bound(&mut self, cur_tm: i64) -> bool {
+        if self.client.socket.is_none() && self.client.need_connect {
+            self.client.bind_socket(cur_tm);
+            self.client.spawn_reader();
+        }
+        self.client.socket.is_some()
+    }
+
+    fn drain_app_commands(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        self.drain_reader_decoded(cur_tm, mode);
+    }
+
+    fn wait_5ms(&mut self) {
         // Delphi Execute spins on shared queues and sleeps a fixed short tick
         // when there is no outgoing work. Reader-decoded work is polled from
         // `pending_reader_decoded`, not signalled through a Rust-only wake FIFO.
         if self.client.send_lock.lock().unwrap().is_empty() {
             thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
         }
+    }
+
+    fn send_maintenance_phase(
+        &mut self,
+        cur_tm: i64,
+        mode: &mut RunMode<'_>,
+        protocol_metrics: &ProtocolMetrics,
+    ) {
+        let send_phase_start = Instant::now();
+        self.transport_writer_maintenance_tick(cur_tm);
+        protocol_metrics.record_send_phase(send_phase_start.elapsed());
+
+        // Active library: all-trades reconnect sequence lives on the
+        // writer tick. Gap recovery itself is checked only after
+        // successful trades packets, like Delphi `ProcessTradesStream`.
+        self.periodic_trades_reconnect_tick(cur_tm, mode);
+        self.periodic_orderbook_reconnect_tick(cur_tm, mode);
+        self.periodic_orders_tick(cur_tm, mode);
+
+        self.transport_reconnect_tail_tick(cur_tm);
     }
 
     fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {

@@ -749,6 +749,39 @@ Decoded timestamp red flag closed:
   the expected `TradesResend` with the old writer-tick timestamping when three
   decoded packets were drained in one writer tick.
 
+Next cross-platform gate:
+
+- Run `cargo test --test udp_polling --quiet` on Linux VPS, not only Windows.
+  VPS paths are documented in root `AGENTS.md` (`/root/work/moonkernel` for the
+  MoonKernel checkout). This is required before treating `polling` readiness
+  behavior as proven cross-platform.
+
+### 2026-05-24 - Phase B first skeleton split
+
+Done:
+
+- `ReaderRuntime::run` now delegates without behavior change to
+  `recv_drain_once` and `process_datagram`.
+- `WriterRuntime::run` now delegates without behavior change to
+  `writer_tick_prologue`, `ensure_socket_bound`, `drain_app_commands`,
+  `wait_5ms`, and `send_maintenance_phase`.
+
+Reason:
+
+- These names are the first `ProtocolCore` skeleton boundary. They keep the
+  same call order and side effects, but give the next step exact blocks to move
+  or prove against Delphi `UDPRead` / `Execute`.
+
+Checks:
+
+- `cargo test --lib --quiet`: 598 passed.
+- `cargo test --test udp_polling --quiet`: 1 passed on Windows.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `cargo test --test fire_test -- --ignored --nocapture`: passed against the
+  configured live server, including `err_emu=10%` initial health and `err_emu=50%`
+  high-loss simple-ops gates.
+
 ### 2026-05-22 - Phase 3 partial
 
 Done:
