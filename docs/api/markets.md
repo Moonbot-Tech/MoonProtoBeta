@@ -10,9 +10,10 @@ Markets state is maintained from Engine API responses:
 When using `Client::run_with_dispatcher`, relevant responses are applied to
 `EventDispatcher::markets()` automatically.
 
-The active dispatcher applies `UpdateMarketsList` and `CheckBinanceTags`
-directly while reading the payload, matching Delphi's in-loop state updates.
-The pure parse helpers remain available for raw callers and tests.
+The active dispatcher applies `GetMarketsList`, `UpdateMarketsList`, and
+`CheckBinanceTags` directly while reading the payload, matching Delphi's
+in-loop state updates. The pure parse helpers remain available for raw callers
+and tests.
 
 Low-level market response builders use Delphi string serialization: `Word`
 UTF-8 byte length followed by exactly that declared number of bytes.

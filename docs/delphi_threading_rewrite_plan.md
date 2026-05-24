@@ -4662,6 +4662,29 @@ Verification:
 
 Still not done:
 
-- `GetMarketsList` still has a partial-apply gap on malformed payloads:
-  Delphi mutates market objects during the market loop before CorrMarkets and
-  post-processing. Rust active dispatcher still parses the full list first.
+- `GetMarketsList` direct active apply is handled in the next entry.
+
+### 2026-05-24 - Phase 1 partial: direct GetMarketsList active apply
+
+Done:
+
+- Closed the remaining active-dispatcher market partial-apply mismatch for
+  `GetMarketsList`.
+- Delphi reads and applies each market inside the market loop, rebuilds
+  `SrvMarkets` after that loop, and only then reads CorrMarkets. If a later
+  CorrMarket string read fails, already-read markets and rebuilt indexes remain.
+- Rust active dispatcher now applies `GetMarketsList` directly from payload in
+  the same order. Pure `parse_markets_list_response` remains for raw
+  callers/tests.
+- Recorded `spec_pipeline/work/хуйня.md §X.140`.
+
+Verification:
+
+- Added a regression test where the market row is complete but the following
+  CorrMarket string is truncated; the market and index mapping remain applied.
+
+Still not done:
+
+- Continue broader `GetMarketsList` post-processing parity audit for Delphi
+  fields that Rust does not model directly (`ListedType`, `CheckCorrMarkets`,
+  `CheckCurrencyRefMarkets`, `NewMarkets` side list).

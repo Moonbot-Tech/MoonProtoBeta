@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
-    apply_delphi_local_funding_shift, CorrMarket, CorrMarketPriceUpdate, EngineStreamReader,
-    Market, MarketPriceUpdate, MarketTokenTags, MarketsListResponse, MarketsPricesResponse,
-    TokenTags,
+    apply_delphi_local_funding_shift, read_corr_market, read_market_with_local_shift, CorrMarket,
+    CorrMarketPriceUpdate, EngineStreamReader, Market, MarketPriceUpdate, MarketTokenTags,
+    MarketsListResponse, MarketsPricesResponse, TokenTags,
 };
 
 const EPS_MARKET: f64 = 1e-12;
@@ -188,6 +188,93 @@ impl MarketsState {
             count: self.markets.len(),
             corr_count,
         }
+    }
+
+    /// Active-library direct counterpart of Delphi `GetMarketsList`.
+    ///
+    /// Delphi applies each market inside the read loop, rebuilds server indexes
+    /// after that loop, then applies CorrMarkets. If a CorrMarket read fails,
+    /// already-read markets and rebuilt indexes remain.
+    pub(crate) fn apply_markets_list_payload_like_delphi(
+        &mut self,
+        data: &[u8],
+        ver: u16,
+    ) -> Option<MarketsEvent> {
+        self.apply_markets_list_payload_with_local_shift(
+            data,
+            ver,
+            current_local_time_shift_minutes(),
+        )
+    }
+
+    fn apply_markets_list_payload_with_local_shift(
+        &mut self,
+        data: &[u8],
+        ver: u16,
+        local_shift_minutes: f64,
+    ) -> Option<MarketsEvent> {
+        let first_create_markets = self.markets.is_empty();
+        let new_market_found = self.markets_list_refresh_needed;
+        let allow_new_markets = first_create_markets || new_market_found;
+        let mut r = EngineStreamReader::new(data);
+        let count = r.read_count()?;
+        let mut incoming_server_names = if allow_new_markets {
+            Vec::with_capacity(r.bounded_count_capacity(count, 16))
+        } else {
+            Vec::new()
+        };
+
+        for _ in 0..count {
+            let market = read_market_with_local_shift(&mut r, ver, local_shift_minutes)?;
+            if allow_new_markets {
+                incoming_server_names.push(market.bn_market_name.clone());
+            }
+            self.apply_one_market_from_list(market, allow_new_markets);
+        }
+
+        if allow_new_markets {
+            self.market_indexes = incoming_server_names;
+            self.indexes_synchronized = true;
+        }
+
+        let corr_count = r.read_count()?;
+        for _ in 0..corr_count {
+            let cm = read_corr_market(&mut r)?;
+            if cm.base_currency_name.is_empty() {
+                continue;
+            }
+            self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+        }
+
+        self.markets_list_refresh_needed = false;
+
+        Some(MarketsEvent::MarketsListReplaced {
+            count: self.markets.len(),
+            corr_count,
+        })
+    }
+
+    fn apply_one_market_from_list(&mut self, market: Market, allow_new_markets: bool) {
+        if let Some(&idx) = self.by_name.get(&market.bn_market_name) {
+            merge_market_like_delphi_get_markets_list(
+                &mut self.markets[idx],
+                &market,
+                self.copy_max_leverage_from_markets_list,
+            );
+            if let Some(price) = self.prices.get_mut(idx) {
+                price.funding_time = market.funding_time;
+            }
+            return;
+        }
+
+        if !allow_new_markets {
+            return;
+        }
+
+        let idx = self.markets.len();
+        self.by_name.insert(market.bn_market_name.clone(), idx);
+        self.prices.push(market_price_from_market(&market));
+        self.markets.push(market);
     }
 
     /// Применить ответ `emk_UpdateMarketsList`.
@@ -548,7 +635,9 @@ fn market_price_from_market(m: &Market) -> MarketPrice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::market::{BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate};
+    use crate::commands::market::{
+        write_market, BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate,
+    };
 
     fn mk_market(name: &str, idx: u16) -> Market {
         Market {
@@ -638,6 +727,30 @@ mod tests {
         assert_eq!(st.get("ETH").unwrap().bn_market_name, "ETH");
         assert!(st.get("DOGE").is_none());
         assert_eq!(st.market_name_by_index(1), Some("ETH"));
+    }
+
+    #[test]
+    fn apply_markets_list_payload_keeps_read_market_on_late_corr_parse_error_like_delphi() {
+        let mut st = MarketsState::new();
+        let market = mk_market("BTCUSDT", 0);
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_le_bytes());
+        write_market(&mut data, &market, 2);
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&7u16.to_le_bytes()); // broken CorrMarket name
+
+        let ev = st.apply_markets_list_payload_with_local_shift(&data, 2, 0.0);
+
+        assert!(ev.is_none());
+        assert!(
+            st.get("BTCUSDT").is_some(),
+            "Delphi applies each market before reading CorrMarkets"
+        );
+        assert_eq!(
+            st.market_name_by_index(0),
+            Some("BTCUSDT"),
+            "Delphi rebuilds SrvMarkets after the market loop and before CorrMarkets"
+        );
     }
 
     #[test]

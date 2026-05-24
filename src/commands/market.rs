@@ -271,7 +271,7 @@ pub fn read_market(r: &mut EngineStreamReader, ver: u16) -> Option<Market> {
     read_market_with_local_shift(r, ver, current_local_time_shift_minutes())
 }
 
-fn read_market_with_local_shift(
+pub(crate) fn read_market_with_local_shift(
     r: &mut EngineStreamReader,
     ver: u16,
     local_shift_minutes: f64,

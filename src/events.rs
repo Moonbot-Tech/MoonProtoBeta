@@ -34,7 +34,7 @@ use crate::commands::balance::parse_balance;
 use crate::commands::engine_api::{
     parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse, ServerInfo,
 };
-use crate::commands::market::{parse_markets_indexes_response, parse_markets_list_response};
+use crate::commands::market::parse_markets_indexes_response;
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
@@ -1082,8 +1082,10 @@ impl EventDispatcher {
             match resp.method {
                 EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
                     if resp.method == EngineMethod::GetMarketsList {
-                        if let Some(list) = parse_markets_list_response(&resp.data, ASSUMED_VER) {
-                            let ev = self.markets.apply_markets_list(list);
+                        if let Some(ev) = self
+                            .markets
+                            .apply_markets_list_payload_like_delphi(&resp.data, ASSUMED_VER)
+                        {
                             Some(Event::Markets(ev))
                         } else {
                             None
