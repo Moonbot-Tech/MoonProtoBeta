@@ -1493,16 +1493,16 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
         diag.outgoing_blackholed_packets
     );
     for raw in [
-        Command::Sliced as u8,
-        Command::SlicedACK as u8,
-        Command::UI as u8,
-        Command::API as u8,
-        Command::WhoAreYou as u8,
-        Command::Fine as u8,
-        Command::WrongHello as u8,
-        Command::WantNewHello as u8,
-        Command::NeedHelloAgain as u8,
-        Command::Ping as u8,
+        Command::Sliced.to_byte(),
+        Command::SlicedACK.to_byte(),
+        Command::UI.to_byte(),
+        Command::API.to_byte(),
+        Command::WhoAreYou.to_byte(),
+        Command::Fine.to_byte(),
+        Command::WrongHello.to_byte(),
+        Command::WantNewHello.to_byte(),
+        Command::NeedHelloAgain.to_byte(),
+        Command::Ping.to_byte(),
     ] {
         if let Some(cmd) = diag.by_cmd.iter().find(|cmd| cmd.raw_cmd == raw) {
             let cmd_drop = cmd.dropped_packets as f64 / cmd.valid_packets.max(1) as f64 * 100.0;
@@ -1519,12 +1519,12 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
     }
 
     for raw in [
-        Command::Hello as u8,
-        Command::HelloAgain as u8,
-        Command::ImFriend as u8,
-        Command::LogOff as u8,
-        Command::Ping as u8,
-        Command::SlicedACK as u8,
+        Command::Hello.to_byte(),
+        Command::HelloAgain.to_byte(),
+        Command::ImFriend.to_byte(),
+        Command::LogOff.to_byte(),
+        Command::Ping.to_byte(),
+        Command::SlicedACK.to_byte(),
     ] {
         if let Some(cmd) = diag.outgoing_by_cmd.iter().find(|cmd| cmd.raw_cmd == raw) {
             eprintln!(
@@ -1569,13 +1569,13 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
 
 fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
     let completed_settings =
-        dg.completed_cmd == Some(Command::UI as u8) && dg.completed_ui_cmd_id == Some(1);
+        dg.completed_cmd == Some(Command::UI.to_byte()) && dg.completed_ui_cmd_id == Some(1);
     let block0_ui = dg
         .block0_wire_cmd
         .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::UI)
         .unwrap_or(false);
     let block0_known_settings = dg.block0_ui_cmd_id == Some(1);
-    let completed_api = dg.completed_cmd == Some(Command::API as u8);
+    let completed_api = dg.completed_cmd == Some(Command::API.to_byte());
     let block0_api = dg
         .block0_wire_cmd
         .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::API)

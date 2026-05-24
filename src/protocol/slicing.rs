@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(datagram_num, 33);
         assert_eq!(
             cmd,
-            Command::None as u8,
+            Command::None.to_byte(),
             "Delphi leaves TMoonProtoSlicedData.Fcmd at MPC_None when no BlockNum=0 was seen"
         );
         assert_eq!(data, vec![0xAA, 0xBB]);

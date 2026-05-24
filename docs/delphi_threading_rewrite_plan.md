@@ -4458,3 +4458,27 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: Command raw Delphi ordinal
+
+Done:
+
+- Extended raw-ordinal parity to the outer MoonProto channel byte.
+- Delphi stores `TMoonProtoCommand` as a one-byte enum in packet headers and
+  `GetRealCommand(cmd)` returns `TMoonProtoCommand(Ord(cmd) and $7F)`: only the
+  compressed flag is stripped, unknown ordinals are preserved.
+- Rust previously mapped unknown command bytes to `Command::None`.
+- `Command` is now a raw-byte wrapper with named constants for known `MPC_*`
+  values; `from_byte` strips bit 7 and preserves the remaining ordinal.
+- Recorded `spec_pipeline/work/хуйня.md §X.134`.
+
+Verification:
+
+- Added protocol tests for unknown command preservation and compressed-flag
+  stripping.
+- Added dispatcher test proving `Event::Raw` carries the unknown command byte.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

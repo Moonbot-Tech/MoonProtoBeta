@@ -105,6 +105,11 @@ markets-related response was applied, followed by `Event::EngineResponse(...)`.
 the failure path and exists so live diagnostics can dump exact bytes instead of
 guessing from `cmd/len`.
 
+`Command` is a raw one-byte Delphi `TMoonProtoCommand` ordinal wrapper. Known
+channels are constants such as `Command::Order`; unknown channel bytes are
+preserved in `Event::Raw`/`Event::ParseFailed`. Use `Command::from_byte(raw)`
+and `cmd.to_byte()` for raw access.
+
 ## Reading State
 
 State fields are encapsulated. Read them through getters:

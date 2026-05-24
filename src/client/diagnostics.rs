@@ -468,7 +468,7 @@ mod tests {
         }
         .write_to(&mut out);
         if block_num == 0 {
-            out.push(Command::API as u8);
+            out.push(Command::API.to_byte());
         }
         out
     }
@@ -481,9 +481,17 @@ mod tests {
             dropped: false,
         };
 
-        state.record_packet(Command::Sliced as u8, &sliced_payload(5, 20, 26), delivered);
-        state.record_packet(Command::Sliced as u8, &sliced_payload(5, 1, 14), delivered);
-        state.record_sliced_complete(5, 15, Command::API as u8, &[]);
+        state.record_packet(
+            Command::Sliced.to_byte(),
+            &sliced_payload(5, 20, 26),
+            delivered,
+        );
+        state.record_packet(
+            Command::Sliced.to_byte(),
+            &sliced_payload(5, 1, 14),
+            delivered,
+        );
+        state.record_sliced_complete(5, 15, Command::API.to_byte(), &[]);
 
         let snapshot = state.snapshot(10);
         let same_num: Vec<_> = snapshot
@@ -498,7 +506,7 @@ mod tests {
         assert!(same_num.iter().any(|dg| {
             dg.blocks_count == 15
                 && dg.delivered_unique_blocks() == 1
-                && dg.completed_cmd == Some(Command::API as u8)
+                && dg.completed_cmd == Some(Command::API.to_byte())
         }));
     }
 }

@@ -546,6 +546,9 @@ let raw = build_custom_ui_payload();
 sender.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
 ```
 
+`Command` is not a closed Rust enum; it preserves Delphi wire ordinals. Use
+`Command::from_byte(raw)` and `cmd.to_byte()` when building low-level tools.
+
 ## Periodic Refresh
 
 `ClientConfig.refresh` controls automatic background Engine API requests.

@@ -902,7 +902,7 @@ impl ClientSender {
     ) -> Result<(), SubscribeError> {
         let item = SendItem {
             data,
-            cmd: cmd as u8,
+            cmd: cmd.to_byte(),
             encrypted,
             priority,
             retry_left: initial_retry_left(encrypted, max_retries),
@@ -2776,7 +2776,7 @@ impl ProtocolCore<'_> {
         ) {
             self.send_command(Command::Ping, &response);
             self.client_new_data(
-                Command::Ping as u8,
+                Command::Ping.to_byte(),
                 payload.to_vec(),
                 false,
                 false,
@@ -3521,7 +3521,7 @@ impl ProtocolCore<'_> {
         self.client.send_datagram_num = self.client.send_datagram_num.wrapping_add(1);
 
         if trace_io_enabled() {
-            let api = if item.cmd == Command::API as u8 && item.data.len() >= 12 {
+            let api = if item.cmd == Command::API.to_byte() && item.data.len() >= 12 {
                 let uid = u64::from_le_bytes(item.data[3..11].try_into().unwrap());
                 let method = item.data[11];
                 format!(" api_uid={uid} api_method={method}")
@@ -4856,7 +4856,7 @@ impl Client {
     ) {
         let item = SendItem {
             data,
-            cmd: cmd as u8,
+            cmd: cmd.to_byte(),
             encrypted,
             priority,
             retry_left: initial_retry_left(encrypted, max_retries),
@@ -4974,7 +4974,7 @@ impl Client {
             return rx;
         };
         if !self.domain_ready
-            && !outgoing_allowed_before_domain_ready(Command::API as u8, request_payload)
+            && !outgoing_allowed_before_domain_ready(Command::API.to_byte(), request_payload)
         {
             log::warn!(target: "moonproto::client",
                 "send_api_request_async: domain gate is closed before InitDone — Engine API request uid={} method={:?} not queued",
@@ -5580,7 +5580,7 @@ impl Client {
 
     #[cfg(test)]
     fn outgoing_mm_orders_subscribe_intent(item: &SendItem) -> Option<bool> {
-        if item.cmd != Command::UI as u8 || item.u_key.kind != UK_TURN_MM_DETECTION {
+        if item.cmd != Command::UI.to_byte() || item.u_key.kind != UK_TURN_MM_DETECTION {
             return None;
         }
         if item.data.first().copied() != Some(5) {
@@ -7478,7 +7478,7 @@ impl Client {
     }
 
     fn dispatch_api_pending_inline(api_pending: &ApiPending, cmd: u8, payload: &[u8]) -> bool {
-        if cmd != Command::API as u8 {
+        if cmd != Command::API.to_byte() {
             return false;
         }
         let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
@@ -7499,7 +7499,7 @@ impl Client {
         payload: &[u8],
         now_ms: i64,
     ) -> bool {
-        if cmd != Command::API as u8 {
+        if cmd != Command::API.to_byte() {
             return false;
         }
         if Self::engine_response_method_from_payload(payload)
@@ -7527,7 +7527,7 @@ impl Client {
         candles_chunk_consumed_by_reader: bool,
         sink: &mut DispatchSink<'_>,
     ) {
-        if cmd == Command::API as u8 {
+        if cmd == Command::API.to_byte() {
             match self.process_api_command_decoded(
                 payload,
                 api_pending_consumed_by_reader,
@@ -7723,9 +7723,9 @@ impl Client {
 
     fn crypted_wire_cmd(inner_cmd: u8) -> u8 {
         if inner_cmd & COMPRESSED_FLAG != 0 {
-            Command::Crypted as u8 | COMPRESSED_FLAG
+            Command::Crypted.to_byte() | COMPRESSED_FLAG
         } else {
-            Command::Crypted as u8
+            Command::Crypted.to_byte()
         }
     }
 
@@ -7763,13 +7763,13 @@ impl Client {
             &mut self.send_buf,
             &self.mac_ctx,
             &self.cfg.mac_key,
-            cmd as u8,
+            cmd.to_byte(),
             self.cfg.client_id,
             payload,
             self.cfg.mask_ver,
         );
         let packet = std::mem::take(&mut self.send_buf);
-        self.dispatch_send(cmd as u8, &packet, extra.as_deref(), addr);
+        self.dispatch_send(cmd.to_byte(), &packet, extra.as_deref(), addr);
         self.send_buf = packet;
         self.send_buf.clear();
     }
@@ -8917,7 +8917,7 @@ mod api_pending_dispatch_tests {
             rnd: 0x5A,
             checksum: 0,
             ver: TRANSPORT_VER,
-            cmd: cmd as u8,
+            cmd: cmd.to_byte(),
         };
         let mut buf = hdr.to_bytes().to_vec();
         buf.extend_from_slice(payload);
@@ -8964,7 +8964,7 @@ mod api_pending_dispatch_tests {
         let mut count = 0;
         let (sliced, high, low) = client.take_send_queues_for_test();
         for item in sliced.into_iter().chain(high).chain(low) {
-            if item.cmd == Command::API as u8
+            if item.cmd == Command::API.to_byte()
                 && item.data.get(11) == Some(&(EngineMethod::BaseCheck.to_byte()))
             {
                 assert_eq!(item.priority, SendPriority::Sliced);
@@ -9055,7 +9055,13 @@ mod api_pending_dispatch_tests {
         let mut payloads = Vec::new();
         {
             let mut sink = DispatchSink::Buffer(&mut payloads);
-            client.client_new_data_decoded(Command::API as u8, payload, false, false, &mut sink);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                payload,
+                false,
+                false,
+                &mut sink,
+            );
         }
 
         let resp = rx.try_recv().expect("pending receiver must get response");
@@ -9101,7 +9107,15 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_int_inline(Command::API as u8, &payload, 64, 123, true, None, &mut mode);
+        .data_read_int_inline(
+            Command::API.to_byte(),
+            &payload,
+            64,
+            123,
+            true,
+            None,
+            &mut mode,
+        );
         let resp = rx
             .try_recv()
             .expect("receiver must be signalled by receive-side API dispatch");
@@ -9124,7 +9138,7 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .client_new_data(Command::API as u8, payload, true, false, 123, &mut mode);
+        .client_new_data(Command::API.to_byte(), payload, true, false, 123, &mut mode);
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
@@ -9147,7 +9161,7 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .client_new_data(Command::API as u8, payload, true, false, 123, &mut mode);
+        .client_new_data(Command::API.to_byte(), payload, true, false, 123, &mut mode);
 
         let queued = dispatcher.take_queued_events();
         assert!(queued.iter().any(|event| matches!(
@@ -9211,7 +9225,7 @@ mod api_pending_dispatch_tests {
                             client: &mut client,
                         }
                         .data_read_int_inline(
-                            Command::TradesStream as u8,
+                            Command::TradesStream.to_byte(),
                             payload,
                             64,
                             *timestamp_ms,
@@ -9226,7 +9240,7 @@ mod api_pending_dispatch_tests {
                             client: &mut client,
                         }
                         .data_read_int_inline(
-                            Command::TradesStream as u8,
+                            Command::TradesStream.to_byte(),
                             &payload,
                             64,
                             timestamp_ms,
@@ -9276,7 +9290,7 @@ mod api_pending_dispatch_tests {
                 .chain(high)
                 .chain(low)
                 .filter(|item| {
-                    item.cmd == Command::API as u8
+                    item.cmd == Command::API.to_byte()
                         && item.data.get(11) == Some(&(EngineMethod::TradesResend.to_byte()))
                 })
                 .count();
@@ -9326,7 +9340,15 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_int_inline(Command::API as u8, &payload0, 64, 10, true, None, &mut mode);
+        .data_read_int_inline(
+            Command::API.to_byte(),
+            &payload0,
+            64,
+            10,
+            true,
+            None,
+            &mut mode,
+        );
         assert!(
             rx.try_recv().is_err(),
             "first chunk stores progress but does not complete receiver"
@@ -9335,7 +9357,15 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_int_inline(Command::API as u8, &payload1, 64, 20, true, None, &mut mode);
+        .data_read_int_inline(
+            Command::API.to_byte(),
+            &payload1,
+            64,
+            20,
+            true,
+            None,
+            &mut mode,
+        );
 
         let merged = rx
             .try_recv()
@@ -9367,7 +9397,7 @@ mod api_pending_dispatch_tests {
             client: &mut client,
         }
         .client_new_data(
-            Command::API as u8,
+            Command::API.to_byte(),
             payload.clone(),
             false,
             true,
@@ -9388,7 +9418,7 @@ mod api_pending_dispatch_tests {
             client: &mut client,
         }
         .client_new_data(
-            Command::API as u8,
+            Command::API.to_byte(),
             payload,
             false,
             true,
@@ -9412,7 +9442,13 @@ mod api_pending_dispatch_tests {
         });
         {
             let mut sink = DispatchSink::Callback(&mut cb);
-            client.client_new_data_decoded(Command::API as u8, payload, false, false, &mut sink);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                payload,
+                false,
+                false,
+                &mut sink,
+            );
         }
 
         assert!(rx.try_recv().is_ok(), "pending receiver must get response");
@@ -9426,7 +9462,7 @@ mod api_pending_dispatch_tests {
         let mut payloads = Vec::new();
         let (cmd, payload) = Client::decode_data_read_int_payload_shared(
             &mut client.data_read_state,
-            Command::UI as u8 | COMPRESSED_FLAG,
+            Command::UI.to_byte() | COMPRESSED_FLAG,
             &compressed_garbage,
         )
         .expect("failed compressed payload still has a decoded real command");
@@ -9762,7 +9798,7 @@ mod client_sender_tests {
         assert!(registry.lock().unwrap().orderbook_subs.contains("BTCUSDT"));
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].cmd, Command::API as u8);
+        assert_eq!(sent[0].cmd, Command::API.to_byte());
         assert_eq!(
             method_id(&sent[0].data),
             Some(EngineMethod::SubscribeOrderBook.to_byte())
@@ -9955,7 +9991,7 @@ mod client_sender_tests {
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].data, payload);
-        assert_eq!(sent[0].cmd, Command::Order as u8);
+        assert_eq!(sent[0].cmd, Command::Order.to_byte());
         assert_eq!(sent[0].priority, SendPriority::High);
         assert!(sent[0].encrypted);
         assert_eq!(sent[0].max_retries, 3);
@@ -9999,7 +10035,7 @@ mod client_sender_tests {
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].data, payload);
-        assert_eq!(sent[0].cmd, Command::API as u8);
+        assert_eq!(sent[0].cmd, Command::API.to_byte());
         assert_eq!(sent[0].priority, SendPriority::Sliced);
         assert!(sent[0].encrypted);
         assert_eq!(sent[0].max_retries, 6);
@@ -10050,7 +10086,7 @@ mod client_sender_tests {
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].data, base_check);
-        assert_eq!(sent[0].cmd, Command::API as u8);
+        assert_eq!(sent[0].cmd, Command::API.to_byte());
     }
 
     #[test]
@@ -10087,7 +10123,7 @@ mod client_sender_tests {
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
         let item = &sent[0];
-        assert_eq!(item.cmd, Command::Order as u8);
+        assert_eq!(item.cmd, Command::Order.to_byte());
         assert_eq!(item.priority, SendPriority::High);
         assert!(item.encrypted);
         assert_eq!(item.max_retries, 3);
@@ -10120,12 +10156,12 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 2);
 
         let dex_uid = command_uid(&sent[0].data).expect("dex wire UID");
-        assert_eq!(sent[0].cmd, Command::UI as u8);
+        assert_eq!(sent[0].cmd, Command::UI.to_byte());
         assert_eq!(sent[0].priority, SendPriority::High);
         assert_eq!(sent[0].u_key, UniqueKey::dex_switch_for(dex_uid));
 
         let spot_uid = command_uid(&sent[1].data).expect("spot wire UID");
-        assert_eq!(sent[1].cmd, Command::UI as u8);
+        assert_eq!(sent[1].cmd, Command::UI.to_byte());
         assert_eq!(sent[1].priority, SendPriority::High);
         assert_eq!(sent[1].u_key, UniqueKey::spot_switch_for(spot_uid));
     }
@@ -10138,7 +10174,7 @@ mod client_sender_tests {
 
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].cmd, Command::Strat as u8);
+        assert_eq!(sent[0].cmd, Command::Strat.to_byte());
         assert_eq!(sent[0].priority, SendPriority::Sliced);
         assert!(sent[0].encrypted);
         assert_eq!(sent[0].max_retries, 6);
@@ -10154,7 +10190,7 @@ mod client_sender_tests {
 
         let sent = take_send_items(&send_q);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].cmd, Command::Balance as u8);
+        assert_eq!(sent[0].cmd, Command::Balance.to_byte());
         assert_eq!(sent[0].priority, SendPriority::High);
         assert!(sent[0].encrypted);
         assert_eq!(sent[0].max_retries, 3);
@@ -10241,7 +10277,7 @@ mod client_subscribe_integration_tests {
         let mut out = Vec::new();
         let (sliced, high, low) = client.take_send_queues_for_test();
         for item in sliced.into_iter().chain(high).chain(low) {
-            if item.cmd == Command::API as u8 {
+            if item.cmd == Command::API.to_byte() {
                 out.push(item.data);
             }
         }
@@ -10430,7 +10466,7 @@ mod client_subscribe_integration_tests {
         let (_, high, _) = client.take_send_queues_for_test();
         assert_eq!(high.len(), 1);
         let item = &high[0];
-        assert_eq!(item.cmd, Command::Order as u8);
+        assert_eq!(item.cmd, Command::Order.to_byte());
         assert_eq!(item.priority, SendPriority::High);
         assert_eq!(item.max_retries, 3);
         assert_eq!(item.u_key, UniqueKey::order_move(uid));
@@ -10970,11 +11006,11 @@ mod client_subscribe_integration_tests {
         assert_eq!(sent.len(), 2);
 
         let dex_uid = command_uid(&sent[0].data).expect("dex wire UID");
-        assert_eq!(sent[0].cmd, Command::UI as u8);
+        assert_eq!(sent[0].cmd, Command::UI.to_byte());
         assert_eq!(sent[0].u_key, UniqueKey::dex_switch_for(dex_uid));
 
         let spot_uid = command_uid(&sent[1].data).expect("spot wire UID");
-        assert_eq!(sent[1].cmd, Command::UI as u8);
+        assert_eq!(sent[1].cmd, Command::UI.to_byte());
         assert_eq!(sent[1].u_key, UniqueKey::spot_switch_for(spot_uid));
     }
 
@@ -11188,7 +11224,7 @@ mod pmtu_tests {
     fn pending_h_item(msg_num: u64) -> SendItem {
         SendItem {
             data: vec![0x11],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: true,
             priority: SendPriority::High,
             retry_left: 1,
@@ -11293,7 +11329,7 @@ mod pmtu_tests {
             )
             .expect("valid ping payload");
         writer.client_new_data(
-            Command::Ping as u8,
+            Command::Ping.to_byte(),
             payload.to_vec(),
             false,
             false,
@@ -11389,7 +11425,7 @@ mod pmtu_tests {
 
         let item = SendItem {
             data: vec![1],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Sliced,
             retry_left: 0,
@@ -11466,7 +11502,7 @@ mod pmtu_tests {
             client: &mut client,
         }
         .client_new_data(
-            Command::Ping as u8,
+            Command::Ping.to_byte(),
             payload.clone(),
             false,
             false,
@@ -11504,7 +11540,7 @@ mod pmtu_tests {
 
         let new_sliced = SendItem {
             data: vec![0x22],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Sliced,
             retry_left: 0,
@@ -11532,7 +11568,7 @@ mod pmtu_tests {
 
         let new_high = SendItem {
             data: vec![0x33],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: true,
             priority: SendPriority::High,
             retry_left: 1,
@@ -11575,7 +11611,7 @@ mod pmtu_tests {
 
         let new_high = SendItem {
             data: vec![0x33],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: true,
             priority: SendPriority::High,
             retry_left: 1,
@@ -11609,7 +11645,7 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         let item = SendItem {
             data: vec![0x11, 0x22, 0x33],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Sliced,
             retry_left: 0,
@@ -11635,7 +11671,7 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         let item = SendItem {
             data: (0..130_000).map(|i| (i % 4) as u8).collect(),
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Sliced,
             retry_left: 0,
@@ -11654,7 +11690,7 @@ mod pmtu_tests {
         );
         assert_eq!(
             client.sending[0].slices[0][4],
-            Command::UI as u8 | COMPRESSED_FLAG
+            Command::UI.to_byte() | COMPRESSED_FLAG
         );
     }
 
@@ -11664,7 +11700,7 @@ mod pmtu_tests {
         client.encode_cipher = Some(crypto::cipher_from_key(&[0; 16]));
         let item = SendItem {
             data: Vec::new(),
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: true,
             priority: SendPriority::Sliced,
             retry_left: 1,
@@ -11689,7 +11725,7 @@ mod pmtu_tests {
 
         let item = SendItem {
             data: vec![0xA5; 10],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: true,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11703,7 +11739,7 @@ mod pmtu_tests {
 
         let wire_len =
             u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize;
-        assert_eq!(client.tmp_send_buf[0], Command::Crypted as u8);
+        assert_eq!(client.tmp_send_buf[0], Command::Crypted.to_byte());
         assert_eq!(wire_len, 60);
         assert_eq!(client.tmp_send_buf.len(), 3 + wire_len);
         assert_eq!(client.tmp_send_size, 15 + 3 + wire_len);
@@ -11726,7 +11762,7 @@ mod pmtu_tests {
 
         let small = SendItem {
             data: vec![0x11; 10], // Delphi sz = 10 + header(15) + item hdr(3) = 28
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11737,7 +11773,7 @@ mod pmtu_tests {
         };
         let large = SendItem {
             data: vec![0x22; 80], // sz = 98; 28 + 98 > PMTU and 28 > 98 is false
-            cmd: Command::API as u8,
+            cmd: Command::API.to_byte(),
             encrypted: false,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11755,12 +11791,12 @@ mod pmtu_tests {
         let (cmd, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
         assert_eq!(
             cmd,
-            Command::API as u8,
+            Command::API.to_byte(),
             "Delphi DoSendMPData sends the current oversized item directly and keeps the older buffer"
         );
         assert_eq!(payload, large.data);
         assert_eq!(client.tmp_send_count, 1);
-        assert_eq!(client.tmp_send_buf[0], Command::UI as u8);
+        assert_eq!(client.tmp_send_buf[0], Command::UI.to_byte());
         assert_eq!(
             u16::from_le_bytes([client.tmp_send_buf[1], client.tmp_send_buf[2]]) as usize,
             small.data.len()
@@ -11770,7 +11806,7 @@ mod pmtu_tests {
         writer(&mut client).flush_send_batch();
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
         let (cmd, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
-        assert_eq!(cmd, Command::UI as u8);
+        assert_eq!(cmd, Command::UI.to_byte());
         assert_eq!(payload, small.data);
     }
 
@@ -11795,7 +11831,7 @@ mod pmtu_tests {
 
         let first_low = SendItem {
             data: vec![0x11],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11806,7 +11842,7 @@ mod pmtu_tests {
         };
         let second_low = SendItem {
             data: vec![0x22],
-            cmd: Command::API as u8,
+            cmd: Command::API.to_byte(),
             encrypted: false,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11822,20 +11858,20 @@ mod pmtu_tests {
         let mut raw = [0u8; 256];
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
         let (cmd, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
-        assert_eq!(cmd, Command::UI as u8);
+        assert_eq!(cmd, Command::UI.to_byte());
         assert_eq!(payload, first_low.data);
 
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
         let (cmd, _payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
         assert_eq!(
             cmd,
-            Command::Sliced as u8,
+            Command::Sliced.to_byte(),
             "Delphi retries Sliced after only the first Low item was flushed"
         );
 
         let (n, _) = server_sock.recv_from(&mut raw).unwrap();
         let (cmd, payload) = unpack_client_packet(&client.cfg.mac_key, &raw[..n]);
-        assert_eq!(cmd, Command::API as u8);
+        assert_eq!(cmd, Command::API.to_byte());
         assert_eq!(payload, second_low.data);
     }
 
@@ -11846,7 +11882,7 @@ mod pmtu_tests {
 
         let item = SendItem {
             data: vec![0xA5; 10],
-            cmd: Command::UI as u8 | COMPRESSED_FLAG,
+            cmd: Command::UI.to_byte() | COMPRESSED_FLAG,
             encrypted: true,
             priority: SendPriority::Low,
             retry_left: 0,
@@ -11860,7 +11896,7 @@ mod pmtu_tests {
 
         assert_eq!(
             client.tmp_send_buf[0],
-            Command::Crypted as u8 | COMPRESSED_FLAG
+            Command::Crypted.to_byte() | COMPRESSED_FLAG
         );
     }
 
@@ -11871,7 +11907,7 @@ mod pmtu_tests {
 
         let mut item = SendItem {
             data: vec![0xA5; 10],
-            cmd: Command::UI as u8 | COMPRESSED_FLAG,
+            cmd: Command::UI.to_byte() | COMPRESSED_FLAG,
             encrypted: true,
             priority: SendPriority::High,
             retry_left: 1,
@@ -11885,10 +11921,13 @@ mod pmtu_tests {
 
         assert_eq!(
             client.tmp_send_buf[0],
-            Command::Crypted as u8 | COMPRESSED_FLAG
+            Command::Crypted.to_byte() | COMPRESSED_FLAG
         );
         assert_eq!(client.pending_h.len(), 1);
-        assert_eq!(client.pending_h[0].cmd, Command::UI as u8 | COMPRESSED_FLAG);
+        assert_eq!(
+            client.pending_h[0].cmd,
+            Command::UI.to_byte() | COMPRESSED_FLAG
+        );
     }
 
     #[test]
@@ -12176,7 +12215,7 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         let send_item = SendItem {
             data: vec![0x44],
-            cmd: Command::UI as u8,
+            cmd: Command::UI.to_byte(),
             encrypted: false,
             priority: SendPriority::Sliced,
             retry_left: 0,
@@ -12250,7 +12289,7 @@ mod api_retry_tests {
 
         let (sliced, _, _) = client.take_send_queues_for_test();
         assert_eq!(sliced.len(), 1);
-        assert_eq!(sliced[0].cmd, Command::API as u8);
+        assert_eq!(sliced[0].cmd, Command::API.to_byte());
         assert_eq!(sliced[0].priority, SendPriority::Sliced);
         assert_eq!(sliced[0].max_retries, 6);
         assert_eq!(sliced[0].retry_left, 5);
@@ -12264,7 +12303,7 @@ mod send_queue_dedup_tests {
     fn item(kind: u8, uid: u64, marker: u8) -> SendItem {
         SendItem {
             data: vec![marker],
-            cmd: Command::Order as u8,
+            cmd: Command::Order.to_byte(),
             encrypted: true,
             priority: SendPriority::High,
             retry_left: 2,
@@ -12493,7 +12532,7 @@ mod active_library_helpers_tests {
             1,
             "post-init timeout must retry GetMarketsIndexes"
         );
-        assert_eq!(sliced[0].cmd, Command::API as u8);
+        assert_eq!(sliced[0].cmd, Command::API.to_byte());
         assert_eq!(
             sliced[0].data.get(11).copied(),
             Some(EngineMethod::GetMarketsIndexes.to_byte())
@@ -12565,7 +12604,7 @@ mod registry_subscription_restore_tests {
         let mut out = Vec::new();
         let (sliced, high, low) = client.take_send_queues_for_test();
         for item in sliced.into_iter().chain(high).chain(low) {
-            if item.cmd == Command::API as u8 {
+            if item.cmd == Command::API.to_byte() {
                 out.push(item.data);
             }
         }
@@ -12641,7 +12680,7 @@ mod registry_subscription_restore_tests {
         client.restore_registry_subscriptions();
         let sent = drain_send_items(&client);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].cmd, Command::UI as u8);
+        assert_eq!(sent[0].cmd, Command::UI.to_byte());
         assert_eq!(sent[0].priority, SendPriority::High);
         let uid = command_uid(&sent[0].data).expect("wire command UID");
         assert_eq!(sent[0].u_key, UniqueKey::turn_mm_detection_for(uid));
@@ -12733,7 +12772,7 @@ mod refresh_tick_tests {
         let mut out = Vec::new();
         let (sliced, high, low) = client.take_send_queues_for_test();
         for item in sliced.into_iter().chain(high).chain(low) {
-            if item.cmd == Command::API as u8 && item.data.len() >= 12 {
+            if item.cmd == Command::API.to_byte() && item.data.len() >= 12 {
                 out.push(item.data[11]);
             }
         }
@@ -13169,7 +13208,7 @@ mod event_loop_fairness_tests {
             rnd: 0x5A,
             checksum: 0,
             ver: TRANSPORT_VER,
-            cmd: cmd as u8,
+            cmd: cmd.to_byte(),
         };
         let mut buf = hdr.to_bytes().to_vec();
         buf.extend_from_slice(payload);
@@ -13237,7 +13276,7 @@ mod event_loop_fairness_tests {
         let (sliced, high, low) = client.take_send_queues_for_test();
         assert_eq!(sliced.len(), 1);
         assert_eq!(sliced[0].data, base_check);
-        assert_eq!(sliced[0].cmd, Command::API as u8);
+        assert_eq!(sliced[0].cmd, Command::API.to_byte());
         assert!(high.is_empty());
         assert!(low.is_empty());
     }
@@ -13501,7 +13540,7 @@ mod event_loop_fairness_tests {
             client: &mut client,
         }
         .data_read_int_inline(
-            Command::OrderBook as u8,
+            Command::OrderBook.to_byte(),
             &[],
             1234,
             777,
@@ -13548,7 +13587,7 @@ mod event_loop_fairness_tests {
                 client: &mut client,
             }
             .data_read_int_inline(
-                cmd as u8,
+                cmd.to_byte(),
                 &[idx as u8],
                 10 + idx as u64,
                 100 + idx as i64,
@@ -13586,7 +13625,7 @@ mod event_loop_fairness_tests {
             client: &mut client,
         }
         .data_read_int_inline(
-            Command::TradesStream as u8,
+            Command::TradesStream.to_byte(),
             &[0xAA],
             1,
             1,
@@ -13606,7 +13645,7 @@ mod event_loop_fairness_tests {
             client: &mut client,
         }
         .data_read_int_inline(
-            Command::TradesStream as u8,
+            Command::TradesStream.to_byte(),
             &[0xAA],
             1,
             2,
@@ -13636,7 +13675,7 @@ mod event_loop_fairness_tests {
             client: &mut client,
         }
         .data_read_int_inline(
-            Command::UI as u8,
+            Command::UI.to_byte(),
             &[0xAA, 0xBB],
             321,
             123,
@@ -13660,10 +13699,10 @@ mod event_loop_fairness_tests {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
         let mut grouped = Vec::new();
-        grouped.push(Command::UI as u8);
+        grouped.push(Command::UI.to_byte());
         grouped.extend_from_slice(&1u16.to_le_bytes());
         grouped.push(0xAA);
-        grouped.push(Command::Balance as u8);
+        grouped.push(Command::Balance.to_byte());
         grouped.extend_from_slice(&1u16.to_le_bytes());
         grouped.push(0xBB);
 
@@ -13689,7 +13728,14 @@ mod event_loop_fairness_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_inline(Command::Grouped as u8, &grouped, 77, 456, true, &mut mode);
+        .data_read_inline(
+            Command::Grouped.to_byte(),
+            &grouped,
+            77,
+            456,
+            true,
+            &mut mode,
+        );
 
         assert_eq!(delivered.load(Ordering::Relaxed), 2);
         assert_eq!(client.total_recv, 77);
@@ -13740,7 +13786,7 @@ mod service_cmd_tests {
             rnd: 0x5A,
             checksum: 0,
             ver: TRANSPORT_VER,
-            cmd: cmd as u8,
+            cmd: cmd.to_byte(),
         };
         let mut buf = hdr.to_bytes().to_vec();
         buf.extend_from_slice(payload);
@@ -13880,7 +13926,7 @@ mod service_cmd_tests {
             Command::ProbeMTU,
             Command::SlicedACK,
         ] {
-            assert!(is_service_cmd(cmd as u8), "{cmd:?} must be service");
+            assert!(is_service_cmd(cmd.to_byte()), "{cmd:?} must be service");
         }
     }
 
@@ -13895,14 +13941,14 @@ mod service_cmd_tests {
             Command::TradesStream,
             Command::OrderBook,
         ] {
-            assert!(!is_service_cmd(cmd as u8), "{cmd:?} must stay data");
+            assert!(!is_service_cmd(cmd.to_byte()), "{cmd:?} must stay data");
         }
     }
 
     #[test]
     fn sliced_is_not_err_emu_service() {
         assert!(
-            !is_service_cmd(Command::Sliced as u8),
+            !is_service_cmd(Command::Sliced.to_byte()),
             "ErrEmu must drop MPC_Sliced with the full configured rate like Delphi"
         );
     }
@@ -13910,21 +13956,24 @@ mod service_cmd_tests {
     #[test]
     fn err_emu_halves_service_drop_rate_like_delphi() {
         assert_eq!(
-            err_emu_drop_rate_for_cmd(50, Command::Fine as u8),
+            err_emu_drop_rate_for_cmd(50, Command::Fine.to_byte()),
             25,
             "Delphi MoonProtoErrEmu halves service/handshake commands"
         );
         assert_eq!(
-            err_emu_drop_rate_for_cmd(50, Command::NeedHelloAgain as u8),
+            err_emu_drop_rate_for_cmd(50, Command::NeedHelloAgain.to_byte()),
             25
         );
-        assert_eq!(err_emu_drop_rate_for_cmd(50, Command::SlicedACK as u8), 25);
         assert_eq!(
-            err_emu_drop_rate_for_cmd(50, Command::Sliced as u8),
+            err_emu_drop_rate_for_cmd(50, Command::SlicedACK.to_byte()),
+            25
+        );
+        assert_eq!(
+            err_emu_drop_rate_for_cmd(50, Command::Sliced.to_byte()),
             50,
             "MPC_Sliced data must keep the full configured drop rate"
         );
-        assert_eq!(err_emu_drop_rate_for_cmd(250, Command::API as u8), 100);
+        assert_eq!(err_emu_drop_rate_for_cmd(250, Command::API.to_byte()), 100);
     }
 
     #[test]
@@ -13982,7 +14031,7 @@ mod service_cmd_tests {
             0x00, // DatagramNum = 42
             0x00, // BlockNum = 0
             0x00, // MaxBlockNum = 0
-            Command::API as u8,
+            Command::API.to_byte(),
             0xDE,
             0xAD,
         ];
@@ -13992,7 +14041,7 @@ mod service_cmd_tests {
         let ((hdr, ack_payload), events) =
             recv_client_packet_with_events(&server_sock, &mut client);
 
-        assert_eq!(hdr.cmd, Command::SlicedACK as u8);
+        assert_eq!(hdr.cmd, Command::SlicedACK.to_byte());
         assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
         assert_eq!(ack_payload[0] & 0x01, 0x01);
         assert_eq!(&ack_payload[32..34], &42u16.to_le_bytes());
@@ -14086,7 +14135,7 @@ mod service_cmd_tests {
             (datagram_num >> 8) as u8,
             0x00, // BlockNum = 0
             0x01, // MaxBlockNum = 1, so this packet is only a partial datagram
-            Command::API as u8,
+            Command::API.to_byte(),
             0xCA,
             0xFE,
         ];
@@ -14102,7 +14151,7 @@ mod service_cmd_tests {
             "partial Sliced must only ACK and stay in Receiving; no DataReadInt before completion",
         );
 
-        assert_eq!(hdr.cmd, Command::SlicedACK as u8);
+        assert_eq!(hdr.cmd, Command::SlicedACK.to_byte());
         assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
         assert_eq!(ack_payload[0] & 0x01, 0x01);
         assert_eq!(&ack_payload[32..34], &datagram_num.to_le_bytes());
@@ -14120,7 +14169,7 @@ mod service_cmd_tests {
         let ((hdr2, ack_payload2), second_events) =
             recv_client_packet_with_events(&server_sock, &mut client);
 
-        assert_eq!(hdr2.cmd, Command::SlicedACK as u8);
+        assert_eq!(hdr2.cmd, Command::SlicedACK.to_byte());
         assert_eq!(ack_payload2[0] & 0x03, 0x03);
         assert_eq!(&ack_payload2[32..34], &datagram_num.to_le_bytes());
         assert_eq!(
@@ -14166,7 +14215,7 @@ mod service_cmd_tests {
             "SizeTest sends SizeAck immediately and does not enqueue DataReadInt",
         );
 
-        assert_eq!(hdr.cmd, Command::SizeAck as u8);
+        assert_eq!(hdr.cmd, Command::SizeAck.to_byte());
         assert_eq!(ack_payload.len(), size as usize);
         assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
         assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
@@ -14210,7 +14259,7 @@ mod service_cmd_tests {
             "ProbeMTU sends ProbeMTUAck immediately and does not enqueue DataReadInt",
         );
 
-        assert_eq!(hdr.cmd, Command::ProbeMTUAck as u8);
+        assert_eq!(hdr.cmd, Command::ProbeMTUAck.to_byte());
         assert_eq!(ack_payload.len(), test_size as usize);
         assert_eq!(&ack_payload[0..2], &probe_id.to_le_bytes());
         assert_eq!(ack_payload[2], probe_index);
@@ -14248,7 +14297,7 @@ mod service_cmd_tests {
 
         let ((hdr, response), events) = recv_client_packet_with_events(&server_sock, &mut client);
 
-        assert_eq!(hdr.cmd, Command::Ping as u8);
+        assert_eq!(hdr.cmd, Command::Ping.to_byte());
         assert_eq!(response.len(), 50);
         assert_eq!(
             u64::from_le_bytes(response[25..33].try_into().unwrap()),
@@ -14321,8 +14370,8 @@ mod service_cmd_tests {
             recv_client_packet_with_events(&server_sock, &mut client);
         let (hdr2, imfriend2) = recv_client_packet(&server_sock, &mut client);
 
-        assert_eq!(hdr1.cmd, Command::ImFriend as u8);
-        assert_eq!(hdr2.cmd, Command::ImFriend as u8);
+        assert_eq!(hdr1.cmd, Command::ImFriend.to_byte());
+        assert_eq!(hdr2.cmd, Command::ImFriend.to_byte());
         assert!(events1.is_empty());
         assert_eq!(
             imfriend1, imfriend2,
@@ -14375,7 +14424,7 @@ mod service_cmd_tests {
         .check_hello_send(100);
 
         let (hello_hdr, hello_payload) = recv_client_packet(&server_sock, &mut client);
-        assert_eq!(hello_hdr.cmd, Command::Hello as u8);
+        assert_eq!(hello_hdr.cmd, Command::Hello.to_byte());
         let aad = client.cfg.client_id.to_le_bytes();
         let hello = crypto::decrypt(&client.cfg.master_key, &hello_payload, &aad)
             .and_then(|payload| handshake::Hello::from_bytes(&payload))
@@ -14395,8 +14444,8 @@ mod service_cmd_tests {
             recv_client_packet_with_events(&server_sock, &mut client);
         let (hdr2, _imfriend2) = recv_client_packet(&server_sock, &mut client);
 
-        assert_eq!(hdr1.cmd, Command::ImFriend as u8);
-        assert_eq!(hdr2.cmd, Command::ImFriend as u8);
+        assert_eq!(hdr1.cmd, Command::ImFriend.to_byte());
+        assert_eq!(hdr2.cmd, Command::ImFriend.to_byte());
         assert!(events1.is_empty());
         let (encode_key, _decode_key) =
             crypto::generate_sub_keys(&client.cfg.master_key, server_token);
@@ -14644,7 +14693,7 @@ mod service_cmd_tests {
         client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
         let incompatible_addr: SocketAddr = "[::1]:9".parse().unwrap();
 
-        client.dispatch_send(Command::Ping as u8, &[0xAA], None, incompatible_addr);
+        client.dispatch_send(Command::Ping.to_byte(), &[0xAA], None, incompatible_addr);
 
         assert_eq!(client.total_sent(), 0, "IPv4 socket → IPv6 addr must fail");
         assert!(
@@ -14781,7 +14830,7 @@ mod reconnect_timing_tests {
     fn api_methods(items: &[SendItem]) -> Vec<u8> {
         items
             .iter()
-            .filter(|item| item.cmd == Command::API as u8)
+            .filter(|item| item.cmd == Command::API.to_byte())
             .filter_map(|item| method_id(&item.data))
             .collect()
     }
@@ -14974,10 +15023,10 @@ mod reconnect_timing_tests {
         );
         assert!(
             sent.iter().all(|item| {
-                item.cmd != Command::Order as u8
-                    && item.cmd != Command::UI as u8
-                    && item.cmd != Command::Balance as u8
-                    && item.cmd != Command::Strat as u8
+                item.cmd != Command::Order.to_byte()
+                    && item.cmd != Command::UI.to_byte()
+                    && item.cmd != Command::Balance.to_byte()
+                    && item.cmd != Command::Strat.to_byte()
             }),
             "Delphi post-init resync is not repeated by the client on reconnect"
         );
@@ -15019,7 +15068,7 @@ mod reconnect_timing_tests {
         {
             let mut sink = DispatchSink::Buffer(&mut buffered);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,
@@ -15078,7 +15127,7 @@ mod reconnect_timing_tests {
         let subscribe_uid = after_indexes_sent
             .iter()
             .find(|item| {
-                item.cmd == Command::API as u8
+                item.cmd == Command::API.to_byte()
                     && method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook.to_byte())
             })
             .and_then(|item| request_uid(&item.data))
@@ -15089,7 +15138,7 @@ mod reconnect_timing_tests {
             let mut ignored = Vec::new();
             let mut sink = DispatchSink::Buffer(&mut ignored);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,
@@ -15164,7 +15213,7 @@ mod reconnect_timing_tests {
             let mut ignored = Vec::new();
             let mut sink = DispatchSink::Buffer(&mut ignored);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 normal_subscribe_response,
                 false,
                 false,
@@ -15190,7 +15239,7 @@ mod reconnect_timing_tests {
             let mut ignored = Vec::new();
             let mut sink = DispatchSink::Buffer(&mut ignored);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,
@@ -15221,7 +15270,7 @@ mod reconnect_timing_tests {
             let mut ignored = Vec::new();
             let mut sink = DispatchSink::Buffer(&mut ignored);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,
@@ -15262,7 +15311,7 @@ mod reconnect_timing_tests {
         {
             let mut sink = DispatchSink::Buffer(&mut buffered);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,
@@ -15439,7 +15488,7 @@ mod reconnect_timing_tests {
         {
             let mut sink = DispatchSink::Buffer(&mut buffered);
             client.client_new_data_decoded(
-                Command::API as u8,
+                Command::API.to_byte(),
                 response_payload,
                 false,
                 false,

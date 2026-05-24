@@ -15,6 +15,11 @@ Used by terminal UI developers to understand what data arrives from the server.
 | TradesStream | 33 (MPC_TradesStream) | Real-time trade feed | Single format, sections per market |
 | OrderBook | 36 (MPC_OrderBook) | Order book updates | Full snapshot or diff |
 
+The public `Command` type is a raw one-byte Delphi `TMoonProtoCommand` ordinal
+wrapper. Known channels are constants (`Command::Order`, `Command::API`, ...);
+unknown channel bytes are preserved after stripping the compressed flag, matching
+Delphi `GetRealCommand`.
+
 ## Common Wire Format
 
 Every command starts with:

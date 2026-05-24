@@ -2167,6 +2167,22 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_unknown_raw_command_preserves_header_ordinal_like_delphi() {
+        let mut d = EventDispatcher::new();
+        let raw_cmd = Command::from_byte(99);
+        let events = d.dispatch(raw_cmd, b"hello", 1000);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Raw { cmd, payload } => {
+                assert_eq!(cmd.to_byte(), 99);
+                assert_eq!(*cmd, raw_cmd);
+                assert_eq!(payload, b"hello");
+            }
+            other => panic!("expected Raw event, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn dispatcher_logmsg_parses_time_and_msg() {
         let mut d = EventDispatcher::new();
         let mut payload = 45678.5f64.to_le_bytes().to_vec();
@@ -2588,7 +2604,7 @@ mod tests {
 
         let mut found = false;
         for item in drain_client_send_items(&client) {
-            if item.cmd != Command::Order as u8 {
+            if item.cmd != Command::Order.to_byte() {
                 continue;
             }
             let Some(TradeCommand::OrderStatusRequest(req)) = TradeCommand::parse(&item.data)
@@ -2664,7 +2680,7 @@ mod tests {
 
         let mut found = false;
         for item in drain_client_send_items(&client) {
-            if item.cmd == Command::API as u8
+            if item.cmd == Command::API.to_byte()
                 && item.data.get(11).copied()
                     == Some(
                         crate::commands::engine_api::EngineMethod::RequestOrderBookFull.to_byte(),
@@ -3185,7 +3201,7 @@ mod tests {
         // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
         let mut found_snapshot_send = false;
         for item in drain_client_send_items(&client) {
-            if item.cmd == Command::Strat as u8 {
+            if item.cmd == Command::Strat.to_byte() {
                 let data = &item.data;
                 if data.len() == 11 + 8 + 8 + 4 + 1 + fresh_snapshot.len() {
                     let cmd_subcode = data[0];
@@ -3250,7 +3266,7 @@ mod tests {
         // Drain send queues — должен быть Command::Strat с пустым serializer batch.
         let mut empty_snapshot_sends = 0;
         for item in drain_client_send_items(&client) {
-            if item.cmd == Command::Strat as u8 {
+            if item.cmd == Command::Strat.to_byte() {
                 let cmd = crate::commands::strat::StratCommand::parse(&item.data)
                     .expect("sent strat command must parse");
                 match cmd {
@@ -3409,7 +3425,7 @@ mod tests {
 
         let mut found = false;
         for item in drain_client_send_items(&client) {
-            if item.cmd != Command::Strat as u8 {
+            if item.cmd != Command::Strat.to_byte() {
                 continue;
             }
             let cmd = crate::commands::strat::StratCommand::parse(&item.data)
@@ -3456,7 +3472,7 @@ mod tests {
         let sent = drain_client_send_items(&client);
         let snapshot = sent
             .iter()
-            .find(|item| item.cmd == Command::Strat as u8)
+            .find(|item| item.cmd == Command::Strat.to_byte())
             .and_then(|item| crate::commands::strat::StratCommand::parse(&item.data))
             .and_then(|cmd| match cmd {
                 crate::commands::strat::StratCommand::Snapshot(snapshot) => Some(snapshot),
@@ -3503,7 +3519,7 @@ mod tests {
 
         let sent = drain_client_send_items(&client);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].cmd, Command::UI as u8);
+        assert_eq!(sent[0].cmd, Command::UI.to_byte());
         match crate::commands::ui::UICommand::parse(&sent[0].data).unwrap() {
             crate::commands::ui::UICommand::StratStartStopV2(cmd) => {
                 assert!(cmd.is_start);

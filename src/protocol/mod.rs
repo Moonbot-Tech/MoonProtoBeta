@@ -12,115 +12,141 @@ pub mod handshake;
 pub mod slicing;
 pub mod slider;
 
-/// MoonProto command enum matching Delphi `TMoonProtoCommand` ordinals.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    None = 0,
-    Test = 1,
-    Hello = 2,
-    WhoAreYou = 3,
-    ImFriend = 4,
-    Fine = 5,
-    HelloAgain = 6,
-    TestWantCrypted = 7,
-    TestCrypted = 8,
-    TestStopCrypted = 9,
-    Ping = 10,
-    Data = 11,
-    Grouped = 12,
-    LogOff = 13,
-    SizeTest = 14,
-    SizeAck = 15,
-    PTMUReq = 16,
-    Sliced = 17,
-    SlicedACK = 18,
-    Crypted = 19,
-    Echo = 20,
-    EchoReply = 21,
-    WrongHello = 22,
-    WantNewHello = 23,
-    NeedHelloAgain = 24,
-    ProbeMTU = 25,
-    ProbeMTUAck = 26,
-    LogMsg = 27,
-    Order = 28,
-    UI = 29,
-    Strat = 30,
-    API = 31,
-    Balance = 32,
-    TradesStream = 33,
-    TradesResend = 34,
-    TradesResendResponse = 35,
-    OrderBook = 36,
-    Reserved1 = 37,
+/// MoonProto command ordinal matching Delphi `TMoonProtoCommand`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Command(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl Command {
+    pub const None: Self = Self(0);
+    pub const Test: Self = Self(1);
+    pub const Hello: Self = Self(2);
+    pub const WhoAreYou: Self = Self(3);
+    pub const ImFriend: Self = Self(4);
+    pub const Fine: Self = Self(5);
+    pub const HelloAgain: Self = Self(6);
+    pub const TestWantCrypted: Self = Self(7);
+    pub const TestCrypted: Self = Self(8);
+    pub const TestStopCrypted: Self = Self(9);
+    pub const Ping: Self = Self(10);
+    pub const Data: Self = Self(11);
+    pub const Grouped: Self = Self(12);
+    pub const LogOff: Self = Self(13);
+    pub const SizeTest: Self = Self(14);
+    pub const SizeAck: Self = Self(15);
+    pub const PTMUReq: Self = Self(16);
+    pub const Sliced: Self = Self(17);
+    pub const SlicedACK: Self = Self(18);
+    pub const Crypted: Self = Self(19);
+    pub const Echo: Self = Self(20);
+    pub const EchoReply: Self = Self(21);
+    pub const WrongHello: Self = Self(22);
+    pub const WantNewHello: Self = Self(23);
+    pub const NeedHelloAgain: Self = Self(24);
+    pub const ProbeMTU: Self = Self(25);
+    pub const ProbeMTUAck: Self = Self(26);
+    pub const LogMsg: Self = Self(27);
+    pub const Order: Self = Self(28);
+    pub const UI: Self = Self(29);
+    pub const Strat: Self = Self(30);
+    pub const API: Self = Self(31);
+    pub const Balance: Self = Self(32);
+    pub const TradesStream: Self = Self(33);
+    pub const TradesResend: Self = Self(34);
+    pub const TradesResendResponse: Self = Self(35);
+    pub const OrderBook: Self = Self(36);
+    pub const Reserved1: Self = Self(37);
+
+    /// Convert a wire command byte into the raw Delphi ordinal wrapper.
+    /// The compressed flag is stripped exactly like Delphi `GetRealCommand`.
+    pub fn from_byte(b: u8) -> Self {
+        Self(b & 0x7F)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Reserved1.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Test => "Test",
+            Self::Hello => "Hello",
+            Self::WhoAreYou => "WhoAreYou",
+            Self::ImFriend => "ImFriend",
+            Self::Fine => "Fine",
+            Self::HelloAgain => "HelloAgain",
+            Self::TestWantCrypted => "TestWantCrypted",
+            Self::TestCrypted => "TestCrypted",
+            Self::TestStopCrypted => "TestStopCrypted",
+            Self::Ping => "Ping",
+            Self::Data => "Data",
+            Self::Grouped => "Grouped",
+            Self::LogOff => "LogOff",
+            Self::SizeTest => "SizeTest",
+            Self::SizeAck => "SizeAck",
+            Self::PTMUReq => "PTMUReq",
+            Self::Sliced => "Sliced",
+            Self::SlicedACK => "SlicedACK",
+            Self::Crypted => "Crypted",
+            Self::Echo => "Echo",
+            Self::EchoReply => "EchoReply",
+            Self::WrongHello => "WrongHello",
+            Self::WantNewHello => "WantNewHello",
+            Self::NeedHelloAgain => "NeedHelloAgain",
+            Self::ProbeMTU => "ProbeMTU",
+            Self::ProbeMTUAck => "ProbeMTUAck",
+            Self::LogMsg => "LogMsg",
+            Self::Order => "Order",
+            Self::UI => "UI",
+            Self::Strat => "Strat",
+            Self::API => "API",
+            Self::Balance => "Balance",
+            Self::TradesStream => "TradesStream",
+            Self::TradesResend => "TradesResend",
+            Self::TradesResendResponse => "TradesResendResponse",
+            Self::OrderBook => "OrderBook",
+            Self::Reserved1 => "Reserved1",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl Command {
-    /// Convert a wire command byte into the typed enum.
-    ///
-    /// Unknown non-zero bytes map to `Command::None` after a throttled warning.
-    /// This keeps the UDP receive path tolerant of corrupted packets and future
-    /// server-side extensions.
-    pub fn from_byte(b: u8) -> Self {
-        match b & 0x7F {
-            0 => Self::None,
-            1 => Self::Test,
-            2 => Self::Hello,
-            3 => Self::WhoAreYou,
-            4 => Self::ImFriend,
-            5 => Self::Fine,
-            6 => Self::HelloAgain,
-            7 => Self::TestWantCrypted,
-            8 => Self::TestCrypted,
-            9 => Self::TestStopCrypted,
-            10 => Self::Ping,
-            11 => Self::Data,
-            12 => Self::Grouped,
-            13 => Self::LogOff,
-            14 => Self::SizeTest,
-            15 => Self::SizeAck,
-            16 => Self::PTMUReq,
-            17 => Self::Sliced,
-            18 => Self::SlicedACK,
-            19 => Self::Crypted,
-            20 => Self::Echo,
-            21 => Self::EchoReply,
-            22 => Self::WrongHello,
-            23 => Self::WantNewHello,
-            24 => Self::NeedHelloAgain,
-            25 => Self::ProbeMTU,
-            26 => Self::ProbeMTUAck,
-            27 => Self::LogMsg,
-            28 => Self::Order,
-            29 => Self::UI,
-            30 => Self::Strat,
-            31 => Self::API,
-            32 => Self::Balance,
-            33 => Self::TradesStream,
-            34 => Self::TradesResend,
-            35 => Self::TradesResendResponse,
-            36 => Self::OrderBook,
-            37 => Self::Reserved1,
-            // 0 уже покрыт в `0 => Self::None` выше; здесь — всё прочее (unknown).
-            _ => {
-                // A-V2-06 fix: throttle warn — атакующий мог бы залить лог штормом
-                // пакетов с unknown cmd. Логируем максимум 1 раз в секунду.
-                use std::sync::atomic::{AtomicI64, Ordering};
-                static LAST_LOGGED_MS: AtomicI64 = AtomicI64::new(0);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let last = LAST_LOGGED_MS.load(Ordering::Relaxed);
-                if now_ms.saturating_sub(last) > 1000 {
-                    LAST_LOGGED_MS.store(now_ms, Ordering::Relaxed);
-                    log::warn!(target: "moonproto::cmd",
-                        "unknown Command byte: {} (server-side extension? / corrupted pkt? / DoS attempt?)",
-                        b & 0x7F);
-                }
-                Self::None
-            }
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+
+    #[test]
+    fn command_from_byte_preserves_unknown_raw_ordinal_like_delphi() {
+        let cmd = Command::from_byte(99);
+        assert_eq!(cmd.to_byte(), 99);
+        assert_eq!(cmd.name(), "Unknown");
+        assert!(!cmd.is_known());
+    }
+
+    #[test]
+    fn command_from_byte_strips_compressed_flag_without_losing_unknown_ordinal() {
+        assert_eq!(
+            Command::from_byte(Command::UI.to_byte() | 0x80),
+            Command::UI
+        );
+
+        let cmd = Command::from_byte(99 | 0x80);
+        assert_eq!(cmd.to_byte(), 99);
+        assert_eq!(cmd.name(), "Unknown");
     }
 }
