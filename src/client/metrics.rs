@@ -47,6 +47,14 @@ pub struct ProtocolMetricsSnapshot {
     pub app_enqueue_over_100us: u64,
     pub app_enqueue_over_1ms: u64,
     pub app_enqueue_over_5ms: u64,
+    /// Active/domain dispatch work before app/event enqueue.
+    pub active_dispatch_count: u64,
+    pub active_dispatch_ns: u64,
+    pub active_dispatch_max_ns: u64,
+    /// Active/domain dispatch segments slower than 100 us / 1 ms / 5 ms.
+    pub active_dispatch_over_100us: u64,
+    pub active_dispatch_over_1ms: u64,
+    pub active_dispatch_over_5ms: u64,
     /// Total nanoseconds spent in the send/maintenance phase.
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
@@ -80,6 +88,12 @@ pub(crate) struct ProtocolMetrics {
     app_enqueue_over_100us: AtomicU64,
     app_enqueue_over_1ms: AtomicU64,
     app_enqueue_over_5ms: AtomicU64,
+    active_dispatch_count: AtomicU64,
+    active_dispatch_ns: AtomicU64,
+    active_dispatch_max_ns: AtomicU64,
+    active_dispatch_over_100us: AtomicU64,
+    active_dispatch_over_1ms: AtomicU64,
+    active_dispatch_over_5ms: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
 }
@@ -135,6 +149,18 @@ impl ProtocolMetrics {
         );
     }
 
+    pub(crate) fn record_active_dispatch(&self, duration: Duration) {
+        record_timing(
+            &self.active_dispatch_count,
+            &self.active_dispatch_ns,
+            &self.active_dispatch_max_ns,
+            &self.active_dispatch_over_100us,
+            &self.active_dispatch_over_1ms,
+            &self.active_dispatch_over_5ms,
+            duration,
+        );
+    }
+
     pub(crate) fn snapshot(&self, public_event_queue_len: usize) -> ProtocolMetricsSnapshot {
         ProtocolMetricsSnapshot {
             recv_count: self.recv_count.load(Ordering::Relaxed),
@@ -159,6 +185,12 @@ impl ProtocolMetrics {
             app_enqueue_over_100us: self.app_enqueue_over_100us.load(Ordering::Relaxed),
             app_enqueue_over_1ms: self.app_enqueue_over_1ms.load(Ordering::Relaxed),
             app_enqueue_over_5ms: self.app_enqueue_over_5ms.load(Ordering::Relaxed),
+            active_dispatch_count: self.active_dispatch_count.load(Ordering::Relaxed),
+            active_dispatch_ns: self.active_dispatch_ns.load(Ordering::Relaxed),
+            active_dispatch_max_ns: self.active_dispatch_max_ns.load(Ordering::Relaxed),
+            active_dispatch_over_100us: self.active_dispatch_over_100us.load(Ordering::Relaxed),
+            active_dispatch_over_1ms: self.active_dispatch_over_1ms.load(Ordering::Relaxed),
+            active_dispatch_over_5ms: self.active_dispatch_over_5ms.load(Ordering::Relaxed),
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
             public_event_queue_len,

@@ -199,11 +199,12 @@ current `EventDispatcher` public event queue length to the same snapshot.
 
 The snapshot also separates CPU-ish protocol work from wall-clock waits:
 `writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `app_enqueue_*`
-measures event/snapshot enqueue work before user callbacks, and the
-`*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are coarse red flags for
-unexpectedly heavy protocol blocks. These are wall-clock durations of code
-sections, not OS CPU counters, but they intentionally exclude network waits and
-user callback body time.
+measures event/snapshot enqueue work before user callbacks, and
+`active_dispatch_*` measures typed dispatcher/domain-state work before those
+events are enqueued. The `*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are
+coarse red flags for unexpectedly heavy protocol blocks. These are wall-clock
+durations of code sections, not OS CPU counters, but they intentionally exclude
+network waits and user callback body time.
 
 These metrics are diagnostics only. They never affect retry, ACK, reconnect,
 queueing, or drop decisions.

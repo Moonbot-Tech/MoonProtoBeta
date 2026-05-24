@@ -596,7 +596,7 @@ impl Session {
             .client
             .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
         format!(
-            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
@@ -608,6 +608,11 @@ impl Session {
             m.writer_cpu_over_100us,
             m.writer_cpu_over_1ms,
             m.writer_cpu_over_5ms,
+            avg_us(m.active_dispatch_ns, m.active_dispatch_count),
+            m.active_dispatch_max_ns / 1_000,
+            m.active_dispatch_over_100us,
+            m.active_dispatch_over_1ms,
+            m.active_dispatch_over_5ms,
             avg_us(m.app_enqueue_ns, m.app_enqueue_count),
             m.app_enqueue_max_ns / 1_000,
             m.app_enqueue_over_100us,

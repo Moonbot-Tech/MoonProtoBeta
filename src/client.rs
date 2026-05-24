@@ -3222,6 +3222,7 @@ impl ProtocolCore<'_> {
                     event_buf.clear();
                     active_actions_buf.clear();
                     let ctx = crate::events::ActiveDispatchContext::from_client(self.client);
+                    let active_dispatch_start = Instant::now();
                     dispatcher.dispatch_into_active_actions(
                         c,
                         &p,
@@ -3232,6 +3233,9 @@ impl ProtocolCore<'_> {
                     );
                     self.client
                         .apply_active_actions(active_actions_buf.drain(..));
+                    self.client
+                        .protocol_metrics
+                        .record_active_dispatch(active_dispatch_start.elapsed());
                     on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
                 }
             }
