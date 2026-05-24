@@ -163,6 +163,7 @@ The typed parser is also available as
 
 ```rust
 pub struct EngineResponse {
+    pub ver: u16,
     pub request_uid: u64,
     pub method: EngineMethod,
     pub success: bool,
@@ -172,8 +173,9 @@ pub struct EngineResponse {
 }
 ```
 
-`method` preserves the exact one-byte ordinal that the server sent. `data` is
-already DEFLATE-decompressed when the response was compressed on the wire.
+`ver` is the Delphi `TBaseCommand.ver` from the response header. `method`
+preserves the exact one-byte ordinal that the server sent. `data` is already
+DEFLATE-decompressed when the response was compressed on the wire.
 
 Transfer asset rows returned by `request_transfer_assets`:
 

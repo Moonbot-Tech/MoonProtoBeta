@@ -146,6 +146,7 @@ mod tests {
 
     fn mk_resp(uid: u64) -> EngineResponse {
         EngineResponse {
+            ver: 3,
             request_uid: uid,
             method: EngineMethod::BaseCheck,
             success: true,

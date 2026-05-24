@@ -1082,14 +1082,13 @@ impl EventDispatcher {
 
     /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.
     fn process_api_command(&mut self, resp: EngineResponse, out: &mut Vec<Event>) {
-        const ASSUMED_VER: u16 = 2;
         let extra_event: Option<Event> = if resp.success {
             match resp.method {
                 EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
                     if resp.method == EngineMethod::GetMarketsList {
                         if let Some(ev) = self
                             .markets
-                            .apply_markets_list_payload_like_delphi(&resp.data, ASSUMED_VER)
+                            .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
                         {
                             Some(Event::Markets(ev))
                         } else {
@@ -1378,7 +1377,7 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
-    use crate::commands::market::{BaseCurrency, Market, MarketsListResponse};
+    use crate::commands::market::{write_market, BaseCurrency, Market, MarketsListResponse};
     use crate::commands::registry::write_string;
     use crate::commands::strat::build_snapshot_request;
     use crate::commands::trade::trace_flags;
@@ -1634,6 +1633,61 @@ mod tests {
             markets: names.iter().map(|name| event_market(name)).collect(),
             corr_markets: vec![],
         });
+    }
+
+    fn api_response_payload_ver(ver: u16, method: EngineMethod, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(Command::API.to_byte());
+        out.extend_from_slice(&ver.to_le_bytes());
+        out.extend_from_slice(&0xAAu64.to_le_bytes());
+        out.extend_from_slice(&0xBBu64.to_le_bytes());
+        out.push(method.to_byte());
+        out.push(1);
+        out.extend_from_slice(&0i32.to_le_bytes());
+        write_string(&mut out, "");
+        out.push(0);
+        out.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    fn markets_list_v1_payload_without_futures_type(market: &Market) -> Vec<u8> {
+        let mut market_bytes = Vec::new();
+        write_market(&mut market_bytes, market, 1);
+        market_bytes.pop();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&1i32.to_le_bytes());
+        out.extend_from_slice(&market_bytes);
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn api_get_markets_list_uses_response_ver_like_delphi() {
+        let mut dispatcher = EventDispatcher::new();
+        let market = event_market("OLDV1");
+        let data = markets_list_v1_payload_without_futures_type(&market);
+        let payload = api_response_payload_ver(1, EngineMethod::GetMarketsList, &data);
+
+        let events = dispatcher.dispatch(Command::API, &payload, 0);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Markets(MarketsEvent::MarketsListReplaced { count: 1, .. })
+            )),
+            "Delphi passes resp.ver into ReadMarketFromStream; v1 market payload must be applied"
+        );
+        assert_eq!(
+            dispatcher
+                .markets
+                .get("OLDV1")
+                .expect("v1 market applied")
+                .futures_type,
+            BaseCurrency::EMPTY,
+            "v1 payload has no FuturesType byte, so Delphi keeps CreateBase default BC_EMPTY"
+        );
     }
 
     fn order_status_for_test(

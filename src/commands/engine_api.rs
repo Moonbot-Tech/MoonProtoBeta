@@ -213,6 +213,8 @@ mod tests {
 /// Parsed Engine API response (`TEngineResponse`, server to client).
 #[derive(Debug, Clone)]
 pub struct EngineResponse {
+    /// Delphi `TBaseCommand.ver` from the response header.
+    pub ver: u16,
     /// UID of the original `TEngineRequest`.
     pub request_uid: u64,
     /// Engine method echoed by the server.
@@ -248,6 +250,10 @@ pub struct EngineResponse {
 ///
 /// Matches `MoonProtoEngineStruct.pas:364-403`.
 pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
+    if data.len() < 11 {
+        return None;
+    }
+    let ver = u16::from_le_bytes(data[1..3].try_into().unwrap());
     // Skip Engine TBaseCommand header: CmdId(1) + ver(2) + own_UID(8) = 11 bytes.
     let mut pos = 11usize;
 
@@ -280,6 +286,7 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     // IsCompressed + data size
     if pos + 1 > data.len() {
         return Some(EngineResponse {
+            ver,
             request_uid,
             method,
             success,
@@ -293,6 +300,7 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
 
     if pos + 4 > data.len() {
         return Some(EngineResponse {
+            ver,
             request_uid,
             method,
             success,
@@ -338,6 +346,7 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     };
 
     Some(EngineResponse {
+        ver,
         request_uid,
         method,
         success,
@@ -908,6 +917,7 @@ mod parse_engine_response_tests {
             &[],
         );
         let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.ver, 3);
         assert_eq!(resp.request_uid, request_uid);
         assert_eq!(resp.method, EngineMethod::BaseCheck);
         assert!(resp.success);

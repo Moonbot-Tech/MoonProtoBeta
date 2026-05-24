@@ -4917,3 +4917,23 @@ Verification:
 - Added regression coverage that an empty direct `UpdateMarketsList` payload
   returns `None` but still clears all existing `mark_price_found` flags, matching
   Delphi's clear-before-read order.
+
+### 2026-05-24 - Phase 1 partial: EngineResponse carries real response version
+
+Done:
+
+- Fixed an active-dispatcher market-list version mismatch.
+- Delphi `TEngineResponse` inherits `TBaseCommand.ver`, and
+  `ReadMarketFromStream` reads `FuturesType` only when `resp.ver >= 2`.
+- Rust parsed the response header but discarded `ver`; active dispatcher passed
+  a constant `2` into `apply_markets_list_payload_like_delphi`.
+- `EngineResponse` now exposes `ver`, `parse_engine_response` preserves it from
+  the wire header, and active `GetMarketsList` apply passes `resp.ver`.
+- API docs now document `EngineResponse::ver`.
+
+Verification:
+
+- Added parser coverage that `parse_engine_response` keeps `ver`.
+- Added dispatcher regression coverage for an old v1 market-list payload without
+  a `FuturesType` byte: Rust now applies it and keeps
+  `Market::futures_type = BaseCurrency::EMPTY`, matching Delphi.
