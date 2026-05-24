@@ -74,8 +74,9 @@ Delphi model по факту:
 
 - `src/client.rs` - accepted UDP packets and user sends are not represented as
   event variants.
-- `src/client.rs` - `send_queues`, `incoming_sliced_acks`,
-  `pending_reader_decoded`.
+- `src/client.rs` - `SendLockState` holds `DataToSend*`,
+  `incoming_sliced_acks`, and `TmpSlider`; `pending_reader_decoded` is the
+  remaining Rust ownership bridge for decoded user/active-library delivery.
 - `src/client.rs` - `WriterRuntime::run` polls `pending_reader_decoded`, then calls
   `copy_send_ack_and_check_sening_data`, the Rust block matching Delphi
   `Execute -> GetCopySendList -> GetCopyAcks -> CopyRecvdData ->
@@ -89,8 +90,8 @@ Delphi model по факту:
 - `src/client.rs` - reader immediate replies use
   `ReaderRuntime::send_command`, matching the Delphi reader-side calls to
   `SendCommand` from SlicedACK/Ping/PMTU/ImFriend branches.
-- `src/client.rs` - ping handling writes shared `TmpSlider`; writer later copies
-  it and runs `ApplyRegularHLAck`.
+- `src/client.rs` - ping handling writes `TmpSlider` inside `SendLockState`;
+  writer later copies it and runs `ApplyRegularHLAck`.
 - `src/events.rs:753` - `EventDispatcher::dispatch_into_active` требует `&mut Client` и может сам слать API через `client.send_api_request`.
 
 Текущее устройство Rust:
@@ -133,8 +134,9 @@ main-loop wake budgeting.
 ### 2. SlicedACK не должен применяться в reader
 
 В Delphi reader складывает `MPC_SlicedACK` в `ACKs`, writer применяет ACK внутри `CheckSeningData`.
-Rust now matches this part: reader parses ACK into `incoming_sliced_acks`; writer
-tick does `get_copy_acks` and `apply_copy_acks`.
+Rust now matches this part: reader parses ACK into `SendLockState`'s
+`incoming_sliced_acks`; writer tick snapshots the same SendLock and then runs
+`apply_copy_acks`.
 
 Это важно для порядка: Delphi ACK применяется в одном writer cycle вместе с send/retry decisions.
 
@@ -143,9 +145,9 @@ tick does `get_copy_acks` and `apply_copy_acks`.
 В Delphi `DataReadInt(MPC_Ping)` под `SendLock` пишет `TmpSlider`, writer копирует это через
 `CopyRecvdData`, потом `ApplyRegularHLAck` чистит `PendingH`.
 
-Rust now matches the copy/apply order: ping handling writes shared `TmpSlider`,
-writer copies it to `RecvdSlider`, then `ApplyRegularHLAck` removes ACKed
-`PendingH`.
+Rust now matches the copy/apply order: ping handling writes `TmpSlider` under
+`SendLockState`, writer copies it to `RecvdSlider`, then `ApplyRegularHLAck`
+removes ACKed `PendingH`.
 
 ### 4. User/app send intents не должны конкурировать с reader packets в общем event budget
 
@@ -1187,7 +1189,8 @@ Done:
   - `TotalRecvBytes := 0`, `RS := 1.0`, `UsedSlicedLimit := false`,
     `LastSentHello := 0`, `LastOnline := 0` -> reader transport mirror plus
     `full_reset`.
-  - `MPSlider.Init`, `TmpSlider.Init` -> shared `ReaderProtocolState::reset()`.
+  - `MPSlider.Init` -> shared `ReaderProtocolState::reset()`.
+  - `TmpSlider.Init` -> `SendLockState::reset_tmp_slider()`.
   - `RecvdSlider.Init` -> shared `Arc<Mutex<Slider>>` reset in reader and
     `full_reset`.
 - `HSendAttempts`, `HRecvCount`, `PrevSentDown`, `PrevRemoteRecvDown`, and
@@ -2087,6 +2090,158 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: stale reader epoch transport state
+
+Done:
+
+- Closed the `NextIdeas.md` epoch proof item for writer-visible transport
+  state.
+- Rust already tagged `ReaderDecodedMsg` with `epoch`, but the shared
+  `reader_transport_state` could still be mutated by an async old reader after
+  `spawn_reader()` moved the client to a new epoch. Delphi stops the UDP reader
+  synchronously before reset/reconnect, so the old reader has no such writer
+  state side effect.
+- `ReaderTransportState` now carries `active_reader_epoch`. `spawn_reader()`
+  increments `current_reader_epoch` before publishing writer state to the
+  reader side. Reader-side recv, ping, and handshake writes are no-op unless
+  their `reader_epoch` is still active.
+- Recorded `spec_pipeline/work/хуйня.md §X.128`.
+
+Verification:
+
+- Added `old_reader_output_and_transport_state_are_discarded_after_new_reader_epoch`.
+- Targeted test passed.
+
+Still not done:
+
+- Continue the `NextIdeas.md` lock/slicer work: prove and then collapse the
+  Delphi `SendLock` snapshot pieces without adding heavy work under the lock.
+
+### 2026-05-24 - Phase 1 partial: unified SendLock snapshot
+
+Done:
+
+- Collapsed the Delphi `SendLock` snapshot pieces into one Rust
+  `SendLockState`.
+- `DataToSend*` (`SendQueues`), reader `MPC_SlicedACK` queue, and `TmpSlider`
+  now live under the same mutex. This matches Delphi's
+  `AcquireSendLock; GetCopySendList; GetCopyAcks; FClient.CopyRecvdData;
+  ReleaseSendLock`.
+- Reader/user code still does only short push/copy work under this lock. Heavy
+  parse/dispatch/send/retry logic remains outside the lock, matching the Delphi
+  pattern.
+- Recorded `spec_pipeline/work/хуйня.md §X.129`.
+
+Verification:
+
+- Added `send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi`.
+- Targeted tests passed:
+  `send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi`,
+  `writer_tick_copies_ack_queues_then_check_sening_data_like_delphi`,
+  `ping_ack_does_not_drop_pending_h_until_writer_copy_apply`.
+
+Still not done:
+
+- Continue the `NextIdeas.md` work: move `slicer` and remaining reader protocol
+  state toward per-reader ownership only after preserving immediate ACK/send
+  side effects.
+
+### 2026-05-24 - Phase 1 partial: reader-owned Sliced receiver
+
+Done:
+
+- Moved incoming Sliced reassembly state from shared `Client.slicer:
+  Arc<Mutex<SlicingReceiver>>` into per-thread `ReaderRuntime.slicer`.
+- Each `spawn_reader()` now starts with a fresh `SlicingReceiver`, matching the
+  Delphi lifecycle where the old UDP reader is stopped before a new reader can
+  mutate `TMoonProtoClient.Receiving`.
+- `WantNewHello` still resets the current reader's local receiver.
+- Recorded `spec_pipeline/work/хуйня.md §X.130`.
+
+Verification:
+
+- `reader_sends_sliced_ack_without_main_loop_tick` passed.
+- `reader_handles_partial_sliced_without_recv_event_backlog` now proves
+  reader-owned partial reassembly by sending block 0 and block 1 of the same
+  datagram and checking the completed decoded payload.
+- `old_reader_output_and_transport_state_are_discarded_after_new_reader_epoch`
+  still passed.
+
+Still not done:
+
+- Full removal of `ReaderProtocolState` mutex is not done yet. Delphi soft
+  reconnect does not call `FClient.Reset`, so `MPSlider`/session keys must not
+  be reset just because a new Rust reader thread is spawned.
+
+### 2026-05-24 - Phase 1 partial: stale reader epoch protocol side effects
+
+Done:
+
+- Closed the next unsafe piece of the `NextIdeas.md` reader ownership item.
+- After the first epoch fix, stale reader output was dropped by writer and
+  transport-state writes were gated, but an async old reader could still touch
+  protocol-owned shared state before its stale `ReaderDecodedMsg` was dropped:
+  `ReaderProtocolState` (`MPSlider`, `DataSizeAck` series), `SendLockState`
+  reader writes (`SlicedACK`, `TmpSlider` from Ping), and `ReaderPingState`.
+- Delphi has no equivalent stale-reader side effect: `UDPClient.Active := false`
+  stops the listener before reset/reconnect continues.
+- Rust now publishes `active_reader_epoch` to the remaining reader-shared
+  protocol state on every `spawn_reader()`. Reader-side recv processing exits
+  early if its epoch is stale, and each remaining shared reader mutation checks
+  the same epoch at the mutation point.
+- This is a transitional parity fix, not a new architecture claim: it preserves
+  soft-reconnect `MPSlider`/key lifetime while removing the Rust-only stale
+  mutation effect.
+- Recorded `spec_pipeline/work/хуйня.md §X.131`.
+
+Verification:
+
+- Added `stale_reader_epoch_cannot_mutate_reader_shared_protocol_state`.
+- Targeted tests passed:
+  `stale_reader_epoch_cannot_mutate_reader_shared_protocol_state`,
+  `old_reader_output_and_transport_state_are_discarded_after_new_reader_epoch`,
+  `reader_handles_size_test_without_main_loop_tick`,
+  `ping_ack_does_not_drop_pending_h_until_writer_copy_apply`,
+  `reader_sends_sliced_ack_without_main_loop_tick`,
+  `reader_handles_partial_sliced_without_recv_event_backlog`,
+  `send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi`.
+
+Still not done:
+
+- Decide the exact final shape for `ReaderProtocolState`: per-reader ownership
+  is only safe if the Rust port preserves Delphi soft reconnect semantics where
+  `FClient.Reset` is skipped and replay/session state is carried forward.
+
+### 2026-05-24 - Phase 1 partial: reader ping state atomics
+
+Done:
+
+- Removed the mutex around the small ping/adaptive-rate reader state.
+- Delphi mutates `PingCount`, `CanSendRate`, and `UsedSlicedLimit` as ordinary
+  shared client fields: writer marks `UsedSlicedLimit` when the sliced send
+  budget was hit, reader consumes that flag on next `MPC_Ping`, adjusts
+  `CanSendRate`, clears the flag, and emits the ping response.
+- Rust now represents that exact shared-field effect with atomics:
+  `active_reader_epoch`, `ping_count`, `can_send_rate`, and
+  `used_sliced_limit`. The reader still computes the same adaptive-rate update
+  at the same `MPC_Ping` point; writer still marks the flag at the same
+  `CheckSeningData` budget point.
+- Recorded `spec_pipeline/work/хуйня.md §X.132`.
+
+Verification:
+
+- `ping_adaptive_can_send_rate_uses_delphi_used_limit_gate` passed after the
+  refactor.
+- `stale_reader_epoch_cannot_mutate_reader_shared_protocol_state` passed after
+  the refactor, proving stale reader epoch still cannot consume/mutate ping
+  state.
+
+Still not done:
+
+- `ReaderTransportState` remains a mutex snapshot because it carries coherent
+  multi-field handshake state (tokens/keys/status). Converting it to atomics
+  needs a separate proof that Rust will not observe impossible mixed snapshots.
 
 ### 2026-05-24 - Phase 1 partial: Trades market-index gate and section filtering
 

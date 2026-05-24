@@ -469,6 +469,15 @@ pub(crate) struct SendItem {
     pub u_key: UniqueKey,  // dedup key (matches TMoonUniqueKey)
 }
 
+#[inline]
+fn initial_retry_left(encrypted: bool, max_retries: i32) -> i32 {
+    if encrypted {
+        (max_retries - 1).max(0)
+    } else {
+        0
+    }
+}
+
 /// Delphi `TMoonProtoBaseNet.DataToSend*` queues.
 ///
 /// `SendCmdInt` appends directly into one of these grow-only lists under
@@ -515,6 +524,102 @@ impl SendQueues {
 
     fn is_empty(&self) -> bool {
         self.sliced.is_empty() && self.high.is_empty() && self.low.is_empty()
+    }
+}
+
+/// Delphi `TMoonProtoBaseNet.SendLock` shared state.
+///
+/// The writer snapshots `DataToSend*`, `ACKs`, and `TmpSlider` under one lock,
+/// then performs all heavy protocol work outside it. Reader-side code may only
+/// append/copy small already-decoded values here.
+#[derive(Default)]
+pub(crate) struct SendLockState {
+    active_reader_epoch: u32,
+    send_queues: SendQueues,
+    incoming_sliced_acks: Vec<SlicedAck>,
+    tmp_slider: Slider,
+}
+
+impl SendLockState {
+    fn set_active_reader_epoch(&mut self, epoch: u32) {
+        self.active_reader_epoch = epoch;
+    }
+
+    fn is_active_reader(&self, epoch: u32) -> bool {
+        self.active_reader_epoch == epoch
+    }
+
+    fn push_send_cmd_int(&mut self, item: SendItem) {
+        self.send_queues.push_send_cmd_int(item);
+    }
+
+    fn take_send_snapshot(
+        &mut self,
+        sliced: &mut Vec<SendItem>,
+        high: &mut Vec<SendItem>,
+        low: &mut Vec<SendItem>,
+    ) -> (Vec<SlicedAck>, Option<Slider>) {
+        self.send_queues.take_into(sliced, high, low);
+        let acks = std::mem::take(&mut self.incoming_sliced_acks);
+        let recvd = self.copy_tmp_slider();
+        (acks, recvd)
+    }
+
+    fn push_sliced_ack(&mut self, ack: SlicedAck) {
+        self.incoming_sliced_acks.push(ack);
+    }
+
+    fn push_sliced_ack_from_reader(&mut self, reader_epoch: u32, ack: SlicedAck) {
+        if self.is_active_reader(reader_epoch) {
+            self.push_sliced_ack(ack);
+        }
+    }
+
+    fn copy_tmp_slider(&mut self) -> Option<Slider> {
+        let has_new_data = self.tmp_slider.has_new_data;
+        let copied = has_new_data.then(|| self.tmp_slider.clone());
+        self.tmp_slider.has_new_data = false;
+        copied
+    }
+
+    fn apply_ping_ack_bitmap(&mut self, payload: &[u8]) {
+        // DataReadInt(MPC_Ping): parse server's ACK bitmap into TmpSlider only.
+        // Delphi drops PendingH later in writer CheckSeningData via
+        // CopyRecvdData -> ApplyRegularHLAck.
+        if payload.len() > 50 {
+            let srv_ack_start = u64::from_le_bytes(payload[42..50].try_into().unwrap());
+            let ack_data_len = payload.len() - 50;
+            let r_count = (ack_data_len / 8).min(64);
+            let mut bits = [0u64; 64];
+            for i in 0..r_count {
+                bits[i] =
+                    u64::from_le_bytes(payload[50 + i * 8..50 + i * 8 + 8].try_into().unwrap());
+            }
+            self.tmp_slider.bit_field = bits;
+            self.tmp_slider.start_num = srv_ack_start;
+            self.tmp_slider.has_new_data = true;
+            self.tmp_slider.r_count = r_count as i32;
+        }
+    }
+
+    fn apply_ping_ack_bitmap_from_reader(&mut self, reader_epoch: u32, payload: &[u8]) {
+        if self.is_active_reader(reader_epoch) {
+            self.apply_ping_ack_bitmap(payload);
+        }
+    }
+
+    fn reset_tmp_slider(&mut self) {
+        self.tmp_slider = Slider::new();
+    }
+
+    fn reset_tmp_slider_from_reader(&mut self, reader_epoch: u32) {
+        if self.is_active_reader(reader_epoch) {
+            self.reset_tmp_slider();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.send_queues.is_empty()
     }
 }
 
@@ -575,15 +680,15 @@ struct ReaderRuntime {
     server_addr: Option<SocketAddr>,
     api_pending: Arc<ApiPending>,
     pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
-    incoming_sliced_acks: Arc<Mutex<Vec<SlicedAck>>>,
+    send_lock: Arc<Mutex<SendLockState>>,
     pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
-    reader_ping_state: Arc<Mutex<ReaderPingState>>,
+    reader_ping_state: Arc<ReaderPingState>,
     reader_transport_state: Arc<Mutex<ReaderTransportState>>,
     crypt_msg_counter: Arc<AtomicU64>,
     recvd_slider: Arc<Mutex<Slider>>,
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
-    slicer: Arc<Mutex<slicing::SlicingReceiver>>,
+    slicer: slicing::SlicingReceiver,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
     debug_outgoing_blackhole: Arc<AtomicBool>,
@@ -593,6 +698,13 @@ struct ReaderRuntime {
 }
 
 impl ReaderRuntime {
+    fn is_active_reader(&self) -> bool {
+        self.reader_transport_state
+            .lock()
+            .unwrap()
+            .is_active_reader(self.epoch)
+    }
+
     fn run(mut self) {
         let mut buf = [0u8; 65535];
         loop {
@@ -640,15 +752,19 @@ impl ReaderRuntime {
                 );
             }
 
+            let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
+            let reader_is_active = self
+                .reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_recv_side_effects(self.epoch, n as u64, timestamp_ms);
+            if !reader_is_active {
+                continue;
+            }
             let total_recv_after = self
                 .total_recv_shared
                 .fetch_add(n as u64, Ordering::Relaxed)
                 + n as u64;
-            let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
-            self.reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_recv_side_effects(n as u64, timestamp_ms);
 
             if err_emu_should_drop(hdr.cmd) {
                 self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
@@ -672,11 +788,8 @@ impl ReaderRuntime {
         total_recv_after: u64,
         timestamp_ms: i64,
     ) -> bool {
-        {
-            let mut slicer = self.slicer.lock().unwrap();
-            slicer.set_last_online(timestamp_ms);
-            slicer.do_cleanup();
-        }
+        self.slicer.set_last_online(timestamp_ms);
+        self.slicer.do_cleanup();
 
         match Command::from_byte(raw_cmd) {
             Command::Ping => {
@@ -824,8 +937,12 @@ impl ReaderRuntime {
         apply_recv_effects: bool,
         sliced_stats: Option<ReaderSlicedStats>,
     ) {
-        let decoded =
-            Client::decode_data_read_int_payload_shared(&self.reader_protocol, raw_cmd, payload);
+        let decoded = Client::decode_data_read_int_payload_shared(
+            &self.reader_protocol,
+            self.epoch,
+            raw_cmd,
+            payload,
+        );
         let (cmd, payload) = decoded
             .map(|(cmd, payload)| (cmd, Some(payload)))
             .unwrap_or((raw_cmd, None));
@@ -859,7 +976,12 @@ impl ReaderRuntime {
     }
 
     fn on_new_size_test(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
-        if let Some(ack) = Client::build_size_ack_payload(&self.reader_protocol, payload) {
+        if let Some(ack) =
+            Client::build_size_ack_payload(&self.reader_protocol, self.epoch, payload)
+        {
+            if !self.is_active_reader() {
+                return;
+            }
             // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
             // `MPC_SizeAck` of requested size, then turn DontFragment off.
             set_dont_fragment_for_socket(&self.sock, true);
@@ -870,6 +992,9 @@ impl ReaderRuntime {
 
     fn on_new_probe_mtu(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
+            if !self.is_active_reader() {
+                return;
+            }
             // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
             // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
             set_dont_fragment_for_socket(&self.sock, true);
@@ -878,24 +1003,32 @@ impl ReaderRuntime {
         }
     }
 
-    fn on_handshake_control(&self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
+    fn on_handshake_control(&mut self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
+        if !self.is_active_reader() {
+            return;
+        }
         let update = Client::simple_handshake_update(cmd);
         if cmd == Command::WantNewHello {
-            self.reader_protocol.lock().unwrap().reset();
-            self.reader_ping_state
+            self.reader_protocol
                 .lock()
                 .unwrap()
-                .reset_protocol_session();
+                .reset_from_reader(self.epoch);
+            self.send_lock
+                .lock()
+                .unwrap()
+                .reset_tmp_slider_from_reader(self.epoch);
+            self.reader_ping_state
+                .reset_protocol_session_from_reader(self.epoch);
             self.crypt_msg_counter.store(0, Ordering::Relaxed);
             self.total_sent.store(0, Ordering::Relaxed);
             *self.recvd_slider.lock().unwrap() = Slider::new();
-            *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
+            self.slicer = slicing::SlicingReceiver::new();
             self.total_recv_shared.store(0, Ordering::Relaxed);
         }
         self.reader_transport_state
             .lock()
             .unwrap()
-            .apply_handshake_update(&update, timestamp_ms);
+            .apply_handshake_update(self.epoch, &update, timestamp_ms);
         self.pending_reader_decoded
             .lock()
             .unwrap()
@@ -918,6 +1051,9 @@ impl ReaderRuntime {
         if let Some(hello) =
             Client::decode_handshake_hello(&self.master_key, self.client_id, payload)
         {
+            if !self.is_active_reader() {
+                return;
+            }
             self.reader_client_token = self.reader_transport_state.lock().unwrap().client_token;
             let (update, encrypted) = Client::build_who_are_you_imfriend(
                 &self.master_key,
@@ -929,11 +1065,17 @@ impl ReaderRuntime {
             self.reader_transport_state
                 .lock()
                 .unwrap()
-                .apply_handshake_update(&update, timestamp_ms);
+                .apply_handshake_update(self.epoch, &update, timestamp_ms);
             self.reader_protocol
                 .lock()
                 .unwrap()
-                .set_decode_cipher(crate::crypto::cipher_from_key(&update.decode_key));
+                .set_decode_cipher_from_reader(
+                    self.epoch,
+                    crate::crypto::cipher_from_key(&update.decode_key),
+                );
+            if !self.is_active_reader() {
+                return;
+            }
 
             // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
             // `MPC_ImFriend` twice with a blocking 32ms delay before returning
@@ -971,11 +1113,14 @@ impl ReaderRuntime {
 
     fn on_fine(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
         if Client::decode_handshake_hello(&self.master_key, self.client_id, payload).is_some() {
+            if !self.is_active_reader() {
+                return;
+            }
             let update = Client::fine_handshake_update();
             self.reader_transport_state
                 .lock()
                 .unwrap()
-                .apply_handshake_update(&update, timestamp_ms);
+                .apply_handshake_update(self.epoch, &update, timestamp_ms);
             self.pending_reader_decoded
                 .lock()
                 .unwrap()
@@ -1004,18 +1149,18 @@ impl ReaderRuntime {
         }
     }
 
-    fn on_new_sliced(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) -> bool {
+    fn on_new_sliced(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) -> bool {
         if self.shutdown_flag.load(Ordering::Relaxed) {
             return false;
         }
 
-        let (assembled, ack) = {
-            let mut slicer = self.slicer.lock().unwrap();
-            slicer.on_new_sliced(payload)
-        };
+        let (assembled, ack) = self.slicer.on_new_sliced(payload);
 
         if self.shutdown_flag.load(Ordering::Relaxed) {
             return false;
+        }
+        if !self.is_active_reader() {
+            return true;
         }
 
         // Delphi `OnNewSliced`: every received slice gets an immediate
@@ -1064,7 +1209,7 @@ impl ReaderRuntime {
                     blocks_count,
                 }),
             );
-            self.slicer.lock().unwrap().receiving.remove(&datagram_num);
+            self.slicer.receiving.remove(&datagram_num);
         } else {
             // Delphi `OnNewSliced` stops here for partial datagrams: ACK was
             // sent, but `DataReadInt` is called only after `Sliced.Received`.
@@ -1077,7 +1222,7 @@ impl ReaderRuntime {
     fn on_new_sliced_ack(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
         // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
         // Applying it is writer/`CheckSeningData` work.
-        Client::push_sliced_ack(&self.incoming_sliced_acks, payload);
+        Client::push_sliced_ack_from_reader(&self.send_lock, self.epoch, payload);
     }
 
     fn on_new_ping(
@@ -1091,18 +1236,23 @@ impl ReaderRuntime {
         let corrected_now_dt = delphi_now();
         if let Some((ping_update, response)) = Client::reader_build_ping_update_and_response(
             &self.reader_protocol,
+            &self.send_lock,
             &self.reader_ping_state,
             &self.server_time_delta_handle,
+            self.epoch,
             payload,
             raw_now_dt,
             corrected_now_dt,
             self.total_sent.load(Ordering::Relaxed),
             total_recv_after,
         ) {
+            if !self.is_active_reader() {
+                return;
+            }
             self.reader_transport_state
                 .lock()
                 .unwrap()
-                .apply_ping_update(&ping_update);
+                .apply_ping_update(self.epoch, &ping_update);
             // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
             // Ping response immediately from the reader stack.
             self.send_command(Command::Ping, &response);
@@ -1190,7 +1340,7 @@ impl std::error::Error for SubscribeError {}
 pub struct ClientSender {
     app_queue_alive: Arc<AtomicBool>,
     domain_ready: Arc<AtomicBool>,
-    send_queues: Arc<Mutex<SendQueues>>,
+    send_lock: Arc<Mutex<SendLockState>>,
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
     start: Instant,
@@ -1510,7 +1660,7 @@ impl ClientSender {
             cmd: cmd as u8,
             encrypted,
             priority,
-            retry_left: if encrypted { max_retries - 1 } else { 0 },
+            retry_left: initial_retry_left(encrypted, max_retries),
             max_retries,
             msg_num: 0,
             last_sent_at: 0,
@@ -2337,7 +2487,7 @@ impl ClientSender {
         {
             return Err(SubscribeError::DomainNotReady);
         }
-        self.send_queues.lock().unwrap().push_send_cmd_int(item);
+        self.send_lock.lock().unwrap().push_send_cmd_int(item);
         Ok(())
     }
 }
@@ -2894,7 +3044,7 @@ impl WriterRuntime<'_> {
         // Delphi Execute spins on shared queues and sleeps a fixed short tick
         // when there is no outgoing work. Reader-decoded work is polled from
         // `pending_reader_decoded`, not signalled through a Rust-only wake FIFO.
-        if self.client.send_queues.lock().unwrap().is_empty() {
+        if self.client.send_lock.lock().unwrap().is_empty() {
             thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
         }
     }
@@ -3440,15 +3590,11 @@ impl WriterRuntime<'_> {
 
         // Delphi `Execute` under `SendLock`:
         // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
-        // Rust uses separate mutexes for these exact lists, but keeps the same
-        // writer-visible order before `CheckSeningData`.
-        self.get_copy_send_list(
+        let copy_acks = self.get_copy_send_lock_snapshot(
             &mut copy_send_list,
             &mut copy_send_list_h,
             &mut copy_send_list_l,
         );
-        let copy_acks = self.get_copy_acks();
-        self.copy_recvd_data();
 
         self.check_sening_data(
             copy_send_list,
@@ -3484,32 +3630,35 @@ impl WriterRuntime<'_> {
         self.send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
     }
 
-    fn get_copy_send_list(
+    fn get_copy_send_lock_snapshot(
         &mut self,
         sliced: &mut Vec<SendItem>,
         h_items: &mut Vec<SendItem>,
         l_items: &mut Vec<SendItem>,
-    ) {
-        self.client
-            .send_queues
-            .lock()
-            .unwrap()
-            .take_into(sliced, h_items, l_items);
-    }
-
-    fn get_copy_acks(&mut self) -> Vec<SlicedAck> {
-        let mut acks = self.client.incoming_sliced_acks.lock().unwrap();
-        std::mem::take(&mut *acks)
-    }
-
-    fn copy_recvd_data(&mut self) {
-        if let Some(tmp_slider) = self
+    ) -> Vec<SlicedAck> {
+        let (acks, tmp_slider) = self
             .client
-            .reader_protocol
+            .send_lock
             .lock()
             .unwrap()
-            .copy_tmp_slider()
-        {
+            .take_send_snapshot(sliced, h_items, l_items);
+        if let Some(tmp_slider) = tmp_slider {
+            *self.client.recvd_slider.lock().unwrap() = tmp_slider;
+        }
+        acks
+    }
+
+    #[cfg(test)]
+    fn get_copy_acks(&mut self) -> Vec<SlicedAck> {
+        let mut sliced = Vec::new();
+        let mut high = Vec::new();
+        let mut low = Vec::new();
+        self.get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low)
+    }
+
+    #[cfg(test)]
+    fn copy_recvd_data(&mut self) {
+        if let Some(tmp_slider) = self.client.send_lock.lock().unwrap().copy_tmp_slider() {
             *self.client.recvd_slider.lock().unwrap() = tmp_slider;
         }
     }
@@ -3936,7 +4085,7 @@ impl WriterRuntime<'_> {
         let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
         if bytes_sent_at_once >= used_limit_threshold {
             client.used_sliced_limit = true;
-            client.reader_ping_state.lock().unwrap().used_sliced_limit = true;
+            client.reader_ping_state.mark_used_sliced_limit();
             client.publish_transport_state_from_client();
         }
 
@@ -4189,61 +4338,62 @@ struct SlicedAck {
 }
 
 struct ReaderProtocolState {
+    active_reader_epoch: u32,
     decode_cipher: Option<crate::crypto::Aes128Gcm>,
     slider: Slider,
-    tmp_slider: Slider,
     data_size_ack_series_num: u16,
 }
 
 impl ReaderProtocolState {
     fn new() -> Self {
         Self {
+            active_reader_epoch: 0,
             decode_cipher: None,
             slider: Slider::new(),
-            tmp_slider: Slider::new(),
             data_size_ack_series_num: 0,
         }
     }
 
+    fn set_active_reader_epoch(&mut self, epoch: u32) {
+        self.active_reader_epoch = epoch;
+    }
+
+    fn is_active_reader(&self, epoch: u32) -> bool {
+        self.active_reader_epoch == epoch
+    }
+
     fn reset(&mut self) {
         self.slider = Slider::new();
-        self.tmp_slider = Slider::new();
         self.data_size_ack_series_num = 0;
+    }
+
+    fn reset_from_reader(&mut self, reader_epoch: u32) {
+        if self.is_active_reader(reader_epoch) {
+            self.reset();
+        }
     }
 
     fn set_decode_cipher(&mut self, cipher: crate::crypto::Aes128Gcm) {
         self.decode_cipher = Some(cipher);
     }
 
-    fn copy_tmp_slider(&mut self) -> Option<Slider> {
-        let has_new_data = self.tmp_slider.has_new_data;
-        let copied = has_new_data.then(|| self.tmp_slider.clone());
-        self.tmp_slider.has_new_data = false;
-        copied
-    }
-
-    fn apply_ping_ack_bitmap(&mut self, payload: &[u8]) {
-        // DataReadInt(MPC_Ping): parse server's ACK bitmap into TmpSlider only.
-        // Delphi drops PendingH later in writer CheckSeningData via
-        // CopyRecvdData -> ApplyRegularHLAck.
-        if payload.len() > 50 {
-            let srv_ack_start = u64::from_le_bytes(payload[42..50].try_into().unwrap());
-            let ack_data_len = payload.len() - 50;
-            let r_count = (ack_data_len / 8).min(64);
-            let mut bits = [0u64; 64];
-            for i in 0..r_count {
-                bits[i] =
-                    u64::from_le_bytes(payload[50 + i * 8..50 + i * 8 + 8].try_into().unwrap());
-            }
-            self.tmp_slider.bit_field = bits;
-            self.tmp_slider.start_num = srv_ack_start;
-            self.tmp_slider.has_new_data = true;
-            self.tmp_slider.r_count = r_count as i32;
+    fn set_decode_cipher_from_reader(
+        &mut self,
+        reader_epoch: u32,
+        cipher: crate::crypto::Aes128Gcm,
+    ) {
+        if self.is_active_reader(reader_epoch) {
+            self.set_decode_cipher(cipher);
         }
     }
 
     fn build_ack_half(&self) -> (u64, Vec<u64>) {
         self.slider.build_ack_half()
+    }
+
+    fn build_ack_half_from_reader(&self, reader_epoch: u32) -> Option<(u64, Vec<u64>)> {
+        self.is_active_reader(reader_epoch)
+            .then(|| self.build_ack_half())
     }
 
     fn update_data_size_ack_series_num(&mut self, series_num: u16) -> u16 {
@@ -4252,30 +4402,75 @@ impl ReaderProtocolState {
         }
         self.data_size_ack_series_num
     }
+
+    fn update_data_size_ack_series_num_from_reader(
+        &mut self,
+        reader_epoch: u32,
+        series_num: u16,
+    ) -> Option<u16> {
+        self.is_active_reader(reader_epoch)
+            .then(|| self.update_data_size_ack_series_num(series_num))
+    }
 }
 
 struct ReaderPingState {
-    ping_count: u32,
-    can_send_rate: i32,
-    used_sliced_limit: bool,
+    active_reader_epoch: std::sync::atomic::AtomicU32,
+    ping_count: std::sync::atomic::AtomicU32,
+    can_send_rate: std::sync::atomic::AtomicI32,
+    used_sliced_limit: AtomicBool,
 }
 
 impl ReaderPingState {
     fn new() -> Self {
         Self {
-            ping_count: 0,
-            can_send_rate: 2 * 1024 * 1024,
-            used_sliced_limit: false,
+            active_reader_epoch: std::sync::atomic::AtomicU32::new(0),
+            ping_count: std::sync::atomic::AtomicU32::new(0),
+            can_send_rate: std::sync::atomic::AtomicI32::new(2 * 1024 * 1024),
+            used_sliced_limit: AtomicBool::new(false),
         }
     }
 
-    fn reset_protocol_session(&mut self) {
-        self.used_sliced_limit = false;
+    fn set_active_reader_epoch(&self, epoch: u32) {
+        self.active_reader_epoch.store(epoch, Ordering::Relaxed);
+    }
+
+    fn is_active_reader(&self, epoch: u32) -> bool {
+        self.active_reader_epoch.load(Ordering::Relaxed) == epoch
+    }
+
+    fn reset_protocol_session(&self) {
+        self.used_sliced_limit.store(false, Ordering::Relaxed);
+    }
+
+    fn reset_protocol_session_from_reader(&self, reader_epoch: u32) {
+        if self.is_active_reader(reader_epoch) {
+            self.reset_protocol_session();
+        }
+    }
+
+    fn mark_used_sliced_limit(&self) {
+        self.used_sliced_limit.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn set_can_send_rate_for_test(&self, rate: i32) {
+        self.can_send_rate.store(rate, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn set_used_sliced_limit_for_test(&self, used: bool) {
+        self.used_sliced_limit.store(used, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn ping_count(&self) -> u32 {
+        self.ping_count.load(Ordering::Relaxed)
     }
 }
 
 #[derive(Clone)]
 struct ReaderTransportState {
+    active_reader_epoch: u32,
     seq: u64,
     connected: bool,
     authorized: bool,
@@ -4309,6 +4504,7 @@ struct ReaderTransportState {
 impl ReaderTransportState {
     fn new() -> Self {
         Self {
+            active_reader_epoch: 0,
             seq: 0,
             connected: false,
             authorized: false,
@@ -4344,7 +4540,26 @@ impl ReaderTransportState {
         self.seq = self.seq.wrapping_add(1);
     }
 
-    fn apply_recv_side_effects(&mut self, recv_bytes: u64, timestamp_ms: i64) {
+    fn set_active_reader_epoch(&mut self, epoch: u32) {
+        if self.active_reader_epoch != epoch {
+            self.active_reader_epoch = epoch;
+            self.bump();
+        }
+    }
+
+    fn is_active_reader(&self, epoch: u32) -> bool {
+        self.active_reader_epoch == epoch
+    }
+
+    fn apply_recv_side_effects(
+        &mut self,
+        reader_epoch: u32,
+        recv_bytes: u64,
+        timestamp_ms: i64,
+    ) -> bool {
+        if !self.is_active_reader(reader_epoch) {
+            return false;
+        }
         self.connected = true;
         if self.auth_status == AuthStatus::Base {
             self.auth_status = AuthStatus::Connected;
@@ -4353,6 +4568,7 @@ impl ReaderTransportState {
         self.recv_bps_pending = self.recv_bps_pending.wrapping_add(recv_bytes);
         self.last_online = timestamp_ms;
         self.bump();
+        true
     }
 
     fn reset_protocol_session(&mut self) {
@@ -4363,7 +4579,10 @@ impl ReaderTransportState {
         self.last_sent_hello = NEVER_SENT_MS;
     }
 
-    fn apply_ping_update(&mut self, update: &ReaderPingUpdate) {
+    fn apply_ping_update(&mut self, reader_epoch: u32, update: &ReaderPingUpdate) {
+        if !self.is_active_reader(reader_epoch) {
+            return;
+        }
         self.ping_count = update.ping_count;
         self.round_trip_delay = update.round_trip_delay;
         self.actual_pmtu = update.actual_pmtu;
@@ -4378,7 +4597,15 @@ impl ReaderTransportState {
         self.bump();
     }
 
-    fn apply_handshake_update(&mut self, update: &ReaderHandshakeUpdate, timestamp_ms: i64) {
+    fn apply_handshake_update(
+        &mut self,
+        reader_epoch: u32,
+        update: &ReaderHandshakeUpdate,
+        timestamp_ms: i64,
+    ) {
+        if !self.is_active_reader(reader_epoch) {
+            return;
+        }
         match update.cmd {
             Command::WrongHello => {
                 self.waiting_hello = false;
@@ -4428,16 +4655,14 @@ pub struct Client {
     cfg: ClientConfig,
 
     app_queue_alive: Arc<AtomicBool>,
-    // Delphi `DataToSend`, `DataToSendH`, `DataToSendL`: raw/user/API sends are
-    // appended here directly by `send_cmd` / `ClientSender::send_cmd`.
-    send_queues: Arc<Mutex<SendQueues>>,
+    // Delphi `SendLock`: raw send queues, SlicedACK queue, and TmpSlider are
+    // copied as one short writer snapshot before CheckSeningData.
+    send_lock: Arc<Mutex<SendLockState>>,
 
     // Pending H-commands (main thread only, no sharing)
     pending_h: Vec<SendItem>,
     // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
     sending: Vec<SentSliced>,
-    // Reader -> writer SlicedACK list (matches TMoonProtoBaseNet.ACKs).
-    incoming_sliced_acks: Arc<Mutex<Vec<SlicedAck>>>,
     // Reader -> main decoded OnNewData payloads. Completed incoming Sliced
     // datagrams run the DataReadInt decrypt/decompress core in the reader stack
     // and enter this queue only for user/active-library delivery.
@@ -4512,14 +4737,14 @@ pub struct Client {
     tmp_send_count: usize, // items in batch
     tmp_send_size: usize, // Delphi TmpSendSize accounting: sum of (payload + header + grouped item header)
 
-    // Reader-shared part of Delphi DataReadInt:
-    // MPSlider replay/ACK bitmap, TmpSlider, and decode cipher. Delphi mutates
-    // these from UDPRead/reader thread and CheckSeningData copies TmpSlider from
-    // writer thread under SendLock.
+    // Reader-shared part of Delphi DataReadInt that must survive soft reconnect:
+    // MPSlider replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider
+    // lives in SendLockState so writer copies it atomically with ACK queues.
+    // Reader mutations are epoch-gated because Rust reader shutdown is async.
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
     // Reader-owned Ping block state used to send `MPC_Ping` replies from
     // UDPRead order before main/writer observes the packet.
-    reader_ping_state: Arc<Mutex<ReaderPingState>>,
+    reader_ping_state: Arc<ReaderPingState>,
     // Reader-owned mirror of Delphi fields mutated directly inside UDPRead.
     // Writer copies it back into `Client` before writer/reconnect ticks.
     reader_transport_state: Arc<Mutex<ReaderTransportState>>,
@@ -4528,7 +4753,6 @@ pub struct Client {
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
     recvd_slider: Arc<Mutex<Slider>>,
-    slicer: Arc<Mutex<slicing::SlicingReceiver>>,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
     next_port: u16,
@@ -4755,11 +4979,10 @@ impl Client {
         // Reader packets and raw send queues are separate so dense incoming
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
-        let send_queues = Arc::new(Mutex::new(SendQueues::default()));
-        let incoming_sliced_acks = Arc::new(Mutex::new(Vec::new()));
+        let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let pending_reader_decoded = Arc::new(Mutex::new(Vec::new()));
         let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
-        let reader_ping_state = Arc::new(Mutex::new(ReaderPingState::new()));
+        let reader_ping_state = Arc::new(ReaderPingState::new());
         let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
         let total_recv_shared = Arc::new(AtomicU64::new(0));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
@@ -4780,10 +5003,9 @@ impl Client {
         Self {
             cfg,
             app_queue_alive,
-            send_queues,
+            send_lock,
             pending_h: Vec::new(),
             sending: Vec::new(),
-            incoming_sliced_acks,
             pending_reader_decoded,
             socket: None,
             connected: false,
@@ -4842,7 +5064,6 @@ impl Client {
             reader_transport_state,
             reader_transport_seen_seq: 0,
             recvd_slider: Arc::new(Mutex::new(Slider::new())),
-            slicer: Arc::new(Mutex::new(slicing::SlicingReceiver::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
@@ -5085,10 +5306,24 @@ impl Client {
             state.last_sent_hello = self.last_sent_hello;
             state.waiting_hello_start = self.waiting_hello_start;
             state.last_need_hello_again = self.last_need_hello_again;
+            state.set_active_reader_epoch(self.current_reader_epoch);
             state.bump();
             state.seq
         };
         self.reader_transport_seen_seq = seq;
+    }
+
+    fn publish_reader_active_epoch(&self) {
+        self.reader_protocol
+            .lock()
+            .unwrap()
+            .set_active_reader_epoch(self.current_reader_epoch);
+        self.send_lock
+            .lock()
+            .unwrap()
+            .set_active_reader_epoch(self.current_reader_epoch);
+        self.reader_ping_state
+            .set_active_reader_epoch(self.current_reader_epoch);
     }
 
     fn sync_transport_state_from_reader(&mut self) {
@@ -5205,7 +5440,7 @@ impl Client {
             cmd: cmd as u8,
             encrypted,
             priority,
-            retry_left: if encrypted { max_retries - 1 } else { 0 },
+            retry_left: initial_retry_left(encrypted, max_retries),
             max_retries,
             msg_num: 0,
             last_sent_at: 0,
@@ -5237,7 +5472,7 @@ impl Client {
         if !self.domain_ready && !outgoing_allowed_before_domain_ready(item.cmd, &item.data) {
             return Err(SubscribeError::DomainNotReady);
         }
-        self.send_queues.lock().unwrap().push_send_cmd_int(item);
+        self.send_lock.lock().unwrap().push_send_cmd_int(item);
         Ok(())
     }
 
@@ -5248,9 +5483,10 @@ impl Client {
         let mut sliced = Vec::new();
         let mut high = Vec::new();
         let mut low = Vec::new();
-        self.send_queues
+        self.send_lock
             .lock()
             .unwrap()
+            .send_queues
             .take_into(&mut sliced, &mut high, &mut low);
         (sliced, high, low)
     }
@@ -5824,7 +6060,7 @@ impl Client {
         ClientSender {
             app_queue_alive: Arc::clone(&self.app_queue_alive),
             domain_ready: Arc::clone(&self.domain_ready_flag),
-            send_queues: Arc::clone(&self.send_queues),
+            send_lock: Arc::clone(&self.send_lock),
             subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
             start: self._start,
@@ -7437,16 +7673,13 @@ impl Client {
         let server_addr = self.server_socket_addr();
         let api_pending = Arc::clone(&self.api_pending);
         let pending_candles = Arc::clone(&self.pending_candles);
-        let incoming_sliced_acks = Arc::clone(&self.incoming_sliced_acks);
+        let send_lock = Arc::clone(&self.send_lock);
         let pending_reader_decoded = Arc::clone(&self.pending_reader_decoded);
         let reader_protocol = Arc::clone(&self.reader_protocol);
         let reader_ping_state = Arc::clone(&self.reader_ping_state);
-        self.publish_transport_state_from_client();
-        let reader_transport_state = Arc::clone(&self.reader_transport_state);
         let crypt_msg_counter = Arc::clone(&self.crypt_msg_counter);
         let recvd_slider = Arc::clone(&self.recvd_slider);
         let server_time_delta_handle = Arc::clone(&self.server_time_delta_handle);
-        let slicer = Arc::clone(&self.slicer);
         let total_sent = Arc::clone(&self.total_sent);
         let total_recv_shared = Arc::clone(&self.total_recv_shared);
         let debug_outgoing_blackhole = Arc::clone(&self.debug_outgoing_blackhole);
@@ -7462,6 +7695,9 @@ impl Client {
         // (старый reader ещё крутится но мы его игнорируем).
         self.current_reader_epoch = self.current_reader_epoch.wrapping_add(1);
         let my_epoch = self.current_reader_epoch;
+        self.publish_reader_active_epoch();
+        self.publish_transport_state_from_client();
+        let reader_transport_state = Arc::clone(&self.reader_transport_state);
 
         // C-03: named thread для удобства debug (ps -L / Instruments / DebugView)
         let spawn_result = thread::Builder::new()
@@ -7479,7 +7715,7 @@ impl Client {
                     server_addr,
                     api_pending,
                     pending_candles,
-                    incoming_sliced_acks,
+                    send_lock,
                     pending_reader_decoded,
                     reader_protocol,
                     reader_ping_state,
@@ -7487,7 +7723,7 @@ impl Client {
                     crypt_msg_counter,
                     recvd_slider,
                     server_time_delta_handle,
-                    slicer,
+                    slicer: slicing::SlicingReceiver::new(),
                     total_sent,
                     total_recv_shared,
                     debug_outgoing_blackhole,
@@ -7513,9 +7749,16 @@ impl Client {
         })
     }
 
-    fn push_sliced_ack(queue: &Arc<Mutex<Vec<SlicedAck>>>, payload: &[u8]) {
+    fn push_sliced_ack_from_reader(
+        send_lock: &Arc<Mutex<SendLockState>>,
+        reader_epoch: u32,
+        payload: &[u8],
+    ) {
         if let Some(ack) = Self::parse_sliced_ack_payload(payload) {
-            queue.lock().unwrap().push(ack);
+            send_lock
+                .lock()
+                .unwrap()
+                .push_sliced_ack_from_reader(reader_epoch, ack);
         }
     }
 
@@ -7603,6 +7846,7 @@ impl Client {
 
     fn build_size_ack_payload(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_epoch: u32,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
         let size_test = control::SizeTestData::read(payload)?;
@@ -7613,7 +7857,7 @@ impl Client {
         let series = reader_protocol
             .lock()
             .unwrap()
-            .update_data_size_ack_series_num(size_test.series_num);
+            .update_data_size_ack_series_num_from_reader(reader_epoch, size_test.series_num)?;
         Some(control::SizeTestData::ack_bytes(size, series))
     }
 
@@ -7627,8 +7871,10 @@ impl Client {
 
     fn reader_build_ping_update_and_response(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        reader_ping_state: &Arc<Mutex<ReaderPingState>>,
+        send_lock: &Arc<Mutex<SendLockState>>,
+        reader_ping_state: &Arc<ReaderPingState>,
         server_time_delta_handle: &Arc<std::sync::atomic::AtomicU64>,
+        reader_epoch: u32,
         payload: &[u8],
         raw_now_dt: f64,
         corrected_now_dt: f64,
@@ -7649,33 +7895,44 @@ impl Client {
         const MIN_RATE: i32 = 256 * 1024;
         const MAX_RATE: i32 = 8 * 1024 * 1024;
         let (ping_count, can_send_rate, used_sliced_limit) = {
-            let mut state = reader_ping_state.lock().unwrap();
-            if state.used_sliced_limit {
+            if !reader_ping_state.is_active_reader(reader_epoch) {
+                return None;
+            }
+            let mut can_send_rate = reader_ping_state.can_send_rate.load(Ordering::Relaxed);
+            if reader_ping_state
+                .used_sliced_limit
+                .swap(false, Ordering::Relaxed)
+            {
                 let new_rate = if rs > COMFORTABLE_RS {
-                    let increase = (state.can_send_rate as f64 * 0.03).round() as i32;
-                    state.can_send_rate + increase.max(32 * 1024)
+                    let increase = (can_send_rate as f64 * 0.03).round() as i32;
+                    can_send_rate + increase.max(32 * 1024)
                 } else if rs < CRITICAL_RS {
-                    (state.can_send_rate as f64 * 0.85).round() as i32
+                    (can_send_rate as f64 * 0.85).round() as i32
                 } else {
                     let drift = (rs - COMFORTABLE_RS) / COMFORTABLE_RS;
-                    (state.can_send_rate as f64 * (1.0 + drift * 0.05)).round() as i32
+                    (can_send_rate as f64 * (1.0 + drift * 0.05)).round() as i32
                 };
-                state.can_send_rate = new_rate.clamp(MIN_RATE, MAX_RATE);
-                state.used_sliced_limit = false;
+                can_send_rate = new_rate.clamp(MIN_RATE, MAX_RATE);
+                reader_ping_state
+                    .can_send_rate
+                    .store(can_send_rate, Ordering::Relaxed);
             }
-            state.ping_count = state.ping_count.wrapping_add(1);
+            let ping_count = reader_ping_state
+                .ping_count
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
             (
-                state.ping_count,
-                state.can_send_rate,
-                state.used_sliced_limit,
+                ping_count,
+                can_send_rate,
+                reader_ping_state.used_sliced_limit.load(Ordering::Relaxed),
             )
         };
 
         // DataReadInt(MPC_Ping): write server ACK bitmap into TmpSlider.
-        reader_protocol
+        send_lock
             .lock()
             .unwrap()
-            .apply_ping_ack_bitmap(payload);
+            .apply_ping_ack_bitmap_from_reader(reader_epoch, payload);
 
         // ClientNewData(MPC_Ping): update wall-clock deltas before SendPing.
         let initial_time = ping.initial_time;
@@ -7689,7 +7946,10 @@ impl Client {
         let net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let (ack_start, ack_words) = reader_protocol.lock().unwrap().build_ack_half();
+        let (ack_start, ack_words) = reader_protocol
+            .lock()
+            .unwrap()
+            .build_ack_half_from_reader(reader_epoch)?;
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,
@@ -7795,7 +8055,7 @@ impl Client {
 
     #[cfg(test)]
     fn on_new_sliced_ack(&self, payload: &[u8]) {
-        Self::push_sliced_ack(&self.incoming_sliced_acks, payload);
+        Self::push_sliced_ack_from_reader(&self.send_lock, self.current_reader_epoch, payload);
     }
 
     fn apply_sliced_ack(&mut self, ack: SlicedAck, _now_ms: i64) {
@@ -7869,6 +8129,7 @@ impl Client {
 
     fn decode_data_read_int_payload_shared(
         reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_epoch: u32,
         raw_cmd: u8,
         data: &[u8],
     ) -> Option<(u8, Vec<u8>)> {
@@ -7885,6 +8146,9 @@ impl Client {
             // (cipher = None) Crypted-пакетов и быть не должно — но защищаемся return.
             let decrypted = {
                 let mut protocol = reader_protocol.lock().unwrap();
+                if !protocol.is_active_reader(reader_epoch) {
+                    return None;
+                }
                 let ReaderProtocolState {
                     decode_cipher,
                     slider,
@@ -7983,7 +8247,8 @@ impl Client {
         let mut out = Vec::new();
         let mut push_decoded = |raw_cmd: u8, data: &[u8]| {
             let apply_recv_effects = apply_recv_effects_first && out.is_empty();
-            let decoded = Self::decode_data_read_int_payload_shared(reader_protocol, raw_cmd, data);
+            let decoded =
+                Self::decode_data_read_int_payload_shared(reader_protocol, epoch, raw_cmd, data);
             let (cmd, payload) = decoded
                 .map(|(cmd, payload)| (cmd, Some(payload)))
                 .unwrap_or((raw_cmd, None));
@@ -8418,13 +8683,10 @@ impl Client {
         self.total_recv_shared.store(0, Ordering::Relaxed);
         self.rs = 1.0;
         self.used_sliced_limit = false;
-        self.reader_ping_state
-            .lock()
-            .unwrap()
-            .reset_protocol_session();
+        self.reader_ping_state.reset_protocol_session();
         self.reader_protocol.lock().unwrap().reset();
+        self.send_lock.lock().unwrap().reset_tmp_slider();
         *self.recvd_slider.lock().unwrap() = Slider::new();
-        *self.slicer.lock().unwrap() = slicing::SlicingReceiver::new();
         self.pending_reader_decoded.lock().unwrap().clear();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
@@ -9827,6 +10089,7 @@ mod api_pending_dispatch_tests {
         let mut payloads = Vec::new();
         let (cmd, payload) = Client::decode_data_read_int_payload_shared(
             &client.reader_protocol,
+            client.current_reader_epoch,
             Command::UI as u8 | COMPRESSED_FLAG,
             &compressed_garbage,
         )
@@ -10032,13 +10295,13 @@ mod client_sender_tests {
     fn make_sender() -> (
         ClientSender,
         Arc<Mutex<SubscriptionRegistry>>,
-        Arc<Mutex<SendQueues>>,
+        Arc<Mutex<SendLockState>>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
     ) {
         let subscription_registry = Arc::new(Mutex::new(SubscriptionRegistry::default()));
-        let send_queues = Arc::new(Mutex::new(SendQueues::default()));
+        let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let domain_ready = Arc::new(AtomicBool::new(true));
         let server_update_sent = Arc::new(AtomicBool::new(false));
@@ -10046,25 +10309,26 @@ mod client_sender_tests {
             ClientSender {
                 app_queue_alive: Arc::clone(&app_queue_alive),
                 domain_ready: Arc::clone(&domain_ready),
-                send_queues: Arc::clone(&send_queues),
+                send_lock: Arc::clone(&send_lock),
                 subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
                 start: Instant::now(),
             },
             subscription_registry,
-            send_queues,
+            send_lock,
             app_queue_alive,
             server_update_sent,
             domain_ready,
         )
     }
 
-    fn take_send_items(q: &Arc<Mutex<SendQueues>>) -> Vec<SendItem> {
+    fn take_send_items(q: &Arc<Mutex<SendLockState>>) -> Vec<SendItem> {
         let mut sliced = Vec::new();
         let mut high = Vec::new();
         let mut low = Vec::new();
         q.lock()
             .unwrap()
+            .send_queues
             .take_into(&mut sliced, &mut high, &mut low);
         sliced.extend(high);
         sliced.extend(low);
@@ -10333,6 +10597,30 @@ mod client_sender_tests {
     }
 
     #[test]
+    fn sender_retry_left_clamps_zero_like_delphi() {
+        let (sender, _, send_q, _, _, _) = make_sender();
+
+        sender
+            .try_send_cmd_keyed(
+                vec![1, 2, 3, 4],
+                Command::Order,
+                SendPriority::High,
+                true,
+                0,
+                UniqueKey::order_move(42),
+            )
+            .expect("send command should enqueue");
+
+        let sent = take_send_items(&send_q);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].max_retries, 0);
+        assert_eq!(
+            sent[0].retry_left, 0,
+            "Delphi clamps RetryLeft with Max(0, MaxRetryCount - 1)"
+        );
+    }
+
+    #[test]
     fn sender_try_send_api_request_uses_sliced_api_defaults() {
         let (sender, _, send_q, _, _, _) = make_sender();
         let payload = crate::commands::engine_request::base_check();
@@ -10542,6 +10830,28 @@ mod client_subscribe_integration_tests {
         let mut client = Client::new(dummy_cfg());
         client.set_domain_ready(true);
         client
+    }
+
+    #[test]
+    fn client_retry_left_clamps_zero_like_delphi() {
+        let client = ready_client();
+
+        client.send_cmd_keyed(
+            vec![1, 2, 3, 4],
+            Command::UI,
+            SendPriority::High,
+            true,
+            0,
+            UniqueKey::base_ui_settings_slot(),
+        );
+
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        assert_eq!(high[0].max_retries, 0);
+        assert_eq!(
+            high[0].retry_left, 0,
+            "Delphi clamps RetryLeft with Max(0, MaxRetryCount - 1)"
+        );
     }
 
     fn command_uid(payload: &[u8]) -> Option<u64> {
@@ -11594,8 +11904,10 @@ mod pmtu_tests {
         let recv_bytes = payload.len() as u64;
         let (ping_update, _response) = Client::reader_build_ping_update_and_response(
             &client.reader_protocol,
+            &client.send_lock,
             &client.reader_ping_state,
             &client.server_time_delta_handle,
+            client.current_reader_epoch,
             payload,
             raw_now_dt,
             corrected_now_dt,
@@ -11665,14 +11977,19 @@ mod pmtu_tests {
         let payload = ping_payload_with_pmtu(508);
 
         {
-            let mut state = client.reader_ping_state.lock().unwrap();
-            state.can_send_rate = 2 * 1024 * 1024;
-            state.used_sliced_limit = false;
+            client
+                .reader_ping_state
+                .set_can_send_rate_for_test(2 * 1024 * 1024);
+            client
+                .reader_ping_state
+                .set_used_sliced_limit_for_test(false);
         }
         let (update, _) = Client::reader_build_ping_update_and_response(
             &client.reader_protocol,
+            &client.send_lock,
             &client.reader_ping_state,
             &client.server_time_delta_handle,
+            client.current_reader_epoch,
             &payload,
             0.0,
             0.0,
@@ -11687,14 +12004,19 @@ mod pmtu_tests {
         );
 
         {
-            let mut state = client.reader_ping_state.lock().unwrap();
-            state.can_send_rate = 2 * 1024 * 1024;
-            state.used_sliced_limit = true;
+            client
+                .reader_ping_state
+                .set_can_send_rate_for_test(2 * 1024 * 1024);
+            client
+                .reader_ping_state
+                .set_used_sliced_limit_for_test(true);
         }
         let (update, _) = Client::reader_build_ping_update_and_response(
             &client.reader_protocol,
+            &client.send_lock,
             &client.reader_ping_state,
             &client.server_time_delta_handle,
+            client.current_reader_epoch,
             &payload,
             0.0,
             0.0,
@@ -11714,14 +12036,19 @@ mod pmtu_tests {
         let mut congested = payload;
         congested[41] = 0;
         {
-            let mut state = client.reader_ping_state.lock().unwrap();
-            state.can_send_rate = 1_000_000;
-            state.used_sliced_limit = true;
+            client
+                .reader_ping_state
+                .set_can_send_rate_for_test(1_000_000);
+            client
+                .reader_ping_state
+                .set_used_sliced_limit_for_test(true);
         }
         let (update, _) = Client::reader_build_ping_update_and_response(
             &client.reader_protocol,
+            &client.send_lock,
             &client.reader_ping_state,
             &client.server_time_delta_handle,
+            client.current_reader_epoch,
             &congested,
             0.0,
             0.0,
@@ -11792,28 +12119,14 @@ mod pmtu_tests {
             1,
             "Delphi DataReadInt(MPC_Ping) writes TmpSlider only; PendingH is writer work"
         );
-        assert!(
-            client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .tmp_slider
-                .has_new_data
-        );
+        assert!(client.send_lock.lock().unwrap().tmp_slider.has_new_data);
         assert!(!client.recvd_slider.lock().unwrap().has_new_data);
 
         WriterRuntime {
             client: &mut client,
         }
         .copy_recvd_data();
-        assert!(
-            !client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .tmp_slider
-                .has_new_data
-        );
+        assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
         assert!(client.recvd_slider.lock().unwrap().has_new_data);
 
         WriterRuntime {
@@ -11831,7 +12144,7 @@ mod pmtu_tests {
         let mut client = Client::new(dummy_cfg());
         let payload = ping_payload_with_ack(40, &[1 << 2]);
         client
-            .reader_protocol
+            .send_lock
             .lock()
             .unwrap()
             .apply_ping_ack_bitmap(&payload);
@@ -11839,14 +12152,7 @@ mod pmtu_tests {
             client: &mut client,
         }
         .copy_recvd_data();
-        assert!(
-            !client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .tmp_slider
-                .has_new_data
-        );
+        assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
         assert!(client.recvd_slider.lock().unwrap().has_new_data);
 
         let delivered = Arc::new(Mutex::new(Vec::new()));
@@ -11880,12 +12186,7 @@ mod pmtu_tests {
         let delivered = Arc::try_unwrap(delivered).unwrap().into_inner().unwrap();
 
         assert!(
-            !client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .tmp_slider
-                .has_new_data,
+            !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
             "main Ping branch must not write TmpSlider again after reader DataReadInt core"
         );
         assert_eq!(delivered.len(), 1);
@@ -12543,7 +12844,7 @@ mod pmtu_tests {
         client.sending.push(sent_sliced_with_lengths(&[10], 100));
         client.pending_h.push(pending_h_item(42));
         client
-            .reader_protocol
+            .send_lock
             .lock()
             .unwrap()
             .apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
@@ -12575,13 +12876,56 @@ mod pmtu_tests {
             "GetCopyAcks must clear reader-to-writer ACK queue before CheckSeningData"
         );
         assert!(
-            !client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .tmp_slider
-                .has_new_data,
+            !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
             "CopyRecvdData must clear TmpSlider after snapshot"
+        );
+    }
+
+    #[test]
+    fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi() {
+        let mut client = Client::new(dummy_cfg());
+        let send_item = SendItem {
+            data: vec![0x44],
+            cmd: Command::UI as u8,
+            encrypted: false,
+            priority: SendPriority::Sliced,
+            retry_left: 0,
+            max_retries: 6,
+            msg_num: 0,
+            last_sent_at: 0,
+            u_key: UniqueKey::base_ui_settings_slot(),
+        };
+        let mut ack = [0u8; 34];
+        ack[0] = 1;
+        ack[32..34].copy_from_slice(&9u16.to_le_bytes());
+
+        {
+            let mut send_lock = client.send_lock.lock().unwrap();
+            send_lock.push_send_cmd_int(send_item);
+            send_lock.push_sliced_ack(Client::parse_sliced_ack_payload(&ack).unwrap());
+            send_lock.apply_ping_ack_bitmap(&ping_payload_with_ack(40, &[1 << 2]));
+        }
+
+        let mut sliced = Vec::new();
+        let mut high = Vec::new();
+        let mut low = Vec::new();
+        let acks = WriterRuntime {
+            client: &mut client,
+        }
+        .get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low);
+
+        assert_eq!(sliced.len(), 1);
+        assert!(high.is_empty());
+        assert!(low.is_empty());
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].datagram_num, 9);
+        assert!(client.recvd_slider.lock().unwrap().has_new_data);
+        let send_lock = client.send_lock.lock().unwrap();
+        assert!(send_lock.send_queues.is_empty());
+        assert!(send_lock.incoming_sliced_acks.is_empty());
+        assert!(
+            !send_lock.tmp_slider.has_new_data,
+            "Delphi FClient.CopyRecvdData clears TmpSlider in the same SendLock snapshot"
         );
     }
 }
@@ -13849,34 +14193,13 @@ mod event_loop_fairness_tests {
     fn reader_decoded_sliced_payload_bypasses_recv_event_backlog() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
-        let datagram_num = 77;
-        client.slicer.lock().unwrap().receiving.insert(
-            datagram_num,
-            crate::protocol::slicing::SlicedData::new(datagram_num, 0),
-        );
-        client
-            .slicer
-            .lock()
-            .unwrap()
-            .receiving
-            .remove(&datagram_num);
 
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let delivered_cb = Arc::clone(&delivered);
-        let slicer_for_cb = Arc::clone(&client.slicer);
         let mut mode = RunMode::Callback {
             on_data: Box::new(move |cmd, payload| {
                 assert_eq!(cmd, Command::UI);
                 assert_eq!(payload, &[0xAA, 0xBB]);
-                assert!(
-                    slicer_for_cb
-                        .lock()
-                        .unwrap()
-                        .receiving
-                        .get(&datagram_num)
-                        .is_none(),
-                    "reader has already run DataReadInt core and removed Receiving before queued user delivery"
-                );
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
@@ -13908,15 +14231,6 @@ mod event_loop_fairness_tests {
         .drain_reader_decoded(123, &mut mode);
 
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
-        assert!(
-            !client
-                .slicer
-                .lock()
-                .unwrap()
-                .receiving
-                .contains_key(&datagram_num),
-            "Receiving entry must be removed after DataReadInt"
-        );
         assert_eq!(client.avg_dup_count, 25.0);
         assert_eq!(client.total_recv, 321);
         assert_eq!(client.last_online, 123);
@@ -14220,6 +14534,182 @@ mod service_cmd_tests {
     }
 
     #[test]
+    fn old_reader_output_and_transport_state_are_discarded_after_new_reader_epoch() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
+        client.testing_set_domain_ready(true);
+
+        client.current_reader_epoch = 1;
+        client.publish_transport_state_from_client();
+        let old_epoch = client.current_reader_epoch;
+
+        // Simulate `spawn_reader`: the writer moves to a new reader epoch before
+        // stale reader output is drained. Delphi has already stopped the old
+        // reader synchronously at this point; Rust must make the async old reader
+        // machine effect empty for writer-owned state.
+        client.current_reader_epoch = client.current_reader_epoch.wrapping_add(1);
+        client.publish_transport_state_from_client();
+        let new_epoch = client.current_reader_epoch;
+
+        let stale_update = Client::fine_handshake_update();
+        {
+            let mut state = client.reader_transport_state.lock().unwrap();
+            state.apply_recv_side_effects(old_epoch, 777, 111);
+            state.apply_handshake_update(old_epoch, &stale_update, 111);
+        }
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xDE]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 777,
+                timestamp_ms: 111,
+                epoch: old_epoch,
+                apply_recv_effects: true,
+                sliced_stats: Some(ReaderSlicedStats {
+                    dup_count: 9,
+                    blocks_count: 10,
+                }),
+                ping_update: None,
+                handshake_update: Some(stale_update),
+            });
+
+        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let delivered_cb = Arc::clone(&delivered);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(move |_, _| {
+                delivered_cb.fetch_add(1, Ordering::Relaxed);
+            }),
+        };
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(111, &mut mode);
+
+        assert_eq!(delivered.load(Ordering::Relaxed), 0);
+        assert_eq!(client.total_recv, 0);
+        assert_eq!(client.last_online, 0);
+        assert_eq!(client.avg_dup_count, 0.0);
+        assert_eq!(client.auth_status, AuthStatus::Base);
+        assert!(!client.authorized);
+
+        {
+            let mut state = client.reader_transport_state.lock().unwrap();
+            state.apply_recv_side_effects(new_epoch, 5, 222);
+        }
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 5,
+                timestamp_ms: 222,
+                epoch: new_epoch,
+                apply_recv_effects: false,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .drain_reader_decoded(222, &mut mode);
+
+        assert_eq!(delivered.load(Ordering::Relaxed), 1);
+        assert_eq!(client.total_recv, 5);
+        assert_eq!(client.last_online, 222);
+    }
+
+    #[test]
+    fn stale_reader_epoch_cannot_mutate_reader_shared_protocol_state() {
+        let server_addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        let mut client = Client::new(dummy_cfg_for_server(server_addr));
+        client.current_reader_epoch = 1;
+        client.publish_reader_active_epoch();
+        let old_epoch = client.current_reader_epoch;
+        client.current_reader_epoch = client.current_reader_epoch.wrapping_add(1);
+        client.publish_reader_active_epoch();
+        let new_epoch = client.current_reader_epoch;
+
+        let size = 64u16;
+        let packet_num = 9u16;
+        let series = 0xBEEFu16;
+        let mut size_test = Vec::new();
+        size_test.extend_from_slice(&size.to_le_bytes());
+        size_test.extend_from_slice(&packet_num.to_le_bytes());
+        size_test.extend_from_slice(&series.to_le_bytes());
+        assert!(
+            Client::build_size_ack_payload(&client.reader_protocol, old_epoch, &size_test)
+                .is_none(),
+            "an async old reader must not update DataSizeAck or send SizeAck after a new reader epoch"
+        );
+        assert_eq!(
+            client
+                .reader_protocol
+                .lock()
+                .unwrap()
+                .data_size_ack_series_num,
+            0
+        );
+
+        let mut ack = [0u8; 34];
+        ack[0] = 1;
+        ack[32..34].copy_from_slice(&7u16.to_le_bytes());
+        Client::push_sliced_ack_from_reader(&client.send_lock, old_epoch, &ack);
+        assert!(
+            client
+                .send_lock
+                .lock()
+                .unwrap()
+                .incoming_sliced_acks
+                .is_empty(),
+            "old reader SlicedACK must not enter the writer SendLock queue"
+        );
+
+        let mut ping_payload = vec![0u8; 58];
+        ping_payload[20..22].copy_from_slice(&508u16.to_le_bytes());
+        ping_payload[41] = 255;
+        ping_payload[42..50].copy_from_slice(&40u64.to_le_bytes());
+        ping_payload[50..58].copy_from_slice(&(1u64 << 2).to_le_bytes());
+        assert!(
+            Client::reader_build_ping_update_and_response(
+                &client.reader_protocol,
+                &client.send_lock,
+                &client.reader_ping_state,
+                &client.server_time_delta_handle,
+                old_epoch,
+                &ping_payload,
+                0.0,
+                0.0,
+                0,
+                ping_payload.len() as u64,
+            )
+            .is_none(),
+            "old reader Ping must not mutate ping counters, TmpSlider, or MPSlider ACK state"
+        );
+        assert_eq!(client.reader_ping_state.ping_count(), 0);
+        assert!(
+            !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
+            "old reader Ping ACK bitmap must not touch TmpSlider"
+        );
+
+        assert!(
+            Client::build_size_ack_payload(&client.reader_protocol, new_epoch, &size_test)
+                .is_some(),
+            "the active reader epoch must still perform the same protocol work"
+        );
+    }
+
+    #[test]
     fn reader_sends_sliced_ack_without_main_loop_tick() {
         let _err_emu_guard = err_emu_test_guard();
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -14269,10 +14759,6 @@ mod service_cmd_tests {
         let decoded = client.pending_reader_decoded.lock().unwrap().pop().unwrap();
         assert_eq!(decoded.cmd, Command::API as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&[0xDE, 0xAD][..]));
-        assert!(
-            !client.slicer.lock().unwrap().receiving.contains_key(&42),
-            "reader must remove Receiving after DataReadInt core, before main-loop delivery"
-        );
         let deadline = Instant::now() + Duration::from_secs(1);
         while client.total_sent() == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
@@ -14307,10 +14793,23 @@ mod service_cmd_tests {
         server_sock.send_to(&packet, client_addr).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        while client.incoming_sliced_acks.lock().unwrap().is_empty() && Instant::now() < deadline {
+        while client
+            .send_lock
+            .lock()
+            .unwrap()
+            .incoming_sliced_acks
+            .is_empty()
+            && Instant::now() < deadline
+        {
             thread::sleep(Duration::from_millis(1));
         }
-        let ack = client.incoming_sliced_acks.lock().unwrap().pop().unwrap();
+        let ack = client
+            .send_lock
+            .lock()
+            .unwrap()
+            .incoming_sliced_acks
+            .pop()
+            .unwrap();
         wait_reader_total_recv(&client, packet.len() as u64);
         assert_no_reader_decoded(
             &client,
@@ -14364,24 +14863,37 @@ mod service_cmd_tests {
             &client,
             "partial Sliced must only ACK and stay in Receiving; no DataReadInt before completion",
         );
-        client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::SlicedACK as u8);
         assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
         assert_eq!(ack_payload[0] & 0x01, 0x01);
         assert_eq!(&ack_payload[32..34], &datagram_num.to_le_bytes());
-        assert!(
-            client
-                .slicer
-                .lock()
-                .unwrap()
-                .receiving
-                .contains_key(&datagram_num),
-            "partial Sliced datagram must stay in Receiving until completed or cleaned"
+
+        let slice_payload_2 = vec![
+            datagram_num as u8,
+            (datagram_num >> 8) as u8,
+            0x01, // BlockNum = 1
+            0x01, // MaxBlockNum = 1
+            0xBE,
+            0xEF,
+        ];
+        let packet2 = pack_server_packet(&client.cfg.mac_key, Command::Sliced, &slice_payload_2);
+        server_sock.send_to(&packet2, client_addr).unwrap();
+        let (hdr2, ack_payload2) = recv_client_packet(&server_sock, &client.cfg.mac_key);
+        let decoded = pop_reader_decoded(&client);
+        client.reader_shutdown.store(true, Ordering::Relaxed);
+
+        assert_eq!(hdr2.cmd, Command::SlicedACK as u8);
+        assert_eq!(ack_payload2[0] & 0x03, 0x03);
+        assert_eq!(&ack_payload2[32..34], &datagram_num.to_le_bytes());
+        assert_eq!(decoded.cmd, Command::API as u8);
+        assert_eq!(
+            decoded.payload.as_deref(),
+            Some(&[0xCA, 0xFE, 0xBE, 0xEF][..])
         );
         assert_eq!(
             reader_transport_snapshot(&client).total_recv,
-            packet.len() as u64
+            (packet.len() + packet2.len()) as u64
         );
     }
 
