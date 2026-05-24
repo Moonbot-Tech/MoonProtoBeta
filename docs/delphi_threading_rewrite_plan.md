@@ -984,6 +984,35 @@ Checks:
 - `cargo test --release --test fire_test -- --ignored --nocapture`: passed and
   produced the CPU numbers above.
 
+### 2026-05-24 - Phase D0 remove scoped writer thread
+
+Done:
+
+- `run`, `run_with_dispatcher`, `run_with_dispatcher_state`, and internal
+  queued runs no longer spawn an extra scoped writer thread.
+- The caller thread that entered `run*` now owns `ProtocolCore::run` for that
+  call. User callbacks and lifecycle callbacks still run through their app
+  queues, so blocking UI/user work does not enter protocol ACK/retry/send
+  progress.
+- The UDP reader thread still exists after this step. This is not the final
+  single-owner runtime; it removes one Rust-only ceremony layer before moving
+  recv/process into the same owner.
+
+Reason:
+
+- Public `run*` already blocks the caller for the requested duration. Spawning a
+  second writer thread inside that blocking call added no Delphi machine effect;
+  it only added a Rust-only thread boundary. Removing it makes the live runtime
+  closer to the planned single-owner `ProtocolCore + AppQueue` shape.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 604 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `cargo test --release --test fire_test -- --ignored --nocapture`: passed.
+
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 
 Done:

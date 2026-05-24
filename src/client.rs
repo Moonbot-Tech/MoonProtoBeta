@@ -2870,7 +2870,7 @@ pub type EventWithStateFn =
 /// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
 ///   `EventDispatcher` (используется `Client::run_with_dispatcher`).
 ///
-/// Этот enum позволяет одному delivery pipeline (`WriterRuntime` drain +
+/// Этот enum позволяет одному delivery pipeline (`ProtocolCore` drain +
 /// `client_new_data_decoded`) обслуживать оба сценария без
 /// `Arc<Mutex>`-обходов borrow checker.
 pub(crate) enum DispatchSink<'a> {
@@ -2977,6 +2977,7 @@ struct ProtocolCore<'client> {
     client: &'client mut Client,
 }
 
+#[cfg(test)]
 type WriterRuntime<'client> = ProtocolCore<'client>;
 
 impl ProtocolCore<'_> {
@@ -7557,13 +7558,10 @@ impl Client {
                     on_data(cmd, &payload);
                 }
             });
-            let writer_handle = scope.spawn(|| {
+            {
                 let mut mode = RunMode::CallbackQueue { app_tx };
                 ProtocolCore { client: self }.run(duration, &mut mode);
-            });
-            writer_handle
-                .join()
-                .expect("moonproto writer thread panicked");
+            }
             *lifecycle_app_tx.lock().unwrap() = None;
             app_handle
                 .join()
@@ -7655,7 +7653,7 @@ impl Client {
                     on_event(&event);
                 }
             });
-            let writer_handle = scope.spawn(|| {
+            {
                 let mut mode = RunMode::Dispatcher {
                     dispatcher,
                     on_event: DispatcherEventFn::QueueToCallback(app_tx),
@@ -7664,10 +7662,7 @@ impl Client {
                     active_actions_buf: Vec::with_capacity(4),
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
-            });
-            writer_handle
-                .join()
-                .expect("moonproto writer thread panicked");
+            }
             *lifecycle_app_tx.lock().unwrap() = None;
             app_handle
                 .join()
@@ -7723,7 +7718,7 @@ impl Client {
                     on_event(&event, snapshot.as_ref());
                 }
             });
-            let writer_handle = scope.spawn(|| {
+            {
                 let mut mode = RunMode::Dispatcher {
                     dispatcher,
                     on_event: DispatcherEventFn::QueueToStateCallback(app_tx),
@@ -7732,10 +7727,7 @@ impl Client {
                     active_actions_buf: Vec::with_capacity(4),
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
-            });
-            writer_handle
-                .join()
-                .expect("moonproto writer thread panicked");
+            }
             *lifecycle_app_tx.lock().unwrap() = None;
             app_handle
                 .join()
@@ -7844,10 +7836,7 @@ impl Client {
                     cb
                 })
             });
-            let handle = scope.spawn(|| {
-                WriterRuntime { client: self }.run(duration, &mut mode);
-            });
-            handle.join().expect("moonproto writer thread panicked");
+            ProtocolCore { client: self }.run(duration, &mut mode);
             *lifecycle_app_tx.lock().unwrap() = None;
             if let Some(handle) = lifecycle_handle {
                 restored_lifecycle_cb = Some(
@@ -14442,7 +14431,7 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
-    fn run_inner_executes_writer_runtime_on_dedicated_thread() {
+    fn raw_run_delivers_callback_on_app_thread() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
         client.authorized = true;

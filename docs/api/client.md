@@ -79,9 +79,9 @@ transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
 `run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
-for the requested duration, but the MoonProto writer/orchestrator loop runs in a
-dedicated scoped writer thread while the call is active. The UDP reader is a
-separate reader thread. `run` raw callbacks and ordinary
+for the requested duration and run the MoonProto writer/orchestrator loop on
+that caller thread. The UDP reader is still a separate reader thread.
+`run` raw callbacks and ordinary
 `run_with_dispatcher` event callbacks are delivered through the application
 callback queue after protocol/domain state is updated, so slow UI work does not
 block ACK/retry/send progress. The call returns after the queued callbacks from
