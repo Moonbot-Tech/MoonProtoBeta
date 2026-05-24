@@ -271,12 +271,21 @@ exchange_type_flags::PREDICT;
 ```rust
 let auth = client.request_auth_check(&mut dispatcher, Duration::from_secs(12))?;
 println!("account={}", auth.account_id);
+assert_eq!(client.auth_info().map(|a| a.account_id.as_str()), Some(auth.account_id.as_str()));
 ```
 
 Mandatory fields are required. The optional Hyperliquid DEX tail is parsed like
 the Delphi client: if the declared DEX count is larger than the complete records
 present in the payload, complete records are kept and the truncated tail does not
 reject the whole AuthCheck response.
+
+`request_auth_check` stores the parsed response in `client.auth_info()`.
+`run_init_sequence` does the same for its mandatory AuthCheck step and also
+copies it to `InitResult::auth_info`. A successful AuthCheck response with a
+malformed mandatory payload is still treated as AuthCheck success during init,
+but no auth metadata is stored; this mirrors Delphi, where
+`TMoonProtoEngine.AuthCheck` sets `Result := resp.Success` before the parse block
+and only logs `AuthCheck parse` exceptions.
 
 ## Low-Level Builders
 

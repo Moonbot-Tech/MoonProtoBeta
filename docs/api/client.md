@@ -235,8 +235,8 @@ println!("orderbooks subscribed: {}", result.orderbooks_subscribed);
 ```
 
 The helper keeps the client loop running while it waits for the connection and
-for each Engine API response. It also fills `client.server_info()` after
-`BaseCheck`.
+for each Engine API response. It fills `client.server_info()` after `BaseCheck`
+and `client.auth_info()` after a successful `AuthCheck`.
 
 Init is a one-time step for a `Client` session. After it succeeds, do not call
 `run_init_sequence` again just because the UDP transport reconnected; the library
@@ -250,6 +250,15 @@ BaseCheck/AuthCheck are not delayed by early background refresh traffic.
 Critical BaseCheck/AuthCheck waits use the same default as Delphi
 `TMoonProtoEngine.FTimeout`: 12 seconds per Engine API request. Mandatory init
 step timeouts/errors fail init and leave the domain gate closed.
+
+`AuthCheck` follows Delphi's result ordering: a successful server response opens
+the next init step even if the optional account payload cannot be parsed. When
+the payload is valid, `InitResult::auth_info` and `client.auth_info()` contain
+the parsed account metadata (`account_id`, `btc_address`, sub-account flag,
+transfer payload limit, and Hyperliquid DEX tail). When a successful AuthCheck
+payload is malformed, `auth_check_ok` remains true, `auth_info` stays `None`,
+and `InitResult::errors` receives a non-fatal parse note, matching Delphi's
+`AuthCheck parse` log path.
 
 `BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
 request. If `client.mark_server_update_sent()` was called before init, the next

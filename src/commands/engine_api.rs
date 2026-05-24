@@ -542,7 +542,7 @@ pub struct DexInfo {
 /// ```
 ///
 /// Source: `MoonProtoEngine.pas:605-639`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AuthCheckResponse {
     /// ID аккаунта на Binance (если используется Binance API; иначе 0).
     pub binance_account_id: i64,

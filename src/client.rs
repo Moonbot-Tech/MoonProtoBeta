@@ -4350,6 +4350,14 @@ pub struct Client {
     /// `Vec<Client>` и различает их по `client.server_info().bot_id`.
     server_info: crate::commands::engine_api::ServerInfo,
 
+    /// Per-account data received from Delphi `TMoonProtoEngine.AuthCheck`.
+    ///
+    /// Delphi stores `BinanceAccountID`, `BTCAddress`, `AccountID`,
+    /// `RecvdMaxPayload`, and Hyperliquid DEX tail in local engine/cfg state
+    /// during init. Rust keeps the parsed payload here so active-lib state and
+    /// user code can observe the same successful AuthCheck result.
+    auth_info: Option<crate::commands::engine_api::AuthCheckResponse>,
+
     /// Delphi `InitDone`: transport auth уже завершён, но domain-пуши
     /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) можно применять
     /// только после полного init bootstrap. До этого `dispatch_into_active`
@@ -4529,6 +4537,7 @@ impl Client {
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
+            auth_info: None,
             domain_ready: false,
             last_update_markets_ms: i64::MIN / 2,
             last_check_tags_ms: i64::MIN / 2,
@@ -4549,6 +4558,15 @@ impl Client {
     /// См. [`crate::commands::engine_api::ServerInfo`].
     pub fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
         &self.server_info
+    }
+
+    /// Per-account metadata from the last successful `emk_AuthCheck`.
+    ///
+    /// Filled automatically by [`run_init_sequence`] and [`Self::request_auth_check`].
+    /// Returns `None` before a successful AuthCheck, or if a successful response
+    /// had a malformed mandatory AuthCheck payload.
+    pub fn auth_info(&self) -> Option<&crate::commands::engine_api::AuthCheckResponse> {
+        self.auth_info.as_ref()
     }
 
     /// Snapshot client-side [`set_err_emu`] counters for live tests.
@@ -4594,6 +4612,11 @@ impl Client {
     /// (минуя `run_init_sequence`) и хочет вручную распарсить ответ `api_base_check`.
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
         self.server_info = info;
+    }
+
+    /// Set per-account AuthCheck metadata manually for custom init flows.
+    pub fn set_auth_info(&mut self, info: crate::commands::engine_api::AuthCheckResponse) {
+        self.auth_info = Some(info);
     }
 
     /// Build a trade command context from the active server route.
@@ -5073,12 +5096,14 @@ impl Client {
         dispatcher: &mut crate::events::EventDispatcher,
         timeout: Duration,
     ) -> Result<AuthCheckResponse, EngineRequestError> {
-        self.request_engine_parsed(
+        let auth = self.request_engine_parsed(
             dispatcher,
             &crate::commands::engine_request::auth_check(),
             timeout,
             parse_auth_check_response,
-        )
+        )?;
+        self.set_auth_info(auth.clone());
+        Ok(auth)
     }
 
     /// Run `emk_GetBalance` and parse the returned quantity.
@@ -8237,6 +8262,11 @@ pub struct InitResult {
     pub base_check_ok: bool,
     /// `AuthCheck` succeeded.
     pub auth_check_ok: bool,
+    /// Parsed per-account metadata from the successful `AuthCheck`, when its
+    /// payload could be parsed. Delphi logs AuthCheck parse failures but keeps
+    /// the success result; Rust mirrors that by leaving this as `None` while
+    /// keeping `auth_check_ok = true`.
+    pub auth_info: Option<AuthCheckResponse>,
     /// Payload size in bytes for the `GetMarketsList` response. The actual
     /// market count is parsed into `EventDispatcher::markets()`.
     pub markets_response_bytes: usize,
@@ -8550,6 +8580,18 @@ fn run_auth_check_once(
     let req = crate::commands::engine_request::auth_check();
     match client.request_engine_response(dispatcher, &req, timeout) {
         Ok(resp) if resp.success => {
+            let len = resp.data.len();
+            match parse_auth_check_response(&resp.data) {
+                Some(auth) => {
+                    client.set_auth_info(auth.clone());
+                    result.auth_info = Some(auth);
+                }
+                None => {
+                    result
+                        .errors
+                        .push(format!("AuthCheck parse: malformed payload ({len} bytes)"));
+                }
+            }
             result.auth_check_ok = true;
             Ok(CriticalInitStatus::Ok)
         }
@@ -13030,7 +13072,7 @@ mod refresh_tick_tests {
 #[cfg(test)]
 mod server_info_tests {
     use super::*;
-    use crate::commands::engine_api::ServerInfo;
+    use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -13053,6 +13095,7 @@ mod server_info_tests {
         let client = Client::new(dummy_cfg());
         assert_eq!(client.server_info(), &ServerInfo::default());
         assert!(!client.server_info().has_identity());
+        assert!(client.auth_info().is_none());
     }
 
     #[test]
@@ -13134,6 +13177,26 @@ mod server_info_tests {
         assert_eq!(ctx.uid, 0x0102_0304_0506_0708);
         assert_eq!(ctx.currency, 17);
         assert_eq!(ctx.platform, 9);
+    }
+
+    #[test]
+    fn set_auth_info_updates_storage_and_is_retrievable_via_getter() {
+        let mut client = Client::new(dummy_cfg());
+        let auth = AuthCheckResponse {
+            binance_account_id: 123,
+            btc_address: "btc".to_string(),
+            spot_ref: 7,
+            is_sub_account: true,
+            account_id: "acc".to_string(),
+            recvd_max_payload: Some(4096),
+            known_dexes: Vec::new(),
+            hl_dex_market: Some(1),
+            hl_spot_market: Some(0),
+        };
+
+        client.set_auth_info(auth.clone());
+
+        assert_eq!(client.auth_info(), Some(&auth));
     }
 }
 

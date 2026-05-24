@@ -4957,3 +4957,28 @@ Done:
 Verification:
 
 - Added parser regression coverage for every malformed-tail case.
+
+### 2026-05-24 - Phase 1 partial: AuthCheck payload is retained
+
+Done:
+
+- Fixed an active-lib mismatch where init treated `AuthCheck` as only a success
+  boolean and discarded the per-account payload.
+- Delphi `TMoonProtoEngine.AuthCheck` stores `BinanceAccountID`, `BTCAddress`,
+  `AccountID`, sub-account state, `RecvdMaxPayload`, and the Hyperliquid DEX
+  tail in local engine/cfg state during init.
+- Rust now stores the parsed `AuthCheckResponse` in `Client::auth_info()` and
+  exposes the same value through `InitResult::auth_info`.
+- `Client::request_auth_check` also stores the parsed value for custom init
+  flows.
+- Init keeps Delphi result ordering: `resp.Success` makes AuthCheck successful;
+  if the mandatory auth payload is malformed, Rust records a non-fatal parse
+  note and leaves `auth_info = None` instead of failing init.
+
+Verification:
+
+- Added storage/getter unit coverage.
+- API docs updated for the new observable AuthCheck state.
+- Quick prod FireTest passed: `FIRETEST_QUICK_PASS after 24.48s`,
+  `ParseFailed=0`, successful `AuthCheck` payload observed (`data_len=220`) and
+  init continued through markets/indexes/update/streams.

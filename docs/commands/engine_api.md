@@ -83,7 +83,10 @@ common response payloads:
 
 `AuthCheckResponse.known_dexes` is a Delphi soft-read tail: the parser reads the
 declared DEX count, keeps every complete 18-byte `THLDexInfo` record, and does
-not drop the whole response when the optional DEX tail is truncated.
+not drop the whole response when the optional DEX tail is truncated. High-level
+`Client::request_auth_check` and `run_init_sequence` store the parsed response
+in `Client::auth_info`, matching Delphi's local engine/cfg AuthCheck side
+effects.
 
 ### BaseCheck Response - Multi-Server Identity
 
