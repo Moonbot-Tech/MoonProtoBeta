@@ -51,10 +51,13 @@ pub struct ProtocolMetricsSnapshot {
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
     pub send_phase_max_ns: u64,
-    /// Current length of the reader-decoded queue. In the target architecture
-    /// this becomes the AppQueue metric.
+    /// Current length of the internal receive-decoded bridge.
+    ///
+    /// Production receive delivers decoded payloads directly; this is normally
+    /// zero and remains visible for internal/unit-injected bridge cases while
+    /// that scaffolding is removed.
     pub app_queue_len: usize,
-    /// Maximum observed reader-decoded queue length.
+    /// Maximum observed internal receive-decoded bridge length.
     pub app_queue_max_len: u64,
     /// Current public event queue length when a dispatcher-backed snapshot was
     /// requested; otherwise zero.

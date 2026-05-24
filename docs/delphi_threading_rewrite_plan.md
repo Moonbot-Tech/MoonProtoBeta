@@ -141,61 +141,66 @@ Delphi model по факту:
 - `src/client.rs` - accepted UDP packets and user sends are not represented as
   event variants.
 - `src/client.rs` - `SendLockState` holds `DataToSend*`,
-  `incoming_sliced_acks`, and `TmpSlider`; `pending_reader_decoded` is the
-  remaining Rust ownership bridge for decoded user/active-library delivery.
-- `src/client.rs` - `WriterRuntime::run` polls `pending_reader_decoded`, then calls
-  `copy_send_ack_and_check_sening_data`, the Rust block matching Delphi
-  `Execute -> GetCopySendList -> GetCopyAcks -> CopyRecvdData ->
-  CheckSeningData`.
-- `src/client.rs` - `spawn_reader` handles service commands, Sliced/SlicedACK,
-  handshake, Ping, SizeTest/ProbeMTU, and data `DataReadInt` core in reader.
-- `src/client.rs` - production reader data path is now named like Delphi:
-  `ReaderRuntime::data_read` handles `MPC_Grouped` and calls
-  `ReaderRuntime::data_read_int`; completed Sliced datagrams call
-  `data_read_int` before `Receiving` removal.
-- `src/client.rs` - reader immediate replies use
-  `ReaderRuntime::send_command`, matching the Delphi reader-side calls to
-  `SendCommand` from SlicedACK/Ping/PMTU/ImFriend branches.
+  `incoming_sliced_acks`, and `TmpSlider`; production receive now calls
+  `client_new_data` directly after decode. `pending_reader_decoded` remains only
+  for direct unit/internal injection while the last bridge scaffolding is
+  removed.
+- `src/client.rs` - `ProtocolCore::run` owns UDP receive, decoded delivery,
+  `copy_send_ack_and_check_sening_data`, and send/maintenance in one caller
+  thread.
+- `src/client.rs` - old production `spawn_reader` / `ReaderRuntime` path is
+  removed. `ProtocolCore::recv_drain_phase` accepts UDP, then
+  `process_datagram_inline` handles service commands, Sliced/SlicedACK,
+  handshake, Ping, SizeTest/ProbeMTU, and data `DataReadInt` core.
+- `src/client.rs` - immediate replies use `ProtocolCore::send_command`,
+  matching the Delphi receive-side calls to `SendCommand` from
+  SlicedACK/Ping/PMTU/ImFriend branches.
 - `src/client.rs` - ping handling writes `TmpSlider` inside `SendLockState`;
   writer later copies it and runs `ApplyRegularHLAck`.
-- `src/events.rs:753` - `EventDispatcher::dispatch_into_active` требует `&mut Client` и может сам слать API через `client.send_api_request`.
+- `src/events.rs` - production active delivery uses
+  `dispatch_into_active_actions` and an action outbox; old direct
+  `dispatch_into_active(..., &mut Client)` production path is gone.
 
 Текущее устройство Rust:
 
-1. Reader thread:
+1. `ProtocolCore` receive phase:
    - принимает UDP;
    - делает outer unpack/checksum/ver/ErrEmu;
-   - выполняет reader-side cleanup cadence;
+   - выполняет receive-side cleanup cadence;
    - обрабатывает handshake/control exits, Ping, SizeTest/ProbeMTU;
    - `MPC_Sliced`: собирает slice, немедленно отправляет `MPC_SlicedACK`, при
      complete выполняет общий `DataReadInt` decrypt/decompress core;
-   - `MPC_SlicedACK`: кладёт ACK в reader→writer ACK queue;
+   - `MPC_SlicedACK`: кладёт ACK в writer/apply ACK queue;
    - обычные data packets и `MPC_Grouped`: выполняет `DataReadInt` core;
-   - кладёт decoded payload/state updates в `pending_reader_decoded` для
-     user/active delivery.
+   - доставляет decoded payload/state updates напрямую в `client_new_data`
+     до следующей UDP datagram.
 
-2. Writer/orchestrator loop:
-   - дренит `pending_reader_decoded` и выполняет `OnNewData`/active delivery;
+2. `ProtocolCore` send/maintenance phase:
+   - выполняет `OnNewData`/active delivery уже после каждого accepted datagram;
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
 
-Это всё ещё не полный Delphi model: transport/DataReadInt core уже reader-side,
-но `OnNewData`/active-library delivery ещё зависит от main/run loop.
+Оставшийся bridge: `ReaderDecodedMsg` ещё существует для unit/internal injected
+cases. Production `DataReadInt` уже не делает pack -> queue -> unpack перед
+`client_new_data`.
 
 ## Главные расхождения, которые надо убрать архитектурно
 
 ### 1. Recv backlog не должен задерживать transport receive effects
 
 В Delphi `MPC_Sliced` получает ACK немедленно из reader path. Rust уже отправляет
-`MPC_SlicedACK` из reader thread и для полного Sliced выполняет общий
-`DataReadInt` decrypt/decompress core в reader stack, затем удаляет `Receiving`.
-Оставшийся разрыв: `OnNewData`/active-library delivery всё ещё доезжает до user
-code через main/run очередь.
+`MPC_SlicedACK` из receive phase и для полного Sliced выполняет общий
+`DataReadInt` decrypt/decompress core в receive stack, затем удаляет
+`Receiving`. `OnNewData`/active-library delivery теперь дренится после каждой
+accepted datagram, а не после всего poll batch.
 
-Target: `MPC_Sliced` обрабатывается в reader thread: `SlicingReceiver::on_new_sliced`, immediate
-`send_raw_packet(MPC_SlicedACK)`, complete datagram идёт в `DataReadInt` path,
-а затем в reader-owned `OnNewData`/active dispatch без зависимости от
-main-loop wake budgeting.
+Target: `MPC_Sliced` обрабатывается в receive path:
+`SlicingReceiver::on_new_sliced`, immediate `send_raw_packet(MPC_SlicedACK)`,
+complete datagram идёт в `DataReadInt` path, а затем напрямую в
+receive-owned `OnNewData`/active dispatch без зависимости от main-loop wake
+budgeting. Следующий cleanup: убрать сам `ReaderDecodedMsg` bridge из
+unit/internal scaffolding, если это можно сделать без потери тестовой
+доказуемости.
 
 ### 2. SlicedACK не должен применяться в reader
 
@@ -781,7 +786,7 @@ ProtocolMetrics proof:
 
 - metrics live in `src/client/metrics.rs`;
 - `Client::protocol_metrics_snapshot()` reports recv count, reader protocol ns,
-  writer tick ns, send phase ns, and current/max reader-decoded queue length;
+  writer tick ns, send phase ns, and current/max receive-decoded queue length;
 - `Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` also reports
   dispatcher public event queue length;
 - unit test proves queue lengths are observable while recv count remains
@@ -1083,6 +1088,85 @@ Checks:
   `cargo check --examples --quiet` OK, `cargo test --test fire_test --no-run
   --quiet` OK, live release FireTest on prod OK: `FIRETEST_PASS`,
   `ParseFailed=0`, `FAIL=0`.
+
+### 2026-05-24 - Phase D3 per-datagram decoded delivery
+
+Done:
+
+- `ProtocolCore::recv_drain_phase` now completes decoded delivery after each
+  accepted UDP datagram. It no longer waits until the whole poll-readable batch
+  is drained.
+- Service/receive tests were updated from "pop decoded record later" to the
+  real machine effect: ACK/reply/state/callback are already applied by the time
+  one datagram step returns, and `pending_reader_decoded` is empty.
+- Production receive no longer pushes `ReaderDecodedMsg`: `DataReadInt` calls
+  `client_new_data` directly for decoded data, ping payloads, and handshake
+  control state. `drain_reader_decoded` still exists only for directly injected
+  unit/internal cases while the bridge scaffolding is being removed.
+
+Reason:
+
+- Delphi `UDPRead -> DataReadInt -> OnNewData` completes the current datagram
+  before the reader consumes the next UDP datagram. This step removes the
+  Rust-only poll-batch boundary while keeping user callbacks outside protocol
+  blocking paths.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 607 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
+  passed on prod in `23.96s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Status of the two-thread-boilerplate problem:
+
+- Root cause: the old Rust two-thread shape forced the receive side to avoid
+  writing directly into `Client`/domain state. That created Rust-only
+  pack -> queue -> unpack boilerplate around `ReaderDecodedMsg`,
+  `pending_reader_decoded`, epoch gates and bridge tests.
+- Current solution: move protocol ownership into one `ProtocolCore` owner.
+  Receive can process a datagram, mutate protocol/domain state, send immediate
+  replies and drain decoded delivery before the next datagram, while user
+  callbacks stay outside the protocol loop through app queues.
+- Progress now: production `ReaderRuntime`/`spawn_reader` is gone, UDP receive
+  and writer/send maintenance share one owner, decoded delivery is direct and
+  per-datagram. Production receive no longer uses the `ReaderDecodedMsg`
+  bridge. The remaining work is to remove or shrink the last `ReaderDecodedMsg`
+  tests/helpers that exist only because of the old bridge.
+- Expected result: roughly hundreds of lines of bridge boilerplate disappear
+  (target order: ~800 lines once the bridge/test scaffolding is gone). Code
+  should look more like Delphi: one owner, direct access to protocol-owned
+  structures, and simpler block-by-block machine-effect comparison.
+
+### 2026-05-24 - FireTest quick profile
+
+Done:
+
+- Added `MOONPROTO_FIRETEST_PROFILE=quick|full`.
+- Default remains `full`, preserving the old complete scenario.
+- `quick` is one-client, non-mutating, target `<=30s`, with client-side
+  `err_emu=10%` enabled before connect.
+- `quick` checks `connect_and_init`/AuthDone/InitDone, live Engine API methods
+  `BaseCheck`, `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`,
+  `UpdateMarketsList`, `SubscribeAllTrades`, `SubscribeOrderBook`, first useful
+  trades/orderbook/MarketPrice state for the configured market, `ParseFailed=0`,
+  ErrEmu/Sliced diagnostics, and protocol CPU summary.
+- `quick` intentionally skips the expensive gates: second client, full candles,
+  high-loss 50%, order lifecycle, settings/strategy mutation, forced reconnect.
+- Verification policy from this point:
+  - use `quick` where earlier intermediate work would have triggered full
+    FireTest;
+  - use `full` only at the most important architecture gates, before major
+    handoff/stable-point commits, and when a change touches candles/high-loss/
+    reconnect/order lifecycle/mutation behavior directly.
+
+Check:
+
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
+  passed on prod in `21.84s` before direct decoded delivery and in `23.96s`
+  after direct decoded delivery.
 
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 

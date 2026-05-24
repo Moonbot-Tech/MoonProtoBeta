@@ -22,6 +22,13 @@
 //! # candles_timeout_secs = 30
 //! # high_loss_timeout_secs = 60
 //! ```
+//!
+//! Profiles:
+//! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
+//!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
+//!   trades + orderbook streams, ParseFailed=0, CPU summary.
+//! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
+//!   health/stress scenario below. Requires `allow_mutation=true`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -64,7 +71,37 @@ const PUMP_SLICE: Duration = Duration::from_millis(50);
 const PRICE_NEIGHBORHOOD_PCT: f64 = 0.05;
 const FIRETEST_ORDER_SIZE_USD: f64 = 1000.0;
 const EPS: f64 = 1e-9;
+const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
+const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
+const QUICK_TOTAL_TARGET_SECS: u64 = 30;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FireProfile {
+    Quick,
+    Full,
+}
+
+impl FireProfile {
+    fn from_env() -> Self {
+        match std::env::var("MOONPROTO_FIRETEST_PROFILE") {
+            Ok(value) if value.eq_ignore_ascii_case("quick") => Self::Quick,
+            Ok(value) if value.eq_ignore_ascii_case("full") => Self::Full,
+            Ok(value) => {
+                panic!("bad MOONPROTO_FIRETEST_PROFILE={value:?}; expected `quick` or `full`")
+            }
+            Err(_) => Self::Full,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+        }
+    }
+}
+
+#[derive(Clone)]
 struct FireConfig {
     path: PathBuf,
     host: String,
@@ -281,6 +318,7 @@ struct SessionStats {
     reconnecting: u64,
     disconnected: u64,
     engine_responses: u64,
+    engine_method_counts: HashMap<u8, u64>,
     raw_events: u64,
     server_logs: u64,
     settings_events: u64,
@@ -328,6 +366,7 @@ impl Clone for SessionStats {
             reconnecting: self.reconnecting,
             disconnected: self.disconnected,
             engine_responses: self.engine_responses,
+            engine_method_counts: self.engine_method_counts.clone(),
             raw_events: self.raw_events,
             server_logs: self.server_logs,
             settings_events: self.settings_events,
@@ -365,6 +404,17 @@ impl Clone for SessionStats {
 }
 
 impl SessionStats {
+    fn engine_method_count(&self, method: EngineMethod) -> u64 {
+        self.engine_method_counts
+            .get(&(method as u8))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn has_engine_method(&self, method: EngineMethod) -> bool {
+        self.engine_method_count(method) > 0
+    }
+
     fn summary(&self) -> String {
         let candles = self
             .candles_complete
@@ -1033,6 +1083,9 @@ fn record_strategy_snapshot(
 
 fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineResponse) {
     st.engine_responses += 1;
+    *st.engine_method_counts
+        .entry(resp.method as u8)
+        .or_insert(0) += 1;
     let mut detail = format!(
         "EngineResponse #{} uid={} method={:?} success={} error_code={} error_msg={} data_len={} head={}",
         st.engine_responses,
@@ -1288,6 +1341,35 @@ where
     false
 }
 
+fn pump_single_until<F>(
+    session: &mut Session,
+    timeout: Duration,
+    label: &str,
+    mut predicate: F,
+) -> bool
+where
+    F: FnMut(&SessionStats) -> bool,
+{
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        session.pump(PUMP_SLICE);
+        let stats = session.snapshot();
+        if predicate(&stats) {
+            println!("OK: {label} after {:.2}s", start.elapsed().as_secs_f64());
+            return true;
+        }
+    }
+
+    let stats = session.snapshot();
+    eprintln!(
+        "FIRETEST TIMEOUT {label}: A=[{}] A.metrics=[{}]",
+        stats.summary(),
+        session.protocol_summary(),
+    );
+    log_err_emu_snapshot(label, "A", &session.client.err_emu_diagnostics_snapshot());
+    false
+}
+
 fn pump_pair_until_sessions<F>(
     a: &mut Session,
     b: &mut Session,
@@ -1323,6 +1405,19 @@ where
 
 fn has_initial_health(st: &SessionStats) -> bool {
     st.connected_now && st.trades_apply > 0 && st.orderbook_apply > 0 && st.parse_failed == 0
+}
+
+fn has_quick_health(st: &SessionStats) -> bool {
+    st.connected_now
+        && st.parse_failed == 0
+        && st.has_engine_method(EngineMethod::BaseCheck)
+        && st.has_engine_method(EngineMethod::AuthCheck)
+        && st.has_engine_method(EngineMethod::GetMarketsList)
+        && st.has_engine_method(EngineMethod::GetMarketsIndexes)
+        && st.has_engine_method(EngineMethod::UpdateMarketsList)
+        && st.has_engine_method(EngineMethod::SubscribeAllTrades)
+        && st.has_engine_method(EngineMethod::SubscribeOrderBook)
+        && has_market_consistency(st)
 }
 
 fn has_market_consistency(st: &SessionStats) -> bool {
@@ -1684,6 +1779,84 @@ fn log_high_loss_recovery_math() {
         both_sides_reconnect_attempt * 100.0,
         FIRETEST_RECONNECT_MATH_ATTEMPTS,
         both_sides_fail * 100.0,
+    );
+}
+
+fn quick_profile_config(cfg: &FireConfig) -> FireConfig {
+    let mut quick = cfg.clone();
+    quick.connect_timeout = quick
+        .connect_timeout
+        .min(Duration::from_secs(QUICK_CONNECT_TIMEOUT_SECS));
+    quick.wait = quick
+        .wait
+        .min(Duration::from_secs(QUICK_STREAM_TIMEOUT_SECS));
+    quick
+}
+
+fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
+    let start = Instant::now();
+    let cfg = quick_profile_config(cfg);
+    let _err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
+
+    println!(
+        "FIRETEST quick target: <= {}s; one client, err_emu={}%, connect_timeout={:?}, stream_timeout={:?}",
+        QUICK_TOTAL_TARGET_SECS,
+        FIRETEST_ERR_EMU_PERCENT,
+        cfg.connect_timeout,
+        cfg.wait
+    );
+
+    let mut a = Session::connect("A", &cfg, keys, None);
+    assert!(
+        a.client.is_authorized(),
+        "quick FireTest: connect_and_init returned but client is not AuthDone"
+    );
+    println!(
+        "OK: quick connect/AuthDone/InitDone after {:.2}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    assert!(
+        pump_single_until(&mut a, cfg.wait, "quick streams/API/market health", |a| {
+            has_quick_health(a)
+        }),
+        "quick FireTest did not receive required API methods, market state, trades and orderbook within {:?}: A=[{}]",
+        cfg.wait,
+        a.snapshot().summary()
+    );
+
+    let st = a.snapshot();
+    println!(
+        "OK: quick methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={}",
+        st.engine_method_count(EngineMethod::BaseCheck),
+        st.engine_method_count(EngineMethod::AuthCheck),
+        st.engine_method_count(EngineMethod::GetMarketsList),
+        st.engine_method_count(EngineMethod::GetMarketsIndexes),
+        st.engine_method_count(EngineMethod::UpdateMarketsList),
+        st.engine_method_count(EngineMethod::SubscribeAllTrades),
+        st.engine_method_count(EngineMethod::SubscribeOrderBook),
+    );
+    println!(
+        "OK: quick market consistency [{}]",
+        st.market_probe_summary()
+    );
+    log_err_emu_snapshot(
+        "quick 10% gate",
+        "A",
+        &a.client.err_emu_diagnostics_snapshot(),
+    );
+    println!("FIRETEST CPU quick A: {}", a.protocol_summary());
+
+    assert_eq!(st.parse_failed, 0, "quick FireTest saw ParseFailed");
+    assert!(
+        start.elapsed() <= Duration::from_secs(QUICK_TOTAL_TARGET_SECS),
+        "quick FireTest exceeded {}s target: {:.2}s",
+        QUICK_TOTAL_TARGET_SECS,
+        start.elapsed().as_secs_f64()
+    );
+    println!(
+        "FIRETEST_QUICK_PASS after {:.2}s",
+        start.elapsed().as_secs_f64()
     );
 }
 
@@ -2192,15 +2365,12 @@ fn is_usd_like_base(base_currency_name: Option<&str>) -> bool {
 #[ignore = "live MoonBot server required; create ../moonproto.firetest.conf"]
 fn fire_test_active_library_health() {
     let cfg = FireConfig::load_required();
-    assert!(
-        cfg.allow_mutation,
-        "FireTest mutates live server settings/strategies. Set allow_mutation=true in {} only for a test server.",
-        cfg.path.display()
-    );
-    let mut err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
+    let profile = FireProfile::from_env();
+    let keys = import_key(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
 
     println!(
-        "FIRETEST config: path={} server={}:{} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
+        "FIRETEST config: profile={} path={} server={}:{} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
+        profile.as_str(),
         cfg.path.display(),
         cfg.host,
         cfg.port,
@@ -2213,7 +2383,18 @@ fn fire_test_active_library_health() {
         cfg.candles_timeout,
         cfg.high_loss_timeout
     );
-    let keys = import_key(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+
+    if profile == FireProfile::Quick {
+        run_quick_fire_test(&cfg, keys);
+        return;
+    }
+
+    assert!(
+        cfg.allow_mutation,
+        "Full FireTest mutates live server settings/strategies/orders. Set allow_mutation=true in {} only for a test server.",
+        cfg.path.display()
+    );
+    let mut err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
     let seeded_strategy = firetest_strategy(&cfg);
     let seeded_strategy_id = seeded_strategy.strategy_id;
 
