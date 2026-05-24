@@ -4937,3 +4937,23 @@ Verification:
 - Added dispatcher regression coverage for an old v1 market-list payload without
   a `FuturesType` byte: Rust now applies it and keeps
   `Market::futures_type = BaseCurrency::EMPTY`, matching Delphi.
+
+### 2026-05-24 - Phase 1 partial: malformed EngineResponse is dropped
+
+Done:
+
+- Fixed a parser mismatch where malformed `TEngineResponse` tails could become a
+  valid Rust `EngineResponse` with empty `data`.
+- Delphi reads `ErrorMsg` through `ReadStringFromStreamUtf8`, which uses
+  `ReadBuffer`; truncation raises and `DataReadInt` catches/logs the read error
+  instead of delivering a response.
+- Positive `DataSize` declares an exact body. A shorter body is not a valid
+  empty response and must not mutate active state.
+- Rust now returns `None` for truncated `ErrorMsg`, missing `IsCompressed`,
+  missing `DataSize`, and declared positive `DataSize` larger than the remaining
+  bytes. Negative or zero `DataSize` still yields empty `data`, matching
+  Delphi's `if sz > 0 then ...` branch.
+
+Verification:
+
+- Added parser regression coverage for every malformed-tail case.

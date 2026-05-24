@@ -61,6 +61,13 @@ DEFLATE-decompresses `Data` when `IsCompressed` is set. The client uses
 `Client::api_*` wrappers. The public `EngineResponse::data` field contains the
 decompressed payload.
 
+Malformed responses are dropped: truncated `ErrorMsg`, missing
+`IsCompressed`/`DataSize`, a positive `DataSize` larger than the remaining
+bytes, or failed DEFLATE decompression does not produce an `EngineResponse`.
+This matches Delphi's effective machine effect: malformed `TEngineResponse`
+construction raises or cannot build the declared stream, and the receive loop
+logs the read error instead of delivering a partial API response.
+
 The `Data` format is method-specific. See the doc comments on each
 `EngineMethod` variant (`cargo doc --open` -> `EngineMethod`). Parsers for
 common response payloads:

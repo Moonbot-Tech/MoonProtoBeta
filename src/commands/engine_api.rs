@@ -281,33 +281,17 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     let error_code = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
 
-    let error_msg = read_string(data, &mut pos).unwrap_or_default();
+    let error_msg = read_string(data, &mut pos)?;
 
     // IsCompressed + data size
     if pos + 1 > data.len() {
-        return Some(EngineResponse {
-            ver,
-            request_uid,
-            method,
-            success,
-            error_code,
-            error_msg,
-            data: Vec::new(),
-        });
+        return None;
     }
     let is_compressed = data[pos] != 0;
     pos += 1;
 
     if pos + 4 > data.len() {
-        return Some(EngineResponse {
-            ver,
-            request_uid,
-            method,
-            success,
-            error_code,
-            error_msg,
-            data: Vec::new(),
-        });
+        return None;
     }
     let sz = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     pos += 4;
@@ -321,25 +305,28 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
             return None;
         };
         if end > data.len() {
-            Vec::new()
-        } else {
-            let raw = &data[pos..end];
-            if is_compressed {
-                use std::io::Read;
-                let mut decoder = DeflateDecoder::new(raw);
-                let mut decompressed = Vec::new();
-                match decoder.read_to_end(&mut decompressed) {
-                    Ok(_) => decompressed,
-                    Err(e) => {
-                        log::warn!(target: "moonproto::engine_api",
-                            "DEFLATE decompress failed for EngineResponse uid={}: {}",
-                            request_uid, e);
-                        return None;
-                    }
+            log::warn!(target: "moonproto::engine_api",
+                "EngineResponse uid={} declares data size {} but only {} bytes remain",
+                request_uid, sz, data.len().saturating_sub(pos));
+            return None;
+        }
+
+        let raw = &data[pos..end];
+        if is_compressed {
+            use std::io::Read;
+            let mut decoder = DeflateDecoder::new(raw);
+            let mut decompressed = Vec::new();
+            match decoder.read_to_end(&mut decompressed) {
+                Ok(_) => decompressed,
+                Err(e) => {
+                    log::warn!(target: "moonproto::engine_api",
+                        "DEFLATE decompress failed for EngineResponse uid={}: {}",
+                        request_uid, e);
+                    return None;
                 }
-            } else {
-                raw.to_vec()
             }
+        } else {
+            raw.to_vec()
         }
     } else {
         Vec::new()
@@ -1147,6 +1134,50 @@ mod parse_engine_response_tests {
         let mut buf = vec![0u8; 11];
         buf.extend_from_slice(&[1, 2, 3, 4]);
         assert!(parse_engine_response(&buf).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_when_error_msg_body_is_truncated_like_delphi_readbuffer() {
+        let mut payload = build_wire_response(0, 100, EngineMethod::AuthCheck, false, 401, "", &[]);
+        let error_msg_len_pos = 11 + 8 + 1 + 1 + 4;
+        payload.truncate(error_msg_len_pos);
+        payload.extend_from_slice(&(4u16).to_le_bytes());
+        payload.extend_from_slice(b"NO");
+
+        assert!(parse_engine_response(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_when_compression_flag_is_missing() {
+        let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
+        payload.truncate(11 + 8 + 1 + 1 + 4 + 2);
+
+        assert!(parse_engine_response(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_when_data_size_is_missing() {
+        let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
+        payload.truncate(11 + 8 + 1 + 1 + 4 + 2 + 1);
+
+        assert!(parse_engine_response(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_returns_none_when_declared_data_body_is_truncated() {
+        let mut payload = build_wire_response(
+            0,
+            100,
+            EngineMethod::GetMarketsList,
+            true,
+            0,
+            "",
+            &[0xAA, 0xBB],
+        );
+        let size_pos = payload.len() - 2 - 4;
+        payload[size_pos..size_pos + 4].copy_from_slice(&(8i32).to_le_bytes());
+
+        assert!(parse_engine_response(&payload).is_none());
     }
 }
 
