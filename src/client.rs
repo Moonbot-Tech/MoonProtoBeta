@@ -556,16 +556,6 @@ pub(crate) struct ReaderSlicedStats {
     blocks_count: usize,
 }
 
-#[derive(Clone)]
-pub(crate) struct ReaderHandshakeUpdate {
-    cmd: Command,
-    server_token: u64,
-    peer_app_token: u64,
-    client_token: u64,
-    encode_key: MoonKey,
-    decode_key: MoonKey,
-}
-
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
 /// Send/control queues are intentionally unbounded to preserve the Delphi
@@ -2679,7 +2669,9 @@ impl ProtocolCore<'_> {
     }
 
     fn on_handshake_control_inline(&mut self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
-        let update = Client::simple_handshake_update(cmd);
+        if matches!(cmd, Command::WrongHello | Command::WantNewHello) {
+            self.client.waiting_hello = false;
+        }
         if cmd == Command::WantNewHello {
             self.client
                 .reader_protocol
@@ -2697,38 +2689,33 @@ impl ProtocolCore<'_> {
             self.client.total_recv_shared.store(0, Ordering::Relaxed);
         }
         let _ = recv_bytes;
-        self.apply_reader_handshake_update(update, timestamp_ms);
+        match cmd {
+            Command::WrongHello => self.apply_wrong_hello(),
+            Command::WantNewHello => self.apply_want_new_hello(),
+            Command::NeedHelloAgain => self.apply_need_hello_again(timestamp_ms),
+            _ => {}
+        }
     }
 
     fn on_who_are_you_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        self.client.waiting_hello = false;
         if let Some(hello) = Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,
             payload,
         ) {
-            let mut reader_client_token = self.client.client_token;
-            let (update, encrypted) = Client::build_who_are_you_imfriend(
-                &self.client.cfg.master_key,
-                self.client.cfg.client_id,
-                self.client.app_token,
-                &mut reader_client_token,
-                hello,
-            );
-            self.client.reader_protocol.set_decode_cipher_from_reader(
-                self.client.current_reader_epoch,
-                crate::crypto::cipher_from_key(&update.decode_key),
-            );
+            let encrypted = self.apply_who_are_you_hello_and_build_imfriend(hello);
             self.send_command(Command::ImFriend, &encrypted);
             thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
             self.send_command(Command::ImFriend, &encrypted);
             let _ = recv_bytes;
-            self.apply_reader_handshake_update(update, timestamp_ms);
         } else {
             let _ = (recv_bytes, timestamp_ms);
         }
     }
 
     fn on_fine_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        self.client.waiting_hello = false;
         if Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,
@@ -2736,9 +2723,8 @@ impl ProtocolCore<'_> {
         )
         .is_some()
         {
-            let update = Client::fine_handshake_update();
             let _ = recv_bytes;
-            self.apply_reader_handshake_update(update, timestamp_ms);
+            self.apply_fine_auth_done();
         } else {
             let _ = (recv_bytes, timestamp_ms);
         }
@@ -2930,64 +2916,70 @@ impl ProtocolCore<'_> {
         }
     }
 
-    fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
-        match update.cmd {
-            Command::WrongHello => {
-                self.client.waiting_hello = false;
-                self.client.auth_status = AuthStatus::Connected;
+    fn apply_wrong_hello(&mut self) {
+        self.client.auth_status = AuthStatus::Connected;
+    }
+
+    fn apply_want_new_hello(&mut self) {
+        self.client.full_reset();
+        self.client.last_sent_hello = NEVER_SENT_MS;
+        self.client.auth_status = AuthStatus::Connected;
+        self.client.authorized = false;
+        self.client.need_connect = true;
+        self.client.soft_reconnect = false;
+    }
+
+    fn apply_need_hello_again(&mut self, timestamp_ms: i64) {
+        if (timestamp_ms - self.client.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS {
+            self.client.last_need_hello_again = timestamp_ms;
+            if !self.client.waiting_hello {
+                self.client.waiting_hello_start = timestamp_ms;
             }
-            Command::WantNewHello => {
-                self.client.waiting_hello = false;
-                self.client.full_reset();
-                self.client.last_sent_hello = NEVER_SENT_MS;
-                self.client.auth_status = AuthStatus::Connected;
-                self.client.authorized = false;
-                self.client.need_connect = true;
-                self.client.soft_reconnect = false;
-            }
-            Command::NeedHelloAgain => {
-                if (timestamp_ms - self.client.last_need_hello_again).abs()
-                    > NEED_HELLO_AGAIN_THROTTLE_MS
-                {
-                    self.client.last_need_hello_again = timestamp_ms;
-                    if !self.client.waiting_hello {
-                        self.client.waiting_hello_start = timestamp_ms;
-                    }
-                    self.client.waiting_hello = true;
-                    self.client.last_sent_hello = NEVER_SENT_MS;
-                }
-            }
-            Command::WhoAreYou => {
-                self.client.waiting_hello = false;
-                self.client.server_token = update.server_token;
-                let prev_app_token = self.client.peer_app_token;
-                self.client.peer_app_token = update.peer_app_token;
-                if prev_app_token != 0 && prev_app_token != update.peer_app_token {
-                    self.client.indexes_fetch_in_flight = false;
-                    self.client.tracked_indexes_peer_app_token = 0;
-                    self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
-                }
-                self.client.encode_key = update.encode_key;
-                self.client.decode_key = update.decode_key;
-                self.client.encode_cipher =
-                    Some(crate::crypto::cipher_from_key(&self.client.encode_key));
-                self.client
-                    .reader_protocol
-                    .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
-                self.client.client_token = update.client_token;
-            }
-            Command::Fine => {
-                let restore_after_reconnect =
-                    self.client.domain_ready && self.client.was_ever_connected;
-                self.client.need_connect = false;
-                self.client.waiting_hello = false;
-                self.client.auth_status = AuthStatus::AuthDone;
-                self.client.authorized = true;
-                if restore_after_reconnect {
-                    self.client.restore_domain_after_reconnect();
-                }
-            }
-            _ => {}
+            self.client.waiting_hello = true;
+            self.client.last_sent_hello = NEVER_SENT_MS;
+        }
+    }
+
+    fn apply_who_are_you_hello_and_build_imfriend(
+        &mut self,
+        mut hello: handshake::Hello,
+    ) -> Vec<u8> {
+        self.client.server_token = hello.server_token;
+        let prev_app_token = self.client.peer_app_token;
+        self.client.peer_app_token = hello.app_token;
+        if prev_app_token != 0 && prev_app_token != hello.app_token {
+            self.client.indexes_fetch_in_flight = false;
+            self.client.tracked_indexes_peer_app_token = 0;
+            self.client.fire_lifecycle(LifecycleEvent::ServerRestart);
+        }
+
+        self.client.client_token = self.client.client_token.wrapping_add(1);
+        hello.mix_ts = self.client.client_token;
+        hello.app_token = self.client.app_token;
+        hello.timestamp = delphi_now();
+        let packed = hello.to_bytes_packed();
+
+        let (encode_key, decode_key) =
+            crypto::generate_sub_keys(&self.client.cfg.master_key, self.client.server_token);
+        self.client.encode_key = encode_key;
+        self.client.decode_key = decode_key;
+        let encode_cipher = crate::crypto::cipher_from_key(&self.client.encode_key);
+        self.client.encode_cipher = Some(encode_cipher.clone());
+        self.client
+            .reader_protocol
+            .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
+
+        let aad = self.client.cfg.client_id.to_le_bytes();
+        crypto::encrypt_with_cipher(&encode_cipher, &packed, &aad)
+    }
+
+    fn apply_fine_auth_done(&mut self) {
+        let restore_after_reconnect = self.client.domain_ready && self.client.was_ever_connected;
+        self.client.need_connect = false;
+        self.client.auth_status = AuthStatus::AuthDone;
+        self.client.authorized = true;
+        if restore_after_reconnect {
+            self.client.restore_domain_after_reconnect();
         }
     }
 
@@ -4146,16 +4138,6 @@ impl ReaderProtocolState {
 
     fn set_decode_cipher(&mut self, cipher: crate::crypto::Aes128Gcm) {
         self.decode_cipher = Some(cipher);
-    }
-
-    fn set_decode_cipher_from_reader(
-        &mut self,
-        reader_epoch: u32,
-        cipher: crate::crypto::Aes128Gcm,
-    ) {
-        if self.is_active_reader(reader_epoch) {
-            self.set_decode_cipher(cipher);
-        }
     }
 
     fn build_ack_half(&self) -> (u64, Vec<u64>) {
@@ -7362,55 +7344,6 @@ impl Client {
         let aad = client_id.to_le_bytes();
         let decrypted = crypto::decrypt(master_key, payload, &aad)?;
         handshake::Hello::from_bytes(&decrypted)
-    }
-
-    fn build_who_are_you_imfriend(
-        master_key: &MoonKey,
-        client_id: u64,
-        app_token: u64,
-        client_token: &mut u64,
-        hello: handshake::Hello,
-    ) -> (ReaderHandshakeUpdate, Vec<u8>) {
-        let server_token = hello.server_token;
-        let peer_app_token = hello.app_token;
-        let (encode_key, decode_key) = crypto::generate_sub_keys(master_key, server_token);
-
-        *client_token += 1;
-        let mut im = hello;
-        im.mix_ts = *client_token;
-        im.app_token = app_token;
-        im.timestamp = delphi_now();
-        let packed = im.to_bytes_packed();
-        let aad = client_id.to_le_bytes();
-        let cipher = crate::crypto::cipher_from_key(&encode_key);
-        let encrypted = crypto::encrypt_with_cipher(&cipher, &packed, &aad);
-
-        (
-            ReaderHandshakeUpdate {
-                cmd: Command::WhoAreYou,
-                server_token,
-                peer_app_token,
-                client_token: *client_token,
-                encode_key,
-                decode_key,
-            },
-            encrypted,
-        )
-    }
-
-    fn fine_handshake_update() -> ReaderHandshakeUpdate {
-        Self::simple_handshake_update(Command::Fine)
-    }
-
-    fn simple_handshake_update(cmd: Command) -> ReaderHandshakeUpdate {
-        ReaderHandshakeUpdate {
-            cmd,
-            server_token: 0,
-            peer_app_token: 0,
-            client_token: 0,
-            encode_key: [0; 16],
-            decode_key: [0; 16],
-        }
     }
 
     fn build_size_ack_payload(
@@ -14714,6 +14647,43 @@ mod service_cmd_tests {
     }
 
     #[test]
+    fn reader_clears_waiting_hello_before_invalid_who_are_you_like_delphi() {
+        let _err_emu_guard = err_emu_test_guard();
+        let (server_sock, client_addr, mut client) = inline_reader_test_client();
+        client.waiting_hello = true;
+        client.server_token = 0x1234;
+
+        let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, b"bad");
+        server_sock.send_to(&packet, client_addr).unwrap();
+
+        pump_inline_reader(&mut client);
+
+        assert!(!client.waiting_hello);
+        assert_eq!(
+            client.server_token, 0x1234,
+            "invalid handshake payload must not apply WhoAreYou fields",
+        );
+    }
+
+    #[test]
+    fn reader_clears_waiting_hello_before_invalid_fine_like_delphi() {
+        let _err_emu_guard = err_emu_test_guard();
+        let (server_sock, client_addr, mut client) = inline_reader_test_client();
+        client.waiting_hello = true;
+        client.need_connect = true;
+
+        let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, b"bad");
+        server_sock.send_to(&packet, client_addr).unwrap();
+
+        pump_inline_reader(&mut client);
+
+        assert!(!client.waiting_hello);
+        assert!(client.need_connect);
+        assert!(!client.authorized);
+        assert_ne!(client.auth_status, AuthStatus::AuthDone);
+    }
+
+    #[test]
     fn reader_handles_wrong_hello_without_recv_event_backlog() {
         let _err_emu_guard = err_emu_test_guard();
         let (server_sock, client_addr, mut client) = inline_reader_test_client();
@@ -14977,29 +14947,18 @@ mod reconnect_timing_tests {
     fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[u8]) -> bool {
         let master_key = client.cfg.master_key;
         let client_id = client.cfg.client_id;
-        let app_token = client.app_token;
         let Some(hello) = Client::decode_handshake_hello(&master_key, client_id, payload) else {
             return false;
         };
 
         match cmd {
             Command::WhoAreYou => {
-                let mut client_token = client.client_token;
-                let (update, _encrypted_imfriend) = Client::build_who_are_you_imfriend(
-                    &master_key,
-                    client_id,
-                    app_token,
-                    &mut client_token,
-                    hello,
-                );
-                let now = client.now_ms();
-                ProtocolCore { client }.apply_reader_handshake_update(update, now);
+                let _encrypted_imfriend =
+                    ProtocolCore { client }.apply_who_are_you_hello_and_build_imfriend(hello);
                 true
             }
             Command::Fine => {
-                let now = client.now_ms();
-                ProtocolCore { client }
-                    .apply_reader_handshake_update(Client::fine_handshake_update(), now);
+                ProtocolCore { client }.apply_fine_auth_done();
                 true
             }
             _ => false,
@@ -15056,7 +15015,7 @@ mod reconnect_timing_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .apply_reader_handshake_update(Client::simple_handshake_update(Command::WantNewHello), 0);
+        .on_handshake_control_inline(Command::WantNewHello, 0, 0);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         ProtocolCore {
@@ -15809,10 +15768,7 @@ mod reconnect_timing_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .apply_reader_handshake_update(
-            Client::simple_handshake_update(Command::NeedHelloAgain),
-            1000,
-        );
+        .on_handshake_control_inline(Command::NeedHelloAgain, 0, 1000);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         ProtocolCore {

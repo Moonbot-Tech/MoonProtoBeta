@@ -165,6 +165,10 @@ Delphi model по факту:
 - `src/client.rs` - Ping handling mutates `Client` fields directly and writes
   `TmpSlider` inside `SendLockState`; writer later copies it and runs
   `ApplyRegularHLAck`.
+- `src/client.rs` - handshake service commands no longer use
+  `ReaderHandshakeUpdate`. `WrongHello`, `WantNewHello`, `NeedHelloAgain`,
+  `WhoAreYou`, and `Fine` mutate the single `Client` owner directly in the
+  receive block.
 - `src/client.rs` - writer-owned `RecvdSlider` is a direct `Client` field.
   The Delphi order remains `TmpSlider` in `SendLockState` snapshot ->
   `RecvdSlider` -> `ApplyRegularHLAck`.
@@ -1495,6 +1499,41 @@ Checks:
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - Full `cargo test --test fire_test -- --ignored --nocapture` passed on prod
   in `186.1s` with `err_emu=10%`; this covers the full candles snapshot gate.
+
+### 2026-05-24 - Phase D15 direct handshake updates
+
+Done:
+
+- Removed `ReaderHandshakeUpdate`, `simple_handshake_update`,
+  `fine_handshake_update`, and the old build-then-apply helper.
+- `WrongHello`, `WantNewHello`, and `NeedHelloAgain` now mutate `Client`
+  directly from the receive block.
+- `WhoAreYou` now follows the Delphi machine-effect order more closely:
+  clear `waiting_hello` before decode, apply `ServerToken`/`PeerAppToken`,
+  increment `ClientToken`, build/pack the ImFriend hello, generate session keys,
+  encrypt, then send the same `MPC_ImFriend` payload twice with the 32ms pause.
+- `Fine` now clears `waiting_hello` before decode, like Delphi
+  `UDPRead` does before entering `HandleHandShake`.
+- Added regression tests for invalid `WhoAreYou`/`Fine`: invalid encrypted
+  payload must still clear `waiting_hello`, but must not apply decoded fields or
+  mark the client authorized.
+
+Reason:
+
+- The old update object was a leftover reader-thread mirror. During Delphi
+  comparison it also exposed a real ordering mismatch: Delphi clears
+  `FWaitingHello` before attempting to decode `MPC_WhoAreYou/MPC_Fine`; Rust
+  cleared it only after successful decode.
+
+Checks:
+
+- Targeted handshake tests: `who_are_you`, `fine`, `need_hello_again`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 608 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `23.38s`: `FIRETEST_QUICK_PASS`.
 
 ### 2026-05-24 - FireTest quick profile
 
