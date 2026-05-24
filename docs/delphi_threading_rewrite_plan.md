@@ -155,6 +155,9 @@ Delphi model по факту:
 - `src/client.rs` - `ReaderProtocolState` is no longer `Arc<Mutex<_>>`.
   MPSlider, decode cipher, and SizeAck series live directly in the single
   `Client` owner and are mutated inline from the receive path.
+- `src/client.rs` - stale reader epoch guards are gone. They protected only the
+  removed async reader closure; accepted UDP datagrams are now processed by the
+  current single-owner `ProtocolCore` directly.
 - `src/client.rs` - old production `spawn_reader` / `ReaderRuntime` path is
   removed. `ProtocolCore::recv_drain_phase` accepts UDP, then
   `process_datagram_inline` handles service commands, Sliced/SlicedACK,
@@ -1378,8 +1381,9 @@ Done:
 - `MPSlider`, decode cipher, and `DataSizeAck` series now live directly in
   `Client` and are mutated from the inline receive path, matching Delphi's
   direct `DataReadInt` field effects more closely.
-- Kept `active_reader_epoch` checks inside the state helpers. They are now a
-  session/socket guard, not a shared-reader synchronization mechanism.
+- At this checkpoint `active_reader_epoch` checks were still kept inside the
+  state helpers. Phase D16 later removed them after proving they only protected
+  the already-deleted async reader closure.
 
 Reason:
 
@@ -1481,7 +1485,7 @@ Done:
   slot directly into `Client`.
 - `request_candles_data` removes the slot directly on timeout/error.
 - Chunked candles receive handling now mutates the same direct `HashMap` from
-  `dispatch_candles_chunk_from_reader` / `handle_candles_chunk_in_map`.
+  `dispatch_candles_chunk_inline` / `handle_candles_chunk_in_map`.
 - The public async boundary remains the existing `mpsc::Sender<MergedCandles>`;
   this change only removes the Rust-only lock around protocol-owned state.
 
@@ -1534,6 +1538,36 @@ Checks:
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
   passed on prod in `23.38s`: `FIRETEST_QUICK_PASS`.
+
+### 2026-05-24 - Phase D16 removed stale reader epoch guards
+
+Done:
+
+- Removed `Client.current_reader_epoch`.
+- Removed `active_reader_epoch` from `SendLockState` and `ReaderProtocolState`.
+- Removed the `*_from_reader` epoch-gated helper layer for SlicedACK, Ping ACK
+  bitmap, SizeAck series, decode, and TmpSlider reset.
+- Renamed the remaining direct helpers to inline/direct names:
+  `push_sliced_ack_payload`, `apply_ping_and_build_response`,
+  `dispatch_api_pending_inline`, `dispatch_candles_chunk_inline`.
+- Removed the obsolete stale-reader-epoch unit test.
+
+Reason:
+
+- The epoch guard protected against an already-removed async reader closure
+  mutating shared protocol state after socket/session replacement. With the
+  current single-owner receive loop, every accepted UDP datagram is processed by
+  the current `ProtocolCore`; the old guard no longer represented a real
+  machine state or Delphi behavior.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 607 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `22.10s`: `FIRETEST_QUICK_PASS`.
 
 ### 2026-05-24 - FireTest quick profile
 
