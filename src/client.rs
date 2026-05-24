@@ -2622,7 +2622,7 @@ impl ProtocolCore<'_> {
         });
         let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
             Client::dispatch_candles_chunk_from_reader(
-                self.client.pending_candles.as_ref(),
+                &mut self.client.pending_candles,
                 cmd,
                 payload,
                 timestamp_ms,
@@ -4339,7 +4339,7 @@ pub struct Client {
     ///
     /// **Внутренняя работа** — потребитель API не знает об этом поле, видит только
     /// `mpsc::Receiver<MergedCandles>`.
-    pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
+    pending_candles: HashMap<u64, PartialCandles>,
 
     /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
     /// Используется в handshake/Ping processing для детекции server restart:
@@ -4606,7 +4606,7 @@ impl Client {
             domain_ready_flag,
             domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
-            pending_candles: Arc::new(Mutex::new(HashMap::new())),
+            pending_candles: HashMap::new(),
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
             update_markets_after_indexes: false,
@@ -5510,7 +5510,7 @@ impl Client {
         };
         // Замещение существующего slot'а допустимо — старый sender дропнется, его
         // receiver получит Err(Disconnected) (что корректно при двойном вызове).
-        self.pending_candles.lock().unwrap().insert(uid, partial);
+        self.pending_candles.insert(uid, partial);
         self.send_api_request(&raw);
         (uid, rx)
     }
@@ -5550,7 +5550,7 @@ impl Client {
         match self.run_until_response(dispatcher, &rx, timeout) {
             Ok(merged) => Ok(merged),
             Err(err) => {
-                self.pending_candles.lock().unwrap().remove(&uid);
+                self.pending_candles.remove(&uid);
                 Err(err)
             }
         }
@@ -7670,7 +7670,7 @@ impl Client {
     }
 
     fn dispatch_candles_chunk_from_reader(
-        pending_candles: &Mutex<HashMap<u64, PartialCandles>>,
+        pending_candles: &mut HashMap<u64, PartialCandles>,
         cmd: u8,
         payload: &[u8],
         now_ms: i64,
@@ -7686,7 +7686,7 @@ impl Client {
         let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
             return false;
         };
-        if !pending_candles.lock().unwrap().contains_key(&uid) {
+        if !pending_candles.contains_key(&uid) {
             return false;
         }
         let Some(resp) = parse_engine_response(payload) else {
@@ -7740,8 +7740,9 @@ impl Client {
             // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
             // несколько response пакетов с одинаковым UID. До завершения сборки
             // не дропаем slot.
+            let now_ms = self.now_ms();
             if resp.method == EngineMethod::RequestCandlesData
-                && Self::handle_candles_chunk_in_map(&self.pending_candles, &resp, self.now_ms())
+                && Self::handle_candles_chunk_in_map(&mut self.pending_candles, &resp, now_ms)
             {
                 // Чанк потреблён aggregator'ом. Передаём в on_data только
                 // если потребитель НЕ использует async API (тогда тут merged
@@ -7828,13 +7829,13 @@ impl Client {
     /// slot удаляется. Если sender уже дропнут (receiver не ждёт) — slot всё равно
     /// удаляется (semantic = "fire-and-forget с финализацией").
     fn handle_candles_chunk_in_map(
-        pending_candles: &Mutex<HashMap<u64, PartialCandles>>,
+        pending_candles: &mut HashMap<u64, PartialCandles>,
         resp: &EngineResponse,
         _now_ms: i64,
     ) -> bool {
         // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
         if !resp.success {
-            if let Some(partial) = pending_candles.lock().unwrap().remove(&resp.request_uid) {
+            if let Some(partial) = pending_candles.remove(&resp.request_uid) {
                 log::warn!(target: "moonproto::client",
                     "candles request uid={} failed code={} msg={}",
                     resp.request_uid, resp.error_code, resp.error_msg);
@@ -7846,7 +7847,6 @@ impl Client {
 
         let uid = resp.request_uid;
         let chunk_result = {
-            let mut pending_candles = pending_candles.lock().unwrap();
             let Some(partial) = pending_candles.get_mut(&uid) else {
                 return false;
             };
@@ -7868,7 +7868,7 @@ impl Client {
                     "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, zipped_data.len());
                 Vec::new()
             });
-            if let Some(partial) = pending_candles.lock().unwrap().remove(&uid) {
+            if let Some(partial) = pending_candles.remove(&uid) {
                 let _ = partial.sender.send(MergedCandles {
                     uid,
                     zipped_data,
@@ -9519,7 +9519,7 @@ mod api_pending_dispatch_tests {
         assert_eq!(merged.uid, uid);
         assert_eq!(merged.zipped_data, vec![1, 2, 3, 4]);
         assert!(merged.markets.is_empty());
-        assert!(client.pending_candles.lock().unwrap().is_empty());
+        assert!(client.pending_candles.is_empty());
     }
 
     #[test]
@@ -9643,7 +9643,7 @@ mod api_pending_dispatch_tests {
             .expect_err("zero timeout should expire before any chunk arrives");
 
         assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
-        assert!(client.pending_candles.lock().unwrap().is_empty());
+        assert!(client.pending_candles.is_empty());
     }
 
     #[test]

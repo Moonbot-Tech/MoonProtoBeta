@@ -168,6 +168,10 @@ Delphi model по факту:
 - `src/client.rs` - writer-owned `RecvdSlider` is a direct `Client` field.
   The Delphi order remains `TmpSlider` in `SendLockState` snapshot ->
   `RecvdSlider` -> `ApplyRegularHLAck`.
+- `src/client.rs` - `pending_candles` is a direct `HashMap` in the single
+  `Client` owner. The request registers the slot before send, and chunked
+  response handling mutates/removes the slot inline from the receive/API path;
+  only the final `mpsc::Sender` result crosses back to the API caller.
 - `src/events.rs` - production active delivery uses
   `dispatch_into_active_actions` and an action outbox; old direct
   `dispatch_into_active(..., &mut Client)` production path is gone.
@@ -1463,6 +1467,34 @@ Observed quick CPU:
 - `reader avg/max = 923us / 112838us`, `>1ms = 90`, `>5ms = 7`.
 - `active_dispatch avg/max = 889us / 105196us`, `>1ms = 4`, `>5ms = 2`.
 - `app_enqueue avg/max = 986us / 2405us`, `>1ms = 76`, `>5ms = 0`.
+
+### 2026-05-24 - Phase D14 direct pending candles map
+
+Done:
+
+- Removed `Arc<Mutex<_>>` from `pending_candles`.
+- `api_request_candles_data_async_registered` now inserts the partial candles
+  slot directly into `Client`.
+- `request_candles_data` removes the slot directly on timeout/error.
+- Chunked candles receive handling now mutates the same direct `HashMap` from
+  `dispatch_candles_chunk_from_reader` / `handle_candles_chunk_in_map`.
+- The public async boundary remains the existing `mpsc::Sender<MergedCandles>`;
+  this change only removes the Rust-only lock around protocol-owned state.
+
+Reason:
+
+- After the async reader was removed, candles aggregation is single-owner
+  protocol state. The mutex no longer represented Delphi behavior or a real
+  cross-thread protocol boundary.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- Full `cargo test --test fire_test -- --ignored --nocapture` passed on prod
+  in `186.1s` with `err_emu=10%`; this covers the full candles snapshot gate.
 
 ### 2026-05-24 - FireTest quick profile
 
