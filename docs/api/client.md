@@ -80,7 +80,8 @@ inside the same `Client` session maintains the user-requested active-lib state.
 
 `run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
 for the requested duration and run the MoonProto writer/orchestrator loop on
-that caller thread. The UDP reader is still a separate reader thread.
+that caller thread. The UDP reader is still a separate reader thread; it waits
+with a nonblocking UDP poller and drains readable packets until `WouldBlock`.
 `run` raw callbacks and ordinary
 `run_with_dispatcher` event callbacks are delivered through the application
 callback queue after protocol/domain state is updated, so slow UI work does not

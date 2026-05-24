@@ -31,6 +31,7 @@ use log::{debug, error, warn};
 // MoonProto UDP Client architecture follows the Delphi split:
 // main/send loop plus UDP reader thread. See MAPPING.md for line-by-line
 // correspondence.
+use polling::{Event as PollEvent, Events as PollEvents, Poller};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -164,6 +165,7 @@ fn queued_client_settings_updated_since(
 
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
+const READER_POLL_TIMEOUT_MS: u64 = 1_000; // old read_timeout shutdown bound
 const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
 const SETTINGS_HELPER_RETRY_PAUSE_MS: u64 = 5_000;
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
@@ -640,6 +642,21 @@ impl ReaderRuntime {
     }
 
     fn run(mut self) {
+        if let Err(e) = self.run_polling() {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            log::warn!(target: "moonproto::reader",
+                "UDP poller reader failed: {e}; falling back to blocking recv_from");
+            let _ = self.sock.set_nonblocking(false);
+            let _ = self
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(READER_POLL_TIMEOUT_MS)));
+            self.run_blocking();
+        }
+    }
+
+    fn run_blocking(&mut self) {
         let mut buf = [0u8; 65535];
         loop {
             let n = match self.recv_drain_once(&mut buf) {
@@ -650,6 +667,59 @@ impl ReaderRuntime {
             if !self.process_datagram(&buf[..n], n as u64) {
                 break;
             }
+        }
+    }
+
+    fn run_polling(&mut self) -> std::io::Result<()> {
+        let poller = Poller::new()?;
+        let mut events = PollEvents::new();
+        self.sock.set_nonblocking(true)?;
+        // Safety: this reader owns the cloned UDP socket and removes it from
+        // the poller before leaving the polling path.
+        unsafe {
+            poller.add(&self.sock, PollEvent::readable(1))?;
+        }
+        let result = self.run_polling_registered(&poller, &mut events);
+        if let Err(e) = poller.delete(&self.sock) {
+            log::warn!(target: "moonproto::reader", "UDP poller delete failed: {e}");
+        }
+        result
+    }
+
+    fn run_polling_registered(
+        &mut self,
+        poller: &Poller,
+        events: &mut PollEvents,
+    ) -> std::io::Result<()> {
+        let mut buf = [0u8; 65535];
+        loop {
+            if self.shutdown_flag.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            events.clear();
+            match poller.wait(events, Some(Duration::from_millis(READER_POLL_TIMEOUT_MS))) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+            if !events.iter().any(|event| event.key == 1 && event.readable) {
+                continue;
+            }
+
+            loop {
+                match self.recv_drain_once(&mut buf) {
+                    ReaderRecvOnce::Datagram(n) => {
+                        if !self.process_datagram(&buf[..n], n as u64) {
+                            return Ok(());
+                        }
+                    }
+                    ReaderRecvOnce::Retry => break,
+                    ReaderRecvOnce::Stop => return Ok(()),
+                }
+            }
+
+            poller.modify(&self.sock, PollEvent::readable(1))?;
         }
     }
 
@@ -3612,7 +3682,7 @@ impl ProtocolCore<'_> {
         if self.client.connected && !self.client.soft_reconnect {
             self.send_command(Command::LogOff, &[]);
         }
-        // Сигналим текущему reader thread завершиться (макс через 1с — read_timeout).
+        // Сигналим текущему reader thread завершиться (макс через reader poll timeout).
         // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
         // за длинную сессию (часы).
         self.client.reader_shutdown.store(true, Ordering::Relaxed);
@@ -4823,14 +4893,14 @@ pub struct Client {
     /// Shutdown signal для reader thread.
     /// `spawn_reader` создаёт НОВЫЙ `Arc<AtomicBool>` для каждого reader thread и сохраняет
     /// его сюда. При `do_force_disconnect` / `Drop` мы ставим `true` — reader thread выйдет
-    /// из loop (макс через `read_timeout` = 1s).
+    /// из loop (макс через reader poll timeout).
     /// Каждый новый reader получает свой Arc → старый и новый reader НЕ конфликтуют.
     reader_shutdown: Arc<AtomicBool>,
     /// Аудит #7 (audit_delphi_deviation E-V2-02): инкремент на каждый `spawn_reader`.
     /// Reader thread получает копию текущего значения и проставляет её в
     /// reader-owned decoded/control records. Main loop фильтрует stale reader
     /// work с epoch != этого значения. Защита от race на reconnect (старый
-    /// reader может ещё крутиться 1с пока read_timeout сработает).
+    /// reader может ещё крутиться до reader poll timeout).
     current_reader_epoch: u32,
 
     /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
@@ -7907,7 +7977,7 @@ impl Client {
     ///
     /// **Shutdown:** создаём НОВЫЙ `Arc<AtomicBool>` для этого reader. Сохраняем clone в
     /// `self.reader_shutdown`. При `do_force_disconnect` / `Drop` ставим в `true` —
-    /// reader thread выйдет из loop (макс через `read_timeout=1s`).
+    /// reader thread выйдет из loop (макс через reader poll timeout).
     /// Новый spawn_reader создаёт **свой** Arc — старый и новый не конфликтуют.
     fn spawn_reader(&mut self) {
         let Some(ref sock) = self.socket else {
@@ -9832,7 +9902,7 @@ fn send_post_init_resync(
 }
 
 /// Drop: сигналим reader thread'у завершиться даже если потребитель не вызвал
-/// `disconnect()`. Reader выйдет из loop макс через 1 сек (read_timeout).
+/// `disconnect()`. Reader выйдет из loop макс через reader poll timeout.
 /// Process-level NTP guard освобождается автоматически после тела `drop`; если
 /// это был последний клиент, общий NTP worker остановится.
 impl Drop for Client {

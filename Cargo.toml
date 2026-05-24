@@ -16,6 +16,7 @@ flate2 = "1"
 socket2 = "0.5"
 log = "0.4"
 zerocopy = { version = "0.8.48", features = ["derive"] }
+polling = "3.11.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -23,6 +24,3 @@ libc = "0.2"
 [[example]]
 name = "client_test"
 path = "examples/client_test.rs"
-
-[dev-dependencies]
-polling = "3.11.0"

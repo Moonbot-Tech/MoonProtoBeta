@@ -1013,6 +1013,36 @@ Checks:
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `cargo test --release --test fire_test -- --ignored --nocapture`: passed.
 
+### 2026-05-24 - Phase D1 production UDP poller reader
+
+Done:
+
+- Promoted `polling` from dev-only proof dependency to runtime dependency.
+- Current reader thread now uses `Poller + nonblocking UDP` and drains
+  `recv_from` until `WouldBlock` after a readable event.
+- The old blocking `recv_from` path remains only as a fallback if the production
+  poller cannot be created/registered.
+- No protocol ordering changed: SlicedACK, Ping/PMTU replies, decrypt/decompress
+  and decoded delivery still run in the same reader receive branch as before.
+
+Reason:
+
+- This puts the live receive side on the exact waiting primitive required by
+  the planned single-owner runtime, while keeping the reader thread boundary for
+  this incremental step.
+- The next Phase D step can move the already-proven poll/drain loop into
+  `ProtocolCore` instead of changing socket waiting and state ownership at the
+  same time.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 604 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test udp_polling --quiet`: 1 passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `cargo test --release --test fire_test -- --ignored --nocapture`: passed.
+
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 
 Done:
