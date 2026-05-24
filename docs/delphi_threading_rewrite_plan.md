@@ -4538,3 +4538,27 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: OrderBook buyCount cap removed
+
+Done:
+
+- Removed a Rust-only cap in `parse_order_book_packet`.
+- Delphi uses declared `buyCount` when reading orderbook full/diff payloads and
+  only computes sells after advancing through all declared buy levels.
+- Rust previously used `min(buy_count_raw, remaining / 8)`, which could
+  reclassify missing buy bytes as sell levels on a truncated/corrupt payload.
+- Rust now uses the declared buy count for valid payloads and rejects truncated
+  buy sections instead of silently applying a different book split.
+- Recorded `spec_pipeline/work/хуйня.md §X.122`.
+
+Verification:
+
+- Added parser tests for declared buy-count split and truncated buy-section
+  rejection.
+
+Still not done:
+
+- Corrupt `TMemoryStream.Read` partial-byte exactness is still not modeled:
+  Delphi can leave unread bytes in local `Single` variables. That needs a
+  separate decision instead of a hidden Rust-only cap.

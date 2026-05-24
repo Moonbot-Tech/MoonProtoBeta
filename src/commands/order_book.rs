@@ -52,11 +52,11 @@ pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     let buy_count_raw = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
 
-    // Cap по реально доступным байтам — защита от malicious `buy_count = 65535` который
-    // на пустом payload запросил бы `Vec::with_capacity(65535)` = 512 KB на пакет ×
-    // burst rate = аллокатор thrash. См. robustness audit H7.
-    let max_buys_by_payload = (data.len() - pos) / 8;
-    let buy_count = buy_count_raw.min(max_buys_by_payload);
+    let buy_bytes = buy_count_raw.checked_mul(8)?;
+    if buy_bytes > data.len().saturating_sub(pos) {
+        return None;
+    }
+    let buy_count = buy_count_raw;
 
     let mut buys = Vec::with_capacity(buy_count);
     for _ in 0..buy_count {
@@ -96,4 +96,50 @@ pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
         buys,
         sells,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push_level(out: &mut Vec<u8>, rate: f32, quantity: f32) {
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&quantity.to_le_bytes());
+    }
+
+    fn compressed_packet(buy_count: u16, levels: &[(f32, f32)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(&buy_count.to_le_bytes());
+        for (rate, quantity) in levels {
+            push_level(&mut data, *rate, *quantity);
+        }
+        compression::synlz_compress(&data)
+    }
+
+    #[test]
+    fn parse_order_book_uses_declared_buy_count_without_rust_cap() {
+        let raw = compressed_packet(2, &[(10.0, 1.0), (9.0, 2.0), (11.0, 3.0)]);
+
+        let pkt = parse_order_book_packet(&raw).expect("valid orderbook packet");
+
+        assert_eq!(pkt.market_index, 1);
+        assert_eq!(pkt.seq, 2);
+        assert!(pkt.is_full);
+        assert_eq!(pkt.book_kind, 0);
+        assert_eq!(pkt.buys.len(), 2);
+        assert_eq!(pkt.sells.len(), 1);
+        assert_eq!(pkt.buys[0].rate, 10.0);
+        assert_eq!(pkt.buys[1].quantity, 2.0);
+        assert_eq!(pkt.sells[0].rate, 11.0);
+    }
+
+    #[test]
+    fn parse_order_book_rejects_truncated_buy_section_instead_of_reclassifying_tail() {
+        let raw = compressed_packet(3, &[(10.0, 1.0), (9.0, 2.0)]);
+
+        assert!(parse_order_book_packet(&raw).is_none());
+    }
 }
