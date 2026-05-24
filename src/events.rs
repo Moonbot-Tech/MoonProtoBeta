@@ -150,7 +150,14 @@ pub enum Event {
     /// Raw payload for channels the dispatcher does not parse.
     Raw { cmd: Command, payload: Vec<u8> },
     /// Payload parsing failed.
-    ParseFailed { cmd: Command, len: usize },
+    ///
+    /// `payload` is cloned only on failure so live diagnostics can dump the
+    /// exact bytes that failed to parse without adding work to the normal path.
+    ParseFailed {
+        cmd: Command,
+        len: usize,
+        payload: Vec<u8>,
+    },
 }
 
 pub(crate) struct ActiveDispatchContext {
@@ -356,6 +363,14 @@ impl EventDispatcherSnapshot {
 impl EventDispatcher {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn parse_failed(cmd: Command, payload: &[u8]) -> Event {
+        Event::ParseFailed {
+            cmd,
+            len: payload.len(),
+            payload: payload.to_vec(),
+        }
     }
 
     /// Copy the current read model for application callback delivery.
@@ -752,10 +767,7 @@ impl EventDispatcher {
         match TradeCommand::parse(payload) {
             Some(TradeCommand::AllStatuses(snap)) => self.process_all_statuses(snap, now_ms, out),
             Some(tc) => self.process_command_order(tc, now_ms, out),
-            None => out.push(Event::ParseFailed {
-                cmd: Command::Order,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::Order, payload)),
         }
     }
 
@@ -862,10 +874,7 @@ impl EventDispatcher {
                     out.push(Event::OrderBook(ev));
                 }
             }
-            None => out.push(Event::ParseFailed {
-                cmd: Command::OrderBook,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::OrderBook, payload)),
         }
     }
 
@@ -882,10 +891,7 @@ impl EventDispatcher {
                     out.push(Event::Trade(ev));
                 }
             }
-            None => out.push(Event::ParseFailed {
-                cmd: Command::TradesStream,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::TradesStream, payload)),
         }
     }
 
@@ -904,10 +910,7 @@ impl EventDispatcher {
                         out.push(Event::Trade(ev));
                     }
                 }
-                None => out.push(Event::ParseFailed {
-                    cmd: Command::TradesResendResponse,
-                    len: inner.len(),
-                }),
+                None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
             }
         }
     }
@@ -938,10 +941,7 @@ impl EventDispatcher {
 
     fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         if payload.len() < 11 {
-            out.push(Event::ParseFailed {
-                cmd: Command::Balance,
-                len: payload.len(),
-            });
+            out.push(Self::parse_failed(Command::Balance, payload));
             return;
         }
         let sub_cmd_id = payload[0];
@@ -953,10 +953,7 @@ impl EventDispatcher {
         match sub_cmd_id {
             2 => {
                 if parse_balance(sub_cmd_id, body).is_none() {
-                    out.push(Event::ParseFailed {
-                        cmd: Command::Balance,
-                        len: payload.len(),
-                    });
+                    out.push(Self::parse_failed(Command::Balance, payload));
                 }
             }
             3 | 4 => match parse_balance(sub_cmd_id, body) {
@@ -965,10 +962,7 @@ impl EventDispatcher {
                     let ev = self.balances.apply_with_known_markets(upd, &known_markets);
                     out.push(Event::Balance(ev));
                 }
-                None => out.push(Event::ParseFailed {
-                    cmd: Command::Balance,
-                    len: payload.len(),
-                }),
+                None => out.push(Self::parse_failed(Command::Balance, payload)),
             },
             6 => match parse_arb_prices(payload) {
                 Some(arb) => {
@@ -980,10 +974,7 @@ impl EventDispatcher {
                         });
                     }
                 }
-                None => out.push(Event::ParseFailed {
-                    cmd: Command::Balance,
-                    len: payload.len(),
-                }),
+                None => out.push(Self::parse_failed(Command::Balance, payload)),
             },
             _ => out.push(Event::Raw {
                 cmd: Command::Balance,
@@ -1014,10 +1005,7 @@ impl EventDispatcher {
     fn client_new_data_strat(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         match StratCommand::parse(payload) {
             Some(cmd_v) => self.process_strat_command(cmd_v, out),
-            None => out.push(Event::ParseFailed {
-                cmd: Command::Strat,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::Strat, payload)),
         }
     }
 
@@ -1079,20 +1067,14 @@ impl EventDispatcher {
                 let ev = self.settings.apply(cmd_v);
                 out.push(Event::Settings(ev));
             }
-            None => out.push(Event::ParseFailed {
-                cmd: Command::UI,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::UI, payload)),
         }
     }
 
     fn client_new_data_api(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         match parse_engine_response(payload) {
             Some(resp) => self.process_api_command(resp, out),
-            None => out.push(Event::ParseFailed {
-                cmd: Command::API,
-                len: payload.len(),
-            }),
+            None => out.push(Self::parse_failed(Command::API, payload)),
         }
     }
 
@@ -1153,10 +1135,7 @@ impl EventDispatcher {
 
     fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         if payload.len() < 8 {
-            out.push(Event::ParseFailed {
-                cmd: Command::LogMsg,
-                len: payload.len(),
-            });
+            out.push(Self::parse_failed(Command::LogMsg, payload));
             return;
         }
         let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());

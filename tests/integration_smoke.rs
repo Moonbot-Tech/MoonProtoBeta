@@ -184,7 +184,7 @@ fn runtime_smoke_full_happy_path() {
                 Event::OrderBook(moonproto::state::OrderBookEvent::Apply { .. }) => {
                     o.fetch_add(1, Ordering::Relaxed);
                 }
-                Event::ParseFailed { cmd, len } => {
+                Event::ParseFailed { cmd, len, .. } => {
                     eprintln!("WARN: ParseFailed cmd={cmd:?} len={len}");
                     p.fetch_add(1, Ordering::Relaxed);
                 }

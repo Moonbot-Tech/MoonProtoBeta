@@ -22,7 +22,9 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
         Event::EngineResponse(resp) if !resp.success => {
             eprintln!("engine error {}: {}", resp.error_code, resp.error_msg);
         }
-        Event::ParseFailed { cmd, len } => eprintln!("parse failed: {cmd:?}, {len} bytes"),
+        Event::ParseFailed { cmd, len, payload } => {
+            eprintln!("parse failed: {cmd:?}, {len} bytes, head={:02X?}", &payload[..payload.len().min(16)]);
+        }
         _ => {}
     }
 }));
@@ -41,8 +43,8 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 ```
 
 `run_with_dispatcher` and `run_with_dispatcher_state` block the caller for the
-requested duration while the MoonProto writer/orchestrator loop runs in a
-dedicated scoped writer thread. Event callbacks run through an application
+requested duration while the MoonProto protocol loop runs on that caller thread.
+Event callbacks run through an application
 callback queue after protocol state is updated. Slow callbacks delay return from
 the run call because the queue is drained before return, but they do not block
 ACK/retry/send progress inside the protocol loop. For
@@ -93,12 +95,15 @@ pub enum Event {
     EngineResponse(EngineResponse),
     ServerLog { time: f64, msg: String },
     Raw { cmd: Command, payload: Vec<u8> },
-    ParseFailed { cmd: Command, len: usize },
+    ParseFailed { cmd: Command, len: usize, payload: Vec<u8> },
 }
 ```
 
 `Command::API` may produce two events: `Event::Markets(...)` when a
 markets-related response was applied, followed by `Event::EngineResponse(...)`.
+`Event::ParseFailed` carries the raw failed payload. The clone happens only on
+the failure path and exists so live diagnostics can dump exact bytes instead of
+guessing from `cmd/len`.
 
 ## Reading State
 

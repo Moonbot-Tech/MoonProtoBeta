@@ -2709,6 +2709,38 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
 
+### 2026-05-24 - FireTest diagnostics: ParseFailed raw payload
+
+Done:
+
+- Fixed ErrEmu Sliced diagnostics so reused `datagram_num` values with different
+  `blocks_count` are not merged into impossible `blocks=X/Y` summaries.
+- Changed `Event::ParseFailed` to carry raw `payload` in addition to `cmd/len`.
+  This clone happens only on parser failure and does not touch the normal
+  protocol hot path.
+- FireTest now writes a raw temp dump for every `ParseFailed` and prints
+  `cmd/len/head/dump` in the live log.
+- API event docs were updated for the new `ParseFailed` shape and for the
+  current caller-thread `ProtocolCore` run model.
+- Recorded open candidate `spec_pipeline/work/хуйня.md §X.129` for the one
+  observed high-loss reconnect `OrderBook ParseFailed`.
+
+Verification:
+
+- `cargo fmt --check` OK.
+- `cargo test --lib --quiet` OK: `605 passed`.
+- `cargo check --examples --quiet` OK.
+- `cargo test --test fire_test --no-run --quiet` OK.
+- Live `cargo test --release --test fire_test -- --ignored --nocapture` OK:
+  `FIRETEST_PASS`, no `ParseFailed` lines in the run log.
+
+Still not done:
+
+- If `ParseFailed` reproduces, investigate the dumped payload against Delphi
+  orderbook parser/decompress/Sliced reassembly byte-for-byte.
+- Continue runtime/protocol parity work. Phase Z remains mandatory at the end:
+  full optimization attribution/fixes for all protocol-owned hot paths.
+
 ### 2026-05-24 - Phase 1 partial: stale reader epoch transport state
 
 Done:

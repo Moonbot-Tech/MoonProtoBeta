@@ -990,7 +990,7 @@ impl ReaderRuntime {
             self.err_emu_diagnostics
                 .lock()
                 .unwrap()
-                .record_sliced_complete(stats.datagram_num, cmd, payload);
+                .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, payload);
         }
         self.push_reader_decoded(ReaderDecodedMsg {
             cmd,

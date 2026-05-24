@@ -462,7 +462,7 @@ fn main() {
                         events_to_log.push(format!("[SRV] {}", trimmed));
                     }
                 }
-                Event::ParseFailed { cmd, len } => {
+                Event::ParseFailed { cmd, len, .. } => {
                     counters_cb.parse_failed.fetch_add(1, Ordering::Relaxed);
                     events_to_log.push(format!("[PARSE-FAIL] cmd={:?} len={}", cmd, len));
                 }

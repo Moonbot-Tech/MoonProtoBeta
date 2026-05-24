@@ -911,9 +911,22 @@ fn record_event(
                 ),
             );
         }
-        Event::ParseFailed { cmd, len } => {
+        Event::ParseFailed { cmd, len, payload } => {
             st.parse_failed += 1;
-            log_server_event(&st, event_no, format!("ParseFailed cmd={cmd:?} len={len}"));
+            let dump = write_parse_failed_dump(&st.label, event_no, *cmd, payload);
+            let dump_suffix = dump
+                .as_ref()
+                .map(|path| format!(" dump={}", path.display()))
+                .unwrap_or_else(|| " dump=<write-failed>".to_string());
+            log_server_event(
+                &st,
+                event_no,
+                format!(
+                    "ParseFailed cmd={cmd:?} len={len} head={}{}",
+                    hex_preview(payload, 32),
+                    dump_suffix
+                ),
+            );
         }
         other => {
             log_server_event(&st, event_no, format!("{other:?}"));
@@ -1191,6 +1204,45 @@ fn hex_preview(data: &[u8], max_len: usize) -> String {
         out.push_str(" ...");
     }
     out
+}
+
+fn write_parse_failed_dump(
+    label: &str,
+    event_no: u64,
+    cmd: Command,
+    payload: &[u8],
+) -> Option<std::path::PathBuf> {
+    let name = format!(
+        "moonproto_firetest_parse_failed_{}_{}_{}_{:06}.bin",
+        sanitize_file_component(label),
+        sanitize_file_component(&format!("{cmd:?}")),
+        payload.len(),
+        event_no
+    );
+    let path = std::env::temp_dir().join(name);
+    match std::fs::write(&path, payload) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            eprintln!(
+                "WARN: failed to write ParseFailed dump label={label} cmd={cmd:?} len={} err={err}",
+                payload.len()
+            );
+            None
+        }
+    }
+}
+
+fn sanitize_file_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn pump_pair_for(a: &mut Session, b: &mut Session, duration: Duration) {

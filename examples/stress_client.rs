@@ -1545,7 +1545,7 @@ fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
                 println!("[{label}] server log: {trimmed}");
             }
         }
-        Event::ParseFailed { cmd, len } => {
+        Event::ParseFailed { cmd, len, .. } => {
             stats.parse_failed.fetch_add(1, Ordering::Relaxed);
             println!("[{label}] parse failed cmd={cmd:?} len={len}");
         }

@@ -144,7 +144,7 @@ pub(crate) struct ErrEmuDiagnosticsState {
     dropped_by_cmd: [u64; 256],
     outgoing_by_cmd: [u64; 256],
     outgoing_blackholed_by_cmd: [u64; 256],
-    sliced: HashMap<u16, ErrEmuSlicedDatagramState>,
+    sliced: HashMap<ErrEmuSlicedKey, ErrEmuSlicedDatagramState>,
 }
 
 impl Default for ErrEmuDiagnosticsState {
@@ -163,7 +163,6 @@ impl Default for ErrEmuDiagnosticsState {
 
 #[derive(Debug, Default)]
 struct ErrEmuSlicedDatagramState {
-    blocks_count: usize,
     block0_wire_cmd: Option<u8>,
     block0_ui_cmd_id: Option<u8>,
     completed_cmd: Option<u8>,
@@ -175,6 +174,12 @@ struct ErrEmuSlicedDatagramState {
     delivered_packets: u64,
     dropped_packets: u64,
     blocks: HashMap<u8, ErrEmuSlicedBlockState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ErrEmuSlicedKey {
+    datagram_num: u16,
+    blocks_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -219,8 +224,11 @@ impl ErrEmuDiagnosticsState {
             return;
         };
         let block_data = &payload[slicing::SLICE_HEADER_SIZE..];
-        let dg = self.sliced.entry(hdr.datagram_num).or_default();
-        dg.blocks_count = (hdr.max_block_num as usize) + 1;
+        let key = ErrEmuSlicedKey {
+            datagram_num: hdr.datagram_num,
+            blocks_count: (hdr.max_block_num as usize) + 1,
+        };
+        let dg = self.sliced.entry(key).or_default();
         if hdr.block_num == 0 {
             if let Some((&wire_cmd, rest)) = block_data.split_first() {
                 dg.block0_wire_cmd = Some(wire_cmd);
@@ -243,8 +251,18 @@ impl ErrEmuDiagnosticsState {
         }
     }
 
-    pub(crate) fn record_sliced_complete(&mut self, datagram_num: u16, cmd: u8, payload: &[u8]) {
-        let dg = self.sliced.entry(datagram_num).or_default();
+    pub(crate) fn record_sliced_complete(
+        &mut self,
+        datagram_num: u16,
+        blocks_count: usize,
+        cmd: u8,
+        payload: &[u8],
+    ) {
+        let key = ErrEmuSlicedKey {
+            datagram_num,
+            blocks_count,
+        };
+        let dg = self.sliced.entry(key).or_default();
         dg.completed_cmd = Some(cmd);
         dg.completed_payload_len = Some(payload.len());
         if Command::from_byte(cmd) == Command::UI {
@@ -309,7 +327,7 @@ impl ErrEmuDiagnosticsState {
         let mut sliced: Vec<_> = self
             .sliced
             .iter()
-            .map(|(&datagram_num, dg)| {
+            .map(|(&key, dg)| {
                 let mut blocks: Vec<_> = dg
                     .blocks
                     .iter()
@@ -321,8 +339,8 @@ impl ErrEmuDiagnosticsState {
                     .collect();
                 blocks.sort_by_key(|block| block.block_num);
                 ErrEmuSlicedDatagramDiagnostics {
-                    datagram_num,
-                    blocks_count: dg.blocks_count,
+                    datagram_num: key.datagram_num,
+                    blocks_count: key.blocks_count,
                     block0_wire_cmd: dg.block0_wire_cmd,
                     block0_ui_cmd_id: dg.block0_ui_cmd_id,
                     completed_cmd: dg.completed_cmd,
@@ -337,7 +355,7 @@ impl ErrEmuDiagnosticsState {
                 }
             })
             .collect();
-        sliced.sort_by_key(|dg| dg.datagram_num);
+        sliced.sort_by_key(|dg| (dg.datagram_num, dg.blocks_count));
 
         ErrEmuDiagnostics {
             configured_rate: if configured_rate == 0 {
@@ -434,5 +452,53 @@ pub(crate) fn err_emu_drop_rate_for_cmd(base_rate: u8, cmd: u8) -> u8 {
         base_rate / 2
     } else {
         base_rate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sliced_payload(datagram_num: u16, block_num: u8, max_block_num: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        slicing::SliceHeader {
+            datagram_num,
+            block_num,
+            max_block_num,
+        }
+        .write_to(&mut out);
+        if block_num == 0 {
+            out.push(Command::API as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn sliced_diagnostics_do_not_merge_reused_datagram_numbers_with_different_sizes() {
+        let mut state = ErrEmuDiagnosticsState::default();
+        let delivered = ErrEmuDropDecision {
+            configured_rate: 10,
+            dropped: false,
+        };
+
+        state.record_packet(Command::Sliced as u8, &sliced_payload(5, 20, 26), delivered);
+        state.record_packet(Command::Sliced as u8, &sliced_payload(5, 1, 14), delivered);
+        state.record_sliced_complete(5, 15, Command::API as u8, &[]);
+
+        let snapshot = state.snapshot(10);
+        let same_num: Vec<_> = snapshot
+            .sliced
+            .iter()
+            .filter(|dg| dg.datagram_num == 5)
+            .collect();
+        assert_eq!(same_num.len(), 2);
+        assert!(same_num
+            .iter()
+            .any(|dg| dg.blocks_count == 27 && dg.delivered_unique_blocks() == 1));
+        assert!(same_num.iter().any(|dg| {
+            dg.blocks_count == 15
+                && dg.delivered_unique_blocks() == 1
+                && dg.completed_cmd == Some(Command::API as u8)
+        }));
     }
 }
