@@ -1286,6 +1286,15 @@ impl Orders {
             TradeCommand::OrderNotFound(h) => {
                 let uid = h.market.base.uid;
                 let found = if let Some(entry) = self.map.get_mut(&uid) {
+                    if entry.job_is_done {
+                        return (
+                            ApplyResult::NotApplicable,
+                            OrderEvent::Ignored {
+                                uid,
+                                reason: ApplyResult::NotApplicable,
+                            },
+                        );
+                    }
                     entry.server_forced_remove = true;
                     entry.cancel_request = true;
                     let close_time = delphi_now_days();
@@ -2657,6 +2666,59 @@ mod tests {
         );
         assert_eq!(orders.drain_pending_removals(), vec![42]);
         assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn order_not_found_does_not_force_cleanup_when_worker_job_is_done_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            42,
+            "BTCUSDT",
+            OrderWorkerStatus::BuySet,
+            1,
+        )));
+        {
+            let order = orders.map.get_mut(&42).unwrap();
+            order.job_is_done = true;
+            order.buy_order.is_opened = 1;
+            order.buy_order.canceled = 0;
+            order.buy_order.is_closed = 0;
+            order.sell_order.is_opened = 1;
+            order.sell_order.canceled = 0;
+            order.sell_order.is_closed = 0;
+        }
+
+        let not_found = make_epoch(42, 3, "BTCUSDT", 2, OrderWorkerStatus::None);
+        let (res, ev) = orders.apply(TradeCommand::OrderNotFound(not_found));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert!(matches!(
+            ev,
+            OrderEvent::Ignored {
+                uid: 42,
+                reason: ApplyResult::NotApplicable
+            }
+        ));
+        let order = orders.get(42).unwrap();
+        assert!(!order.server_forced_remove);
+        assert!(!order.cancel_request);
+        assert_eq!(
+            (
+                order.buy_order.is_opened,
+                order.buy_order.canceled,
+                order.buy_order.is_closed
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            (
+                order.sell_order.is_opened,
+                order.sell_order.canceled,
+                order.sell_order.is_closed
+            ),
+            (1, 0, 0)
+        );
+        assert!(orders.drain_pending_removals().is_empty());
     }
 
     #[test]

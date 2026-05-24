@@ -199,14 +199,15 @@ worker and does not apply the rest of `UpdateData` to `buy_order`.
 Delphi's `CheckReplaceFlag` pending path. While the order stays pending,
 `run_with_dispatcher` keeps repeating the replace-then-cancel pair from its
 active order tick no more often than Delphi's 32 ms worker loop.
-`TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately
-while the entry is still present. It also mirrors Delphi virtual-worker
-`finally`: both compact orders are marked closed+canceled with local close time,
-and replace flags are cleared before deferred removal. `job_is_done` is a
-read-model terminal marker, not Delphi's thread-lifetime
-`BOrderWorker.JobIsDone`; during the deferred removal window the Rust entry
-still corresponds to a virtual worker that has not returned from
-`DoTheJobVirtual`.
+`TOrderNotFound` sets `cancel_request` and `server_forced_remove` only while the
+entry is still present and has not reached `job_is_done`. It also mirrors Delphi
+virtual-worker `finally`: both compact orders are marked closed+canceled with
+local close time, and replace flags are cleared before deferred removal. If the
+entry is already terminal, `TOrderNotFound` is ignored like Delphi's
+`if not Worker.JobIsDone` guard. `job_is_done` is a read-model terminal marker,
+not Delphi's thread-lifetime `BOrderWorker.JobIsDone`; during the deferred
+removal window the Rust entry still corresponds to a virtual worker that has
+not returned from `DoTheJobVirtual`.
 
 ## Status Values
 

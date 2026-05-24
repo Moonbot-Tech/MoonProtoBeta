@@ -2961,3 +2961,28 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: TOrderNotFound respects JobIsDone guard
+
+Done:
+
+- Fixed a `ProcessCommandOrder` / `DoTheJobVirtual` parity bug found during the
+  line-by-line order block pass.
+- Delphi `TMoonProtoNetClient.ProcessCommandOrder` handles `TOrderNotFound` by
+  logging, then sets `CancellRequest` / `ServerForcedRemove` only inside
+  `If not Worker.JobIsDone`; otherwise it frees the command and exits without
+  mutating the already-done worker.
+- Rust previously applied server-forced cleanup even if the local entry was
+  already terminal. Rust now ignores `TOrderNotFound` for `job_is_done` entries:
+  snapshot flag can still be refreshed before the branch, but forced-remove
+  flags and compact-order close/cancel fields are not changed.
+- Recorded `spec_pipeline/work/хуйня.md §X.127`.
+
+Verification:
+
+- Added `order_not_found_does_not_force_cleanup_when_worker_job_is_done_like_delphi`.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
