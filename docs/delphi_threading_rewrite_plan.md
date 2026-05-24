@@ -143,8 +143,8 @@ Delphi model по факту:
 - `src/client.rs` - `SendLockState` holds `DataToSend*`,
   `incoming_sliced_acks`, and `TmpSlider`; production receive now calls
   `client_new_data` directly after decode. `pending_reader_decoded` remains only
-  for direct unit/internal injection while the last bridge scaffolding is
-  removed.
+  under `cfg(test)` for direct unit/internal injection while the last bridge
+  scaffolding is removed.
 - `src/client.rs` - `ProtocolCore::run` owns UDP receive, decoded delivery,
   `copy_send_ack_and_check_sening_data`, and send/maintenance in one caller
   thread.
@@ -180,9 +180,9 @@ Delphi model по факту:
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
 
-Оставшийся bridge: `ReaderDecodedMsg` ещё существует для unit/internal injected
-cases. Production `DataReadInt` уже не делает pack -> queue -> unpack перед
-`client_new_data`.
+Оставшийся bridge: `ReaderDecodedMsg` существует только под `cfg(test)` для
+unit/internal injected cases. Production `DataReadInt` уже не делает pack ->
+queue -> unpack перед `client_new_data`.
 
 ## Главные расхождения, которые надо убрать архитектурно
 
@@ -199,7 +199,7 @@ Target: `MPC_Sliced` обрабатывается в receive path:
 complete datagram идёт в `DataReadInt` path, а затем напрямую в
 receive-owned `OnNewData`/active dispatch без зависимости от main-loop wake
 budgeting. Следующий cleanup: убрать сам `ReaderDecodedMsg` bridge из
-unit/internal scaffolding, если это можно сделать без потери тестовой
+test-only scaffolding, если это можно сделать без потери тестовой
 доказуемости.
 
 ### 2. SlicedACK не должен применяться в reader
@@ -1132,13 +1132,42 @@ Status of the two-thread-boilerplate problem:
   callbacks stay outside the protocol loop through app queues.
 - Progress now: production `ReaderRuntime`/`spawn_reader` is gone, UDP receive
   and writer/send maintenance share one owner, decoded delivery is direct and
-  per-datagram. Production receive no longer uses the `ReaderDecodedMsg`
-  bridge. The remaining work is to remove or shrink the last `ReaderDecodedMsg`
-  tests/helpers that exist only because of the old bridge.
+  per-datagram. Production receive no longer uses or contains the
+  `ReaderDecodedMsg` bridge; it is test-only scaffolding now. The remaining
+  work is to remove or shrink the tests/helpers that exist only because of the
+  old bridge.
 - Expected result: roughly hundreds of lines of bridge boilerplate disappear
   (target order: ~800 lines once the bridge/test scaffolding is gone). Code
   should look more like Delphi: one owner, direct access to protocol-owned
   structures, and simpler block-by-block machine-effect comparison.
+
+### 2026-05-24 - Phase D4 test-only decoded bridge
+
+Done:
+
+- `pending_reader_decoded`, `ReaderDecodedMsg`, `reader_decode_data_packets`,
+  `drain_reader_decoded`, and `process_reader_decoded` are now compiled only
+  under `cfg(test)`.
+- Production still drains deferred order removals after receive/app delivery via
+  a separate `drain_deferred_order_removals_due` helper, so removing the empty
+  bridge does not drop that side effect.
+- Production metrics report `app_queue_len=0` for this removed bridge; public
+  dispatcher queue length is still reported separately.
+
+Reason:
+
+- After D3 no production receive block pushed into `pending_reader_decoded`.
+  Keeping the field in release builds only preserved Rust-old-path state that
+  Delphi never had. Moving it behind `cfg(test)` shrinks the runtime state
+  without changing protocol machine effect.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --lib --quiet`: 607 passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
+  passed on prod in `21.08s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
 
 ### 2026-05-24 - FireTest quick profile
 

@@ -53,9 +53,9 @@ pub struct ProtocolMetricsSnapshot {
     pub send_phase_max_ns: u64,
     /// Current length of the internal receive-decoded bridge.
     ///
-    /// Production receive delivers decoded payloads directly; this is normally
-    /// zero and remains visible for internal/unit-injected bridge cases while
-    /// that scaffolding is removed.
+    /// Production receive delivers decoded payloads directly; this bridge is
+    /// not present in non-test builds and remains visible only for
+    /// unit-injected bridge cases while that scaffolding is removed.
     pub app_queue_len: usize,
     /// Maximum observed internal receive-decoded bridge length.
     pub app_queue_max_len: u64,

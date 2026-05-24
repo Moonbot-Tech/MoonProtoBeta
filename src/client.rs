@@ -549,6 +549,7 @@ impl SendLockState {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ReaderDecodedMsg {
     cmd: u8,
@@ -2412,7 +2413,7 @@ impl ProtocolCore<'_> {
                     // reader takes the next UDP datagram. Production delivery
                     // is direct; this drain is only for internal injected
                     // bridge records while that scaffolding is removed.
-                    self.drain_reader_decoded(cur_tm, mode);
+                    self.drain_post_receive_delivery(cur_tm, mode);
                     if !continue_recv {
                         break;
                     }
@@ -2918,7 +2919,7 @@ impl ProtocolCore<'_> {
     }
 
     fn drain_app_commands(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        self.drain_reader_decoded(cur_tm, mode);
+        self.drain_post_receive_delivery(cur_tm, mode);
     }
 
     fn wait_5ms(&mut self) {
@@ -2976,16 +2977,13 @@ impl ProtocolCore<'_> {
         self.client.publish_transport_state_from_client();
     }
 
-    fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        self.client.sync_transport_state_from_reader();
-        let decoded = {
-            let mut pending = self.client.pending_reader_decoded.lock().unwrap();
-            std::mem::take(&mut *pending)
-        };
+    fn drain_post_receive_delivery(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        #[cfg(test)]
+        self.drain_reader_decoded(cur_tm, mode);
+        self.drain_deferred_order_removals_due(cur_tm, mode);
+    }
 
-        for msg in decoded {
-            self.process_reader_decoded(msg, cur_tm, mode);
-        }
+    fn drain_deferred_order_removals_due(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         if let RunMode::Dispatcher {
             dispatcher,
             on_event,
@@ -2999,6 +2997,20 @@ impl ProtocolCore<'_> {
         }
     }
 
+    #[cfg(test)]
+    fn drain_reader_decoded(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+        self.client.sync_transport_state_from_reader();
+        let decoded = {
+            let mut pending = self.client.pending_reader_decoded.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+
+        for msg in decoded {
+            self.process_reader_decoded(msg, cur_tm, mode);
+        }
+    }
+
+    #[cfg(test)]
     fn process_reader_decoded(
         &mut self,
         msg: ReaderDecodedMsg,
@@ -4595,9 +4607,9 @@ pub struct Client {
     pending_h: Vec<SendItem>,
     // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
     sending: Vec<SentSliced>,
-    // Receive -> main decoded OnNewData payloads. Completed incoming Sliced
-    // datagrams run the DataReadInt decrypt/decompress core in the receive stack
-    // and enter this queue only for user/active-library delivery.
+    // Test-only old receive-decoded bridge. Production receive now delivers
+    // DataReadInt output directly from ProtocolCore.
+    #[cfg(test)]
     pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
 
     // Main thread state
@@ -4918,6 +4930,7 @@ impl Client {
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
+        #[cfg(test)]
         let pending_reader_decoded = Arc::new(Mutex::new(Vec::new()));
         let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
         let reader_ping_state = Arc::new(ReaderPingState::new());
@@ -4946,6 +4959,7 @@ impl Client {
             send_lock,
             pending_h: Vec::new(),
             sending: Vec::new(),
+            #[cfg(test)]
             pending_reader_decoded,
             socket: None,
             recv_slicer: slicing::SlicingReceiver::new(),
@@ -5091,7 +5105,10 @@ impl Client {
     /// receive-side protocol work and writer send/maintenance phases stay
     /// bounded while auditing Delphi machine-effect parity.
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
+        #[cfg(test)]
         let app_queue_len = self.pending_reader_decoded.lock().unwrap().len();
+        #[cfg(not(test))]
+        let app_queue_len = 0;
         self.protocol_metrics.record_app_queue_len(app_queue_len);
         self.protocol_metrics.snapshot(app_queue_len, 0)
     }
@@ -5102,7 +5119,10 @@ impl Client {
         &self,
         dispatcher: &crate::events::EventDispatcher,
     ) -> ProtocolMetricsSnapshot {
+        #[cfg(test)]
         let app_queue_len = self.pending_reader_decoded.lock().unwrap().len();
+        #[cfg(not(test))]
+        let app_queue_len = 0;
         self.protocol_metrics.record_app_queue_len(app_queue_len);
         self.protocol_metrics
             .snapshot(app_queue_len, dispatcher.queued_event_count())
@@ -8721,6 +8741,7 @@ impl Client {
         self.send_lock.lock().unwrap().reset_tmp_slider();
         *self.recvd_slider.lock().unwrap() = Slider::new();
         self.recv_slicer = slicing::SlicingReceiver::new();
+        #[cfg(test)]
         self.pending_reader_decoded.lock().unwrap().clear();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
