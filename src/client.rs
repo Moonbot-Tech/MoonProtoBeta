@@ -557,20 +557,6 @@ pub(crate) struct ReaderSlicedStats {
 }
 
 #[derive(Clone)]
-pub(crate) struct ReaderPingUpdate {
-    ping_count: u32,
-    round_trip_delay: i64,
-    actual_pmtu: u16,
-    global_timing_orders: u16,
-    overheat: u8,
-    rs: f64,
-    server_time_delta: f64,
-    net_lag_ping: i64,
-    can_send_rate: i32,
-    used_sliced_limit: bool,
-}
-
-#[derive(Clone)]
 pub(crate) struct ReaderHandshakeUpdate {
     cmd: Command,
     server_token: u64,
@@ -2703,9 +2689,7 @@ impl ProtocolCore<'_> {
                 .lock()
                 .unwrap()
                 .reset_tmp_slider_from_reader(self.client.current_reader_epoch);
-            self.client
-                .reader_ping_state
-                .reset_protocol_session_from_reader(self.client.current_reader_epoch);
+            self.client.used_sliced_limit = false;
             self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
             self.client.total_sent.store(0, Ordering::Relaxed);
             self.client.recvd_slider = Slider::new();
@@ -2838,11 +2822,7 @@ impl ProtocolCore<'_> {
     ) {
         let raw_now_dt = delphi_now_raw();
         let corrected_now_dt = delphi_now();
-        if let Some((ping_update, response)) = Client::reader_build_ping_update_and_response(
-            &self.client.reader_protocol,
-            &self.client.send_lock,
-            &self.client.reader_ping_state,
-            &self.client.server_time_delta_handle,
+        if let Some(response) = self.client.apply_ping_from_reader_and_build_response(
             self.client.current_reader_epoch,
             payload,
             raw_now_dt,
@@ -2851,7 +2831,6 @@ impl ProtocolCore<'_> {
             total_recv_after,
         ) {
             self.send_command(Command::Ping, &response);
-            self.apply_reader_ping_update(ping_update);
             self.client_new_data(
                 Command::Ping as u8,
                 payload.to_vec(),
@@ -2949,32 +2928,6 @@ impl ProtocolCore<'_> {
         } else {
             self.client.avg_dup_count = (self.client.avg_dup_count * 9.0 + dup_pct) * 0.1;
         }
-    }
-
-    fn apply_reader_ping_update(&mut self, update: ReaderPingUpdate) {
-        self.client.ping_count = update.ping_count;
-        self.client.round_trip_delay = update.round_trip_delay;
-        self.client.actual_pmtu = update.actual_pmtu;
-        self.client.global_timing_orders = update.global_timing_orders;
-        self.client.overheat = update.overheat;
-        self.client.rs = update.rs;
-        // A server can start sending Ping after it created its side of the
-        // client, even if the final MPC_Fine was lost on the way back. Ping
-        // proves the peer is alive, but it does not complete authorization.
-        // Keep the connect loop alive until AuthDone, otherwise a single lost
-        // Fine can leave the client permanently Connected-but-not-authorized.
-        if self.client.auth_status == AuthStatus::AuthDone {
-            self.client.need_connect = false;
-        }
-        self.client.server_time_delta = update.server_time_delta;
-        self.client.server_time_delta_handle.store(
-            update.server_time_delta.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        set_server_time_delta_global(update.server_time_delta);
-        self.client.net_lag_ping = update.net_lag_ping;
-        self.client.can_send_rate = update.can_send_rate;
-        self.client.used_sliced_limit = update.used_sliced_limit;
     }
 
     fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
@@ -3905,7 +3858,6 @@ impl ProtocolCore<'_> {
         let used_limit_threshold = (client_limit as f64 * 0.8).round() as usize;
         if bytes_sent_at_once >= used_limit_threshold {
             client.used_sliced_limit = true;
-            client.reader_ping_state.mark_used_sliced_limit();
         }
 
         // Аудит #2: отправляем по индексу из self.sending — никаких clone.
@@ -4232,61 +4184,6 @@ impl ReaderProtocolState {
     }
 }
 
-struct ReaderPingState {
-    active_reader_epoch: std::sync::atomic::AtomicU32,
-    ping_count: std::sync::atomic::AtomicU32,
-    can_send_rate: std::sync::atomic::AtomicI32,
-    used_sliced_limit: AtomicBool,
-}
-
-impl ReaderPingState {
-    fn new() -> Self {
-        Self {
-            active_reader_epoch: std::sync::atomic::AtomicU32::new(0),
-            ping_count: std::sync::atomic::AtomicU32::new(0),
-            can_send_rate: std::sync::atomic::AtomicI32::new(2 * 1024 * 1024),
-            used_sliced_limit: AtomicBool::new(false),
-        }
-    }
-
-    fn set_active_reader_epoch(&self, epoch: u32) {
-        self.active_reader_epoch.store(epoch, Ordering::Relaxed);
-    }
-
-    fn is_active_reader(&self, epoch: u32) -> bool {
-        self.active_reader_epoch.load(Ordering::Relaxed) == epoch
-    }
-
-    fn reset_protocol_session(&self) {
-        self.used_sliced_limit.store(false, Ordering::Relaxed);
-    }
-
-    fn reset_protocol_session_from_reader(&self, reader_epoch: u32) {
-        if self.is_active_reader(reader_epoch) {
-            self.reset_protocol_session();
-        }
-    }
-
-    fn mark_used_sliced_limit(&self) {
-        self.used_sliced_limit.store(true, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    fn set_can_send_rate_for_test(&self, rate: i32) {
-        self.can_send_rate.store(rate, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    fn set_used_sliced_limit_for_test(&self, used: bool) {
-        self.used_sliced_limit.store(used, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    fn ping_count(&self) -> u32 {
-        self.ping_count.load(Ordering::Relaxed)
-    }
-}
-
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -4378,8 +4275,6 @@ pub struct Client {
     // lives in SendLockState so writer copies it atomically with ACK queues.
     // Mutations are epoch-gated across socket/session replacement.
     reader_protocol: ReaderProtocolState,
-    // Ping block state used to send `MPC_Ping` replies from UDPRead order.
-    reader_ping_state: Arc<ReaderPingState>,
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
@@ -4613,7 +4508,6 @@ impl Client {
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
-        let reader_ping_state = Arc::new(ReaderPingState::new());
         let total_recv_shared = Arc::new(AtomicU64::new(0));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
@@ -4694,7 +4588,6 @@ impl Client {
             tmp_send_count: 0,
             tmp_send_size: 0,
             reader_protocol: ReaderProtocolState::new(),
-            reader_ping_state,
             recvd_slider: Slider::new(),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
@@ -4969,8 +4862,6 @@ impl Client {
         self.send_lock
             .lock()
             .unwrap()
-            .set_active_reader_epoch(self.current_reader_epoch);
-        self.reader_ping_state
             .set_active_reader_epoch(self.current_reader_epoch);
     }
 
@@ -7545,84 +7436,76 @@ impl Client {
         Some(probe.ack_bytes())
     }
 
-    fn reader_build_ping_update_and_response(
-        reader_protocol: &ReaderProtocolState,
-        send_lock: &Arc<Mutex<SendLockState>>,
-        reader_ping_state: &Arc<ReaderPingState>,
-        server_time_delta_handle: &Arc<std::sync::atomic::AtomicU64>,
+    fn apply_ping_from_reader_and_build_response(
+        &mut self,
         reader_epoch: u32,
         payload: &[u8],
         raw_now_dt: f64,
         corrected_now_dt: f64,
         total_sent_before_ping: u64,
         total_recv_after_packet: u64,
-    ) -> Option<(ReaderPingUpdate, Vec<u8>)> {
+    ) -> Option<Vec<u8>> {
         let ping = control::PingFrame::read(payload)?;
+        if self.current_reader_epoch != reader_epoch {
+            return None;
+        }
 
         // UDPRead Ping branch: update transport ping fields before DataRead.
-        let round_trip_delay = ping.trip_delay as i64;
-        let actual_pmtu = ping.pmtu;
-        let global_timing_orders = ping.global_timing_orders;
-        let overheat = ping.overheat;
         let rs = ping.rs();
-
         const COMFORTABLE_RS: f64 = 0.92;
         const CRITICAL_RS: f64 = 0.85;
         const MIN_RATE: i32 = 256 * 1024;
         const MAX_RATE: i32 = 8 * 1024 * 1024;
-        let (ping_count, can_send_rate, used_sliced_limit) = {
-            if !reader_ping_state.is_active_reader(reader_epoch) {
-                return None;
-            }
-            let mut can_send_rate = reader_ping_state.can_send_rate.load(Ordering::Relaxed);
-            if reader_ping_state
-                .used_sliced_limit
-                .swap(false, Ordering::Relaxed)
-            {
-                let new_rate = if rs > COMFORTABLE_RS {
-                    let increase = (can_send_rate as f64 * 0.03).round() as i32;
-                    can_send_rate + increase.max(32 * 1024)
-                } else if rs < CRITICAL_RS {
-                    (can_send_rate as f64 * 0.85).round() as i32
-                } else {
-                    let drift = (rs - COMFORTABLE_RS) / COMFORTABLE_RS;
-                    (can_send_rate as f64 * (1.0 + drift * 0.05)).round() as i32
-                };
-                can_send_rate = new_rate.clamp(MIN_RATE, MAX_RATE);
-                reader_ping_state
-                    .can_send_rate
-                    .store(can_send_rate, Ordering::Relaxed);
-            }
-            let ping_count = reader_ping_state
-                .ping_count
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            (
-                ping_count,
-                can_send_rate,
-                reader_ping_state.used_sliced_limit.load(Ordering::Relaxed),
-            )
-        };
+        self.round_trip_delay = ping.trip_delay as i64;
+        self.actual_pmtu = ping.pmtu;
+        self.overheat = ping.overheat;
+        self.rs = rs;
+        // A server can start sending Ping after it created its side of the
+        // client, even if the final MPC_Fine was lost on the way back. Ping
+        // proves the peer is alive, but it does not complete authorization.
+        // Keep the connect loop alive until AuthDone, otherwise a single lost
+        // Fine can leave the client permanently Connected-but-not-authorized.
+        if self.auth_status == AuthStatus::AuthDone {
+            self.need_connect = false;
+        }
+        if self.used_sliced_limit {
+            let new_rate = if rs > COMFORTABLE_RS {
+                let increase = (self.can_send_rate as f64 * 0.03).round() as i32;
+                self.can_send_rate + increase.max(32 * 1024)
+            } else if rs < CRITICAL_RS {
+                (self.can_send_rate as f64 * 0.85).round() as i32
+            } else {
+                let drift = (rs - COMFORTABLE_RS) / COMFORTABLE_RS;
+                (self.can_send_rate as f64 * (1.0 + drift * 0.05)).round() as i32
+            };
+            self.can_send_rate = new_rate.clamp(MIN_RATE, MAX_RATE);
+            self.used_sliced_limit = false;
+        }
 
         // DataReadInt(MPC_Ping): write server ACK bitmap into TmpSlider.
-        send_lock
+        self.send_lock
             .lock()
             .unwrap()
             .apply_ping_ack_bitmap_from_reader(reader_epoch, payload);
 
         // ClientNewData(MPC_Ping): update wall-clock deltas before SendPing.
+        self.ping_count = self.ping_count.wrapping_add(1);
+        self.global_timing_orders = ping.global_timing_orders;
         let initial_time = ping.initial_time;
         let server_time = ping.time;
         let server_time_delta = initial_time - raw_now_dt;
-        server_time_delta_handle.store(
+        self.server_time_delta = server_time_delta;
+        self.server_time_delta_handle.store(
             server_time_delta.to_bits(),
             std::sync::atomic::Ordering::Relaxed,
         );
         set_server_time_delta_global(server_time_delta);
-        let net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
+        self.net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let (ack_start, ack_words) = reader_protocol.build_ack_half_from_reader(reader_epoch)?;
+        let (ack_start, ack_words) = self
+            .reader_protocol
+            .build_ack_half_from_reader(reader_epoch)?;
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,
@@ -7633,21 +7516,7 @@ impl Client {
             response.extend_from_slice(&word.to_le_bytes());
         }
 
-        Some((
-            ReaderPingUpdate {
-                ping_count,
-                round_trip_delay,
-                actual_pmtu,
-                global_timing_orders,
-                overheat,
-                rs,
-                server_time_delta,
-                net_lag_ping,
-                can_send_rate,
-                used_sliced_limit,
-            },
-            response,
-        ))
+        Some(response)
     }
 
     #[cfg(test)]
@@ -8207,7 +8076,6 @@ impl Client {
         self.total_recv_shared.store(0, Ordering::Relaxed);
         self.rs = 1.0;
         self.used_sliced_limit = false;
-        self.reader_ping_state.reset_protocol_session();
         self.reader_protocol.reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
         self.recvd_slider = Slider::new();
@@ -11578,19 +11446,6 @@ mod pmtu_tests {
         corrected_now_dt: f64,
     ) -> Vec<(Command, Vec<u8>)> {
         let recv_bytes = payload.len() as u64;
-        let (ping_update, _response) = Client::reader_build_ping_update_and_response(
-            &client.reader_protocol,
-            &client.send_lock,
-            &client.reader_ping_state,
-            &client.server_time_delta_handle,
-            client.current_reader_epoch,
-            payload,
-            raw_now_dt,
-            corrected_now_dt,
-            client.total_sent.load(Ordering::Relaxed),
-            recv_bytes,
-        )
-        .expect("valid ping payload");
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let delivered_for_cb = Arc::clone(&delivered);
         let mut mode = RunMode::Callback {
@@ -11603,7 +11458,18 @@ mod pmtu_tests {
         };
         let mut writer = writer(client);
         writer.apply_recv_side_effects(recv_bytes, 123);
-        writer.apply_reader_ping_update(ping_update);
+        let total_sent = writer.client.total_sent.load(Ordering::Relaxed);
+        writer
+            .client
+            .apply_ping_from_reader_and_build_response(
+                writer.client.current_reader_epoch,
+                payload,
+                raw_now_dt,
+                corrected_now_dt,
+                total_sent,
+                recv_bytes,
+            )
+            .expect("valid ping payload");
         writer.client_new_data(
             Command::Ping as u8,
             payload.to_vec(),
@@ -11614,21 +11480,6 @@ mod pmtu_tests {
         );
         drop(mode);
         Arc::try_unwrap(delivered).unwrap().into_inner().unwrap()
-    }
-
-    fn direct_ping_update_for_writer(client: &Client, payload: &[u8]) -> ReaderPingUpdate {
-        ReaderPingUpdate {
-            ping_count: client.ping_count.wrapping_add(1),
-            round_trip_delay: i32::from_le_bytes(payload[16..20].try_into().unwrap()) as i64,
-            actual_pmtu: u16::from_le_bytes(payload[20..22].try_into().unwrap()),
-            global_timing_orders: u16::from_le_bytes(payload[22..24].try_into().unwrap()),
-            overheat: payload[24],
-            rs: payload[41] as f64 * (1.0 / 255.0),
-            server_time_delta: client.server_time_delta,
-            net_lag_ping: client.net_lag_ping,
-            can_send_rate: client.can_send_rate,
-            used_sliced_limit: client.used_sliced_limit,
-        }
     }
 
     #[test]
@@ -11645,91 +11496,64 @@ mod pmtu_tests {
 
     #[test]
     fn ping_adaptive_can_send_rate_uses_delphi_used_limit_gate() {
-        let client = Client::new(dummy_cfg());
+        let mut client = Client::new(dummy_cfg());
         let payload = ping_payload_with_pmtu(508);
 
-        {
-            client
-                .reader_ping_state
-                .set_can_send_rate_for_test(2 * 1024 * 1024);
-            client
-                .reader_ping_state
-                .set_used_sliced_limit_for_test(false);
-        }
-        let (update, _) = Client::reader_build_ping_update_and_response(
-            &client.reader_protocol,
-            &client.send_lock,
-            &client.reader_ping_state,
-            &client.server_time_delta_handle,
-            client.current_reader_epoch,
-            &payload,
-            0.0,
-            0.0,
-            0,
-            50,
-        )
-        .expect("valid ping");
+        client.can_send_rate = 2 * 1024 * 1024;
+        client.used_sliced_limit = false;
+        client
+            .apply_ping_from_reader_and_build_response(
+                client.current_reader_epoch,
+                &payload,
+                0.0,
+                0.0,
+                0,
+                50,
+            )
+            .expect("valid ping");
         assert_eq!(
-            update.can_send_rate,
+            client.can_send_rate,
             2 * 1024 * 1024,
             "Delphi changes CanSendRate only after UsedSlicedLimit"
         );
 
-        {
-            client
-                .reader_ping_state
-                .set_can_send_rate_for_test(2 * 1024 * 1024);
-            client
-                .reader_ping_state
-                .set_used_sliced_limit_for_test(true);
-        }
-        let (update, _) = Client::reader_build_ping_update_and_response(
-            &client.reader_protocol,
-            &client.send_lock,
-            &client.reader_ping_state,
-            &client.server_time_delta_handle,
-            client.current_reader_epoch,
-            &payload,
-            0.0,
-            0.0,
-            0,
-            50,
-        )
-        .expect("valid ping");
+        client.can_send_rate = 2 * 1024 * 1024;
+        client.used_sliced_limit = true;
+        client
+            .apply_ping_from_reader_and_build_response(
+                client.current_reader_epoch,
+                &payload,
+                0.0,
+                0.0,
+                0,
+                50,
+            )
+            .expect("valid ping");
         assert_eq!(
-            update.can_send_rate, 2_160_067,
+            client.can_send_rate, 2_160_067,
             "Delphi raises healthy channel by max(round(rate*0.03), 32KB/s)"
         );
         assert!(
-            !update.used_sliced_limit,
+            !client.used_sliced_limit,
             "Delphi clears UsedSlicedLimit after the adaptive update"
         );
 
         let mut congested = payload;
         congested[41] = 0;
-        {
-            client
-                .reader_ping_state
-                .set_can_send_rate_for_test(1_000_000);
-            client
-                .reader_ping_state
-                .set_used_sliced_limit_for_test(true);
-        }
-        let (update, _) = Client::reader_build_ping_update_and_response(
-            &client.reader_protocol,
-            &client.send_lock,
-            &client.reader_ping_state,
-            &client.server_time_delta_handle,
-            client.current_reader_epoch,
-            &congested,
-            0.0,
-            0.0,
-            0,
-            50,
-        )
-        .expect("valid ping");
+        client.can_send_rate = 1_000_000;
+        client.used_sliced_limit = true;
+        client
+            .apply_ping_from_reader_and_build_response(
+                client.current_reader_epoch,
+                &congested,
+                0.0,
+                0.0,
+                0,
+                50,
+            )
+            .expect("valid ping");
         assert_eq!(
-            update.can_send_rate, 850_000,
+            client.can_send_rate, 850_000,
             "Delphi cuts congested channel by round(rate*0.85)"
         );
     }
@@ -11837,15 +11661,6 @@ mod pmtu_tests {
                     .push((cmd, payload.to_vec()));
             }),
         };
-        let ping_update = direct_ping_update_for_writer(&client, &payload);
-        ProtocolCore {
-            client: &mut client,
-        }
-        .apply_recv_side_effects(payload.len() as u64, 123);
-        ProtocolCore {
-            client: &mut client,
-        }
-        .apply_reader_ping_update(ping_update);
         ProtocolCore {
             client: &mut client,
         }
@@ -14386,22 +14201,19 @@ mod service_cmd_tests {
         ping_payload[42..50].copy_from_slice(&40u64.to_le_bytes());
         ping_payload[50..58].copy_from_slice(&(1u64 << 2).to_le_bytes());
         assert!(
-            Client::reader_build_ping_update_and_response(
-                &client.reader_protocol,
-                &client.send_lock,
-                &client.reader_ping_state,
-                &client.server_time_delta_handle,
-                old_epoch,
-                &ping_payload,
-                0.0,
-                0.0,
-                0,
-                ping_payload.len() as u64,
-            )
-            .is_none(),
+            client
+                .apply_ping_from_reader_and_build_response(
+                    old_epoch,
+                    &ping_payload,
+                    0.0,
+                    0.0,
+                    0,
+                    ping_payload.len() as u64,
+                )
+                .is_none(),
             "old reader Ping must not mutate ping counters, TmpSlider, or MPSlider ACK state"
         );
-        assert_eq!(client.reader_ping_state.ping_count(), 0);
+        assert_eq!(client.ping_count(), 0);
         assert!(
             !client.send_lock.lock().unwrap().tmp_slider.has_new_data,
             "old reader Ping ACK bitmap must not touch TmpSlider"
@@ -16022,21 +15834,17 @@ mod reconnect_timing_tests {
         client.need_connect = true;
         client.waiting_hello = false;
 
-        ProtocolCore {
-            client: &mut client,
-        }
-        .apply_reader_ping_update(ReaderPingUpdate {
-            ping_count: 1,
-            round_trip_delay: 100,
-            actual_pmtu: 508,
-            global_timing_orders: 0,
-            overheat: 0,
-            rs: 1.0,
-            server_time_delta: 0.0,
-            net_lag_ping: 0,
-            can_send_rate: 1024,
-            used_sliced_limit: false,
-        });
+        let ping_payload = vec![0u8; control::PING_SIZE];
+        client
+            .apply_ping_from_reader_and_build_response(
+                client.current_reader_epoch,
+                &ping_payload,
+                0.0,
+                0.0,
+                0,
+                ping_payload.len() as u64,
+            )
+            .expect("valid ping");
 
         assert!(
             client.need_connect,

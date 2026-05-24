@@ -162,8 +162,9 @@ Delphi model по факту:
 - `src/client.rs` - immediate replies use `ProtocolCore::send_command`,
   matching the Delphi receive-side calls to `SendCommand` from
   SlicedACK/Ping/PMTU/ImFriend branches.
-- `src/client.rs` - ping handling writes `TmpSlider` inside `SendLockState`;
-  writer later copies it and runs `ApplyRegularHLAck`.
+- `src/client.rs` - Ping handling mutates `Client` fields directly and writes
+  `TmpSlider` inside `SendLockState`; writer later copies it and runs
+  `ApplyRegularHLAck`.
 - `src/client.rs` - writer-owned `RecvdSlider` is a direct `Client` field.
   The Delphi order remains `TmpSlider` in `SendLockState` snapshot ->
   `RecvdSlider` -> `ApplyRegularHLAck`.
@@ -1428,6 +1429,40 @@ Observed quick CPU:
 - `reader avg/max = 1020us / 126809us`, `>1ms = 60`, `>5ms = 6`.
 - `active_dispatch avg/max = 1366us / 115358us`, `>1ms = 4`, `>5ms = 2`.
 - `app_enqueue avg/max = 1030us / 2973us`, `>1ms = 58`, `>5ms = 0`.
+
+### 2026-05-24 - Phase D13 direct Ping state
+
+Done:
+
+- Removed `ReaderPingState` and `ReaderPingUpdate`.
+- `PingCount`, `RoundTripDelay`, `ActualPMTU`, `RS`, `CanSendRate`, and
+  `UsedSlicedLimit` now mutate directly on `Client`.
+- Preserved the Delphi Ping order:
+  `UDPRead Ping` fields/adaptive rate -> `DataReadInt(MPC_Ping)` writes
+  `TmpSlider` -> `ClientNewData(MPC_Ping)` increments `PingCount`, updates time
+  deltas, builds/sends Ping response.
+- Preserved the Rust fix for lost `Fine`: Ping before `AuthDone` proves peer
+  liveness but does not clear `need_connect`.
+
+Reason:
+
+- After the async reader was removed, `ReaderPingState` was a Rust-only mirror
+  of fields Delphi stores directly on the client.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `24.65s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Observed quick CPU:
+
+- `reader avg/max = 923us / 112838us`, `>1ms = 90`, `>5ms = 7`.
+- `active_dispatch avg/max = 889us / 105196us`, `>1ms = 4`, `>5ms = 2`.
+- `app_enqueue avg/max = 986us / 2405us`, `>1ms = 76`, `>5ms = 0`.
 
 ### 2026-05-24 - FireTest quick profile
 
