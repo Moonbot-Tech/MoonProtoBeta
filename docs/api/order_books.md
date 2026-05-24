@@ -31,8 +31,9 @@ Unsubscribe removes that market from the registry and sends
 `emk_UnsubscribeOrderBook` only after `domain_ready`.
 Use the batched helpers when a UI toggles several markets at once; they preserve
 one registry update and one batched Engine API request. Use
-`unsubscribe_all_orderbooks` to clear the registry and send the protocol's
-empty-market-list unsubscribe request.
+`unsubscribe_all_orderbooks` to clear the registry and send one batched
+unsubscribe request for the market names that were remembered locally. If the
+registry is already empty, it sends no wire packet.
 
 The public call always updates the reconnect registry immediately. Once Init is
 open, changed subscriptions also append the wire Engine API request to the

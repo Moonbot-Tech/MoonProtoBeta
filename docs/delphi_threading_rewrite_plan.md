@@ -5056,3 +5056,26 @@ Verification:
   `cargo check --examples --quiet` passed.
 - Quick prod FireTest passed after the registry split:
   `FIRETEST_QUICK_PASS after 22.81s`, `ParseFailed=0`.
+
+### 2026-05-24 - Phase 1 partial: unsubscribe_all_orderbooks sends real names
+
+Done:
+
+- Fixed a Rust-only orderbook API behavior bug.
+- Delphi `TMoonProtoEngine.DoUnsubscribeOrderBooks` exits before sending when
+  the market array is empty.
+- The current Delphi server also treats an empty `emk_UnsubscribeOrderBook`
+  market list as `success=false` and unsubscribes nothing.
+- Rust `unsubscribe_all_orderbooks()` previously cleared the local registry and
+  sent `emk_UnsubscribeOrderBook` with an empty market list. That could leave
+  the server still subscribed while the library believed the registry was empty.
+- The helper now drains the remembered registry names and sends one batched
+  unsubscribe request for those names. If the registry was already empty, it
+  sends no wire packet.
+
+Verification:
+
+- Updated sender/client tests to require non-empty market-name counts for
+  `unsubscribe_all_orderbooks()` and no packet for an empty registry.
+- `cargo fmt --all --check`, `cargo test --lib --quiet` (`652 passed`), and
+  `cargo check --examples --quiet` passed.

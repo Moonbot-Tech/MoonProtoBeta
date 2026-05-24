@@ -783,15 +783,17 @@ impl ClientSender {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        self.subscription_registry
-            .lock()
-            .unwrap()
-            .orderbook_subs
-            .clear();
-        if !self.domain_ready_for_typed_send() {
+        let removed_names = {
+            let mut registry = self.subscription_registry.lock().unwrap();
+            registry.orderbook_subs.drain().collect::<Vec<_>>()
+        };
+        if removed_names.is_empty() || !self.domain_ready_for_typed_send() {
             return Ok(());
         }
-        self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[]))
+        let refs: Vec<&str> = removed_names.iter().map(String::as_str).collect();
+        self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(
+            &refs,
+        ))
     }
 
     /// Fallible all-trades subscription.
@@ -5577,10 +5579,10 @@ impl Client {
 
     /// Unsubscribe from all remembered orderbook streams.
     ///
-    /// This clears the reconnect registry and sends the server's
-    /// `emk_UnsubscribeOrderBook` request with an empty market list. Prefer this
-    /// high-level method over raw `api_unsubscribe_order_book(&[])`; the raw call
-    /// does not update the registry and reconnect would restore stale
+    /// This clears the reconnect registry and sends one batched
+    /// `emk_UnsubscribeOrderBook` request for the market names that were actually
+    /// remembered. Prefer this high-level method over raw Engine API calls; the
+    /// raw call does not update the registry and reconnect would restore stale
     /// subscriptions.
     pub fn unsubscribe_all_orderbooks(&self) {
         self.sender().unsubscribe_all_orderbooks();
@@ -9988,6 +9990,11 @@ mod client_sender_tests {
         payload.get(11).copied()
     }
 
+    fn market_names_count(payload: &[u8]) -> Option<i32> {
+        let bytes: [u8; 4] = payload.get(14..18)?.try_into().ok()?;
+        Some(i32::from_le_bytes(bytes))
+    }
+
     #[test]
     fn subscribe_orderbook_updates_registry_and_sends_wire_request() {
         let (sender, registry, send_q, _, _, _) = make_sender();
@@ -10076,7 +10083,7 @@ mod client_sender_tests {
     }
 
     #[test]
-    fn unsubscribe_all_orderbooks_clears_registry_and_sends_wire_request() {
+    fn unsubscribe_all_orderbooks_clears_registry_and_sends_existing_names() {
         let (sender, registry, send_q, _, _, _) = make_sender();
         registry
             .lock()
@@ -10091,6 +10098,7 @@ mod client_sender_tests {
             method_id(&sent[0].data),
             Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
+        assert_eq!(market_names_count(&sent[0].data), Some(1));
     }
 
     #[test]
@@ -10465,7 +10473,7 @@ mod client_subscribe_integration_tests {
         payload.get(11).copied()
     }
 
-    fn empty_market_names_count(payload: &[u8]) -> Option<i32> {
+    fn market_names_count(payload: &[u8]) -> Option<i32> {
         let bytes: [u8; 4] = payload.get(14..18)?.try_into().ok()?;
         Some(i32::from_le_bytes(bytes))
     }
@@ -11283,7 +11291,7 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
-    fn unsubscribe_all_orderbooks_clears_registry() {
+    fn unsubscribe_all_orderbooks_clears_registry_and_sends_existing_names() {
         let client = ready_client();
         client.subscribe_orderbooks(["BTC", "ETH"]);
         let _ = drain_api_requests(&client);
@@ -11295,7 +11303,15 @@ mod client_subscribe_integration_tests {
             method_id(&sent[0]),
             Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
-        assert_eq!(empty_market_names_count(&sent[0]), Some(0));
+        assert_eq!(market_names_count(&sent[0]), Some(2));
+    }
+
+    #[test]
+    fn unsubscribe_all_orderbooks_with_empty_registry_sends_no_wire() {
+        let client = ready_client();
+        client.unsubscribe_all_orderbooks();
+        assert!(client.with_subscription_registry(|registry| registry.orderbook_subs.is_empty()));
+        assert!(drain_api_requests(&client).is_empty());
     }
 
     #[test]

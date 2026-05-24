@@ -498,8 +498,10 @@ so the application can render futures and spot books separately.
 The batched orderbook helpers update the same registry and send one
 `emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` request for the changed
 market names. Use `unsubscribe_all_orderbooks` instead of raw
-`api_unsubscribe_order_book(&[])` when clearing the UI selection: the raw
-Engine API call does not update the reconnect registry.
+Engine API calls when clearing the UI selection: the raw Engine API call does
+not update the reconnect registry. The high-level helper sends one batched
+unsubscribe for the names that were remembered locally; if none were
+remembered, it sends nothing.
 
 For UI threads, clone a `ClientSender`:
 

@@ -91,7 +91,7 @@ client.unsubscribe_all_orderbooks();
 Those APIs update the subscription registry. Before Init, they do not send
 subscription wire packets; the one-time Init flushes the current registry once.
 After Init, reconnect restores registry-aware subscriptions automatically. Raw
-`api_subscribe_*` calls and raw `api_unsubscribe_order_book(&[])` are useful for
+`api_subscribe_*` calls and raw `api_unsubscribe_order_book(...)` are useful for
 custom tools but do not update the subscription registry and do not enforce the
 typed subscription gate.
 
