@@ -80,8 +80,9 @@ inside the same `Client` session maintains the user-requested active-lib state.
 
 `run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
 for the requested duration and run the MoonProto writer/orchestrator loop on
-that caller thread. The UDP reader is still a separate reader thread; it waits
-with a nonblocking UDP poller and drains readable packets until `WouldBlock`.
+that caller thread. UDP receive is owned by the same `ProtocolCore` loop: it
+waits with a nonblocking UDP poller and drains readable packets until
+`WouldBlock`.
 `run` raw callbacks and ordinary
 `run_with_dispatcher` event callbacks are delivered through the application
 callback queue after protocol/domain state is updated, so slow UI work does not
@@ -95,7 +96,7 @@ snapshot copy itself is still protocol-loop work; for high-rate hot paths prefer
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
-packets and reader-decoded delivery. Typed domain helpers are gated by Init:
+packets and receive-decoded delivery. Typed domain helpers are gated by Init:
 before `domain_ready`, subscriptions update only the reconnect registry and
 order/UI/strategy/balance wrappers queue no wire command. After Init, the same
 typed helpers append their Engine API/UI/domain wire commands to the send
@@ -188,8 +189,8 @@ logs.
 ## Protocol Metrics
 
 `Client::protocol_metrics_snapshot()` returns passive protocol-loop counters:
-UDP receive count, reader-side protocol nanoseconds, writer tick nanoseconds,
-send/maintenance nanoseconds, and internal reader-decoded queue length.
+UDP receive count, receive-side protocol nanoseconds, writer tick nanoseconds,
+send/maintenance nanoseconds, and internal receive-decoded queue length.
 
 `Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` adds the
 current `EventDispatcher` public event queue length to the same snapshot.
@@ -345,8 +346,8 @@ Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
 The response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the
 client.
-With an active reader thread, registered Engine API responses are delivered to
-their receiver from the reader-side DataReadInt path before dispatcher event
+While the client loop is active, registered Engine API responses are delivered
+to their receiver from the receive-side DataReadInt path before dispatcher event
 delivery. The same payload still reaches `EventDispatcher` for state updates.
 `run_until_response` uses the same queued-event behavior as typed one-shot
 helpers.
@@ -359,8 +360,8 @@ registered again.
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Use `request_candles_data` for the common one-shot flow:
 
-Registered candle chunks are aggregated from the reader-side DataReadInt path
-when the reader thread is active; consumed chunks do not produce raw callback or
+Registered candle chunks are aggregated from the receive-side DataReadInt path
+while the client loop is active; consumed chunks do not produce raw callback or
 dispatcher events.
 
 ```rust
@@ -457,7 +458,10 @@ old local index map.
 All-trades reconnect follows Delphi `NeedReconnectAllTrades`: until a
 `TradesStream` packet is seen with the current `ServerToken`, the library sends
 `UnsubscribeAllTrades`, waits 100 ms, then sends `SubscribeAllTrades`, retrying
-that sequence no more often than once per 5000 ms.
+that sequence no more often than once per 5000 ms. A queued
+`SubscribeAllTrades` request arms the same gate, and a successful response
+refreshes it, so the active library waits for the first trades packet before
+deciding that the stream needs another reconnect cycle.
 Orderbook reconnect follows Delphi `NeedResubscribeOrderBooks`: until a
 successful full-registry `SubscribeOrderBook` response confirms the current
 `ServerToken`, the library repeats the batched subscribe no more often than

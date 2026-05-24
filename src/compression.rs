@@ -54,7 +54,10 @@ thread_local! {
 /// - `last_hashed` инициализируется на позицию **перед** буфером (`dst - 1` в Delphi pointer-math,
 ///   `isize -1` в Rust → используем `Option<usize>` через signed sentinel).
 /// - Для **литерала**: одиночный hash-update `if last_hashed < dst - 3 then inc(last_hashed); update`.
-///   Hash'ируется позиция **перед** только что записанным байтом (если есть 4 байта впереди).
+///   Это ровно Delphi pointer rule: после записи литерала `dst` уже указывает на следующий
+///   байт, поэтому хэшируется позиция `<= dst - 3`. mORMot может читать один байт
+///   "вперёд" из уже выделенного output buffer; сдвиг на `dst - 4` меняет hash table
+///   и ломает валидные live `OrderBook` streams.
 /// - Для **back-ref**: до копирования back-ref хэшируются позиции `< dst` (НЕ `dst + t`!), затем
 ///   `inc(dst, t); last_hashed := dst - 1` — скопированные t байт НЕ хэшируются в этой итерации.
 pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
@@ -152,10 +155,9 @@ fn synlz_decompress_inner(
                 }
 
                 // Update hash table (SINGLE update, not loop).
-                // Delphi: `if last_hashed < dst - 3 then begin inc(last_hashed); update; end`
-                // Эквивалент: last_hashed + 1 <= (dst_pos as i64) - 4, т.е. в `dst[last_hashed+1..last_hashed+5]`
-                // есть валидные 4 байта.
-                if last_hashed < (dst_pos as i64) - 4 {
+                // Delphi: `if last_hashed < dst - 3 then begin inc(last_hashed); update; end`.
+                // Эквивалент после `dst_pos += 1`: `last_hashed < dst_pos - 3`.
+                if last_hashed < (dst_pos as i64) - 3 {
                     last_hashed += 1;
                     let lh = last_hashed as usize;
                     if lh + 4 <= dst.len() {
@@ -447,7 +449,13 @@ mod tests {
 
         let decoded = synlz_decompress(&live_orderbook_payload)
             .expect("decompress must not depend on stale thread-local offsets");
-        assert_eq!(decoded.len(), 63);
+        assert_eq!(
+            decoded,
+            hex_to_bytes(
+                "0100030000030084759647a037953d801b88475873803b00f87147faedeb3ae13e97470000000046419747000000001f4597476f12833b2145974700000000"
+            ),
+            "literal hash update must match mORMot `last_hashed < dst - 3`, not only output length"
+        );
     }
 
     #[test]

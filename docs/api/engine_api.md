@@ -41,15 +41,15 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 Calling `rx.recv_timeout(...)` directly on the same thread usually times out
 because no UDP packets are processed during that wait.
 
-When a reader thread is already active and decodes a registered
-`TEngineResponse`, the receiver is signalled immediately from the reader-side
+When the client loop is already active and decodes a registered
+`TEngineResponse`, the receiver is signalled immediately from the receive-side
 DataReadInt path, before the same payload is later applied to `EventDispatcher`.
 This avoids waiting for a second dispatcher drain, but single-threaded callers
 still need `run_until_response` because the current writer/send loop is pumped
 there.
 
 Chunked `RequestCandlesData` uses its own pending registry: registered chunks
-are also consumed and merged from reader-side DataReadInt, and the final
+are also consumed and merged from receive-side DataReadInt, and the final
 `MergedCandles` receiver is signalled when the last chunk arrives.
 
 For custom raw payloads with caller-owned timeout cleanup, call

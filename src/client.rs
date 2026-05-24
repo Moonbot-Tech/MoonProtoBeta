@@ -28,13 +28,13 @@ use crate::crypto;
 use crate::protocol::{control, crypted, handshake, slicing, slider::Slider, Command};
 use crate::MoonKey;
 use log::{debug, error, warn};
-// MoonProto UDP Client architecture follows the Delphi split:
-// main/send loop plus UDP reader thread. See MAPPING.md for line-by-line
-// correspondence.
+// MoonProto UDP Client architecture follows Delphi receive machine effects
+// inside one ProtocolCore owner: recv drain, immediate service replies,
+// domain dispatch enqueue, then send/maintenance.
 use polling::{Event as PollEvent, Events as PollEvents, Poller};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -165,7 +165,6 @@ fn queued_client_settings_updated_since(
 
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
-const READER_POLL_TIMEOUT_MS: u64 = 1_000; // old read_timeout shutdown bound
 const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
 const SETTINGS_HELPER_RETRY_PAUSE_MS: u64 = 5_000;
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
@@ -457,7 +456,7 @@ impl SendQueues {
 /// Delphi `TMoonProtoBaseNet.SendLock` shared state.
 ///
 /// The writer snapshots `DataToSend*`, `ACKs`, and `TmpSlider` under one lock,
-/// then performs all heavy protocol work outside it. Reader-side code may only
+/// then performs all heavy protocol work outside it. Receive-side code may only
 /// append/copy small already-decoded values here.
 #[derive(Default)]
 pub(crate) struct SendLockState {
@@ -596,733 +595,6 @@ pub(crate) struct ReaderHandshakeUpdate {
     decode_key: MoonKey,
 }
 
-struct ReaderRuntime {
-    sock: UdpSocket,
-    mac_key: MoonKey,
-    master_key: MoonKey,
-    mac_ctx: moonproto_transport::MacContext,
-    mask_ver: u8,
-    client_id: u64,
-    app_token: u64,
-    reader_client_token: u64,
-    server_addr: Option<SocketAddr>,
-    api_pending: Arc<ApiPending>,
-    pending_candles: Arc<Mutex<HashMap<u64, PartialCandles>>>,
-    send_lock: Arc<Mutex<SendLockState>>,
-    pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
-    reader_protocol: Arc<Mutex<ReaderProtocolState>>,
-    reader_ping_state: Arc<ReaderPingState>,
-    reader_transport_state: Arc<Mutex<ReaderTransportState>>,
-    crypt_msg_counter: Arc<AtomicU64>,
-    recvd_slider: Arc<Mutex<Slider>>,
-    server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
-    err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
-    protocol_metrics: Arc<ProtocolMetrics>,
-    slicer: slicing::SlicingReceiver,
-    total_sent: Arc<AtomicU64>,
-    total_recv_shared: Arc<AtomicU64>,
-    debug_outgoing_blackhole: Arc<AtomicBool>,
-    start_time: Instant,
-    shutdown_flag: Arc<AtomicBool>,
-    epoch: u32,
-}
-
-enum ReaderRecvOnce {
-    Datagram(usize),
-    Retry,
-    Stop,
-}
-
-impl ReaderRuntime {
-    fn is_active_reader(&self) -> bool {
-        self.reader_transport_state
-            .lock()
-            .unwrap()
-            .is_active_reader(self.epoch)
-    }
-
-    fn run(mut self) {
-        if let Err(e) = self.run_polling() {
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                return;
-            }
-            log::warn!(target: "moonproto::reader",
-                "UDP poller reader failed: {e}; falling back to blocking recv_from");
-            let _ = self.sock.set_nonblocking(false);
-            let _ = self
-                .sock
-                .set_read_timeout(Some(Duration::from_millis(READER_POLL_TIMEOUT_MS)));
-            self.run_blocking();
-        }
-    }
-
-    fn run_blocking(&mut self) {
-        let mut buf = [0u8; 65535];
-        loop {
-            let n = match self.recv_drain_once(&mut buf) {
-                ReaderRecvOnce::Datagram(n) => n,
-                ReaderRecvOnce::Retry => continue,
-                ReaderRecvOnce::Stop => break,
-            };
-            if !self.process_datagram(&buf[..n], n as u64) {
-                break;
-            }
-        }
-    }
-
-    fn run_polling(&mut self) -> std::io::Result<()> {
-        let poller = Poller::new()?;
-        let mut events = PollEvents::new();
-        self.sock.set_nonblocking(true)?;
-        // Safety: this reader owns the cloned UDP socket and removes it from
-        // the poller before leaving the polling path.
-        unsafe {
-            poller.add(&self.sock, PollEvent::readable(1))?;
-        }
-        let result = self.run_polling_registered(&poller, &mut events);
-        if let Err(e) = poller.delete(&self.sock) {
-            log::warn!(target: "moonproto::reader", "UDP poller delete failed: {e}");
-        }
-        result
-    }
-
-    fn run_polling_registered(
-        &mut self,
-        poller: &Poller,
-        events: &mut PollEvents,
-    ) -> std::io::Result<()> {
-        let mut buf = [0u8; 65535];
-        loop {
-            if self.shutdown_flag.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-
-            events.clear();
-            match poller.wait(events, Some(Duration::from_millis(READER_POLL_TIMEOUT_MS))) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-            if !events.iter().any(|event| event.key == 1 && event.readable) {
-                continue;
-            }
-
-            loop {
-                match self.recv_drain_once(&mut buf) {
-                    ReaderRecvOnce::Datagram(n) => {
-                        if !self.process_datagram(&buf[..n], n as u64) {
-                            return Ok(());
-                        }
-                    }
-                    ReaderRecvOnce::Retry => break,
-                    ReaderRecvOnce::Stop => return Ok(()),
-                }
-            }
-
-            poller.modify(&self.sock, PollEvent::readable(1))?;
-        }
-    }
-
-    fn recv_drain_once(&self, buf: &mut [u8]) -> ReaderRecvOnce {
-        if self.shutdown_flag.load(Ordering::Relaxed) {
-            return ReaderRecvOnce::Stop;
-        }
-
-        match self.sock.recv_from(buf) {
-            Ok((n, _)) => ReaderRecvOnce::Datagram(n),
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                    ReaderRecvOnce::Retry
-                }
-                _ => {
-                    if self.shutdown_flag.load(Ordering::Relaxed) {
-                        return ReaderRecvOnce::Stop;
-                    }
-                    log::warn!(target: "moonproto::reader", "recv_from error: {} ({:?})", e, e.kind());
-                    thread::sleep(Duration::from_millis(5));
-                    ReaderRecvOnce::Retry
-                }
-            },
-        }
-    }
-
-    fn process_datagram(&mut self, datagram: &[u8], recv_bytes: u64) -> bool {
-        let protocol_metrics = Arc::clone(&self.protocol_metrics);
-        protocol_metrics.record_recv_packet();
-        let _protocol_timer = protocol_metrics.reader_protocol_timer();
-
-        if self.shutdown_flag.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
-            &self.mac_ctx,
-            &self.mac_key,
-            datagram,
-            self.mask_ver,
-        ) else {
-            return true;
-        };
-
-        if trace_io_enabled() {
-            eprintln!(
-                "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
-                Command::from_byte(hdr.cmd),
-                hdr.cmd,
-                datagram.len(),
-                payload.len()
-            );
-        }
-
-        let timestamp_ms = self.start_time.elapsed().as_millis() as i64;
-        let reader_is_active = self
-            .reader_transport_state
-            .lock()
-            .unwrap()
-            .apply_recv_side_effects(self.epoch, recv_bytes, timestamp_ms);
-        if !reader_is_active {
-            return true;
-        }
-        let total_recv_after = self
-            .total_recv_shared
-            .fetch_add(recv_bytes, Ordering::Relaxed)
-            + recv_bytes;
-
-        if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
-            self.err_emu_diagnostics
-                .lock()
-                .unwrap()
-                .record_packet(hdr.cmd, &payload, decision);
-            if decision.dropped {
-                self.on_err_emu_drop(hdr.cmd, &payload, recv_bytes, timestamp_ms);
-                return true;
-            }
-        }
-
-        self.handle_command(
-            hdr.cmd,
-            &payload,
-            recv_bytes,
-            total_recv_after,
-            timestamp_ms,
-        )
-    }
-
-    fn handle_command(
-        &mut self,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        total_recv_after: u64,
-        timestamp_ms: i64,
-    ) -> bool {
-        self.slicer.set_last_online(timestamp_ms);
-        self.slicer.do_cleanup();
-
-        match Command::from_byte(raw_cmd) {
-            Command::Ping => {
-                self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms);
-            }
-            Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
-                self.on_handshake_control(Command::from_byte(raw_cmd), recv_bytes, timestamp_ms);
-            }
-            Command::WhoAreYou => {
-                self.on_who_are_you(payload, recv_bytes, timestamp_ms);
-            }
-            Command::Fine => {
-                self.on_fine(payload, recv_bytes, timestamp_ms);
-            }
-            Command::SizeTest => {
-                self.on_new_size_test(payload, recv_bytes, timestamp_ms);
-            }
-            Command::ProbeMTU => {
-                self.on_new_probe_mtu(payload, recv_bytes, timestamp_ms);
-            }
-            Command::SlicedACK => {
-                self.on_new_sliced_ack(payload, recv_bytes, timestamp_ms);
-            }
-            Command::Sliced => {
-                if !self.on_new_sliced(payload, recv_bytes, timestamp_ms) {
-                    return false;
-                }
-            }
-            _ => {
-                self.on_data_packet(raw_cmd, payload, recv_bytes, timestamp_ms);
-            }
-        }
-
-        true
-    }
-
-    fn on_err_emu_drop(&self, raw_cmd: u8, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
-        if trace_io_enabled() {
-            eprintln!(
-                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
-                Command::from_byte(raw_cmd),
-                raw_cmd,
-                payload.len()
-            );
-        }
-        if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
-            if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
-                eprintln!(
-                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
-                    sh.datagram_num,
-                    sh.block_num,
-                    sh.max_block_num,
-                    payload.len()
-                );
-            } else {
-                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
-            }
-        }
-
-        // Delphi ErrEmu exits after packet accounting / LastOnline side
-        // effects; it does not deliver anything into protocol/user handlers.
-        // Reader transport state was already updated before this call, and the
-        // writer loop synchronizes it directly from `reader_transport_state`.
-    }
-
-    fn on_data_packet(&self, raw_cmd: u8, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        self.data_read(raw_cmd, payload, recv_bytes, timestamp_ms, false);
-    }
-
-    fn send_command(&self, cmd: Command, payload: &[u8]) {
-        Client::reader_send_raw_packet(
-            &self.sock,
-            self.server_addr,
-            &self.mac_ctx,
-            &self.mac_key,
-            cmd,
-            self.client_id,
-            payload,
-            self.mask_ver,
-            &self.total_sent,
-            &self.debug_outgoing_blackhole,
-        );
-    }
-
-    fn data_read(
-        &self,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        apply_recv_effects_first: bool,
-    ) {
-        if Command::from_byte(raw_cmd) != Command::Grouped {
-            self.data_read_int(
-                raw_cmd,
-                payload,
-                recv_bytes,
-                timestamp_ms,
-                apply_recv_effects_first,
-                None,
-            );
-            return;
-        }
-
-        let mut pos = 0;
-        let mut emitted = false;
-        while pos + 3 <= payload.len() {
-            let sub_cmd = payload[pos];
-            pos += 1;
-            let sz = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
-            pos += 2;
-            if pos + sz > payload.len() {
-                break;
-            }
-            self.data_read_int(
-                sub_cmd,
-                &payload[pos..pos + sz],
-                recv_bytes,
-                timestamp_ms,
-                apply_recv_effects_first && !emitted,
-                None,
-            );
-            emitted = true;
-            pos += sz;
-        }
-
-        if !emitted {
-            Client::push_reader_recv_side_effect(
-                &self.pending_reader_decoded,
-                &self.protocol_metrics,
-                raw_cmd,
-                recv_bytes,
-                timestamp_ms,
-                self.epoch,
-                apply_recv_effects_first,
-            );
-        }
-    }
-
-    fn data_read_int(
-        &self,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        apply_recv_effects: bool,
-        sliced_stats: Option<ReaderSlicedStats>,
-    ) {
-        let decoded = Client::decode_data_read_int_payload_shared(
-            &self.reader_protocol,
-            self.epoch,
-            raw_cmd,
-            payload,
-        );
-        let (cmd, payload) = decoded
-            .map(|(cmd, payload)| (cmd, Some(payload)))
-            .unwrap_or((raw_cmd, None));
-        let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
-            Client::dispatch_api_pending_from_reader(self.api_pending.as_ref(), cmd, payload)
-        });
-        let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
-            Client::dispatch_candles_chunk_from_reader(
-                self.pending_candles.as_ref(),
-                cmd,
-                payload,
-                timestamp_ms,
-            )
-        });
-        if let (Some(stats), Some(payload)) = (sliced_stats.as_ref(), payload.as_deref()) {
-            self.err_emu_diagnostics
-                .lock()
-                .unwrap()
-                .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, payload);
-        }
-        self.push_reader_decoded(ReaderDecodedMsg {
-            cmd,
-            payload,
-            api_pending_consumed,
-            candles_chunk_consumed,
-            recv_bytes,
-            timestamp_ms,
-            epoch: self.epoch,
-            apply_recv_effects,
-            sliced_stats,
-            ping_update: None,
-            handshake_update: None,
-        });
-    }
-
-    fn push_reader_decoded(&self, msg: ReaderDecodedMsg) {
-        let mut pending = self.pending_reader_decoded.lock().unwrap();
-        pending.push(msg);
-        self.protocol_metrics.record_app_queue_len(pending.len());
-    }
-
-    fn push_reader_control_decoded(&self, msg: ReaderDecodedMsg) {
-        self.push_reader_decoded(msg);
-    }
-
-    fn build_reader_control_decoded(
-        &self,
-        cmd: u8,
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        ping_update: Option<ReaderPingUpdate>,
-        handshake_update: Option<ReaderHandshakeUpdate>,
-        payload: Option<Vec<u8>>,
-    ) -> ReaderDecodedMsg {
-        ReaderDecodedMsg {
-            cmd,
-            payload,
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes,
-            timestamp_ms,
-            epoch: self.epoch,
-            apply_recv_effects: false,
-            sliced_stats: None,
-            ping_update,
-            handshake_update,
-        }
-    }
-
-    fn on_new_size_test(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
-        if let Some(ack) =
-            Client::build_size_ack_payload(&self.reader_protocol, self.epoch, payload)
-        {
-            if !self.is_active_reader() {
-                return;
-            }
-            // Delphi `UDPRead(MPC_SizeTest)`: turn DontFragment on, send
-            // `MPC_SizeAck` of requested size, then turn DontFragment off.
-            set_dont_fragment_for_socket(&self.sock, true);
-            self.send_command(Command::SizeAck, &ack);
-            set_dont_fragment_for_socket(&self.sock, false);
-        }
-    }
-
-    fn on_new_probe_mtu(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
-        if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
-            if !self.is_active_reader() {
-                return;
-            }
-            // Delphi `UDPRead(MPC_ProbeMTU)`: echo probe fields in
-            // `MPC_ProbeMTUAck`, with DontFragment toggled around the send.
-            set_dont_fragment_for_socket(&self.sock, true);
-            self.send_command(Command::ProbeMTUAck, &ack);
-            set_dont_fragment_for_socket(&self.sock, false);
-        }
-    }
-
-    fn on_handshake_control(&mut self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
-        if !self.is_active_reader() {
-            return;
-        }
-        let update = Client::simple_handshake_update(cmd);
-        if cmd == Command::WantNewHello {
-            self.reader_protocol
-                .lock()
-                .unwrap()
-                .reset_from_reader(self.epoch);
-            self.send_lock
-                .lock()
-                .unwrap()
-                .reset_tmp_slider_from_reader(self.epoch);
-            self.reader_ping_state
-                .reset_protocol_session_from_reader(self.epoch);
-            self.crypt_msg_counter.store(0, Ordering::Relaxed);
-            self.total_sent.store(0, Ordering::Relaxed);
-            *self.recvd_slider.lock().unwrap() = Slider::new();
-            self.slicer = slicing::SlicingReceiver::new();
-            self.total_recv_shared.store(0, Ordering::Relaxed);
-        }
-        self.reader_transport_state
-            .lock()
-            .unwrap()
-            .apply_handshake_update(self.epoch, &update, timestamp_ms);
-        self.push_reader_control_decoded(self.build_reader_control_decoded(
-            cmd as u8,
-            recv_bytes,
-            timestamp_ms,
-            None,
-            Some(update),
-            None,
-        ));
-    }
-
-    fn on_who_are_you(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        if let Some(hello) =
-            Client::decode_handshake_hello(&self.master_key, self.client_id, payload)
-        {
-            if !self.is_active_reader() {
-                return;
-            }
-            self.reader_client_token = self.reader_transport_state.lock().unwrap().client_token;
-            let (update, encrypted) = Client::build_who_are_you_imfriend(
-                &self.master_key,
-                self.client_id,
-                self.app_token,
-                &mut self.reader_client_token,
-                hello,
-            );
-            self.reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_handshake_update(self.epoch, &update, timestamp_ms);
-            self.reader_protocol
-                .lock()
-                .unwrap()
-                .set_decode_cipher_from_reader(
-                    self.epoch,
-                    crate::crypto::cipher_from_key(&update.decode_key),
-                );
-            if !self.is_active_reader() {
-                return;
-            }
-
-            // Delphi `UDPRead(MPC_WhoAreYou)`: derive session keys and send
-            // `MPC_ImFriend` twice with a blocking 32ms delay before returning
-            // to the reader loop.
-            self.send_command(Command::ImFriend, &encrypted);
-            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
-            self.send_command(Command::ImFriend, &encrypted);
-            self.push_reader_control_decoded(self.build_reader_control_decoded(
-                Command::WhoAreYou as u8,
-                recv_bytes,
-                timestamp_ms,
-                None,
-                Some(update),
-                None,
-            ));
-        } else {
-            Client::push_reader_recv_side_effect(
-                &self.pending_reader_decoded,
-                &self.protocol_metrics,
-                Command::WhoAreYou as u8,
-                recv_bytes,
-                timestamp_ms,
-                self.epoch,
-                false,
-            );
-        }
-    }
-
-    fn on_fine(&self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        if Client::decode_handshake_hello(&self.master_key, self.client_id, payload).is_some() {
-            if !self.is_active_reader() {
-                return;
-            }
-            let update = Client::fine_handshake_update();
-            self.reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_handshake_update(self.epoch, &update, timestamp_ms);
-            self.push_reader_control_decoded(self.build_reader_control_decoded(
-                Command::Fine as u8,
-                recv_bytes,
-                timestamp_ms,
-                None,
-                Some(update),
-                None,
-            ));
-        } else {
-            Client::push_reader_recv_side_effect(
-                &self.pending_reader_decoded,
-                &self.protocol_metrics,
-                Command::Fine as u8,
-                recv_bytes,
-                timestamp_ms,
-                self.epoch,
-                false,
-            );
-        }
-    }
-
-    fn on_new_sliced(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) -> bool {
-        if self.shutdown_flag.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        let (assembled, ack) = self.slicer.on_new_sliced(payload);
-
-        if self.shutdown_flag.load(Ordering::Relaxed) {
-            return false;
-        }
-        if !self.is_active_reader() {
-            return true;
-        }
-
-        // Delphi `OnNewSliced`: every received slice gets an immediate
-        // `MPC_SlicedACK` from the reader stack before any complete datagram is
-        // passed into `DataReadInt`.
-        if slicing::trace_enabled() {
-            if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {
-                let mut flags = [0u8; 32];
-                flags.copy_from_slice(&ack[..32]);
-                let total = hdr.max_block_num as usize + 1;
-                eprintln!(
-                    "[slice-ack-tx] d={} after_b={}/{} acked={}/{} missing={}",
-                    u16::from_le_bytes([ack[32], ack[33]]),
-                    hdr.block_num,
-                    hdr.max_block_num,
-                    slicing::acked_count(&flags, total),
-                    total,
-                    slicing::missing_preview(&flags, total)
-                );
-            }
-        }
-        let partial_sliced = assembled.is_none();
-        self.send_command(Command::SlicedACK, &ack);
-        if partial_sliced {
-            for duplicate_idx in 0..diagnostic_duplicate_sliced_acks() {
-                if slicing::trace_enabled() {
-                    eprintln!(
-                        "[slice-ack-tx-duplicate] d={} duplicate_idx={}",
-                        u16::from_le_bytes([ack[32], ack[33]]),
-                        duplicate_idx + 1
-                    );
-                }
-                self.send_command(Command::SlicedACK, &ack);
-            }
-        }
-
-        if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
-            self.data_read_int(
-                cmd,
-                &payload,
-                recv_bytes,
-                timestamp_ms,
-                false,
-                Some(ReaderSlicedStats {
-                    datagram_num,
-                    dup_count,
-                    blocks_count,
-                }),
-            );
-            self.slicer.receiving.remove(&datagram_num);
-        } else {
-            // Delphi `OnNewSliced` stops here for partial datagrams: ACK was
-            // sent, but `DataReadInt` is called only after `Sliced.Received`.
-            // Do not enqueue a Rust-only no-op reader event per slice.
-        }
-
-        true
-    }
-
-    fn on_new_sliced_ack(&self, payload: &[u8], _recv_bytes: u64, _timestamp_ms: i64) {
-        // Delphi `OnNewSlicedACK`: reader only appends ACK to the ACK queue.
-        // Applying it is writer/`CheckSeningData` work.
-        Client::push_sliced_ack_from_reader(&self.send_lock, self.epoch, payload);
-    }
-
-    fn on_new_ping(
-        &self,
-        payload: &[u8],
-        recv_bytes: u64,
-        total_recv_after: u64,
-        timestamp_ms: i64,
-    ) {
-        let raw_now_dt = delphi_now_raw();
-        let corrected_now_dt = delphi_now();
-        if let Some((ping_update, response)) = Client::reader_build_ping_update_and_response(
-            &self.reader_protocol,
-            &self.send_lock,
-            &self.reader_ping_state,
-            &self.server_time_delta_handle,
-            self.epoch,
-            payload,
-            raw_now_dt,
-            corrected_now_dt,
-            self.total_sent.load(Ordering::Relaxed),
-            total_recv_after,
-        ) {
-            if !self.is_active_reader() {
-                return;
-            }
-            self.reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_ping_update(self.epoch, &ping_update);
-            // Delphi `UDPRead(MPC_Ping)` runs `DataReadInt(MPC_Ping)` and sends
-            // Ping response immediately from the reader stack.
-            self.send_command(Command::Ping, &response);
-            self.push_reader_control_decoded(self.build_reader_control_decoded(
-                Command::Ping as u8,
-                recv_bytes,
-                timestamp_ms,
-                Some(ping_update),
-                None,
-                Some(payload.to_vec()),
-            ));
-        } else {
-            Client::push_reader_recv_side_effect(
-                &self.pending_reader_decoded,
-                &self.protocol_metrics,
-                Command::Ping as u8,
-                recv_bytes,
-                timestamp_ms,
-                self.epoch,
-                false,
-            );
-        }
-    }
-}
-
 /// Error returned by fallible [`ClientSender`] queueing methods.
 ///
 /// Send/control queues are intentionally unbounded to preserve the Delphi
@@ -1381,6 +653,7 @@ pub struct ClientSender {
     send_lock: Arc<Mutex<SendLockState>>,
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
+    last_trades_subscribe_request_ms: Arc<AtomicI64>,
     start: Instant,
 }
 
@@ -1722,7 +995,15 @@ impl ClientSender {
 
     /// Fallible variant of [`Self::send_api_request`].
     pub fn try_send_api_request(&self, request_payload: Vec<u8>) -> Result<(), SubscribeError> {
-        self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6)
+        let is_subscribe_all_trades =
+            engine_request_method(&request_payload) == Some(EngineMethod::SubscribeAllTrades);
+        let result =
+            self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6);
+        if result.is_ok() && is_subscribe_all_trades {
+            self.last_trades_subscribe_request_ms
+                .store(self.start.elapsed().as_millis() as i64, Ordering::Relaxed);
+        }
+        result
     }
 
     fn send_domain_cmd(
@@ -3062,22 +2343,18 @@ impl ProtocolCore<'_> {
             }
             let cur_tm = self.client.now_ms();
 
-            let cpu_start = Instant::now();
             self.writer_tick_prologue(cur_tm);
 
             if self.ensure_socket_bound(cur_tm) {
+                self.recv_drain_phase();
+
+                let cpu_start = Instant::now();
                 self.drain_app_commands(cur_tm, mode);
-                let cpu_before_sleep = cpu_start.elapsed();
-
-                self.wait_5ms();
-
-                let cpu_after_sleep_start = Instant::now();
-                self.drain_app_commands(cur_tm, mode);
-
                 self.send_maintenance_phase(cur_tm, mode, &protocol_metrics);
-                protocol_metrics
-                    .record_writer_cpu(cpu_before_sleep + cpu_after_sleep_start.elapsed());
+                protocol_metrics.record_writer_cpu(cpu_start.elapsed());
+                self.wait_5ms();
             } else {
+                let cpu_start = Instant::now();
                 protocol_metrics.record_writer_cpu(cpu_start.elapsed());
                 // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
@@ -3109,9 +2386,591 @@ impl ProtocolCore<'_> {
     fn ensure_socket_bound(&mut self, cur_tm: i64) -> bool {
         if self.client.socket.is_none() && self.client.need_connect {
             self.client.bind_socket(cur_tm);
-            self.client.spawn_reader();
+        }
+        if self.client.socket.is_some() && self.client.recv_poller.is_none() {
+            self.client.register_recv_poller();
         }
         self.client.socket.is_some()
+    }
+
+    fn recv_drain_phase(&mut self) {
+        let mut buf = [0u8; 65535];
+        let mut drained_any = false;
+        loop {
+            let recv_result = {
+                let Some(sock) = self.client.socket.as_ref() else {
+                    break;
+                };
+                sock.recv_from(&mut buf)
+            };
+
+            match recv_result {
+                Ok((n, _)) => {
+                    drained_any = true;
+                    if !self.process_datagram_inline(&buf[..n], n as u64) {
+                        break;
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(target: "moonproto::reader",
+                        "recv_from error: {} ({:?})", e, e.kind());
+                    break;
+                }
+            }
+        }
+
+        if drained_any {
+            self.rearm_recv_poller();
+        }
+    }
+
+    fn rearm_recv_poller(&mut self) {
+        let (Some(poller), Some(sock)) = (
+            self.client.recv_poller.as_ref(),
+            self.client.socket.as_ref(),
+        ) else {
+            return;
+        };
+        if let Err(e) = poller.modify(sock, PollEvent::readable(1)) {
+            log::warn!(target: "moonproto::reader", "UDP poller rearm failed: {e}");
+            self.client.recv_poller = None;
+        }
+    }
+
+    fn process_datagram_inline(&mut self, datagram: &[u8], recv_bytes: u64) -> bool {
+        let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
+        protocol_metrics.record_recv_packet();
+        let _protocol_timer = protocol_metrics.reader_protocol_timer();
+
+        let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
+            &self.client.mac_ctx,
+            &self.client.cfg.mac_key,
+            datagram,
+            self.client.cfg.mask_ver,
+        ) else {
+            return true;
+        };
+
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                Command::from_byte(hdr.cmd),
+                hdr.cmd,
+                datagram.len(),
+                payload.len()
+            );
+        }
+
+        let timestamp_ms = self.client.now_ms();
+        self.apply_recv_side_effects(recv_bytes, timestamp_ms);
+        let total_recv_after = self
+            .client
+            .total_recv_shared
+            .fetch_add(recv_bytes, Ordering::Relaxed)
+            + recv_bytes;
+
+        if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+            self.client
+                .err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_packet(hdr.cmd, &payload, decision);
+            if decision.dropped {
+                Self::on_err_emu_drop_inline(hdr.cmd, &payload);
+                return true;
+            }
+        }
+
+        self.handle_command_inline(
+            hdr.cmd,
+            &payload,
+            recv_bytes,
+            total_recv_after,
+            timestamp_ms,
+        )
+    }
+
+    fn handle_command_inline(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+    ) -> bool {
+        self.client.recv_slicer.set_last_online(timestamp_ms);
+        self.client.recv_slicer.do_cleanup();
+
+        match Command::from_byte(raw_cmd) {
+            Command::Ping => {
+                self.on_new_ping_inline(payload, recv_bytes, total_recv_after, timestamp_ms);
+            }
+            Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
+                self.on_handshake_control_inline(
+                    Command::from_byte(raw_cmd),
+                    recv_bytes,
+                    timestamp_ms,
+                );
+            }
+            Command::WhoAreYou => {
+                self.on_who_are_you_inline(payload, recv_bytes, timestamp_ms);
+            }
+            Command::Fine => {
+                self.on_fine_inline(payload, recv_bytes, timestamp_ms);
+            }
+            Command::SizeTest => {
+                self.on_new_size_test_inline(payload);
+            }
+            Command::ProbeMTU => {
+                self.on_new_probe_mtu_inline(payload);
+            }
+            Command::SlicedACK => {
+                self.on_new_sliced_ack_inline(payload);
+            }
+            Command::Sliced => {
+                if !self.on_new_sliced_inline(payload, recv_bytes, timestamp_ms) {
+                    return false;
+                }
+            }
+            _ => {
+                self.data_read_inline(raw_cmd, payload, recv_bytes, timestamp_ms, false);
+            }
+        }
+
+        true
+    }
+
+    fn on_err_emu_drop_inline(raw_cmd: u8, payload: &[u8]) {
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
+                Command::from_byte(raw_cmd),
+                raw_cmd,
+                payload.len()
+            );
+        }
+        if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
+            if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
+                eprintln!(
+                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
+                    sh.datagram_num,
+                    sh.block_num,
+                    sh.max_block_num,
+                    payload.len()
+                );
+            } else {
+                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
+            }
+        }
+    }
+
+    fn data_read_inline(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        apply_recv_effects_first: bool,
+    ) {
+        if Command::from_byte(raw_cmd) != Command::Grouped {
+            self.data_read_int_inline(
+                raw_cmd,
+                payload,
+                recv_bytes,
+                timestamp_ms,
+                apply_recv_effects_first,
+                None,
+            );
+            return;
+        }
+
+        let mut pos = 0;
+        let mut emitted = false;
+        while pos + 3 <= payload.len() {
+            let sub_cmd = payload[pos];
+            pos += 1;
+            let sz = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+            pos += 2;
+            if pos + sz > payload.len() {
+                break;
+            }
+            self.data_read_int_inline(
+                sub_cmd,
+                &payload[pos..pos + sz],
+                recv_bytes,
+                timestamp_ms,
+                apply_recv_effects_first && !emitted,
+                None,
+            );
+            emitted = true;
+            pos += sz;
+        }
+
+        if !emitted {
+            Client::push_reader_recv_side_effect(
+                &self.client.pending_reader_decoded,
+                &self.client.protocol_metrics,
+                raw_cmd,
+                recv_bytes,
+                timestamp_ms,
+                self.client.current_reader_epoch,
+                apply_recv_effects_first,
+            );
+        }
+    }
+
+    fn data_read_int_inline(
+        &mut self,
+        raw_cmd: u8,
+        payload: &[u8],
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        apply_recv_effects: bool,
+        sliced_stats: Option<ReaderSlicedStats>,
+    ) {
+        let decoded = Client::decode_data_read_int_payload_shared(
+            &self.client.reader_protocol,
+            self.client.current_reader_epoch,
+            raw_cmd,
+            payload,
+        );
+        let (cmd, payload) = decoded
+            .map(|(cmd, payload)| (cmd, Some(payload)))
+            .unwrap_or((raw_cmd, None));
+        let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
+            Client::dispatch_api_pending_from_reader(self.client.api_pending.as_ref(), cmd, payload)
+        });
+        let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
+            Client::dispatch_candles_chunk_from_reader(
+                self.client.pending_candles.as_ref(),
+                cmd,
+                payload,
+                timestamp_ms,
+            )
+        });
+        if let (Some(stats), Some(payload)) = (sliced_stats.as_ref(), payload.as_deref()) {
+            self.client
+                .err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, payload);
+        }
+        self.push_reader_decoded_inline(ReaderDecodedMsg {
+            cmd,
+            payload,
+            api_pending_consumed,
+            candles_chunk_consumed,
+            recv_bytes,
+            timestamp_ms,
+            epoch: self.client.current_reader_epoch,
+            apply_recv_effects,
+            sliced_stats,
+            ping_update: None,
+            handshake_update: None,
+        });
+    }
+
+    fn push_reader_decoded_inline(&mut self, msg: ReaderDecodedMsg) {
+        let mut pending = self.client.pending_reader_decoded.lock().unwrap();
+        pending.push(msg);
+        self.client
+            .protocol_metrics
+            .record_app_queue_len(pending.len());
+    }
+
+    fn build_reader_control_decoded_inline(
+        &self,
+        cmd: u8,
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        ping_update: Option<ReaderPingUpdate>,
+        handshake_update: Option<ReaderHandshakeUpdate>,
+        payload: Option<Vec<u8>>,
+    ) -> ReaderDecodedMsg {
+        ReaderDecodedMsg {
+            cmd,
+            payload,
+            api_pending_consumed: false,
+            candles_chunk_consumed: false,
+            recv_bytes,
+            timestamp_ms,
+            epoch: self.client.current_reader_epoch,
+            apply_recv_effects: false,
+            sliced_stats: None,
+            ping_update,
+            handshake_update,
+        }
+    }
+
+    fn on_new_size_test_inline(&mut self, payload: &[u8]) {
+        if let Some(ack) = Client::build_size_ack_payload(
+            &self.client.reader_protocol,
+            self.client.current_reader_epoch,
+            payload,
+        ) {
+            if let Some(sock) = self.client.socket.as_ref() {
+                set_dont_fragment_for_socket(sock, true);
+            }
+            self.send_command(Command::SizeAck, &ack);
+            if let Some(sock) = self.client.socket.as_ref() {
+                set_dont_fragment_for_socket(sock, false);
+            }
+        }
+    }
+
+    fn on_new_probe_mtu_inline(&mut self, payload: &[u8]) {
+        if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
+            if let Some(sock) = self.client.socket.as_ref() {
+                set_dont_fragment_for_socket(sock, true);
+            }
+            self.send_command(Command::ProbeMTUAck, &ack);
+            if let Some(sock) = self.client.socket.as_ref() {
+                set_dont_fragment_for_socket(sock, false);
+            }
+        }
+    }
+
+    fn on_handshake_control_inline(&mut self, cmd: Command, recv_bytes: u64, timestamp_ms: i64) {
+        let update = Client::simple_handshake_update(cmd);
+        if cmd == Command::WantNewHello {
+            self.client
+                .reader_protocol
+                .lock()
+                .unwrap()
+                .reset_from_reader(self.client.current_reader_epoch);
+            self.client
+                .send_lock
+                .lock()
+                .unwrap()
+                .reset_tmp_slider_from_reader(self.client.current_reader_epoch);
+            self.client
+                .reader_ping_state
+                .reset_protocol_session_from_reader(self.client.current_reader_epoch);
+            self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
+            self.client.total_sent.store(0, Ordering::Relaxed);
+            *self.client.recvd_slider.lock().unwrap() = Slider::new();
+            self.client.recv_slicer = slicing::SlicingReceiver::new();
+            self.client.total_recv_shared.store(0, Ordering::Relaxed);
+        }
+        self.client
+            .reader_transport_state
+            .lock()
+            .unwrap()
+            .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
+        let msg = self.build_reader_control_decoded_inline(
+            cmd as u8,
+            recv_bytes,
+            timestamp_ms,
+            None,
+            Some(update),
+            None,
+        );
+        self.push_reader_decoded_inline(msg);
+    }
+
+    fn on_who_are_you_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if let Some(hello) = Client::decode_handshake_hello(
+            &self.client.cfg.master_key,
+            self.client.cfg.client_id,
+            payload,
+        ) {
+            let mut reader_client_token = self.client.client_token;
+            let (update, encrypted) = Client::build_who_are_you_imfriend(
+                &self.client.cfg.master_key,
+                self.client.cfg.client_id,
+                self.client.app_token,
+                &mut reader_client_token,
+                hello,
+            );
+            self.client
+                .reader_protocol
+                .lock()
+                .unwrap()
+                .set_decode_cipher_from_reader(
+                    self.client.current_reader_epoch,
+                    crate::crypto::cipher_from_key(&update.decode_key),
+                );
+            self.client
+                .reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
+
+            self.send_command(Command::ImFriend, &encrypted);
+            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
+            self.send_command(Command::ImFriend, &encrypted);
+            let msg = self.build_reader_control_decoded_inline(
+                Command::WhoAreYou as u8,
+                recv_bytes,
+                timestamp_ms,
+                None,
+                Some(update),
+                None,
+            );
+            self.push_reader_decoded_inline(msg);
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.client.pending_reader_decoded,
+                &self.client.protocol_metrics,
+                Command::WhoAreYou as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.client.current_reader_epoch,
+                false,
+            );
+        }
+    }
+
+    fn on_fine_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+        if Client::decode_handshake_hello(
+            &self.client.cfg.master_key,
+            self.client.cfg.client_id,
+            payload,
+        )
+        .is_some()
+        {
+            let update = Client::fine_handshake_update();
+            self.client
+                .reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
+            let msg = self.build_reader_control_decoded_inline(
+                Command::Fine as u8,
+                recv_bytes,
+                timestamp_ms,
+                None,
+                Some(update),
+                None,
+            );
+            self.push_reader_decoded_inline(msg);
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.client.pending_reader_decoded,
+                &self.client.protocol_metrics,
+                Command::Fine as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.client.current_reader_epoch,
+                false,
+            );
+        }
+    }
+
+    fn on_new_sliced_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) -> bool {
+        let (assembled, ack) = self.client.recv_slicer.on_new_sliced(payload);
+
+        if slicing::trace_enabled() {
+            if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {
+                let mut flags = [0u8; 32];
+                flags.copy_from_slice(&ack[..32]);
+                let total = hdr.max_block_num as usize + 1;
+                eprintln!(
+                    "[slice-ack-tx] d={} after_b={}/{} acked={}/{} missing={}",
+                    u16::from_le_bytes([ack[32], ack[33]]),
+                    hdr.block_num,
+                    hdr.max_block_num,
+                    slicing::acked_count(&flags, total),
+                    total,
+                    slicing::missing_preview(&flags, total)
+                );
+            }
+        }
+        let partial_sliced = assembled.is_none();
+        self.send_command(Command::SlicedACK, &ack);
+        if partial_sliced {
+            for duplicate_idx in 0..diagnostic_duplicate_sliced_acks() {
+                if slicing::trace_enabled() {
+                    eprintln!(
+                        "[slice-ack-tx-duplicate] d={} duplicate_idx={}",
+                        u16::from_le_bytes([ack[32], ack[33]]),
+                        duplicate_idx + 1
+                    );
+                }
+                self.send_command(Command::SlicedACK, &ack);
+            }
+        }
+
+        if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
+            self.data_read_int_inline(
+                cmd,
+                &payload,
+                recv_bytes,
+                timestamp_ms,
+                false,
+                Some(ReaderSlicedStats {
+                    datagram_num,
+                    dup_count,
+                    blocks_count,
+                }),
+            );
+            self.client.recv_slicer.receiving.remove(&datagram_num);
+        }
+
+        true
+    }
+
+    fn on_new_sliced_ack_inline(&mut self, payload: &[u8]) {
+        Client::push_sliced_ack_from_reader(
+            &self.client.send_lock,
+            self.client.current_reader_epoch,
+            payload,
+        );
+    }
+
+    fn on_new_ping_inline(
+        &mut self,
+        payload: &[u8],
+        recv_bytes: u64,
+        total_recv_after: u64,
+        timestamp_ms: i64,
+    ) {
+        let raw_now_dt = delphi_now_raw();
+        let corrected_now_dt = delphi_now();
+        if let Some((ping_update, response)) = Client::reader_build_ping_update_and_response(
+            &self.client.reader_protocol,
+            &self.client.send_lock,
+            &self.client.reader_ping_state,
+            &self.client.server_time_delta_handle,
+            self.client.current_reader_epoch,
+            payload,
+            raw_now_dt,
+            corrected_now_dt,
+            self.client.total_sent.load(Ordering::Relaxed),
+            total_recv_after,
+        ) {
+            self.client
+                .reader_transport_state
+                .lock()
+                .unwrap()
+                .apply_ping_update(self.client.current_reader_epoch, &ping_update);
+            self.send_command(Command::Ping, &response);
+            let msg = self.build_reader_control_decoded_inline(
+                Command::Ping as u8,
+                recv_bytes,
+                timestamp_ms,
+                Some(ping_update),
+                None,
+                Some(payload.to_vec()),
+            );
+            self.push_reader_decoded_inline(msg);
+        } else {
+            Client::push_reader_recv_side_effect(
+                &self.client.pending_reader_decoded,
+                &self.client.protocol_metrics,
+                Command::Ping as u8,
+                recv_bytes,
+                timestamp_ms,
+                self.client.current_reader_epoch,
+                false,
+            );
+        }
     }
 
     fn drain_app_commands(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
@@ -3119,11 +2978,26 @@ impl ProtocolCore<'_> {
     }
 
     fn wait_5ms(&mut self) {
-        // Delphi Execute spins on shared queues and sleeps a fixed short tick
-        // when there is no outgoing work. Reader-decoded work is polled from
-        // `pending_reader_decoded`, not signalled through a Rust-only wake FIFO.
-        if self.client.send_lock.lock().unwrap().is_empty() {
+        // Delphi writer sleeps a fixed short tick when there is no outgoing
+        // work. In the single-owner Rust loop this wait is also the UDP
+        // readable wait; the next loop drains the socket before send phase.
+        if !self.client.send_lock.lock().unwrap().is_empty() {
+            return;
+        }
+        let timeout = Some(Duration::from_millis(DEFAULT_SLEEP_MS));
+        let Some(poller) = self.client.recv_poller.as_ref() else {
             thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
+            return;
+        };
+        self.client.recv_events.clear();
+        match poller.wait(&mut self.client.recv_events, timeout) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                log::warn!(target: "moonproto::reader",
+                    "UDP poller wait failed: {e}; falling back to sleep for this tick");
+                thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
+            }
         }
     }
 
@@ -3218,7 +3092,7 @@ impl ProtocolCore<'_> {
             self.apply_reader_handshake_update(update, msg.timestamp_ms);
         }
         if let Some(payload) = msg.payload {
-            // Delphi `OnNewData` runs immediately from the UDP reader stack, so
+            // Delphi `OnNewData` runs immediately from the UDP receive stack, so
             // domain handlers observe the packet processing time, not the next
             // writer tick time. Keep the receive timestamp for gap/retry
             // timers while `cur_tm` remains the writer-loop maintenance time.
@@ -3682,10 +3556,7 @@ impl ProtocolCore<'_> {
         if self.client.connected && !self.client.soft_reconnect {
             self.send_command(Command::LogOff, &[]);
         }
-        // Сигналим текущему reader thread завершиться (макс через reader poll timeout).
-        // Это предотвращает утечку thread'ов при множественных soft/hard reconnect'ах
-        // за длинную сессию (часы).
-        self.client.reader_shutdown.store(true, Ordering::Relaxed);
+        self.client.clear_recv_poller();
         self.client.socket = None;
         if !self.client.soft_reconnect {
             self.client.full_reset();
@@ -4664,6 +4535,7 @@ impl ReaderTransportState {
         self.active_reader_epoch == epoch
     }
 
+    #[cfg(test)]
     fn apply_recv_side_effects(
         &mut self,
         reader_epoch: u32,
@@ -4778,13 +4650,16 @@ pub struct Client {
     pending_h: Vec<SendItem>,
     // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
     sending: Vec<SentSliced>,
-    // Reader -> main decoded OnNewData payloads. Completed incoming Sliced
-    // datagrams run the DataReadInt decrypt/decompress core in the reader stack
+    // Receive -> main decoded OnNewData payloads. Completed incoming Sliced
+    // datagrams run the DataReadInt decrypt/decompress core in the receive stack
     // and enter this queue only for user/active-library delivery.
     pending_reader_decoded: Arc<Mutex<Vec<ReaderDecodedMsg>>>,
 
     // Main thread state
     socket: Option<UdpSocket>,
+    recv_slicer: slicing::SlicingReceiver,
+    recv_poller: Option<Poller>,
+    recv_events: PollEvents,
     connected: bool, // FConnected: true after first valid packet received
     authorized: bool,
     last_online: i64,
@@ -4890,17 +4765,10 @@ pub struct Client {
     /// Предыдущий auth_status (для детектирования переходов).
     prev_auth_status: AuthStatus,
 
-    /// Shutdown signal для reader thread.
-    /// `spawn_reader` создаёт НОВЫЙ `Arc<AtomicBool>` для каждого reader thread и сохраняет
-    /// его сюда. При `do_force_disconnect` / `Drop` мы ставим `true` — reader thread выйдет
-    /// из loop (макс через reader poll timeout).
-    /// Каждый новый reader получает свой Arc → старый и новый reader НЕ конфликтуют.
-    reader_shutdown: Arc<AtomicBool>,
-    /// Аудит #7 (audit_delphi_deviation E-V2-02): инкремент на каждый `spawn_reader`.
-    /// Reader thread получает копию текущего значения и проставляет её в
-    /// reader-owned decoded/control records. Main loop фильтрует stale reader
-    /// work с epoch != этого значения. Защита от race на reconnect (старый
-    /// reader может ещё крутиться до reader poll timeout).
+    /// Inline receive epoch. It is incremented when a new UDP socket/session is
+    /// created, and queued decoded records carry the epoch they were produced
+    /// under. Stale records from an already replaced socket have no machine
+    /// effect on writer-owned state.
     current_reader_epoch: u32,
 
     /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
@@ -4964,6 +4832,13 @@ pub struct Client {
     /// `NeedReconnectAllTrades` spends this throttle before it runs the
     /// unsubscribe/sleep/subscribe sequence again.
     last_trades_reconnect_check_ms: i64,
+
+    /// Last queued `emk_SubscribeAllTrades` request, including requests queued
+    /// through `ClientSender`. Delphi `SubscribeAllTrades` blocks inside
+    /// `SendAndWait`, so `NeedReconnectAllTrades` cannot run while that request
+    /// is in flight. Rust queues it asynchronously, therefore this timestamp is
+    /// part of the machine-effect gate.
+    last_trades_subscribe_request_ms: Arc<AtomicI64>,
 
     /// Delphi `TMoonProtoEngine.FSubscribedBookServerToken`: current
     /// `ServerToken` confirmed by a successful full `BookSubbed` batch subscribe.
@@ -5061,9 +4936,9 @@ pub struct Client {
     /// Используется в transport_pack/unpack hot-path вместо пересчёта HMAC ipad/opad
     /// (128 XOR + crc32c) на каждом пакете. См. `moonproto_transport::MacContext`.
     ///
-    /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в ClientConfig
-    /// и не меняется) — этот context тоже фиксирован. Clone() в `spawn_reader`
-    /// для передачи в reader thread.
+    /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в
+    /// ClientConfig и не меняется) — этот context тоже фиксирован и
+    /// переиспользуется receive/send фазами.
     mac_ctx: moonproto_transport::MacContext,
 
     /// Reusable buffer для `transport_pack_into_with_mac` — экономит alloc/dealloc на каждый
@@ -5128,6 +5003,9 @@ impl Client {
             sending: Vec::new(),
             pending_reader_decoded,
             socket: None,
+            recv_slicer: slicing::SlicingReceiver::new(),
+            recv_poller: None,
+            recv_events: PollEvents::new(),
             connected: false,
             authorized: false,
             last_online: 0,
@@ -5195,7 +5073,6 @@ impl Client {
             lifecycle_app_tx: Arc::new(Mutex::new(None)),
             server_update_sent: Arc::new(AtomicBool::new(false)),
             prev_auth_status: AuthStatus::Base,
-            reader_shutdown: Arc::new(AtomicBool::new(false)),
             current_reader_epoch: 0,
             cached_server_addr: None,
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
@@ -5208,6 +5085,7 @@ impl Client {
             update_markets_after_indexes: false,
             restore_orderbooks_after_indexes: false,
             last_trades_reconnect_check_ms: 0,
+            last_trades_subscribe_request_ms: Arc::new(AtomicI64::new(i64::MIN / 2)),
             subscribed_book_server_token: 0,
             last_book_reconnect_check_ms: 0,
             pending_orderbook_resubscribe_uid: None,
@@ -5265,7 +5143,7 @@ impl Client {
     ///
     /// These counters are diagnostics only. They never change retry, ACK,
     /// reconnect, queueing, or drop decisions. Use this to prove that
-    /// reader-side protocol work and writer send/maintenance phases stay
+    /// receive-side protocol work and writer send/maintenance phases stay
     /// bounded while auditing Delphi machine-effect parity.
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
         let app_queue_len = self.pending_reader_decoded.lock().unwrap().len();
@@ -5502,6 +5380,52 @@ impl Client {
             .set_active_reader_epoch(self.current_reader_epoch);
     }
 
+    fn start_inline_reader_session(&mut self) {
+        self.current_reader_epoch = self.current_reader_epoch.wrapping_add(1);
+        self.recv_slicer = slicing::SlicingReceiver::new();
+        self.publish_reader_active_epoch();
+        self.publish_transport_state_from_client();
+        self.register_recv_poller();
+    }
+
+    fn clear_recv_poller(&mut self) {
+        if let (Some(poller), Some(sock)) = (self.recv_poller.as_ref(), self.socket.as_ref()) {
+            if let Err(e) = poller.delete(sock) {
+                log::warn!(target: "moonproto::reader", "UDP poller delete failed: {e}");
+            }
+        }
+        self.recv_poller = None;
+        self.recv_events.clear();
+    }
+
+    fn register_recv_poller(&mut self) {
+        self.clear_recv_poller();
+        let Some(sock) = self.socket.as_ref() else {
+            return;
+        };
+        if let Err(e) = sock.set_nonblocking(true) {
+            log::warn!(target: "moonproto::reader", "set_nonblocking(true) failed: {e}");
+            return;
+        }
+        let poller = match Poller::new() {
+            Ok(poller) => poller,
+            Err(e) => {
+                log::warn!(target: "moonproto::reader",
+                    "UDP poller create failed: {e}; falling back to 5ms nonblocking recv probe");
+                return;
+            }
+        };
+        // Safety: the client owns this UDP socket and deletes it from the
+        // poller before replacing or dropping the socket.
+        let add_result = unsafe { poller.add(sock, PollEvent::readable(1)) };
+        if let Err(e) = add_result {
+            log::warn!(target: "moonproto::reader",
+                "UDP poller add failed: {e}; falling back to 5ms nonblocking recv probe");
+            return;
+        }
+        self.recv_poller = Some(poller);
+    }
+
     fn sync_transport_state_from_reader(&mut self) {
         let (state, recv_bps_pending) = {
             let mut state = self.reader_transport_state.lock().unwrap();
@@ -5563,7 +5487,7 @@ impl Client {
     ///
     /// The command is appended directly to the unbounded Delphi-style
     /// `DataToSend*` queue for its priority, separate from accepted UDP packets
-    /// and reader-decoded delivery. This API has no local capacity-drop branch.
+    /// and receive-decoded delivery. This API has no local capacity-drop branch.
     ///
     /// E-V2-06: возвращает `()`, **но** при закрытом канале (main loop завершён)
     /// логирует error через `log` crate. Потерянная команда — серьёзный сигнал,
@@ -5689,6 +5613,10 @@ impl Client {
     /// Matches Delphi: `TEngineRequest` has explicit `MoonCmdPriority(MPS_Sliced)`,
     /// and `TCommandRegistry.InitRegistry` gives Sliced commands `MaxRetries=6`.
     pub fn send_api_request(&self, request_payload: &[u8]) {
+        if engine_request_method(request_payload) == Some(EngineMethod::SubscribeAllTrades) {
+            self.last_trades_subscribe_request_ms
+                .store(self.now_ms(), Ordering::Relaxed);
+        }
         self.send_cmd(
             request_payload.to_vec(),
             Command::API,
@@ -6239,6 +6167,7 @@ impl Client {
             send_lock: Arc::clone(&self.send_lock),
             subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
+            last_trades_subscribe_request_ms: Arc::clone(&self.last_trades_subscribe_request_ms),
             start: self._start,
         }
     }
@@ -6488,7 +6417,13 @@ impl Client {
         if self.server_token == trades_server_token {
             return;
         }
-        if (now_ms - self.last_trades_reconnect_check_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
+        let last_subscribe_request_ms = self
+            .last_trades_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        let reconnect_gate_ms = self
+            .last_trades_reconnect_check_ms
+            .max(last_subscribe_request_ms);
+        if (now_ms - reconnect_gate_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
             return;
         }
         self.start_trades_reconnect_sequence(now_ms);
@@ -7553,7 +7488,7 @@ impl Client {
     /// Delphi GetTickCount64 семантикой "since some fixed past point").
     ///
     /// B-V3-02 fix: ранее использовался `SystemTime::now()` (clock_gettime CLOCK_REALTIME)
-    /// — ~30-100ns per call. На hot path reader thread (50K pps на пике TradesStream)
+    /// — ~30-100ns per call. На hot path receive loop (50K pps на пике TradesStream)
     /// это давало 1-5 мс/сек wasted CPU + потенциальный wall-clock jump при NTP-step
     /// (ломал бы diff'ы). `Instant::elapsed()` использует CLOCK_MONOTONIC (на Linux/Mac)
     /// либо QueryPerformanceCounter (Windows) — стабильный, ~5-20ns per call, не
@@ -7563,7 +7498,7 @@ impl Client {
     /// не ms since UNIX_EPOCH. Все callers используют **diff** между двумя `now_ms()`,
     /// так что absolute-base разница не имеет значения.
     ///
-    /// MUST use same time base everywhere (reader thread, main thread, slicing) —
+    /// MUST use same time base everywhere (receive, send, slicing) —
     /// гарантируется через общий `self._start: Instant`.
     #[inline]
     fn now_ms(&self) -> i64 {
@@ -7598,7 +7533,7 @@ impl Client {
         }
     }
 
-    /// Run the client. Spawns reader thread, runs main loop for `duration`.
+    /// Run the client protocol loop for `duration`.
     /// Matches TMoonProtoUDPClient.Execute.
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
         // Low-level raw API для потребителей которым НЕ нужны active-library
@@ -7970,109 +7905,6 @@ impl Client {
         }
     }
 
-    /// Spawn reader thread (≡ Indy TIdUDPListenerThread).
-    /// Accepted packets run their protocol-owned receive core in this reader
-    /// stack; main is woken only to apply queued user/active-library delivery
-    /// and writer-visible side effects that are still being split out.
-    ///
-    /// **Shutdown:** создаём НОВЫЙ `Arc<AtomicBool>` для этого reader. Сохраняем clone в
-    /// `self.reader_shutdown`. При `do_force_disconnect` / `Drop` ставим в `true` —
-    /// reader thread выйдет из loop (макс через reader poll timeout).
-    /// Новый spawn_reader создаёт **свой** Arc — старый и новый не конфликтуют.
-    fn spawn_reader(&mut self) {
-        let Some(ref sock) = self.socket else {
-            return;
-        };
-        // D-03: graceful try_clone — на FD exhaustion (long-running клиент с многими reconnect'ами
-        // может упереться в ulimit) не паникуем, а триггерим force_disconnect для restart cycle.
-        let sock_clone = match sock.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                error!("socket try_clone failed: {e} — triggering force_disconnect");
-                self.force_disconnect = true;
-                return;
-            }
-        };
-        let mac_key = self.cfg.mac_key;
-        let master_key = self.cfg.master_key;
-        let mac_ctx = self.mac_ctx.clone(); // shared cached HMAC context (hot path).
-        let mask_ver = self.cfg.mask_ver;
-        let client_id = self.cfg.client_id;
-        let app_token = self.app_token;
-        let reader_client_token_start = self.client_token;
-        let server_addr = self.server_socket_addr();
-        let api_pending = Arc::clone(&self.api_pending);
-        let pending_candles = Arc::clone(&self.pending_candles);
-        let send_lock = Arc::clone(&self.send_lock);
-        let pending_reader_decoded = Arc::clone(&self.pending_reader_decoded);
-        let reader_protocol = Arc::clone(&self.reader_protocol);
-        let reader_ping_state = Arc::clone(&self.reader_ping_state);
-        let crypt_msg_counter = Arc::clone(&self.crypt_msg_counter);
-        let recvd_slider = Arc::clone(&self.recvd_slider);
-        let server_time_delta_handle = Arc::clone(&self.server_time_delta_handle);
-        let total_sent = Arc::clone(&self.total_sent);
-        let total_recv_shared = Arc::clone(&self.total_recv_shared);
-        let err_emu_diagnostics = Arc::clone(&self.err_emu_diagnostics);
-        let protocol_metrics = Arc::clone(&self.protocol_metrics);
-        let debug_outgoing_blackhole = Arc::clone(&self.debug_outgoing_blackhole);
-        // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
-        let start_time = self._start;
-
-        // Новый shutdown flag для этого reader thread.
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        self.reader_shutdown = shutdown_flag.clone();
-
-        // Аудит #7: инкрементируем epoch. Каждый новый reader thread получает свой
-        // epoch'идентификатор; main loop игнорирует events с **старого** epoch'а
-        // (старый reader ещё крутится но мы его игнорируем).
-        self.current_reader_epoch = self.current_reader_epoch.wrapping_add(1);
-        let my_epoch = self.current_reader_epoch;
-        self.publish_reader_active_epoch();
-        self.publish_transport_state_from_client();
-        let reader_transport_state = Arc::clone(&self.reader_transport_state);
-
-        // C-03: named thread для удобства debug (ps -L / Instruments / DebugView)
-        let spawn_result = thread::Builder::new()
-            .name("moonproto-reader".into())
-            .spawn(move || {
-                ReaderRuntime {
-                    sock: sock_clone,
-                    mac_key,
-                    master_key,
-                    mac_ctx,
-                    mask_ver,
-                    client_id,
-                    app_token,
-                    reader_client_token: reader_client_token_start,
-                    server_addr,
-                    api_pending,
-                    pending_candles,
-                    send_lock,
-                    pending_reader_decoded,
-                    reader_protocol,
-                    reader_ping_state,
-                    reader_transport_state,
-                    crypt_msg_counter,
-                    recvd_slider,
-                    server_time_delta_handle,
-                    slicer: slicing::SlicingReceiver::new(),
-                    total_sent,
-                    total_recv_shared,
-                    err_emu_diagnostics,
-                    protocol_metrics,
-                    debug_outgoing_blackhole,
-                    start_time,
-                    shutdown_flag,
-                    epoch: my_epoch,
-                }
-                .run();
-            });
-        if let Err(e) = spawn_result {
-            error!("spawn moonproto-reader thread failed: {e} — triggering force_disconnect");
-            self.force_disconnect = true;
-        }
-    }
-
     fn parse_sliced_ack_payload(payload: &[u8]) -> Option<SlicedAck> {
         // Delphi OnNewSlicedACK reads Flags(32 bytes) + DatagramNum(2 bytes)
         // from the command payload after the transport header.
@@ -8314,82 +8146,6 @@ impl Client {
         ))
     }
 
-    fn reader_send_raw_packet(
-        sock: &UdpSocket,
-        addr: Option<SocketAddr>,
-        mac_ctx: &moonproto_transport::MacContext,
-        mac_key: &MoonKey,
-        cmd: Command,
-        client_id: u64,
-        payload: &[u8],
-        mask_ver: u8,
-        total_sent: &Arc<AtomicU64>,
-        debug_outgoing_blackhole: &AtomicBool,
-    ) {
-        let Some(addr) = addr else {
-            return;
-        };
-        let mut packet = Vec::new();
-        let extra = moonproto_transport::transport_pack_into_with_mac(
-            &mut packet,
-            mac_ctx,
-            mac_key,
-            cmd as u8,
-            client_id,
-            payload,
-            mask_ver,
-        );
-
-        if debug_outgoing_blackhole.load(Ordering::Relaxed) {
-            if trace_io_enabled() {
-                eprintln!(
-                    "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
-                    cmd,
-                    cmd as u8,
-                    packet.len(),
-                    extra.as_ref().map(|p| p.len()).unwrap_or(0),
-                    addr
-                );
-            }
-            return;
-        }
-
-        if let Some(extra_pkt) = extra.as_deref() {
-            if let Err(e) = sock.send_to(extra_pkt, addr) {
-                warn!("send_to(extra, cmd={}) failed: {e}", cmd as u8);
-            }
-        }
-        match sock.send_to(&packet, addr) {
-            Ok(_) => {
-                total_sent.fetch_add(packet.len() as u64, Ordering::Relaxed);
-                if trace_io_enabled() {
-                    eprintln!(
-                        "[mp-io-tx-ok] cmd={:?} raw={} packet_len={} total_sent={}",
-                        cmd,
-                        cmd as u8,
-                        packet.len(),
-                        total_sent.load(Ordering::Relaxed)
-                    );
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                warn!(
-                    "send_to(cmd={}) would block (kernel send buffer full)",
-                    cmd as u8
-                );
-            }
-            Err(e) if is_datagram_too_large_error(&e) => {
-                warn!(
-                    "send_to(cmd={}) packet too large for current path MTU: {e}",
-                    cmd as u8
-                );
-            }
-            Err(e) => {
-                error!("send_to(cmd={}) failed: {e}", cmd as u8);
-            }
-        }
-    }
-
     #[cfg(test)]
     fn on_new_sliced_ack(&self, payload: &[u8]) {
         Self::push_sliced_ack_from_reader(&self.send_lock, self.current_reader_epoch, payload);
@@ -8518,7 +8274,7 @@ impl Client {
     fn engine_response_request_uid_from_payload(payload: &[u8]) -> Option<u64> {
         // Engine response payload includes 11-byte TBaseCommand header, then
         // RequestUID. This is enough to cheaply check ApiPending without
-        // inflating a full response in the reader thread.
+        // inflating a full response in the receive phase.
         let uid = payload.get(11..19)?;
         Some(u64::from_le_bytes(uid.try_into().unwrap()))
     }
@@ -8752,6 +8508,17 @@ impl Client {
                 if is_reconnect_batch {
                     self.pending_orderbook_resubscribe_uid = None;
                 }
+            }
+
+            // Delphi `TMoonProtoEngine.SubscribeAllTrades`: successful
+            // `emk_SubscribeAllTrades` refreshes `LastReconnectCheck`.
+            // Until the first TradesStream packet updates `FTradesServerToken`,
+            // this 5s gate prevents immediate unsubscribe/resubscribe churn.
+            if resp.method == EngineMethod::SubscribeAllTrades && resp.success {
+                let now_ms = self.now_ms();
+                self.last_trades_reconnect_check_ms = now_ms;
+                self.last_trades_subscribe_request_ms
+                    .store(now_ms, Ordering::Relaxed);
             }
 
             // 4. Pending registry (обычный async API).
@@ -9032,6 +8799,7 @@ impl Client {
         self.reader_protocol.lock().unwrap().reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
         *self.recvd_slider.lock().unwrap() = Slider::new();
+        self.recv_slicer = slicing::SlicingReceiver::new();
         self.pending_reader_decoded.lock().unwrap().clear();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
@@ -9064,6 +8832,7 @@ impl Client {
                     self.socket = Some(sock);
                     // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
                     self.cached_server_addr = None;
+                    self.start_inline_reader_session();
                     self.reset_bind_failure_tracking();
                     return;
                 }
@@ -9901,14 +9670,14 @@ fn send_post_init_resync(
     result.post_init_resync_sent = true;
 }
 
-/// Drop: сигналим reader thread'у завершиться даже если потребитель не вызвал
-/// `disconnect()`. Reader выйдет из loop макс через reader poll timeout.
+/// Drop: mark app queues closed and unregister the UDP poller even if the
+/// consumer did not call `disconnect()`.
 /// Process-level NTP guard освобождается автоматически после тела `drop`; если
 /// это был последний клиент, общий NTP worker остановится.
 impl Drop for Client {
     fn drop(&mut self) {
         self.app_queue_alive.store(false, Ordering::Relaxed);
-        self.reader_shutdown.store(true, Ordering::Relaxed);
+        self.clear_recv_poller();
     }
 }
 
@@ -10209,11 +9978,11 @@ mod api_pending_dispatch_tests {
         assert_eq!(decoded.len(), 1);
         assert!(
             decoded[0].api_pending_consumed,
-            "reader-side DataReadInt should deliver registered Engine API receiver before run loop"
+            "receive-side DataReadInt should deliver registered Engine API receiver before run loop"
         );
         let resp = rx
             .try_recv()
-            .expect("receiver must be signalled by reader-side API dispatch");
+            .expect("receiver must be signalled by receive-side API dispatch");
         assert_eq!(resp.request_uid, request_uid);
         assert_eq!(resp.method, EngineMethod::AuthCheck);
     }
@@ -10472,7 +10241,7 @@ mod api_pending_dispatch_tests {
         assert_eq!(decoded0.len(), 1);
         assert!(
             decoded0[0].candles_chunk_consumed,
-            "registered candles chunk must be consumed by reader-side aggregator"
+            "registered candles chunk must be consumed by receive-side aggregator"
         );
         assert!(
             rx.try_recv().is_err(),
@@ -10867,6 +10636,7 @@ mod client_sender_tests {
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let domain_ready = Arc::new(AtomicBool::new(true));
         let server_update_sent = Arc::new(AtomicBool::new(false));
+        let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(i64::MIN / 2));
         (
             ClientSender {
                 app_queue_alive: Arc::clone(&app_queue_alive),
@@ -10874,6 +10644,7 @@ mod client_sender_tests {
                 send_lock: Arc::clone(&send_lock),
                 subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
+                last_trades_subscribe_request_ms,
                 start: Instant::now(),
             },
             subscription_registry,
@@ -15153,53 +14924,61 @@ mod service_cmd_tests {
 
     fn recv_client_packet(
         server_sock: &UdpSocket,
-        mac_key: &MoonKey,
+        client: &mut Client,
     ) -> (ClientMsgHeader, Vec<u8>) {
+        pump_inline_reader(client);
         let mut ack_buf = [0u8; 2048];
         let (n, _from) = server_sock.recv_from(&mut ack_buf).unwrap();
-        unpack_client_packet(mac_key, &ack_buf[..n])
+        unpack_client_packet(&client.cfg.mac_key, &ack_buf[..n])
     }
 
-    fn spawn_reader_test_client() -> (UdpSocket, SocketAddr, Client) {
+    fn inline_reader_test_client() -> (UdpSocket, SocketAddr, Client) {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_addr = server_sock.local_addr().unwrap();
 
         let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client_sock
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
         let client_addr = client_sock.local_addr().unwrap();
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         (server_sock, client_addr, client)
     }
 
-    fn pop_reader_decoded(client: &Client) -> ReaderDecodedMsg {
+    fn pump_inline_reader(client: &mut Client) {
+        ProtocolCore { client }.recv_drain_phase();
+    }
+
+    fn pop_reader_decoded(client: &mut Client) -> ReaderDecodedMsg {
         let deadline = Instant::now() + Duration::from_secs(1);
         while client.pending_reader_decoded.lock().unwrap().is_empty() && Instant::now() < deadline
         {
+            pump_inline_reader(client);
             thread::sleep(Duration::from_millis(1));
         }
         client.pending_reader_decoded.lock().unwrap().pop().unwrap()
     }
 
-    fn assert_no_reader_decoded(client: &Client, why: &str) {
-        thread::sleep(Duration::from_millis(30));
+    fn assert_no_reader_decoded(client: &mut Client, why: &str) {
+        let deadline = Instant::now() + Duration::from_millis(30);
+        while Instant::now() < deadline {
+            pump_inline_reader(client);
+            thread::sleep(Duration::from_millis(1));
+        }
         assert!(
             client.pending_reader_decoded.lock().unwrap().is_empty(),
             "{why}"
         );
     }
 
-    fn wait_reader_total_recv(client: &Client, expected: u64) {
+    fn wait_reader_total_recv(client: &mut Client, expected: u64) {
         let deadline = Instant::now() + Duration::from_secs(1);
-        while reader_transport_snapshot(client).total_recv < expected && Instant::now() < deadline {
+        while client.total_recv() < expected && Instant::now() < deadline {
+            pump_inline_reader(client);
             thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(reader_transport_snapshot(client).total_recv, expected);
+        assert_eq!(client.total_recv(), expected);
     }
 
     fn reader_transport_snapshot(client: &Client) -> ReaderTransportState {
@@ -15349,10 +15128,9 @@ mod service_cmd_tests {
         client.publish_transport_state_from_client();
         let old_epoch = client.current_reader_epoch;
 
-        // Simulate `spawn_reader`: the writer moves to a new reader epoch before
-        // stale reader output is drained. Delphi has already stopped the old
-        // reader synchronously at this point; Rust must make the async old reader
-        // machine effect empty for writer-owned state.
+        // Simulate a socket/session replacement: the writer moves to a new
+        // receive epoch before stale decoded output is drained. Stale output
+        // must have empty machine effect for writer-owned state.
         client.current_reader_epoch = client.current_reader_epoch.wrapping_add(1);
         client.publish_transport_state_from_client();
         let new_epoch = client.current_reader_epoch;
@@ -15457,7 +15235,7 @@ mod service_cmd_tests {
         assert!(
             Client::build_size_ack_payload(&client.reader_protocol, old_epoch, &size_test)
                 .is_none(),
-            "an async old reader must not update DataSizeAck or send SizeAck after a new reader epoch"
+            "a stale receive epoch must not update DataSizeAck or send SizeAck after a new epoch"
         );
         assert_eq!(
             client
@@ -15533,7 +15311,7 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let slice_payload = vec![
             0x2A,
@@ -15547,32 +15325,18 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::Sliced, &slice_payload);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let mut ack_buf = [0u8; 256];
-        let (n, _from) = server_sock.recv_from(&mut ack_buf).unwrap();
-        let (hdr, ack_payload) = unpack_client_packet(&client.cfg.mac_key, &ack_buf[..n]);
-
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
 
         assert_eq!(hdr.cmd, Command::SlicedACK as u8);
         assert_eq!(ack_payload.len(), slicing::ACK256_WIRE_SIZE);
         assert_eq!(ack_payload[0] & 0x01, 0x01);
         assert_eq!(&ack_payload[32..34], &42u16.to_le_bytes());
-        let decoded_deadline = Instant::now() + Duration::from_secs(1);
-        while client.pending_reader_decoded.lock().unwrap().is_empty()
-            && Instant::now() < decoded_deadline
-        {
-            thread::sleep(Duration::from_millis(1));
-        }
-        let decoded = client.pending_reader_decoded.lock().unwrap().pop().unwrap();
+        let decoded = pop_reader_decoded(&mut client);
         assert_eq!(decoded.cmd, Command::API as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&[0xDE, 0xAD][..]));
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while client.total_sent() == 0 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(1));
-        }
         assert!(
             client.total_sent() > 0,
-            "reader-side ACK must go to UDP immediately, before run_inner/write tick"
+            "ProtocolCore receive must send ACK immediately before write tick"
         );
     }
 
@@ -15590,7 +15354,7 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let datagram_num = 0x3344u16;
         let mut ack_payload = vec![0u8; slicing::ACK256_WIRE_SIZE];
@@ -15599,6 +15363,7 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::SlicedACK, &ack_payload);
         server_sock.send_to(&packet, client_addr).unwrap();
 
+        wait_reader_total_recv(&mut client, packet.len() as u64);
         let deadline = Instant::now() + Duration::from_secs(1);
         while client
             .send_lock
@@ -15617,12 +15382,10 @@ mod service_cmd_tests {
             .incoming_sliced_acks
             .pop()
             .unwrap();
-        wait_reader_total_recv(&client, packet.len() as u64);
         assert_no_reader_decoded(
-            &client,
+            &mut client,
             "Delphi OnNewSlicedACK only queues ACK; no DataReadInt/no reader event",
         );
-        client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(ack.datagram_num, datagram_num);
         assert_eq!(ack.flags[0], 0b1010_0101);
@@ -15649,7 +15412,7 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let datagram_num = 43u16;
         let slice_payload = vec![
@@ -15664,10 +15427,10 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::Sliced, &slice_payload);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        wait_reader_total_recv(&client, packet.len() as u64);
+        let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
+        wait_reader_total_recv(&mut client, packet.len() as u64);
         assert_no_reader_decoded(
-            &client,
+            &mut client,
             "partial Sliced must only ACK and stay in Receiving; no DataReadInt before completion",
         );
 
@@ -15686,9 +15449,8 @@ mod service_cmd_tests {
         ];
         let packet2 = pack_server_packet(&client.cfg.mac_key, Command::Sliced, &slice_payload_2);
         server_sock.send_to(&packet2, client_addr).unwrap();
-        let (hdr2, ack_payload2) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let (hdr2, ack_payload2) = recv_client_packet(&server_sock, &mut client);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(hdr2.cmd, Command::SlicedACK as u8);
         assert_eq!(ack_payload2[0] & 0x03, 0x03);
@@ -15721,7 +15483,7 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let size = 64u16;
         let packet_num = 9u16;
@@ -15733,13 +15495,12 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::SizeTest, &size_test);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        wait_reader_total_recv(&client, packet.len() as u64);
+        let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
+        wait_reader_total_recv(&mut client, packet.len() as u64);
         assert_no_reader_decoded(
-            &client,
+            &mut client,
             "SizeTest sends SizeAck immediately and does not enqueue DataReadInt",
         );
-        client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::SizeAck as u8);
         assert_eq!(ack_payload.len(), size as usize);
@@ -15776,7 +15537,7 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let probe_id = 0x1234u16;
         let probe_index = 1u8;
@@ -15788,13 +15549,12 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::ProbeMTU, &probe);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr, ack_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        wait_reader_total_recv(&client, packet.len() as u64);
+        let (hdr, ack_payload) = recv_client_packet(&server_sock, &mut client);
+        wait_reader_total_recv(&mut client, packet.len() as u64);
         assert_no_reader_decoded(
-            &client,
+            &mut client,
             "ProbeMTU sends ProbeMTUAck immediately and does not enqueue DataReadInt",
         );
-        client.reader_shutdown.store(true, Ordering::Relaxed);
 
         assert_eq!(hdr.cmd, Command::ProbeMTUAck as u8);
         assert_eq!(ack_payload.len(), test_size as usize);
@@ -15829,15 +15589,14 @@ mod service_cmd_tests {
         client.need_connect = true;
         client.publish_transport_state_from_client();
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let ping = service_ping_payload(123, 8_224, 456, 7, 128);
         let packet = pack_server_packet(&client.cfg.mac_key, Command::Ping, &ping);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr, response) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let (hdr, response) = recv_client_packet(&server_sock, &mut client);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(hdr.cmd, Command::Ping as u8);
         assert_eq!(response.len(), 50);
@@ -15915,7 +15674,7 @@ mod service_cmd_tests {
         let server_token = 0x2222_3333_4444_5555;
         let peer_app_token = 0xAAAA_BBBB_CCCC_DDDD;
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let who = encrypted_server_hello(
             &client.cfg.master_key,
@@ -15926,10 +15685,9 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, &who);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr1, imfriend1) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let (hdr2, imfriend2) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let (hdr1, imfriend1) = recv_client_packet(&server_sock, &mut client);
+        let (hdr2, imfriend2) = recv_client_packet(&server_sock, &mut client);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(hdr1.cmd, Command::ImFriend as u8);
         assert_eq!(hdr2.cmd, Command::ImFriend as u8);
@@ -15991,14 +15749,14 @@ mod service_cmd_tests {
         let server_token = 0x2222_3333_4444_5555;
         let peer_app_token = 0xAAAA_BBBB_CCCC_DDDD;
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         WriterRuntime {
             client: &mut client,
         }
         .check_hello_send(100);
 
-        let (hello_hdr, hello_payload) = recv_client_packet(&server_sock, &client.cfg.mac_key);
+        let (hello_hdr, hello_payload) = recv_client_packet(&server_sock, &mut client);
         assert_eq!(hello_hdr.cmd, Command::Hello as u8);
         let aad = client.cfg.client_id.to_le_bytes();
         let hello = crypto::decrypt(&client.cfg.master_key, &hello_payload, &aad)
@@ -16015,10 +15773,9 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WhoAreYou, &who);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let (hdr1, imfriend1) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let (hdr2, _imfriend2) = recv_client_packet(&server_sock, &client.cfg.mac_key);
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let (hdr1, imfriend1) = recv_client_packet(&server_sock, &mut client);
+        let (hdr2, _imfriend2) = recv_client_packet(&server_sock, &mut client);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(hdr1.cmd, Command::ImFriend as u8);
         assert_eq!(hdr2.cmd, Command::ImFriend as u8);
@@ -16061,15 +15818,14 @@ mod service_cmd_tests {
         client.need_connect = true;
         client.waiting_hello = true;
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let fine =
             encrypted_server_hello(&client.cfg.master_key, client.cfg.client_id, 0x2222, 0x3333);
         let packet = pack_server_packet(&client.cfg.mac_key, Command::Fine, &fine);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(decoded.cmd, Command::Fine as u8);
         assert!(decoded.payload.is_none());
@@ -16097,14 +15853,13 @@ mod service_cmd_tests {
     #[test]
     fn reader_handles_wrong_hello_without_recv_event_backlog() {
         let _err_emu_guard = err_emu_test_guard();
-        let (server_sock, client_addr, mut client) = spawn_reader_test_client();
+        let (server_sock, client_addr, mut client) = inline_reader_test_client();
         client.auth_status = AuthStatus::Offline;
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WrongHello, &[]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(decoded.cmd, Command::WrongHello as u8);
         assert!(decoded.handshake_update.is_some());
@@ -16125,7 +15880,7 @@ mod service_cmd_tests {
     #[test]
     fn reader_handles_want_new_hello_without_recv_event_backlog() {
         let _err_emu_guard = err_emu_test_guard();
-        let (server_sock, client_addr, mut client) = spawn_reader_test_client();
+        let (server_sock, client_addr, mut client) = inline_reader_test_client();
         client.authorized = true;
         client.need_connect = false;
         client.soft_reconnect = true;
@@ -16137,8 +15892,7 @@ mod service_cmd_tests {
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(decoded.cmd, Command::WantNewHello as u8);
         assert!(decoded.handshake_update.is_some());
@@ -16169,15 +15923,14 @@ mod service_cmd_tests {
     #[test]
     fn reader_handles_need_hello_again_without_recv_event_backlog() {
         let _err_emu_guard = err_emu_test_guard();
-        let (server_sock, client_addr, mut client) = spawn_reader_test_client();
+        let (server_sock, client_addr, mut client) = inline_reader_test_client();
         client.waiting_hello = false;
         client.last_sent_hello = 12345;
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::NeedHelloAgain, &[]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let decoded = pop_reader_decoded(&client);
-        client.reader_shutdown.store(true, Ordering::Relaxed);
+        let decoded = pop_reader_decoded(&mut client);
 
         assert_eq!(decoded.cmd, Command::NeedHelloAgain as u8);
         assert!(decoded.handshake_update.is_some());
@@ -16214,19 +15967,12 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while client.pending_reader_decoded.lock().unwrap().is_empty() && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(1));
-        }
-        client.reader_shutdown.store(true, Ordering::Relaxed);
-
-        let decoded = client.pending_reader_decoded.lock().unwrap().pop().unwrap();
+        let decoded = pop_reader_decoded(&mut client);
         assert_eq!(decoded.cmd, Command::UI as u8);
         assert_eq!(decoded.payload.as_deref(), Some(&[0xAA, 0xBB][..]));
         assert!(!decoded.apply_recv_effects);
@@ -16251,17 +15997,16 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.socket = Some(client_sock);
-        client.spawn_reader();
+        client.start_inline_reader_session();
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
         server_sock.send_to(&packet, client_addr).unwrap();
 
-        wait_reader_total_recv(&client, packet.len() as u64);
+        wait_reader_total_recv(&mut client, packet.len() as u64);
         assert_no_reader_decoded(
-            &client,
+            &mut client,
             "Delphi ErrEmu exits after stats side effects; no protocol/user event",
         );
-        client.reader_shutdown.store(true, Ordering::Relaxed);
 
         let reader_state = reader_transport_snapshot(&client);
         assert!(reader_state.connected);
@@ -17116,6 +16861,84 @@ mod reconnect_timing_tests {
         assert!(
             drain_send_items(&client).is_empty(),
             "observed current FTradesServerToken stops further retries"
+        );
+    }
+
+    #[test]
+    fn successful_subscribe_all_trades_response_refreshes_reconnect_gate_like_delphi() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.server_token = 0x2222;
+        client.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        });
+
+        let response_payload =
+            build_engine_response_payload(0x7777, EngineMethod::SubscribeAllTrades, &[]);
+        let mut buffered = Vec::new();
+        {
+            let mut sink = DispatchSink::Buffer(&mut buffered);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+
+        let refreshed_at = client.last_trades_reconnect_check_ms;
+        assert!(
+            refreshed_at >= 0,
+            "Delphi SubscribeAllTrades success updates LastReconnectCheck"
+        );
+
+        client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS - 1, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "until the 5s gate expires, FTradesServerToken=0 must not cause immediate reconnect"
+        );
+
+        client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::UnsubscribeAllTrades as u8],
+            "after the Delphi gate expires, missing TradesStream token starts reconnect"
+        );
+    }
+
+    #[test]
+    fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect_like_delphi_sendandwait() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.server_token = 0x2222;
+        client.last_trades_reconnect_check_ms = -TRADES_RECONNECT_THROTTLE_MS;
+
+        client.subscribe_all_trades(true);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeAllTrades as u8]
+        );
+
+        let requested_at = client
+            .last_trades_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        assert!(
+            requested_at >= 0,
+            "queued SubscribeAllTrades must arm the Delphi SendAndWait gate"
+        );
+
+        client.tick_trades_reconnect_sequence(requested_at + TRADES_RECONNECT_THROTTLE_MS - 1, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "NeedReconnectAllTrades must not enqueue UnsubscribeAllTrades while the subscribe request is still inside the Delphi-equivalent gate"
+        );
+
+        client.tick_trades_reconnect_sequence(requested_at + TRADES_RECONNECT_THROTTLE_MS, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::UnsubscribeAllTrades as u8]
         );
     }
 

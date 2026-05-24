@@ -23,8 +23,9 @@ let mut sessions: Vec<Session> = configs
     .collect();
 ```
 
-Each `Client` owns its socket, reader thread, subscription registry, pending API
-registry, candle aggregators, server-time delta handle, and server identity.
+Each `Client` owns its socket, `ProtocolCore` receive/send loop, subscription
+registry, pending API registry, candle aggregators, server-time delta handle,
+and server identity.
 
 ## Identity
 

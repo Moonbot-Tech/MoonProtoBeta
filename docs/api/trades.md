@@ -20,6 +20,10 @@ has not yet been observed on `MPC_TradesStream`, the maintenance tick sends
 `emk_UnsubscribeAllTrades`, waits 100 ms, then sends
 `emk_SubscribeAllTrades`. The sequence is retried no more often than once per
 5000 ms until a trades packet for the current `ServerToken` reaches the parser.
+Queuing `emk_SubscribeAllTrades` arms that gate, and a successful response
+refreshes it again. This preserves the Delphi `SendAndWait` effect: the library
+does not immediately unsubscribe from a stream it has just subscribed to while
+waiting for the first trades packet.
 Unsubscribe removes the registry intent and sends `emk_UnsubscribeAllTrades`
 only after `domain_ready`.
 

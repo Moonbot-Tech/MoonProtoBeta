@@ -79,7 +79,7 @@ effects match Delphi's log/free/exit receive path. The diagnostic
 `OrderEvent::Ignored` value is returned only by direct low-level
 `Orders::apply` calls.
 Terminal statuses and `TOrderNotFound` are removed in a deferred flush after the
-current reader batch. `SelLDone` has an additional 400 ms grace window matching
+current receive batch. `SelLDone` has an additional 400 ms grace window matching
 Delphi `DoTheJobVirtual`, which runs two `Sleep(200); ProcessCommands` passes
 before removing the worker from `WCache`. The worker remains addressable long
 enough for immediately following visual packets such as `TOrderTracePoint`,

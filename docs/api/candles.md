@@ -96,8 +96,8 @@ The helper registers the chunk aggregator, keeps the UDP loop running through
 short dispatcher ticks, and removes the pending candles slot if the caller's
 timeout expires before the final chunk.
 
-When a reader thread is already active, registered `RequestCandlesData` chunks
-are aggregated from the reader-side DataReadInt path. Completed streams signal
+When the client loop is already active, registered `RequestCandlesData` chunks
+are aggregated from the receive-side DataReadInt path. Completed streams signal
 the `MergedCandles` receiver before the consumed chunks are considered for raw
 callbacks or `EventDispatcher` delivery.
 

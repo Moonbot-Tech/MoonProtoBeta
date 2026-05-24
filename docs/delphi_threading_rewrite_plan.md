@@ -472,6 +472,8 @@ Exit gate: byte/wire tests, perf counters, FireTest/stress, API docs updated.
 
 Делать в самом конце, после protocol/runtime parity и после того, как крупные
 архитектурные мосты уже убраны. Это не optional cleanup, а обязательный gate.
+Работа по порту не считается закрытой, пока этот проход не сделан по всему
+protocol-owned коду, а не только по случайно найденным горячим местам.
 
 Цель: разобрать и оптимизировать всё protocol-owned, что можно упростить или
 ускорить без изменения Delphi machine effect:
@@ -482,6 +484,7 @@ Exit gate: byte/wire tests, perf counters, FireTest/stress, API docs updated.
 - Sliced/ACK/retry loops;
 - API response/candles parsing and delivery;
 - active-lib state apply paths and event notification paths.
+- all remaining CPU red flags from FireTest/stress/protocol metrics.
 
 FireTest/stress CPU summaries становятся gate. Любой protocol-owned sample
 `>1ms` должен получить точное объяснение и фикс, если его можно убрать. Если
@@ -1042,6 +1045,44 @@ Checks:
 - `cargo test --test udp_polling --quiet`: 1 passed.
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `cargo test --release --test fire_test -- --ignored --nocapture`: passed.
+
+### 2026-05-24 - Phase D2 single-owner UDP receive
+
+Done:
+
+- Removed the production UDP reader thread. `ProtocolCore::run` now owns the
+  UDP recv drain, packet unpack, ErrEmu accounting, immediate service replies
+  (`Ping`, `SizeAck`, `ProbeMTUAck`, `SlicedACK`, `ImFriend`), decoded payload
+  enqueue, send/maintenance, and app queue delivery in one caller thread.
+- Kept the existing `ReaderDecodedMsg` delivery queue as the next temporary
+  bridge: this step removes the thread boundary first, but does not yet inline
+  every domain callback/event delivery.
+- The live socket is registered in a `polling::Poller` once per socket/session;
+  `wait_5ms` now waits for UDP readability or the Delphi 5ms timeout. If poller
+  registration fails, the socket is still nonblocking and the loop probes recv
+  once per 5ms tick.
+- Deleted the old production `ReaderRuntime` / `spawn_reader` path instead of
+  keeping a legacy alternative.
+- Converted reader service tests to pump `ProtocolCore::recv_drain_phase()`
+  directly, so tests cover the new path.
+
+Reason:
+
+- This is the main NextIdeas3 move: there is one protocol owner and no
+  reader-thread queue/cap/lock boundary between UDP recv and protocol-owned
+  side effects. The machine effect stays Delphi-shaped: each received datagram
+  is processed independently; service replies and SlicedACKs are still sent
+  immediately from the receive path; public/user callbacks remain outside the
+  protocol loop.
+
+Checks:
+
+- First unit gate after the move: `cargo test --lib --quiet` OK: `605 passed`.
+- Final gate for this working point, after the all-trades reconnect gate and
+  SynLZ follow-up fixes below: `cargo test --lib --quiet` OK: `607 passed`,
+  `cargo check --examples --quiet` OK, `cargo test --test fire_test --no-run
+  --quiet` OK, live release FireTest on prod OK: `FIRETEST_PASS`,
+  `ParseFailed=0`, `FAIL=0`.
 
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 
@@ -2722,22 +2763,29 @@ Done:
   `cmd/len/head/dump` in the live log.
 - API event docs were updated for the new `ParseFailed` shape and for the
   current caller-thread `ProtocolCore` run model.
-- Recorded open candidate `spec_pipeline/work/хуйня.md §X.129` for the one
-  observed high-loss reconnect `OrderBook ParseFailed`.
+- Closed `spec_pipeline/work/хуйня.md §X.129`: the observed `OrderBook`
+  `ParseFailed` led to a real Rust-only SynLZ mismatch. mORMot hashes literals
+  with `last_hashed < dst - 3`; Rust used `dst_pos - 4`, so some live
+  OrderBook streams decoded to wrong bytes while preserving the expected length.
+- `compression.rs::synlz_decompress_inner` now uses the exact mORMot condition,
+  and the live OrderBook regression test compares exact decoded bytes instead of
+  checking only `len == 63`.
 
 Verification:
 
 - `cargo fmt --check` OK.
-- `cargo test --lib --quiet` OK: `605 passed`.
+- `cargo test --lib --quiet` OK: `607 passed`.
+- `cargo test --lib synlz_decompress -- --nocapture` OK.
 - `cargo check --examples --quiet` OK.
 - `cargo test --test fire_test --no-run --quiet` OK.
-- Live `cargo test --release --test fire_test -- --ignored --nocapture` OK:
-  `FIRETEST_PASS`, no `ParseFailed` lines in the run log.
+- Live `cargo test --release --test fire_test -- --ignored --nocapture` on prod
+  OK: `FIRETEST_PASS` in 176.75s, `ParseFailed=0`, `FAIL=0`.
 
 Still not done:
 
-- If `ParseFailed` reproduces, investigate the dumped payload against Delphi
-  orderbook parser/decompress/Sliced reassembly byte-for-byte.
+- If `ParseFailed` reproduces after the SynLZ fix, treat it as a new
+  sliced/server-payload candidate and investigate the dumped payload against
+  Delphi orderbook parser/decompress/Sliced reassembly byte-for-byte.
 - Continue runtime/protocol parity work. Phase Z remains mandatory at the end:
   full optimization attribution/fixes for all protocol-owned hot paths.
 
