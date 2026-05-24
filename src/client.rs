@@ -2594,8 +2594,9 @@ impl std::error::Error for TradeContextError {}
 
 /// Lifecycle event for the connection to the MoonProto server.
 ///
-/// Register a callback with [`Client::on_lifecycle`]. The callback runs on the
-/// same thread that executes the client loop.
+/// Register a callback with [`Client::on_lifecycle`]. During client run calls,
+/// the callback is delivered through the application callback queue, not inside
+/// the protocol writer tick.
 ///
 /// Typical sequence:
 /// ```text
@@ -4791,9 +4792,10 @@ pub struct Client {
     /// в зарегистрированный receiver, если UID найден.
     api_pending: Arc<ApiPending>,
 
-    /// Lifecycle callback — вызывается при изменении статуса канала (Connecting → Connected{fresh} → Reconnecting/Disconnected).
+    /// Lifecycle callback — queued при изменении статуса канала (Connecting → Connected{fresh} → Reconnecting/Disconnected).
     /// Установить через `client.on_lifecycle(cb)`. Опционально.
     lifecycle_cb: Option<LifecycleFn>,
+    lifecycle_app_tx: Arc<Mutex<Option<mpsc::Sender<LifecycleEvent>>>>,
     /// Delphi `cfg.MoonProtoConfig.ServerUpdateSent`: set by UI commands that
     /// can make the server restart/change routing; consumed by BaseCheck init.
     server_update_sent: Arc<AtomicBool>,
@@ -5102,6 +5104,7 @@ impl Client {
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
             lifecycle_cb: None,
+            lifecycle_app_tx: Arc::new(Mutex::new(None)),
             server_update_sent: Arc::new(AtomicBool::new(false)),
             prev_auth_status: AuthStatus::Base,
             reader_shutdown: Arc::new(AtomicBool::new(false)),
@@ -5286,7 +5289,10 @@ impl Client {
         Arc::clone(&self.server_time_delta_handle)
     }
 
-    /// Установить lifecycle callback. Вызывается из main-thread при изменении auth_status.
+    /// Установить lifecycle callback.
+    ///
+    /// During `run*` calls the callback is queued outside the protocol writer
+    /// tick, matching Delphi `TThread.Queue` for status notifications.
     pub fn on_lifecycle(&mut self, cb: LifecycleFn) {
         self.lifecycle_cb = Some(cb);
     }
@@ -5314,6 +5320,11 @@ impl Client {
     /// Внутренний хук: вызывает callback на переход состояния.
     /// Должен вызываться там где меняется `self.auth_status` или `self.need_connect`.
     fn fire_lifecycle(&mut self, ev: LifecycleEvent) {
+        let tx = self.lifecycle_app_tx.lock().unwrap().clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(ev);
+            return;
+        }
         if let Some(ref mut cb) = self.lifecycle_cb {
             cb(ev);
         }
@@ -7506,7 +7517,23 @@ impl Client {
         // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).
         // User callback выполняется через app queue, а не внутри protocol tick.
         let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
             let app_handle = scope.spawn(move || {
                 let mut on_data = on_data;
                 while let Ok((cmd, payload)) = app_rx.recv() {
@@ -7520,10 +7547,21 @@ impl Client {
             writer_handle
                 .join()
                 .expect("moonproto writer thread panicked");
+            *lifecycle_app_tx.lock().unwrap() = None;
             app_handle
                 .join()
                 .expect("moonproto app callback thread panicked");
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
         });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
+        }
     }
 
     /// Send LogOff and close socket. Call when done.
@@ -7577,7 +7615,23 @@ impl Client {
         // state reset) живут в protocol thread. User callback получает уже
         // готовые события через app queue и не блокирует protocol tick.
         let (app_tx, app_rx) = mpsc::channel::<crate::events::Event>();
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
             let app_handle = scope.spawn(move || {
                 let mut on_event = on_event;
                 while let Ok(event) = app_rx.recv() {
@@ -7597,10 +7651,21 @@ impl Client {
             writer_handle
                 .join()
                 .expect("moonproto writer thread panicked");
+            *lifecycle_app_tx.lock().unwrap() = None;
             app_handle
                 .join()
                 .expect("moonproto app callback thread panicked");
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
         });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
+        }
     }
 
     /// Same as [`Self::run_with_dispatcher`], but the callback also receives the
@@ -7699,12 +7764,39 @@ impl Client {
     ///     resend tail-check после valid trades packets. Для Callback mode
     ///     потребитель сам решает что делать с TradesEvent.
     fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
             let handle = scope.spawn(|| {
                 WriterRuntime { client: self }.run(duration, &mut mode);
             });
             handle.join().expect("moonproto writer thread panicked");
+            *lifecycle_app_tx.lock().unwrap() = None;
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
         });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
+        }
     }
 
     pub(crate) fn apply_active_actions<I>(&self, actions: I)
@@ -14441,6 +14533,42 @@ mod event_loop_fairness_tests {
         assert!(
             snapshot.writer_tick_max_ns < 50_000_000,
             "blocking event app callback leaked into protocol tick: max={}ns",
+            snapshot.writer_tick_max_ns
+        );
+    }
+
+    #[test]
+    fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
+        let mut client = Client::new(dummy_cfg());
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        client.auth_status = AuthStatus::Connected;
+        client.prev_auth_status = AuthStatus::Base;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        client.on_lifecycle(Box::new(move |event| {
+            assert_eq!(event, LifecycleEvent::Connecting);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+
+        let handle = thread::spawn(move || {
+            let mut dispatcher = EventDispatcher::new();
+            client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+            client
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("lifecycle callback started");
+        thread::sleep(Duration::from_millis(80));
+        release_tx.send(()).unwrap();
+
+        let client = handle.join().expect("client run thread");
+        let snapshot = client.protocol_metrics_snapshot();
+        assert!(
+            snapshot.writer_tick_max_ns < 50_000_000,
+            "blocking lifecycle app callback leaked into protocol tick: max={}ns",
             snapshot.writer_tick_max_ns
         );
     }

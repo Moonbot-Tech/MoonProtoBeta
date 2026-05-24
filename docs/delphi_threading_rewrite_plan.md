@@ -883,6 +883,34 @@ Checks:
   the configured prod server, including `err_emu=10%` initial health and
   `err_emu=50%` high-loss simple-ops gates.
 
+### 2026-05-24 - Phase C2 lifecycle callback queue
+
+Done:
+
+- `Client::on_lifecycle` notifications are now sent through a run-scoped
+  lifecycle app channel when the client loop is active.
+- The callback object is moved into the lifecycle app worker for the run and
+  restored back into `Client` before the run call returns.
+- If a lifecycle event is fired outside a run call, the old direct fallback is
+  kept because there is no active app queue.
+
+Reason:
+
+- Delphi `TMoonProtoUDPClient.DoStatusChanged` uses `TThread.Queue`; status UI
+  must not block protocol writer progress.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test lifecycle_callback_block_does_not_extend_protocol_writer_tick
+  --quiet`: passed.
+- `cargo test --lib --quiet`: 602 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- live `cargo test --test fire_test -- --ignored --nocapture`: passed against
+  the configured prod server, including `err_emu=10%` initial health and
+  `err_emu=50%` high-loss simple-ops gates.
+
 ### 2026-05-22 - Phase 3 partial
 
 Done:

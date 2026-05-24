@@ -85,8 +85,9 @@ separate reader thread. `run` raw callbacks and ordinary
 `run_with_dispatcher` event callbacks are delivered through the application
 callback queue after protocol/domain state is updated, so slow UI work does not
 block ACK/retry/send progress. The call returns after the queued callbacks from
-that run are drained. `run_with_dispatcher_state` still calls inline because it
-lends the current dispatcher state to the callback; keep that callback short.
+that run are drained. `Client::on_lifecycle` notifications use the same queued
+delivery during run calls. `run_with_dispatcher_state` still calls inline because
+it lends the current dispatcher state to the callback; keep that callback short.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
