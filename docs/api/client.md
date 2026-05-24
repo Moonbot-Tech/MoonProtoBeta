@@ -86,8 +86,11 @@ separate reader thread. `run` raw callbacks and ordinary
 callback queue after protocol/domain state is updated, so slow UI work does not
 block ACK/retry/send progress. The call returns after the queued callbacks from
 that run are drained. `Client::on_lifecycle` notifications use the same queued
-delivery during run calls. `run_with_dispatcher_state` still calls inline because
-it lends the current dispatcher state to the callback; keep that callback short.
+delivery during run calls. `run_with_dispatcher_state` also uses the application
+callback queue; it receives an `EventDispatcherSnapshot`, not the live
+dispatcher, so slow UI work cannot stall protocol ACK/retry/send progress. The
+snapshot copy itself is still protocol-loop work; for high-rate hot paths prefer
+`run_with_dispatcher` unless the callback needs the read model.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
@@ -99,7 +102,8 @@ queues. The public guarantee is no local capacity cap: dense incoming streams
 do not drop queued user commands or Engine API requests.
 
 If the callback needs to read the just-updated dispatcher state, use
-`run_with_dispatcher_state`:
+`run_with_dispatcher_state`. The `state` argument is a read-only snapshot copied
+after the dispatcher applied the event:
 
 ```rust
 client.run_with_dispatcher_state(Duration::from_secs(3600), &mut dispatcher, Box::new(|event, state| {

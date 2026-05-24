@@ -112,7 +112,12 @@ payloads into typed events and performs library-owned transport/read-model work:
 - merging chunked candle responses.
 
 When an event callback needs the already-updated read model, use
-`run_with_dispatcher_state`:
+`run_with_dispatcher_state`. Its second callback argument is a read-only
+`EventDispatcherSnapshot` copied after state application; it is delivered
+through the application callback queue, so the callback body cannot block
+protocol ACK/retry/send progress. The snapshot copy itself is protocol-loop work;
+for high-rate hot paths prefer `run_with_dispatcher` unless the callback really
+needs the read model:
 
 ```rust
 client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {

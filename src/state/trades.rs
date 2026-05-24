@@ -128,6 +128,7 @@ pub enum TradesEvent {
 }
 
 /// Главный sync state для TradesStream.
+#[derive(Debug, Clone)]
 pub struct TradesState {
     buckets: [GapBucket; MAX_GAP_BUCKETS],
     used_buckets: usize,

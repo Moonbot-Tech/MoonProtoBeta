@@ -28,8 +28,8 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 }));
 ```
 
-Use `Client::run_with_dispatcher_state` when the callback needs the read-only
-state after the event has been applied:
+Use `Client::run_with_dispatcher_state` when the callback needs a read-only
+state snapshot after the event has been applied:
 
 ```rust
 client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
@@ -42,9 +42,18 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 
 `run_with_dispatcher` and `run_with_dispatcher_state` block the caller for the
 requested duration while the MoonProto writer/orchestrator loop runs in a
-dedicated scoped writer thread. Event callbacks run on that writer thread, not
-on the caller thread. Keep callbacks short; if UI work can block, hand events
-off to the UI thread explicitly.
+dedicated scoped writer thread. Event callbacks run through an application
+callback queue after protocol state is updated. Slow callbacks delay return from
+the run call because the queue is drained before return, but they do not block
+ACK/retry/send progress inside the protocol loop. For
+`run_with_dispatcher_state`, building the state snapshot is still protocol-loop
+work; use the plain event callback for hot paths that do not need state reads.
+
+`run_with_dispatcher_state` receives `EventDispatcherSnapshot`. It has the same
+read-only getters used by UI code (`orders()`, `order_books()`, `trades()`,
+`balances()`, `strats()`, `settings()`, `markets()`,
+`strategy_snapshot_vec()`), but it is not the live dispatcher and cannot mutate
+protocol state.
 
 The client-level domain gate runs before dispatcher delivery. Until Init opens
 `domain_ready`, `Order`, `Strat`, `Balance`, `TradesStream`,

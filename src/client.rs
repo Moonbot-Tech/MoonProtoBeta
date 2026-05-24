@@ -2844,6 +2844,7 @@ impl std::fmt::Debug for ClientConfig {
 /// the protocol writer tick.
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
 type RawAppEvent = (Command, Vec<u8>);
+type StateAppEvent = (crate::events::Event, crate::events::EventDispatcherSnapshot);
 
 /// Callback that receives typed events from [`Client::run_with_dispatcher`].
 ///
@@ -2857,7 +2858,7 @@ pub type EventFn = Box<dyn FnMut(&crate::events::Event) + Send>;
 /// Use this with [`Client::run_with_dispatcher_state`] when the event only
 /// carries an id and the UI immediately needs the applied read model.
 pub type EventWithStateFn =
-    Box<dyn FnMut(&crate::events::Event, &crate::events::EventDispatcher) + Send>;
+    Box<dyn FnMut(&crate::events::Event, &crate::events::EventDispatcherSnapshot) + Send>;
 
 /// Куда доставлять `Command + payload` после внутренней обработки (decrypt,
 /// decompress, Grouped split, API pending dispatch). Два варианта:
@@ -2929,12 +2930,12 @@ pub(crate) enum RunMode<'a> {
     },
 }
 
-/// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcher)`.
+/// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcherSnapshot)`.
 /// Изоляция позволяет иметь два публичных метода (`run_with_dispatcher` /
 /// `run_with_dispatcher_state`) без дубликации main loop кода.
 pub(crate) enum DispatcherEventFn {
     QueueToCallback(mpsc::Sender<crate::events::Event>),
-    EventWithState(EventWithStateFn),
+    QueueToStateCallback(mpsc::Sender<StateAppEvent>),
     Queue,
 }
 
@@ -2950,11 +2951,13 @@ impl DispatcherEventFn {
                     let _ = tx.send(event);
                 }
             }
-            Self::EventWithState(cb) => {
-                for event in events.iter() {
-                    cb(event, dispatcher);
+            Self::QueueToStateCallback(tx) => {
+                if !events.is_empty() {
+                    let snapshot = dispatcher.snapshot();
+                    for event in events.drain(..) {
+                        let _ = tx.send((event, snapshot.clone()));
+                    }
                 }
-                events.clear();
             }
             Self::Queue => {
                 dispatcher.queue_events(events.drain(..));
@@ -7668,26 +7671,72 @@ impl Client {
         }
     }
 
-    /// Same as [`Self::run_with_dispatcher`], but the callback also receives the
-    /// updated read-only `EventDispatcher`.
+    /// Same as [`Self::run_with_dispatcher`], but the callback also receives an
+    /// updated read-only [`crate::events::EventDispatcherSnapshot`].
     ///
     /// This is useful for UI events that carry only an id, such as
     /// `OrderEvent::Updated(uid)`: the callback can immediately read the
-    /// current order from the dispatcher state.
+    /// current order from the state snapshot. The callback runs from the
+    /// application callback queue and does not block protocol ACK/retry/send
+    /// progress.
     pub fn run_with_dispatcher_state(
         &mut self,
         duration: Duration,
         dispatcher: &mut crate::events::EventDispatcher,
         on_event: EventWithStateFn,
     ) {
-        let mode = RunMode::Dispatcher {
-            dispatcher,
-            on_event: DispatcherEventFn::EventWithState(on_event),
-            event_buf: Vec::with_capacity(8),
-            payload_buf: Vec::with_capacity(4),
-            active_actions_buf: Vec::with_capacity(4),
-        };
-        self.run_inner(duration, mode);
+        let (app_tx, app_rx) = mpsc::channel::<StateAppEvent>();
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
+        thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
+            let app_handle = scope.spawn(move || {
+                let mut on_event = on_event;
+                while let Ok((event, snapshot)) = app_rx.recv() {
+                    on_event(&event, &snapshot);
+                }
+            });
+            let writer_handle = scope.spawn(|| {
+                let mut mode = RunMode::Dispatcher {
+                    dispatcher,
+                    on_event: DispatcherEventFn::QueueToStateCallback(app_tx),
+                    event_buf: Vec::with_capacity(8),
+                    payload_buf: Vec::with_capacity(4),
+                    active_actions_buf: Vec::with_capacity(4),
+                };
+                ProtocolCore { client: self }.run(duration, &mut mode);
+            });
+            writer_handle
+                .join()
+                .expect("moonproto writer thread panicked");
+            *lifecycle_app_tx.lock().unwrap() = None;
+            app_handle
+                .join()
+                .expect("moonproto app callback thread panicked");
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
+        });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
+        }
     }
 
     fn run_with_dispatcher_queued(
@@ -14533,6 +14582,77 @@ mod event_loop_fairness_tests {
         assert!(
             snapshot.writer_tick_max_ns < 50_000_000,
             "blocking event app callback leaked into protocol tick: max={}ns",
+            snapshot.writer_tick_max_ns
+        );
+    }
+
+    #[test]
+    fn dispatcher_state_callback_block_does_not_extend_protocol_writer_tick() {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        client.prev_auth_status = AuthStatus::AuthDone;
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let settings = crate::commands::ui::ClientSettingsCommand {
+            uid: 0x5151,
+            x_sell: 3,
+            ..Default::default()
+        };
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(crate::commands::ui::build_client_settings(&settings)),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+
+        let mut dispatcher = EventDispatcher::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            client.run_with_dispatcher_state(
+                Duration::from_millis(20),
+                &mut dispatcher,
+                Box::new(move |event, state| {
+                    assert!(matches!(
+                        event,
+                        crate::events::Event::Settings(
+                            crate::state::SettingsEvent::ClientSettingsUpdated
+                        )
+                    ));
+                    assert_eq!(
+                        state.settings().client_settings.as_ref().map(|s| s.uid),
+                        Some(0x5151)
+                    );
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+            );
+            client
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("state event callback started");
+        thread::sleep(Duration::from_millis(80));
+        release_tx.send(()).unwrap();
+
+        let client = handle.join().expect("client run thread");
+        let snapshot = client.protocol_metrics_snapshot();
+        assert!(
+            snapshot.writer_tick_max_ns < 50_000_000,
+            "blocking state app callback leaked into protocol tick: max={}ns",
             snapshot.writer_tick_max_ns
         );
     }

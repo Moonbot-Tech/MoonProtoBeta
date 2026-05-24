@@ -858,9 +858,9 @@ Done:
 - Production `Client::run_with_dispatcher` now delivers typed `Event` values
   through an unbounded application callback channel after `EventDispatcher`
   state and active-library actions are applied.
-- `run_with_dispatcher_state` remains inline for now because its callback borrows
-  the live dispatcher state. Moving it requires a separate state-snapshot or
-  state-owner design in Phase D.
+- `run_with_dispatcher_state` was left inline in this phase because its callback
+  borrowed the live dispatcher state. This was closed in Phase C3 with
+  `EventDispatcherSnapshot`.
 
 Reason:
 
@@ -882,6 +882,44 @@ Checks:
 - live `cargo test --test fire_test -- --ignored --nocapture`: passed against
   the configured prod server, including `err_emu=10%` initial health and
   `err_emu=50%` high-loss simple-ops gates.
+
+### 2026-05-24 - Phase C3 state callback snapshot queue
+
+Done:
+
+- `Client::run_with_dispatcher_state` now delivers callbacks through the same
+  application callback boundary as `run_with_dispatcher`.
+- The callback receives `EventDispatcherSnapshot`: an immutable copy of the
+  dispatcher read models after state application, not a borrow of the live
+  `EventDispatcher`.
+- `Orders`, `OrderBooks`, `TradesState`, and `StratsState` now implement
+  `Clone` so fixed read-model snapshots can be built without sharing mutable
+  protocol state across threads.
+- Full decoded `StrategySnapshot` storage inside `StratsState` is
+  copy-on-write (`Arc<StrategySnapshot>`). `EventDispatcherSnapshot` clones the
+  strategy index cheaply and only deep-clones full strategies when the
+  application explicitly calls `strategy_snapshot_vec()`.
+
+Reason:
+
+- Delphi sends UI/application work through `TThread.Queue`. The Rust protocol
+  owner must not wait for user callbacks. A snapshot preserves the machine
+  effect of protocol state mutation while moving only notification work across
+  the app boundary. Snapshot creation itself remains protocol-loop work and is
+  covered by protocol tick metrics; later zero-alloc/read-model refactors should
+  reduce that cost without changing the boundary.
+
+Checks:
+
+- `cargo test event_loop_fairness_tests::dispatcher_state_callback_block_does_not_extend_protocol_writer_tick -- --nocapture`: passed.
+- `cargo test state::strats::tests::clone_shares_full_strategy_snapshots_until_mutation --lib -- --nocapture`: passed.
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 604 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- live `cargo test --test fire_test -- --ignored --nocapture`: passed against
+  the configured prod server, including `err_emu=10%` initial health, full
+  candles snapshot, `err_emu=50%` simple-ops gate, and reconnect/restore checks.
 
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 

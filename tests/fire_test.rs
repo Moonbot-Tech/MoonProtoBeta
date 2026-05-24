@@ -47,7 +47,7 @@ use moonproto::state::{
 };
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
-    ImportedKeys, InitConfig, LifecycleEvent,
+    EventDispatcherSnapshot, ImportedKeys, InitConfig, LifecycleEvent,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -531,13 +531,37 @@ impl Session {
 
     fn drain_queued(&mut self) {
         let events = self.dispatcher.take_queued_events();
+        let snapshot = self.dispatcher.snapshot();
         for event in events {
-            record_event(&self.stats, &event, &self.dispatcher);
+            record_event(&self.stats, &event, &snapshot);
         }
     }
 
     fn snapshot(&self) -> SessionStats {
         self.stats.lock().unwrap().clone()
+    }
+
+    fn protocol_summary(&self) -> String {
+        let m = self
+            .client
+            .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
+        let writer_avg_ns = if m.writer_tick_count == 0 {
+            0
+        } else {
+            m.writer_tick_ns / m.writer_tick_count
+        };
+        format!(
+            "recv={} reader_max={}us writer_ticks={} writer_avg={}us writer_max={}us send_max={}us appq={} appq_max={} public_events={}",
+            m.recv_count,
+            m.reader_protocol_max_ns / 1_000,
+            m.writer_tick_count,
+            writer_avg_ns / 1_000,
+            m.writer_tick_max_ns / 1_000,
+            m.send_phase_max_ns / 1_000,
+            m.app_queue_len,
+            m.app_queue_max_len,
+            m.public_event_queue_len
+        )
     }
 
     fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
@@ -613,7 +637,11 @@ impl Session {
     }
 }
 
-fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &EventDispatcher) {
+fn record_event(
+    stats: &Arc<Mutex<SessionStats>>,
+    event: &Event,
+    dispatcher: &EventDispatcherSnapshot,
+) {
     let mut st = stats.lock().unwrap();
     st.server_events += 1;
     let event_no = st.server_events;
@@ -879,7 +907,7 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
 fn sync_market_probe_from_dispatcher(
     st: &mut SessionStats,
     event_no: u64,
-    dispatcher: &EventDispatcher,
+    dispatcher: &EventDispatcherSnapshot,
     log_changes: bool,
 ) {
     let old_index = st.market_index;
@@ -905,7 +933,7 @@ fn sync_market_probe_from_dispatcher(
     }
 }
 
-fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &EventDispatcher) {
+fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &EventDispatcherSnapshot) {
     for order in dispatcher.orders().iter() {
         st.order_status_by_uid.insert(order.uid, order.status);
         st.order_market_by_uid
@@ -1181,9 +1209,11 @@ where
     let a_stats = a.snapshot();
     let b_stats = b.snapshot();
     eprintln!(
-        "FIRETEST TIMEOUT {label}: A=[{}] B=[{}]",
+        "FIRETEST TIMEOUT {label}: A=[{}] A.metrics=[{}] B=[{}] B.metrics=[{}]",
         a_stats.summary(),
-        b_stats.summary()
+        a.protocol_summary(),
+        b_stats.summary(),
+        b.protocol_summary()
     );
     log_err_emu_pair(label, a, b);
     false
@@ -1212,9 +1242,11 @@ where
     let a_stats = a.snapshot();
     let b_stats = b.snapshot();
     eprintln!(
-        "FIRETEST TIMEOUT {label}: A=[{}] B=[{}]",
+        "FIRETEST TIMEOUT {label}: A=[{}] A.metrics=[{}] B=[{}] B.metrics=[{}]",
         a_stats.summary(),
-        b_stats.summary()
+        a.protocol_summary(),
+        b_stats.summary(),
+        b.protocol_summary()
     );
     log_err_emu_pair(label, a, b);
     false

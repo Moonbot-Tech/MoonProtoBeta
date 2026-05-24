@@ -521,7 +521,7 @@ impl From<&Order> for TradeCtx {
 ///
 /// **Однопоточная** — модифицируется только из main thread клиента.
 /// Юзер получает read-only ссылки через `iter()`, `get()`.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Orders {
     map: HashMap<u64, Order>,
     /// Local/UI visual-order markers registered before the first server

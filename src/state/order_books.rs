@@ -140,7 +140,7 @@ struct CachedPacket {
 }
 
 /// Per-(market_index, book_kind) кэш. Соответствует Delphi `TOrderBookCache`.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct OrderBookCache {
     /// Следующий ожидаемый seq.
     expected_seq: u16,
@@ -266,7 +266,7 @@ pub enum OrderBookEvent {
 }
 
 /// Главный sync state — кэш на каждый (market_index, book_kind).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct OrderBooks {
     caches: HashMap<BookKey, OrderBookCache>,
     books: HashMap<BookKey, OrderBookSnapshot>,

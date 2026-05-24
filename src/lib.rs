@@ -137,7 +137,7 @@ pub use client::{
     LifecycleEvent, ProtocolMetricsSnapshot, RefreshConfig, SendPriority, SubscribeError,
     TradeContextError, UniqueKey,
 };
-pub use events::{Event, EventDispatcher, StrategySnapshotReply};
+pub use events::{Event, EventDispatcher, EventDispatcherSnapshot, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};
 pub use moonproto_transport::{MoonKey, ServerMsgHeader};
 pub use protocol::Command;

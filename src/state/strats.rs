@@ -17,6 +17,7 @@ use crate::commands::strategy_serializer::{
     parse_strategy_batch, FieldValue, StrategyBatch, StrategySnapshot,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Информация по одной стратегии — то что хранится клиентом.
 #[derive(Debug, Clone)]
@@ -92,7 +93,7 @@ pub enum StratEvent {
 /// **Snapshot применяется через `apply_snapshot_decoded(deflate_data)`** — для полного
 /// snapshot'а dispatcher распаковывает raw payload через
 /// [`crate::commands::strategy_serializer`] и применяет декодированный batch.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct StratsState {
     /// `strategy_id → StrategyInfo`. Удаляется при `TStratDelete`.
     pub by_id: HashMap<u64, StrategyInfo>,
@@ -104,7 +105,7 @@ pub struct StratsState {
     /// `strategy_id → StrategySnapshot`. Полный decoded snapshot, которым владеет
     /// active library: из него строится ответ на `TStratSnapshotRequest` и его же
     /// читает пользовательский код через API.
-    snapshots_by_id: HashMap<u64, StrategySnapshot>,
+    snapshots_by_id: HashMap<u64, Arc<StrategySnapshot>>,
     /// Серверный epoch последнего применённого snapshot'а — для детекции
     /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
@@ -263,6 +264,7 @@ impl StratsState {
                         entry.prev_checked = it.checked;
                     }
                     if let Some(snapshot) = self.snapshots_by_id.get_mut(&it.strategy_id) {
+                        let snapshot = Arc::make_mut(snapshot);
                         snapshot.checked = it.checked;
                     }
                 }
@@ -327,7 +329,7 @@ impl StratsState {
             entry.prev_checked = s.checked;
         }
         self.create_folders_for_path(&s.path);
-        self.snapshots_by_id.insert(s.strategy_id, s);
+        self.snapshots_by_id.insert(s.strategy_id, Arc::new(s));
     }
 
     /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
@@ -348,7 +350,8 @@ impl StratsState {
             entry.prev_checked = s.checked;
         }
         self.create_folders_for_path(&s.path);
-        self.snapshots_by_id.insert(s.strategy_id, s.clone());
+        self.snapshots_by_id
+            .insert(s.strategy_id, Arc::new(s.clone()));
         true
     }
 
@@ -391,6 +394,7 @@ impl StratsState {
         };
         entry.checked = checked;
         if let Some(snapshot) = self.snapshots_by_id.get_mut(&strategy_id) {
+            let snapshot = Arc::make_mut(snapshot);
             snapshot.checked = checked;
         }
         true
@@ -418,7 +422,7 @@ impl StratsState {
     }
 
     pub fn snapshot(&self, strategy_id: u64) -> Option<&StrategySnapshot> {
-        self.snapshots_by_id.get(&strategy_id)
+        self.snapshots_by_id.get(&strategy_id).map(Arc::as_ref)
     }
 
     pub fn has_folder(&self, folder_path: &str) -> bool {
@@ -432,14 +436,14 @@ impl StratsState {
     pub fn snapshots(&self) -> impl Iterator<Item = &StrategySnapshot> {
         self.order
             .iter()
-            .filter_map(|strategy_id| self.snapshots_by_id.get(strategy_id))
+            .filter_map(|strategy_id| self.snapshots_by_id.get(strategy_id).map(Arc::as_ref))
     }
 
     pub fn snapshot_vec(&self) -> Vec<StrategySnapshot> {
         let mut out = Vec::new();
         for strategy_id in &self.order {
             if let Some(snapshot) = self.snapshots_by_id.get(strategy_id) {
-                out.push(snapshot.clone());
+                out.push(snapshot.as_ref().clone());
             }
         }
         out
@@ -1001,6 +1005,41 @@ mod tests {
             .map(|snapshot| snapshot.strategy_id)
             .collect();
         assert_eq!(ids, vec![30, 10, 20]);
+    }
+
+    #[test]
+    fn clone_shares_full_strategy_snapshots_until_mutation() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+
+        let mut s = StratsState::new();
+        let mut fields = HashMap::new();
+        fields.insert(
+            "Comment".to_string(),
+            FieldValue::String("heavy snapshot stays shared".to_string()),
+        );
+        s.upsert_local_snapshot(StrategySnapshot {
+            strategy_id: 30,
+            strategy_ver: 1,
+            last_date: 30,
+            checked: false,
+            kind: 1,
+            path: String::new(),
+            fields,
+        });
+
+        let mut cloned = s.clone();
+        assert!(Arc::ptr_eq(
+            s.snapshots_by_id.get(&30).unwrap(),
+            cloned.snapshots_by_id.get(&30).unwrap()
+        ));
+
+        assert!(cloned.set_checked(30, true));
+        assert!(!Arc::ptr_eq(
+            s.snapshots_by_id.get(&30).unwrap(),
+            cloned.snapshots_by_id.get(&30).unwrap()
+        ));
+        assert!(!s.snapshot(30).unwrap().checked);
+        assert!(cloned.snapshot(30).unwrap().checked);
     }
 
     #[test]
