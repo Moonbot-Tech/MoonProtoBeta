@@ -4482,3 +4482,30 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: TOrderNotFound immediate effects
+
+Done:
+
+- Fixed `TOrderNotFound` immediate state parity.
+- Delphi `TMoonProtoNetClient.ProcessCommandOrder(TOrderNotFound)` sets only
+  `Worker.CancellRequest := true` and `Worker.ServerForcedRemove := true`,
+  frees the command, and exits.
+- Delphi closes/cancels the compact buy/sell records later in
+  `BOrderWorker.DoTheJobVirtual.finally`, after the worker loop exits.
+- Rust previously rewrote `buy_order`/`sell_order` and cleared replace flags
+  immediately inside `Orders::apply(OrderNotFound)`.
+- Rust now leaves compact orders and replace flags unchanged at receive time,
+  and only sets the immediate cancel/server-forced flags.
+- Recorded `spec_pipeline/work/хуйня.md §X.135`.
+
+Verification:
+
+- Updated the `OrderNotFound` regression test to prove compact order fields and
+  replace flags are unchanged after receive, while `cancel_request` and
+  `server_forced_remove` are set.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
