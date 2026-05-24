@@ -794,6 +794,33 @@ Checks:
   configured live server, including `err_emu=10%` initial health and `err_emu=50%`
   high-loss simple-ops gates.
 
+### 2026-05-24 - Phase C0 AppQueue container
+
+Done:
+
+- Added explicit internal `AppQueue<T>` with no fixed capacity and no drop
+  policy. It records maximum observed length as diagnostics only.
+- `EventDispatcher` one-shot queued events now use `AppQueue<Event>` instead of
+  a raw `Vec<Event>`.
+- Public API docs now expose `queued_event_max_count()` next to
+  `queued_event_count()`.
+
+Reason:
+
+- This is the first app/protocol boundary object for Phase C. It preserves the
+  existing one-shot helper behavior, but makes the correctness rule explicit:
+  app-side event accumulation is unbounded like Delphi `TThread.Queue`; growth
+  is a metric, not a reason to drop events.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 599 passed.
+- `cargo test app_queue_keeps_all_events_and_records_max_len_without_drop_policy
+  --quiet`: passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+
 ### 2026-05-22 - Phase 3 partial
 
 Done:

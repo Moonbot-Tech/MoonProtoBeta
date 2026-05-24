@@ -28,6 +28,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::app_queue::AppQueue;
 use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
 use crate::commands::balance::parse_balance;
 use crate::commands::engine_api::{
@@ -269,7 +270,7 @@ pub struct EventDispatcher {
     /// callback. One-shot helpers (`run_until_response`, `request_*`) have no
     /// callback argument, so they store produced events here for the application
     /// to drain after the helper returns.
-    queued_events: Vec<Event>,
+    queued_events: AppQueue<Event>,
 }
 
 impl EventDispatcher {
@@ -470,7 +471,7 @@ impl EventDispatcher {
     /// such as `Client::run_until_response`, `request_client_settings`,
     /// `request_order_snapshot`, and typed `request_*` Engine API helpers.
     pub fn queued_events(&self) -> &[Event] {
-        &self.queued_events
+        self.queued_events.as_slice()
     }
 
     /// Number of currently queued one-shot events.
@@ -478,9 +479,17 @@ impl EventDispatcher {
         self.queued_events.len()
     }
 
+    /// Maximum queued one-shot events observed since dispatcher creation.
+    ///
+    /// This is diagnostics only. The queue has no fixed capacity and does not
+    /// drop old events when this number grows.
+    pub fn queued_event_max_count(&self) -> usize {
+        self.queued_events.max_len()
+    }
+
     /// Remove and return events accumulated during one-shot waits.
     pub fn take_queued_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.queued_events)
+        self.queued_events.take()
     }
 
     /// Drop queued one-shot events without processing them.
@@ -1325,6 +1334,46 @@ mod tests {
         out.push(0); // UseCoinsBlackList
         out.extend_from_slice(&0i32.to_le_bytes()); // TempBLCount
         out
+    }
+
+    #[test]
+    fn app_queue_keeps_all_events_and_records_max_len_without_drop_policy() {
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.queue_events((0..128).map(|i| Event::Raw {
+            cmd: Command::UI,
+            payload: vec![i as u8],
+        }));
+
+        assert_eq!(dispatcher.queued_event_count(), 128);
+        assert_eq!(dispatcher.queued_event_max_count(), 128);
+        match &dispatcher.queued_events()[0] {
+            Event::Raw { payload, .. } => assert_eq!(payload, &[0]),
+            other => panic!("unexpected first queued event: {other:?}"),
+        }
+        match &dispatcher.queued_events()[127] {
+            Event::Raw { payload, .. } => assert_eq!(payload, &[127]),
+            other => panic!("unexpected last queued event: {other:?}"),
+        }
+
+        let drained = dispatcher.take_queued_events();
+        assert_eq!(drained.len(), 128);
+        assert_eq!(dispatcher.queued_event_count(), 0);
+        assert_eq!(
+            dispatcher.queued_event_max_count(),
+            128,
+            "max length is diagnostic history, not a cap"
+        );
+
+        dispatcher.queue_events([Event::Raw {
+            cmd: Command::Ping,
+            payload: vec![1, 2, 3],
+        }]);
+        assert_eq!(dispatcher.queued_event_count(), 1);
+        assert_eq!(
+            dispatcher.queued_event_max_count(),
+            128,
+            "smaller later pushes must not reset the observed max"
+        );
     }
 
     fn all_statuses_payload(uid: u64, orders: &[OrderStatus]) -> Vec<u8> {

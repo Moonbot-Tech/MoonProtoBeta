@@ -126,8 +126,10 @@ for event in dispatcher.take_queued_events() {
 }
 ```
 
-Use `queued_events()` for a borrowed view, `queued_event_count()` for metrics,
-`take_queued_events()` to drain, and `clear_queued_events()` to discard.
+Use `queued_events()` for a borrowed view, `queued_event_count()` and
+`queued_event_max_count()` for diagnostics, `take_queued_events()` to drain, and
+`clear_queued_events()` to discard. The queue has no fixed capacity and no drop
+policy; if it grows, diagnostics report that fact instead of losing events.
 `Client::run_with_dispatcher` does not use this queue because it delivers events
 directly to its callback.
 

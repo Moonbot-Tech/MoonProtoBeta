@@ -120,6 +120,7 @@
 //! modes 1/2.
 
 mod api_pending;
+mod app_queue;
 pub mod client;
 pub mod commands;
 pub mod compression;
