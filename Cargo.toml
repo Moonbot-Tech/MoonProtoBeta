@@ -23,3 +23,6 @@ libc = "0.2"
 [[example]]
 name = "client_test"
 path = "examples/client_test.rs"
+
+[dev-dependencies]
+polling = "3.11.0"

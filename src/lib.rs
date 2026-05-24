@@ -133,7 +133,8 @@ pub mod state;
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ClientSender, ConnectConfig,
     ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    LifecycleEvent, RefreshConfig, SendPriority, SubscribeError, TradeContextError, UniqueKey,
+    LifecycleEvent, ProtocolMetricsSnapshot, RefreshConfig, SendPriority, SubscribeError,
+    TradeContextError, UniqueKey,
 };
 pub use events::{Event, EventDispatcher, StrategySnapshotReply};
 pub use key_import::{import_key, ImportedKeys};

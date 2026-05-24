@@ -175,6 +175,18 @@ feature. Build with that feature and set `MOONPROTO_TRACE_IO=1` or
 `MOONPROTO_TRACE_SLICES=1` to print transport send/receive and sliced reassembly
 logs.
 
+## Protocol Metrics
+
+`Client::protocol_metrics_snapshot()` returns passive protocol-loop counters:
+UDP receive count, reader-side protocol nanoseconds, writer tick nanoseconds,
+send/maintenance nanoseconds, and internal reader-decoded queue length.
+
+`Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` adds the
+current `EventDispatcher` public event queue length to the same snapshot.
+
+These metrics are diagnostics only. They never affect retry, ACK, reconnect,
+queueing, or drop decisions.
+
 ## Connection Setup
 
 For the common setup path, call `connect_and_init`. The Delphi init contract is

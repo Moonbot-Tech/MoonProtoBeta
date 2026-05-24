@@ -306,6 +306,55 @@ transport client. Reader/domain path кладёт эти actions в send queues.
 | Domain active state | reader path via `OnNewData`, some UI queued | `ProtocolCore` applies `INLINE`; `QUEUE` tasks go to `AppQueue` |
 | Public callbacks/events | mixed: direct reader and `TThread.Queue` | `AppQueue`/public event queue only; never from protocol loop |
 
+## Phase A-1: Delphi receive branch classification
+
+Checked source:
+
+- `MoonProtoClient.pas:256-449` — `TMoonProtoNetClient.ClientNewData`.
+- `MoonProtoClient.pas:513-635` — `ProcessCommandOrder`.
+- `MoonProtoClient.pas:689-805` — `ProcessStratCommand`.
+- `MoonProtoClient.pas:807-901` — `ProcessApiCommand`.
+- `MoonProtoEngine.pas:1216-1352` — balance snapshot/increment apply.
+- `MoonProtoEngine.pas:1577-1919` — trades stream apply and gap tracking.
+- `MoonProtoEngine.pas:1921-1945` — trades resend batch.
+- `MoonProtoEngine.pas:1982-2044` — orderbook packet apply and full-request actions.
+- `MoonProtoUDPClient.pas:857` + `IndyUDPHelper.pas:153-156` — client UDP uses
+  `ThreadedEvent = true`; `Synchronize(UDPRead)` is not the active receive path.
+
+Classification:
+
+| Delphi branch | Class | Machine effect |
+| --- | --- | --- |
+| `MPC_Ping` | `INLINE` | Updates ping/time/pmtu/rate fields and immediately sends ping reply. |
+| `MPC_Test`, `MPC_Test_Crypted` | `INLINE` | Updates test counters/log diagnostics only. |
+| `MPC_LogMsg` | `QUEUE` | Parses server log, then `TThread.Queue` to UI log. |
+| `MPC_Order/TAllStatuses` | `INLINE + actions` | Applies every order status through `ProcessCommandOrder`, updates snapshot flag, then `CleanupMissingWorkers` sends missing status requests. New worker UI notification is queued. |
+| `MPC_Order/TBaseMarketCommand` | `INLINE + optional QUEUE` | Finds/creates local worker, adjusts server time, applies command inline; only new worker handoff uses `TThread.Queue`. |
+| `MPC_Strat` | `QUEUE` | Entire `ProcessStratCommand` body runs in `TThread.Queue`: snapshot reply, snapshot apply/save, delete, checked sync/echo. |
+| `MPC_API/RequestCandlesData` | `INLINE` | Stores candle chunks, merges when complete, flips market flags; no `TThread.Queue`. |
+| `MPC_API/regular EngineResponse` | `INLINE` | Matches pending request by UID under lock and stores `p.resp`; no queued callback in this block. |
+| `MPC_Balance/TArbPricesCommand` | `INLINE` | Parses compact arb payload immediately. |
+| `MPC_Balance/snapshot-increment` | `INLINE` | Applies balances/positions to markets and recalculates total PnL immediately. |
+| `MPC_TradesStream` | `INLINE + actions` | Decompresses/parses trades, mutates market trade buffers, gap buckets, detection state; queues only resize/UI helper tasks. Missing-packet resend is a protocol action after processing. |
+| `MPC_TradesResendResponse` | `INLINE` | Splits batch and calls `ProcessTradesStream(..., False)` for every inner packet. |
+| `MPC_OrderBook` | `INLINE + actions` | Decompresses/parses book, applies full/diff/cache state immediately; full request is a protocol action, redraw helpers may queue UI work. |
+| `MPC_UI/TClientSettingsCommand` | `QUEUE` | `TThread.Queue` to `ApplySettingsFromServer`; command freed inside queued task. |
+| `MPC_UI/TUpdateVersionCommand` | `QUEUE` | `TThread.Queue` to log and remote update handler. |
+| `MPC_UI/TLevManageCommand` | `QUEUE` | `TThread.Queue` to apply leverage manager update. |
+| `MPC_UI/TNewMarketNotifyCommand` | `INLINE` | Logs, triggers market-check event, frees command. |
+| `MPC_UI/TArbActivateNotify` | `QUEUE` | `TThread.Queue` to apply arb activation notify. |
+
+Phase A implication:
+
+- `ProtocolCore` may inline bounded protocol/state effects for Order, Balance,
+  Trades, TradesResend, OrderBook, API pending/candles and small UI notify.
+- `AppQueue` must own the Delphi `TThread.Queue` class: server logs, full
+  strategy command handling, settings/update/lev/arb UI commands, new-order UI
+  handoff, resize/redraw/UI helper work.
+- No active client receive branch was classified as `SYNC`; if later code reads
+  find `TThread.Synchronize` under this receive graph, it is a red flag and must
+  be added here before architecture changes.
+
 ## Новый порядок перестройки
 
 ### Phase A0 - short GOD-module split before proof work
@@ -640,6 +689,65 @@ Checks:
 - `cargo test --lib --features diagnostic-trace`: 596 passed;
 - `cargo test --test fire_test --no-run`;
 - `cargo check --examples`.
+
+### 2026-05-24 - Phase A proof gates started
+
+Done:
+
+- A-1 Delphi receive branch classification added above.
+- A-2 cross-platform UDP polling prototype added as `tests/udp_polling.rs`.
+- A-3 passive `ProtocolMetrics` added without control effect.
+- A-4 first decoded-batch equivalence proof added: the same ordered
+  `TradesStream` decoded sequence processed one-by-one or drained as one batch
+  must produce the same active state, same resend event, and same queued
+  `emk_TradesResend` send intent.
+
+Polling proof result:
+
+- socket is configured nonblocking once;
+- `Poller::wait(..., 5ms)` returns without readable events on an empty UDP socket;
+- after several datagrams, one readable event lets the loop drain `recv_from`
+  until `WouldBlock`;
+- `Poller::modify` rearms the same socket after drain;
+- `Poller::delete` + binding a fresh UDP socket + `Poller::add` works, proving
+  reconnect/rebind can re-register a socket without changing socket options on
+  the hot path.
+- This test must run on every supported OS. Current local run proves Windows;
+  Linux/macOS are expected to use `polling`'s epoll/kqueue backends, but remain
+  unproven until the same test runs there.
+
+Check:
+
+- `cargo test --test udp_polling`: 1 passed on Windows.
+- `cargo test --lib`: 598 passed.
+- `cargo check --examples`: passed.
+- `cargo test --test fire_test --no-run`: passed.
+- `cargo test --test fire_test -- --ignored --nocapture`: passed against the
+  configured live server, including `err_emu=10%` initial health and `err_emu=50%`
+  high-loss simple-ops gates.
+
+ProtocolMetrics proof:
+
+- metrics live in `src/client/metrics.rs`;
+- `Client::protocol_metrics_snapshot()` reports recv count, reader protocol ns,
+  writer tick ns, send phase ns, and current/max reader-decoded queue length;
+- `Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` also reports
+  dispatcher public event queue length;
+- unit test proves queue lengths are observable while recv count remains
+  unchanged; metrics do not affect ACK/retry/reconnect/drop decisions.
+
+Decoded timestamp red flag closed:
+
+- During A-4 proof Rust still passed writer `cur_tm` into active dispatcher for
+  queued decoded payloads. Delphi `DataReadInt -> OnNewData ->
+  ProcessTradesStream` runs in the UDP reader path and `ProcessTradesStream`
+  takes `NowTimeX := Now` inside that immediate call.
+- Rust now passes `ReaderDecodedMsg.timestamp_ms` into domain dispatch, so
+  trades gap/retry timers use packet receive processing time, not the batch's
+  writer tick time.
+- Unit test `decoded_batch_uses_receive_timestamp_for_active_timers` would miss
+  the expected `TradesResend` with the old writer-tick timestamping when three
+  decoded packets were drained in one writer tick.
 
 ### 2026-05-22 - Phase 3 partial
 
