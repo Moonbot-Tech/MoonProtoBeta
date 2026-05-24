@@ -545,17 +545,26 @@ impl Session {
         let m = self
             .client
             .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
-        let writer_avg_ns = if m.writer_tick_count == 0 {
-            0
-        } else {
-            m.writer_tick_ns / m.writer_tick_count
-        };
         format!(
-            "recv={} reader_max={}us writer_ticks={} writer_avg={}us writer_max={}us send_max={}us appq={} appq_max={} public_events={}",
+            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us appq={} appq_max={} public_events={}",
             m.recv_count,
+            avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
+            m.reader_protocol_over_100us,
+            m.reader_protocol_over_1ms,
+            m.reader_protocol_over_5ms,
+            avg_us(m.writer_cpu_ns, m.writer_cpu_count),
+            m.writer_cpu_max_ns / 1_000,
+            m.writer_cpu_over_100us,
+            m.writer_cpu_over_1ms,
+            m.writer_cpu_over_5ms,
+            avg_us(m.app_enqueue_ns, m.app_enqueue_count),
+            m.app_enqueue_max_ns / 1_000,
+            m.app_enqueue_over_100us,
+            m.app_enqueue_over_1ms,
+            m.app_enqueue_over_5ms,
             m.writer_tick_count,
-            writer_avg_ns / 1_000,
+            avg_us(m.writer_tick_ns, m.writer_tick_count),
             m.writer_tick_max_ns / 1_000,
             m.send_phase_max_ns / 1_000,
             m.app_queue_len,
@@ -634,6 +643,14 @@ impl Session {
             st.settings_events += 1;
         }
         st.last_settings = Some(settings.clone());
+    }
+}
+
+fn avg_us(total_ns: u64, count: u64) -> u64 {
+    if count == 0 {
+        0
+    } else {
+        total_ns / count / 1_000
     }
 }
 
@@ -1300,6 +1317,11 @@ fn price_near_envelope(price: f64, bid: f64, ask: f64) -> bool {
 fn log_err_emu_pair(label: &str, a: &Session, b: &Session) {
     log_err_emu_snapshot(label, "A", &a.client.err_emu_diagnostics_snapshot());
     log_err_emu_snapshot(label, "B", &b.client.err_emu_diagnostics_snapshot());
+}
+
+fn log_protocol_cpu_pair(label: &str, a: &Session, b: &Session) {
+    println!("FIRETEST CPU {label} A: {}", a.protocol_summary());
+    println!("FIRETEST CPU {label} B: {}", b.protocol_summary());
 }
 
 fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
@@ -2179,6 +2201,7 @@ fn fire_test_active_library_health() {
         b.snapshot().market_probe_summary()
     );
     log_err_emu_pair("initial health 10% gate", &a, &b);
+    log_protocol_cpu_pair("initial health 10% gate", &a, &b);
 
     a.request_candles_snapshot();
     assert!(
@@ -2200,7 +2223,9 @@ fn fire_test_active_library_health() {
     if let Some(candles) = a.snapshot().candles_complete {
         println!("OK: full candles snapshot {}", candles.summary());
     }
+    log_protocol_cpu_pair("after candles 10% gate", &a, &b);
     run_high_loss_simple_ops_gate(&mut a, &mut b, &mut err_emu, cfg.high_loss_timeout);
+    log_protocol_cpu_pair("after high-loss simple ops gate", &a, &b);
     err_emu.reset("high-loss simple ops gate");
     a.client.reset_err_emu_diagnostics();
     b.client.reset_err_emu_diagnostics();
@@ -2338,5 +2363,6 @@ fn fire_test_active_library_health() {
     );
 
     pump_pair_for(&mut a, &mut b, Duration::from_millis(200));
+    log_protocol_cpu_pair("final", &a, &b);
     println!("FIRETEST_PASS");
 }

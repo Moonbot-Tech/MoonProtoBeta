@@ -15,15 +15,38 @@ pub struct ProtocolMetricsSnapshot {
     pub recv_count: u64,
     /// Total nanoseconds spent in the reader-side protocol packet path after
     /// `recv_from` returned.
+    pub reader_protocol_count: u64,
     pub reader_protocol_ns: u64,
     /// Maximum single reader-side protocol packet duration, in nanoseconds.
     pub reader_protocol_max_ns: u64,
+    /// Reader protocol packets slower than 100 us / 1 ms / 5 ms.
+    pub reader_protocol_over_100us: u64,
+    pub reader_protocol_over_1ms: u64,
+    pub reader_protocol_over_5ms: u64,
     /// Writer/orchestrator loop iterations.
     pub writer_tick_count: u64,
     /// Total nanoseconds spent in writer/orchestrator loop iterations.
     pub writer_tick_ns: u64,
     /// Maximum single writer/orchestrator loop iteration, in nanoseconds.
     pub writer_tick_max_ns: u64,
+    /// Writer/orchestrator CPU-ish work excluding the fixed Delphi 5 ms sleep.
+    pub writer_cpu_count: u64,
+    /// Total nanoseconds spent in writer/orchestrator CPU-ish work.
+    pub writer_cpu_ns: u64,
+    /// Maximum single writer/orchestrator CPU-ish segment, in nanoseconds.
+    pub writer_cpu_max_ns: u64,
+    /// Writer CPU-ish segments slower than 100 us / 1 ms / 5 ms.
+    pub writer_cpu_over_100us: u64,
+    pub writer_cpu_over_1ms: u64,
+    pub writer_cpu_over_5ms: u64,
+    /// App/event enqueue work done by the protocol owner before user callbacks.
+    pub app_enqueue_count: u64,
+    pub app_enqueue_ns: u64,
+    pub app_enqueue_max_ns: u64,
+    /// App enqueue segments slower than 100 us / 1 ms / 5 ms.
+    pub app_enqueue_over_100us: u64,
+    pub app_enqueue_over_1ms: u64,
+    pub app_enqueue_over_5ms: u64,
     /// Total nanoseconds spent in the send/maintenance phase.
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
@@ -41,11 +64,27 @@ pub struct ProtocolMetricsSnapshot {
 #[derive(Debug, Default)]
 pub(crate) struct ProtocolMetrics {
     recv_count: AtomicU64,
+    reader_protocol_count: AtomicU64,
     reader_protocol_ns: AtomicU64,
     reader_protocol_max_ns: AtomicU64,
+    reader_protocol_over_100us: AtomicU64,
+    reader_protocol_over_1ms: AtomicU64,
+    reader_protocol_over_5ms: AtomicU64,
     writer_tick_count: AtomicU64,
     writer_tick_ns: AtomicU64,
     writer_tick_max_ns: AtomicU64,
+    writer_cpu_count: AtomicU64,
+    writer_cpu_ns: AtomicU64,
+    writer_cpu_max_ns: AtomicU64,
+    writer_cpu_over_100us: AtomicU64,
+    writer_cpu_over_1ms: AtomicU64,
+    writer_cpu_over_5ms: AtomicU64,
+    app_enqueue_count: AtomicU64,
+    app_enqueue_ns: AtomicU64,
+    app_enqueue_max_ns: AtomicU64,
+    app_enqueue_over_100us: AtomicU64,
+    app_enqueue_over_1ms: AtomicU64,
+    app_enqueue_over_5ms: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
     app_queue_max_len: AtomicU64,
@@ -78,6 +117,30 @@ impl ProtocolMetrics {
         store_max(&self.send_phase_max_ns, ns);
     }
 
+    pub(crate) fn record_writer_cpu(&self, duration: Duration) {
+        record_timing(
+            &self.writer_cpu_count,
+            &self.writer_cpu_ns,
+            &self.writer_cpu_max_ns,
+            &self.writer_cpu_over_100us,
+            &self.writer_cpu_over_1ms,
+            &self.writer_cpu_over_5ms,
+            duration,
+        );
+    }
+
+    pub(crate) fn record_app_enqueue(&self, duration: Duration) {
+        record_timing(
+            &self.app_enqueue_count,
+            &self.app_enqueue_ns,
+            &self.app_enqueue_max_ns,
+            &self.app_enqueue_over_100us,
+            &self.app_enqueue_over_1ms,
+            &self.app_enqueue_over_5ms,
+            duration,
+        );
+    }
+
     pub(crate) fn record_app_queue_len(&self, len: usize) {
         store_max(&self.app_queue_max_len, len as u64);
     }
@@ -89,11 +152,27 @@ impl ProtocolMetrics {
     ) -> ProtocolMetricsSnapshot {
         ProtocolMetricsSnapshot {
             recv_count: self.recv_count.load(Ordering::Relaxed),
+            reader_protocol_count: self.reader_protocol_count.load(Ordering::Relaxed),
             reader_protocol_ns: self.reader_protocol_ns.load(Ordering::Relaxed),
             reader_protocol_max_ns: self.reader_protocol_max_ns.load(Ordering::Relaxed),
+            reader_protocol_over_100us: self.reader_protocol_over_100us.load(Ordering::Relaxed),
+            reader_protocol_over_1ms: self.reader_protocol_over_1ms.load(Ordering::Relaxed),
+            reader_protocol_over_5ms: self.reader_protocol_over_5ms.load(Ordering::Relaxed),
             writer_tick_count: self.writer_tick_count.load(Ordering::Relaxed),
             writer_tick_ns: self.writer_tick_ns.load(Ordering::Relaxed),
             writer_tick_max_ns: self.writer_tick_max_ns.load(Ordering::Relaxed),
+            writer_cpu_count: self.writer_cpu_count.load(Ordering::Relaxed),
+            writer_cpu_ns: self.writer_cpu_ns.load(Ordering::Relaxed),
+            writer_cpu_max_ns: self.writer_cpu_max_ns.load(Ordering::Relaxed),
+            writer_cpu_over_100us: self.writer_cpu_over_100us.load(Ordering::Relaxed),
+            writer_cpu_over_1ms: self.writer_cpu_over_1ms.load(Ordering::Relaxed),
+            writer_cpu_over_5ms: self.writer_cpu_over_5ms.load(Ordering::Relaxed),
+            app_enqueue_count: self.app_enqueue_count.load(Ordering::Relaxed),
+            app_enqueue_ns: self.app_enqueue_ns.load(Ordering::Relaxed),
+            app_enqueue_max_ns: self.app_enqueue_max_ns.load(Ordering::Relaxed),
+            app_enqueue_over_100us: self.app_enqueue_over_100us.load(Ordering::Relaxed),
+            app_enqueue_over_1ms: self.app_enqueue_over_1ms.load(Ordering::Relaxed),
+            app_enqueue_over_5ms: self.app_enqueue_over_5ms.load(Ordering::Relaxed),
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
             app_queue_len,
@@ -103,9 +182,15 @@ impl ProtocolMetrics {
     }
 
     fn record_reader_protocol(&self, duration: Duration) {
-        let ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
-        self.reader_protocol_ns.fetch_add(ns, Ordering::Relaxed);
-        store_max(&self.reader_protocol_max_ns, ns);
+        record_timing(
+            &self.reader_protocol_count,
+            &self.reader_protocol_ns,
+            &self.reader_protocol_max_ns,
+            &self.reader_protocol_over_100us,
+            &self.reader_protocol_over_1ms,
+            &self.reader_protocol_over_5ms,
+            duration,
+        );
     }
 
     fn record_writer_tick(&self, duration: Duration) {
@@ -145,5 +230,29 @@ fn store_max(slot: &AtomicU64, value: u64) {
             Ok(_) => break,
             Err(actual) => current = actual,
         }
+    }
+}
+
+fn record_timing(
+    count: &AtomicU64,
+    total: &AtomicU64,
+    max: &AtomicU64,
+    over_100us: &AtomicU64,
+    over_1ms: &AtomicU64,
+    over_5ms: &AtomicU64,
+    duration: Duration,
+) {
+    let ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+    count.fetch_add(1, Ordering::Relaxed);
+    total.fetch_add(ns, Ordering::Relaxed);
+    store_max(max, ns);
+    if ns > 100_000 {
+        over_100us.fetch_add(1, Ordering::Relaxed);
+    }
+    if ns > 1_000_000 {
+        over_1ms.fetch_add(1, Ordering::Relaxed);
+    }
+    if ns > 5_000_000 {
+        over_5ms.fetch_add(1, Ordering::Relaxed);
     }
 }

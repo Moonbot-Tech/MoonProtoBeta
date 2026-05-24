@@ -468,6 +468,27 @@ Exit gate: full unit suite, examples check, FireTest, stress under `err_emu=10%`
 
 Exit gate: byte/wire tests, perf counters, FireTest/stress, API docs updated.
 
+### Phase Z - final full optimization pass
+
+Делать в самом конце, после protocol/runtime parity и после того, как крупные
+архитектурные мосты уже убраны. Это не optional cleanup, а обязательный gate.
+
+Цель: разобрать и оптимизировать всё protocol-owned, что можно упростить или
+ускорить без изменения Delphi machine effect:
+
+- allocations/clones, особенно на больших strategy/market/order/trades данных;
+- locks/channels/queues/snapshots и лишнюю упаковка->очередь->распаковка;
+- binary parsers и packed wire structs;
+- Sliced/ACK/retry loops;
+- API response/candles parsing and delivery;
+- active-lib state apply paths and event notification paths.
+
+FireTest/stress CPU summaries становятся gate. Любой protocol-owned sample
+`>1ms` должен получить точное объяснение и фикс, если его можно убрать. Если
+sample относится к cold/non-protocol/app work, это надо доказать метриками и
+вынести из protocol loop, а не списывать как "нормально". Никаких accepted
+deviation без отдельного согласования.
+
 ## Исторический план и progress log 2026-05-22
 
 Ниже старые фазы reader/writer rewrite. Они оставлены как история уже
@@ -920,6 +941,48 @@ Checks:
 - live `cargo test --test fire_test -- --ignored --nocapture`: passed against
   the configured prod server, including `err_emu=10%` initial health, full
   candles snapshot, `err_emu=50%` simple-ops gate, and reconnect/restore checks.
+
+### 2026-05-24 - Phase C4 coarse protocol CPU red-flag metrics
+
+Done:
+
+- Added CPU-ish protocol timing counters that exclude the fixed writer
+  `wait_5ms()` sleep:
+  - reader protocol avg/max and `>100us/>1ms/>5ms` counters;
+  - writer protocol CPU avg/max and `>100us/>1ms/>5ms` counters;
+  - app enqueue/snapshot avg/max and `>100us/>1ms/>5ms` counters.
+- FireTest now prints protocol CPU summaries at the initial health gate, after
+  candles, after the high-loss simple-ops gate, and at final pass/fail.
+- State-callback delivery now sends `Arc<EventDispatcherSnapshot>` through the
+  app queue, so a batch does not deep-clone the same snapshot once per event.
+
+Release FireTest measurement after the Arc batch fix:
+
+- A final: reader avg/max `25us/32469us`, writer CPU avg/max
+  `177us/663077us`, app enqueue avg/max `922us/2437us`.
+- B final: reader avg/max `30us/32267us`, writer CPU avg/max
+  `157us/69492us`, app enqueue avg/max `994us/3760us`.
+- App enqueue improved versus the pre-Arc measurement (`max 50ms` observed
+  before the fix) and no longer crossed `>5ms` in the final run.
+
+Interpretation:
+
+- Steady-state averages are in the expected microsecond range, but the max
+  writer CPU samples are not Delphi-like. A protocol/domain block reaching
+  tens/hundreds of milliseconds is a real red flag.
+- The current coarse counters prove the problem class but not the exact command.
+  While the runtime rewrite is still in progress, fix only obvious Rust-only
+  overhead found on the way. The mandatory full attribution/optimization pass is
+  Phase Z after protocol/runtime parity.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 604 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `cargo test --release --test fire_test -- --ignored --nocapture`: passed and
+  produced the CPU numbers above.
 
 ### 2026-05-24 - Phase C2 lifecycle callback queue
 

@@ -2844,7 +2844,10 @@ impl std::fmt::Debug for ClientConfig {
 /// the protocol writer tick.
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
 type RawAppEvent = (Command, Vec<u8>);
-type StateAppEvent = (crate::events::Event, crate::events::EventDispatcherSnapshot);
+type StateAppEvent = (
+    crate::events::Event,
+    Arc<crate::events::EventDispatcherSnapshot>,
+);
 
 /// Callback that receives typed events from [`Client::run_with_dispatcher`].
 ///
@@ -2944,7 +2947,12 @@ impl DispatcherEventFn {
         &mut self,
         events: &mut Vec<crate::events::Event>,
         dispatcher: &mut crate::events::EventDispatcher,
+        protocol_metrics: &ProtocolMetrics,
     ) {
+        if events.is_empty() {
+            return;
+        }
+        let enqueue_start = Instant::now();
         match self {
             Self::QueueToCallback(tx) => {
                 for event in events.drain(..) {
@@ -2952,17 +2960,16 @@ impl DispatcherEventFn {
                 }
             }
             Self::QueueToStateCallback(tx) => {
-                if !events.is_empty() {
-                    let snapshot = dispatcher.snapshot();
-                    for event in events.drain(..) {
-                        let _ = tx.send((event, snapshot.clone()));
-                    }
+                let snapshot = Arc::new(dispatcher.snapshot());
+                for event in events.drain(..) {
+                    let _ = tx.send((event, Arc::clone(&snapshot)));
                 }
             }
             Self::Queue => {
                 dispatcher.queue_events(events.drain(..));
             }
         }
+        protocol_metrics.record_app_enqueue(enqueue_start.elapsed());
     }
 }
 
@@ -2984,16 +2991,23 @@ impl ProtocolCore<'_> {
             }
             let cur_tm = self.client.now_ms();
 
+            let cpu_start = Instant::now();
             self.writer_tick_prologue(cur_tm);
 
             if self.ensure_socket_bound(cur_tm) {
                 self.drain_app_commands(cur_tm, mode);
+                let cpu_before_sleep = cpu_start.elapsed();
 
                 self.wait_5ms();
+
+                let cpu_after_sleep_start = Instant::now();
                 self.drain_app_commands(cur_tm, mode);
 
                 self.send_maintenance_phase(cur_tm, mode, &protocol_metrics);
+                protocol_metrics
+                    .record_writer_cpu(cpu_before_sleep + cpu_after_sleep_start.elapsed());
             } else {
+                protocol_metrics.record_writer_cpu(cpu_start.elapsed());
                 // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
@@ -3095,7 +3109,7 @@ impl ProtocolCore<'_> {
         {
             event_buf.clear();
             dispatcher.drain_deferred_order_removals_due(cur_tm, event_buf);
-            on_event.drain_events(event_buf, dispatcher);
+            on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
         }
     }
 
@@ -3319,7 +3333,7 @@ impl ProtocolCore<'_> {
                     );
                     self.client
                         .apply_active_actions(active_actions_buf.drain(..));
-                    on_event.drain_events(event_buf, dispatcher);
+                    on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
                 }
             }
         }
@@ -3455,7 +3469,7 @@ impl ProtocolCore<'_> {
             dispatcher.tick_orders_active_actions(cur_tm, event_buf, active_actions_buf);
             self.client
                 .apply_active_actions(active_actions_buf.drain(..));
-            on_event.drain_events(event_buf, dispatcher);
+            on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
         }
     }
 
@@ -7706,7 +7720,7 @@ impl Client {
             let app_handle = scope.spawn(move || {
                 let mut on_event = on_event;
                 while let Ok((event, snapshot)) = app_rx.recv() {
-                    on_event(&event, &snapshot);
+                    on_event(&event, snapshot.as_ref());
                 }
             });
             let writer_handle = scope.spawn(|| {
