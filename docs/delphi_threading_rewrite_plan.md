@@ -4616,3 +4616,52 @@ Still not done:
   applied before a later read exception. Rust still parses a complete response
   first and applies after parse success. This is a separate parity red flag,
   not an accepted deviation.
+
+### 2026-05-24 - Phase 1 partial: unknown CorrMarket prices ignored
+
+Done:
+
+- Fixed a valid-packet market state mismatch in `UpdateMarketsList`.
+- Delphi reads each CorrMarket price, then applies it only if
+  `Markets.GetCorrMarket(MName)` returns a known corr market.
+- Rust previously inserted every incoming corr price into `corr_prices`, even
+  for names absent from `corr_markets`.
+- Rust now ignores unknown corr price names and preserves merge semantics for
+  known names.
+- Recorded `spec_pipeline/work/хуйня.md §X.138`.
+
+Verification:
+
+- Added a regression test with one known and one unknown corr price.
+
+Still not done:
+
+- Continue the separate partial-apply parser/state red flag for malformed
+  market Engine API payloads.
+
+### 2026-05-24 - Phase 1 partial: direct market apply for update/tags
+
+Done:
+
+- Closed two active-dispatcher partial-apply mismatches for market Engine API.
+- Delphi `UpdateMarketsList` clears `CurrentMarkPriceFound`, then applies each
+  read price row immediately; if a later CorrMarket string read fails, already
+  applied prices remain.
+- Delphi `CheckBinanceTags` applies each read tag immediately and clears unseen
+  tags only after the loop completes; if a later string read fails, already read
+  tags remain and old absent tags are not cleared.
+- Rust active dispatcher now uses direct payload apply for
+  `UpdateMarketsList` and `CheckBinanceTags` instead of pure parse-then-apply.
+  The pure parse helpers remain for raw callers/tests.
+- Recorded `spec_pipeline/work/хуйня.md §X.139`.
+
+Verification:
+
+- Added regression tests for late corr parse error after a read price row and
+  late tag parse error after a read tag.
+
+Still not done:
+
+- `GetMarketsList` still has a partial-apply gap on malformed payloads:
+  Delphi mutates market objects during the market loop before CorrMarkets and
+  post-processing. Rust active dispatcher still parses the full list first.

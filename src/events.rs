@@ -34,10 +34,7 @@ use crate::commands::balance::parse_balance;
 use crate::commands::engine_api::{
     parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse, ServerInfo,
 };
-use crate::commands::market::{
-    parse_markets_indexes_response, parse_markets_list_response, parse_markets_prices_response,
-    parse_token_tags_response,
-};
+use crate::commands::market::{parse_markets_indexes_response, parse_markets_list_response};
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
@@ -1091,8 +1088,10 @@ impl EventDispatcher {
                         } else {
                             None
                         }
-                    } else if let Some(prices) = parse_markets_prices_response(&resp.data) {
-                        let ev = self.markets.apply_markets_prices(prices);
+                    } else if let Some(ev) = self
+                        .markets
+                        .apply_markets_prices_payload_like_delphi(&resp.data)
+                    {
                         Some(Event::Markets(ev))
                     } else {
                         None
@@ -1107,8 +1106,10 @@ impl EventDispatcher {
                     }
                 }
                 EngineMethod::CheckBinanceTags => {
-                    if let Some(items) = parse_token_tags_response(&resp.data) {
-                        let ev = self.markets.apply_token_tags(items);
+                    if let Some(ev) = self
+                        .markets
+                        .apply_token_tags_payload_like_delphi(&resp.data)
+                    {
                         Some(Event::Markets(ev))
                     } else {
                         None

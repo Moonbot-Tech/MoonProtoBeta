@@ -8,10 +8,13 @@
 //! - `emk_GetMarketsIndexes` → имена в порядке индексов (mIndex).
 //! - Периодически (~60 секунд + hourly burst) `emk_CheckBinanceTags` → теги монет.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
-    CorrMarket, Market, MarketTokenTags, MarketsListResponse, MarketsPricesResponse, TokenTags,
+    apply_delphi_local_funding_shift, CorrMarket, CorrMarketPriceUpdate, EngineStreamReader,
+    Market, MarketPriceUpdate, MarketTokenTags, MarketsListResponse, MarketsPricesResponse,
+    TokenTags,
 };
 
 const EPS_MARKET: f64 = 1e-12;
@@ -192,38 +195,90 @@ impl MarketsState {
     /// Если mapping неизвестен или stale после server restart — запись пропускается.
     pub fn apply_markets_prices(&mut self, resp: MarketsPricesResponse) -> MarketsEvent {
         let count = resp.prices.len();
-        let mut missing_market_seen = false;
         for slot in &mut self.prices {
             slot.mark_price_found = false;
         }
         for p in &resp.prices {
-            if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
-                let slot = &mut self.prices[idx];
-                slot.bid = p.bid;
-                slot.ask = p.ask;
-                if resp.send_funding {
-                    slot.funding_rate = p.funding_rate;
-                    slot.funding_time = p.funding_time;
-                }
-                slot.mark_price = p.mark_price;
-                slot.mark_price_found = p.mark_price_found;
-            } else if self.price_row_points_to_missing_market(p.m_index) {
-                missing_market_seen = true;
-            }
-        }
-        if missing_market_seen {
-            self.markets_list_refresh_needed = true;
+            self.apply_one_market_price_update(p, resp.send_funding);
         }
         if resp.send_corr_markets {
             for c in &resp.corr_prices {
-                self.corr_prices
-                    .insert(c.bn_market_name.clone(), c.last_price);
+                self.apply_one_corr_price_update(c);
             }
         }
         MarketsEvent::PricesUpdated {
             count,
             included_funding: resp.send_funding,
             included_corr: resp.send_corr_markets,
+        }
+    }
+
+    /// Active-library direct counterpart of Delphi `UpdateMarketsList`.
+    ///
+    /// Delphi mutates market prices inside the read loop. If a later corr-market
+    /// string read raises, already-applied prices remain. The pure parser is kept
+    /// for tests/raw callers; dispatcher uses this method for protocol state.
+    pub(crate) fn apply_markets_prices_payload_like_delphi(
+        &mut self,
+        data: &[u8],
+    ) -> Option<MarketsEvent> {
+        self.apply_markets_prices_payload_with_local_shift(data, current_local_time_shift_minutes())
+    }
+
+    fn apply_markets_prices_payload_with_local_shift(
+        &mut self,
+        data: &[u8],
+        local_shift_minutes: f64,
+    ) -> Option<MarketsEvent> {
+        let mut r = EngineStreamReader::new(data);
+        let send_funding = r.read_bool()?;
+        let count = r.read_count()?;
+        for slot in &mut self.prices {
+            slot.mark_price_found = false;
+        }
+
+        for _ in 0..count {
+            let update =
+                read_market_price_update_like_delphi(&mut r, send_funding, local_shift_minutes)?;
+            self.apply_one_market_price_update(&update, send_funding);
+        }
+
+        let send_corr_markets = r.read_bool()?;
+        if send_corr_markets {
+            let corr_count = r.read_count()?;
+            for _ in 0..corr_count {
+                let update = read_corr_price_update_like_delphi(&mut r)?;
+                self.apply_one_corr_price_update(&update);
+            }
+        }
+
+        Some(MarketsEvent::PricesUpdated {
+            count,
+            included_funding: send_funding,
+            included_corr: send_corr_markets,
+        })
+    }
+
+    fn apply_one_market_price_update(&mut self, p: &MarketPriceUpdate, send_funding: bool) {
+        if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
+            let slot = &mut self.prices[idx];
+            slot.bid = p.bid;
+            slot.ask = p.ask;
+            if send_funding {
+                slot.funding_rate = p.funding_rate;
+                slot.funding_time = p.funding_time;
+            }
+            slot.mark_price = p.mark_price;
+            slot.mark_price_found = p.mark_price_found;
+        } else if self.price_row_points_to_missing_market(p.m_index) {
+            self.markets_list_refresh_needed = true;
+        }
+    }
+
+    fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
+        if self.corr_markets.contains_key(&c.bn_market_name) {
+            self.corr_prices
+                .insert(c.bn_market_name.clone(), c.last_price);
         }
     }
 
@@ -261,6 +316,32 @@ impl MarketsState {
             }
         }
         MarketsEvent::TokenTagsUpdated { count }
+    }
+
+    /// Active-library direct counterpart of Delphi `CheckBinanceTags`.
+    ///
+    /// Delphi applies tags inside the read loop and clears unseen tags only
+    /// after the loop completes. A late string read error therefore leaves
+    /// already-read tag updates applied and does not clear old absent tags.
+    pub(crate) fn apply_token_tags_payload_like_delphi(
+        &mut self,
+        data: &[u8],
+    ) -> Option<MarketsEvent> {
+        let mut r = EngineStreamReader::new(data);
+        let count = r.read_count()?;
+        let mut seen = HashSet::with_capacity(r.bounded_count_capacity(count, 6));
+
+        for _ in 0..count {
+            let market_name = r.read_str()?;
+            let tags = TokenTags::from_bits(r.read_int()? as u32);
+            if self.by_name.contains_key(&market_name) {
+                self.token_tags.insert(market_name.clone(), tags);
+                seen.insert(market_name);
+            }
+        }
+
+        self.token_tags.retain(|name, _| seen.contains(name));
+        Some(MarketsEvent::TokenTagsUpdated { count: seen.len() })
     }
 
     /// Получить маркет по имени.
@@ -378,6 +459,46 @@ impl MarketsState {
     }
 }
 
+fn read_market_price_update_like_delphi(
+    r: &mut EngineStreamReader<'_>,
+    send_funding: bool,
+    local_shift_minutes: f64,
+) -> Option<MarketPriceUpdate> {
+    let m_index = r.read_word()?;
+    let bid = r.read_double()?;
+    let ask = r.read_double()?;
+    let (funding_rate, funding_time) = if send_funding {
+        (
+            r.read_double()?,
+            apply_delphi_local_funding_shift(r.read_double()?, local_shift_minutes),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    let mark_price = r.read_double()?;
+    let mark_price_found = r.read_bool()?;
+    Some(MarketPriceUpdate {
+        m_index,
+        bid,
+        ask,
+        funding_rate,
+        funding_time,
+        mark_price,
+        mark_price_found,
+    })
+}
+
+fn read_corr_price_update_like_delphi(
+    r: &mut EngineStreamReader<'_>,
+) -> Option<CorrMarketPriceUpdate> {
+    let bn_market_name = r.read_str()?;
+    let last_price = r.read_double()?;
+    Some(CorrMarketPriceUpdate {
+        bn_market_name,
+        last_price,
+    })
+}
+
 fn merge_market_like_delphi_get_markets_list(
     dst: &mut Market,
     src: &Market,
@@ -475,6 +596,26 @@ mod tests {
             bn_only_isolated: false,
             futures_type: BaseCurrency::USDT,
         }
+    }
+
+    fn push_str(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u16).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    fn push_price_update(
+        out: &mut Vec<u8>,
+        m_index: u16,
+        bid: f64,
+        ask: f64,
+        mark_price: f64,
+        mark_price_found: bool,
+    ) {
+        out.extend_from_slice(&m_index.to_le_bytes());
+        out.extend_from_slice(&bid.to_le_bytes());
+        out.extend_from_slice(&ask.to_le_bytes());
+        out.extend_from_slice(&mark_price.to_le_bytes());
+        out.push(mark_price_found as u8);
     }
 
     #[test]
@@ -808,6 +949,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_prices_payload_keeps_read_updates_on_late_corr_parse_error_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut data = Vec::new();
+        data.push(0); // HasFunding=false
+        data.extend_from_slice(&1i32.to_le_bytes());
+        push_price_update(&mut data, 0, 10.0, 11.0, 10.5, true);
+        data.push(1); // HasCorrMarkets=true
+        data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&10u16.to_le_bytes()); // broken corr market string
+
+        let ev = st.apply_markets_prices_payload_with_local_shift(&data, 0.0);
+
+        assert!(ev.is_none());
+        let price = st.price("BTCUSDT").unwrap();
+        assert_eq!(price.bid, 10.0);
+        assert_eq!(price.ask, 11.0);
+        assert!(price.mark_price_found);
+    }
+
+    #[test]
     fn apply_prices_uses_server_index_mapping() {
         let mut st = MarketsState::new();
         st.apply_markets_list(MarketsListResponse {
@@ -1084,6 +1251,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_corr_prices_ignores_unknown_corr_market_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.0,
+                base_currency_name: "BTC".to_string(),
+            }],
+        });
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![],
+            send_corr_markets: true,
+            corr_prices: vec![
+                CorrMarketPriceUpdate {
+                    bn_market_name: "DOGEBTC".to_string(),
+                    last_price: 0.00000123,
+                },
+                CorrMarketPriceUpdate {
+                    bn_market_name: "UNKNOWNBTC".to_string(),
+                    last_price: 0.5,
+                },
+            ],
+        });
+
+        assert_eq!(st.corr_prices.get("DOGEBTC").copied(), Some(0.00000123));
+        assert_eq!(
+            st.corr_prices.get("UNKNOWNBTC"),
+            None,
+            "Delphi UpdateMarketsList applies CorrMarket price only when GetCorrMarket(MName) is found"
+        );
+    }
+
+    #[test]
     fn apply_token_tags_clears_missing_markets_like_delphi_check_binance_tags() {
         let mut st = MarketsState::new();
         st.apply_markets_list(MarketsListResponse {
@@ -1127,6 +1331,40 @@ mod tests {
         );
         assert!(st.tags("ETHUSDT").contains(TokenTags::ALPHA));
         assert!(st.tags("UNKNOWN").is_empty());
+    }
+
+    #[test]
+    fn apply_token_tags_payload_keeps_read_tags_on_late_parse_error_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_token_tags(vec![
+            MarketTokenTags {
+                market_name: "BTCUSDT".to_string(),
+                tags: TokenTags::MONITORING,
+            },
+            MarketTokenTags {
+                market_name: "ETHUSDT".to_string(),
+                tags: TokenTags::GAMING,
+            },
+        ]);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i32.to_le_bytes());
+        push_str(&mut data, "BTCUSDT");
+        data.extend_from_slice(&(TokenTags::ALPHA.bits() as i32).to_le_bytes());
+        data.extend_from_slice(&10u16.to_le_bytes()); // broken second market string
+
+        let ev = st.apply_token_tags_payload_like_delphi(&data);
+
+        assert!(ev.is_none());
+        assert!(st.tags("BTCUSDT").contains(TokenTags::ALPHA));
+        assert!(
+            st.tags("ETHUSDT").contains(TokenTags::GAMING),
+            "Delphi clears unseen tags only after the read loop completes"
+        );
     }
 
     #[test]

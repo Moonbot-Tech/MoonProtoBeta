@@ -381,7 +381,10 @@ fn read_market_with_local_shift(
     })
 }
 
-fn apply_delphi_local_funding_shift(wire_funding_time: f64, local_shift_minutes: f64) -> f64 {
+pub(crate) fn apply_delphi_local_funding_shift(
+    wire_funding_time: f64,
+    local_shift_minutes: f64,
+) -> f64 {
     if wire_funding_time > 0.0 {
         wire_funding_time + local_shift_minutes.round() / MINS_IN_DAY
     } else {

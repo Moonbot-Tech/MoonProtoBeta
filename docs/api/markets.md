@@ -10,6 +10,10 @@ Markets state is maintained from Engine API responses:
 When using `Client::run_with_dispatcher`, relevant responses are applied to
 `EventDispatcher::markets()` automatically.
 
+The active dispatcher applies `UpdateMarketsList` and `CheckBinanceTags`
+directly while reading the payload, matching Delphi's in-loop state updates.
+The pure parse helpers remain available for raw callers and tests.
+
 Low-level market response builders use Delphi string serialization: `Word`
 UTF-8 byte length followed by exactly that declared number of bytes.
 
@@ -39,8 +43,10 @@ from the incoming list because Delphi inserts the whole `TMarket`.
 Correlation market definitions from `GetMarketsList` are inserted only when
 their `base_currency_name` is non-empty, matching Delphi's `If not
 BaseCur.IsEmpty then AddOrSetCorrMarket`. Correlation market price updates are
-merge-style: prices present in `UpdateMarketsList` overwrite their entries,
-while absent correlation prices keep their previous value.
+merge-style for known correlation markets only: prices present in
+`UpdateMarketsList` overwrite their entries, unknown names are ignored like
+Delphi `GetCorrMarket(MName) = nil`, and absent known prices keep their
+previous value.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
