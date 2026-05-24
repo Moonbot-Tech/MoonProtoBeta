@@ -119,26 +119,27 @@ impl<'a> EngineStreamReader<'a> {
         read_string(self.data, &mut self.pos)
     }
 
-    /// Read i32 count + DoS-validate. Returns Some(count) если count >= 0 и
-    /// `count * min_elem_size <= remaining bytes`. Иначе None + warn-log.
+    /// Read i32 count like Delphi `resp.ReadInt`.
     ///
-    /// Используется для всех server-provided коллекций где элементы имеют известный минимум
-    /// (закрывает `Vec::with_capacity(i32::MAX as usize)` OOM-panic от corrupt/adversarial payload).
-    pub fn read_count(&mut self, min_elem_size: usize) -> Option<usize> {
+    /// Do not pre-reject `count * elem_size > remaining`: Delphi readers do not
+    /// check collection size up front and fail only at the concrete field read.
+    /// Callers should use [`Self::bounded_count_capacity`] for allocation only.
+    pub fn read_count(&mut self) -> Option<usize> {
         let raw = self.read_int()?;
         if raw < 0 {
             log::warn!(target: "moonproto::commands",
                 "read_count: negative count {} rejected", raw);
             return None;
         }
-        let n = raw as usize;
-        if min_elem_size > 0 && n.saturating_mul(min_elem_size) > self.remaining() {
-            log::warn!(target: "moonproto::commands",
-                "read_count: count={} × min_elem_size={} exceeds remaining={} (DoS guard)",
-                n, min_elem_size, self.remaining());
-            return None;
+        Some(raw as usize)
+    }
+
+    pub fn bounded_count_capacity(&self, count: usize, min_elem_size: usize) -> usize {
+        if min_elem_size == 0 {
+            count
+        } else {
+            count.min(self.remaining() / min_elem_size)
         }
-        Some(n)
     }
 }
 
@@ -532,9 +533,10 @@ fn parse_markets_list_response_with_local_shift(
     local_shift_minutes: f64,
 ) -> Option<MarketsListResponse> {
     let mut r = EngineStreamReader::new(data);
-    // Market минимум ~40 байт (несколько строк + числа); используем 16 как консервативный пол.
-    let count = r.read_count(16)?;
-    let mut markets = Vec::with_capacity(count);
+    // Market минимум заведомо больше 16 байт; число используется только для
+    // prealloc, не для Delphi-incompatible early reject.
+    let count = r.read_count()?;
+    let mut markets = Vec::with_capacity(r.bounded_count_capacity(count, 16));
     for _ in 0..count {
         markets.push(read_market_with_local_shift(
             &mut r,
@@ -542,9 +544,9 @@ fn parse_markets_list_response_with_local_shift(
             local_shift_minutes,
         )?);
     }
-    // CorrMarket минимум ~10 байт (две короткие строки + число).
-    let corr_count = r.read_count(8)?;
-    let mut corr_markets = Vec::with_capacity(corr_count);
+    // CorrMarket минимум больше 8 байт; только bounded prealloc.
+    let corr_count = r.read_count()?;
+    let mut corr_markets = Vec::with_capacity(r.bounded_count_capacity(corr_count, 8));
     for _ in 0..corr_count {
         corr_markets.push(read_corr_market(&mut r)?);
     }
@@ -626,9 +628,9 @@ fn parse_markets_prices_response_with_local_shift(
     let mut r = EngineStreamReader::new(data);
     let send_funding = r.read_bool()?;
     // MarketPriceUpdate минимум: m_index(2) + bid(8) + ask(8) + mark_price(8) + mark_found(1) = 27 байт.
-    // Если send_funding=true ещё +16. Используем 27 как минимум.
-    let count = r.read_count(27)?;
-    let mut prices = Vec::with_capacity(count);
+    // Если send_funding=true ещё +16. 27 используется только для bounded prealloc.
+    let count = r.read_count()?;
+    let mut prices = Vec::with_capacity(r.bounded_count_capacity(count, 27));
     for _ in 0..count {
         let m_index = r.read_word()?;
         let bid = r.read_double()?;
@@ -657,8 +659,8 @@ fn parse_markets_prices_response_with_local_shift(
     let mut corr_prices = Vec::new();
     if send_corr_markets {
         // CorrMarketPriceUpdate: bn_market_name (string u16+chars) + last_price (8) = минимум 10 байт.
-        let corr_count = r.read_count(10)?;
-        corr_prices.reserve(corr_count);
+        let corr_count = r.read_count()?;
+        corr_prices.reserve(r.bounded_count_capacity(corr_count, 10));
         for _ in 0..corr_count {
             let bn_market_name = r.read_str()?;
             let last_price = r.read_double()?;
@@ -722,8 +724,8 @@ fn build_markets_prices_response_with_local_shift(
 pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
     let mut r = EngineStreamReader::new(data);
     // Каждое имя — UTF-8 string с u16-prefix. Минимум 2 байта (пустая строка).
-    let count = r.read_count(2)?;
-    let mut names = Vec::with_capacity(count);
+    let count = r.read_count()?;
+    let mut names = Vec::with_capacity(r.bounded_count_capacity(count, 2));
     for _ in 0..count {
         names.push(r.read_str()?);
     }
@@ -808,8 +810,8 @@ pub struct MarketTokenTags {
 pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
     // MarketTokenTags: market_name (string u16+chars) + tags (i32) = минимум 6 байт.
-    let count = r.read_count(6)?;
-    let mut out = Vec::with_capacity(count);
+    let count = r.read_count()?;
+    let mut out = Vec::with_capacity(r.bounded_count_capacity(count, 6));
     for _ in 0..count {
         let market_name = r.read_str()?;
         let tags_int = r.read_int()? as u32;
@@ -963,6 +965,17 @@ mod tests {
 
         let mut r = EngineStreamReader::new(&buf);
         assert_eq!(r.read_str().unwrap(), "M");
+    }
+
+    #[test]
+    fn market_count_reader_does_not_precheck_remaining_like_delphi() {
+        let bytes = 2i32.to_le_bytes();
+        let mut r = EngineStreamReader::new(&bytes);
+
+        let count = r.read_count().unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(r.bounded_count_capacity(count, 27), 0);
     }
 
     #[test]

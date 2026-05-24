@@ -219,3 +219,13 @@ let list = parse_markets_list_response(&resp.data, 2).expect("bad markets list")
 
 `EventDispatcher` currently uses protocol version `2` for `GetMarketsList`
 responses, matching the live server format with `futures_type`.
+
+Low-level market parsers read collection counts like Delphi `resp.ReadInt`:
+they do not reject a packet only because `count * estimated_item_size` is larger
+than the remaining bytes. Allocation is still bounded by the remaining payload;
+malformed packets fail at the concrete field read.
+
+`EngineStreamReader::read_count()` reads only the signed Delphi count and
+returns it as `usize` when non-negative. Code that needs preallocation should
+call `EngineStreamReader::bounded_count_capacity(count, estimated_item_size)`;
+that helper affects capacity only and must not be used as a parse gate.

@@ -4587,3 +4587,32 @@ Still not done:
   `TMemoryStream.Read` into a partially available `THLDexInfo` can leave
   unread bytes in record storage. This remains a corrupt-tail decision, not a
   hidden parser cap.
+
+### 2026-05-24 - Phase 1 partial: market Engine API count precheck removed
+
+Done:
+
+- Removed the Rust-only count/remaining precheck from market Engine API
+  response parsing.
+- Delphi `GetMarketsList`, `GetMarketsIndexes`, `UpdateMarketsList`, and
+  `CheckBinanceTags` read counts with `resp.ReadInt` and then enter the item
+  loops. They do not reject the whole response just because
+  `count * estimated_item_size` is larger than the bytes currently remaining.
+- Rust `EngineStreamReader::read_count()` now only reads the signed count and
+  rejects negative counts. Allocation sizing moved to
+  `bounded_count_capacity`, which affects `Vec` capacity only and not parser
+  acceptance.
+- Recorded `spec_pipeline/work/хуйня.md §X.137`.
+
+Verification:
+
+- Added a unit test proving a declared count is preserved even when the
+  estimated item bytes do not fit the remaining payload.
+
+Still not done:
+
+- Exact Delphi partial-apply semantics are still open for market APIs. Delphi
+  mutates some market state while parsing and can leave already-read items
+  applied before a later read exception. Rust still parses a complete response
+  first and applies after parse success. This is a separate parity red flag,
+  not an accepted deviation.
