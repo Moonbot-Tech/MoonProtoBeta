@@ -139,6 +139,12 @@ Buy bulk move uses `MoveAllBuysCmdType`, which has only `MoveKind = 0` and
 `Pers = 2`. Delphi has no buy-side `PriceZone` mode, and the server buy branch
 does not process `CmdType = 1`.
 
+The low-level trade action option types preserve Delphi raw enum ordinals:
+`FixedPosition(pub u8)`, `MoveAllCmdType(pub u8)`,
+`MoveAllBuysCmdType(pub u8)`, and `ReplaceMultiKind(pub u8)`. Use their named
+constants for regular API calls; unknown ordinals can still be parsed and
+round-tripped from wire payloads instead of becoming `ParseFailed`.
+
 `move_all_sells` intentionally takes a parameter struct instead of a long
 positional argument list. This is part of the public API:
 

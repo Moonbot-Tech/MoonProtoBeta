@@ -10696,7 +10696,7 @@ mod client_subscribe_integration_tests {
                 assert_eq!(cmd.market.base.uid, ctx.uid);
                 assert_eq!(cmd.market.currency, 17);
                 assert_eq!(cmd.market.platform, 9);
-                assert_eq!(cmd.cmd_type, MoveAllCmdType::MoveKind as u8);
+                assert_eq!(cmd.cmd_type, MoveAllCmdType::MoveKind.to_byte());
                 assert_eq!(cmd.move_kind, ReplaceMultiKind::TopVol);
                 assert_eq!(cmd.side, FixedPosition::Long);
             }
@@ -10746,7 +10746,7 @@ mod client_subscribe_integration_tests {
         match TradeCommand::parse(&high[0].data).expect("valid move all buys") {
             TradeCommand::MoveAllBuys(cmd) => {
                 assert_eq!(cmd.market.base.uid, ctx.uid);
-                assert_eq!(cmd.cmd_type, MoveAllBuysCmdType::Pers as u8);
+                assert_eq!(cmd.cmd_type, MoveAllBuysCmdType::Pers.to_byte());
                 assert_eq!(cmd.move_kind, ReplaceMultiKind::None);
                 assert_eq!(cmd.side, FixedPosition::Short);
             }

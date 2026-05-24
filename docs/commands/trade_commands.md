@@ -91,8 +91,10 @@ notify updates for changes made by another client or by the engine.
 - `2` = `Pers`.
 
 There is no buy-side `PriceZone` mode in Delphi. The Rust public builder and
-client wrappers use the separate `MoveAllBuysCmdType` enum so regular API code
-cannot create a buy command with `CmdType = 1`.
+client wrappers use the separate `MoveAllBuysCmdType` type so regular API code
+does not name a buy command with `CmdType = 1`. The wire types preserve raw
+Delphi ordinals, so parsed future/unknown byte values remain available instead
+of being collapsed or rejected.
 
 ## Order state machine
 

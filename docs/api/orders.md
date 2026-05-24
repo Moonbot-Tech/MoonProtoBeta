@@ -92,7 +92,9 @@ flag; the active dispatcher clears `ReplaceSentTime` or the current-side flag
 from the worker tick, matching Delphi `CheckReplaceFlag`.
 For replace-response and bulk-replace side selection, Delphi treats only
 `OrderType::Buy` (`O_BUY`) as the buy side; `Sell`, `BuyStop`, and `BuyLimit`
-all use the sell side in the order read model.
+all use the sell side in the order read model. `OrderType` preserves the raw
+Delphi ordinal byte, so future/unknown values are represented as
+`OrderType(n)` / debug `Unknown(n)` and also use the sell side unless `n == 1`.
 
 ## `Order`
 

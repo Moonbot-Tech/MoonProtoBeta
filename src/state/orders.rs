@@ -595,6 +595,7 @@ impl Orders {
             FixedPosition::Both => true,
             FixedPosition::Long => !order.is_short,
             FixedPosition::Short => order.is_short,
+            _ => true,
         }
     }
 
@@ -626,6 +627,7 @@ impl Orders {
             MoveAllCmdType::Pers => self.map.values().any(|order| {
                 order.market_name == market_name && order.status == OrderWorkerStatus::SellSet
             }),
+            _ => false,
         }
     }
 
@@ -653,6 +655,7 @@ impl Orders {
             MoveAllBuysCmdType::Pers => self.map.values().any(|order| {
                 order.market_name == market_name && order.status == OrderWorkerStatus::BuySet
             }),
+            _ => false,
         }
     }
 
@@ -768,7 +771,7 @@ impl Orders {
                 OrderType::Buy
             }
             OrderWorkerStatus::BuySet => {
-                let order_type = OrderType::from_byte(order.buy_order.order_type)?;
+                let order_type = OrderType::from_byte(order.buy_order.order_type);
                 if order.replace_sent_time_ms > 0 && !order.bulk_replace_buy {
                     order.replace_sent_time_ms = 0;
                 }
@@ -781,7 +784,7 @@ impl Orders {
                 order_type
             }
             OrderWorkerStatus::SellSet => {
-                let order_type = OrderType::from_byte(order.sell_order.order_type)?;
+                let order_type = OrderType::from_byte(order.sell_order.order_type);
                 if order.replace_sent_time_ms > 0 && !order.bulk_replace_sell {
                     order.replace_sent_time_ms = 0;
                 }
@@ -2019,7 +2022,7 @@ mod tests {
     fn outgoing_send_replace_if_requested_matches_delphi_gate() {
         let mut orders = Orders::new();
         let mut buy_status = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-        buy_status.buy_order.order_type = OrderType::Buy as u8;
+        buy_status.buy_order.order_type = OrderType::Buy.to_byte();
         orders.apply(order_status_cmd(buy_status));
 
         assert!(
@@ -3400,6 +3403,30 @@ mod tests {
         let notify = BulkReplaceNotify {
             market: make_market(0, 3, "X"),
             order_type: OrderType::BuyStop,
+            uids: vec![1],
+        };
+        let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::BulkReplaced { .. }));
+        let order = orders.get(1).unwrap();
+        assert!(!order.bulk_replace_buy);
+        assert!(order.bulk_replace_sell);
+    }
+
+    #[test]
+    fn bulk_replace_notify_unknown_order_type_uses_sell_side_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::SellSet,
+            10,
+        )));
+
+        let notify = BulkReplaceNotify {
+            market: make_market(0, 3, "X"),
+            order_type: OrderType::from_byte(250),
             uids: vec![1],
         };
         let (res, ev) = orders.apply_at(TradeCommand::BulkReplaceNotify(notify), 1000);

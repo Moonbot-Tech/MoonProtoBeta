@@ -28,25 +28,47 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 // ============================================================================
 
 /// TOrderType (Vars.pas:57): O_SELL=0, O_BUY=1, O_BuyStop=2, O_BuyLimit=3.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrderType {
-    Sell = 0,
-    Buy = 1,
-    BuyStop = 2,
-    BuyLimit = 3,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderType(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl OrderType {
+    pub const Sell: Self = Self(0);
+    pub const Buy: Self = Self(1);
+    pub const BuyStop: Self = Self(2);
+    pub const BuyLimit: Self = Self(3);
+
+    /// Сохранить raw Delphi ordinal byte. Delphi читает/пишет `TOrderType`
+    /// через packed enum field и не роняет packet на unknown.
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::BuyLimit.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sell => "Sell",
+            Self::Buy => "Buy",
+            Self::BuyStop => "BuyStop",
+            Self::BuyLimit => "BuyLimit",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl OrderType {
-    /// Возвращает `None` если байт неизвестен — caller должен drop packet + log.
-    /// Финансовый enum: silent fallback в Default = silent corruption (A-02).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Sell),
-            1 => Some(Self::Buy),
-            2 => Some(Self::BuyStop),
-            3 => Some(Self::BuyLimit),
-            _ => None,
+impl std::fmt::Debug for OrderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
@@ -157,47 +179,89 @@ impl std::fmt::Debug for OrderWorkerStatus {
 }
 
 /// TFixedPosition (Vars.pas:52): FP_Both=0, FP_Long=1, FP_Short=2.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixedPosition {
-    Both = 0,
-    Long = 1,
-    Short = 2,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixedPosition(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl FixedPosition {
+    pub const Both: Self = Self(0);
+    pub const Long: Self = Self(1);
+    pub const Short: Self = Self(2);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Short.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Both => "Both",
+            Self::Long => "Long",
+            Self::Short => "Short",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl FixedPosition {
-    /// Возвращает `None` если байт неизвестен (A-02).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Both),
-            1 => Some(Self::Long),
-            2 => Some(Self::Short),
-            _ => None,
+impl std::fmt::Debug for FixedPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
 
 /// Sell-side `TMoveAllCmdType` (MoonProtoTradeStruct.pas:148 inline comment).
 /// Описывает интерпретацию параметра `Price`/`PriceZone` в `TMoveAllSellsCommand`.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MoveAllCmdType {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MoveAllCmdType(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl MoveAllCmdType {
     /// `MoveKind` — двигать всех по правилу из `ReplaceMultiKind`.
-    MoveKind = 0,
+    pub const MoveKind: Self = Self(0);
     /// `PriceZone` — двигать тех чья цена в зоне `[price_zone.min_p, price_zone.max_p]`.
-    PriceZone = 1,
+    pub const PriceZone: Self = Self(1);
     /// `Pers` — персональный режим (см. Delphi server logic).
-    Pers = 2,
+    pub const Pers: Self = Self(2);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Pers.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MoveKind => "MoveKind",
+            Self::PriceZone => "PriceZone",
+            Self::Pers => "Pers",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl MoveAllCmdType {
-    /// Возвращает `None` если байт неизвестен (A-02).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::MoveKind),
-            1 => Some(Self::PriceZone),
-            2 => Some(Self::Pers),
-            _ => None,
+impl std::fmt::Debug for MoveAllCmdType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
@@ -207,51 +271,93 @@ impl MoveAllCmdType {
 /// Delphi `TMoveAllBuysCommand` supports only `0: MoveKind` and `2: Pers`;
 /// there is no buy-side `PriceZone` mode and the server buy branch ignores
 /// `CmdType=1`.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MoveAllBuysCmdType {
-    MoveKind = 0,
-    Pers = 2,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MoveAllBuysCmdType(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl MoveAllBuysCmdType {
+    pub const MoveKind: Self = Self(0);
+    pub const Pers: Self = Self(2);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        matches!(self, Self::MoveKind | Self::Pers)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MoveKind => "MoveKind",
+            Self::Pers => "Pers",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl MoveAllBuysCmdType {
-    /// Возвращает `None` если байт неизвестен или sell-only (`PriceZone=1`).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::MoveKind),
-            2 => Some(Self::Pers),
-            _ => None,
+impl std::fmt::Debug for MoveAllBuysCmdType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
 
 /// TReplaceMultiKind (Vars.pas:37).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplaceMultiKind {
-    None = 0,
-    Shift = 1,
-    TopVol = 2,
-    LowVol = 3,
-    TopProfit = 4,
-    All = 5,
-    LastSet = 6,
-    LastMoved = 7,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReplaceMultiKind(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl ReplaceMultiKind {
+    pub const None: Self = Self(0);
+    pub const Shift: Self = Self(1);
+    pub const TopVol: Self = Self(2);
+    pub const LowVol: Self = Self(3);
+    pub const TopProfit: Self = Self(4);
+    pub const All: Self = Self(5);
+    pub const LastSet: Self = Self(6);
+    pub const LastMoved: Self = Self(7);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::LastMoved.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Shift => "Shift",
+            Self::TopVol => "TopVol",
+            Self::LowVol => "LowVol",
+            Self::TopProfit => "TopProfit",
+            Self::All => "All",
+            Self::LastSet => "LastSet",
+            Self::LastMoved => "LastMoved",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl ReplaceMultiKind {
-    /// Возвращает `None` если байт неизвестен (A-02).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::None),
-            1 => Some(Self::Shift),
-            2 => Some(Self::TopVol),
-            3 => Some(Self::LowVol),
-            4 => Some(Self::TopProfit),
-            5 => Some(Self::All),
-            6 => Some(Self::LastSet),
-            7 => Some(Self::LastMoved),
-            _ => None,
+impl std::fmt::Debug for ReplaceMultiKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
@@ -1202,7 +1308,7 @@ impl OrderReplaceCommand {
         if r.len() < 1 + 8 {
             return None;
         }
-        let order_type = OrderType::from_byte(r[0])?;
+        let order_type = OrderType::from_byte(r[0]);
         *r = &r[1..];
         let new_price = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
@@ -1234,7 +1340,7 @@ impl OrderReplaceResponse {
         if r.len() < 1 + 8 + ORDER_UPDATE_DATA_SIZE + 8 {
             return None;
         }
-        let order_type = OrderType::from_byte(r[0])?;
+        let order_type = OrderType::from_byte(r[0]);
         *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
@@ -1408,7 +1514,7 @@ impl MoveAllSellsCommand {
         }
         let cmd_type = r[0];
         *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0])?;
+        let move_kind = ReplaceMultiKind::from_byte(r[0]);
         *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
@@ -1416,7 +1522,7 @@ impl MoveAllSellsCommand {
         *r = &r[PRICE_ZONE_SIZE..];
         // Soft-read like Delphi: when older payloads have no Side byte, use Both.
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0])?;
+            let v = FixedPosition::from_byte(r[0]);
             *r = &r[1..];
             v
         } else {
@@ -1607,7 +1713,7 @@ impl OrderTracePoint {
         *r = &r[4..];
         let stop_price = f32::from_le_bytes(r[0..4].try_into().unwrap());
         *r = &r[4..];
-        let ord_type = OrderType::from_byte(r[0])?;
+        let ord_type = OrderType::from_byte(r[0]);
         *r = &r[1..];
         let flags = r[0];
         *r = &r[1..];
@@ -1690,12 +1796,12 @@ impl MoveAllBuysCommand {
         }
         let cmd_type = r[0];
         *r = &r[1..];
-        let move_kind = ReplaceMultiKind::from_byte(r[0])?;
+        let move_kind = ReplaceMultiKind::from_byte(r[0]);
         *r = &r[1..];
         let price = f64::from_le_bytes(r[0..8].try_into().unwrap());
         *r = &r[8..];
         let side = if !r.is_empty() {
-            let v = FixedPosition::from_byte(r[0])?;
+            let v = FixedPosition::from_byte(r[0]);
             *r = &r[1..];
             v
         } else {
@@ -1730,7 +1836,7 @@ impl BulkReplaceNotify {
         if r.len() < 1 + 2 {
             return None;
         }
-        let order_type = OrderType::from_byte(r[0])?;
+        let order_type = OrderType::from_byte(r[0]);
         *r = &r[1..];
         let count = u16::from_le_bytes([r[0], r[1]]) as usize;
         *r = &r[2..];
@@ -1873,7 +1979,7 @@ pub fn build_order_replace(
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     write_trade_epoch_header(&mut out, 6, ctx, market_name, 0, OrderWorkerStatus::None);
-    out.push(order_type as u8);
+    out.push(order_type.to_byte());
     out.extend_from_slice(&new_price.to_le_bytes());
     out
 }
@@ -1950,11 +2056,11 @@ pub fn build_move_all_sells(
         ctx.currency,
         ctx.platform,
     );
-    out.push(params.cmd_type as u8);
-    out.push(params.move_kind as u8);
+    out.push(params.cmd_type.to_byte());
+    out.push(params.move_kind.to_byte());
     out.extend_from_slice(&params.price.to_le_bytes());
     params.price_zone.write_to(&mut out);
-    out.push(params.side as u8);
+    out.push(params.side.to_byte());
     out
 }
 
@@ -2083,10 +2189,10 @@ pub fn build_move_all_buys(
         ctx.currency,
         ctx.platform,
     );
-    out.push(cmd_type as u8);
-    out.push(move_kind as u8);
+    out.push(cmd_type.to_byte());
+    out.push(move_kind.to_byte());
     out.extend_from_slice(&price.to_le_bytes());
-    out.push(side as u8);
+    out.push(side.to_byte());
     out
 }
 
@@ -2438,7 +2544,7 @@ mod tests {
         raw.push(1);
         raw.push(2);
         write_string(&mut raw, "BTCUSDT");
-        raw.push(OrderType::Buy as u8);
+        raw.push(OrderType::Buy.to_byte());
         raw.extend_from_slice(&2u16.to_le_bytes());
         raw.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
 
@@ -2503,6 +2609,98 @@ mod tests {
                 assert_eq!(header.status.to_byte(), 250);
                 assert!(!header.status.is_known());
                 assert_eq!(header.status.name(), "Unknown");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn order_type_fields_preserve_unknown_ordinals_like_delphi() {
+        let mut bulk = Vec::new();
+        write_base_command_header(&mut bulk, 28, 77);
+        bulk.push(1);
+        bulk.push(2);
+        write_string(&mut bulk, "BTCUSDT");
+        bulk.push(250);
+        bulk.extend_from_slice(&1u16.to_le_bytes());
+        bulk.extend_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+        match TradeCommand::parse(&bulk).unwrap() {
+            TradeCommand::BulkReplaceNotify(cmd) => {
+                assert_eq!(cmd.order_type.to_byte(), 250);
+                assert!(!cmd.order_type.is_known());
+                assert_eq!(cmd.uids, vec![0x1122_3344_5566_7788]);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let mut trace = Vec::new();
+        write_base_command_header(&mut trace, 25, 88);
+        trace.push(1);
+        trace.push(2);
+        write_string(&mut trace, "BTCUSDT");
+        trace.extend_from_slice(&45_000.25f64.to_le_bytes());
+        trace.extend_from_slice(&1.5f32.to_le_bytes());
+        trace.extend_from_slice(&1.25f32.to_le_bytes());
+        trace.extend_from_slice(&0.0f32.to_le_bytes());
+        trace.push(251);
+        trace.push(trace_flags::IS_INITIAL);
+
+        match TradeCommand::parse(&trace).unwrap() {
+            TradeCommand::OrderTracePoint(cmd) => {
+                assert_eq!(cmd.ord_type.to_byte(), 251);
+                assert!(!cmd.ord_type.is_known());
+                assert_eq!(cmd.flags, trace_flags::IS_INITIAL);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_all_commands_preserve_unknown_ordinals_like_delphi() {
+        let mut sells = Vec::new();
+        write_base_command_header(&mut sells, 13, 77);
+        sells.push(1);
+        sells.push(2);
+        write_string(&mut sells, "BTCUSDT");
+        sells.push(250);
+        sells.push(251);
+        sells.extend_from_slice(&123.0f64.to_le_bytes());
+        PriceZone {
+            min_p: 1.0,
+            max_p: 2.0,
+        }
+        .write_to(&mut sells);
+        sells.push(252);
+
+        match TradeCommand::parse(&sells).unwrap() {
+            TradeCommand::MoveAllSells(cmd) => {
+                assert_eq!(cmd.cmd_type, 250);
+                assert_eq!(cmd.move_kind.to_byte(), 251);
+                assert!(!cmd.move_kind.is_known());
+                assert_eq!(cmd.side.to_byte(), 252);
+                assert!(!cmd.side.is_known());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let mut buys = Vec::new();
+        write_base_command_header(&mut buys, 27, 88);
+        buys.push(1);
+        buys.push(2);
+        write_string(&mut buys, "ETHUSDT");
+        buys.push(253);
+        buys.push(254);
+        buys.extend_from_slice(&456.0f64.to_le_bytes());
+        buys.push(255);
+
+        match TradeCommand::parse(&buys).unwrap() {
+            TradeCommand::MoveAllBuys(cmd) => {
+                assert_eq!(cmd.cmd_type, 253);
+                assert_eq!(cmd.move_kind.to_byte(), 254);
+                assert!(!cmd.move_kind.is_known());
+                assert_eq!(cmd.side.to_byte(), 255);
+                assert!(!cmd.side.is_known());
             }
             other => panic!("wrong variant: {other:?}"),
         }

@@ -4380,3 +4380,32 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: order-side enum raw ordinals
+
+Done:
+
+- Extended the same Delphi raw-ordinal rule to order-side enum fields:
+  `OrderType`, `FixedPosition`, `MoveAllCmdType`, `MoveAllBuysCmdType`, and
+  `ReplaceMultiKind`.
+- Delphi reads and writes these fields as raw enum bytes inside
+  `TOrderReplace*`, `TMoveAll*`, `TOrderTracePoint`, and
+  `TBulkReplaceNotify`; unknown ordinals are not a parser-level packet drop.
+- Rust now keeps those bytes in raw wrappers with named constants for known
+  values. Existing public calls still use `OrderType::Buy`,
+  `MoveAllCmdType::PriceZone`, etc.; parser paths can preserve unknown bytes.
+- For state side-selection, only `OrderType::Buy` maps to the buy side, so
+  unknown `OrderType` follows Delphi's `if = O_BUY then buy else sell` shape.
+- Recorded `spec_pipeline/work/хуйня.md §X.132`.
+
+Verification:
+
+- Added parser tests proving unknown `OrderType`, `MoveKind`, and `Side`
+  ordinals are preserved.
+- Added state test proving unknown `OrderType` in `TBulkReplaceNotify` uses the
+  sell side like Delphi.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
