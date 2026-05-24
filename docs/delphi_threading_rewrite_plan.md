@@ -4740,3 +4740,27 @@ Still not done:
 - Continue broader `GetMarketsList` post-processing parity audit:
   `CheckCorrMarkets`, `CheckCurrencyRefMarkets`, and heavier listing-strategy
   follow-ups remain open.
+
+### 2026-05-24 - Phase 1 partial: CorrMarket repeated definition merge
+
+Done:
+
+- Fixed a Delphi `AddOrSetCorrMarket` merge mismatch.
+- Delphi sets `TCorrMarket.bnMarketCurrency` only when a CorrMarket object is
+  first created. On repeated `GetMarketsList` definitions for the same
+  `bnMarketName`, it updates `bnTickSize` and `BaseCurrency`, but leaves the
+  original `bnMarketCurrency`.
+- Rust previously replaced the whole `CorrMarket` struct and could expose a
+  different `bn_market_currency`.
+- Rust now inserts new CorrMarkets, but for existing entries updates only
+  `bn_tick_size` and `base_currency_name`.
+- Recorded `spec_pipeline/work/хуйня.md §X.143`.
+
+Verification:
+
+- Added regression coverage for repeated CorrMarket definitions.
+
+Still not done:
+
+- Continue `CheckCorrMarkets` per-market BTC-correlation reference and
+  `CheckCurrencyRefMarkets` / `UpdateCurrencyPrices` parity audit.

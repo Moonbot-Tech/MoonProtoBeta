@@ -43,7 +43,10 @@ from the incoming list because Delphi inserts the whole `TMarket`.
 
 Correlation market definitions from `GetMarketsList` are inserted only when
 their `base_currency_name` is non-empty, matching Delphi's `If not
-BaseCur.IsEmpty then AddOrSetCorrMarket`. Correlation market price updates are
+BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
+correlation market update `bn_tick_size` and `base_currency_name`, but keep the
+original `bn_market_currency`, matching Delphi `AddOrSetCorrMarket`.
+Correlation market price updates are
 merge-style for known correlation markets only: prices present in
 `UpdateMarketsList` overwrite their entries, unknown names are ignored like
 Delphi `GetCorrMarket(MName) = nil`, and absent known prices keep their

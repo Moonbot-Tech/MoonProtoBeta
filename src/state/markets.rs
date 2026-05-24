@@ -181,10 +181,7 @@ impl MarketsState {
         self.prices = prices;
 
         for cm in resp.corr_markets {
-            if cm.base_currency_name.is_empty() {
-                continue;
-            }
-            self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+            self.apply_one_corr_market_from_list(cm);
         }
         if allow_new_markets {
             self.market_indexes = incoming_server_names;
@@ -251,10 +248,7 @@ impl MarketsState {
         let corr_count = r.read_count()?;
         for _ in 0..corr_count {
             let cm = read_corr_market(&mut r)?;
-            if cm.base_currency_name.is_empty() {
-                continue;
-            }
-            self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+            self.apply_one_corr_market_from_list(cm);
         }
 
         self.markets_list_refresh_needed = false;
@@ -287,6 +281,18 @@ impl MarketsState {
         self.prices.push(market_price_from_market(&market));
         self.markets.push(market);
         true
+    }
+
+    fn apply_one_corr_market_from_list(&mut self, cm: CorrMarket) {
+        if cm.base_currency_name.is_empty() {
+            return;
+        }
+        if let Some(existing) = self.corr_markets.get_mut(&cm.bn_market_name) {
+            existing.bn_tick_size = cm.bn_tick_size;
+            existing.base_currency_name = cm.base_currency_name;
+        } else {
+            self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+        }
     }
 
     /// Применить ответ `emk_UpdateMarketsList`.
@@ -1346,6 +1352,38 @@ mod tests {
             0,
             "Delphi calls AddOrSetCorrMarket only when BaseCur is not empty"
         );
+    }
+
+    #[test]
+    fn apply_markets_list_preserves_existing_corr_market_currency_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.00000001,
+                base_currency_name: "BTC".to_string(),
+            }],
+        });
+
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "WRONG".to_string(),
+                bn_tick_size: 0.00000002,
+                base_currency_name: "USDT".to_string(),
+            }],
+        });
+
+        let cm = st.corr_markets.get("DOGEBTC").unwrap();
+        assert_eq!(
+            cm.bn_market_currency, "DOGE",
+            "Delphi AddOrSetCorrMarket writes bnMarketCurrency only when TCorrMarket is created"
+        );
+        assert_eq!(cm.bn_tick_size, 0.00000002);
+        assert_eq!(cm.base_currency_name, "USDT");
     }
 
     #[test]
