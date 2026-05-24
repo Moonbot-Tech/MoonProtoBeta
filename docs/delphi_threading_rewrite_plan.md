@@ -769,6 +769,9 @@ Done:
 - `WriterRuntime::run` now delegates without behavior change to
   `writer_tick_prologue`, `ensure_socket_bound`, `drain_app_commands`,
   `wait_5ms`, and `send_maintenance_phase`.
+- `WriterRuntime` is now a compatibility alias to the first `ProtocolCore`
+  skeleton. Existing tests and callers still construct `WriterRuntime`, but the
+  owned protocol/orchestrator methods live on `ProtocolCore`.
 
 Reason:
 
@@ -781,6 +784,10 @@ Checks:
 - `cargo test --lib --quiet`: 598 passed.
 - `cargo test --test udp_polling --quiet`: 1 passed on Windows.
 - VPS Linux temporary-crate copy of `tests/udp_polling.rs`: 1 passed.
+- `ProtocolCore` alias step: `cargo fmt --check`, `cargo test --lib --quiet`,
+  `cargo check --examples --quiet`, `cargo test --test fire_test --no-run
+  --quiet`, and live `cargo test --test fire_test -- --ignored --nocapture`
+  passed.
 - `cargo check --examples --quiet`: passed.
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `cargo test --test fire_test -- --ignored --nocapture`: passed against the

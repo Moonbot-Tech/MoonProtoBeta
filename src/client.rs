@@ -2946,11 +2946,13 @@ impl DispatcherEventFn {
     }
 }
 
-struct WriterRuntime<'client> {
+struct ProtocolCore<'client> {
     client: &'client mut Client,
 }
 
-impl WriterRuntime<'_> {
+type WriterRuntime<'client> = ProtocolCore<'client>;
+
+impl ProtocolCore<'_> {
     fn run(&mut self, duration: Duration, mode: &mut RunMode<'_>) {
         let run_start = Instant::now();
         let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
