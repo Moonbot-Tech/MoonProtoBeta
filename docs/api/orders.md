@@ -211,19 +211,25 @@ still corresponds to a virtual worker that has not returned from
 ## Status Values
 
 ```rust
-pub enum OrderWorkerStatus {
-    None = 0,
-    BuyFail = 1,
-    BuySet = 2,
-    BuyCancel = 3,
-    BuyDone = 4,
-    SellFail = 5,
-    SellSet = 6,
-    SellCancel = 7,
-    SelLDone = 8,
-    SelLAlmostDone = 9,
+pub struct OrderWorkerStatus(pub u8);
+
+impl OrderWorkerStatus {
+    pub const None: Self = Self(0);
+    pub const BuyFail: Self = Self(1);
+    pub const BuySet: Self = Self(2);
+    pub const BuyCancel: Self = Self(3);
+    pub const BuyDone: Self = Self(4);
+    pub const SellFail: Self = Self(5);
+    pub const SellSet: Self = Self(6);
+    pub const SellCancel: Self = Self(7);
+    pub const SelLDone: Self = Self(8);
+    pub const SelLAlmostDone: Self = Self(9);
 }
 ```
+
+`OrderWorkerStatus` intentionally preserves the raw Delphi ordinal byte. Known
+values use the constants above; future/unknown values remain available through
+`.0` / `to_byte()` and are rendered as `Unknown(n)` in debug output.
 
 Terminal statuses are `SelLDone`, `SelLAlmostDone`, `BuyCancel`, `BuyFail`,
 `SellCancel`, and `SellFail`.

@@ -76,52 +76,64 @@ impl OrderType {
 /// - Откат фазы запрещён сервером (нельзя из SellSet вернуться в BuySet).
 /// - Внутри фазы переходы по статусам валидны (BuySet → BuyDone).
 /// - Terminal состояние не меняется.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrderWorkerStatus {
-    /// Initial state — ордер ещё не отправлен на биржу.
-    None = 0,
-    /// Buy-ордер не удался (отказ биржи, недостаточно баланса, т.п.). Terminal.
-    BuyFail = 1,
-    /// Buy-ордер размещён на бирже, ждём fill.
-    BuySet = 2,
-    /// Buy-ордер отменён (пользователем или системой). Terminal.
-    BuyCancel = 3,
-    /// Buy-ордер исполнен — позиция открыта.
-    BuyDone = 4,
-    /// Sell-ордер не удался. Terminal.
-    SellFail = 5,
-    /// Sell-ордер (закрытие/take-profit) размещён, ждём fill.
-    SellSet = 6,
-    /// Sell-ордер отменён. Terminal.
-    SellCancel = 7,
-    /// Sell-ордер полностью исполнен — позиция закрыта. Final terminal state для
-    /// успешной торговой сделки.
-    SelLDone = 8,
-    /// Sell завершился через intermediate path; terminal для worker/state.
-    SelLAlmostDone = 9,
-}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderWorkerStatus(pub u8);
 
+#[allow(non_upper_case_globals)]
 impl OrderWorkerStatus {
-    /// Возвращает `None` если байт неизвестен. Финансовый enum — silent fallback opasen (A-02).
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::None),
-            1 => Some(Self::BuyFail),
-            2 => Some(Self::BuySet),
-            3 => Some(Self::BuyCancel),
-            4 => Some(Self::BuyDone),
-            5 => Some(Self::SellFail),
-            6 => Some(Self::SellSet),
-            7 => Some(Self::SellCancel),
-            8 => Some(Self::SelLDone),
-            9 => Some(Self::SelLAlmostDone),
-            _ => None,
+    /// Initial state — ордер ещё не отправлен на биржу.
+    pub const None: Self = Self(0);
+    /// Buy-ордер не удался (отказ биржи, недостаточно баланса, т.п.). Terminal.
+    pub const BuyFail: Self = Self(1);
+    /// Buy-ордер размещён на бирже, ждём fill.
+    pub const BuySet: Self = Self(2);
+    /// Buy-ордер отменён (пользователем или системой). Terminal.
+    pub const BuyCancel: Self = Self(3);
+    /// Buy-ордер исполнен — позиция открыта.
+    pub const BuyDone: Self = Self(4);
+    /// Sell-ордер не удался. Terminal.
+    pub const SellFail: Self = Self(5);
+    /// Sell-ордер (закрытие/take-profit) размещён, ждём fill.
+    pub const SellSet: Self = Self(6);
+    /// Sell-ордер отменён. Terminal.
+    pub const SellCancel: Self = Self(7);
+    /// Sell-ордер полностью исполнен — позиция закрыта.
+    pub const SelLDone: Self = Self(8);
+    /// Sell завершился через intermediate path; terminal для worker/state.
+    pub const SelLAlmostDone: Self = Self(9);
+
+    /// Сохранить raw Delphi ordinal byte. Delphi читает `TOrderWorkerStatus`
+    /// через `ms.Read(Status, SizeOf(Status))` и не роняет packet на unknown.
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::SelLAlmostDone.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::BuyFail => "BuyFail",
+            Self::BuySet => "BuySet",
+            Self::BuyCancel => "BuyCancel",
+            Self::BuyDone => "BuyDone",
+            Self::SellFail => "SellFail",
+            Self::SellSet => "SellSet",
+            Self::SellCancel => "SellCancel",
+            Self::SelLDone => "SellDone",
+            Self::SelLAlmostDone => "SellAlmostDone",
+            _ => "Unknown",
         }
     }
 
     /// Terminal status — ордер закрыт, воркер удалить.
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(self) -> bool {
         matches!(
             self,
             Self::SelLDone
@@ -131,6 +143,16 @@ impl OrderWorkerStatus {
                 | Self::SellFail
                 | Self::SellCancel
         )
+    }
+}
+
+impl std::fmt::Debug for OrderWorkerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
     }
 }
 
@@ -768,7 +790,7 @@ impl TradeEpochHeader {
             return None;
         }
         let epoch = u16::from_le_bytes([r[0], r[1]]);
-        let status = OrderWorkerStatus::from_byte(r[2])?;
+        let status = OrderWorkerStatus::from_byte(r[2]);
         *r = &r[3..];
         Some(Self {
             market,
@@ -780,7 +802,7 @@ impl TradeEpochHeader {
     pub fn write(&self, out: &mut Vec<u8>, base_currency: u8, base_platform: u8) {
         self.market.write(out, base_currency, base_platform);
         out.extend_from_slice(&self.epoch.to_le_bytes());
-        out.push(self.status as u8);
+        out.push(self.status.to_byte());
     }
 }
 
@@ -1807,7 +1829,7 @@ fn write_trade_epoch_header(
         ctx.platform,
     );
     out.extend_from_slice(&epoch.to_le_bytes());
-    out.push(status as u8);
+    out.push(status.to_byte());
 }
 
 /// Route fields shared by client-originated trade command builders.
@@ -2355,7 +2377,7 @@ mod tests {
         out.push(2);
         write_string(&mut out, "BTCUSDT");
         out.extend_from_slice(&1u16.to_le_bytes());
-        out.push(OrderWorkerStatus::None as u8);
+        out.push(OrderWorkerStatus::None.to_byte());
         OrderCompact::default().write_to(&mut out);
         OrderCompact::default().write_to(&mut out);
         StopSettings::default().write_to(&mut out);
@@ -2461,6 +2483,28 @@ mod tests {
                 assert_eq!(header.market_name, "A?B");
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn trade_epoch_header_preserves_unknown_status_ordinal_like_delphi() {
+        let mut raw = Vec::new();
+        write_base_command_header(&mut raw, 18, 77);
+        raw.push(1);
+        raw.push(2);
+        write_string(&mut raw, "BTCUSDT");
+        raw.extend_from_slice(&123u16.to_le_bytes());
+        raw.push(250);
+
+        match TradeCommand::parse(&raw).unwrap() {
+            TradeCommand::OrderStatusRequest(header) => {
+                assert_eq!(header.market.base.uid, 77);
+                assert_eq!(header.epoch, 123);
+                assert_eq!(header.status.to_byte(), 250);
+                assert!(!header.status.is_known());
+                assert_eq!(header.status.name(), "Unknown");
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

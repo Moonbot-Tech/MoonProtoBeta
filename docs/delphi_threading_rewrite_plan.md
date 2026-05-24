@@ -4352,3 +4352,31 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: OrderWorkerStatus raw Delphi ordinal
+
+Done:
+
+- Fixed a parser-level `TTradeEpochCommand` parity bug found during the
+  order-block audit.
+- Delphi reads `Status: TOrderWorkerStatus` as a raw one-byte enum field and
+  does not reject the packet when the ordinal is outside the current known
+  range. `AcceptServerCommand` simply skips `FServerLatestEpoch[Status]` for an
+  invalid ordinal, and `StatusPhase` returns `0`.
+- Rust previously represented `OrderWorkerStatus` as a closed enum and returned
+  `None` from `TradeEpochHeader::read` for unknown status bytes. That dropped
+  the whole order command before `ProcessCommandOrder`-equivalent side effects
+  such as snapshot-flag refresh.
+- `OrderWorkerStatus` is now a raw-byte wrapper with named constants for the
+  known Delphi values. Unknown ordinals are preserved and can round-trip.
+- Recorded `spec_pipeline/work/хуйня.md §X.131`.
+
+Verification:
+
+- Added parser/state tests for unknown status ordinal preservation and
+  Delphi-like snapshot/epoch-index behavior.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

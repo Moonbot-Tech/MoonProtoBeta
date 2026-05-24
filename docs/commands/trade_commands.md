@@ -106,7 +106,8 @@ None ──► BuySet ──► BuyDone ──► SellSet ──► SelLAlmostDo
        BuyFail    BuyCancel   SellFail    SellCancel
 ```
 
-**Terminal states:** `SelLDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
+**Terminal states:** `SelLDone`, `SelLAlmostDone`, `BuyFail`, `BuyCancel`,
+`SellFail`, `SellCancel`.
 
 ## UKey Deduplication
 

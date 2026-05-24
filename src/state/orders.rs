@@ -1406,7 +1406,7 @@ impl Orders {
         entry: &mut Order,
         header: &TradeEpochHeader,
     ) -> Result<(), ApplyResult> {
-        let phase_idx = header.status as usize;
+        let phase_idx = header.status.to_byte() as usize;
         if phase_idx < entry.server_latest_epoch.len() {
             if !epoch_is_ok(entry.server_latest_epoch[phase_idx], header.epoch) {
                 return Err(ApplyResult::OutOfOrder);
@@ -3513,6 +3513,34 @@ mod tests {
             orders.missing_after_snapshot().is_empty(),
             "Delphi sets Worker.SnapshotFlag before AcceptServerCommand can reject the command"
         );
+    }
+
+    #[test]
+    fn unknown_status_ordinal_preserves_snapshot_flag_and_skips_epoch_index_like_delphi() {
+        let mut orders = Orders::new();
+        orders.apply(order_status_cmd(make_status(
+            1,
+            "X",
+            OrderWorkerStatus::BuySet,
+            10,
+        )));
+
+        orders.begin_snapshot();
+        let unknown_status = OrderWorkerStatus::from_byte(250);
+        let (res, _) = orders.apply(TradeCommand::OrderStatusRequest(make_epoch(
+            1,
+            3,
+            "X",
+            11,
+            unknown_status,
+        )));
+
+        assert_eq!(res, ApplyResult::NotApplicable);
+        assert!(
+            orders.missing_after_snapshot().is_empty(),
+            "Delphi sets SnapshotFlag before AcceptServerCommand; invalid enum ordinal only skips FServerLatestEpoch indexing"
+        );
+        assert_eq!(orders.get(1).unwrap().status, OrderWorkerStatus::BuySet);
     }
 
     #[test]
