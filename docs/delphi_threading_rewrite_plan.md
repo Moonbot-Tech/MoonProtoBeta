@@ -4409,3 +4409,25 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 proof: skipped/unknown order class dispatch
+
+Done:
+
+- Proved the `TCommandRegistry` skipped-class path for `MPC_Order`.
+- Delphi `ver > Current_Proto_CmdVer` returns skipped `TBaseTradeCommand`, and
+  unknown current-version `CmdId` also falls back to `TBaseTradeCommand`.
+  `ClientNewData(MPC_Order)` frees both because neither is `TBaseMarketCommand`;
+  `ProcessCommandOrder` is not called and `SnapshotFlag` is not refreshed.
+- Rust already had the same machine effect through `TradeCommand::Unknown`
+  returning `NotApplicable` without snapshot-flag refresh.
+
+Verification:
+
+- Added dispatcher tests for future-version order command and unknown order
+  `CmdId`; both assert no public event and no snapshot-flag refresh.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

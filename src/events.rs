@@ -1684,6 +1684,76 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_skips_future_version_order_command_like_delphi_registry() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x1234;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            1000,
+            &mut out,
+        );
+
+        d.orders.begin_snapshot();
+        let mut future_status = Vec::new();
+        future_status.push(4);
+        future_status.extend_from_slice(&99u16.to_le_bytes());
+        future_status.extend_from_slice(&uid.to_le_bytes());
+
+        let events = d.dispatch(Command::Order, &future_status, 1010);
+
+        assert!(events.is_empty());
+        assert_eq!(
+            d.orders.missing_after_snapshot(),
+            vec![uid],
+            "Delphi registry returns skipped TBaseTradeCommand for future versions, so ClientNewData does not call ProcessCommandOrder"
+        );
+    }
+
+    #[test]
+    fn dispatcher_skips_unknown_order_cmd_id_like_delphi_base_trade() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+        let uid = 0x1235;
+
+        d.process_command_order(
+            TradeCommand::OrderStatus(Box::new(order_status_for_test(
+                uid,
+                "BTCUSDT",
+                7,
+                9,
+                OrderWorkerStatus::BuySet,
+            ))),
+            1000,
+            &mut out,
+        );
+
+        d.orders.begin_snapshot();
+        let mut unknown = Vec::new();
+        unknown.push(250);
+        unknown.extend_from_slice(&3u16.to_le_bytes());
+        unknown.extend_from_slice(&uid.to_le_bytes());
+
+        let events = d.dispatch(Command::Order, &unknown, 1010);
+
+        assert!(events.is_empty());
+        assert_eq!(
+            d.orders.missing_after_snapshot(),
+            vec![uid],
+            "Delphi unknown CmdId under TBaseTradeCommand is not TBaseMarketCommand, so it is freed before ProcessCommandOrder"
+        );
+    }
+
+    #[test]
     fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
         let mut d = EventDispatcher::new();
         seed_event_markets(&mut d, &["BTCUSDT"]);
