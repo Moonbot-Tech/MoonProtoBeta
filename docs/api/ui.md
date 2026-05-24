@@ -39,7 +39,11 @@ and arb validity time.
 
 For a one-shot fetch, use `request_client_settings`. It sends
 `TSettingsRequest`, keeps the UDP loop running, and returns the next
-`ClientSettingsCommand` snapshot applied by `EventDispatcher`:
+`ClientSettingsCommand` snapshot applied by `EventDispatcher`. The returned
+snapshot may have the same command UID as the previous snapshot; the protocol
+guarantee is a newly received/applied settings packet, not UID monotonicity.
+Because `TSettingsRequest` is a fire-and-forget UI command, the helper may
+reissue it while the timeout is still open:
 
 ```rust
 let settings = client.request_client_settings(

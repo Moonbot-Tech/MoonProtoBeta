@@ -34,106 +34,25 @@ use log::{debug, error, warn};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "diagnostic-trace")]
-use std::sync::OnceLock;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// =============================================================================
-//  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
-// =============================================================================
-//
-// ⚠️ **НЕ ИСПОЛЬЗОВАТЬ В PRODUCTION.** Это инструмент для нагрузочного тестирования
-// gap-recovery / reconnect / extend-bucket логики через искусственный дроп UDP-пакетов.
-//
-// По умолчанию выключено (ERR_EMU_RATE = 0). Включается явным вызовом
-// `set_err_emu(percent)` где percent ∈ [0..100].
-//
-// Зеркало серверного `MoonProtoErrEmu` (Delphi `MoonProtoUDPClient.pas:534-541` и
-// `MoonProtoUDPServer.pas:1281-1288`): дроп происходит **после** успешной проверки
-// MAC и version, а в Delphi-клиенте ещё и после побочных эффектов `TotalRecvBytes`
-// / `LastOnline`. Rust сохраняет тот же порядок: валидный packet, выбранный ErrEmu
-// для дропа, всё равно доезжает до main-loop, обновляет transport stats, и только
-// потом не dispatch'ится в protocol layer. Служебные команды (Ping /
-// handshake-related / ACK) дропаются с rate/2 чтобы handshake не отваливался
-// полностью.
-//
-// Использование (пример: 75% loss):
-//   moonproto::client::set_err_emu(75);
-//   let mut client = Client::new(cfg);
-//   client.run(...);
-//
-// Используется в `examples/loss_logger.rs` — runtime-логгер потерь и восстановлений.
-/// Process-wide incoming packet-loss emulator rate, in percent.
-///
-/// This is a test hook for stress and FireTest-style scenarios. Prefer
-/// [`set_err_emu`] instead of writing the atomic directly.
+mod diagnostics;
+
 #[doc(hidden)]
-pub static ERR_EMU_RATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub use diagnostics::ERR_EMU_RATE;
+pub use diagnostics::{
+    set_err_emu, ErrEmuCommandDiagnostics, ErrEmuDiagnostics, ErrEmuSlicedBlockDiagnostics,
+    ErrEmuSlicedDatagramDiagnostics,
+};
 
-/// Set the client-side incoming packet-loss emulator percentage (`0..=100`).
-///
-/// `0` disables emulation and is the default. This hook is for tests only and
-/// mirrors Delphi `MoonProtoErrEmu`.
-pub fn set_err_emu(percent: u8) {
-    ERR_EMU_RATE.store(percent.min(100), std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(feature = "diagnostic-trace")]
-fn trace_io_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("MOONPROTO_TRACE_IO")
-            .map(|v| {
-                let v = v.to_string_lossy();
-                !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(false)
-    })
-}
-
-#[cfg(feature = "diagnostic-trace")]
-fn diagnostic_duplicate_sliced_acks() -> usize {
-    static COUNT: OnceLock<usize> = OnceLock::new();
-    *COUNT.get_or_init(|| {
-        std::env::var("MOONPROTO_DIAG_DUP_SLICED_ACKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0)
-            .min(16)
-    })
-}
-
-#[cfg(not(feature = "diagnostic-trace"))]
-#[inline(always)]
-fn diagnostic_duplicate_sliced_acks() -> usize {
-    0
-}
-
-#[cfg(not(feature = "diagnostic-trace"))]
-#[inline(always)]
-fn trace_io_enabled() -> bool {
-    false
-}
-
-/// Команды, для которых dropRate делится пополам (служебные).
-/// Точное соответствие Delphi MoonProtoUDPClient.pas:537-538.
-#[inline]
-fn is_service_cmd(cmd: u8) -> bool {
-    matches!(
-        Command::from_byte(cmd),
-        Command::Ping
-            | Command::WantNewHello
-            | Command::WrongHello
-            | Command::WhoAreYou
-            | Command::Fine
-            | Command::NeedHelloAgain
-            | Command::SizeTest
-            | Command::ProbeMTU
-            | Command::SlicedACK
-    )
-}
+use diagnostics::{
+    diagnostic_duplicate_sliced_acks, err_emu_drop_decision, trace_io_enabled,
+    ErrEmuDiagnosticsState,
+};
+#[cfg(test)]
+use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
 
 #[inline]
 fn is_domain_push_command(cmd: Command) -> bool {
@@ -152,22 +71,6 @@ fn is_domain_push_command(cmd: Command) -> bool {
 #[inline]
 fn is_trades_stream_command(cmd: Command) -> bool {
     matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
-}
-
-/// Возвращает `true` если пакет нужно дропнуть согласно ErrEmu.
-#[inline]
-fn err_emu_should_drop(cmd: u8) -> bool {
-    let base_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
-    if base_rate == 0 {
-        return false;
-    }
-    let drop_rate = if is_service_cmd(cmd) {
-        base_rate / 2
-    } else {
-        base_rate
-    };
-    let roll: u8 = rand::random::<u8>() % 100;
-    roll < drop_rate
 }
 
 #[inline]
@@ -238,9 +141,28 @@ fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
     }
 }
 
+#[inline]
+fn queued_client_settings_updated_since(
+    dispatcher: &crate::events::EventDispatcher,
+    first_new_event: usize,
+) -> bool {
+    dispatcher
+        .queued_events()
+        .get(first_new_event..)
+        .unwrap_or(&[])
+        .iter()
+        .any(|event| {
+            matches!(
+                event,
+                crate::events::Event::Settings(crate::state::SettingsEvent::ClientSettingsUpdated)
+            )
+        })
+}
+
 // === Constants matching Delphi exactly ===
 const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
 const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
+const SETTINGS_HELPER_RETRY_PAUSE_MS: u64 = 5_000;
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
 const DELPHI_BASE_CHECK_UPDATE_RETRIES: usize = 10; // MoonProtoEngine.pas:586
@@ -640,6 +562,7 @@ pub(crate) struct ReaderDecodedMsg {
 
 #[derive(Clone)]
 pub(crate) struct ReaderSlicedStats {
+    datagram_num: u16,
     dup_count: u8,
     blocks_count: usize,
 }
@@ -688,6 +611,7 @@ struct ReaderRuntime {
     crypt_msg_counter: Arc<AtomicU64>,
     recvd_slider: Arc<Mutex<Slider>>,
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
+    err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     slicer: slicing::SlicingReceiver,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
@@ -766,15 +690,18 @@ impl ReaderRuntime {
                 .fetch_add(n as u64, Ordering::Relaxed)
                 + n as u64;
 
-            if err_emu_should_drop(hdr.cmd) {
-                self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
-            } else if !self.handle_command(
-                hdr.cmd,
-                &payload,
-                n as u64,
-                total_recv_after,
-                timestamp_ms,
-            ) {
+            if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+                self.err_emu_diagnostics
+                    .lock()
+                    .unwrap()
+                    .record_packet(hdr.cmd, &payload, decision);
+                if decision.dropped {
+                    self.on_err_emu_drop(hdr.cmd, &payload, n as u64, timestamp_ms);
+                    continue;
+                }
+            }
+
+            if !self.handle_command(hdr.cmd, &payload, n as u64, total_recv_after, timestamp_ms) {
                 break;
             }
         }
@@ -957,6 +884,12 @@ impl ReaderRuntime {
                 timestamp_ms,
             )
         });
+        if let (Some(stats), Some(payload)) = (sliced_stats.as_ref(), payload.as_deref()) {
+            self.err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_sliced_complete(stats.datagram_num, cmd, payload);
+        }
         self.pending_reader_decoded
             .lock()
             .unwrap()
@@ -1205,6 +1138,7 @@ impl ReaderRuntime {
                 timestamp_ms,
                 false,
                 Some(ReaderSlicedStats {
+                    datagram_num,
                     dup_count,
                     blocks_count,
                 }),
@@ -3138,7 +3072,14 @@ impl WriterRuntime<'_> {
         self.client.global_timing_orders = update.global_timing_orders;
         self.client.overheat = update.overheat;
         self.client.rs = update.rs;
-        self.client.need_connect = false;
+        // A server can start sending Ping after it created its side of the
+        // client, even if the final MPC_Fine was lost on the way back. Ping
+        // proves the peer is alive, but it does not complete authorization.
+        // Keep the connect loop alive until AuthDone, otherwise a single lost
+        // Fine can leave the client permanently Connected-but-not-authorized.
+        if self.client.auth_status == AuthStatus::AuthDone {
+            self.client.need_connect = false;
+        }
         self.client.server_time_delta = update.server_time_delta;
         self.client.server_time_delta_handle.store(
             update.server_time_delta.to_bits(),
@@ -3517,13 +3458,6 @@ impl WriterRuntime<'_> {
                 && !self.client.need_connect
                 && (cur_tm - last_online).abs() > OFFLINE_BASE_MS + self.client.round_trip_delay);
         if !should {
-            return;
-        }
-        if self.client.waiting_hello
-            && !self.client.soft_reconnect
-            && !authorized
-            && self.client.last_sent_hello != NEVER_SENT_MS
-        {
             return;
         }
         if (cur_tm - self.client.last_sent_hello).abs() <= throttle {
@@ -4589,7 +4523,9 @@ impl ReaderTransportState {
         self.global_timing_orders = update.global_timing_orders;
         self.overheat = update.overheat;
         self.rs = update.rs;
-        self.need_connect = false;
+        if self.auth_status == AuthStatus::AuthDone {
+            self.need_connect = false;
+        }
         self.server_time_delta = update.server_time_delta;
         self.net_lag_ping = update.net_lag_ping;
         self.can_send_rate = update.can_send_rate;
@@ -4755,6 +4691,7 @@ pub struct Client {
     recvd_slider: Arc<Mutex<Slider>>,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
+    err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     next_port: u16,
     ping_count: u32,
 
@@ -4985,6 +4922,7 @@ impl Client {
         let reader_ping_state = Arc::new(ReaderPingState::new());
         let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
         let total_recv_shared = Arc::new(AtomicU64::new(0));
+        let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
@@ -5066,6 +5004,7 @@ impl Client {
             recvd_slider: Arc::new(Mutex::new(Slider::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
+            err_emu_diagnostics,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
@@ -5120,6 +5059,24 @@ impl Client {
         &self.server_info
     }
 
+    /// Snapshot client-side [`set_err_emu`] counters for live tests.
+    ///
+    /// This does not affect protocol behavior. FireTest uses it to distinguish
+    /// "server did not send", "ErrEmu dropped all retries", and
+    /// "Sliced reassembly/parse failed after packets arrived".
+    pub fn err_emu_diagnostics_snapshot(&self) -> ErrEmuDiagnostics {
+        let configured_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
+        self.err_emu_diagnostics
+            .lock()
+            .unwrap()
+            .snapshot(configured_rate)
+    }
+
+    /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
+    pub fn reset_err_emu_diagnostics(&self) {
+        *self.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
+    }
+
     /// Установить `ServerInfo` вручную. Обычно не нужно — `run_init_sequence` делает
     /// это автоматически. Полезно если приложение использует свой init pattern
     /// (минуя `run_init_sequence`) и хочет вручную распарсить ответ `api_base_check`.
@@ -5170,6 +5127,11 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn testing_set_server_token(&mut self, token: u64) {
         self.server_token = token;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn testing_set_subscribed_book_server_token(&mut self, token: u64) {
+        self.subscribed_book_server_token = token;
     }
 
     fn set_domain_ready(&mut self, ready: bool) {
@@ -7009,7 +6971,11 @@ impl Client {
     /// Engine API calls. `TSettingsRequest` does not carry a request/response
     /// UID pair on the wire: Delphi answers by sending a fresh
     /// `TClientSettingsCommand`. The helper therefore waits until
-    /// `EventDispatcher` observes a settings snapshot with a new command UID.
+    /// `EventDispatcher` observes the next applied settings snapshot; the
+    /// snapshot UID is not required to change because the server may resend the
+    /// current settings object unchanged. The low-level Delphi command is
+    /// fire-and-forget, so this helper reissues `TSettingsRequest` every few
+    /// seconds while waiting.
     pub fn request_client_settings(
         &mut self,
         dispatcher: &mut crate::events::EventDispatcher,
@@ -7017,17 +6983,14 @@ impl Client {
     ) -> Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError> {
         const TICK: Duration = Duration::from_millis(50);
 
-        let previous_uid = dispatcher
-            .settings()
-            .client_settings
-            .as_ref()
-            .map(|settings| settings.uid);
+        let first_new_event = dispatcher.queued_event_count();
         let start = Instant::now();
+        let mut next_request_at = start + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
         self.ui_settings_request();
 
         loop {
-            if let Some(settings) = dispatcher.settings().client_settings.as_ref() {
-                if previous_uid != Some(settings.uid) {
+            if queued_client_settings_updated_since(dispatcher, first_new_event) {
+                if let Some(settings) = dispatcher.settings().client_settings.as_ref() {
                     return Ok(settings.clone());
                 }
             }
@@ -7035,6 +6998,12 @@ impl Client {
             let Some(remaining) = timeout_remaining(start, timeout) else {
                 return Err(mpsc::RecvTimeoutError::Timeout);
             };
+
+            let now = Instant::now();
+            if now >= next_request_at {
+                self.ui_settings_request();
+                next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
+            }
 
             let tick = remaining.min(TICK);
             self.run_with_dispatcher_queued(tick, dispatcher);
@@ -7682,6 +7651,7 @@ impl Client {
         let server_time_delta_handle = Arc::clone(&self.server_time_delta_handle);
         let total_sent = Arc::clone(&self.total_sent);
         let total_recv_shared = Arc::clone(&self.total_recv_shared);
+        let err_emu_diagnostics = Arc::clone(&self.err_emu_diagnostics);
         let debug_outgoing_blackhole = Arc::clone(&self.debug_outgoing_blackhole);
         // B-V3-02: Instant clone (Copy) для использования в reader closure без borrow self.
         let start_time = self._start;
@@ -7726,6 +7696,7 @@ impl Client {
                     slicer: slicing::SlicingReceiver::new(),
                     total_sent,
                     total_recv_shared,
+                    err_emu_diagnostics,
                     debug_outgoing_blackhole,
                     start_time,
                     shutdown_flag,
@@ -8572,6 +8543,10 @@ impl Client {
     /// `ForceDisconnect`.
     fn dispatch_send(&mut self, cmd: u8, packet: &[u8], extra: Option<&[u8]>, addr: SocketAddr) {
         if self.debug_outgoing_blackhole.load(Ordering::Relaxed) {
+            self.err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_outgoing(cmd, true);
             if trace_io_enabled() {
                 eprintln!(
                     "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
@@ -8613,6 +8588,10 @@ impl Client {
         }
         match main_result {
             Ok(_) => {
+                self.err_emu_diagnostics
+                    .lock()
+                    .unwrap()
+                    .record_outgoing(cmd, false);
                 let total_sent = self
                     .total_sent
                     .fetch_add(packet.len() as u64, Ordering::Relaxed)
@@ -8890,6 +8869,10 @@ impl Client {
     /// выставлен для diagnostic UI.
     pub fn server_token(&self) -> u64 {
         self.server_token
+    }
+
+    pub(crate) fn subscribed_book_server_token(&self) -> u64 {
+        self.subscribed_book_server_token
     }
 
     /// `PeerAppToken` — генерируется при старте серверного процесса. Меняется при перезапуске
@@ -9670,6 +9653,7 @@ mod api_pending_dispatch_tests {
     use crate::commands::engine_api::EngineMethod;
     use crate::commands::market::build_markets_indexes_response;
     use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+    use crate::commands::ui::{build_client_settings, ClientSettingsCommand};
     use crate::events::EventDispatcher;
     use std::collections::HashMap;
 
@@ -10131,6 +10115,37 @@ mod api_pending_dispatch_tests {
 
         assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
         assert!(client.pending_candles.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn request_client_settings_waits_for_applied_event_not_uid_change() {
+        let mut dispatcher = EventDispatcher::new();
+        let settings = ClientSettingsCommand {
+            uid: 0x7788,
+            x_sell: 7,
+            ..ClientSettingsCommand::default()
+        };
+        let payload = build_client_settings(&settings);
+
+        let first_events = dispatcher.dispatch(Command::UI, &payload, 0);
+        dispatcher.queue_events(first_events);
+        let first_new_event = dispatcher.queued_event_count();
+
+        let repeated_events = dispatcher.dispatch(Command::UI, &payload, 1);
+        dispatcher.queue_events(repeated_events);
+
+        assert_eq!(
+            dispatcher
+                .settings()
+                .client_settings
+                .as_ref()
+                .map(|settings| settings.uid),
+            Some(0x7788)
+        );
+        assert!(
+            queued_client_settings_updated_since(&dispatcher, first_new_event),
+            "same-UID TClientSettingsCommand is still a fresh applied snapshot"
+        );
     }
 
     #[test]
@@ -14218,6 +14233,7 @@ mod event_loop_fairness_tests {
                 epoch: client.current_reader_epoch,
                 apply_recv_effects: true,
                 sliced_stats: Some(ReaderSlicedStats {
+                    datagram_num: 1,
                     dup_count: 1,
                     blocks_count: 4,
                 }),
@@ -14491,6 +14507,26 @@ mod service_cmd_tests {
     }
 
     #[test]
+    fn err_emu_halves_service_drop_rate_like_delphi() {
+        assert_eq!(
+            err_emu_drop_rate_for_cmd(50, Command::Fine as u8),
+            25,
+            "Delphi MoonProtoErrEmu halves service/handshake commands"
+        );
+        assert_eq!(
+            err_emu_drop_rate_for_cmd(50, Command::NeedHelloAgain as u8),
+            25
+        );
+        assert_eq!(err_emu_drop_rate_for_cmd(50, Command::SlicedACK as u8), 25);
+        assert_eq!(
+            err_emu_drop_rate_for_cmd(50, Command::Sliced as u8),
+            50,
+            "MPC_Sliced data must keep the full configured drop rate"
+        );
+        assert_eq!(err_emu_drop_rate_for_cmd(250, Command::API as u8), 100);
+    }
+
+    #[test]
     fn writer_polls_reader_decoded_without_wake_fifo() {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
@@ -14571,6 +14607,7 @@ mod service_cmd_tests {
                 epoch: old_epoch,
                 apply_recv_effects: true,
                 sliced_stats: Some(ReaderSlicedStats {
+                    datagram_num: 2,
                     dup_count: 9,
                     blocks_count: 10,
                 }),
@@ -15017,6 +15054,10 @@ mod service_cmd_tests {
 
         let mut client = Client::new(dummy_cfg_for_server(server_addr));
         client.total_sent.store(777, Ordering::Relaxed);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.need_connect = true;
+        client.publish_transport_state_from_client();
         client.socket = Some(client_sock);
         client.spawn_reader();
 
@@ -15057,7 +15098,7 @@ mod service_cmd_tests {
         assert_eq!(reader_state.global_timing_orders, 456);
         assert_eq!(reader_state.ping_count, 1);
         assert_eq!(reader_state.total_recv, packet.len() as u64);
-        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
+        assert_eq!(reader_state.auth_status, AuthStatus::AuthDone);
         assert!(!reader_state.need_connect);
 
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -15956,6 +15997,46 @@ mod reconnect_timing_tests {
         );
         client.apply_active_actions(actions.drain(..));
         assert!(
+            out.is_empty(),
+            "Delphi ProcessOrderBookPacket still gates packets until SubscribeOrderBook success confirms FSubscribedBookServerToken"
+        );
+
+        let subscribe_uid = after_indexes_sent
+            .iter()
+            .find(|item| {
+                item.cmd == Command::API as u8
+                    && method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook as u8)
+            })
+            .and_then(|item| request_uid(&item.data))
+            .expect("SubscribeOrderBook replay uid");
+        let response_payload =
+            build_engine_response_payload(subscribe_uid, EngineMethod::SubscribeOrderBook, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API as u8,
+                response_payload,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        assert_eq!(client.subscribed_book_server_token, client.server_token);
+
+        out.clear();
+        actions.clear();
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
+            Command::OrderBook,
+            &[],
+            client.now_ms(),
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+        client.apply_active_actions(actions.drain(..));
+        assert!(
             out.iter().any(|ev| matches!(
                 ev,
                 Event::ParseFailed {
@@ -15963,7 +16044,7 @@ mod reconnect_timing_tests {
                     ..
                 }
             )),
-            "after index restore, orderbook packets reach parser instead of being silently gated"
+            "after SubscribeOrderBook success confirms current ServerToken, OrderBook packets reach parser"
         );
     }
 
@@ -16269,7 +16350,7 @@ mod reconnect_timing_tests {
     }
 
     #[test]
-    fn primary_hard_handshake_does_not_send_hello_again_before_session_exists() {
+    fn waiting_hello_retries_hello_again_like_delphi_even_before_fine() {
         let mut client = dummy_client();
         let token_before = client.client_token;
 
@@ -16285,16 +16366,13 @@ mod reconnect_timing_tests {
         }
         .check_offline_reconnect(350);
 
-        assert_eq!(
-            client.last_sent_hello, 100,
-            "before Fine the server has no FClients entry; retry HelloAgain would make it answer WantNewHello",
-        );
+        assert_eq!(client.auth_status, AuthStatus::Offline);
+        assert_eq!(client.last_sent_hello, 350);
         assert_eq!(
             client.client_token,
-            token_before + 1,
-            "only the first Hello may increment token in primary hard handshake",
+            token_before + 2,
+            "Delphi retries HelloAgain while FWaitingHello; a dropped Fine must not stall auth",
         );
-        assert_eq!(client.auth_status, AuthStatus::Base);
     }
 
     #[test]
@@ -16364,6 +16442,42 @@ mod reconnect_timing_tests {
             client.last_sent_hello, 100,
             "NeedHelloAgain должен обходить минимум 200мс после Delphi-сброса LastSentHello в ноль",
         );
+        assert!(client.waiting_hello);
+    }
+
+    #[test]
+    fn ping_before_fine_does_not_stop_connect_retry_after_lost_fine() {
+        let mut client = dummy_client();
+        client.auth_status = AuthStatus::Connected;
+        client.need_connect = true;
+        client.waiting_hello = false;
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .apply_reader_ping_update(ReaderPingUpdate {
+            ping_count: 1,
+            round_trip_delay: 100,
+            actual_pmtu: 508,
+            global_timing_orders: 0,
+            overheat: 0,
+            rs: 1.0,
+            server_time_delta: 0.0,
+            net_lag_ping: 0,
+            can_send_rate: 1024,
+            used_sliced_limit: false,
+        });
+
+        assert!(
+            client.need_connect,
+            "Ping before AuthDone proves server liveness, not a completed Fine; connect retry must stay armed",
+        );
+
+        WriterRuntime {
+            client: &mut client,
+        }
+        .check_hello_send(100);
+        assert_eq!(client.last_sent_hello, 100);
         assert!(client.waiting_hello);
     }
 }

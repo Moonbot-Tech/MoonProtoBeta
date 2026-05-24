@@ -2,9 +2,11 @@
 //!
 //! This test is intentionally ignored by default. It talks to a real MoonBot
 //! server, enables client-side `err_emu=10%` before connecting, verifies the
-//! full chunked candles snapshot, mutates settings/strategy state, verifies
-//! cross-client broadcast, then forces a real reconnect and checks that
-//! trades/orderbook streams continue.
+//! full chunked candles snapshot under loss, then raises client-side
+//! `err_emu=50%` for simple operations and reconnect health. Heavy candles are
+//! intentionally excluded from the 50% gate; settings/strategy mutation,
+//! cross-client broadcast, and the final forced reconnect run after resetting
+//! the stochastic loss emulator.
 //!
 //! Config file is outside this crate repository:
 //! `../moonproto.firetest.conf` relative to `moonproto/`.
@@ -18,6 +20,7 @@
 //! strategy_field = Comment
 //! # strategy_id = 123456789
 //! # candles_timeout_secs = 30
+//! # high_loss_timeout_secs = 60
 //! ```
 
 use std::collections::HashMap;
@@ -26,29 +29,41 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use moonproto::client::set_err_emu;
+use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
 use moonproto::commands::arb::ArbPayload;
 use moonproto::commands::candles::{parse_request_candles_data_response, CandlesAggregator};
 use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
+use moonproto::commands::engine_request;
 use moonproto::commands::strategy_serializer::{
     parse_strategy_batch, FieldValue, StrategySnapshot,
 };
+use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
 use moonproto::commands::trades_stream::TradeSection;
 use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
-use moonproto::state::{OrderBookEvent, SettingsEvent, StratEvent, TradesEvent};
+use moonproto::protocol::Command;
+use moonproto::state::{
+    MarketPrice, OrderBookEvent, OrderBookKind, SettingsEvent, StratEvent, TradesEvent,
+};
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
     ImportedKeys, InitConfig, LifecycleEvent,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
+const FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT: u8 = 50;
+const FIRETEST_RECONNECT_MATH_ATTEMPTS: i32 = 10;
 const FIRETEST_STRATEGY_ID: u64 = 0xF17E_5737_0000_0001;
 const DEFAULT_WAIT_SECS: u64 = 5;
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_CANDLES_TIMEOUT_SECS: u64 = 90;
+const DEFAULT_HIGH_LOSS_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DISCONNECT_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_RECONNECT_TIMEOUT_SECS: u64 = 30;
 const PUMP_SLICE: Duration = Duration::from_millis(50);
+const PRICE_NEIGHBORHOOD_PCT: f64 = 0.05;
+const FIRETEST_ORDER_SIZE_USD: f64 = 1000.0;
+const EPS: f64 = 1e-9;
 
 struct FireConfig {
     path: PathBuf,
@@ -60,7 +75,9 @@ struct FireConfig {
     strategy_id: Option<u64>,
     strategy_field: String,
     wait: Duration,
+    connect_timeout: Duration,
     candles_timeout: Duration,
+    high_loss_timeout: Duration,
     disconnect_timeout: Duration,
     reconnect_timeout: Duration,
 }
@@ -132,9 +149,17 @@ impl FireConfig {
             values.get("wait_secs").map(String::as_str),
             DEFAULT_WAIT_SECS,
         ));
+        let connect_timeout = Duration::from_secs(parse_u64(
+            values.get("connect_timeout_secs").map(String::as_str),
+            DEFAULT_CONNECT_TIMEOUT_SECS,
+        ));
         let candles_timeout = Duration::from_secs(parse_u64(
             values.get("candles_timeout_secs").map(String::as_str),
             DEFAULT_CANDLES_TIMEOUT_SECS,
+        ));
+        let high_loss_timeout = Duration::from_secs(parse_u64(
+            values.get("high_loss_timeout_secs").map(String::as_str),
+            DEFAULT_HIGH_LOSS_TIMEOUT_SECS,
         ));
         let disconnect_timeout = Duration::from_secs(parse_u64(
             values.get("disconnect_timeout_secs").map(String::as_str),
@@ -155,7 +180,9 @@ impl FireConfig {
             strategy_id,
             strategy_field,
             wait,
+            connect_timeout,
             candles_timeout,
+            high_loss_timeout,
             disconnect_timeout,
             reconnect_timeout,
         }
@@ -223,9 +250,30 @@ impl CandlesSnapshotSummary {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MarketProbePrice {
+    bid: f64,
+    ask: f64,
+    mark_price: f64,
+    mark_price_found: bool,
+}
+
+impl From<&MarketPrice> for MarketProbePrice {
+    fn from(value: &MarketPrice) -> Self {
+        Self {
+            bid: value.bid,
+            ask: value.ask,
+            mark_price: value.mark_price,
+            mark_price_found: value.mark_price_found,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionStats {
     label: String,
+    market: String,
+    market_index: Option<u16>,
     connected_now: bool,
     server_events: u64,
     connected_fresh: u64,
@@ -237,8 +285,23 @@ struct SessionStats {
     server_logs: u64,
     settings_events: u64,
     strategy_events: u64,
+    market_events: u64,
     trades_apply: u64,
+    target_trade_packets: u64,
     orderbook_apply: u64,
+    target_orderbook_full: u64,
+    target_orderbook_update: u64,
+    last_trade_price: Option<f64>,
+    last_book_bid: Option<f64>,
+    last_book_ask: Option<f64>,
+    last_book_kind: Option<u8>,
+    last_market_price: Option<MarketProbePrice>,
+    market_invariant_error: Option<String>,
+    order_events: u64,
+    order_uid_by_request: HashMap<u64, u64>,
+    order_status_by_uid: HashMap<u64, OrderWorkerStatus>,
+    order_market_by_uid: HashMap<u64, String>,
+    order_sell_reason_by_uid: HashMap<u64, String>,
     parse_failed: u64,
     candles_requested: bool,
     candles_chunks: u64,
@@ -256,6 +319,8 @@ impl Clone for SessionStats {
     fn clone(&self) -> Self {
         Self {
             label: self.label.clone(),
+            market: self.market.clone(),
+            market_index: self.market_index,
             connected_now: self.connected_now,
             server_events: self.server_events,
             connected_fresh: self.connected_fresh,
@@ -267,8 +332,23 @@ impl Clone for SessionStats {
             server_logs: self.server_logs,
             settings_events: self.settings_events,
             strategy_events: self.strategy_events,
+            market_events: self.market_events,
             trades_apply: self.trades_apply,
+            target_trade_packets: self.target_trade_packets,
             orderbook_apply: self.orderbook_apply,
+            target_orderbook_full: self.target_orderbook_full,
+            target_orderbook_update: self.target_orderbook_update,
+            last_trade_price: self.last_trade_price,
+            last_book_bid: self.last_book_bid,
+            last_book_ask: self.last_book_ask,
+            last_book_kind: self.last_book_kind,
+            last_market_price: self.last_market_price,
+            market_invariant_error: self.market_invariant_error.clone(),
+            order_events: self.order_events,
+            order_uid_by_request: self.order_uid_by_request.clone(),
+            order_status_by_uid: self.order_status_by_uid.clone(),
+            order_market_by_uid: self.order_market_by_uid.clone(),
+            order_sell_reason_by_uid: self.order_sell_reason_by_uid.clone(),
             parse_failed: self.parse_failed,
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
@@ -303,7 +383,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strategy_rows={} trades={} books={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -316,10 +396,39 @@ impl SessionStats {
             self.settings_events,
             self.strategy_events,
             self.strategies_by_id.len(),
+            self.market_events,
             self.trades_apply,
+            self.target_trade_packets,
             self.orderbook_apply,
+            self.target_orderbook_full,
+            self.target_orderbook_update,
+            self.market_probe_summary(),
+            self.order_events,
             self.parse_failed,
             candles
+        )
+    }
+
+    fn market_probe_summary(&self) -> String {
+        let market_price = self
+            .last_market_price
+            .map(|p| {
+                format!(
+                    "market_bid={:.8} market_ask={:.8} mark={:.8}/{}",
+                    p.bid, p.ask, p.mark_price, p.mark_price_found
+                )
+            })
+            .unwrap_or_else(|| "market_price=none".to_string());
+        format!(
+            "market={} idx={:?} book_kind={:?} bid={:?} ask={:?} trade={:?} {} err={}",
+            self.market,
+            self.market_index,
+            self.last_book_kind,
+            self.last_book_bid,
+            self.last_book_ask,
+            self.last_trade_price,
+            market_price,
+            self.market_invariant_error.as_deref().unwrap_or("none")
         )
     }
 }
@@ -339,12 +448,14 @@ impl Session {
     ) -> Self {
         let stats = Arc::new(Mutex::new(SessionStats {
             label: label.to_string(),
+            market: cfg.market.clone(),
             ..Default::default()
         }));
         let mut client = Client::new(
             ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
                 .with_client_id(rand::random()),
         );
+        client.reset_err_emu_diagnostics();
 
         let lc_stats = Arc::clone(&stats);
         let lifecycle_label = label.to_string();
@@ -395,7 +506,7 @@ impl Session {
         connect_and_init(
             &mut client,
             &mut dispatcher,
-            ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
+            ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
         )
         .unwrap_or_else(|err| panic!("FIRETEST {label}: connect_and_init failed: {err}"));
 
@@ -433,6 +544,39 @@ impl Session {
         self.dispatcher.strategy_snapshot(strategy_id).cloned()
     }
 
+    fn send_strategy_snapshot_batch(&mut self, strategies: &[StrategySnapshot]) {
+        self.dispatcher.set_local_strategies(strategies);
+        self.client.strat_send_snapshot_batch(0, false, strategies);
+    }
+
+    fn send_new_order(
+        &mut self,
+        market: &str,
+        is_short: bool,
+        price: f64,
+        strat_id: u64,
+        order_size: f64,
+    ) -> u64 {
+        let ctx = self
+            .client
+            .random_trade_ctx()
+            .expect("run BaseCheck before FireTest order flow");
+        let request_uid = ctx.uid;
+        self.client
+            .new_order(ctx, market, is_short, price, strat_id, order_size);
+        request_uid
+    }
+
+    fn replace_order(&mut self, uid: u64, new_price: f64) -> bool {
+        self.client
+            .replace_tracked_order(self.dispatcher.orders_mut(), uid, new_price)
+    }
+
+    fn panic_sell_order(&mut self, uid: u64, turn_on: bool) -> bool {
+        self.client
+            .turn_tracked_order_panic_sell(self.dispatcher.orders_mut(), uid, turn_on)
+    }
+
     fn request_candles_snapshot(&mut self) {
         let raw = moonproto::commands::engine_request::request_candles_data();
         let uid = raw
@@ -459,13 +603,36 @@ impl Session {
         }
         self.client.send_api_request(&raw);
     }
+
+    fn remember_settings_snapshot(&self, settings: &ClientSettingsCommand) {
+        let mut st = self.stats.lock().unwrap();
+        if st.last_settings.as_ref().map(|prev| prev.uid) != Some(settings.uid) {
+            st.settings_events += 1;
+        }
+        st.last_settings = Some(settings.clone());
+    }
 }
 
 fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &EventDispatcher) {
     let mut st = stats.lock().unwrap();
     st.server_events += 1;
     let event_no = st.server_events;
+    sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, false);
     match event {
+        Event::Order(ev) => {
+            st.order_events += 1;
+            record_order_state_snapshot(&mut st, dispatcher);
+            log_server_event(&st, event_no, format!("Order {ev:?}"));
+        }
+        Event::Markets(ev) => {
+            st.market_events += 1;
+            sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, true);
+            log_server_event(
+                &st,
+                event_no,
+                format!("Markets {ev:?}; {}", st.market_probe_summary()),
+            );
+        }
         Event::Settings(SettingsEvent::ClientSettingsUpdated) => {
             st.settings_events += 1;
             st.last_settings = dispatcher.settings().client_settings.clone();
@@ -513,6 +680,35 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
         }
         Event::Trade(TradesEvent::Apply(pkt)) => {
             st.trades_apply += 1;
+            let target_market_index = st.market_index;
+            let mut target_trade_price = None;
+            let mut target_trades = 0usize;
+            if let Some(market_index) = target_market_index {
+                for section in &pkt.sections {
+                    if let TradeSection::Trades(items) = section {
+                        for trade in items {
+                            if trade.market_index == market_index && trade.price > 0.0 {
+                                target_trade_price = Some(trade.price as f64);
+                                target_trades += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(price) = target_trade_price {
+                st.target_trade_packets += 1;
+                st.last_trade_price = Some(price);
+                if st.target_trade_packets <= 5 || st.target_trade_packets.is_power_of_two() {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "TradesStream target market={} idx={:?} packet_num={} trades={} last_price={:.8}",
+                            st.market, target_market_index, pkt.packet_num, target_trades, price
+                        ),
+                    );
+                }
+            }
             if should_log_stream_count(st.trades_apply) {
                 let mut trades = 0usize;
                 let mut mm_orders = 0usize;
@@ -555,6 +751,58 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
             sells,
         }) => {
             st.orderbook_apply += 1;
+            if st.market_index == Some(*market_index) {
+                if *is_full {
+                    st.target_orderbook_full += 1;
+                } else {
+                    st.target_orderbook_update += 1;
+                }
+                st.last_book_kind = Some(*book_kind);
+                match OrderBookKind::from_u8(*book_kind)
+                    .and_then(|kind| dispatcher.order_books().top_of_book(*market_index, kind))
+                {
+                    Some(top) => {
+                        if let Some(bid) = top.bid {
+                            st.last_book_bid = Some(bid.rate);
+                        }
+                        if let Some(ask) = top.ask {
+                            st.last_book_ask = Some(ask.rate);
+                        }
+                        if let (Some(bid), Some(ask)) = (st.last_book_bid, st.last_book_ask) {
+                            if bid <= 0.0 || ask <= 0.0 || ask <= bid {
+                                st.market_invariant_error = Some(format!(
+                                    "bad book top for {}: bid={bid:.8} ask={ask:.8}",
+                                    st.market
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        st.market_invariant_error = Some(format!(
+                            "orderbook top unavailable for market={} idx={} kind={}",
+                            st.market, market_index, book_kind
+                        ));
+                    }
+                }
+                if st.target_orderbook_full + st.target_orderbook_update <= 8
+                    || (st.target_orderbook_full + st.target_orderbook_update).is_power_of_two()
+                {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "OrderBook target market={} idx={} kind={} full={} seq={} top_bid={:?} top_ask={:?}",
+                            st.market,
+                            market_index,
+                            book_kind,
+                            is_full,
+                            seq,
+                            st.last_book_bid,
+                            st.last_book_ask
+                        ),
+                    );
+                }
+            }
             if should_log_stream_count(st.orderbook_apply) {
                 let top_buy = buys
                     .first()
@@ -597,6 +845,9 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
         }
         Event::ServerLog { time, msg } => {
             st.server_logs += 1;
+            if let Some((request_uid, server_uid)) = parse_new_order_log_mapping(msg) {
+                st.order_uid_by_request.insert(request_uid, server_uid);
+            }
             log_server_event(
                 &st,
                 event_no,
@@ -623,6 +874,57 @@ fn record_event(stats: &Arc<Mutex<SessionStats>>, event: &Event, dispatcher: &Ev
             log_server_event(&st, event_no, format!("{other:?}"));
         }
     }
+}
+
+fn sync_market_probe_from_dispatcher(
+    st: &mut SessionStats,
+    event_no: u64,
+    dispatcher: &EventDispatcher,
+    log_changes: bool,
+) {
+    let old_index = st.market_index;
+    st.market_index = dispatcher.markets().market_index_by_name(&st.market);
+    if log_changes && st.market_index != old_index {
+        log_server_event(
+            st,
+            event_no,
+            format!(
+                "Market index resolved market={} old={old_index:?} new={:?}",
+                st.market, st.market_index
+            ),
+        );
+    }
+    if let Some(price) = dispatcher.markets().price(&st.market) {
+        st.last_market_price = Some(MarketProbePrice::from(price));
+        if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
+            st.market_invariant_error = Some(format!(
+                "bad UpdateMarketsList price for {}: bid={:.8} ask={:.8}",
+                st.market, price.bid, price.ask
+            ));
+        }
+    }
+}
+
+fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &EventDispatcher) {
+    for order in dispatcher.orders().iter() {
+        st.order_status_by_uid.insert(order.uid, order.status);
+        st.order_market_by_uid
+            .insert(order.uid, order.market_name.clone());
+        st.order_sell_reason_by_uid
+            .insert(order.uid, order.sell_reason().description().to_string());
+    }
+}
+
+fn parse_new_order_log_mapping(msg: &str) -> Option<(u64, u64)> {
+    let request_marker = "request <";
+    let arrow_marker = "=> <";
+    let req_start = msg.find(request_marker)? + request_marker.len();
+    let req_end = msg[req_start..].find('>')? + req_start;
+    let arrow_start = msg[req_end..].find(arrow_marker)? + req_end + arrow_marker.len();
+    let server_end = msg[arrow_start..].find('>')? + arrow_start;
+    let request_uid = msg[req_start..req_end].trim().parse::<u64>().ok()?;
+    let server_uid = msg[arrow_start..server_end].trim().parse::<u64>().ok()?;
+    Some((request_uid, server_uid))
 }
 
 fn record_strategy_snapshot(
@@ -883,15 +1185,260 @@ where
         a_stats.summary(),
         b_stats.summary()
     );
+    log_err_emu_pair(label, a, b);
+    false
+}
+
+fn pump_pair_until_sessions<F>(
+    a: &mut Session,
+    b: &mut Session,
+    timeout: Duration,
+    label: &str,
+    mut predicate: F,
+) -> bool
+where
+    F: FnMut(&Session, &Session) -> bool,
+{
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        a.pump(PUMP_SLICE);
+        b.pump(PUMP_SLICE);
+        if predicate(a, b) {
+            println!("OK: {label} after {:.2}s", start.elapsed().as_secs_f64());
+            return true;
+        }
+    }
+
+    let a_stats = a.snapshot();
+    let b_stats = b.snapshot();
+    eprintln!(
+        "FIRETEST TIMEOUT {label}: A=[{}] B=[{}]",
+        a_stats.summary(),
+        b_stats.summary()
+    );
+    log_err_emu_pair(label, a, b);
     false
 }
 
 fn has_initial_health(st: &SessionStats) -> bool {
-    st.connected_now
-        && st.settings_events > 0
-        && st.trades_apply > 0
-        && st.orderbook_apply > 0
-        && st.parse_failed == 0
+    st.connected_now && st.trades_apply > 0 && st.orderbook_apply > 0 && st.parse_failed == 0
+}
+
+fn has_market_consistency(st: &SessionStats) -> bool {
+    if !st.connected_now || st.parse_failed != 0 || st.market_invariant_error.is_some() {
+        return false;
+    }
+    if st.market_index.is_none() {
+        return false;
+    }
+    let Some(bid) = st.last_book_bid else {
+        return false;
+    };
+    let Some(ask) = st.last_book_ask else {
+        return false;
+    };
+    let Some(trade_price) = st.last_trade_price else {
+        return false;
+    };
+    let Some(market_price) = st.last_market_price else {
+        return false;
+    };
+    !st.market.is_empty()
+        && st.target_orderbook_full > 0
+        && st.target_orderbook_update > 0
+        && st.target_trade_packets > 0
+        && bid > 0.0
+        && ask > bid
+        && market_price.bid > 0.0
+        && market_price.ask >= market_price.bid
+        && price_near_envelope(trade_price, bid, ask)
+        && price_near_envelope(market_price.bid, bid, ask)
+        && price_near_envelope(market_price.ask, bid, ask)
+}
+
+fn price_near_envelope(price: f64, bid: f64, ask: f64) -> bool {
+    if price <= 0.0 || bid <= 0.0 || ask <= 0.0 || ask < bid {
+        return false;
+    }
+    let lower = bid * (1.0 - PRICE_NEIGHBORHOOD_PCT);
+    let upper = ask * (1.0 + PRICE_NEIGHBORHOOD_PCT);
+    price >= lower && price <= upper
+}
+
+fn log_err_emu_pair(label: &str, a: &Session, b: &Session) {
+    log_err_emu_snapshot(label, "A", &a.client.err_emu_diagnostics_snapshot());
+    log_err_emu_snapshot(label, "B", &b.client.err_emu_diagnostics_snapshot());
+}
+
+fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
+    if diag.valid_packets == 0 {
+        eprintln!(
+            "FIRETEST ErrEmu {label} {session}: no packets counted while err_emu was enabled"
+        );
+        return;
+    }
+    let actual_drop = diag.dropped_packets as f64 / diag.valid_packets.max(1) as f64 * 100.0;
+    eprintln!(
+        "FIRETEST ErrEmu {label} {session}: configured={} rx_valid={} rx_delivered={} rx_dropped={} rx_actual_drop={:.2}% tx_sent={} tx_blackholed={}",
+        diag.configured_rate,
+        diag.valid_packets,
+        diag.delivered_packets,
+        diag.dropped_packets,
+        actual_drop,
+        diag.outgoing_packets,
+        diag.outgoing_blackholed_packets
+    );
+    for raw in [
+        Command::Sliced as u8,
+        Command::SlicedACK as u8,
+        Command::UI as u8,
+        Command::API as u8,
+        Command::WhoAreYou as u8,
+        Command::Fine as u8,
+        Command::WrongHello as u8,
+        Command::WantNewHello as u8,
+        Command::NeedHelloAgain as u8,
+        Command::Ping as u8,
+    ] {
+        if let Some(cmd) = diag.by_cmd.iter().find(|cmd| cmd.raw_cmd == raw) {
+            let cmd_drop = cmd.dropped_packets as f64 / cmd.valid_packets.max(1) as f64 * 100.0;
+            eprintln!(
+                "FIRETEST ErrEmu {label} {session}: cmd={:?}/{} valid={} delivered={} dropped={} actual_drop={:.2}%",
+                Command::from_byte(raw),
+                raw,
+                cmd.valid_packets,
+                cmd.delivered_packets,
+                cmd.dropped_packets,
+                cmd_drop
+            );
+        }
+    }
+
+    for raw in [
+        Command::Hello as u8,
+        Command::HelloAgain as u8,
+        Command::ImFriend as u8,
+        Command::LogOff as u8,
+        Command::Ping as u8,
+        Command::SlicedACK as u8,
+    ] {
+        if let Some(cmd) = diag.outgoing_by_cmd.iter().find(|cmd| cmd.raw_cmd == raw) {
+            eprintln!(
+                "FIRETEST ErrEmu {label} {session}: tx_cmd={:?}/{} sent={}",
+                Command::from_byte(raw),
+                raw,
+                cmd.valid_packets,
+            );
+        }
+        if let Some(cmd) = diag
+            .outgoing_blackholed_by_cmd
+            .iter()
+            .find(|cmd| cmd.raw_cmd == raw)
+        {
+            eprintln!(
+                "FIRETEST ErrEmu {label} {session}: tx_cmd={:?}/{} blackholed={}",
+                Command::from_byte(raw),
+                raw,
+                cmd.valid_packets,
+            );
+        }
+    }
+
+    let candidates: Vec<_> = diag
+        .sliced
+        .iter()
+        .filter(|dg| is_sliced_response_candidate(dg))
+        .collect();
+    if candidates.is_empty() {
+        eprintln!(
+            "FIRETEST ErrEmu {label} {session}: no observed Sliced API/UI response datagrams"
+        );
+    } else {
+        for dg in candidates.iter().rev().take(16).rev() {
+            eprintln!(
+                "FIRETEST ErrEmu {label} {session}: {}",
+                describe_sliced_candidate(diag.configured_rate, dg)
+            );
+        }
+    }
+}
+
+fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
+    let completed_settings =
+        dg.completed_cmd == Some(Command::UI as u8) && dg.completed_ui_cmd_id == Some(1);
+    let block0_ui = dg
+        .block0_wire_cmd
+        .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::UI)
+        .unwrap_or(false);
+    let block0_known_settings = dg.block0_ui_cmd_id == Some(1);
+    let completed_api = dg.completed_cmd == Some(Command::API as u8);
+    let block0_api = dg
+        .block0_wire_cmd
+        .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::API)
+        .unwrap_or(false);
+    completed_api
+        || block0_api
+        || completed_settings
+        || (block0_ui && (block0_known_settings || dg.block0_ui_cmd_id.is_none()))
+}
+
+fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagnostics) -> String {
+    let missing = dg.missing_blocks();
+    let missing_preview = preview_u8(&missing, 24);
+    let observed_attempts = dg.delivered_packets + dg.dropped_packets;
+    let p = configured_rate as f64 / 100.0;
+    let pure_err_emu_p = if missing.is_empty() {
+        Some(0.0)
+    } else {
+        let mut acc = 1.0f64;
+        let mut attributable = true;
+        for block in &missing {
+            let drops = dg.block_drop_count(*block);
+            if drops == 0 {
+                attributable = false;
+                break;
+            }
+            acc *= p.powi(drops.min(i32::MAX as u64) as i32);
+        }
+        attributable.then_some(acc)
+    };
+    let pure_err = pure_err_emu_p
+        .map(|v| format!("{:.8}%", v * 100.0))
+        .unwrap_or_else(|| "not attributable to observed ErrEmu drops".to_string());
+    format!(
+        "Sliced d={} blocks={}/{} attempts={} delivered_packets={} dropped_packets={} wire_cmd={:?} ui_cmd={:?} complete_cmd={:?} complete_ui={:?} complete_api_method={:?} complete_api_uid={:?} complete_api_success={:?} payload_len={:?} missing=[{}] pure_err_emu_fail_p={}",
+        dg.datagram_num,
+        dg.delivered_unique_blocks(),
+        dg.blocks_count,
+        observed_attempts,
+        dg.delivered_packets,
+        dg.dropped_packets,
+        dg.block0_wire_cmd.map(Command::from_byte),
+        dg.block0_ui_cmd_id,
+        dg.completed_cmd.map(Command::from_byte),
+        dg.completed_ui_cmd_id,
+        dg.completed_api_method.map(EngineMethod::from_byte),
+        dg.completed_api_uid,
+        dg.completed_api_success,
+        dg.completed_payload_len,
+        missing_preview,
+        pure_err,
+    )
+}
+
+fn preview_u8(values: &[u8], limit: usize) -> String {
+    if values.is_empty() {
+        return "none".to_string();
+    }
+    let mut out: Vec<String> = values
+        .iter()
+        .take(limit)
+        .map(|value| value.to_string())
+        .collect();
+    if values.len() > limit {
+        out.push("...".to_string());
+    }
+    out.join(",")
 }
 
 fn select_field(strategy: &StrategySnapshot, preferred: &str) -> String {
@@ -973,21 +1520,566 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
-struct ErrEmuGuard;
+struct ErrEmuGuard {
+    active: bool,
+}
 
 impl ErrEmuGuard {
     fn set(percent: u8) -> Self {
         set_err_emu(percent);
         println!("FIRETEST: client-side err_emu={percent}% enabled before connect");
-        Self
+        Self {
+            active: percent > 0,
+        }
+    }
+
+    fn set_for_gate(&mut self, percent: u8, gate: &str) {
+        set_err_emu(percent);
+        self.active = percent > 0;
+        println!("FIRETEST: client-side err_emu={percent}% enabled for {gate}");
+    }
+
+    fn reset(&mut self, gate: &str) {
+        if self.active {
+            set_err_emu(0);
+            self.active = false;
+            println!("FIRETEST: client-side err_emu reset to 0% after {gate}");
+        }
     }
 }
 
 impl Drop for ErrEmuGuard {
     fn drop(&mut self) {
-        set_err_emu(0);
-        println!("FIRETEST: client-side err_emu reset to 0%");
+        if self.active {
+            set_err_emu(0);
+            println!("FIRETEST: client-side err_emu reset to 0%");
+        }
     }
+}
+
+fn log_high_loss_recovery_math() {
+    let service_drop = (FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT / 2) as f64 / 100.0;
+    let service_deliver = 1.0 - service_drop;
+    let client_only_reconnect_attempt = service_deliver;
+    let both_sides_reconnect_attempt = service_deliver * service_deliver;
+    let client_only_fail =
+        (1.0 - client_only_reconnect_attempt).powi(FIRETEST_RECONNECT_MATH_ATTEMPTS);
+    let both_sides_fail =
+        (1.0 - both_sides_reconnect_attempt).powi(FIRETEST_RECONNECT_MATH_ATTEMPTS);
+
+    println!(
+        "FIRETEST high-loss math: err_emu={}%, Delphi service drop={}%, delivery={:.2}%; reconnect attempt p(client-side)={:.2}%, fail after {} attempts={:.6}%; p(client+server)={:.2}%, fail after {} attempts={:.6}%",
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT / 2,
+        service_deliver * 100.0,
+        client_only_reconnect_attempt * 100.0,
+        FIRETEST_RECONNECT_MATH_ATTEMPTS,
+        client_only_fail * 100.0,
+        both_sides_reconnect_attempt * 100.0,
+        FIRETEST_RECONNECT_MATH_ATTEMPTS,
+        both_sides_fail * 100.0,
+    );
+}
+
+fn next_attempt_timeout(start: Instant, total: Duration) -> Duration {
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < total,
+        "high-loss operation exceeded total timeout {:?}",
+        total
+    );
+    total.saturating_sub(elapsed).min(Duration::from_secs(20))
+}
+
+fn request_settings_until(session: &mut Session, timeout: Duration) -> ClientSettingsCommand {
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let attempt_timeout = next_attempt_timeout(start, timeout);
+        match session
+            .client
+            .request_client_settings(&mut session.dispatcher, attempt_timeout)
+        {
+            Ok(settings) => {
+                session.drain_queued();
+                session.remember_settings_snapshot(&settings);
+                println!(
+                    "OK: settings snapshot uid={} attempts={} after {:.2}s",
+                    settings.uid,
+                    attempts,
+                    start.elapsed().as_secs_f64()
+                );
+                return settings;
+            }
+            Err(err) if start.elapsed() < timeout => {
+                session.drain_queued();
+                println!("FIRETEST settings retry after {err:?}");
+            }
+            Err(err) => {
+                panic!("settings request failed after {attempts} attempts: {err:?}")
+            }
+        }
+    }
+}
+
+fn request_balance_until(session: &mut Session, timeout: Duration) {
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let attempt_timeout = next_attempt_timeout(start, timeout);
+        match session
+            .client
+            .request_balance_snapshot(&mut session.dispatcher, attempt_timeout)
+        {
+            Ok(balances) => {
+                session.drain_queued();
+                println!(
+                    "OK: high-loss balance snapshot rows={} attempts={} after {:.2}s",
+                    balances.by_market.len(),
+                    attempts,
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            Err(err) if start.elapsed() < timeout => {
+                session.drain_queued();
+                println!("FIRETEST high-loss balance retry after {err:?}");
+            }
+            Err(err) => {
+                panic!("high-loss balance request failed after {attempts} attempts: {err:?}")
+            }
+        }
+    }
+}
+
+fn request_orders_until(session: &mut Session, timeout: Duration) {
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let attempt_timeout = next_attempt_timeout(start, timeout);
+        match session
+            .client
+            .request_order_snapshot(&mut session.dispatcher, attempt_timeout)
+        {
+            Ok(orders) => {
+                session.drain_queued();
+                println!(
+                    "OK: high-loss order snapshot rows={} attempts={} after {:.2}s",
+                    orders.len(),
+                    attempts,
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            Err(err) if start.elapsed() < timeout => {
+                session.drain_queued();
+                println!("FIRETEST high-loss orders retry after {err:?}");
+            }
+            Err(err) => panic!("high-loss order request failed after {attempts} attempts: {err:?}"),
+        }
+    }
+}
+
+fn request_engine_until(
+    session: &mut Session,
+    method: EngineMethod,
+    request: Vec<u8>,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let attempt_timeout = next_attempt_timeout(start, timeout);
+        match session.client.request_engine_response(
+            &mut session.dispatcher,
+            &request,
+            attempt_timeout,
+        ) {
+            Ok(resp) if resp.success && resp.method == method => {
+                session.drain_queued();
+                println!(
+                    "OK: high-loss Engine API {:?} bytes={} attempts={} after {:.2}s",
+                    method,
+                    resp.data.len(),
+                    attempts,
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            Ok(resp) => {
+                session.drain_queued();
+                panic!(
+                    "high-loss Engine API {:?} returned method={:?} success={} code={} msg={}",
+                    method, resp.method, resp.success, resp.error_code, resp.error_msg
+                );
+            }
+            Err(err) if start.elapsed() < timeout => {
+                session.drain_queued();
+                println!("FIRETEST high-loss Engine API {method:?} retry after {err:?}");
+            }
+            Err(err) => panic!(
+                "high-loss Engine API {:?} failed after {} attempts: {:?}",
+                method, attempts, err
+            ),
+        }
+    }
+}
+
+fn run_high_loss_simple_ops_gate(
+    a: &mut Session,
+    b: &mut Session,
+    err_emu: &mut ErrEmuGuard,
+    timeout: Duration,
+) {
+    // Do not "fix" this by disabling err_emu as flaky random. Delphi halves
+    // MoonProtoErrEmu for service/handshake packets, so at 50% configured loss
+    // reconnect service delivery is still 75%. A client-side-only reconnect
+    // attempt needs one incoming Fine, so 10 attempts fail with 0.25^10 =
+    // 0.000095%. Even if both client and server apply 50% ErrEmu, one attempt is
+    // 0.75*0.75 = 56.25%, and 10 attempts fail with ~0.0257%. If this gate fails
+    // consistently, it is a protocol/reconnect bug, not "FireTest randomness".
+    a.client.reset_err_emu_diagnostics();
+    b.client.reset_err_emu_diagnostics();
+    err_emu.set_for_gate(
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+        "50% simple operations/reconnect gate",
+    );
+    log_high_loss_recovery_math();
+
+    request_engine_until(
+        a,
+        EngineMethod::CheckAPIExpirationTime,
+        engine_request::check_api_expiration_time(),
+        timeout,
+    );
+    request_engine_until(
+        a,
+        EngineMethod::QueryHedgeMode,
+        engine_request::query_hedge_mode(),
+        timeout,
+    );
+    let _settings = request_settings_until(a, timeout);
+    request_balance_until(a, timeout);
+    request_orders_until(a, timeout);
+
+    let before_streams = a.snapshot();
+    assert!(
+        pump_pair_until(a, b, timeout, "high-loss live streams", |a, _| {
+            a.trades_apply > before_streams.trades_apply
+                && a.orderbook_apply > before_streams.orderbook_apply
+                && a.parse_failed == before_streams.parse_failed
+        }),
+        "client A did not receive trades and orderbook under err_emu={} within {:?}",
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+        timeout
+    );
+    println!("OK: high-loss live streams delivered");
+
+    let before_blackhole = a.snapshot();
+    a.client.debug_set_outgoing_blackhole(true);
+    let disconnected = pump_pair_until(
+        a,
+        b,
+        timeout,
+        "high-loss forced reconnect detection",
+        |a, _| a.reconnecting > before_blackhole.reconnecting,
+    );
+    a.client.debug_set_outgoing_blackhole(false);
+    assert!(
+        disconnected,
+        "client A did not enter reconnecting state under err_emu={} within {:?}",
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT, timeout
+    );
+
+    let before_reconnect = a.snapshot();
+    let reconnected = pump_pair_until(a, b, timeout, "high-loss reconnect", |a, _| {
+        a.connected_again > before_reconnect.connected_again
+    });
+    assert!(
+        reconnected && a.client.is_authorized(),
+        "client A did not reconnect under err_emu={} within {:?}",
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+        timeout
+    );
+    println!("OK: high-loss reconnect completed");
+
+    let after_reconnect = a.snapshot();
+    assert!(
+        pump_pair_until(
+            a,
+            b,
+            timeout,
+            "high-loss streams after reconnect",
+            |a, _| {
+                a.trades_apply > after_reconnect.trades_apply
+                    && a.orderbook_apply > after_reconnect.orderbook_apply
+                    && a.parse_failed == after_reconnect.parse_failed
+            }
+        ),
+        "client A did not receive trades/orderbook after high-loss reconnect within {:?}",
+        timeout
+    );
+    println!("OK: high-loss streams after reconnect delivered");
+    log_err_emu_pair("high-loss simple ops gate", a, b);
+}
+
+fn ensure_server_emulator_mode(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+) -> Option<ClientSettingsCommand> {
+    let original = request_settings_until(a, cfg.connect_timeout);
+    if original.emu_mode {
+        println!("OK: server emulator mode is already enabled");
+        return None;
+    }
+
+    let mut enabled = original.clone();
+    enabled.emu_mode = true;
+    println!("FIRETEST order flow: enabling server emulator mode through UI settings");
+    a.client.ui_send_settings(&enabled);
+    assert!(
+        pump_pair_until(a, b, cfg.connect_timeout, "enable emulator mode", |a, b| {
+            a.last_settings
+                .as_ref()
+                .map(|settings| settings.emu_mode)
+                .unwrap_or(false)
+                && b.last_settings
+                    .as_ref()
+                    .map(|settings| settings.emu_mode)
+                    .unwrap_or(false)
+        }),
+        "server emulator mode was not confirmed within {:?}",
+        cfg.connect_timeout
+    );
+    Some(original)
+}
+
+fn restore_server_emulator_mode(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+    original: Option<ClientSettingsCommand>,
+) {
+    let Some(original) = original else {
+        return;
+    };
+    println!(
+        "FIRETEST order flow: restoring server emulator mode to {}",
+        original.emu_mode
+    );
+    a.client.ui_send_settings(&original);
+    assert!(
+        pump_pair_until(
+            a,
+            b,
+            cfg.connect_timeout,
+            "restore emulator mode",
+            |a, b| {
+                a.last_settings
+                    .as_ref()
+                    .map(|settings| settings.emu_mode == original.emu_mode)
+                    .unwrap_or(false)
+                    && b.last_settings
+                        .as_ref()
+                        .map(|settings| settings.emu_mode == original.emu_mode)
+                        .unwrap_or(false)
+            }
+        ),
+        "server emulator mode was not restored within {:?}",
+        cfg.connect_timeout
+    );
+}
+
+fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let restore_emu_mode = ensure_server_emulator_mode(cfg, a, b);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_order_lifecycle_gate_body(cfg, a, b);
+    }));
+    restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let before_uids = a
+        .dispatcher
+        .orders()
+        .iter()
+        .map(|order| order.uid)
+        .collect::<Vec<_>>();
+    let probe = a.snapshot();
+    let ask = probe
+        .last_book_ask
+        .or_else(|| probe.last_market_price.map(|p| p.ask))
+        .expect("market consistency gate must provide an ask price before order flow");
+    let initial_price = ask * 0.98;
+    let fill_price = ask * 1.01;
+    let request_uid = a.send_new_order(
+        &cfg.market,
+        false,
+        initial_price,
+        0,
+        FIRETEST_ORDER_SIZE_USD,
+    );
+    println!(
+        "FIRETEST order flow: sent long request_uid={} market={} size_usd={} initial_price={:.8} fill_price={:.8}",
+        request_uid, cfg.market, FIRETEST_ORDER_SIZE_USD, initial_price, fill_price
+    );
+
+    assert!(
+        pump_pair_until_sessions(
+            a,
+            b,
+            cfg.connect_timeout,
+            "order server tag/new status",
+            |a, _| {
+                let st = a.snapshot();
+                st.order_uid_by_request.contains_key(&request_uid)
+                    || st.order_status_by_uid.iter().any(|(uid, _)| {
+                        !before_uids.contains(uid)
+                            && st
+                                .order_market_by_uid
+                                .get(uid)
+                                .map(|market| market == &cfg.market)
+                                .unwrap_or(false)
+                    })
+            }
+        ),
+        "new order did not produce server tag/status within {:?}",
+        cfg.connect_timeout
+    );
+    let st = a.snapshot();
+    let server_uid = st
+        .order_uid_by_request
+        .get(&request_uid)
+        .copied()
+        .or_else(|| {
+            st.order_status_by_uid.iter().find_map(|(uid, _)| {
+                (!before_uids.contains(uid)
+                    && st
+                        .order_market_by_uid
+                        .get(uid)
+                        .map(|market| market == &cfg.market)
+                        .unwrap_or(false))
+                .then_some(*uid)
+            })
+        })
+        .expect("order server uid must be known after gate");
+
+    assert!(
+        pump_pair_until(a, b, cfg.wait, "order waiting buy status", |a, _| {
+            matches!(
+                a.order_status_by_uid.get(&server_uid).copied(),
+                Some(OrderWorkerStatus::None | OrderWorkerStatus::BuySet)
+            )
+        }),
+        "new order uid={} did not stay in waiting buy status",
+        server_uid
+    );
+
+    assert!(
+        a.replace_order(server_uid, fill_price),
+        "replace_order did not pass Delphi local gate for uid={server_uid}"
+    );
+    assert!(
+        pump_pair_until(
+            a,
+            b,
+            cfg.connect_timeout,
+            "order moved to SellSet",
+            |a, _| {
+                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SellSet)
+            }
+        ),
+        "order uid={} did not reach SellSet after replace",
+        server_uid
+    );
+
+    assert!(
+        a.panic_sell_order(server_uid, true),
+        "panic sell did not pass Delphi local gate for uid={server_uid}"
+    );
+    assert!(
+        pump_pair_until(
+            a,
+            b,
+            cfg.connect_timeout,
+            "order closed by panic sell",
+            |a, _| {
+                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SelLDone)
+            }
+        ),
+        "order uid={} did not reach SellDone after PanicSell",
+        server_uid
+    );
+
+    if let Some(order) = a.dispatcher.orders().get(server_uid) {
+        let delphi_delta_base =
+            delphi_sell_report_delta_base(&order.buy_order, &order.sell_order, false);
+        let approx_result_usd =
+            if is_usd_like_base(a.client.server_info().base_currency_name.as_deref()) {
+                delphi_delta_base
+            } else {
+                None
+            };
+        println!(
+            "OK: order flow uid={} status={:?} reason={} buy_q={:.8} sell_q={:.8} sell_spent={:.8} sell_total={:.8} delphi_delta_base={:?} approx_result_usd={:?}",
+            server_uid,
+            order.status,
+            order.sell_reason().description(),
+            order.buy_order.actual_q,
+            order.sell_order.actual_q,
+            order.sell_order.spent_btc,
+            order.sell_order.total_btc,
+            delphi_delta_base,
+            approx_result_usd
+        );
+        if let Some(result) = delphi_delta_base {
+            assert!(
+                result.abs() < FIRETEST_ORDER_SIZE_USD * 0.10,
+                "order result looks insane by Delphi sell-report formula: delphi_delta_base={result:.8}"
+            );
+        }
+    } else {
+        println!(
+            "OK: order flow uid={} reached SellDone and was already removed from active Orders",
+            server_uid
+        );
+    }
+}
+
+fn delphi_sell_report_delta_base(
+    buy: &OrderCompact,
+    sell: &OrderCompact,
+    reverse_base_currency: bool,
+) -> Option<f64> {
+    if sell.spent_btc <= EPS || sell.total_btc <= EPS {
+        return None;
+    }
+    let mut delta = sell.total_btc - sell.spent_btc;
+    if sell.is_short != 0 {
+        delta = -delta;
+    }
+    if reverse_base_currency {
+        delta = -delta;
+    }
+    if (sell.actual_q - buy.actual_q).abs() > EPS {
+        delta -= (sell.actual_q - buy.actual_q) * sell.mean_price;
+    }
+    Some(delta)
+}
+
+fn is_usd_like_base(base_currency_name: Option<&str>) -> bool {
+    matches!(
+        base_currency_name,
+        Some("USD" | "USDT" | "USDC" | "FDUSD" | "TUSD" | "BUSD")
+    )
 }
 
 #[test]
@@ -999,10 +2091,10 @@ fn fire_test_active_library_health() {
         "FireTest mutates live server settings/strategies. Set allow_mutation=true in {} only for a test server.",
         cfg.path.display()
     );
-    let _err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
+    let mut err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
 
     println!(
-        "FIRETEST config: path={} server={}:{} market={} strategy_field={} strategy_id={:?} err_emu={} candles_timeout={:?}",
+        "FIRETEST config: path={} server={}:{} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
         cfg.path.display(),
         cfg.host,
         cfg.port,
@@ -1010,7 +2102,10 @@ fn fire_test_active_library_health() {
         cfg.strategy_field,
         cfg.strategy_id,
         FIRETEST_ERR_EMU_PERCENT,
-        cfg.candles_timeout
+        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+        cfg.connect_timeout,
+        cfg.candles_timeout,
+        cfg.high_loss_timeout
     );
     let keys = import_key(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
     let seeded_strategy = firetest_strategy(&cfg);
@@ -1028,9 +2123,30 @@ fn fire_test_active_library_health() {
         pump_pair_until(&mut a, &mut b, cfg.wait, "initial health", |a, b| {
             has_initial_health(a) && has_initial_health(b)
         }),
-        "FireTest initial health failed: both clients must receive settings, trades, and configured orderbook within {:?}",
+        "FireTest initial health failed: both clients must receive trades and configured orderbook within {:?}",
         cfg.wait
     );
+    let _a_initial_settings = request_settings_until(&mut a, cfg.connect_timeout);
+    let _b_initial_settings = request_settings_until(&mut b, cfg.connect_timeout);
+    assert!(
+        pump_pair_until(
+            &mut a,
+            &mut b,
+            cfg.wait,
+            "market book/trades/UpdateMarketsList consistency",
+            |a, b| has_market_consistency(a) && has_market_consistency(b)
+        ),
+        "FireTest market consistency failed within {:?}: A=[{}] B=[{}]",
+        cfg.wait,
+        a.snapshot().market_probe_summary(),
+        b.snapshot().market_probe_summary()
+    );
+    println!(
+        "OK: market consistency A=[{}] B=[{}]",
+        a.snapshot().market_probe_summary(),
+        b.snapshot().market_probe_summary()
+    );
+    log_err_emu_pair("initial health 10% gate", &a, &b);
 
     a.request_candles_snapshot();
     assert!(
@@ -1052,6 +2168,12 @@ fn fire_test_active_library_health() {
     if let Some(candles) = a.snapshot().candles_complete {
         println!("OK: full candles snapshot {}", candles.summary());
     }
+    run_high_loss_simple_ops_gate(&mut a, &mut b, &mut err_emu, cfg.high_loss_timeout);
+    err_emu.reset("high-loss simple ops gate");
+    a.client.reset_err_emu_diagnostics();
+    b.client.reset_err_emu_diagnostics();
+
+    run_order_lifecycle_gate(&cfg, &mut a, &mut b);
 
     let a_initial = a.snapshot();
     let original_settings = a_initial
@@ -1091,8 +2213,7 @@ fn fire_test_active_library_health() {
         original_settings.x_sell,
         mutated_settings.x_sell
     );
-    a.client
-        .strat_send_snapshot_batch(0, false, std::slice::from_ref(&mutated_strategy));
+    a.send_strategy_snapshot_batch(std::slice::from_ref(&mutated_strategy));
     a.client.ui_send_settings(&mutated_settings);
 
     let mutation_seen =
@@ -1112,8 +2233,7 @@ fn fire_test_active_library_health() {
         original_field_value.clone(),
         2,
     );
-    a.client
-        .strat_send_snapshot_batch(0, false, std::slice::from_ref(&restored_strategy));
+    a.send_strategy_snapshot_batch(std::slice::from_ref(&restored_strategy));
     a.client.ui_send_settings(&original_settings);
     let restored = pump_pair_until(&mut a, &mut b, cfg.wait, "restore mutation", |_, b| {
         b.last_settings

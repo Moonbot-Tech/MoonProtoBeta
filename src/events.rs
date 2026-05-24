@@ -156,6 +156,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) peer_app_token: u64,
     pub(crate) market_indexes_current_for_peer: bool,
     pub(crate) server_token: u64,
+    pub(crate) subscribed_book_server_token: u64,
     pub(crate) round_trip_delay_ms: i64,
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) domain_ready: bool,
@@ -168,6 +169,7 @@ impl ActiveDispatchContext {
             peer_app_token: client.peer_app_token(),
             market_indexes_current_for_peer: client.market_indexes_current_for_peer(),
             server_token: client.server_token(),
+            subscribed_book_server_token: client.subscribed_book_server_token(),
             round_trip_delay_ms: client.round_trip_delay_ms(),
             server_time_delta_source: client.server_time_delta_handle(),
             domain_ready: client.is_domain_ready(),
@@ -1120,6 +1122,16 @@ impl EventDispatcher {
         if is_pre_init_domain_command(cmd) && !ctx.domain_ready {
             log::debug!(target: "moonproto::events",
                 "domain command {:?} skipped before init completion", cmd);
+            return;
+        }
+
+        // Delphi `TMoonProtoEngine.ProcessOrderBookPacket` exits before
+        // decompression unless the current `Client.ServerToken` is confirmed by
+        // a successful `DoSubscribeOrderBooks` batch:
+        // `If MClient.Client.ServerToken <> FSubscribedBookServerToken then exit`.
+        if cmd == Command::OrderBook
+            && (ctx.server_token == 0 || ctx.server_token != ctx.subscribed_book_server_token)
+        {
             return;
         }
 
@@ -2360,6 +2372,8 @@ mod tests {
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
+        client.testing_set_server_token(0x2222);
+        client.testing_set_subscribed_book_server_token(0x2222);
         let mut out = Vec::new();
         let mut actions = Vec::new();
         dispatch_active_packet_for_test(
@@ -2405,6 +2419,8 @@ mod tests {
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
+        client.testing_set_server_token(0x2222);
+        client.testing_set_subscribed_book_server_token(0x2222);
         let mut out = Vec::new();
         let mut actions = Vec::new();
 

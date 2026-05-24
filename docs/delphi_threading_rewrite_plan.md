@@ -1,24 +1,90 @@
-# MoonProto Rust: рабочий план перехода на Delphi threading model
+# MoonProto Rust: рабочий план protocol machine-effect parity
 
 Дата: 2026-05-22
 
 Статус: рабочий документ для перестройки `moonproto`.
 
+## Уточнение 2026-05-24: machine-effect важнее числа потоков
+
+Два OS-потока Delphi не являются самостоятельным протокольным контрактом.
+Контракт — тождественный machine effect: тот же порядок чтения байтов, проверки,
+decrypt/decompress, мутации slider/token/ACK/gap/orderbook/trades/state,
+immediate protocol replies и timer/send effects.
+
+MoonProto спроектирован для среды, где порядок и тайминг доставки UDP не
+определены. Ни один retry, gap bucket или epoch check не должен зависеть от
+того, попал конкретный пакет в tick N или tick N+1. Граница batch'а — шум
+внутри 200ms+ протокольных таймаутов.
+
+Более точная формула: обработка prefix-а детерминирована. Эффект датаграммы
+зависит от текущего state и самой датаграммы, но не от будущих датаграмм и не
+от того, пришла она inline из `recv_from` или через очередь reader thread-а.
+Если порядок полученных датаграмм сохранён, immediate side effects сохранены,
+а send/maintenance phase не голодает, финальное protocol state должно совпасть.
+
+Это граница доказательства для single-thread идеи: переход допустим только если
+анализ Delphi-блоков подтверждает prefix-determinism для затронутого механизма
+и тесты доказывают тот же machine effect.
+
 ## Вердикт
 
-Да, Rust-клиент можно организовать по модели Delphi: отдельный reader thread и отдельный
-orchestrator/writer thread. Более того, это надо сделать, потому что исходный Rust уже имел
-физический reader thread, но семантически протокол был однопоточным: reader только принимал
-UDP-пакет и клал `ClientEvent::Recv` в очередь, а вся протокольная обработка жила в
-`Client::run_inner`.
+Старый вывод "надо обязательно два потока" заменён на более сильный критерий:
+Rust-клиент должен повторять Delphi machine effect. Реализация может быть
+reader+writer или single-thread non-blocking loop, если доказано то же состояние,
+тот же порядок protocol side effects и те же timer/send решения.
 
-Именно из-за этого появились Rust-only сущности: общий `EVENT_DRAIN_BUDGET`, deferred recv,
-смешивание user send intents и server recv packets в одном оркестраторе, зависимость API responses
-от того, крутит ли пользователь `run_*`, и расхождения в SlicedACK/retry/Init timing.
+Первичная Rust-проблема была не в одном потоке сама по себе, а в Rust-only
+очередях и budgets: `EVENT_DRAIN_BUDGET`, deferred recv, смешивание user send
+intents и server packets, зависимость API responses от `run_*`, расхождения в
+SlicedACK/retry/Init timing.
 
-Цель перестройки: не "похоже на Delphi", а одинаковый machine effect по блокам:
-какой поток читает байты, какой поток мутирует очереди, когда ACK применяется, когда отправляется
-ответный пакет, какой таймер двигается, и какой state видит следующий шаг.
+Цель перестройки: одинаковый machine effect по блокам: кто читает байты, что
+мутируется, когда ACK применяется, когда отправляется ответный пакет, какой
+таймер двигается и какой state видит следующий шаг.
+
+## Правила сверки для нового плана
+
+Цель single-owner дизайна: код должен выглядеть ближе к Delphi — один владелец
+protocol state, прямой доступ к структурам, минимум мостов упаковка->очередь->
+распаковка. Так семантика обработки становится 1:1 в большем числе блоков, чем
+в текущей reader/writer/shared-lock модели.
+
+Каждый Delphi-блок получает классификацию:
+
+- `INLINE`: быстрый bounded protocol/state effect. В Rust выполняется в
+  `ProtocolCore` inline.
+- `QUEUE`: Delphi делает `TThread.Queue`/UI-main work или действие потенциально
+  тяжёлое. В Rust это задача для `AppQueue`, не для protocol loop.
+- `SYNC`: Delphi реально блокируется (`TThread.Synchronize`, wait, sleep в
+  domain path). Это красный флаг: отдельно доказать, переносить ли блокировку,
+  заменить ли на очередь, или это не protocol-owned поведение.
+
+`ProtocolCore` не вызывает пользовательский callback. Он может только:
+
+- принять UDP, проверить, decrypt/decompress;
+- обновить transport/protocol/domain state, если операция bounded;
+- отправить immediate protocol reply (`SlicedACK`, Ping/PMTU replies);
+- поставить send intent в свои очереди;
+- положить public notification/task в `AppQueue`.
+
+`AppQueue` — Rust-аналог Delphi `TThread.Queue`. Она выполняет user callbacks,
+логи/UI-facing notifications, strategy/settings heavy apply, file IO и любые
+действия, которые не должны задерживать protocol recv/send.
+
+Доказываемость скорости обязательна. В `ProtocolCore` должны быть счётчики и
+тайминги без влияния на поведение: `recv_count`, `protocol_ns`, `send_phase_ns`,
+`max_tick_ns`, `app_queue_len`, `public_event_queue_len`. Если tick/phase
+выходит за ожидаемый budget — это красный флаг, а не повод вводить drop/cap.
+
+Перед переходом на `polling` нужен отдельный Windows UDP proof: socket
+настраивается один раз, `Poller` будит по readable, timeout 5ms работает,
+hot path не делает `set_nonblocking`/`set_read_timeout`, reconnect/rebind не
+ломает регистрацию socket-а.
+
+Zero-alloc trades/direct state write — второй этап после runtime-loop parity.
+Сначала доказать `ProtocolCore + AppQueue`, потом заменять `Vec<Trade>`/event
+payload delivery на Delphi-like direct ring-buffer write и notification-only
+events.
 
 ## Delphi target model
 
@@ -189,54 +255,148 @@ transport client. Reader/domain path кладёт эти actions в send queues.
 
 1. `Client`
    - public facade;
-   - держит `Arc<ClientShared>`;
-   - владеет JoinHandle'ами reader/writer;
-   - public API только ставит commands/subscriptions/requests в queues и читает snapshots/events.
+   - держит `ProtocolCore` owner/handle и `AppQueue` handle;
+   - public API только ставит commands/subscriptions/requests в protocol queues
+     через `ClientSender` и читает snapshots/events.
 
-2. `ClientShared`
-   - `Mutex<TransportCore>` для protocol state, где нужен общий доступ;
-   - `Mutex<SendQueues>`: sliced/high/low, Delphi `DataToSend*`;
-   - `Mutex<AckQueues>`: incoming SlicedACKs и ping `TmpSlider`;
-   - `Mutex<ActiveCore>` или отдельный actor, если direct reader mutation нельзя сделать без больших locks;
-   - atomics для lifecycle flags/shutdown.
+2. `ProtocolCore`
+   - single owner protocol thread/loop;
+   - владеет UDP socket, transport state, crypto sliders, send queues,
+     Sliced receiver/sender, active state и reconnect state;
+   - делает recv drain, app command drain, send/maintenance phase и wait 5ms;
+   - не вызывает user callback и не делает blocking/heavy work.
 
-3. `ReaderRuntime`
-   - owns/clones UDP socket receive side;
-   - делает `UDPRead` equivalent;
-   - держит локальный recv buffer;
-   - не блокируется на public callbacks;
-   - никогда не кладёт raw accepted UDP packet в общий backlog как обязательный следующий шаг протокола.
+3. `AppQueue`
+   - отдельный worker/queue для Delphi `TThread.Queue`-класса действий;
+   - выполняет user callbacks, public events, logs/UI-facing work, strategy/UI
+     heavy tasks;
+   - может ставить новые protocol send intents обратно через `ClientSender`;
+   - не владеет protocol state.
 
-4. `WriterRuntime`
-   - owns send side или clone UDP socket;
-   - делает `Execute` equivalent;
-   - `copy_send_queues`, `copy_acks`, `copy_recvd_data`;
-   - `check_sending_data`;
-   - hello/reconnect/force disconnect.
+4. `ClientSender`
+   - единственный thread-safe вход из app/UI потоков;
+   - не конкурирует с recv packets в общем event budget;
+   - пишет command intent в protocol command queue/send queues без capacity cap
+     и без drop branch.
 
 5. `PublicEventQueue`
    - только для user-visible events;
    - не является частью transport progress;
    - если пользователь её не читает, transport всё равно работает.
 
+6. `ProtocolMetrics`
+   - диагностические counters/timings: recv packets, protocol time, send phase
+     time, max tick, queue lengths;
+   - не влияет на protocol decisions и не вводит budgets/drop.
+
 ### State ownership table
 
 | State | Delphi owner/effect | Rust target owner/effect |
 | --- | --- | --- |
-| UDP receive buffer | reader thread | `ReaderRuntime` local |
-| Outer unpack/checksum/ver/ErrEmu | reader thread | `ReaderRuntime` |
-| Handshake receive state | reader writes client fields | `ReaderRuntime` mutates `TransportCore` under short lock |
-| Send queues H/S/L/Sliced intents | `SendCmdInt` under `SendLock`, writer copies | `SendQueues` mutex, writer drains copy |
-| Incoming Sliced receiver | reader mutates `AClient.Receiving` | reader mutates receive slicer state |
-| Immediate SlicedACK | reader calls `SendCommand` | reader sends direct ACK through send socket helper |
-| Incoming SlicedACKs | reader appends `ACKs`, writer copies/applies | reader appends `AckQueues.sliced`, writer copies/applies |
-| Ping regular H ACK bitmap | reader writes `TmpSlider`, writer copies/applies | reader writes `tmp_slider`, writer copies/applies |
-| PendingH | writer owns in `CheckSeningData` | writer owns/mutates |
-| Outgoing `Sending` sliced | writer owns in `CheckSeningData` | writer owns/mutates |
-| Domain active state | reader path via `OnNewData`, some UI queued | `ActiveCore` updated from receive path; UI/user events queued separately |
-| Public callbacks/events | mixed: direct reader and `TThread.Queue` | never under core locks; public event queue/callback executor |
+| UDP receive buffer | reader thread | `ProtocolCore` local |
+| Outer unpack/checksum/ver/ErrEmu | reader thread | `ProtocolCore` inline |
+| Handshake receive state | reader writes client fields | `ProtocolCore` inline |
+| Send queues H/S/L/Sliced intents | `SendCmdInt` under `SendLock`, writer copies | `ProtocolCore` owned queues; `ClientSender` sends intents |
+| Incoming Sliced receiver | reader mutates `AClient.Receiving` | `ProtocolCore` mutates receive slicer state |
+| Immediate SlicedACK | reader calls `SendCommand` | `ProtocolCore` sends direct ACK immediately |
+| Incoming SlicedACKs | reader appends `ACKs`, writer copies/applies | `ProtocolCore` records/apply at matching send phase with Delphi order |
+| Ping regular H ACK bitmap | reader writes `TmpSlider`, writer copies/applies | `ProtocolCore` preserves tmp->recvd->apply order inside loop |
+| PendingH | writer owns in `CheckSeningData` | `ProtocolCore` owns/mutates in send phase |
+| Outgoing `Sending` sliced | writer owns in `CheckSeningData` | `ProtocolCore` owns/mutates in send phase |
+| Domain active state | reader path via `OnNewData`, some UI queued | `ProtocolCore` applies `INLINE`; `QUEUE` tasks go to `AppQueue` |
+| Public callbacks/events | mixed: direct reader and `TThread.Queue` | `AppQueue`/public event queue only; never from protocol loop |
 
-## Порядок перестройки
+## Новый порядок перестройки
+
+### Phase A0 - short GOD-module split before proof work
+
+Цель: уменьшить `src/client.rs` перед Phase A, но не трогать protocol
+machine effect.
+
+Разрешено только механическое выделение стабильных зон, которые не меняют
+порядок вызовов, владение state, queues, timers, reconnect, ACK/retry и
+runtime loop:
+
+- diagnostics / ErrEmu / trace hooks;
+- fixed wire structs with compile-time layout checks;
+- маленькие pure helpers, если их границы уже очевидны и покрыты тестами.
+
+Запрещено в A0:
+
+- переносить reader/writer/runtime/reconnect/handshake;
+- менять public API semantics;
+- вводить новые queues, caps, budgets или callback boundaries.
+
+Exit gate: `cargo test --lib`, FireTest/stress-ready build, diff проверен как
+механический split без protocol behavior changes.
+
+### Phase A - proof gates before code move
+
+1. Сверить Delphi `OnNewData` branches и пометить каждый блок `INLINE`,
+   `QUEUE` или `SYNC`.
+2. Сделать Windows UDP `polling` prototype:
+   - one-time nonblocking socket setup;
+   - `Poller::wait(..., 5ms)` будит по readable;
+   - recv drain до `WouldBlock`;
+   - send/maintenance phase гарантированно выполняется;
+   - rebind/reconnect не ломает регистрацию socket-а.
+3. Добавить `ProtocolMetrics` в текущий Rust без изменения поведения:
+   `recv_count`, `protocol_ns`, `send_phase_ns`, `max_tick_ns`, queue lengths.
+4. Unit proof: одна последовательность decoded datagrams даёт одинаковый
+   active/protocol state в текущей модели и в single-owner processor skeleton.
+
+Exit gate: тесты зелёные, FireTest зелёный, metrics показывают bounded protocol
+phase без callback blocking.
+
+### Phase B - introduce `ProtocolCore` skeleton
+
+Сначала без удаления старого runtime:
+
+- выделить pure methods `recv_drain_once`, `process_datagram`,
+  `drain_app_commands`, `send_maintenance_phase`, `wait_5ms`;
+- оставить тот же parser/state код, но убрать лишние упаковка->очередь->
+  распаковка внутри proof path;
+- public callback не вызывается из `ProtocolCore`, только task/event enqueue.
+
+Exit gate: unit equivalence tests + `cargo test` + FireTest.
+
+### Phase C - introduce `AppQueue`
+
+- заменить все потенциально blocking/user-facing callbacks на enqueue в
+  `AppQueue`;
+- классификация Delphi `TThread.Queue` должна быть записана рядом с кодом или
+  в этом документе;
+- `AppQueue` имеет no-cap семантику для correctness, diagnostics для длины
+  очереди, но не drop policy.
+
+Exit gate: тест, где user callback sleep/block не задерживает Ping/SlicedACK/API
+response/retry.
+
+### Phase D - switch live runtime to `ProtocolCore + AppQueue`
+
+- single owner владеет socket/protocol/active state;
+- `ClientSender` ставит intents без общего recv/app budget;
+- `run_*` становится consumer public events, а не мотором transport progress;
+- reconnect сохраняет Init-once и active-lib restore semantics.
+
+Exit gate: full unit suite, examples check, FireTest, stress under `err_emu=10%`.
+
+### Phase E - zero-alloc trades/direct state write
+
+Делать только после runtime parity.
+
+- `WireTrade`/`SectionIter` over bytes вместо `Vec<Trade>`;
+- reusable decompress buffer;
+- direct write в market ring buffers;
+- callback/event только notification, данные читаются из state.
+
+Exit gate: byte/wire tests, perf counters, FireTest/stress, API docs updated.
+
+## Исторический план и progress log 2026-05-22
+
+Ниже старые фазы reader/writer rewrite. Они оставлены как история уже
+выполненных шагов и источник проверок, но новый target — `ProtocolCore +
+AppQueue` при machine-effect parity.
 
 ### Phase 0 - freeze current behavior
 
@@ -440,18 +600,46 @@ Tests:
 
 ## Immediate next implementation block
 
-Start with Phase 1 + Phase 3 around Sliced receive, because FireTest currently proves the request is
-outgoing and ACKed, but large incoming sliced candle chunks do not reliably assemble under `err_emu=10%`.
+Start with Phase A0, then Phase A from the new plan.
 
-Do not start from public API cleanup. First make incoming Sliced machine effect match Delphi:
+Do not start from public API cleanup or zero-alloc trades. First do only the
+short mechanical GOD-module split, then prove the new runtime boundary:
 
 ```text
-UDPRead -> OnNewSliced -> SendCommand(MPC_SlicedACK) -> if complete DataReadInt
+ProtocolCore fast bounded work:
+  UDP recv/process/send-maintenance only
+
+AppQueue:
+  callbacks / logs / settings-strategy heavy apply / user-visible work
 ```
 
-Only after that move SlicedACK/H ACK copy-apply order and then split the rest of the main loop.
+Required first artifacts:
+
+- A0: `client` diagnostics/ErrEmu split with public paths preserved;
+- Delphi branch classification: `INLINE` / `QUEUE` / `SYNC`;
+- Windows UDP `polling` prototype;
+- `ProtocolMetrics` added without behavior change;
+- equivalence test skeleton for same datagram sequence -> same state.
 
 ## Progress log
+
+### 2026-05-24 - Phase A0 started
+
+Done:
+
+- `client` diagnostics / ErrEmu / diagnostic-trace hooks moved to
+  `src/client/diagnostics.rs`;
+- public paths preserved: `moonproto::client::set_err_emu`,
+  `ErrEmu*Diagnostics`, hidden `ERR_EMU_RATE`;
+- runtime, reader/writer, reconnect, ACK/retry, send queues and callback
+  boundaries were not changed by this split.
+
+Checks:
+
+- `cargo test --lib`: 596 passed;
+- `cargo test --lib --features diagnostic-trace`: 596 passed;
+- `cargo test --test fire_test --no-run`;
+- `cargo check --examples`.
 
 ### 2026-05-22 - Phase 3 partial
 

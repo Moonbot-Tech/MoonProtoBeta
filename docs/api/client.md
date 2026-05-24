@@ -123,6 +123,15 @@ Service packets use half of the configured drop rate, matching Delphi
 `MoonProtoErrEmu`: `Ping`, handshake/reconnect commands, MTU probes, and
 `SlicedACK`.
 
+For reconnect/handshake health gates this matters mathematically. With
+`set_err_emu(50)`, service packets are dropped at 25% and delivered at 75%.
+Ten reconnect attempts fail with `0.25^10 = 0.000095%` when only the Rust client
+emulates loss. If a test server also runs the same 50% emulator on its side, one
+attempt needs both directions and succeeds with `0.75 * 0.75 = 56.25%`; ten
+attempts fail with about `0.0257%`. A repeated failure of simple reconnect/API
+operations under this gate should be treated as a protocol bug until proven
+otherwise, not dismissed as random FireTest noise.
+
 For stress tests that target Engine API, candles, and sliced response recovery,
 enable `set_err_emu` after `connect_and_init` / `run_init_sequence`. Enabling it
 before connection intentionally tests handshake/reconnect loss and can prevent
@@ -137,6 +146,29 @@ stress_client <key_base64> [host:port] [market] [duration_secs] [err_emu_pct] [e
 `err_emu_phase=post_init` is the default and enables loss after both stress
 clients finish init. Use `pre_connect` only when the test target is
 authorization/reconnect behavior.
+
+For live health tests, `Client::err_emu_diagnostics_snapshot()` returns
+loss counters collected while `set_err_emu` is enabled. Use
+`Client::reset_err_emu_diagnostics()` to start a new measurement window without
+changing the loss rate.
+
+The snapshot includes total valid/delivered/dropped incoming packets,
+per-command counters, outgoing packets skipped by the hidden FireTest blackhole
+hook, and per-`MPC_Sliced` datagram counters. For sliced datagrams the API
+reports:
+
+- `datagram_num`, `blocks_count`, delivered/dropped packet attempts, and
+  per-block delivered/dropped counters;
+- `block0_wire_cmd` and `block0_ui_cmd_id` when block 0 was observed;
+- `completed_cmd`, `completed_payload_len`, and for completed UI settings the
+  `completed_ui_cmd_id`;
+- for completed Engine API responses:
+  `completed_api_method`, `completed_api_uid`, and `completed_api_success`.
+
+This is diagnostic API, not production control flow. Its purpose is to
+distinguish three cases in tests: the server did not send a response, the server
+sent/retried it but all needed packets were dropped by emulation, or packets
+arrived but reassembly/parsing failed.
 
 Low-level packet diagnostics are compile-gated behind the `diagnostic-trace`
 feature. Build with that feature and set `MOONPROTO_TRACE_IO=1` or
@@ -321,6 +353,12 @@ let settings = client.request_client_settings(
 )?;
 println!("xSell={}", settings.x_sell);
 ```
+
+`request_client_settings` completes on the next applied
+`TClientSettingsCommand`. It does not require the command UID to change because
+the server may answer with the current settings object unchanged. The low-level
+UI request is fire-and-forget, so this helper may reissue `TSettingsRequest`
+inside the same timeout window.
 
 If an application already has local UI settings before connecting, pass them to
 the dispatcher with `set_client_settings_fallback`. This preserves Delphi

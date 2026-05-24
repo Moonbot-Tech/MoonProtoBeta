@@ -267,6 +267,7 @@ market = BTCUSDT
 strategy_field = Comment
 # strategy_id = 123456789
 # candles_timeout_secs = 30
+# high_loss_timeout_secs = 60
 ```
 
 Run:
@@ -278,9 +279,30 @@ cargo test --test fire_test -- --ignored --nocapture
 The test starts two clients, runs one Init per client, verifies settings,
 strategies, trades, and the configured orderbook. It enables client-side
 `err_emu=10%` before connect, requests the full chunked candles snapshot and
-fails unless all chunks are merged and parsed. Then it checks settings/strategy
-broadcast from client A to client B, uses a hidden debug send-blackhole hook to
-force reconnect, and verifies that trades and orderbook continue afterwards.
+fails unless all chunks are merged and parsed. Then it raises client-side
+`err_emu=50%` for a high-loss simple-operations gate: small Engine API
+requests, settings, balances, order snapshots, live trades/orderbook delivery,
+a forced reconnect, and stream delivery after reconnect. Heavy candles are
+intentionally not requested at 50%.
+
+When packet loss is enabled, FireTest prints measured protocol math for
+incoming responses. For `MPC_Sliced` API/UI datagrams the log includes attempts,
+delivered/dropped packets, missing blocks, and completed API method/UID/success
+when reassembly succeeded. A timeout is not treated as random noise until the
+log shows whether the server did not send, ErrEmu dropped all needed retries,
+or the client received bytes but failed to apply them.
+
+The high-loss gate is not a flaky-random smoke test. Delphi halves the loss
+rate for service/handshake packets, so `err_emu=50%` means service packets drop
+at 25% and deliver at 75%. Ten reconnect attempts therefore fail with
+`0.25^10 = 0.000095%` for client-side loss, or about `0.0257%` even if both
+client and server apply the same 50% emulator. A repeated failure here is a
+protocol/reconnect bug until proven otherwise.
+
+After the high-loss gate it disables the stochastic emulator, checks
+settings/strategy broadcast from client A to client B, uses a hidden debug
+send-blackhole hook to force reconnect, and verifies that trades and orderbook
+continue afterwards.
 The `--nocapture` log is intentionally diagnostic: lifecycle events, server
 messages, EngineResponse/candle chunks, parse failures, and compact stream
 summaries are printed without dumping keys or full payloads.
