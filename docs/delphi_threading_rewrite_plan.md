@@ -164,6 +164,9 @@ Delphi model по факту:
   SlicedACK/Ping/PMTU/ImFriend branches.
 - `src/client.rs` - ping handling writes `TmpSlider` inside `SendLockState`;
   writer later copies it and runs `ApplyRegularHLAck`.
+- `src/client.rs` - writer-owned `RecvdSlider` is a direct `Client` field.
+  The Delphi order remains `TmpSlider` in `SendLockState` snapshot ->
+  `RecvdSlider` -> `ApplyRegularHLAck`.
 - `src/events.rs` - production active delivery uses
   `dispatch_into_active_actions` and an action outbox; old direct
   `dispatch_into_active(..., &mut Client)` production path is gone.
@@ -1396,6 +1399,35 @@ Note:
 - The CPU spikes are still Phase Z work. This D11 step only removes a stale
   synchronization layer; it does not claim protocol hot-path optimization is
   complete.
+
+### 2026-05-24 - Phase D12 direct RecvdSlider
+
+Done:
+
+- Removed `Arc<Mutex<_>>` from writer-owned `RecvdSlider`.
+- Kept the exact Delphi ACK order: incoming Ping writes `TmpSlider` under
+  `SendLockState`; writer snapshot copies `TmpSlider` to `RecvdSlider`;
+  `ApplyRegularHLAck` consumes `RecvdSlider` and clears `has_new_data`.
+
+Reason:
+
+- After the runtime became single-owner, `RecvdSlider` had no second owner.
+  The lock was Rust-only ceremony around writer-phase state.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `22.97s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Observed quick CPU:
+
+- `reader avg/max = 1020us / 126809us`, `>1ms = 60`, `>5ms = 6`.
+- `active_dispatch avg/max = 1366us / 115358us`, `>1ms = 4`, `>5ms = 2`.
+- `app_enqueue avg/max = 1030us / 2973us`, `>1ms = 58`, `>5ms = 0`.
 
 ### 2026-05-24 - FireTest quick profile
 

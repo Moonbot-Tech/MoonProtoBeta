@@ -2708,7 +2708,7 @@ impl ProtocolCore<'_> {
                 .reset_protocol_session_from_reader(self.client.current_reader_epoch);
             self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
             self.client.total_sent.store(0, Ordering::Relaxed);
-            *self.client.recvd_slider.lock().unwrap() = Slider::new();
+            self.client.recvd_slider = Slider::new();
             self.client.recv_slicer = slicing::SlicingReceiver::new();
             self.client.total_recv_shared.store(0, Ordering::Relaxed);
         }
@@ -3464,7 +3464,7 @@ impl ProtocolCore<'_> {
             .unwrap()
             .take_send_snapshot(sliced, h_items, l_items);
         if let Some(tmp_slider) = tmp_slider {
-            *self.client.recvd_slider.lock().unwrap() = tmp_slider;
+            self.client.recvd_slider = tmp_slider;
         }
         acks
     }
@@ -3480,7 +3480,7 @@ impl ProtocolCore<'_> {
     #[cfg(test)]
     fn copy_recvd_data(&mut self) {
         if let Some(tmp_slider) = self.client.send_lock.lock().unwrap().copy_tmp_slider() {
-            *self.client.recvd_slider.lock().unwrap() = tmp_slider;
+            self.client.recvd_slider = tmp_slider;
         }
     }
 
@@ -3510,12 +3510,11 @@ impl ProtocolCore<'_> {
 
     fn apply_regular_hl_ack(&mut self) {
         let recvd_slider = {
-            let mut recvd_slider = self.client.recvd_slider.lock().unwrap();
-            if !recvd_slider.has_new_data {
+            if !self.client.recvd_slider.has_new_data {
                 return;
             }
-            recvd_slider.has_new_data = false;
-            recvd_slider.clone()
+            self.client.recvd_slider.has_new_data = false;
+            self.client.recvd_slider.clone()
         };
 
         let limit = (recvd_slider.r_count.max(0) as u64) * 64;
@@ -4384,7 +4383,7 @@ pub struct Client {
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
-    recvd_slider: Arc<Mutex<Slider>>,
+    recvd_slider: Slider,
     total_sent: Arc<AtomicU64>,
     total_recv_shared: Arc<AtomicU64>,
     err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
@@ -4696,7 +4695,7 @@ impl Client {
             tmp_send_size: 0,
             reader_protocol: ReaderProtocolState::new(),
             reader_ping_state,
-            recvd_slider: Arc::new(Mutex::new(Slider::new())),
+            recvd_slider: Slider::new(),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
             err_emu_diagnostics,
@@ -8211,7 +8210,7 @@ impl Client {
         self.reader_ping_state.reset_protocol_session();
         self.reader_protocol.reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
-        *self.recvd_slider.lock().unwrap() = Slider::new();
+        self.recvd_slider = Slider::new();
         self.recv_slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
@@ -11541,7 +11540,7 @@ mod pmtu_tests {
         client.total_recv = 5678;
         client.rs = 0.25;
         client.used_sliced_limit = true;
-        client.recvd_slider.lock().unwrap().has_new_data = true;
+        client.recvd_slider.has_new_data = true;
         client.last_online = 999;
         client.last_sent_hello = 888;
 
@@ -11567,7 +11566,7 @@ mod pmtu_tests {
         assert_eq!(client.total_recv, 0);
         assert_eq!(client.rs, 1.0);
         assert!(!client.used_sliced_limit);
-        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(!client.recvd_slider.has_new_data);
         assert_eq!(client.last_online, 0);
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     }
@@ -11793,14 +11792,14 @@ mod pmtu_tests {
             "Delphi DataReadInt(MPC_Ping) writes TmpSlider only; PendingH is writer work"
         );
         assert!(client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(!client.recvd_slider.has_new_data);
 
         ProtocolCore {
             client: &mut client,
         }
         .copy_recvd_data();
         assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-        assert!(client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(client.recvd_slider.has_new_data);
 
         ProtocolCore {
             client: &mut client,
@@ -11826,7 +11825,7 @@ mod pmtu_tests {
         }
         .copy_recvd_data();
         assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-        assert!(client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(client.recvd_slider.has_new_data);
 
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let delivered_for_cb = Arc::clone(&delivered);
@@ -11952,11 +11951,10 @@ mod pmtu_tests {
         client.pending_h.push(not_acked_same_key);
 
         {
-            let mut recvd_slider = client.recvd_slider.lock().unwrap();
-            recvd_slider.start_num = 40;
-            recvd_slider.bit_field[0] = 1 << 2;
-            recvd_slider.has_new_data = true;
-            recvd_slider.r_count = 1;
+            client.recvd_slider.start_num = 40;
+            client.recvd_slider.bit_field[0] = 1 << 2;
+            client.recvd_slider.has_new_data = true;
+            client.recvd_slider.r_count = 1;
         }
 
         let new_high = SendItem {
@@ -12595,7 +12593,7 @@ mod pmtu_tests {
         assert!(low.is_empty());
         assert_eq!(acks.len(), 1);
         assert_eq!(acks[0].datagram_num, 9);
-        assert!(client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(client.recvd_slider.has_new_data);
         let send_lock = client.send_lock.lock().unwrap();
         assert!(send_lock.send_queues.is_empty());
         assert!(send_lock.incoming_sliced_acks.is_empty());
@@ -14928,7 +14926,7 @@ mod service_cmd_tests {
         client.last_sent_hello = 12345;
         client.crypt_msg_counter.store(77, Ordering::Relaxed);
         client.total_sent.store(123, Ordering::Relaxed);
-        client.recvd_slider.lock().unwrap().has_new_data = true;
+        client.recvd_slider.has_new_data = true;
 
         let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
         server_sock.send_to(&packet, client_addr).unwrap();
@@ -14942,7 +14940,7 @@ mod service_cmd_tests {
         assert!(!client.soft_reconnect);
         assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
         assert_eq!(client.total_sent(), 0);
-        assert!(!client.recvd_slider.lock().unwrap().has_new_data);
+        assert!(!client.recvd_slider.has_new_data);
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         assert_eq!(client.auth_status, AuthStatus::Connected);
         assert!(!client.authorized);
