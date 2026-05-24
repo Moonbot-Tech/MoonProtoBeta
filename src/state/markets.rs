@@ -563,12 +563,13 @@ impl MarketsState {
         data: &[u8],
         local_shift_minutes: f64,
     ) -> Option<MarketsEvent> {
-        let mut r = EngineStreamReader::new(data);
-        let send_funding = r.read_bool()?;
-        let count = r.read_count()?;
         for slot in &mut self.prices {
             slot.mark_price_found = false;
         }
+
+        let mut r = EngineStreamReader::new(data);
+        let send_funding = r.read_bool()?;
+        let count = r.read_count()?;
 
         for _ in 0..count {
             let update =
@@ -1391,6 +1392,50 @@ mod tests {
             "Delphi clears CurrentMarkPriceFound before reading each UpdateMarketsList batch"
         );
         assert!(st.price("ETH").unwrap().mark_price_found);
+    }
+
+    #[test]
+    fn direct_price_payload_clears_mark_found_before_first_read_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTC", 0), mk_market("ETH", 1)],
+            corr_markets: vec![],
+        });
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![
+                MarketPriceUpdate {
+                    m_index: 0,
+                    bid: 10.0,
+                    ask: 11.0,
+                    funding_rate: 0.0,
+                    funding_time: 0.0,
+                    mark_price: 10.5,
+                    mark_price_found: true,
+                },
+                MarketPriceUpdate {
+                    m_index: 1,
+                    bid: 20.0,
+                    ask: 21.0,
+                    funding_rate: 0.0,
+                    funding_time: 0.0,
+                    mark_price: 20.5,
+                    mark_price_found: true,
+                },
+            ],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        assert!(st.price("BTC").unwrap().mark_price_found);
+        assert!(st.price("ETH").unwrap().mark_price_found);
+
+        assert!(st.apply_markets_prices_payload_like_delphi(&[]).is_none());
+
+        assert!(
+            !st.price("BTC").unwrap().mark_price_found,
+            "Delphi clears CurrentMarkPriceFound before ReadBool/ReadInt, even if the payload then fails"
+        );
+        assert!(!st.price("ETH").unwrap().mark_price_found);
     }
 
     #[test]

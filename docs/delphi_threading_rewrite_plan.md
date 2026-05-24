@@ -4897,3 +4897,23 @@ Verification:
 
 - Added regression coverage that `Market` and `MarketPrice` funding fields move
   together after a funding-bearing price update.
+
+### 2026-05-24 - Phase 1 partial: UpdateMarketsList clears MarkPriceFound before first read
+
+Done:
+
+- Fixed a malformed-payload machine-effect mismatch in the active
+  `UpdateMarketsList` apply path.
+- Delphi clears every market's `CurrentMarkPriceFound := false` before reading
+  `HasFunding` and `Count` from the response stream. If the payload is truncated
+  at that point, the clear already happened.
+- Rust direct payload apply previously read `send_funding` and `count` first and
+  cleared `mark_price_found` only after those reads succeeded.
+- Rust now clears `MarketPrice.mark_price_found` before the first payload read in
+  `apply_markets_prices_payload_like_delphi`.
+
+Verification:
+
+- Added regression coverage that an empty direct `UpdateMarketsList` payload
+  returns `None` but still clears all existing `mark_price_found` flags, matching
+  Delphi's clear-before-read order.
