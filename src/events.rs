@@ -166,6 +166,8 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) domain_ready: bool,
     pub(crate) copy_max_leverage_from_markets_list: bool,
+    pub(crate) server_base_currency_name: Option<String>,
+    pub(crate) server_base_currency_code: Option<u8>,
 }
 
 impl ActiveDispatchContext {
@@ -181,6 +183,8 @@ impl ActiveDispatchContext {
             copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
                 client.server_info(),
             ),
+            server_base_currency_name: client.server_info().base_currency_name.clone(),
+            server_base_currency_code: client.server_info().base_currency_code,
         }
     }
 }
@@ -1123,6 +1127,10 @@ impl EventDispatcher {
                     self.markets.set_copy_max_leverage_from_markets_list(
                         copy_max_leverage_from_markets_list(&info),
                     );
+                    self.markets.set_server_base_currency(
+                        info.base_currency_name.as_deref(),
+                        info.base_currency_code,
+                    );
                     None
                 }
                 _ => None,
@@ -1178,6 +1186,10 @@ impl EventDispatcher {
         }
         self.markets
             .set_copy_max_leverage_from_markets_list(ctx.copy_max_leverage_from_markets_list);
+        self.markets.set_server_base_currency(
+            ctx.server_base_currency_name.as_deref(),
+            ctx.server_base_currency_code,
+        );
 
         // Server restart / PeerAppToken change: Delphi gates stream parsing with
         // `FLastServerAppToken <> PeerAppToken` until `GetMarketsIndexes` succeeds.

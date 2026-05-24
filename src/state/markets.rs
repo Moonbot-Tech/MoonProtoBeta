@@ -12,9 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
-    apply_delphi_local_funding_shift, read_corr_market, read_market_with_local_shift, CorrMarket,
-    CorrMarketPriceUpdate, EngineStreamReader, Market, MarketPriceUpdate, MarketTokenTags,
-    MarketsListResponse, MarketsPricesResponse, TokenTags,
+    apply_delphi_local_funding_shift, read_corr_market, read_market_with_local_shift, BaseCurrency,
+    CorrMarket, CorrMarketPriceUpdate, EngineStreamReader, Market, MarketPriceUpdate,
+    MarketTokenTags, MarketsListResponse, MarketsPricesResponse, TokenTags,
 };
 
 const EPS_MARKET: f64 = 1e-12;
@@ -36,6 +36,30 @@ pub struct MarketPrice {
     pub mark_price_found: bool,
 }
 
+/// Delphi `TBaseCurrencyPrice` analogue, keyed by `base_currency`.
+///
+/// The reference fields store market names instead of raw pointers. They are
+/// assigned by the same `CheckCurrencyRefMarkets` conditions and intentionally
+/// are not cleared when a later scan does not find a replacement.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BaseCurrencyPrice {
+    pub base_currency: String,
+    pub last_price: f64,
+    pub usdt_market: Option<String>,
+    pub usdt_rev_market: Option<String>,
+    pub usdt_corr_market: Option<String>,
+    pub usdt_rev_corr_market: Option<String>,
+}
+
+impl BaseCurrencyPrice {
+    fn new(base_currency: String) -> Self {
+        Self {
+            base_currency,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
     /// Маркеты в порядке `mIndex` (как они приходят в `emk_GetMarketsList`).
@@ -48,6 +72,10 @@ pub struct MarketsState {
     pub prices: Vec<MarketPrice>,
     /// Текущие цены CorrMarkets, key = `bn_market_name`.
     pub corr_prices: HashMap<String, f64>,
+    /// Delphi `BaseCurDict`: base currency name -> price/ref state.
+    pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
+    /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
+    pub ref_btc_corr_markets: HashMap<String, String>,
     /// Теги монет, key = `market_name`.
     pub token_tags: HashMap<String, TokenTags>,
     /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
@@ -76,6 +104,8 @@ pub struct MarketsState {
     /// list refresh. Active dispatcher consumes this to request immediate
     /// `UpdateMarketsList`, like Delphi `Engine.NewMarkets.Count > 0`.
     new_markets_pending_price_refresh: usize,
+    server_base_currency_name: Option<String>,
+    server_base_currency_code: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +213,8 @@ impl MarketsState {
         for cm in resp.corr_markets {
             self.apply_one_corr_market_from_list(cm);
         }
+        self.check_corr_markets_like_delphi();
+        self.check_currency_ref_markets_like_delphi();
         if allow_new_markets {
             self.market_indexes = incoming_server_names;
             self.indexes_synchronized = true;
@@ -251,6 +283,8 @@ impl MarketsState {
             self.apply_one_corr_market_from_list(cm);
         }
 
+        self.check_corr_markets_like_delphi();
+        self.check_currency_ref_markets_like_delphi();
         self.markets_list_refresh_needed = false;
 
         Some(MarketsEvent::MarketsListReplaced {
@@ -287,12 +321,197 @@ impl MarketsState {
         if cm.base_currency_name.is_empty() {
             return;
         }
+        self.ensure_base_currency_price(&cm.base_currency_name);
         if let Some(existing) = self.corr_markets.get_mut(&cm.bn_market_name) {
             existing.bn_tick_size = cm.bn_tick_size;
             existing.base_currency_name = cm.base_currency_name;
         } else {
             self.corr_markets.insert(cm.bn_market_name.clone(), cm);
         }
+    }
+
+    fn ensure_base_currency_price(&mut self, base_currency: &str) {
+        if base_currency.is_empty() || self.base_currency_prices.contains_key(base_currency) {
+            return;
+        }
+        self.base_currency_prices.insert(
+            base_currency.to_string(),
+            BaseCurrencyPrice::new(base_currency.to_string()),
+        );
+    }
+
+    pub(crate) fn set_server_base_currency(&mut self, name: Option<&str>, code: Option<u8>) {
+        let next_name = name.map(ToOwned::to_owned);
+        if self.server_base_currency_name == next_name && self.server_base_currency_code == code {
+            return;
+        }
+        self.server_base_currency_name = next_name;
+        self.server_base_currency_code = code;
+        self.check_corr_markets_like_delphi();
+        self.check_currency_ref_markets_like_delphi();
+        self.update_currency_prices_like_delphi();
+    }
+
+    fn check_corr_markets_like_delphi(&mut self) {
+        if self.server_base_is_btc_like_delphi() {
+            return;
+        }
+        let Some(currency) = self.server_base_currency_name.as_deref() else {
+            return;
+        };
+        if currency.is_empty() {
+            return;
+        }
+        for market in &self.markets {
+            if market.bn_market_name.is_empty() {
+                continue;
+            }
+            let corr_name =
+                replace_text_ascii_case_insensitive(&market.bn_market_name, currency, "BTC");
+            if self.corr_markets.contains_key(&corr_name) {
+                self.ref_btc_corr_markets
+                    .insert(market.bn_market_name.clone(), corr_name);
+            } else {
+                self.ref_btc_corr_markets.remove(&market.bn_market_name);
+            }
+        }
+    }
+
+    fn check_currency_ref_markets_like_delphi(&mut self) {
+        // Same final assignments as Delphi nested scans, but indexed first so
+        // the protocol tick does not scale as BaseCurDict * CorrDict in Rust.
+        let mut usdt_market_by_key = HashMap::new();
+        let mut usdt_rev_market_by_key = HashMap::new();
+        for market in &self.markets {
+            if same_text_ascii(&market.base_currency, "USDT") {
+                usdt_market_by_key.insert(
+                    norm_text_ascii(&market.bn_market_currency),
+                    market.bn_market_name.clone(),
+                );
+            }
+            if same_text_ascii(&market.bn_market_currency, "USDT") {
+                usdt_rev_market_by_key.insert(
+                    norm_text_ascii(&market.base_currency),
+                    market.bn_market_name.clone(),
+                );
+            }
+        }
+
+        let mut usdt_corr_market_by_key = HashMap::new();
+        let mut usdt_rev_corr_market_by_key = HashMap::new();
+        for cm in self.corr_markets.values() {
+            if same_text_ascii(&cm.base_currency_name, "USDT") {
+                usdt_corr_market_by_key.insert(
+                    norm_text_ascii(&cm.bn_market_currency),
+                    cm.bn_market_name.clone(),
+                );
+            }
+            if same_text_ascii(&cm.bn_market_currency, "USDT") {
+                usdt_rev_corr_market_by_key.insert(
+                    norm_text_ascii(&cm.base_currency_name),
+                    cm.bn_market_name.clone(),
+                );
+            }
+        }
+
+        let keys = self
+            .base_currency_prices
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let norm_key = norm_text_ascii(&key);
+            let usdt_market = usdt_market_by_key.get(&norm_key).cloned();
+            let usdt_rev_market = usdt_rev_market_by_key.get(&norm_key).cloned();
+            let usdt_corr_market = usdt_corr_market_by_key.get(&norm_key).cloned();
+            let usdt_rev_corr_market = usdt_rev_corr_market_by_key.get(&norm_key).cloned();
+
+            let Some(bc) = self.base_currency_prices.get_mut(&key) else {
+                continue;
+            };
+            if let Some(name) = usdt_market {
+                bc.usdt_market = Some(name);
+            }
+            if let Some(name) = usdt_rev_market {
+                bc.usdt_rev_market = Some(name);
+            }
+            if let Some(name) = usdt_corr_market {
+                bc.usdt_corr_market = Some(name);
+            }
+            if let Some(name) = usdt_rev_corr_market {
+                bc.usdt_rev_corr_market = Some(name);
+            }
+        }
+    }
+
+    fn update_currency_prices_like_delphi(&mut self) {
+        let keys = self
+            .base_currency_prices
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let next_price = self
+                .base_currency_prices
+                .get(&key)
+                .and_then(|bc| self.next_base_currency_price_like_delphi(bc));
+            if let Some(price) = next_price {
+                if let Some(bc) = self.base_currency_prices.get_mut(&key) {
+                    bc.last_price = price;
+                }
+            }
+        }
+    }
+
+    fn next_base_currency_price_like_delphi(&self, bc: &BaseCurrencyPrice) -> Option<f64> {
+        if let Some(price) = bc
+            .usdt_market
+            .as_deref()
+            .and_then(|name| self.price(name))
+            .map(|p| p.ask)
+            .filter(|ask| *ask > EPS_MARKET)
+        {
+            return Some(price);
+        }
+        if let Some(price) = bc
+            .usdt_rev_market
+            .as_deref()
+            .and_then(|name| self.price(name))
+            .map(|p| p.ask)
+            .filter(|ask| *ask > EPS_MARKET)
+        {
+            return Some(1.0 / price);
+        }
+        if let Some(price) = bc
+            .usdt_corr_market
+            .as_deref()
+            .and_then(|name| self.corr_prices.get(name))
+            .copied()
+            .filter(|price| *price > EPS_MARKET)
+        {
+            return Some(price);
+        }
+        if let Some(price) = bc
+            .usdt_rev_corr_market
+            .as_deref()
+            .and_then(|name| self.corr_prices.get(name))
+            .copied()
+            .filter(|price| *price > EPS_MARKET)
+        {
+            return Some(1.0 / price);
+        }
+        if same_text_ascii(&bc.base_currency, "USDT") {
+            return Some(1.0);
+        }
+        None
+    }
+
+    fn server_base_is_btc_like_delphi(&self) -> bool {
+        self.server_base_currency_code == Some(BaseCurrency::BTC.to_byte())
+            || self
+                .server_base_currency_name
+                .as_deref()
+                .is_some_and(|name| same_text_ascii(name, "BTC"))
     }
 
     /// Применить ответ `emk_UpdateMarketsList`.
@@ -311,6 +530,7 @@ impl MarketsState {
                 self.apply_one_corr_price_update(c);
             }
         }
+        self.update_currency_prices_like_delphi();
         MarketsEvent::PricesUpdated {
             count,
             included_funding: resp.send_funding,
@@ -357,6 +577,7 @@ impl MarketsState {
             }
         }
 
+        self.update_currency_prices_like_delphi();
         Some(MarketsEvent::PricesUpdated {
             count,
             included_funding: send_funding,
@@ -512,6 +733,22 @@ impl MarketsState {
             .and_then(|&i| self.prices.get(i))
     }
 
+    /// Delphi `TMarket.refBTCMarket` analogue for a known market.
+    pub fn ref_btc_corr_market(&self, market_name: &str) -> Option<&CorrMarket> {
+        let corr_name = self.ref_btc_corr_markets.get(market_name)?;
+        self.corr_markets.get(corr_name)
+    }
+
+    /// Delphi `BaseCurDict` entry for a base currency.
+    pub fn base_currency_price(&self, base_currency: &str) -> Option<&BaseCurrencyPrice> {
+        self.base_currency_prices.get(base_currency).or_else(|| {
+            self.base_currency_prices
+                .iter()
+                .find(|(key, _)| same_text_ascii(key, base_currency))
+                .map(|(_, value)| value)
+        })
+    }
+
     /// Теги маркета (пустые если не было `apply_token_tags`).
     pub fn tags(&self, market_name: &str) -> TokenTags {
         self.token_tags
@@ -656,6 +893,41 @@ fn market_price_from_market(m: &Market) -> MarketPrice {
     }
 }
 
+fn same_text_ascii(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn norm_text_ascii(value: &str) -> String {
+    value.to_ascii_uppercase()
+}
+
+fn replace_text_ascii_case_insensitive(input: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let needle = from.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0usize;
+    let mut i = 0usize;
+    while i + needle.len() <= bytes.len() {
+        let matched = bytes[i..i + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b));
+        if matched && input.is_char_boundary(i) && input.is_char_boundary(i + needle.len()) {
+            out.push_str(&input[last..i]);
+            out.push_str(to);
+            i += needle.len();
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&input[last..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +981,14 @@ mod tests {
             bn_only_isolated: false,
             futures_type: BaseCurrency::USDT,
         }
+    }
+
+    fn mk_pair_market(name: &str, bn_currency: &str, base_currency: &str, idx: u16) -> Market {
+        let mut market = mk_market(name, idx);
+        market.market_currency = bn_currency.to_string();
+        market.bn_market_currency = bn_currency.to_string();
+        market.base_currency = base_currency.to_string();
+        market
     }
 
     fn push_str(out: &mut Vec<u8>, s: &str) {
@@ -1384,6 +1664,117 @@ mod tests {
         );
         assert_eq!(cm.bn_tick_size, 0.00000002);
         assert_eq!(cm.base_currency_name, "USDT");
+    }
+
+    #[test]
+    fn check_corr_markets_sets_ref_btc_market_like_delphi() {
+        let mut st = MarketsState::new();
+        st.set_server_base_currency(Some("USDT"), Some(BaseCurrency::USDT.to_byte()));
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_pair_market("DOGEUSDT", "DOGE", "USDT", 0)],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.00000001,
+                base_currency_name: "BTC".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            st.ref_btc_corr_market("DOGEUSDT")
+                .map(|cm| cm.bn_market_name.as_str()),
+            Some("DOGEBTC")
+        );
+    }
+
+    #[test]
+    fn check_corr_markets_skips_btc_base_like_delphi() {
+        let mut st = MarketsState::new();
+        st.set_server_base_currency(Some("BTC"), Some(BaseCurrency::BTC.to_byte()));
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_pair_market("DOGEUSDT", "DOGE", "USDT", 0)],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.00000001,
+                base_currency_name: "BTC".to_string(),
+            }],
+        });
+
+        assert!(
+            st.ref_btc_corr_market("DOGEUSDT").is_none(),
+            "Delphi CheckCorrMarkets does nothing when cfg.BaseCurrency = BC_BTC"
+        );
+    }
+
+    #[test]
+    fn update_currency_prices_uses_usdt_market_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_pair_market("BTCUSDT", "BTC", "USDT", 0)],
+            corr_markets: vec![CorrMarket {
+                bn_market_name: "DOGEBTC".to_string(),
+                bn_market_currency: "DOGE".to_string(),
+                bn_tick_size: 0.00000001,
+                base_currency_name: "BTC".to_string(),
+            }],
+        });
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 49_999.0,
+                ask: 50_000.0,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 0.0,
+                mark_price_found: false,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+
+        let btc = st.base_currency_price("BTC").unwrap();
+        assert_eq!(btc.usdt_market.as_deref(), Some("BTCUSDT"));
+        assert_eq!(btc.last_price, 50_000.0);
+    }
+
+    #[test]
+    fn update_currency_prices_uses_usdt_corr_market_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![],
+            corr_markets: vec![
+                CorrMarket {
+                    bn_market_name: "DOGEBTC".to_string(),
+                    bn_market_currency: "DOGE".to_string(),
+                    bn_tick_size: 0.00000001,
+                    base_currency_name: "BTC".to_string(),
+                },
+                CorrMarket {
+                    bn_market_name: "BTCUSDT".to_string(),
+                    bn_market_currency: "BTC".to_string(),
+                    bn_tick_size: 0.01,
+                    base_currency_name: "USDT".to_string(),
+                },
+            ],
+        });
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![],
+            send_corr_markets: true,
+            corr_prices: vec![CorrMarketPriceUpdate {
+                bn_market_name: "BTCUSDT".to_string(),
+                last_price: 50_000.0,
+            }],
+        });
+
+        let btc = st.base_currency_price("BTC").unwrap();
+        assert_eq!(btc.usdt_corr_market.as_deref(), Some("BTCUSDT"));
+        assert_eq!(btc.last_price, 50_000.0);
+        assert_eq!(st.base_currency_price("USDT").unwrap().last_price, 1.0);
     }
 
     #[test]

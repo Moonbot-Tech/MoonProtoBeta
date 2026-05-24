@@ -46,11 +46,20 @@ their `base_currency_name` is non-empty, matching Delphi's `If not
 BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
 correlation market update `bn_tick_size` and `base_currency_name`, but keep the
 original `bn_market_currency`, matching Delphi `AddOrSetCorrMarket`.
+After a successful list, the active state also rebuilds Delphi
+`TMarket.refBTCMarket` equivalents and `BaseCurDict` references. `refBTCMarket`
+uses the current server base currency from `BaseCheck`: for a non-BTC base,
+the library replaces that base currency text in the market name with `BTC` and
+looks up the resulting CorrMarket name. For a BTC base it does nothing, like
+Delphi `CheckCorrMarkets`.
 Correlation market price updates are
 merge-style for known correlation markets only: prices present in
 `UpdateMarketsList` overwrite their entries, unknown names are ignored like
 Delphi `GetCorrMarket(MName) = nil`, and absent known prices keep their
-previous value.
+previous value. After each successful price update, `BaseCurrencyPrice.last_price`
+is refreshed with Delphi priority: direct USDT market ask, reverse USDT market
+ask inverse, direct USDT CorrMarket price, reverse USDT CorrMarket price inverse,
+then `USDT = 1`.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
@@ -141,6 +150,8 @@ pub struct MarketsState {
     pub corr_markets: HashMap<String, CorrMarket>,
     pub prices: Vec<MarketPrice>,
     pub corr_prices: HashMap<String, f64>,
+    pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
+    pub ref_btc_corr_markets: HashMap<String, String>,
     pub token_tags: HashMap<String, TokenTags>,
     pub market_indexes: Vec<String>,
     pub indexes_synchronized: bool,
@@ -156,6 +167,17 @@ pub struct MarketPrice {
     pub funding_time: f64,
     pub mark_price: f64,
     pub mark_price_found: bool,
+}
+```
+
+```rust
+pub struct BaseCurrencyPrice {
+    pub base_currency: String,
+    pub last_price: f64,
+    pub usdt_market: Option<String>,
+    pub usdt_rev_market: Option<String>,
+    pub usdt_corr_market: Option<String>,
+    pub usdt_rev_corr_market: Option<String>,
 }
 ```
 
@@ -197,6 +219,8 @@ dispatcher.markets().market_by_index(0);
 dispatcher.markets().market_index_by_name("BTCUSDT");
 dispatcher.markets().price("BTCUSDT");
 dispatcher.markets().price_by_index(0);
+dispatcher.markets().ref_btc_corr_market("DOGEUSDT");
+dispatcher.markets().base_currency_price("BTC");
 dispatcher.markets().tags("BTCUSDT");
 dispatcher.markets().market_count();
 dispatcher.markets().corr_count();

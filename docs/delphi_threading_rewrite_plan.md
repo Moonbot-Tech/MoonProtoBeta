@@ -4764,3 +4764,34 @@ Still not done:
 
 - Continue `CheckCorrMarkets` per-market BTC-correlation reference and
   `CheckCurrencyRefMarkets` / `UpdateCurrencyPrices` parity audit.
+
+### 2026-05-24 - Phase 1 partial: CheckCorrMarkets and base currency refs
+
+Done:
+
+- Modeled the Delphi market-state post-processing that follows successful
+  `GetMarketsList` / `UpdateMarketsList`.
+- Delphi `CheckCorrMarkets` sets each market's `refBTCMarket` by replacing
+  `cfg.Currency` in `bnMarketName` with `BTC` and looking up CorrMarkets when
+  `cfg.BaseCurrency <> BC_BTC`. Rust now stores the same observable relation as
+  `MarketsState.ref_btc_corr_markets` and exposes
+  `MarketsState::ref_btc_corr_market`.
+- Delphi `AddOrSetCorrMarket` creates `BaseCurDict` entries for CorrMarket
+  base currencies. Rust now keeps `base_currency_prices`.
+- Delphi `CheckCurrencyRefMarkets` assigns direct/reverse market and CorrMarket
+  references without clearing old ones. Rust mirrors this with market names
+  instead of pointers.
+- Delphi `UpdateMarketsList` ends with `Markets.UpdateCurrencyPrices`. Rust now
+  refreshes `BaseCurrencyPrice.last_price` at the same successful-protocol
+  position using the same priority chain.
+
+Verification:
+
+- Added regression coverage for `refBTCMarket` derivation, BTC-base skip, direct
+  USDT market base price, and CorrMarket fallback base price.
+
+Still not done:
+
+- Continue heavier `NewMarkets` listing-strategy follow-ups and any remaining
+  `UpdateMarketsList` internal-market-field parity that is relevant to active
+  library public state.
