@@ -2329,9 +2329,6 @@ struct ProtocolCore<'client> {
     client: &'client mut Client,
 }
 
-#[cfg(test)]
-type WriterRuntime<'client> = ProtocolCore<'client>;
-
 impl ProtocolCore<'_> {
     fn run(&mut self, duration: Duration, mode: &mut RunMode<'_>) {
         let run_start = Instant::now();
@@ -9954,7 +9951,7 @@ mod api_pending_dispatch_tests {
             }),
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(mode_event, 123, &mut mode);
@@ -9990,7 +9987,7 @@ mod api_pending_dispatch_tests {
             active_actions_buf: Vec::new(),
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(msg, 123, &mut mode);
@@ -10073,14 +10070,14 @@ mod api_pending_dispatch_tests {
                         .lock()
                         .unwrap()
                         .extend(messages.iter().cloned());
-                    WriterRuntime {
+                    ProtocolCore {
                         client: &mut client,
                     }
                     .drain_reader_decoded(9_999, &mut mode);
                 } else {
                     for msg in messages {
                         client.pending_reader_decoded.lock().unwrap().push(msg);
-                        WriterRuntime {
+                        ProtocolCore {
                             client: &mut client,
                         }
                         .drain_reader_decoded(9_999, &mut mode);
@@ -10243,7 +10240,7 @@ mod api_pending_dispatch_tests {
                 calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }),
         };
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(msg, 123, &mut callback_mode);
@@ -10270,7 +10267,7 @@ mod api_pending_dispatch_tests {
             payload_buf: Vec::new(),
             active_actions_buf: Vec::new(),
         };
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(msg, 123, &mut dispatcher_mode);
@@ -12131,8 +12128,8 @@ mod pmtu_tests {
         }
     }
 
-    fn writer(client: &mut Client) -> WriterRuntime<'_> {
-        WriterRuntime { client }
+    fn writer(client: &mut Client) -> ProtocolCore<'_> {
+        ProtocolCore { client }
     }
 
     #[test]
@@ -12405,14 +12402,14 @@ mod pmtu_tests {
         assert!(client.send_lock.lock().unwrap().tmp_slider.has_new_data);
         assert!(!client.recvd_slider.lock().unwrap().has_new_data);
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .copy_recvd_data();
         assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
         assert!(client.recvd_slider.lock().unwrap().has_new_data);
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_regular_hl_ack();
@@ -12431,7 +12428,7 @@ mod pmtu_tests {
             .lock()
             .unwrap()
             .apply_ping_ack_bitmap(&payload);
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .copy_recvd_data();
@@ -12461,7 +12458,7 @@ mod pmtu_tests {
             ping_update: Some(direct_ping_update_for_writer(&client, &payload)),
             handshake_update: None,
         };
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(decoded, 123, &mut mode);
@@ -12506,7 +12503,7 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_sliced_send_u_key_cleanup(&[new_sliced]);
@@ -12534,7 +12531,7 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_high_send_u_key_cleanup(&[new_high]);
@@ -12578,7 +12575,7 @@ mod pmtu_tests {
             u_key: key,
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_regular_hl_ack();
@@ -12587,7 +12584,7 @@ mod pmtu_tests {
             1,
             "Delphi ApplyRegularHLAck runs before CopySendListH DeletePendingByKey"
         );
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_high_send_u_key_cleanup(&[new_high]);
@@ -13009,7 +13006,7 @@ mod pmtu_tests {
         ack[32..34].copy_from_slice(&1u16.to_le_bytes());
         client.on_new_sliced_ack(&ack);
         {
-            let mut writer = WriterRuntime {
+            let mut writer = ProtocolCore {
                 client: &mut client,
             };
             let copy_acks = writer.get_copy_acks();
@@ -13031,7 +13028,7 @@ mod pmtu_tests {
         client.sending[0].retry_count = 4;
         client.on_new_sliced_ack(&ack);
         {
-            let mut writer = WriterRuntime {
+            let mut writer = ProtocolCore {
                 client: &mut client,
             };
             let copy_acks = writer.get_copy_acks();
@@ -13077,7 +13074,7 @@ mod pmtu_tests {
 
         client.on_new_sliced_ack(&ack);
         {
-            let mut writer = WriterRuntime {
+            let mut writer = ProtocolCore {
                 client: &mut client,
             };
             let copy_acks = writer.get_copy_acks();
@@ -13109,7 +13106,7 @@ mod pmtu_tests {
         );
 
         {
-            let mut writer = WriterRuntime {
+            let mut writer = ProtocolCore {
                 client: &mut client,
             };
             let copy_acks = writer.get_copy_acks();
@@ -13137,7 +13134,7 @@ mod pmtu_tests {
         ack[32..34].copy_from_slice(&1u16.to_le_bytes());
         client.on_new_sliced_ack(&ack);
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .copy_send_ack_and_check_sening_data(200);
@@ -13151,7 +13148,7 @@ mod pmtu_tests {
             "writer tick must CopyRecvdData then ApplyRegularHLAck inside CheckSeningData"
         );
         assert!(
-            WriterRuntime {
+            ProtocolCore {
                 client: &mut client,
             }
             .get_copy_acks()
@@ -13192,7 +13189,7 @@ mod pmtu_tests {
         let mut sliced = Vec::new();
         let mut high = Vec::new();
         let mut low = Vec::new();
-        let acks = WriterRuntime {
+        let acks = ProtocolCore {
             client: &mut client,
         }
         .get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low);
@@ -13348,8 +13345,8 @@ mod active_library_helpers_tests {
         }
     }
 
-    fn writer(client: &mut Client) -> WriterRuntime<'_> {
-        WriterRuntime { client }
+    fn writer(client: &mut Client) -> ProtocolCore<'_> {
+        ProtocolCore { client }
     }
 
     #[test]
@@ -13733,8 +13730,8 @@ mod refresh_tick_tests {
         out
     }
 
-    fn writer(client: &mut Client) -> WriterRuntime<'_> {
-        WriterRuntime { client }
+    fn writer(client: &mut Client) -> ProtocolCore<'_> {
+        ProtocolCore { client }
     }
 
     #[test]
@@ -14554,7 +14551,7 @@ mod event_loop_fairness_tests {
                 ping_update: None,
                 handshake_update: None,
             });
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(777, &mut mode);
@@ -14610,7 +14607,7 @@ mod event_loop_fairness_tests {
                     ping_update: None,
                     handshake_update: None,
                 });
-            WriterRuntime {
+            ProtocolCore {
                 client: &mut client,
             }
             .drain_reader_decoded(100 + idx as i64, &mut mode);
@@ -14658,7 +14655,7 @@ mod event_loop_fairness_tests {
                 ping_update: None,
                 handshake_update: None,
             });
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(1, &mut mode);
@@ -14687,7 +14684,7 @@ mod event_loop_fairness_tests {
                 ping_update: None,
                 handshake_update: None,
             });
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(2, &mut mode);
@@ -14732,7 +14729,7 @@ mod event_loop_fairness_tests {
                 handshake_update: None,
             });
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(123, &mut mode);
@@ -14794,7 +14791,7 @@ mod event_loop_fairness_tests {
             }),
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(456, &mut mode);
@@ -15137,7 +15134,7 @@ mod service_cmd_tests {
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(111, &mut mode);
@@ -15171,7 +15168,7 @@ mod service_cmd_tests {
                 handshake_update: None,
             });
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .drain_reader_decoded(222, &mut mode);
@@ -15697,7 +15694,7 @@ mod service_cmd_tests {
         client.socket = Some(client_sock);
         client.start_inline_reader_session();
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_hello_send(100);
@@ -16081,12 +16078,12 @@ mod reconnect_timing_tests {
                     hello,
                 );
                 let now = client.now_ms();
-                WriterRuntime { client }.apply_reader_handshake_update(update, now);
+                ProtocolCore { client }.apply_reader_handshake_update(update, now);
                 true
             }
             Command::Fine => {
                 let now = client.now_ms();
-                WriterRuntime { client }
+                ProtocolCore { client }
                     .apply_reader_handshake_update(Client::fine_handshake_update(), now);
                 true
             }
@@ -16157,13 +16154,13 @@ mod reconnect_timing_tests {
             handshake_update: Some(Client::simple_handshake_update(Command::WantNewHello)),
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(decoded, 0, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_hello_send(100);
@@ -16179,7 +16176,7 @@ mod reconnect_timing_tests {
     fn early_hello_again_uses_master_key_before_whoareyou() {
         let mut client = dummy_client();
         let token_before = client.client_token;
-        let payload = WriterRuntime {
+        let payload = ProtocolCore {
             client: &mut client,
         }
         .build_hello_again_packet();
@@ -16853,14 +16850,14 @@ mod reconnect_timing_tests {
         let mut client = dummy_client();
         let token_before = client.client_token;
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_hello_send(100);
         assert_eq!(client.last_sent_hello, 100);
         assert!(client.waiting_hello);
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_offline_reconnect(350);
@@ -16883,7 +16880,7 @@ mod reconnect_timing_tests {
         client.need_connect = true;
         let token_before = client.client_token;
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_hello_send(100);
@@ -16891,7 +16888,7 @@ mod reconnect_timing_tests {
         assert!(client.waiting_hello);
         assert_eq!(client.client_token, token_before + 1);
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_offline_reconnect(350);
@@ -16926,13 +16923,13 @@ mod reconnect_timing_tests {
             handshake_update: Some(Client::simple_handshake_update(Command::NeedHelloAgain)),
         };
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .process_reader_decoded(decoded, 1000, &mut mode);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_offline_reconnect(100);
@@ -16951,7 +16948,7 @@ mod reconnect_timing_tests {
         client.need_connect = true;
         client.waiting_hello = false;
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .apply_reader_ping_update(ReaderPingUpdate {
@@ -16972,7 +16969,7 @@ mod reconnect_timing_tests {
             "Ping before AuthDone proves server liveness, not a completed Fine; connect retry must stay armed",
         );
 
-        WriterRuntime {
+        ProtocolCore {
             client: &mut client,
         }
         .check_hello_send(100);

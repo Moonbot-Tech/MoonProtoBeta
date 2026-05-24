@@ -825,9 +825,9 @@ Done:
 - `WriterRuntime::run` now delegates without behavior change to
   `writer_tick_prologue`, `ensure_socket_bound`, `drain_app_commands`,
   `wait_5ms`, and `send_maintenance_phase`.
-- `WriterRuntime` is now a compatibility alias to the first `ProtocolCore`
-  skeleton. Existing tests and callers still construct `WriterRuntime`, but the
-  owned protocol/orchestrator methods live on `ProtocolCore`.
+- At this point `WriterRuntime` was a compatibility alias to the first
+  `ProtocolCore` skeleton. The alias was removed later in Phase D5; owned
+  protocol/orchestrator methods live on `ProtocolCore`.
 
 Reason:
 
@@ -1168,6 +1168,25 @@ Checks:
 - `cargo test --lib --quiet`: 607 passed.
 - `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
   passed on prod in `21.08s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+### 2026-05-24 - Phase D5 remove `WriterRuntime` alias
+
+Done:
+
+- Removed the `WriterRuntime` compatibility type alias.
+- Unit helpers/tests now instantiate `ProtocolCore` directly when they exercise
+  send/orchestrator blocks.
+
+Reason:
+
+- After D2-D4 there is no separate writer runtime. Keeping the old type name in
+  tests made the architecture look like it still had a hidden old path.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --lib --quiet`: 607 passed.
 
 ### 2026-05-24 - FireTest quick profile
 
