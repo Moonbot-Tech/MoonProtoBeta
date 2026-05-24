@@ -749,12 +749,16 @@ Decoded timestamp red flag closed:
   the expected `TradesResend` with the old writer-tick timestamping when three
   decoded packets were drained in one writer tick.
 
-Next cross-platform gate:
+Linux cross-platform gate:
 
-- Run `cargo test --test udp_polling --quiet` on Linux VPS, not only Windows.
-  VPS paths are documented in root `AGENTS.md` (`/root/work/moonkernel` for the
-  MoonKernel checkout). This is required before treating `polling` readiness
-  behavior as proven cross-platform.
+- 2026-05-24: the same `tests/udp_polling.rs` logic passed on the documented
+  Linux VPS in a temporary crate because the VPS `/root/work/moonkernel`
+  checkout is older and does not yet contain this test target.
+- Result: Ubuntu Linux 6.8, `polling = 3.11.0`, `cargo test --test udp_polling
+  --quiet`: 1 passed.
+- Next time the VPS checkout is synchronized, run the real repo command
+  `cargo test --test udp_polling --quiet` there too. This is a repository-sync
+  gate, not a protocol-behavior blocker.
 
 ### 2026-05-24 - Phase B first skeleton split
 
@@ -776,6 +780,7 @@ Checks:
 
 - `cargo test --lib --quiet`: 598 passed.
 - `cargo test --test udp_polling --quiet`: 1 passed on Windows.
+- VPS Linux temporary-crate copy of `tests/udp_polling.rs`: 1 passed.
 - `cargo check --examples --quiet`: passed.
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `cargo test --test fire_test -- --ignored --nocapture`: passed against the
