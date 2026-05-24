@@ -72,6 +72,10 @@ pub struct MarketsState {
     /// support flag. New markets still receive the incoming value because they
     /// are inserted as whole `TMarket` objects.
     copy_max_leverage_from_markets_list: bool,
+    /// Count of markets newly added by the last successful `NewMarketFound`
+    /// list refresh. Active dispatcher consumes this to request immediate
+    /// `UpdateMarketsList`, like Delphi `Engine.NewMarkets.Count > 0`.
+    new_markets_pending_price_refresh: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +110,7 @@ impl MarketsState {
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
+        self.new_markets_pending_price_refresh = 0;
         let incoming_count = resp.markets.len();
         let corr_count = resp.corr_markets.len();
         let incoming_server_names = if allow_new_markets {
@@ -155,6 +160,9 @@ impl MarketsState {
             }
             if !allow_new_markets {
                 continue;
+            }
+            if new_market_found {
+                self.new_markets_pending_price_refresh += 1;
             }
             prices.push(market_price_from_market(&market));
             markets.push(market);
@@ -216,6 +224,7 @@ impl MarketsState {
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
+        self.new_markets_pending_price_refresh = 0;
         let mut r = EngineStreamReader::new(data);
         let count = r.read_count()?;
         let mut incoming_server_names = if allow_new_markets {
@@ -229,7 +238,9 @@ impl MarketsState {
             if allow_new_markets {
                 incoming_server_names.push(market.bn_market_name.clone());
             }
-            self.apply_one_market_from_list(market, allow_new_markets);
+            if self.apply_one_market_from_list(market, allow_new_markets) && new_market_found {
+                self.new_markets_pending_price_refresh += 1;
+            }
         }
 
         if allow_new_markets {
@@ -254,7 +265,7 @@ impl MarketsState {
         })
     }
 
-    fn apply_one_market_from_list(&mut self, market: Market, allow_new_markets: bool) {
+    fn apply_one_market_from_list(&mut self, market: Market, allow_new_markets: bool) -> bool {
         if let Some(&idx) = self.by_name.get(&market.bn_market_name) {
             merge_market_like_delphi_get_markets_list(
                 &mut self.markets[idx],
@@ -264,17 +275,18 @@ impl MarketsState {
             if let Some(price) = self.prices.get_mut(idx) {
                 price.funding_time = market.funding_time;
             }
-            return;
+            return false;
         }
 
         if !allow_new_markets {
-            return;
+            return false;
         }
 
         let idx = self.markets.len();
         self.by_name.insert(market.bn_market_name.clone(), idx);
         self.prices.push(market_price_from_market(&market));
         self.markets.push(market);
+        true
     }
 
     /// Применить ответ `emk_UpdateMarketsList`.
@@ -539,6 +551,12 @@ impl MarketsState {
 
     pub fn markets_list_refresh_needed(&self) -> bool {
         self.markets_list_refresh_needed
+    }
+
+    pub(crate) fn take_new_markets_pending_price_refresh(&mut self) -> usize {
+        let count = self.new_markets_pending_price_refresh;
+        self.new_markets_pending_price_refresh = 0;
+        count
     }
 
     pub(crate) fn set_copy_max_leverage_from_markets_list(&mut self, enabled: bool) {

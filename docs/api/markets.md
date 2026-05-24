@@ -53,7 +53,9 @@ If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
 dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
 `GetMarketsList` request automatically, throttled to roughly one request per
-30 seconds while the unknown market condition persists.
+30 seconds while the unknown market condition persists. If that listing refresh
+adds new markets, the active dispatcher immediately requests `UpdateMarketsList`
+again so the new markets receive prices like Delphi `NewMarkets.Count > 0`.
 
 `UpdateMarketsList` carries server `mIndex` values. Price updates and
 `price_by_index` resolve those indexes through the current `GetMarketsIndexes`

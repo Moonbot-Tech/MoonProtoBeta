@@ -7186,6 +7186,9 @@ impl Client {
                 crate::events::ActiveAction::RequestMarketsList => {
                     self.send_api_request(&crate::commands::engine_request::get_markets_list());
                 }
+                crate::events::ActiveAction::RequestUpdateMarketsList => {
+                    self.send_api_request(&crate::commands::engine_request::update_markets_list());
+                }
                 crate::events::ActiveAction::RequestOrderBookFull {
                     market_index,
                     book_kind,
@@ -14708,8 +14711,8 @@ mod reconnect_timing_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
     use crate::commands::market::{
-        build_markets_indexes_response, build_markets_prices_response, BaseCurrency, Market,
-        MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse,
+        build_markets_indexes_response, build_markets_list_response, build_markets_prices_response,
+        BaseCurrency, Market, MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse,
     };
     use crate::events::{Event, EventDispatcher};
 
@@ -15424,6 +15427,61 @@ mod reconnect_timing_tests {
         assert!(
             methods.contains(&(EngineMethod::GetMarketsList.to_byte())),
             "active action must enqueue emk_GetMarketsList"
+        );
+    }
+
+    #[test]
+    fn new_market_list_refresh_requests_immediate_prices_like_delphi_new_markets() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![test_market("BTCUSDT")],
+            corr_markets: vec![],
+        });
+        dispatcher.markets.markets_list_refresh_needed = true;
+
+        let list = build_markets_list_response(
+            &MarketsListResponse {
+                markets: vec![test_market("BTCUSDT"), test_market("DOGEUSDT")],
+                corr_markets: vec![],
+            },
+            2,
+        );
+        let response_payload =
+            build_engine_response_payload(0x8888, EngineMethod::GetMarketsList, &list);
+
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let ctx = crate::events::ActiveDispatchContext::from_client(&client);
+        dispatcher.dispatch_into_active_actions(
+            Command::API,
+            &response_payload,
+            client.now_ms(),
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+
+        assert!(dispatcher.markets().get("DOGEUSDT").is_some());
+        assert!(
+            actions.iter().any(|action| {
+                matches!(
+                    action,
+                    crate::events::ActiveAction::RequestUpdateMarketsList
+                )
+            }),
+            "Delphi runs UpdateMarketsList immediately when NewMarkets.Count > 0"
+        );
+        client.apply_active_actions(actions.drain(..));
+        let sent = drain_send_items(&client);
+        let methods = api_methods(&sent);
+        assert!(
+            methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),
+            "active action must enqueue emk_UpdateMarketsList"
         );
     }
 

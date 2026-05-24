@@ -4688,3 +4688,29 @@ Still not done:
 - Continue broader `GetMarketsList` post-processing parity audit for Delphi
   fields that Rust does not model directly (`ListedType`, `CheckCorrMarkets`,
   `CheckCurrencyRefMarkets`, `NewMarkets` side list).
+
+### 2026-05-24 - Phase 1 partial: NewMarkets immediate price refresh
+
+Done:
+
+- Fixed the active-lib continuation after a `NewMarketFound` listing refresh.
+- Delphi `Bworks.pas` calls `Engine.GetMarketsList()` for
+  `Engine.NewMarketFound`, then if `Engine.NewMarkets.Count > 0` immediately
+  calls `Engine.UpdateMarketsList` so newly added markets get prices.
+- Rust already requested `GetMarketsList` on an unknown indexed price row, but
+  after adding new markets it waited for the next periodic price refresh.
+- Rust now tracks how many markets were newly added by a `NewMarketFound`
+  list refresh and emits `RequestUpdateMarketsList` immediately.
+- Recorded `spec_pipeline/work/хуйня.md §X.141`.
+
+Verification:
+
+- Added an active action regression test: unknown price row requests
+  `GetMarketsList`; a successful list that adds `DOGEUSDT` queues
+  `UpdateMarketsList`.
+
+Still not done:
+
+- The heavier Delphi `NewMarkets` follow-up actions remain under audit:
+  optional full balance refresh, listing-strategy price wait, leverage/position
+  setup, and UI/log side effects.

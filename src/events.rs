@@ -193,6 +193,7 @@ fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
 
 pub(crate) enum ActiveAction {
     RequestMarketsList,
+    RequestUpdateMarketsList,
     RequestOrderBookFull {
         market_index: u16,
         book_kind: u8,
@@ -1245,6 +1246,9 @@ impl EventDispatcher {
         {
             self.last_markets_list_refresh_ms = now_ms;
             actions.push(ActiveAction::RequestMarketsList);
+        }
+        if self.markets.take_new_markets_pending_price_refresh() > 0 {
+            actions.push(ActiveAction::RequestUpdateMarketsList);
         }
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
         // Delphi `ProcessTradesStream` в конце вызывает `CheckMissingTradesPackets`;
