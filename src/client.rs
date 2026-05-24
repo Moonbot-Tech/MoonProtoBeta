@@ -8235,8 +8235,8 @@ pub struct InitConfig {
     /// Value for the post-init `TMMOrdersSubscribeCommand`.
     ///
     /// Delphi always sends this UI command after `InitDone` with
-    /// `cfg.ShowHeatMap`. `None` uses `subscribe_trades` as a fallback, then
-    /// falls back to `false`.
+    /// `cfg.ShowHeatMap`. `None` falls back to a previously queued
+    /// `ui_mm_subscribe` intent, then to `false`.
     pub mm_orders_subscribe: Option<bool>,
     /// Subscribe to all-trades with this `want_mm` value. `None` skips the
     /// all-trades subscription during init.
@@ -8829,7 +8829,6 @@ fn send_post_init_resync(
     let mm_orders = cfg
         .mm_orders_subscribe
         .or(registry_mm_orders)
-        .or(cfg.subscribe_trades)
         .unwrap_or(false);
     client.apply_mm_orders_subscribe_intent(mm_orders);
     client.send_mm_orders_subscribe_cmd(mm_orders);
@@ -9790,6 +9789,35 @@ mod api_pending_dispatch_tests {
         assert!(
             seen_balance_refresh,
             "post-init must request balance refresh"
+        );
+    }
+
+    #[test]
+    fn post_init_mm_orders_does_not_fallback_to_subscribe_trades() {
+        let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
+        let cfg = InitConfig {
+            mm_orders_subscribe: None,
+            subscribe_trades: Some(true),
+            ..Default::default()
+        };
+        let dispatcher = EventDispatcher::new();
+        let mut result = InitResult::default();
+
+        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
+
+        let mut mm_orders_value = None;
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        for item in sliced.into_iter().chain(high).chain(low) {
+            if let Some(value) = Client::outgoing_mm_orders_subscribe_intent(&item) {
+                mm_orders_value = Some(value);
+            }
+        }
+
+        assert_eq!(
+            mm_orders_value,
+            Some(false),
+            "Delphi post-init TMMOrdersSubscribeCommand uses cfg.ShowHeatMap, not SubscribeAllTrades want_mm"
         );
     }
 }

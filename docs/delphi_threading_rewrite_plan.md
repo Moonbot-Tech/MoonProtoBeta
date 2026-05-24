@@ -5003,3 +5003,26 @@ Verification:
   `BaseCheck, BaseCheck, AuthCheck` and returns final `AuthCheck` timeout.
 - Quick prod FireTest passed after the control-flow change:
   `FIRETEST_QUICK_PASS after 24.76s`, `ParseFailed=0`.
+
+### 2026-05-24 - Phase 1 partial: post-init MMOrders source
+
+Done:
+
+- Fixed post-init `TMMOrdersSubscribeCommand` source value.
+- Delphi `TCryptoPumpTool.NewData` sends
+  `TMMOrdersSubscribeCommand.Create(cfg.ShowHeatMap)`.
+- Delphi `TMoonProtoEngine.SubscribeAllTrades` separately sends
+  `Strats.HasActivityStrat or cfg.ShowHeatMap`.
+- Rust no longer falls back from `InitConfig::mm_orders_subscribe` to
+  `subscribe_trades` for the UI command. It uses explicit
+  `mm_orders_subscribe`, then a queued `ui_mm_subscribe` intent, then `false`.
+
+Verification:
+
+- Added unit coverage that `subscribe_trades=Some(true)` with no MMOrders/heatmap
+  intent still sends post-init `TMMOrdersSubscribeCommand(false)`.
+- `cargo fmt --all --check`, `cargo test --lib --quiet` (`649 passed`), and
+  `cargo check --examples --quiet` passed.
+- Quick prod FireTest passed after the post-init source fix:
+  `FIRETEST_QUICK_PASS after 21.01s`, `ParseFailed=0`; log observed the
+  post-init MMOrders subscription command independently from all-trades.

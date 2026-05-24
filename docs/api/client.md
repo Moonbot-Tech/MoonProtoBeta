@@ -286,7 +286,11 @@ sends `TStratSnapshotRequest`, the dispatcher replies from the same current
 local strategy list; an empty list is a valid non-empty serializer payload.
 `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
-subscription value independent from `subscribe_trades`.
+subscription value. If it is `None`, a previously queued `ui_mm_subscribe`
+intent is used; otherwise the post-init UI command sends `false`. It never
+falls back to `subscribe_trades`, because Delphi uses `cfg.ShowHeatMap` for
+`TMMOrdersSubscribeCommand` and uses a separate
+`Strats.HasActivityStrat or cfg.ShowHeatMap` value for `SubscribeAllTrades`.
 
 Typed outgoing domain helpers use the same Init gate. Before Init:
 `subscribe_*` / `unsubscribe_*` record the latest registry intent but do not put
