@@ -171,6 +171,7 @@ const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:57
 const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
 const DELPHI_BASE_CHECK_UPDATE_RETRIES: usize = 10; // MoonProtoEngine.pas:586
 const DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS: u64 = 2_000; // MoonProtoEngine.pas:589
+const DELPHI_INIT_AUTH_RETRY_PAUSE_MS: u64 = 200; // Unit1.pas:5064-5068
 const RECONNECT_WAITING_MS: i64 = 7000; // MoonProtoUDPClient.pas:88
 const RECONNECT_THROTTLE_MS: i64 = 15000; // MoonProtoUDPClient.pas:89
 const OFFLINE_BASE_MS: i64 = 2300; // MoonProtoUDPClient.pas:772
@@ -8672,10 +8673,11 @@ pub fn run_init_sequence(
     ));
     let mut result = InitResult::default();
 
-    // === 1. BaseCheck === критический шаг.
+    // === 1. BaseCheck/AuthCheck === Delphi InitInt first auth block.
     // При успехе — парсим server identity и сохраняем в Client.server_info
     // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
-    let base_status = run_base_check_delphi(
+    let auth_block_errors_before = result.errors.len();
+    let mut base_status = run_base_check_delphi(
         client,
         dispatcher,
         &mut result,
@@ -8684,15 +8686,33 @@ pub fn run_init_sequence(
         Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS),
     )?;
 
-    // === 2. AuthCheck === критический шаг
-    let auth_status = if base_status.is_ok() {
+    // === 2. AuthCheck ===
+    let mut auth_status = if base_status.is_ok() {
         run_auth_check_once(client, dispatcher, &mut result, timeout)?
     } else {
         CriticalInitStatus::Skipped
     };
 
-    if let Some(err) = base_status.final_error("BaseCheck") {
-        return Err(err);
+    // Delphi `TCryptoPumpTool.InitInt`: if either BaseCheck or AuthCheck failed,
+    // sleep 200ms, call BaseCheck once more, then assign Result from AuthCheck.
+    // The second BaseCheck still refreshes local ServerInfo if it succeeds, but
+    // the retry branch's final gate is the second AuthCheck.
+    let used_init_auth_retry = !base_status.is_ok() || !auth_status.is_ok();
+    if used_init_auth_retry {
+        client.run_with_dispatcher_queued(
+            Duration::from_millis(DELPHI_INIT_AUTH_RETRY_PAUSE_MS),
+            dispatcher,
+        );
+        base_status = run_base_check_once(client, dispatcher, &mut result, timeout)?;
+        auth_status = run_auth_check_once(client, dispatcher, &mut result, timeout)?;
+    }
+
+    if !used_init_auth_retry {
+        if let Some(err) = base_status.final_error("BaseCheck") {
+            return Err(err);
+        }
+    } else if auth_status.is_ok() {
+        result.errors.truncate(auth_block_errors_before);
     }
     if let Some(err) = auth_status.final_error("AuthCheck") {
         return Err(err);
@@ -9021,6 +9041,17 @@ mod api_pending_dispatch_tests {
         count
     }
 
+    fn drain_api_methods(client: &Client) -> Vec<u8> {
+        let mut out = Vec::new();
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        for item in sliced.into_iter().chain(high).chain(low) {
+            if item.cmd == Command::API.to_byte() && item.data.len() >= 12 {
+                out.push(item.data[11]);
+            }
+        }
+        out
+    }
+
     #[test]
     fn server_update_ui_commands_mark_delphi_base_check_flag() {
         let mut client = Client::new(dummy_cfg());
@@ -9080,6 +9111,36 @@ mod api_pending_dispatch_tests {
         assert_eq!(
             drain_base_check_sends(&mut client),
             1 + DELPHI_BASE_CHECK_UPDATE_RETRIES
+        );
+    }
+
+    #[test]
+    fn init_base_auth_failure_uses_delphi_retry_branch() {
+        let mut client = Client::new(dummy_cfg());
+        client.authorized = true;
+        client.connected = true;
+        client.need_connect = false;
+        let mut dispatcher = EventDispatcher::new();
+
+        let err = run_init_sequence(
+            &mut client,
+            &mut dispatcher,
+            InitConfig {
+                step_timeout: Some(Duration::ZERO),
+                ..Default::default()
+            },
+        )
+        .expect_err("zero-timeout live requests must fail");
+
+        assert!(matches!(err, InitError::CriticalStepTimedOut("AuthCheck")));
+        assert_eq!(
+            drain_api_methods(&client),
+            vec![
+                EngineMethod::BaseCheck.to_byte(),
+                EngineMethod::BaseCheck.to_byte(),
+                EngineMethod::AuthCheck.to_byte(),
+            ],
+            "Delphi InitInt retry branch is Sleep(200); BaseCheck; AuthCheck"
         );
     }
 

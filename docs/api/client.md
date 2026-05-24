@@ -260,6 +260,11 @@ payload is malformed, `auth_check_ok` remains true, `auth_info` stays `None`,
 and `InitResult::errors` receives a non-fatal parse note, matching Delphi's
 `AuthCheck parse` log path.
 
+If the first BaseCheck/AuthCheck block fails, init follows Delphi `InitInt`:
+wait 200 ms, send one more BaseCheck, then send AuthCheck again. The retry
+branch's final gate is the second AuthCheck result; the second BaseCheck still
+updates `client.server_info()` if it succeeds.
+
 `BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
 request. If `client.mark_server_update_sent()` was called before init, the next
 `run_init_sequence` consumes that marker, waits up to `34 * 300ms` for

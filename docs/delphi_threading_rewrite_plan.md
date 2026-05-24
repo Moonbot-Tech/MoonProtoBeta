@@ -4982,3 +4982,24 @@ Verification:
 - Quick prod FireTest passed: `FIRETEST_QUICK_PASS after 24.48s`,
   `ParseFailed=0`, successful `AuthCheck` payload observed (`data_len=220`) and
   init continued through markets/indexes/update/streams.
+
+### 2026-05-24 - Phase 1 partial: InitInt BaseCheck/AuthCheck retry branch
+
+Done:
+
+- Fixed an init-control mismatch: Rust failed immediately after a failed
+  BaseCheck/AuthCheck block.
+- Delphi `TCryptoPumpTool.InitInt` does:
+  `BaseCheck; AuthCheck; if not resBool then Sleep(200); BaseCheck; AuthCheck`.
+  The retry branch assigns the final result from the second AuthCheck; the
+  second BaseCheck still refreshes local server identity when it succeeds.
+- Rust `run_init_sequence` now mirrors that branch. The existing
+  `ServerUpdateSent` BaseCheck retry remains inside the first BaseCheck call, as
+  in Delphi `TMoonProtoEngine.BaseCheck`.
+
+Verification:
+
+- Added unit coverage that a zero-timeout init queues
+  `BaseCheck, BaseCheck, AuthCheck` and returns final `AuthCheck` timeout.
+- Quick prod FireTest passed after the control-flow change:
+  `FIRETEST_QUICK_PASS after 24.76s`, `ParseFailed=0`.
