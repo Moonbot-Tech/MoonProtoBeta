@@ -144,8 +144,7 @@ Delphi model по факту:
 - `src/client.rs` - `SendLockState` holds `DataToSend*`,
   `incoming_sliced_acks`, and `TmpSlider`; production receive now calls
   `client_new_data` directly after decode. There is no production or test-owned
-  pending decoded queue in `Client`; `ReaderDecodedMsg` remains only as a
-  `cfg(test)` direct helper for receive-effect unit proofs.
+  pending decoded queue in `Client`, and no `ReaderDecodedMsg` test bridge.
 - `src/client.rs` - `ProtocolCore::run` owns UDP receive, decoded delivery,
   `copy_send_ack_and_check_sening_data`, and send/maintenance in one caller
   thread.
@@ -181,9 +180,8 @@ Delphi model по факту:
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
 
-Оставшийся test helper: `ReaderDecodedMsg` существует только под `cfg(test)` для
-unit/internal injected cases. Production `DataReadInt` и run-loop tests уже не
-делают pack -> queue -> unpack перед `client_new_data`.
+Decoded bridge is gone: production `DataReadInt`, unit tests, and run-loop tests
+no longer do pack -> queue -> unpack before `client_new_data`.
 
 ## Главные расхождения, которые надо убрать архитектурно
 
@@ -201,7 +199,8 @@ complete datagram идёт в `DataReadInt` path, а затем напрямую
 receive-owned `OnNewData`/active dispatch без зависимости от main-loop wake
 budgeting. Следующий cleanup: убрать сам `ReaderDecodedMsg` bridge из
 test-only scaffolding, если это можно сделать без потери тестовой
-доказуемости. Test-owned `pending_reader_decoded` queue уже удалена.
+доказуемости. Test-owned `pending_reader_decoded` queue and `ReaderDecodedMsg`
+уже удалены.
 
 ### 2. SlicedACK не должен применяться в reader
 
@@ -1285,12 +1284,36 @@ Observed quick CPU:
 - `active_dispatch avg/max = 258us / 19331us`, `>1ms = 2`, `>5ms = 1`.
 - `app_enqueue avg/max = 931us / 2092us`, `>1ms = 69`, `>5ms = 0`.
 
-Remaining:
+Remaining at this checkpoint:
 
 - `ReaderDecodedMsg` and `reader_decode_data_packets` still exist under
   `cfg(test)` as direct proof helpers. Next cleanup is to replace them with
   smaller direct helpers around `data_read_inline` / `client_new_data`, if this
-  can be done without losing unit proof coverage.
+  can be done without losing unit proof coverage. Closed by Phase D9 below.
+
+### 2026-05-24 - Phase D9 removed decoded test container
+
+Done:
+
+- Removed `ReaderDecodedMsg`, `reader_decode_data_packets`, and
+  `ProtocolCore::process_reader_decoded`.
+- Replaced decoded-container tests with direct calls to the real production
+  blocks: `data_read_int_inline`, `data_read_inline`, `client_new_data`,
+  `apply_reader_ping_update`, and `apply_reader_handshake_update`.
+- Removed one obsolete stale queued-decoded epoch test. That queued decoded
+  output model no longer exists; stale reader epoch protection for shared
+  protocol state remains covered by the inline reader/service tests.
+
+Reason:
+
+- After D8 there was no queue left, but the old decoded message type still made
+  tests look like a separate Rust-only delivery layer. This step removes that
+  layer completely.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
 
 ### 2026-05-24 - FireTest quick profile
 

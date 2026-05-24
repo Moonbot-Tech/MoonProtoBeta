@@ -549,22 +549,6 @@ impl SendLockState {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ReaderDecodedMsg {
-    cmd: u8,
-    payload: Option<Vec<u8>>,
-    api_pending_consumed: bool,
-    candles_chunk_consumed: bool,
-    recv_bytes: u64,
-    timestamp_ms: i64,
-    epoch: u32,
-    apply_recv_effects: bool,
-    sliced_stats: Option<ReaderSlicedStats>,
-    ping_update: Option<ReaderPingUpdate>,
-    handshake_update: Option<ReaderHandshakeUpdate>,
-}
-
 #[derive(Clone)]
 pub(crate) struct ReaderSlicedStats {
     datagram_num: u16,
@@ -2988,51 +2972,6 @@ impl ProtocolCore<'_> {
         }
     }
 
-    #[cfg(test)]
-    fn process_reader_decoded(
-        &mut self,
-        msg: ReaderDecodedMsg,
-        _cur_tm: i64,
-        mode: &mut RunMode<'_>,
-    ) {
-        self.client.sync_transport_state_from_reader();
-        if msg.epoch != self.client.current_reader_epoch {
-            if self.client.should_log("stale_reader_decoded_epoch", 5000) {
-                warn!(target: "moonproto::client",
-                    "dropping decoded reader data from old reader epoch (msg.epoch={} current={})",
-                    msg.epoch, self.client.current_reader_epoch);
-            }
-            return;
-        }
-
-        if msg.apply_recv_effects {
-            self.apply_recv_side_effects(msg.recv_bytes, msg.timestamp_ms);
-        }
-        if let Some(stats) = msg.sliced_stats {
-            self.apply_reader_sliced_stats(stats);
-        }
-        if let Some(update) = msg.ping_update {
-            self.apply_reader_ping_update(update);
-        }
-        if let Some(update) = msg.handshake_update {
-            self.apply_reader_handshake_update(update, msg.timestamp_ms);
-        }
-        if let Some(payload) = msg.payload {
-            // Delphi `OnNewData` runs immediately from the UDP receive stack, so
-            // domain handlers observe the packet processing time, not the next
-            // writer tick time. Keep the receive timestamp for gap/retry
-            // timers while `cur_tm` remains the writer-loop maintenance time.
-            self.client_new_data(
-                msg.cmd,
-                payload,
-                msg.api_pending_consumed,
-                msg.candles_chunk_consumed,
-                msg.timestamp_ms,
-                mode,
-            );
-        }
-    }
-
     fn apply_reader_sliced_stats(&mut self, stats: ReaderSlicedStats) {
         let dup_pct = stats.dup_count as f64 / stats.blocks_count.max(1) as f64 * 100.0;
         if self.client.avg_dup_count == 0.0 {
@@ -4472,27 +4411,6 @@ impl ReaderTransportState {
 
     fn is_active_reader(&self, epoch: u32) -> bool {
         self.active_reader_epoch == epoch
-    }
-
-    #[cfg(test)]
-    fn apply_recv_side_effects(
-        &mut self,
-        reader_epoch: u32,
-        recv_bytes: u64,
-        timestamp_ms: i64,
-    ) -> bool {
-        if !self.is_active_reader(reader_epoch) {
-            return false;
-        }
-        self.connected = true;
-        if self.auth_status == AuthStatus::Base {
-            self.auth_status = AuthStatus::Connected;
-        }
-        self.total_recv = self.total_recv.wrapping_add(recv_bytes);
-        self.recv_bps_pending = self.recv_bps_pending.wrapping_add(recv_bytes);
-        self.last_online = timestamp_ms;
-        self.bump();
-        true
     }
 
     fn reset_protocol_session(&mut self) {
@@ -8230,95 +8148,6 @@ impl Client {
         Self::handle_candles_chunk_in_map(pending_candles, &resp, now_ms)
     }
 
-    #[cfg(test)]
-    fn reader_decode_data_packets(
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
-        api_pending: Option<&ApiPending>,
-        pending_candles: Option<&Mutex<HashMap<u64, PartialCandles>>>,
-        raw_cmd: u8,
-        payload: &[u8],
-        recv_bytes: u64,
-        timestamp_ms: i64,
-        epoch: u32,
-        apply_recv_effects_first: bool,
-    ) -> Vec<ReaderDecodedMsg> {
-        let mut out = Vec::new();
-        let mut push_decoded = |raw_cmd: u8, data: &[u8]| {
-            let apply_recv_effects = apply_recv_effects_first && out.is_empty();
-            let decoded =
-                Self::decode_data_read_int_payload_shared(reader_protocol, epoch, raw_cmd, data);
-            let (cmd, payload) = decoded
-                .map(|(cmd, payload)| (cmd, Some(payload)))
-                .unwrap_or((raw_cmd, None));
-            let api_pending_consumed =
-                payload.as_deref().is_some_and(|payload| match api_pending {
-                    Some(api_pending) => {
-                        Self::dispatch_api_pending_from_reader(api_pending, cmd, payload)
-                    }
-                    None => false,
-                });
-            let candles_chunk_consumed =
-                payload
-                    .as_deref()
-                    .is_some_and(|payload| match pending_candles {
-                        Some(pending_candles) => Self::dispatch_candles_chunk_from_reader(
-                            pending_candles,
-                            cmd,
-                            payload,
-                            timestamp_ms,
-                        ),
-                        None => false,
-                    });
-            out.push(ReaderDecodedMsg {
-                cmd,
-                payload,
-                api_pending_consumed,
-                candles_chunk_consumed,
-                recv_bytes,
-                timestamp_ms,
-                epoch,
-                apply_recv_effects,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            });
-        };
-
-        if Command::from_byte(raw_cmd) == Command::Grouped {
-            let mut pos = 0;
-            while pos + 3 <= payload.len() {
-                let sub_cmd = payload[pos];
-                pos += 1;
-                let sz = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
-                pos += 2;
-                if pos + sz > payload.len() {
-                    break;
-                }
-                push_decoded(sub_cmd, &payload[pos..pos + sz]);
-                pos += sz;
-            }
-            if out.is_empty() {
-                out.push(ReaderDecodedMsg {
-                    cmd: raw_cmd,
-                    payload: None,
-                    api_pending_consumed: false,
-                    candles_chunk_consumed: false,
-                    recv_bytes,
-                    timestamp_ms,
-                    epoch,
-                    apply_recv_effects: apply_recv_effects_first,
-                    sliced_stats: None,
-                    ping_update: None,
-                    handshake_update: None,
-                });
-            }
-        } else {
-            push_decoded(raw_cmd, payload);
-        }
-
-        out
-    }
-
     fn client_new_data_decoded(
         &mut self,
         cmd: u8,
@@ -9892,28 +9721,18 @@ mod api_pending_dispatch_tests {
 
     #[test]
     fn reader_decoded_api_response_reaches_pending_receiver_before_run_loop() {
-        let client = Client::new(dummy_cfg());
+        let mut client = Client::new(dummy_cfg());
         let request_uid = 0x7766_5544_3322_1100;
         let rx = client.api_pending.register(request_uid);
         let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(|_, _| panic!("pending response must not be duplicated")),
+        };
 
-        let decoded = Client::reader_decode_data_packets(
-            &client.reader_protocol,
-            Some(&client.api_pending),
-            None,
-            Command::API as u8,
-            &payload,
-            64,
-            123,
-            client.current_reader_epoch,
-            true,
-        );
-
-        assert_eq!(decoded.len(), 1);
-        assert!(
-            decoded[0].api_pending_consumed,
-            "receive-side DataReadInt should deliver registered Engine API receiver before run loop"
-        );
+        ProtocolCore {
+            client: &mut client,
+        }
+        .data_read_int_inline(Command::API as u8, &payload, 64, 123, true, None, &mut mode);
         let resp = rx
             .try_recv()
             .expect("receiver must be signalled by receive-side API dispatch");
@@ -9927,19 +9746,6 @@ mod api_pending_dispatch_tests {
         let payload = build_engine_response_payload(0x55, EngineMethod::BaseCheck, &[]);
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_for_cb = calls.clone();
-        let mode_event = ReaderDecodedMsg {
-            cmd: Command::API as u8,
-            payload: Some(payload),
-            api_pending_consumed: true,
-            candles_chunk_consumed: false,
-            recv_bytes: 64,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: None,
-        };
         let mut mode = RunMode::Callback {
             on_data: Box::new(move |_cmd, _payload| {
                 calls_for_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -9949,7 +9755,7 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(mode_event, 123, &mut mode);
+        .client_new_data(Command::API as u8, payload, true, false, 123, &mut mode);
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
@@ -9960,19 +9766,6 @@ mod api_pending_dispatch_tests {
         client.authorized = true;
         client.auth_status = AuthStatus::AuthDone;
         let payload = build_engine_response_payload(0x66, EngineMethod::AuthCheck, &[]);
-        let msg = ReaderDecodedMsg {
-            cmd: Command::API as u8,
-            payload: Some(payload),
-            api_pending_consumed: true,
-            candles_chunk_consumed: false,
-            recv_bytes: 64,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: None,
-        };
         let mut dispatcher = EventDispatcher::new();
         let mut mode = RunMode::Dispatcher {
             dispatcher: &mut dispatcher,
@@ -9985,7 +9778,7 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(msg, 123, &mut mode);
+        .client_new_data(Command::API as u8, payload, true, false, 123, &mut mode);
 
         let queued = dispatcher.take_queued_events();
         assert!(queued.iter().any(|event| matches!(
@@ -10015,24 +9808,8 @@ mod api_pending_dispatch_tests {
             payload
         }
 
-        fn decoded_trades_msg(
-            client: &Client,
-            packet_num: u16,
-            timestamp_ms: i64,
-        ) -> ReaderDecodedMsg {
-            ReaderDecodedMsg {
-                cmd: Command::TradesStream as u8,
-                payload: Some(minimal_trades_payload(packet_num)),
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 64,
-                timestamp_ms,
-                epoch: client.current_reader_epoch,
-                apply_recv_effects: true,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            }
+        fn trades_packet(packet_num: u16, timestamp_ms: i64) -> (Vec<u8>, i64) {
+            (minimal_trades_payload(packet_num), timestamp_ms)
         }
 
         fn run_sequence(batch: bool) -> Summary {
@@ -10046,9 +9823,9 @@ mod api_pending_dispatch_tests {
             let mut dispatcher = EventDispatcher::new();
             dispatcher.markets.indexes_synchronized = true;
             let messages = [
-                decoded_trades_msg(&client, 100, 1_000),
-                decoded_trades_msg(&client, 105, 1_010),
-                decoded_trades_msg(&client, 106, 1_500),
+                trades_packet(100, 1_000),
+                trades_packet(105, 1_010),
+                trades_packet(106, 1_500),
             ];
 
             {
@@ -10060,18 +9837,34 @@ mod api_pending_dispatch_tests {
                     active_actions_buf: Vec::new(),
                 };
                 if batch {
-                    for msg in messages.iter().cloned() {
+                    for (payload, timestamp_ms) in messages.iter() {
                         ProtocolCore {
                             client: &mut client,
                         }
-                        .process_reader_decoded(msg, 9_999, &mut mode);
+                        .data_read_int_inline(
+                            Command::TradesStream as u8,
+                            payload,
+                            64,
+                            *timestamp_ms,
+                            true,
+                            None,
+                            &mut mode,
+                        );
                     }
                 } else {
-                    for msg in messages {
+                    for (payload, timestamp_ms) in messages {
                         ProtocolCore {
                             client: &mut client,
                         }
-                        .process_reader_decoded(msg, 9_999, &mut mode);
+                        .data_read_int_inline(
+                            Command::TradesStream as u8,
+                            &payload,
+                            64,
+                            timestamp_ms,
+                            true,
+                            None,
+                            &mut mode,
+                        );
                     }
                 }
             }
@@ -10157,40 +9950,23 @@ mod api_pending_dispatch_tests {
         let payload1 =
             build_engine_response_payload(uid, EngineMethod::RequestCandlesData, &chunk1);
 
-        let decoded0 = Client::reader_decode_data_packets(
-            &client.reader_protocol,
-            Some(&client.api_pending),
-            Some(&client.pending_candles),
-            Command::API as u8,
-            &payload0,
-            64,
-            10,
-            client.current_reader_epoch,
-            true,
-        );
-        assert_eq!(decoded0.len(), 1);
-        assert!(
-            decoded0[0].candles_chunk_consumed,
-            "registered candles chunk must be consumed by receive-side aggregator"
-        );
+        let mut mode = RunMode::Callback {
+            on_data: Box::new(|_, _| panic!("candles chunks must be consumed")),
+        };
+
+        ProtocolCore {
+            client: &mut client,
+        }
+        .data_read_int_inline(Command::API as u8, &payload0, 64, 10, true, None, &mut mode);
         assert!(
             rx.try_recv().is_err(),
             "first chunk stores progress but does not complete receiver"
         );
 
-        let decoded1 = Client::reader_decode_data_packets(
-            &client.reader_protocol,
-            Some(&client.api_pending),
-            Some(&client.pending_candles),
-            Command::API as u8,
-            &payload1,
-            64,
-            20,
-            client.current_reader_epoch,
-            true,
-        );
-        assert_eq!(decoded1.len(), 1);
-        assert!(decoded1[0].candles_chunk_consumed);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .data_read_int_inline(Command::API as u8, &payload1, 64, 20, true, None, &mut mode);
 
         let merged = rx
             .try_recv()
@@ -10211,19 +9987,6 @@ mod api_pending_dispatch_tests {
             EngineMethod::RequestCandlesData,
             &[0u8, 0, 1, 0, 1, 2],
         );
-        let msg = ReaderDecodedMsg {
-            cmd: Command::API as u8,
-            payload: Some(payload.clone()),
-            api_pending_consumed: false,
-            candles_chunk_consumed: true,
-            recv_bytes: 64,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: None,
-        };
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_for_cb = calls.clone();
         let mut callback_mode = RunMode::Callback {
@@ -10234,22 +9997,16 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(msg, 123, &mut callback_mode);
+        .client_new_data(
+            Command::API as u8,
+            payload.clone(),
+            false,
+            true,
+            123,
+            &mut callback_mode,
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
 
-        let msg = ReaderDecodedMsg {
-            cmd: Command::API as u8,
-            payload: Some(payload),
-            api_pending_consumed: false,
-            candles_chunk_consumed: true,
-            recv_bytes: 64,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: None,
-        };
         let mut dispatcher = EventDispatcher::new();
         let mut dispatcher_mode = RunMode::Dispatcher {
             dispatcher: &mut dispatcher,
@@ -10261,7 +10018,14 @@ mod api_pending_dispatch_tests {
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(msg, 123, &mut dispatcher_mode);
+        .client_new_data(
+            Command::API as u8,
+            payload,
+            false,
+            true,
+            123,
+            &mut dispatcher_mode,
+        );
         assert!(dispatcher.take_queued_events().is_empty());
     }
 
@@ -12160,21 +11924,17 @@ mod pmtu_tests {
                     .push((cmd, payload.to_vec()));
             }),
         };
-        let decoded = ReaderDecodedMsg {
-            cmd: Command::Ping as u8,
-            payload: Some(payload.to_vec()),
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: Some(ping_update),
-            handshake_update: None,
-        };
-
-        writer(client).process_reader_decoded(decoded, 123, &mut mode);
+        let mut writer = writer(client);
+        writer.apply_recv_side_effects(recv_bytes, 123);
+        writer.apply_reader_ping_update(ping_update);
+        writer.client_new_data(
+            Command::Ping as u8,
+            payload.to_vec(),
+            false,
+            false,
+            123,
+            &mut mode,
+        );
         drop(mode);
         Arc::try_unwrap(delivered).unwrap().into_inner().unwrap()
     }
@@ -12400,23 +12160,26 @@ mod pmtu_tests {
                     .push((cmd, payload.to_vec()));
             }),
         };
-        let decoded = ReaderDecodedMsg {
-            cmd: Command::Ping as u8,
-            payload: Some(payload.clone()),
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes: payload.len() as u64,
-            timestamp_ms: 123,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: Some(direct_ping_update_for_writer(&client, &payload)),
-            handshake_update: None,
-        };
+        let ping_update = direct_ping_update_for_writer(&client, &payload);
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(decoded, 123, &mut mode);
+        .apply_recv_side_effects(payload.len() as u64, 123);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .apply_reader_ping_update(ping_update);
+        ProtocolCore {
+            client: &mut client,
+        }
+        .client_new_data(
+            Command::Ping as u8,
+            payload.clone(),
+            false,
+            false,
+            123,
+            &mut mode,
+        );
         drop(mode);
         let delivered = Arc::try_unwrap(delivered).unwrap().into_inner().unwrap();
 
@@ -14442,26 +14205,16 @@ mod event_loop_fairness_tests {
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
-        let epoch = client.current_reader_epoch;
-
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(
-            ReaderDecodedMsg {
-                cmd: Command::OrderBook as u8,
-                payload: None,
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 1234,
-                timestamp_ms: 777,
-                epoch,
-                apply_recv_effects: true,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            },
+        .data_read_int_inline(
+            Command::OrderBook as u8,
+            &[],
+            1234,
             777,
+            true,
+            None,
             &mut mode,
         );
 
@@ -14499,25 +14252,16 @@ mod event_loop_fairness_tests {
         .into_iter()
         .enumerate()
         {
-            let epoch = client.current_reader_epoch;
             ProtocolCore {
                 client: &mut client,
             }
-            .process_reader_decoded(
-                ReaderDecodedMsg {
-                    cmd: cmd as u8,
-                    payload: Some(vec![idx as u8]),
-                    api_pending_consumed: false,
-                    candles_chunk_consumed: false,
-                    recv_bytes: 10 + idx as u64,
-                    timestamp_ms: 100 + idx as i64,
-                    epoch,
-                    apply_recv_effects: true,
-                    sliced_stats: None,
-                    ping_update: None,
-                    handshake_update: None,
-                },
+            .data_read_int_inline(
+                cmd as u8,
+                &[idx as u8],
+                10 + idx as u64,
                 100 + idx as i64,
+                true,
+                None,
                 &mut mode,
             );
         }
@@ -14546,26 +14290,16 @@ mod event_loop_fairness_tests {
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
-        let epoch = client.current_reader_epoch;
-
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(
-            ReaderDecodedMsg {
-                cmd: Command::TradesStream as u8,
-                payload: Some(vec![0xAA]),
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 1,
-                timestamp_ms: 1,
-                epoch,
-                apply_recv_effects: false,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            },
+        .data_read_int_inline(
+            Command::TradesStream as u8,
+            &[0xAA],
             1,
+            1,
+            false,
+            None,
             &mut mode,
         );
         assert_eq!(
@@ -14576,25 +14310,16 @@ mod event_loop_fairness_tests {
 
         client.subscribe_all_trades(false);
         let _ = client.take_send_queues_for_test();
-        let epoch = client.current_reader_epoch;
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(
-            ReaderDecodedMsg {
-                cmd: Command::TradesStream as u8,
-                payload: Some(vec![0xAA]),
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 1,
-                timestamp_ms: 2,
-                epoch,
-                apply_recv_effects: false,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            },
+        .data_read_int_inline(
+            Command::TradesStream as u8,
+            &[0xAA],
+            1,
             2,
+            false,
+            None,
             &mut mode,
         );
 
@@ -14615,30 +14340,20 @@ mod event_loop_fairness_tests {
                 delivered_cb.fetch_add(1, Ordering::Relaxed);
             }),
         };
-        let epoch = client.current_reader_epoch;
-
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(
-            ReaderDecodedMsg {
-                cmd: Command::UI as u8,
-                payload: Some(vec![0xAA, 0xBB]),
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 321,
-                timestamp_ms: 123,
-                epoch,
-                apply_recv_effects: true,
-                sliced_stats: Some(ReaderSlicedStats {
-                    datagram_num: 1,
-                    dup_count: 1,
-                    blocks_count: 4,
-                }),
-                ping_update: None,
-                handshake_update: None,
-            },
+        .data_read_int_inline(
+            Command::UI as u8,
+            &[0xAA, 0xBB],
+            321,
             123,
+            true,
+            Some(ReaderSlicedStats {
+                datagram_num: 1,
+                dup_count: 1,
+                blocks_count: 4,
+            }),
             &mut mode,
         );
 
@@ -14660,20 +14375,6 @@ mod event_loop_fairness_tests {
         grouped.extend_from_slice(&1u16.to_le_bytes());
         grouped.push(0xBB);
 
-        let decoded = Client::reader_decode_data_packets(
-            &client.reader_protocol,
-            None,
-            None,
-            Command::Grouped as u8,
-            &grouped,
-            77,
-            456,
-            client.current_reader_epoch,
-            true,
-        );
-        assert_eq!(decoded.len(), 2);
-        assert!(decoded[0].apply_recv_effects);
-        assert!(!decoded[1].apply_recv_effects);
         let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let delivered_cb = Arc::clone(&delivered);
         let mut mode = RunMode::Callback {
@@ -14693,12 +14394,10 @@ mod event_loop_fairness_tests {
             }),
         };
 
-        for msg in decoded {
-            ProtocolCore {
-                client: &mut client,
-            }
-            .process_reader_decoded(msg, 456, &mut mode);
+        ProtocolCore {
+            client: &mut client,
         }
+        .data_read_inline(Command::Grouped as u8, &grouped, 77, 456, true, &mut mode);
 
         assert_eq!(delivered.load(Ordering::Relaxed), 2);
         assert_eq!(client.total_recv, 77);
@@ -14968,94 +14667,6 @@ mod service_cmd_tests {
             1,
             "run loop must drain UDP data directly, without a wake FIFO"
         );
-    }
-
-    #[test]
-    fn old_reader_output_and_transport_state_are_discarded_after_new_reader_epoch() {
-        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
-        client.testing_set_domain_ready(true);
-
-        client.current_reader_epoch = 1;
-        client.publish_transport_state_from_client();
-        let old_epoch = client.current_reader_epoch;
-
-        // Simulate a socket/session replacement: the writer moves to a new
-        // receive epoch before stale decoded output is drained. Stale output
-        // must have empty machine effect for writer-owned state.
-        client.current_reader_epoch = client.current_reader_epoch.wrapping_add(1);
-        client.publish_transport_state_from_client();
-        let new_epoch = client.current_reader_epoch;
-
-        let stale_update = Client::fine_handshake_update();
-        {
-            let mut state = client.reader_transport_state.lock().unwrap();
-            state.apply_recv_side_effects(old_epoch, 777, 111);
-            state.apply_handshake_update(old_epoch, &stale_update, 111);
-        }
-        let stale_msg = ReaderDecodedMsg {
-            cmd: Command::UI as u8,
-            payload: Some(vec![0xDE]),
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes: 777,
-            timestamp_ms: 111,
-            epoch: old_epoch,
-            apply_recv_effects: true,
-            sliced_stats: Some(ReaderSlicedStats {
-                datagram_num: 2,
-                dup_count: 9,
-                blocks_count: 10,
-            }),
-            ping_update: None,
-            handshake_update: Some(stale_update),
-        };
-
-        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let delivered_cb = Arc::clone(&delivered);
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(move |_, _| {
-                delivered_cb.fetch_add(1, Ordering::Relaxed);
-            }),
-        };
-        ProtocolCore {
-            client: &mut client,
-        }
-        .process_reader_decoded(stale_msg, 111, &mut mode);
-
-        assert_eq!(delivered.load(Ordering::Relaxed), 0);
-        assert_eq!(client.total_recv, 0);
-        assert_eq!(client.last_online, 0);
-        assert_eq!(client.avg_dup_count, 0.0);
-        assert_eq!(client.auth_status, AuthStatus::Base);
-        assert!(!client.authorized);
-
-        {
-            let mut state = client.reader_transport_state.lock().unwrap();
-            state.apply_recv_side_effects(new_epoch, 5, 222);
-        }
-        let fresh_msg = ReaderDecodedMsg {
-            cmd: Command::UI as u8,
-            payload: Some(vec![0xAA]),
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes: 5,
-            timestamp_ms: 222,
-            epoch: new_epoch,
-            apply_recv_effects: false,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: None,
-        };
-
-        ProtocolCore {
-            client: &mut client,
-        }
-        .process_reader_decoded(fresh_msg, 222, &mut mode);
-
-        assert_eq!(delivered.load(Ordering::Relaxed), 1);
-        assert_eq!(client.total_recv, 5);
-        assert_eq!(client.last_online, 222);
     }
 
     #[test]
@@ -16017,27 +15628,11 @@ mod reconnect_timing_tests {
     #[test]
     fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
         let mut client = dummy_client();
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(|_, _| {}),
-        };
-        let decoded = ReaderDecodedMsg {
-            cmd: Command::WantNewHello as u8,
-            payload: None,
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes: 0,
-            timestamp_ms: 0,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: Some(Client::simple_handshake_update(Command::WantNewHello)),
-        };
 
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(decoded, 0, &mut mode);
+        .apply_reader_handshake_update(Client::simple_handshake_update(Command::WantNewHello), 0);
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         ProtocolCore {
@@ -16786,27 +16381,14 @@ mod reconnect_timing_tests {
     fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
         let mut client = dummy_client();
         install_session_key(&mut client);
-        let mut mode = RunMode::Callback {
-            on_data: Box::new(|_, _| {}),
-        };
-        let decoded = ReaderDecodedMsg {
-            cmd: Command::NeedHelloAgain as u8,
-            payload: None,
-            api_pending_consumed: false,
-            candles_chunk_consumed: false,
-            recv_bytes: 0,
-            timestamp_ms: 1000,
-            epoch: client.current_reader_epoch,
-            apply_recv_effects: true,
-            sliced_stats: None,
-            ping_update: None,
-            handshake_update: Some(Client::simple_handshake_update(Command::NeedHelloAgain)),
-        };
 
         ProtocolCore {
             client: &mut client,
         }
-        .process_reader_decoded(decoded, 1000, &mut mode);
+        .apply_reader_handshake_update(
+            Client::simple_handshake_update(Command::NeedHelloAgain),
+            1000,
+        );
 
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
         ProtocolCore {
