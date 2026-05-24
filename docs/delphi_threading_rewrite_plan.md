@@ -143,9 +143,9 @@ Delphi model по факту:
   event variants.
 - `src/client.rs` - `SendLockState` holds `DataToSend*`,
   `incoming_sliced_acks`, and `TmpSlider`; production receive now calls
-  `client_new_data` directly after decode. `pending_reader_decoded` remains only
-  under `cfg(test)` for direct unit/internal injection while the last bridge
-  scaffolding is removed.
+  `client_new_data` directly after decode. There is no production or test-owned
+  pending decoded queue in `Client`; `ReaderDecodedMsg` remains only as a
+  `cfg(test)` direct helper for receive-effect unit proofs.
 - `src/client.rs` - `ProtocolCore::run` owns UDP receive, decoded delivery,
   `copy_send_ack_and_check_sening_data`, and send/maintenance in one caller
   thread.
@@ -181,9 +181,9 @@ Delphi model по факту:
    - создаёт outgoing Sliced, применяет SlicedACK, ретраит, dispatch'ит active state;
    - API response приходит пользователю только пока этот loop крутится.
 
-Оставшийся bridge: `ReaderDecodedMsg` существует только под `cfg(test)` для
-unit/internal injected cases. Production `DataReadInt` уже не делает pack ->
-queue -> unpack перед `client_new_data`.
+Оставшийся test helper: `ReaderDecodedMsg` существует только под `cfg(test)` для
+unit/internal injected cases. Production `DataReadInt` и run-loop tests уже не
+делают pack -> queue -> unpack перед `client_new_data`.
 
 ## Главные расхождения, которые надо убрать архитектурно
 
@@ -201,7 +201,7 @@ complete datagram идёт в `DataReadInt` path, а затем напрямую
 receive-owned `OnNewData`/active dispatch без зависимости от main-loop wake
 budgeting. Следующий cleanup: убрать сам `ReaderDecodedMsg` bridge из
 test-only scaffolding, если это можно сделать без потери тестовой
-доказуемости.
+доказуемости. Test-owned `pending_reader_decoded` queue уже удалена.
 
 ### 2. SlicedACK не должен применяться в reader
 
@@ -1252,6 +1252,45 @@ Conclusion for Phase Z:
   callback execution. App enqueue also has many >1ms samples, but its max is
   much smaller. Both remain optimization targets; this commit only makes the
   red flag measurable.
+
+### 2026-05-24 - Phase D8 removed test pending decoded queue
+
+Done:
+
+- Removed `Client.pending_reader_decoded` and `ProtocolCore::drain_reader_decoded`.
+- Tests that need run-loop delivery now inject a real UDP datagram and exercise
+  the production `recv_drain_phase -> process_datagram_inline ->
+  client_new_data` path.
+- Tests that need isolated receive-effect proof call the `cfg(test)`
+  `process_reader_decoded` helper directly, without a queue stored in `Client`.
+
+Reason:
+
+- The production decoded bridge was already gone. Keeping even a test-owned
+  pending decoded queue made the code look like an old Rust-only backlog model
+  that Delphi never had.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 607 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
+  passed on prod in `22.51s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Observed quick CPU:
+
+- `reader avg/max = 575us / 32424us`, `>1ms = 71`.
+- `active_dispatch avg/max = 258us / 19331us`, `>1ms = 2`, `>5ms = 1`.
+- `app_enqueue avg/max = 931us / 2092us`, `>1ms = 69`, `>5ms = 0`.
+
+Remaining:
+
+- `ReaderDecodedMsg` and `reader_decode_data_packets` still exist under
+  `cfg(test)` as direct proof helpers. Next cleanup is to replace them with
+  smaller direct helpers around `data_read_inline` / `client_new_data`, if this
+  can be done without losing unit proof coverage.
 
 ### 2026-05-24 - FireTest quick profile
 
