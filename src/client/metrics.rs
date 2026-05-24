@@ -51,14 +51,6 @@ pub struct ProtocolMetricsSnapshot {
     pub send_phase_ns: u64,
     /// Maximum single send/maintenance phase duration, in nanoseconds.
     pub send_phase_max_ns: u64,
-    /// Current length of the internal receive-decoded bridge.
-    ///
-    /// Production receive delivers decoded payloads directly; this bridge is
-    /// not present in non-test builds and remains visible only for
-    /// unit-injected bridge cases while that scaffolding is removed.
-    pub app_queue_len: usize,
-    /// Maximum observed internal receive-decoded bridge length.
-    pub app_queue_max_len: u64,
     /// Current public event queue length when a dispatcher-backed snapshot was
     /// requested; otherwise zero.
     pub public_event_queue_len: usize,
@@ -90,7 +82,6 @@ pub(crate) struct ProtocolMetrics {
     app_enqueue_over_5ms: AtomicU64,
     send_phase_ns: AtomicU64,
     send_phase_max_ns: AtomicU64,
-    app_queue_max_len: AtomicU64,
 }
 
 impl ProtocolMetrics {
@@ -144,15 +135,7 @@ impl ProtocolMetrics {
         );
     }
 
-    pub(crate) fn record_app_queue_len(&self, len: usize) {
-        store_max(&self.app_queue_max_len, len as u64);
-    }
-
-    pub(crate) fn snapshot(
-        &self,
-        app_queue_len: usize,
-        public_event_queue_len: usize,
-    ) -> ProtocolMetricsSnapshot {
+    pub(crate) fn snapshot(&self, public_event_queue_len: usize) -> ProtocolMetricsSnapshot {
         ProtocolMetricsSnapshot {
             recv_count: self.recv_count.load(Ordering::Relaxed),
             reader_protocol_count: self.reader_protocol_count.load(Ordering::Relaxed),
@@ -178,8 +161,6 @@ impl ProtocolMetrics {
             app_enqueue_over_5ms: self.app_enqueue_over_5ms.load(Ordering::Relaxed),
             send_phase_ns: self.send_phase_ns.load(Ordering::Relaxed),
             send_phase_max_ns: self.send_phase_max_ns.load(Ordering::Relaxed),
-            app_queue_len,
-            app_queue_max_len: self.app_queue_max_len.load(Ordering::Relaxed),
             public_event_queue_len,
         }
     }

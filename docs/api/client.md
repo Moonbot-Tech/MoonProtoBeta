@@ -190,10 +190,9 @@ logs.
 
 `Client::protocol_metrics_snapshot()` returns passive protocol-loop counters:
 UDP receive count, receive-side protocol nanoseconds, writer tick nanoseconds,
-send/maintenance nanoseconds, and the internal receive-decoded bridge length.
-In the current production receive path decoded payloads are delivered directly;
-that bridge is not present in non-test builds. The metric is kept for
-test-injected bridge cases while the last scaffolding tests are removed.
+and send/maintenance nanoseconds. The old internal receive-decoded bridge is
+not part of the public metrics API because production decoded delivery is
+direct.
 
 `Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` adds the
 current `EventDispatcher` public event queue length to the same snapshot.

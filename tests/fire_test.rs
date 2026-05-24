@@ -596,7 +596,7 @@ impl Session {
             .client
             .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
         format!(
-            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us appq={} appq_max={} public_events={}",
+            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
@@ -617,8 +617,6 @@ impl Session {
             avg_us(m.writer_tick_ns, m.writer_tick_count),
             m.writer_tick_max_ns / 1_000,
             m.send_phase_max_ns / 1_000,
-            m.app_queue_len,
-            m.app_queue_max_len,
             m.public_event_queue_len
         )
     }

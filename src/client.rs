@@ -5102,12 +5102,7 @@ impl Client {
     /// receive-side protocol work and writer send/maintenance phases stay
     /// bounded while auditing Delphi machine-effect parity.
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
-        #[cfg(test)]
-        let app_queue_len = self.pending_reader_decoded.lock().unwrap().len();
-        #[cfg(not(test))]
-        let app_queue_len = 0;
-        self.protocol_metrics.record_app_queue_len(app_queue_len);
-        self.protocol_metrics.snapshot(app_queue_len, 0)
+        self.protocol_metrics.snapshot(0)
     }
 
     /// Snapshot protocol metrics and include the current dispatcher public
@@ -5116,13 +5111,8 @@ impl Client {
         &self,
         dispatcher: &crate::events::EventDispatcher,
     ) -> ProtocolMetricsSnapshot {
-        #[cfg(test)]
-        let app_queue_len = self.pending_reader_decoded.lock().unwrap().len();
-        #[cfg(not(test))]
-        let app_queue_len = 0;
-        self.protocol_metrics.record_app_queue_len(app_queue_len);
         self.protocol_metrics
-            .snapshot(app_queue_len, dispatcher.queued_event_count())
+            .snapshot(dispatcher.queued_event_count())
     }
 
     /// Установить `ServerInfo` вручную. Обычно не нужно — `run_init_sequence` делает
@@ -10378,26 +10368,8 @@ mod api_pending_dispatch_tests {
     }
 
     #[test]
-    fn protocol_metrics_snapshot_reports_queue_lengths_without_control_effects() {
+    fn protocol_metrics_snapshot_reports_public_event_queue_without_control_effects() {
         let client = Client::new(dummy_cfg());
-        client
-            .pending_reader_decoded
-            .lock()
-            .unwrap()
-            .push(ReaderDecodedMsg {
-                cmd: Command::UI as u8,
-                payload: None,
-                api_pending_consumed: false,
-                candles_chunk_consumed: false,
-                recv_bytes: 7,
-                timestamp_ms: 1000,
-                epoch: client.current_reader_epoch,
-                apply_recv_effects: false,
-                sliced_stats: None,
-                ping_update: None,
-                handshake_update: None,
-            });
-
         let mut dispatcher = EventDispatcher::new();
         dispatcher.queue_events(vec![crate::events::Event::Raw {
             cmd: Command::UI,
@@ -10406,8 +10378,6 @@ mod api_pending_dispatch_tests {
 
         let snapshot = client.protocol_metrics_snapshot_with_dispatcher(&dispatcher);
         assert_eq!(snapshot.recv_count, 0);
-        assert_eq!(snapshot.app_queue_len, 1);
-        assert_eq!(snapshot.app_queue_max_len, 1);
         assert_eq!(snapshot.public_event_queue_len, 1);
     }
 
