@@ -148,6 +148,10 @@ Delphi model по факту:
 - `src/client.rs` - `ProtocolCore::run` owns UDP receive, decoded delivery,
   `copy_send_ack_and_check_sening_data`, and send/maintenance in one caller
   thread.
+- `src/client.rs` - the old `ReaderTransportState` mirror is gone. Receive-side
+  stats, ping, handshake, reconnect flags, tokens, and keys are written
+  directly into the single `Client` owner, matching Delphi's direct field
+  mutation effect.
 - `src/client.rs` - old production `spawn_reader` / `ReaderRuntime` path is
   removed. `ProtocolCore::recv_drain_phase` accepts UDP, then
   `process_datagram_inline` handles service commands, Sliced/SlicedACK,
@@ -1314,6 +1318,42 @@ Checks:
 
 - `cargo fmt --check`: passed.
 - `cargo test --lib --quiet`: 606 passed.
+
+### 2026-05-24 - Phase D10 removed reader transport mirror
+
+Done:
+
+- Removed `ReaderTransportState`, `reader_transport_state`,
+  `reader_transport_seen_seq`, `publish_transport_state_from_client`, and
+  `sync_transport_state_from_reader`.
+- Receive-side stats, Ping updates, handshake tokens/keys/status, reconnect
+  flags, and lifecycle-visible auth state now mutate the single `Client` owner
+  directly.
+- Kept the remaining epoch-gated shared protocol pieces:
+  `ReaderProtocolState`, `SendLockState`, and `ReaderPingState`. These protect
+  MPSlider/decode cipher, SlicedACK/TmpSlider, and ping adaptive-rate fields
+  across socket/session replacement.
+
+Reason:
+
+- After the production reader thread was removed, the transport mirror no
+  longer represented Delphi. It was a leftover Rust-only shared snapshot around
+  fields that Delphi mutates directly.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --release --test fire_test -- --ignored --nocapture`
+  passed on prod in `25.54s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Observed quick CPU:
+
+- `reader avg/max = 661us / 32517us`, `>1ms = 91`.
+- `active_dispatch avg/max = 218us / 22643us`, `>1ms = 2`, `>5ms = 1`.
+- `app_enqueue avg/max = 1109us / 2322us`, `>1ms = 90`, `>5ms = 0`.
 
 ### 2026-05-24 - FireTest quick profile
 

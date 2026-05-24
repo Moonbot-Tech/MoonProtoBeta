@@ -2345,8 +2345,6 @@ impl ProtocolCore<'_> {
     }
 
     fn writer_tick_prologue(&mut self, cur_tm: i64) {
-        self.client.sync_transport_state_from_reader();
-
         // Emit lifecycle events on auth_status transitions.
         self.client.check_lifecycle_transition();
 
@@ -2716,11 +2714,6 @@ impl ProtocolCore<'_> {
             self.client.recv_slicer = slicing::SlicingReceiver::new();
             self.client.total_recv_shared.store(0, Ordering::Relaxed);
         }
-        self.client
-            .reader_transport_state
-            .lock()
-            .unwrap()
-            .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
         let _ = recv_bytes;
         self.apply_reader_handshake_update(update, timestamp_ms);
     }
@@ -2747,12 +2740,6 @@ impl ProtocolCore<'_> {
                     self.client.current_reader_epoch,
                     crate::crypto::cipher_from_key(&update.decode_key),
                 );
-            self.client
-                .reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
-
             self.send_command(Command::ImFriend, &encrypted);
             thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
             self.send_command(Command::ImFriend, &encrypted);
@@ -2772,11 +2759,6 @@ impl ProtocolCore<'_> {
         .is_some()
         {
             let update = Client::fine_handshake_update();
-            self.client
-                .reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_handshake_update(self.client.current_reader_epoch, &update, timestamp_ms);
             let _ = recv_bytes;
             self.apply_reader_handshake_update(update, timestamp_ms);
         } else {
@@ -2874,11 +2856,6 @@ impl ProtocolCore<'_> {
             self.client.total_sent.load(Ordering::Relaxed),
             total_recv_after,
         ) {
-            self.client
-                .reader_transport_state
-                .lock()
-                .unwrap()
-                .apply_ping_update(self.client.current_reader_epoch, &ping_update);
             self.send_command(Command::Ping, &response);
             self.apply_reader_ping_update(ping_update);
             self.client_new_data(
@@ -2951,7 +2928,6 @@ impl ProtocolCore<'_> {
         self.client.total_recv += recv_bytes;
         self.client.track_recv(recv_bytes, timestamp_ms);
         self.client.last_online = timestamp_ms;
-        self.client.publish_transport_state_from_client();
     }
 
     fn drain_post_receive_delivery(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
@@ -3005,7 +2981,6 @@ impl ProtocolCore<'_> {
         self.client.net_lag_ping = update.net_lag_ping;
         self.client.can_send_rate = update.can_send_rate;
         self.client.used_sliced_limit = update.used_sliced_limit;
-        self.client.publish_transport_state_from_client();
     }
 
     fn apply_reader_handshake_update(&mut self, update: ReaderHandshakeUpdate, timestamp_ms: i64) {
@@ -3069,7 +3044,6 @@ impl ProtocolCore<'_> {
             }
             _ => {}
         }
-        self.client.publish_transport_state_from_client();
     }
 
     fn client_new_data(
@@ -3332,7 +3306,6 @@ impl ProtocolCore<'_> {
             self.client.app_token,
             delphi_now(),
         );
-        self.client.publish_transport_state_from_client();
         self.send_command(Command::Hello, &payload);
     }
 
@@ -3355,7 +3328,6 @@ impl ProtocolCore<'_> {
 
     fn send_hello_again(&mut self) {
         let encrypted = self.build_hello_again_packet();
-        self.client.publish_transport_state_from_client();
         self.send_command(Command::HelloAgain, &encrypted);
     }
 
@@ -3376,7 +3348,6 @@ impl ProtocolCore<'_> {
         self.client.last_sent_hello = cur_tm;
         self.client.waiting_hello = true;
         self.client.waiting_hello_start = cur_tm;
-        self.client.publish_transport_state_from_client();
     }
 
     fn check_offline_reconnect(&mut self, cur_tm: i64) {
@@ -3402,7 +3373,6 @@ impl ProtocolCore<'_> {
         self.client.waiting_hello = true;
         self.send_hello_again();
         self.client.last_sent_hello = cur_tm;
-        self.client.publish_transport_state_from_client();
     }
 
     fn check_reconnect_timeout(&mut self, cur_tm: i64) {
@@ -3415,7 +3385,6 @@ impl ProtocolCore<'_> {
             self.client.force_disconnect = true;
             self.client.need_connect = true;
             self.client.waiting_hello = false;
-            self.client.publish_transport_state_from_client();
         }
     }
 
@@ -3426,7 +3395,6 @@ impl ProtocolCore<'_> {
             self.client.soft_reconnect = false;
             self.client.force_disconnect = true;
             self.client.need_connect = true;
-            self.client.publish_transport_state_from_client();
         }
     }
 
@@ -3442,7 +3410,6 @@ impl ProtocolCore<'_> {
         self.client.connected = false;
         self.client.authorized = false;
         self.client.force_disconnect = false;
-        self.client.publish_transport_state_from_client();
     }
 
     fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
@@ -3948,7 +3915,6 @@ impl ProtocolCore<'_> {
         if bytes_sent_at_once >= used_limit_threshold {
             client.used_sliced_limit = true;
             client.reader_ping_state.mark_used_sliced_limit();
-            client.publish_transport_state_from_client();
         }
 
         // Аудит #2: отправляем по индексу из self.sending — никаких clone.
@@ -4330,170 +4296,6 @@ impl ReaderPingState {
     }
 }
 
-#[derive(Clone)]
-struct ReaderTransportState {
-    active_reader_epoch: u32,
-    seq: u64,
-    connected: bool,
-    authorized: bool,
-    last_online: i64,
-    total_recv: u64,
-    recv_bps_pending: u64,
-    auth_status: AuthStatus,
-    need_connect: bool,
-    soft_reconnect: bool,
-    waiting_hello: bool,
-    client_token: u64,
-    server_token: u64,
-    peer_app_token: u64,
-    encode_key: MoonKey,
-    decode_key: MoonKey,
-    round_trip_delay: i64,
-    actual_pmtu: u16,
-    rs: f64,
-    overheat: u8,
-    server_time_delta: f64,
-    global_timing_orders: u16,
-    net_lag_ping: i64,
-    can_send_rate: i32,
-    used_sliced_limit: bool,
-    ping_count: u32,
-    last_sent_hello: i64,
-    waiting_hello_start: i64,
-    last_need_hello_again: i64,
-}
-
-impl ReaderTransportState {
-    fn new() -> Self {
-        Self {
-            active_reader_epoch: 0,
-            seq: 0,
-            connected: false,
-            authorized: false,
-            last_online: 0,
-            total_recv: 0,
-            recv_bps_pending: 0,
-            auth_status: AuthStatus::Base,
-            need_connect: true,
-            soft_reconnect: false,
-            waiting_hello: false,
-            client_token: 0,
-            server_token: 0,
-            peer_app_token: 0,
-            encode_key: [0; 16],
-            decode_key: [0; 16],
-            round_trip_delay: 0,
-            actual_pmtu: 508,
-            rs: 1.0,
-            overheat: 0,
-            server_time_delta: 0.0,
-            global_timing_orders: 0,
-            net_lag_ping: 0,
-            can_send_rate: 2 * 1024 * 1024,
-            used_sliced_limit: false,
-            ping_count: 0,
-            last_sent_hello: NEVER_SENT_MS,
-            waiting_hello_start: 0,
-            last_need_hello_again: i64::MIN / 2,
-        }
-    }
-
-    fn bump(&mut self) {
-        self.seq = self.seq.wrapping_add(1);
-    }
-
-    fn set_active_reader_epoch(&mut self, epoch: u32) {
-        if self.active_reader_epoch != epoch {
-            self.active_reader_epoch = epoch;
-            self.bump();
-        }
-    }
-
-    fn is_active_reader(&self, epoch: u32) -> bool {
-        self.active_reader_epoch == epoch
-    }
-
-    fn reset_protocol_session(&mut self) {
-        self.total_recv = 0;
-        self.rs = 1.0;
-        self.used_sliced_limit = false;
-        self.last_online = 0;
-        self.last_sent_hello = NEVER_SENT_MS;
-    }
-
-    fn apply_ping_update(&mut self, reader_epoch: u32, update: &ReaderPingUpdate) {
-        if !self.is_active_reader(reader_epoch) {
-            return;
-        }
-        self.ping_count = update.ping_count;
-        self.round_trip_delay = update.round_trip_delay;
-        self.actual_pmtu = update.actual_pmtu;
-        self.global_timing_orders = update.global_timing_orders;
-        self.overheat = update.overheat;
-        self.rs = update.rs;
-        if self.auth_status == AuthStatus::AuthDone {
-            self.need_connect = false;
-        }
-        self.server_time_delta = update.server_time_delta;
-        self.net_lag_ping = update.net_lag_ping;
-        self.can_send_rate = update.can_send_rate;
-        self.used_sliced_limit = update.used_sliced_limit;
-        self.bump();
-    }
-
-    fn apply_handshake_update(
-        &mut self,
-        reader_epoch: u32,
-        update: &ReaderHandshakeUpdate,
-        timestamp_ms: i64,
-    ) {
-        if !self.is_active_reader(reader_epoch) {
-            return;
-        }
-        match update.cmd {
-            Command::WrongHello => {
-                self.waiting_hello = false;
-                self.auth_status = AuthStatus::Connected;
-            }
-            Command::WantNewHello => {
-                self.waiting_hello = false;
-                self.reset_protocol_session();
-                self.auth_status = AuthStatus::Connected;
-                self.authorized = false;
-                self.need_connect = true;
-                self.soft_reconnect = false;
-            }
-            Command::NeedHelloAgain => {
-                if (timestamp_ms - self.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS
-                {
-                    self.last_need_hello_again = timestamp_ms;
-                    if !self.waiting_hello {
-                        self.waiting_hello_start = timestamp_ms;
-                    }
-                    self.waiting_hello = true;
-                    self.last_sent_hello = NEVER_SENT_MS;
-                }
-            }
-            Command::WhoAreYou => {
-                self.waiting_hello = false;
-                self.server_token = update.server_token;
-                self.peer_app_token = update.peer_app_token;
-                self.client_token = update.client_token;
-                self.encode_key = update.encode_key;
-                self.decode_key = update.decode_key;
-            }
-            Command::Fine => {
-                self.need_connect = false;
-                self.waiting_hello = false;
-                self.auth_status = AuthStatus::AuthDone;
-                self.authorized = true;
-            }
-            _ => {}
-        }
-        self.bump();
-    }
-}
-
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -4580,18 +4382,13 @@ pub struct Client {
     tmp_send_count: usize, // items in batch
     tmp_send_size: usize, // Delphi TmpSendSize accounting: sum of (payload + header + grouped item header)
 
-    // Reader-shared part of Delphi DataReadInt that must survive soft reconnect:
+    // Receive-side part of Delphi DataReadInt that must survive soft reconnect:
     // MPSlider replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider
     // lives in SendLockState so writer copies it atomically with ACK queues.
-    // Reader mutations are epoch-gated because Rust reader shutdown is async.
+    // Mutations are epoch-gated across socket/session replacement.
     reader_protocol: Arc<Mutex<ReaderProtocolState>>,
-    // Reader-owned Ping block state used to send `MPC_Ping` replies from
-    // UDPRead order before main/writer observes the packet.
+    // Ping block state used to send `MPC_Ping` replies from UDPRead order.
     reader_ping_state: Arc<ReaderPingState>,
-    // Reader-owned mirror of Delphi fields mutated directly inside UDPRead.
-    // Writer copies it back into `Client` before writer/reconnect ticks.
-    reader_transport_state: Arc<Mutex<ReaderTransportState>>,
-    reader_transport_seen_seq: u64,
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
@@ -4619,9 +4416,8 @@ pub struct Client {
     prev_auth_status: AuthStatus,
 
     /// Inline receive epoch. It is incremented when a new UDP socket/session is
-    /// created, and queued decoded records carry the epoch they were produced
-    /// under. Stale records from an already replaced socket have no machine
-    /// effect on writer-owned state.
+    /// created; epoch-gated helpers reject stale service work from an already
+    /// replaced socket/session.
     current_reader_epoch: u32,
 
     /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
@@ -4828,7 +4624,6 @@ impl Client {
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
         let reader_ping_state = Arc::new(ReaderPingState::new());
-        let reader_transport_state = Arc::new(Mutex::new(ReaderTransportState::new()));
         let total_recv_shared = Arc::new(AtomicU64::new(0));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
@@ -4910,8 +4705,6 @@ impl Client {
             tmp_send_size: 0,
             reader_protocol,
             reader_ping_state,
-            reader_transport_state,
-            reader_transport_seen_seq: 0,
             recvd_slider: Arc::new(Mutex::new(Slider::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
@@ -5180,42 +4973,6 @@ impl Client {
         }
     }
 
-    fn publish_transport_state_from_client(&mut self) {
-        let seq = {
-            let mut state = self.reader_transport_state.lock().unwrap();
-            state.connected = self.connected;
-            state.authorized = self.authorized;
-            state.last_online = self.last_online;
-            state.total_recv = self.total_recv;
-            state.auth_status = self.auth_status;
-            state.need_connect = self.need_connect;
-            state.soft_reconnect = self.soft_reconnect;
-            state.waiting_hello = self.waiting_hello;
-            state.client_token = self.client_token;
-            state.server_token = self.server_token;
-            state.peer_app_token = self.peer_app_token;
-            state.encode_key = self.encode_key;
-            state.decode_key = self.decode_key;
-            state.round_trip_delay = self.round_trip_delay;
-            state.actual_pmtu = self.actual_pmtu;
-            state.rs = self.rs;
-            state.overheat = self.overheat;
-            state.server_time_delta = self.server_time_delta;
-            state.global_timing_orders = self.global_timing_orders;
-            state.net_lag_ping = self.net_lag_ping;
-            state.can_send_rate = self.can_send_rate;
-            state.used_sliced_limit = self.used_sliced_limit;
-            state.ping_count = self.ping_count;
-            state.last_sent_hello = self.last_sent_hello;
-            state.waiting_hello_start = self.waiting_hello_start;
-            state.last_need_hello_again = self.last_need_hello_again;
-            state.set_active_reader_epoch(self.current_reader_epoch);
-            state.bump();
-            state.seq
-        };
-        self.reader_transport_seen_seq = seq;
-    }
-
     fn publish_reader_active_epoch(&self) {
         self.reader_protocol
             .lock()
@@ -5233,7 +4990,6 @@ impl Client {
         self.current_reader_epoch = self.current_reader_epoch.wrapping_add(1);
         self.recv_slicer = slicing::SlicingReceiver::new();
         self.publish_reader_active_epoch();
-        self.publish_transport_state_from_client();
         self.register_recv_poller();
     }
 
@@ -5273,63 +5029,6 @@ impl Client {
             return;
         }
         self.recv_poller = Some(poller);
-    }
-
-    fn sync_transport_state_from_reader(&mut self) {
-        let (state, recv_bps_pending) = {
-            let mut state = self.reader_transport_state.lock().unwrap();
-            let recv_bps_pending = state.recv_bps_pending;
-            state.recv_bps_pending = 0;
-            (state.clone(), recv_bps_pending)
-        };
-        if state.seq == self.reader_transport_seen_seq {
-            if recv_bps_pending != 0 {
-                self.track_recv(recv_bps_pending, state.last_online);
-            }
-            return;
-        }
-        self.reader_transport_seen_seq = state.seq;
-
-        self.connected = state.connected;
-        self.total_recv = state.total_recv;
-        self.last_online = state.last_online;
-        if recv_bps_pending != 0 {
-            self.track_recv(recv_bps_pending, state.last_online);
-        }
-        self.auth_status = state.auth_status;
-        self.authorized = state.authorized;
-        self.need_connect = state.need_connect;
-        self.soft_reconnect = state.soft_reconnect;
-        self.waiting_hello = state.waiting_hello;
-        self.client_token = state.client_token;
-        self.server_token = state.server_token;
-        let prev_app_token = self.peer_app_token;
-        self.peer_app_token = state.peer_app_token;
-        if prev_app_token != 0 && prev_app_token != state.peer_app_token {
-            self.indexes_fetch_in_flight = false;
-            self.tracked_indexes_peer_app_token = 0;
-            self.fire_lifecycle(LifecycleEvent::ServerRestart);
-        }
-        self.encode_key = state.encode_key;
-        self.decode_key = state.decode_key;
-        self.encode_cipher =
-            (self.encode_key != [0; 16]).then(|| crate::crypto::cipher_from_key(&self.encode_key));
-        self.round_trip_delay = state.round_trip_delay;
-        self.actual_pmtu = state.actual_pmtu;
-        self.global_timing_orders = state.global_timing_orders;
-        self.overheat = state.overheat;
-        self.rs = state.rs;
-        self.server_time_delta = state.server_time_delta;
-        self.server_time_delta_handle
-            .store(state.server_time_delta.to_bits(), Ordering::Relaxed);
-        set_server_time_delta_global(state.server_time_delta);
-        self.net_lag_ping = state.net_lag_ping;
-        self.can_send_rate = state.can_send_rate;
-        self.used_sliced_limit = state.used_sliced_limit;
-        self.ping_count = state.ping_count;
-        self.last_sent_hello = state.last_sent_hello;
-        self.waiting_hello_start = state.waiting_hello_start;
-        self.last_need_hello_again = state.last_need_hello_again;
     }
 
     /// Public API: queue a command for sending through the owning client loop.
@@ -7441,7 +7140,6 @@ impl Client {
         self.authorized = false;
         self.auth_status = AuthStatus::Base;
         self.set_domain_ready(false);
-        self.publish_transport_state_from_client();
     }
 
     /// Active-library entry point: run the client with an integrated
@@ -8536,7 +8234,6 @@ impl Client {
         self.recv_slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
-        self.publish_transport_state_from_client();
     }
 
     fn bind_socket(&mut self, cur_tm: i64) {
@@ -14545,10 +14242,6 @@ mod service_cmd_tests {
         assert_eq!(client.total_recv(), expected);
     }
 
-    fn reader_transport_snapshot(client: &Client) -> ReaderTransportState {
-        client.reader_transport_state.lock().unwrap().clone()
-    }
-
     fn service_ping_payload(
         trip_delay: i32,
         pmtu: u16,
@@ -14849,10 +14542,7 @@ mod service_cmd_tests {
 
         assert_eq!(ack.datagram_num, datagram_num);
         assert_eq!(ack.flags[0], 0b1010_0101);
-        assert_eq!(
-            reader_transport_snapshot(&client).total_recv,
-            packet.len() as u64
-        );
+        assert_eq!(client.total_recv, packet.len() as u64);
     }
 
     #[test]
@@ -14922,10 +14612,7 @@ mod service_cmd_tests {
             second_events,
             vec![(Command::API, vec![0xCA, 0xFE, 0xBE, 0xEF])]
         );
-        assert_eq!(
-            reader_transport_snapshot(&client).total_recv,
-            (packet.len() + packet2.len()) as u64
-        );
+        assert_eq!(client.total_recv, (packet.len() + packet2.len()) as u64);
     }
 
     #[test]
@@ -14976,10 +14663,7 @@ mod service_cmd_tests {
                 .data_size_ack_series_num,
             series
         );
-        assert_eq!(
-            reader_transport_snapshot(&client).total_recv,
-            packet.len() as u64
-        );
+        assert_eq!(client.total_recv, packet.len() as u64);
     }
 
     #[test]
@@ -15023,10 +14707,7 @@ mod service_cmd_tests {
         assert_eq!(&ack_payload[0..2], &probe_id.to_le_bytes());
         assert_eq!(ack_payload[2], probe_index);
         assert_eq!(&ack_payload[3..5], &test_size.to_le_bytes());
-        assert_eq!(
-            reader_transport_snapshot(&client).total_recv,
-            packet.len() as u64
-        );
+        assert_eq!(client.total_recv, packet.len() as u64);
     }
 
     #[test]
@@ -15050,7 +14731,6 @@ mod service_cmd_tests {
         client.auth_status = AuthStatus::AuthDone;
         client.authorized = true;
         client.need_connect = true;
-        client.publish_transport_state_from_client();
         client.socket = Some(client_sock);
         client.start_inline_reader_session();
 
@@ -15081,14 +14761,13 @@ mod service_cmd_tests {
             &mut client,
             "single-owner receive applies Ping update and drains callback in the same datagram step",
         );
-        let reader_state = reader_transport_snapshot(&client);
-        assert_eq!(reader_state.round_trip_delay, 123);
-        assert_eq!(reader_state.actual_pmtu, 8_224);
-        assert_eq!(reader_state.global_timing_orders, 456);
-        assert_eq!(reader_state.ping_count, 1);
-        assert_eq!(reader_state.total_recv, packet.len() as u64);
-        assert_eq!(reader_state.auth_status, AuthStatus::AuthDone);
-        assert!(!reader_state.need_connect);
+        assert_eq!(client.round_trip_delay, 123);
+        assert_eq!(client.actual_pmtu, 8_224);
+        assert_eq!(client.global_timing_orders, 456);
+        assert_eq!(client.ping_count, 1);
+        assert_eq!(client.total_recv, packet.len() as u64);
+        assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        assert!(!client.need_connect);
 
         assert_eq!(client.round_trip_delay_ms(), 123);
         assert_eq!(client.actual_pmtu(), 8_224);
@@ -15150,14 +14829,11 @@ mod service_cmd_tests {
         assert_eq!(im.mix_ts, token_before.wrapping_add(1));
         assert_eq!(im.app_token, app_token);
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert_eq!(reader_state.server_token, server_token);
-        assert_eq!(reader_state.peer_app_token, peer_app_token);
-        assert_eq!(reader_state.client_token, token_before.wrapping_add(1));
-        assert_eq!(reader_state.encode_key, encode_key);
-        assert_eq!(reader_state.decode_key, decode_key);
         assert_eq!(client.server_token, server_token);
         assert_eq!(client.peer_app_token, peer_app_token);
+        assert_eq!(client.client_token, token_before.wrapping_add(1));
+        assert_eq!(client.encode_key, encode_key);
+        assert_eq!(client.decode_key, decode_key);
         assert_eq!(client.client_token, token_before.wrapping_add(1));
         assert_eq!(client.encode_key, encode_key);
         assert_eq!(client.decode_key, decode_key);
@@ -15224,8 +14900,6 @@ mod service_cmd_tests {
             token_before.wrapping_add(2),
             "Delphi server requires ImFriend.MixTS > original Hello.MixTS",
         );
-        let reader_state = reader_transport_snapshot(&client);
-        assert_eq!(reader_state.client_token, token_before.wrapping_add(2));
         assert_eq!(client.client_token, token_before.wrapping_add(2));
     }
 
@@ -15254,13 +14928,10 @@ mod service_cmd_tests {
 
         pump_inline_reader(&mut client);
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert!(reader_state.authorized);
-        assert_eq!(reader_state.auth_status, AuthStatus::AuthDone);
-        assert!(!reader_state.need_connect);
-        assert!(!reader_state.waiting_hello);
         assert!(client.authorized);
         assert_eq!(client.auth_status, AuthStatus::AuthDone);
+        assert!(!client.need_connect);
+        assert!(!client.waiting_hello);
         assert!(!client.need_connect);
         assert!(!client.waiting_hello);
     }
@@ -15276,10 +14947,8 @@ mod service_cmd_tests {
 
         pump_inline_reader(&mut client);
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
-        assert!(!reader_state.waiting_hello);
         assert_eq!(client.auth_status, AuthStatus::Connected);
+        assert!(!client.waiting_hello);
     }
 
     #[test]
@@ -15299,12 +14968,11 @@ mod service_cmd_tests {
 
         pump_inline_reader(&mut client);
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert_eq!(reader_state.last_sent_hello, NEVER_SENT_MS);
-        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
-        assert!(!reader_state.authorized);
-        assert!(reader_state.need_connect);
-        assert!(!reader_state.soft_reconnect);
+        assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
+        assert_eq!(client.auth_status, AuthStatus::Connected);
+        assert!(!client.authorized);
+        assert!(client.need_connect);
+        assert!(!client.soft_reconnect);
         assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
         assert_eq!(client.total_sent(), 0);
         assert!(!client.recvd_slider.lock().unwrap().has_new_data);
@@ -15327,20 +14995,9 @@ mod service_cmd_tests {
 
         pump_inline_reader(&mut client);
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert!(reader_state.waiting_hello);
-        assert!(reader_state.waiting_hello_start >= 0);
-        assert_eq!(
-            reader_state.last_need_hello_again,
-            reader_state.waiting_hello_start
-        );
-        assert_eq!(reader_state.last_sent_hello, NEVER_SENT_MS);
         assert!(client.waiting_hello);
-        assert_eq!(client.waiting_hello_start, reader_state.waiting_hello_start);
-        assert_eq!(
-            client.last_need_hello_again,
-            reader_state.last_need_hello_again
-        );
+        assert!(client.waiting_hello_start >= 0);
+        assert_eq!(client.last_need_hello_again, client.waiting_hello_start);
         assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     }
 
@@ -15370,10 +15027,7 @@ mod service_cmd_tests {
             &mut client,
             "regular data must be delivered immediately, not left in decoded queue",
         );
-        assert_eq!(
-            reader_transport_snapshot(&client).total_recv,
-            packet.len() as u64
-        );
+        assert_eq!(client.total_recv, packet.len() as u64);
     }
 
     #[test]
@@ -15402,17 +15056,10 @@ mod service_cmd_tests {
             "Delphi ErrEmu exits after stats side effects; no protocol/user event",
         );
 
-        let reader_state = reader_transport_snapshot(&client);
-        assert!(reader_state.connected);
-        assert_eq!(reader_state.auth_status, AuthStatus::Connected);
-        assert_eq!(reader_state.total_recv, packet.len() as u64);
-        assert!(reader_state.last_online >= 0);
-
-        client.sync_transport_state_from_reader();
         assert!(client.connected);
         assert_eq!(client.auth_status, AuthStatus::Connected);
         assert_eq!(client.total_recv, packet.len() as u64);
-        assert_eq!(client.last_online, reader_state.last_online);
+        assert!(client.last_online >= 0);
     }
 
     #[test]
