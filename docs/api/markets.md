@@ -60,6 +60,10 @@ previous value. After each successful price update, `BaseCurrencyPrice.last_pric
 is refreshed with Delphi priority: direct USDT market ask, reverse USDT market
 ask inverse, direct USDT CorrMarket price, reverse USDT CorrMarket price inverse,
 then `USDT = 1`.
+For every applied market price row, `MarketPrice` also mirrors the Delphi
+post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
+`last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
+`min_lot_size = max(max(bn_step_size, bn_min_qty) * p_last, bn_min_notional)`.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
@@ -163,6 +167,10 @@ pub struct MarketsState {
 pub struct MarketPrice {
     pub bid: f64,
     pub ask: f64,
+    pub last_bid: f64,
+    pub last_ask: f64,
+    pub p_last: f64,
+    pub min_lot_size: f64,
     pub funding_rate: f64,
     pub funding_time: f64,
     pub mark_price: f64,

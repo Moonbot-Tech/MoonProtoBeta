@@ -4795,3 +4795,29 @@ Still not done:
 - Continue heavier `NewMarkets` listing-strategy follow-ups and any remaining
   `UpdateMarketsList` internal-market-field parity that is relevant to active
   library public state.
+
+### 2026-05-24 - Phase 1 partial: UpdateMarketsList price-derived fields
+
+Done:
+
+- Modeled the Delphi price-derived market fields updated by
+  `TMoonProtoEngine.UpdateMarketsList`.
+- Delphi assigns `LastBid := Bid`, `LastAsk := Ask`,
+  `pLast := (Bid + Ask) / 2`, and
+  `MinLotSize := Max(Max(bnStepSize, bnminQty) * pLast, bnMinNotional)` in the
+  same branch that applies one price row.
+- Rust `MarketPrice` now exposes `last_bid`, `last_ask`, `p_last`, and
+  `min_lot_size` and updates them in that same price-row branch.
+- Recorded `spec_pipeline/work/хуйня.md §X.145`.
+
+Verification:
+
+- Added regression coverage for the Delphi `pLast` / `MinLotSize` formula.
+
+Still not done:
+
+- `TMarket.Emulating`, `SetEmuMinPrice`, `SetEmuMaxPrice`,
+  `Markets.SetDelta500`, and `m.AddFrom` are still open because they require
+  broader trade/history state, not just `UpdateMarketsList` payload fields.
+- Continue heavier `NewMarkets` listing-strategy follow-ups and remaining
+  active-lib public-state parity.

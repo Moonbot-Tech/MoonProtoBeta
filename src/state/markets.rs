@@ -26,6 +26,14 @@ pub struct MarketPrice {
     pub bid: f64,
     /// Лучшая цена продажи (top of ask side).
     pub ask: f64,
+    /// Delphi `TMarket.LastBid`, updated from `Bid` by `UpdateMarketsList`.
+    pub last_bid: f64,
+    /// Delphi `TMarket.LastAsk`, updated from `Ask` by `UpdateMarketsList`.
+    pub last_ask: f64,
+    /// Delphi `TMarket.pLast = (Bid + Ask) / 2`.
+    pub p_last: f64,
+    /// Delphi `TMarket.MinLotSize`.
+    pub min_lot_size: f64,
     /// Funding rate (для perpetual futures), дробь — например `0.0001` = 0.01%.
     pub funding_rate: f64,
     /// Client-local Delphi `TDateTime` момента следующего funding взимания.
@@ -587,9 +595,21 @@ impl MarketsState {
 
     fn apply_one_market_price_update(&mut self, p: &MarketPriceUpdate, send_funding: bool) {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
+            let (bn_step_size, bn_min_qty, bn_min_notional) = {
+                let market = &self.markets[idx];
+                (
+                    market.bn_step_size,
+                    market.bn_min_qty,
+                    market.bn_min_notional,
+                )
+            };
             let slot = &mut self.prices[idx];
             slot.bid = p.bid;
             slot.ask = p.ask;
+            slot.last_bid = slot.bid;
+            slot.last_ask = slot.ask;
+            slot.p_last = (slot.bid + slot.ask) * 0.5;
+            slot.min_lot_size = (bn_step_size.max(bn_min_qty) * slot.p_last).max(bn_min_notional);
             if send_funding {
                 slot.funding_rate = p.funding_rate;
                 slot.funding_time = p.funding_time;
@@ -886,6 +906,10 @@ fn market_price_from_market(m: &Market) -> MarketPrice {
     MarketPrice {
         bid: 0.0,
         ask: 0.0,
+        last_bid: 0.0,
+        last_ask: 0.0,
+        p_last: 0.0,
+        min_lot_size: 0.0,
         funding_rate: m.funding_rate,
         funding_time: m.funding_time,
         mark_price: 0.0,
@@ -1363,6 +1387,44 @@ mod tests {
             "Delphi clears CurrentMarkPriceFound before reading each UpdateMarketsList batch"
         );
         assert!(st.price("ETH").unwrap().mark_price_found);
+    }
+
+    #[test]
+    fn apply_prices_updates_last_price_and_min_lot_like_delphi() {
+        let mut market = mk_market("BTCUSDT", 0);
+        market.bn_step_size = 0.01;
+        market.bn_min_qty = 0.02;
+        market.bn_min_notional = 5.0;
+
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![market],
+            corr_markets: vec![],
+        });
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 100.0,
+                ask: 110.0,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 105.0,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+
+        let price = st.price("BTCUSDT").unwrap();
+        assert_eq!(price.last_bid, 100.0);
+        assert_eq!(price.last_ask, 110.0);
+        assert_eq!(price.p_last, 105.0);
+        assert_eq!(
+            price.min_lot_size, 5.0,
+            "Delphi uses Max(Max(step,minQty) * pLast, bnMinNotional)"
+        );
     }
 
     #[test]
