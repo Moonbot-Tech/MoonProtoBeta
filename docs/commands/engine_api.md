@@ -5,6 +5,12 @@ into the server-side trading engine: exchange connectivity checks, balances,
 orders, candles, subscriptions, and related account operations. The method id is
 defined by `commands::engine_api::EngineMethod`.
 
+`EngineMethod` is a raw one-byte Delphi ordinal wrapper, not a closed Rust enum.
+Known methods are exposed as constants such as `EngineMethod::BaseCheck`; use
+`EngineMethod::from_byte`, `to_byte`, `is_known`, and `name` for raw access.
+Unknown method bytes are preserved exactly like Delphi
+`ms.Read(Method, SizeOf(Method))`; they are not mapped to `None`.
+
 ## Wire Format
 
 ### Request (C -> S)
@@ -16,7 +22,7 @@ the engine request body:
 [CmdId=2]            1 byte       request marker
 [ver=3]              2 bytes LE   command protocol version
 [UID]                8 bytes LE   request command uid
-[Method]             1 byte       EngineMethod ordinal
+[Method]             1 byte       EngineMethod ordinal, raw byte preserved
 [MarketName]         u16 + UTF-8  single-market argument, or an empty string
 [MarketNamesCount]   i32 LE       number of batch market names
 [MarketNames...]     repeated     each item is u16 length + UTF-8
@@ -40,7 +46,7 @@ response to the registered receiver.
 [ver=3]              2 bytes LE   command protocol version
 [own_UID]            8 bytes LE   response command uid
 [RequestUID]         8 bytes LE   copied from request UID
-[Method]             1 byte       EngineMethod ordinal
+[Method]             1 byte       EngineMethod ordinal, raw byte preserved
 [Success]            1 byte       Delphi Boolean (0 = error, non-zero = success)
 [ErrorCode]          i32 LE       server-side diagnostic code
 [ErrorMsg]           u16 + UTF-8  server-side diagnostic text

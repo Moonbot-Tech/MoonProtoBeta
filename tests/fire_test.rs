@@ -406,7 +406,7 @@ impl Clone for SessionStats {
 impl SessionStats {
     fn engine_method_count(&self, method: EngineMethod) -> u64 {
         self.engine_method_counts
-            .get(&(method as u8))
+            .get(&(method.to_byte()))
             .copied()
             .unwrap_or(0)
     }
@@ -1087,7 +1087,7 @@ fn record_strategy_snapshot(
 fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineResponse) {
     st.engine_responses += 1;
     *st.engine_method_counts
-        .entry(resp.method as u8)
+        .entry(resp.method.to_byte())
         .or_insert(0) += 1;
     let mut detail = format!(
         "EngineResponse #{} uid={} method={:?} success={} error_code={} error_msg={} data_len={} head={}",

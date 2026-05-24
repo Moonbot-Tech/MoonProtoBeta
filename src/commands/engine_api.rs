@@ -24,146 +24,163 @@ const SECONDS_PER_DAY: f64 = 86_400.0;
 /// `EngineResponse::data` is method-specific. Method-specific parsers live next
 /// to the related protocol module, for example `commands::market`,
 /// `commands::candles`, or this module for small scalar responses.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineMethod {
-    /// Empty or unknown method. `from_byte` maps unknown server-side extensions
-    /// here after logging a warning.
-    None = 0,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EngineMethod(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl EngineMethod {
+    /// Empty method (`emk_None`).
+    pub const None: Self = Self(0);
     /// `BaseCheck`: engine health and server-identity check.
-    BaseCheck = 1,
+    pub const BaseCheck: Self = Self(1);
     /// `AuthCheck`: exchange API-key authorization check.
-    AuthCheck = 2,
+    pub const AuthCheck: Self = Self(2);
     /// `GetMarketsList`: full list of tradable markets.
     ///
     /// The response contains market records parsed by
     /// [`crate::commands::market::parse_markets_list_response`].
-    GetMarketsList = 3,
+    pub const GetMarketsList: Self = Self(3);
     /// `UpdateMarketsList`: refresh market prices, funding, mark price, and
     /// correlation prices.
-    UpdateMarketsList = 4,
+    pub const UpdateMarketsList: Self = Self(4);
     /// `GetMarketsIndexes`: compact server `mIndex -> market name` mapping used
     /// by indexed streams.
-    GetMarketsIndexes = 5,
+    pub const GetMarketsIndexes: Self = Self(5);
     /// `GetBalance`: current quantity for one currency. Parse with
     /// [`parse_get_balance_response`].
-    GetBalance = 6,
+    pub const GetBalance: Self = Self(6);
     /// `GetMarketsBalanceFull`: server-side full balance refresh.
     ///
     /// Current Delphi `MoonProtoEngineServer.pas → ProcessRequest` calls
     /// `Engine.GetMarketsBalanceFull`, but the response writer is still a TODO
     /// (`WriteBalancesToStream` is not implemented), so a successful response has
     /// an empty `data` payload.
-    GetMarketsBalanceFull = 7,
+    pub const GetMarketsBalanceFull: Self = Self(7);
     /// `GetOrder` — enum value exists in `TEngineMethodKind`.
     ///
     /// The current Delphi reference server has no `ProcessRequest` branch for this
     /// method, so it returns `Unknown method` (error 400). Raw wrapper is kept for
     /// protocol completeness / future server versions.
-    GetOrder = 8,
+    pub const GetOrder: Self = Self(8);
     /// `GetOpenOrders` — enum value exists in `TEngineMethodKind`.
     ///
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method` (error 400).
-    GetOpenOrders = 9,
+    pub const GetOpenOrders: Self = Self(9);
     /// `GetActiveOrders` — enum value exists in `TEngineMethodKind`.
     ///
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method` (error 400).
-    GetActiveOrders = 10,
+    pub const GetActiveOrders: Self = Self(10);
     /// `CancelAllOrders`: cancel all open orders.
-    CancelAllOrders = 11,
+    pub const CancelAllOrders: Self = Self(11);
     /// `SetLeverage`: set leverage for one market.
-    SetLeverage = 12,
+    pub const SetLeverage: Self = Self(12);
     /// `SetHedgeMode`: enable or disable hedge mode.
-    SetHedgeMode = 13,
+    pub const SetHedgeMode: Self = Self(13);
     /// `QueryHedgeMode`: current hedge-mode flag. Parse with
     /// [`parse_query_hedge_mode_response`].
-    QueryHedgeMode = 14,
+    pub const QueryHedgeMode: Self = Self(14);
     /// `CheckAPIExpirationTime`: exchange API-key expiration as a Delphi
-    /// `TDateTime`, parsed by
-    /// [`parse_api_expiration_time_response`].
-    CheckAPIExpirationTime = 15,
+    /// `TDateTime`, parsed by [`parse_api_expiration_time_response`].
+    pub const CheckAPIExpirationTime: Self = Self(15);
     /// `CheckBinanceTags`: Binance token permission tags.
-    CheckBinanceTags = 16,
+    pub const CheckBinanceTags: Self = Self(16);
     /// `TradesResend`: request resend for missing TradesStream packet numbers.
-    TradesResend = 17,
+    pub const TradesResend: Self = Self(17);
     /// `SubscribeAllTrades`: subscribe to the all-trades stream.
-    SubscribeAllTrades = 18,
+    pub const SubscribeAllTrades: Self = Self(18);
     /// `UnsubscribeAllTrades`: unsubscribe from the all-trades stream.
-    UnsubscribeAllTrades = 19,
+    pub const UnsubscribeAllTrades: Self = Self(19);
     /// `SubscribeOrderBook`: subscribe to orderbooks for market names.
-    SubscribeOrderBook = 20,
+    pub const SubscribeOrderBook: Self = Self(20);
     /// `UnsubscribeOrderBook`: unsubscribe from orderbooks for market names.
-    UnsubscribeOrderBook = 21,
+    pub const UnsubscribeOrderBook: Self = Self(21);
     /// `RequestOrderBookFull`: request a full snapshot for one indexed orderbook.
-    RequestOrderBookFull = 22,
+    pub const RequestOrderBookFull: Self = Self(22);
     /// `ReloadOrderBook`: force reload of subscribed orderbooks.
-    ReloadOrderBook = 23,
+    pub const ReloadOrderBook: Self = Self(23);
     /// `RequestCandlesData`: request full historical candle data.
     ///
     /// The response is chunked: multiple `EngineResponse` packets share one UID.
     /// Prefer `Client::request_candles_data` or `Client::api_request_candles_data_async`.
-    RequestCandlesData = 24,
+    pub const RequestCandlesData: Self = Self(24);
     /// `ChangePositionType`: change isolated/cross position type for a market.
-    ChangePositionType = 25,
+    pub const ChangePositionType: Self = Self(25);
     /// `ConvertDustBNB`: convert dust balances to BNB.
-    ConvertDustBNB = 26,
+    pub const ConvertDustBNB: Self = Self(26);
     /// `ConfirmRiskLimit`: confirm risk limit for a market.
-    ConfirmRiskLimit = 27,
+    pub const ConfirmRiskLimit: Self = Self(27);
     /// `SetMAMode`: enable or disable Binance Multi-Assets mode.
-    SetMAMode = 28,
+    pub const SetMAMode: Self = Self(28);
     /// `DoTransferAsset`: transfer one asset between exchange wallet kinds.
-    DoTransferAsset = 29,
+    pub const DoTransferAsset: Self = Self(29);
     /// `UpdateTransferAssets`: refresh the transferable asset list for one
     /// exchange wallet kind. Parse with [`parse_update_transfer_assets_response`].
-    UpdateTransferAssets = 30,
+    pub const UpdateTransferAssets: Self = Self(30);
     /// `GetCoinCardCandles`: short candle history for a coin-card UI component.
-    GetCoinCardCandles = 31,
+    pub const GetCoinCardCandles: Self = Self(31);
+
+    /// Сохранить raw Delphi ordinal byte. Delphi читает/пишет
+    /// `TEngineMethodKind` через `ms.Read/Stream.Write` и не превращает
+    /// unknown ordinal в `emk_None`.
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::GetCoinCardCandles.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::BaseCheck => "BaseCheck",
+            Self::AuthCheck => "AuthCheck",
+            Self::GetMarketsList => "GetMarketsList",
+            Self::UpdateMarketsList => "UpdateMarketsList",
+            Self::GetMarketsIndexes => "GetMarketsIndexes",
+            Self::GetBalance => "GetBalance",
+            Self::GetMarketsBalanceFull => "GetMarketsBalanceFull",
+            Self::GetOrder => "GetOrder",
+            Self::GetOpenOrders => "GetOpenOrders",
+            Self::GetActiveOrders => "GetActiveOrders",
+            Self::CancelAllOrders => "CancelAllOrders",
+            Self::SetLeverage => "SetLeverage",
+            Self::SetHedgeMode => "SetHedgeMode",
+            Self::QueryHedgeMode => "QueryHedgeMode",
+            Self::CheckAPIExpirationTime => "CheckAPIExpirationTime",
+            Self::CheckBinanceTags => "CheckBinanceTags",
+            Self::TradesResend => "TradesResend",
+            Self::SubscribeAllTrades => "SubscribeAllTrades",
+            Self::UnsubscribeAllTrades => "UnsubscribeAllTrades",
+            Self::SubscribeOrderBook => "SubscribeOrderBook",
+            Self::UnsubscribeOrderBook => "UnsubscribeOrderBook",
+            Self::RequestOrderBookFull => "RequestOrderBookFull",
+            Self::ReloadOrderBook => "ReloadOrderBook",
+            Self::RequestCandlesData => "RequestCandlesData",
+            Self::ChangePositionType => "ChangePositionType",
+            Self::ConvertDustBNB => "ConvertDustBNB",
+            Self::ConfirmRiskLimit => "ConfirmRiskLimit",
+            Self::SetMAMode => "SetMAMode",
+            Self::DoTransferAsset => "DoTransferAsset",
+            Self::UpdateTransferAssets => "UpdateTransferAssets",
+            Self::GetCoinCardCandles => "GetCoinCardCandles",
+            _ => "Unknown",
+        }
+    }
 }
 
-impl EngineMethod {
-    /// `EngineMethod` имеет типизированный `None` вариант (=`0`) — сохраняем как есть
-    /// (не `Option<Self>` поскольку None — известный факт). При неизвестном byte > 0
-    /// логируем warn — это означает что server добавил новый метод которого нет в порте (A-02).
-    pub fn from_byte(b: u8) -> Self {
-        match b {
-            1 => Self::BaseCheck,
-            2 => Self::AuthCheck,
-            3 => Self::GetMarketsList,
-            4 => Self::UpdateMarketsList,
-            5 => Self::GetMarketsIndexes,
-            6 => Self::GetBalance,
-            7 => Self::GetMarketsBalanceFull,
-            8 => Self::GetOrder,
-            9 => Self::GetOpenOrders,
-            10 => Self::GetActiveOrders,
-            11 => Self::CancelAllOrders,
-            12 => Self::SetLeverage,
-            13 => Self::SetHedgeMode,
-            14 => Self::QueryHedgeMode,
-            15 => Self::CheckAPIExpirationTime,
-            16 => Self::CheckBinanceTags,
-            17 => Self::TradesResend,
-            18 => Self::SubscribeAllTrades,
-            19 => Self::UnsubscribeAllTrades,
-            20 => Self::SubscribeOrderBook,
-            21 => Self::UnsubscribeOrderBook,
-            22 => Self::RequestOrderBookFull,
-            23 => Self::ReloadOrderBook,
-            24 => Self::RequestCandlesData,
-            25 => Self::ChangePositionType,
-            26 => Self::ConvertDustBNB,
-            27 => Self::ConfirmRiskLimit,
-            28 => Self::SetMAMode,
-            29 => Self::DoTransferAsset,
-            30 => Self::UpdateTransferAssets,
-            31 => Self::GetCoinCardCandles,
-            0 => Self::None,
-            _ => {
-                log::warn!(target: "moonproto::engine_api", "unknown EngineMethod byte: {b} (server-side extension?)");
-                Self::None
-            }
+impl std::fmt::Debug for EngineMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }
@@ -183,11 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_method_unknown_falls_to_none_with_warn() {
-        // Не can directly assert warn вывод без логгер-impl,
-        // но проверяем что значение fallback на None.
-        assert_eq!(EngineMethod::from_byte(99), EngineMethod::None);
-        assert_eq!(EngineMethod::from_byte(255), EngineMethod::None);
+    fn engine_method_unknown_preserves_raw_ordinal_like_delphi() {
+        // Delphi `ms.Read(Method, SizeOf(Method))` keeps the raw enum byte.
+        let method = EngineMethod::from_byte(99);
+        assert_eq!(method.to_byte(), 99);
+        assert_eq!(method.name(), "Unknown");
+        assert!(!method.is_known());
+        assert_eq!(EngineMethod::from_byte(255).to_byte(), 255);
     }
 }
 
@@ -865,7 +884,7 @@ mod parse_engine_response_tests {
         buf.extend_from_slice(&3u16.to_le_bytes()); // ver = 3
         buf.extend_from_slice(&own_uid.to_le_bytes()); // own_UID
         buf.extend_from_slice(&request_uid.to_le_bytes()); // RequestUID (echo)
-        buf.push(method as u8); // Method
+        buf.push(method.to_byte()); // Method
         buf.push(success as u8); // Success
         buf.extend_from_slice(&error_code.to_le_bytes()); // ErrorCode
         write_string(&mut buf, error_msg);
@@ -913,6 +932,25 @@ mod parse_engine_response_tests {
             assert_eq!(resp.method, method, "method mismatch for {:?}", method);
             assert_eq!(resp.request_uid, 0xBEEF);
         }
+    }
+
+    #[test]
+    fn parse_preserves_unknown_method_ordinal_like_delphi() {
+        let payload = build_wire_response(
+            0xDEAD,
+            0xBEEF,
+            EngineMethod::from_byte(99),
+            false,
+            400,
+            "Unknown method",
+            &[],
+        );
+        let resp = parse_engine_response(&payload).expect("parse ok");
+        assert_eq!(resp.method.to_byte(), 99);
+        assert_eq!(resp.method.name(), "Unknown");
+        assert_eq!(resp.request_uid, 0xBEEF);
+        assert_eq!(resp.error_code, 400);
+        assert_eq!(resp.error_msg, "Unknown method");
     }
 
     #[test]

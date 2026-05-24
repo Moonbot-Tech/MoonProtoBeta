@@ -4431,3 +4431,30 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: EngineMethod raw Delphi ordinal
+
+Done:
+
+- Extended the raw-ordinal rule to Engine API method ids.
+- Delphi reads and writes `TEngineRequest.Method` and
+  `TEngineResponse.Method` directly with `ms.Read(Method, SizeOf(Method))` and
+  `Stream.Write(Method, SizeOf(Method))`.
+- Delphi server creates `TEngineResponse(req.UID, req.Method, ...)`, so even an
+  unknown/default `ErrorCode=400` response echoes the original method byte.
+- Rust previously mapped unknown method bytes to `EngineMethod::None`, losing
+  that wire state.
+- `EngineMethod` is now a raw-byte wrapper with named constants for known
+  Delphi values. Existing public calls still use `EngineMethod::BaseCheck`,
+  etc.; parser paths preserve unknown bytes.
+- Recorded `spec_pipeline/work/хуйня.md §X.133`.
+
+Verification:
+
+- Added tests proving unknown method ordinal preservation in
+  `EngineMethod::from_byte` and full `TEngineResponse` parsing.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

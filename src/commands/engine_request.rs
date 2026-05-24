@@ -75,7 +75,7 @@ pub fn build_engine_request_full(
     buf.extend_from_slice(&uid.to_le_bytes());
 
     // Method (1 byte)
-    buf.push(method as u8);
+    buf.push(method.to_byte());
 
     // MarketName (UTF-8 string with u16 length prefix)
     write_string(&mut buf, market_name);

@@ -8950,7 +8950,7 @@ mod api_pending_dispatch_tests {
         buf.extend_from_slice(&3u16.to_le_bytes()); // version
         buf.extend_from_slice(&0xAABB_CCDD_u64.to_le_bytes());
         buf.extend_from_slice(&request_uid.to_le_bytes());
-        buf.push(method as u8);
+        buf.push(method.to_byte());
         buf.push(1u8); // success
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // empty error_msg
@@ -8965,7 +8965,7 @@ mod api_pending_dispatch_tests {
         let (sliced, high, low) = client.take_send_queues_for_test();
         for item in sliced.into_iter().chain(high).chain(low) {
             if item.cmd == Command::API as u8
-                && item.data.get(11) == Some(&(EngineMethod::BaseCheck as u8))
+                && item.data.get(11) == Some(&(EngineMethod::BaseCheck.to_byte()))
             {
                 assert_eq!(item.priority, SendPriority::Sliced);
                 assert!(item.encrypted);
@@ -9277,7 +9277,7 @@ mod api_pending_dispatch_tests {
                 .chain(low)
                 .filter(|item| {
                     item.cmd == Command::API as u8
-                        && item.data.get(11) == Some(&(EngineMethod::TradesResend as u8))
+                        && item.data.get(11) == Some(&(EngineMethod::TradesResend.to_byte()))
                 })
                 .count();
 
@@ -9765,7 +9765,7 @@ mod client_sender_tests {
         assert_eq!(sent[0].cmd, Command::API as u8);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::SubscribeOrderBook as u8)
+            Some(EngineMethod::SubscribeOrderBook.to_byte())
         );
     }
 
@@ -9804,7 +9804,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::UnsubscribeOrderBook as u8)
+            Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
     }
 
@@ -9820,7 +9820,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::SubscribeOrderBook as u8)
+            Some(EngineMethod::SubscribeOrderBook.to_byte())
         );
     }
 
@@ -9838,7 +9838,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::UnsubscribeOrderBook as u8)
+            Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
     }
 
@@ -9856,7 +9856,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::UnsubscribeOrderBook as u8)
+            Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
     }
 
@@ -9876,7 +9876,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 2);
         assert!(sent
             .iter()
-            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeAllTrades as u8)));
+            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeAllTrades.to_byte())));
     }
 
     #[test]
@@ -9889,7 +9889,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0].data),
-            Some(EngineMethod::UnsubscribeAllTrades as u8)
+            Some(EngineMethod::UnsubscribeAllTrades.to_byte())
         );
     }
 
@@ -10067,7 +10067,7 @@ mod client_sender_tests {
         assert_eq!(sent.len(), 2);
         assert!(sent
             .iter()
-            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook as u8)));
+            .all(|item| method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook.to_byte())));
     }
 
     #[test]
@@ -10365,8 +10365,8 @@ mod client_subscribe_integration_tests {
             .filter_map(|payload| method_id(payload))
             .collect();
         assert_eq!(methods.len(), 2);
-        assert!(methods.contains(&(EngineMethod::SubscribeAllTrades as u8)));
-        assert!(methods.contains(&(EngineMethod::SubscribeOrderBook as u8)));
+        assert!(methods.contains(&(EngineMethod::SubscribeAllTrades.to_byte())));
+        assert!(methods.contains(&(EngineMethod::SubscribeOrderBook.to_byte())));
 
         client.subscribe_all_trades(true);
         let sent = drain_api_requests(&client);
@@ -10386,7 +10386,7 @@ mod client_subscribe_integration_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeOrderBook as u8)
+            Some(EngineMethod::SubscribeOrderBook.to_byte())
         );
     }
 
@@ -10405,7 +10405,7 @@ mod client_subscribe_integration_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeAllTrades as u8)
+            Some(EngineMethod::SubscribeAllTrades.to_byte())
         );
     }
 
@@ -11060,7 +11060,7 @@ mod client_subscribe_integration_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::UnsubscribeOrderBook as u8)
+            Some(EngineMethod::UnsubscribeOrderBook.to_byte())
         );
         assert_eq!(empty_market_names_count(&sent[0]), Some(0));
     }
@@ -12496,7 +12496,7 @@ mod active_library_helpers_tests {
         assert_eq!(sliced[0].cmd, Command::API as u8);
         assert_eq!(
             sliced[0].data.get(11).copied(),
-            Some(EngineMethod::GetMarketsIndexes as u8)
+            Some(EngineMethod::GetMarketsIndexes.to_byte())
         );
     }
 
@@ -12554,7 +12554,7 @@ mod registry_subscription_restore_tests {
     }
 
     fn subscribe_all_trades_want_mm(payload: &[u8]) -> Option<bool> {
-        if method_id(payload)? != EngineMethod::SubscribeAllTrades as u8 {
+        if method_id(payload)? != EngineMethod::SubscribeAllTrades.to_byte() {
             return None;
         }
         payload.last().map(|v| *v != 0)
@@ -12606,7 +12606,7 @@ mod registry_subscription_restore_tests {
         assert_eq!(sent.len(), 1, "только trades → 1 wire-запрос");
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeAllTrades as u8)
+            Some(EngineMethod::SubscribeAllTrades.to_byte())
         );
         assert_eq!(subscribe_all_trades_want_mm(&sent[0]), Some(true));
     }
@@ -12625,7 +12625,7 @@ mod registry_subscription_restore_tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeAllTrades as u8)
+            Some(EngineMethod::SubscribeAllTrades.to_byte())
         );
         assert_eq!(subscribe_all_trades_want_mm(&sent[0]), Some(true));
     }
@@ -12665,7 +12665,7 @@ mod registry_subscription_restore_tests {
         assert_eq!(sent.len(), 1, "3 orderbook подписки → 1 batch wire-запрос");
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeOrderBook as u8)
+            Some(EngineMethod::SubscribeOrderBook.to_byte())
         );
     }
 
@@ -12683,7 +12683,7 @@ mod registry_subscription_restore_tests {
         assert_eq!(sent.len(), 1, "same market is one server-side subscription");
         assert_eq!(
             method_id(&sent[0]),
-            Some(EngineMethod::SubscribeOrderBook as u8)
+            Some(EngineMethod::SubscribeOrderBook.to_byte())
         );
     }
 
@@ -12702,11 +12702,11 @@ mod registry_subscription_restore_tests {
         assert_eq!(sent.len(), 2, "1 trades + 1 orderbook batch = 2 запроса");
         let methods: Vec<Option<u8>> = sent.iter().map(|p| method_id(p)).collect();
         // Один из запросов — SubscribeAllTrades.
-        assert!(methods.contains(&Some(EngineMethod::SubscribeAllTrades as u8)));
+        assert!(methods.contains(&Some(EngineMethod::SubscribeAllTrades.to_byte())));
         // Один запрос — SubscribeOrderBook batch.
         let book_count = methods
             .iter()
-            .filter(|m| **m == Some(EngineMethod::SubscribeOrderBook as u8))
+            .filter(|m| **m == Some(EngineMethod::SubscribeOrderBook.to_byte()))
             .count();
         assert_eq!(book_count, 1);
     }
@@ -12907,7 +12907,7 @@ mod refresh_tick_tests {
         assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
         assert_eq!(
             drain_api_methods(&client),
-            vec![EngineMethod::CheckBinanceTags as u8],
+            vec![EngineMethod::CheckBinanceTags.to_byte()],
         );
 
         writer(&mut client).tick_periodic_refresh_at(200, 42);
@@ -12954,7 +12954,7 @@ mod refresh_tick_tests {
         writer(&mut client).tick_periodic_refresh_at(10_000, 11);
         assert_eq!(
             drain_api_methods(&client),
-            vec![EngineMethod::CheckBinanceTags as u8],
+            vec![EngineMethod::CheckBinanceTags.to_byte()],
         );
         assert_eq!(client.check_tags_burst_sent, 1);
 
@@ -12970,9 +12970,9 @@ mod refresh_tick_tests {
         assert_eq!(
             drain_api_methods(&client),
             vec![
-                EngineMethod::CheckBinanceTags as u8,
-                EngineMethod::CheckBinanceTags as u8,
-                EngineMethod::CheckBinanceTags as u8,
+                EngineMethod::CheckBinanceTags.to_byte(),
+                EngineMethod::CheckBinanceTags.to_byte(),
+                EngineMethod::CheckBinanceTags.to_byte(),
             ],
         );
         assert_eq!(client.check_tags_burst_sent, CHECK_TAGS_BURST_COUNT);
@@ -14796,7 +14796,7 @@ mod reconnect_timing_tests {
         buf.extend_from_slice(&3u16.to_le_bytes());
         buf.extend_from_slice(&0xAABB_CCDD_u64.to_le_bytes());
         buf.extend_from_slice(&request_uid.to_le_bytes());
-        buf.push(method as u8);
+        buf.push(method.to_byte());
         buf.push(1u8);
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
@@ -14954,22 +14954,22 @@ mod reconnect_timing_tests {
         let sent = drain_send_items(&client);
         let methods = api_methods(&sent);
         assert!(
-            methods.contains(&(EngineMethod::GetMarketsIndexes as u8)),
+            methods.contains(&(EngineMethod::GetMarketsIndexes.to_byte())),
             "subscriptions need fresh indexes after reconnect"
         );
         assert!(
-            !methods.contains(&(EngineMethod::SubscribeAllTrades as u8)),
+            !methods.contains(&(EngineMethod::SubscribeAllTrades.to_byte())),
             "trades reconnect is not raw replay; Delphi runs unsubscribe + 100ms delay + subscribe from the maintenance tick"
         );
         assert!(
-            !methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            !methods.contains(&(EngineMethod::SubscribeOrderBook.to_byte())),
             "orderbook subscription must wait for fresh market indexes like Delphi CheckBookTopics"
         );
         assert!(
-            !methods.contains(&(EngineMethod::BaseCheck as u8))
-                && !methods.contains(&(EngineMethod::AuthCheck as u8))
-                && !methods.contains(&(EngineMethod::GetMarketsList as u8))
-                && !methods.contains(&(EngineMethod::GetMarketsBalanceFull as u8)),
+            !methods.contains(&(EngineMethod::BaseCheck.to_byte()))
+                && !methods.contains(&(EngineMethod::AuthCheck.to_byte()))
+                && !methods.contains(&(EngineMethod::GetMarketsList.to_byte()))
+                && !methods.contains(&(EngineMethod::GetMarketsBalanceFull.to_byte())),
             "reconnect restore is not a second Init"
         );
         assert!(
@@ -14987,7 +14987,7 @@ mod reconnect_timing_tests {
         let trades_reconnect_methods = api_methods(&trades_reconnect_sent);
         assert_eq!(
             trades_reconnect_methods,
-            vec![EngineMethod::UnsubscribeAllTrades as u8],
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()],
             "NeedReconnectAllTrades starts with UnSubscribeAllTrades"
         );
 
@@ -15002,7 +15002,7 @@ mod reconnect_timing_tests {
         let trades_subscribe_methods = api_methods(&trades_subscribe_sent);
         assert_eq!(
             trades_subscribe_methods,
-            vec![EngineMethod::SubscribeAllTrades as u8],
+            vec![EngineMethod::SubscribeAllTrades.to_byte()],
             "after 100ms delay reconnect sends DoSubscribeAllTrades(false)"
         );
 
@@ -15031,11 +15031,11 @@ mod reconnect_timing_tests {
         let after_indexes_sent = drain_send_items(&client);
         let after_indexes_methods = api_methods(&after_indexes_sent);
         assert!(
-            after_indexes_methods.contains(&(EngineMethod::UpdateMarketsList as u8)),
+            after_indexes_methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),
             "after reconnect index sync, library must refresh market prices like Delphi UpdateMarketsList"
         );
         assert!(
-            after_indexes_methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            after_indexes_methods.contains(&(EngineMethod::SubscribeOrderBook.to_byte())),
             "after reconnect index sync, library must replay orderbook subscriptions"
         );
 
@@ -15079,7 +15079,7 @@ mod reconnect_timing_tests {
             .iter()
             .find(|item| {
                 item.cmd == Command::API as u8
-                    && method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook as u8)
+                    && method_id(&item.data) == Some(EngineMethod::SubscribeOrderBook.to_byte())
             })
             .and_then(|item| request_uid(&item.data))
             .expect("SubscribeOrderBook replay uid");
@@ -15145,7 +15145,7 @@ mod reconnect_timing_tests {
         let first_methods = api_methods(&first_sent);
         assert_eq!(
             first_methods,
-            vec![EngineMethod::SubscribeOrderBook as u8],
+            vec![EngineMethod::SubscribeOrderBook.to_byte()],
             "reconnect retry sends one batched SubscribeOrderBook"
         );
         let first_uid = request_uid(&first_sent[0].data).expect("request uid");
@@ -15281,11 +15281,11 @@ mod reconnect_timing_tests {
         let sent = drain_send_items(&client);
         let methods = api_methods(&sent);
         assert!(
-            !methods.contains(&(EngineMethod::UpdateMarketsList as u8)),
+            !methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),
             "UpdateMarketsList must wait for valid indexes payload"
         );
         assert!(
-            !methods.contains(&(EngineMethod::SubscribeOrderBook as u8)),
+            !methods.contains(&(EngineMethod::SubscribeOrderBook.to_byte())),
             "orderbook restore must wait for valid indexes payload"
         );
         assert!(
@@ -15373,7 +15373,7 @@ mod reconnect_timing_tests {
         let sent = drain_send_items(&client);
         let methods = api_methods(&sent);
         assert!(
-            methods.contains(&(EngineMethod::GetMarketsList as u8)),
+            methods.contains(&(EngineMethod::GetMarketsList.to_byte())),
             "active action must enqueue emk_GetMarketsList"
         );
     }
@@ -15390,12 +15390,12 @@ mod reconnect_timing_tests {
         client.tick_trades_reconnect_sequence(10_000, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::UnsubscribeAllTrades as u8]
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
         client.tick_trades_reconnect_sequence(10_100, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::SubscribeAllTrades as u8]
+            vec![EngineMethod::SubscribeAllTrades.to_byte()]
         );
 
         client.tick_trades_reconnect_sequence(14_999, 0);
@@ -15406,13 +15406,13 @@ mod reconnect_timing_tests {
         client.tick_trades_reconnect_sequence(15_000, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::UnsubscribeAllTrades as u8]
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
 
         client.tick_trades_reconnect_sequence(15_100, client.server_token);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::SubscribeAllTrades as u8],
+            vec![EngineMethod::SubscribeAllTrades.to_byte()],
             "once UnSubscribeAllTrades ran, the paired delayed SubscribeAllTrades still completes"
         );
 
@@ -15462,7 +15462,7 @@ mod reconnect_timing_tests {
         client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::UnsubscribeAllTrades as u8],
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()],
             "after the Delphi gate expires, missing TradesStream token starts reconnect"
         );
     }
@@ -15477,7 +15477,7 @@ mod reconnect_timing_tests {
         client.subscribe_all_trades(true);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::SubscribeAllTrades as u8]
+            vec![EngineMethod::SubscribeAllTrades.to_byte()]
         );
 
         let requested_at = client
@@ -15497,7 +15497,7 @@ mod reconnect_timing_tests {
         client.tick_trades_reconnect_sequence(requested_at + TRADES_RECONNECT_THROTTLE_MS, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::UnsubscribeAllTrades as u8]
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
     }
 

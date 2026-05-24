@@ -7,6 +7,13 @@ Use typed `Client::request_*` helpers for common one-shot reads. Use
 `Client::api_*` wrappers when you need the raw `EngineResponse` receiver for a
 custom asynchronous flow.
 
+`EngineMethod` is the public method identifier type. It is a raw byte wrapper
+around Delphi `TEngineMethodKind`: known values are constants
+(`EngineMethod::BaseCheck`, `EngineMethod::RequestCandlesData`, ...), and
+unknown method ordinals from the wire are preserved. Use
+`EngineMethod::from_byte(raw)`, `method.to_byte()`, `method.is_known()`, and
+`method.name()`; do not rely on Rust enum casts.
+
 The source-matched default wait is 12 seconds per Engine API response:
 Delphi `TMoonProtoEngine.FTimeout = 12000` and `SendAndWait` sleeps in 10 ms
 ticks until that timeout expires. `run_init_sequence` uses this default when
@@ -165,8 +172,8 @@ pub struct EngineResponse {
 }
 ```
 
-`data` is already DEFLATE-decompressed when the response was compressed on the
-wire.
+`method` preserves the exact one-byte ordinal that the server sent. `data` is
+already DEFLATE-decompressed when the response was compressed on the wire.
 
 Transfer asset rows returned by `request_transfer_assets`:
 

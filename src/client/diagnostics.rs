@@ -270,7 +270,7 @@ impl ErrEmuDiagnosticsState {
         }
         if Command::from_byte(cmd) == Command::API {
             if let Some(resp) = parse_engine_response(payload) {
-                dg.completed_api_method = Some(resp.method as u8);
+                dg.completed_api_method = Some(resp.method.to_byte());
                 dg.completed_api_uid = Some(resp.request_uid);
                 dg.completed_api_success = Some(resp.success);
             }

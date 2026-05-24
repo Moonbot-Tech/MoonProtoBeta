@@ -944,6 +944,6 @@ mod tests {
         // = 11 + 1 + 9 + 4 + 4 + 1 = 30 bytes
         assert_eq!(raw.len(), 30);
         // Method byte after header (offset 11)
-        assert_eq!(raw[11], EngineMethod::GetCoinCardCandles as u8);
+        assert_eq!(raw[11], EngineMethod::GetCoinCardCandles.to_byte());
     }
 }

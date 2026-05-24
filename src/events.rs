@@ -2666,7 +2666,9 @@ mod tests {
         for item in drain_client_send_items(&client) {
             if item.cmd == Command::API as u8
                 && item.data.get(11).copied()
-                    == Some(crate::commands::engine_api::EngineMethod::RequestOrderBookFull as u8)
+                    == Some(
+                        crate::commands::engine_api::EngineMethod::RequestOrderBookFull.to_byte(),
+                    )
             {
                 found = true;
                 break;
