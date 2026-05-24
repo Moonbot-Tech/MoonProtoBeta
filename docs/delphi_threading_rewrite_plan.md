@@ -1187,6 +1187,9 @@ Checks:
 - `cargo fmt --check`: passed.
 - `cargo check --examples --quiet`: passed.
 - `cargo test --lib --quiet`: 607 passed.
+- Full prod FireTest after D3-D5:
+  `cargo test --release --test fire_test -- --ignored --nocapture` passed in
+  `185.8s` with `MOONPROTO_FIRETEST_PROFILE` unset (`full` profile).
 
 ### 2026-05-24 - FireTest quick profile
 
