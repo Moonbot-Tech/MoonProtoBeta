@@ -2623,7 +2623,7 @@ impl ProtocolCore<'_> {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
         let decoded = Client::decode_data_read_int_payload_shared(
-            &self.client.reader_protocol,
+            &mut self.client.reader_protocol,
             self.client.current_reader_epoch,
             raw_cmd,
             payload,
@@ -2666,7 +2666,7 @@ impl ProtocolCore<'_> {
 
     fn on_new_size_test_inline(&mut self, payload: &[u8]) {
         if let Some(ack) = Client::build_size_ack_payload(
-            &self.client.reader_protocol,
+            &mut self.client.reader_protocol,
             self.client.current_reader_epoch,
             payload,
         ) {
@@ -2697,8 +2697,6 @@ impl ProtocolCore<'_> {
         if cmd == Command::WantNewHello {
             self.client
                 .reader_protocol
-                .lock()
-                .unwrap()
                 .reset_from_reader(self.client.current_reader_epoch);
             self.client
                 .send_lock
@@ -2732,14 +2730,10 @@ impl ProtocolCore<'_> {
                 &mut reader_client_token,
                 hello,
             );
-            self.client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .set_decode_cipher_from_reader(
-                    self.client.current_reader_epoch,
-                    crate::crypto::cipher_from_key(&update.decode_key),
-                );
+            self.client.reader_protocol.set_decode_cipher_from_reader(
+                self.client.current_reader_epoch,
+                crate::crypto::cipher_from_key(&update.decode_key),
+            );
             self.send_command(Command::ImFriend, &encrypted);
             thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
             self.send_command(Command::ImFriend, &encrypted);
@@ -3026,8 +3020,6 @@ impl ProtocolCore<'_> {
                     Some(crate::crypto::cipher_from_key(&self.client.encode_key));
                 self.client
                     .reader_protocol
-                    .lock()
-                    .unwrap()
                     .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
                 self.client.client_token = update.client_token;
             }
@@ -4386,7 +4378,7 @@ pub struct Client {
     // MPSlider replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider
     // lives in SendLockState so writer copies it atomically with ACK queues.
     // Mutations are epoch-gated across socket/session replacement.
-    reader_protocol: Arc<Mutex<ReaderProtocolState>>,
+    reader_protocol: ReaderProtocolState,
     // Ping block state used to send `MPC_Ping` replies from UDPRead order.
     reader_ping_state: Arc<ReaderPingState>,
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
@@ -4622,7 +4614,6 @@ impl Client {
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
-        let reader_protocol = Arc::new(Mutex::new(ReaderProtocolState::new()));
         let reader_ping_state = Arc::new(ReaderPingState::new());
         let total_recv_shared = Arc::new(AtomicU64::new(0));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
@@ -4703,7 +4694,7 @@ impl Client {
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
             tmp_send_size: 0,
-            reader_protocol,
+            reader_protocol: ReaderProtocolState::new(),
             reader_ping_state,
             recvd_slider: Arc::new(Mutex::new(Slider::new())),
             total_sent: Arc::new(AtomicU64::new(0)),
@@ -4973,10 +4964,8 @@ impl Client {
         }
     }
 
-    fn publish_reader_active_epoch(&self) {
+    fn publish_reader_active_epoch(&mut self) {
         self.reader_protocol
-            .lock()
-            .unwrap()
             .set_active_reader_epoch(self.current_reader_epoch);
         self.send_lock
             .lock()
@@ -7535,7 +7524,7 @@ impl Client {
     }
 
     fn build_size_ack_payload(
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_protocol: &mut ReaderProtocolState,
         reader_epoch: u32,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
@@ -7545,8 +7534,6 @@ impl Client {
             return None;
         }
         let series = reader_protocol
-            .lock()
-            .unwrap()
             .update_data_size_ack_series_num_from_reader(reader_epoch, size_test.series_num)?;
         Some(control::SizeTestData::ack_bytes(size, series))
     }
@@ -7560,7 +7547,7 @@ impl Client {
     }
 
     fn reader_build_ping_update_and_response(
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_protocol: &ReaderProtocolState,
         send_lock: &Arc<Mutex<SendLockState>>,
         reader_ping_state: &Arc<ReaderPingState>,
         server_time_delta_handle: &Arc<std::sync::atomic::AtomicU64>,
@@ -7636,10 +7623,7 @@ impl Client {
         let net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let (ack_start, ack_words) = reader_protocol
-            .lock()
-            .unwrap()
-            .build_ack_half_from_reader(reader_epoch)?;
+        let (ack_start, ack_words) = reader_protocol.build_ack_half_from_reader(reader_epoch)?;
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,
@@ -7742,7 +7726,7 @@ impl Client {
     }
 
     fn decode_data_read_int_payload_shared(
-        reader_protocol: &Arc<Mutex<ReaderProtocolState>>,
+        reader_protocol: &mut ReaderProtocolState,
         reader_epoch: u32,
         raw_cmd: u8,
         data: &[u8],
@@ -7758,19 +7742,16 @@ impl Client {
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
             // B-V2-03: используем кэшированный cipher вместо ключа. До handshake
             // (cipher = None) Crypted-пакетов и быть не должно — но защищаемся return.
-            let decrypted = {
-                let mut protocol = reader_protocol.lock().unwrap();
-                if !protocol.is_active_reader(reader_epoch) {
-                    return None;
-                }
-                let ReaderProtocolState {
-                    decode_cipher,
-                    slider,
-                    ..
-                } = &mut *protocol;
-                let decode_cipher = decode_cipher.as_ref()?;
-                crypted::decrypt_command(decode_cipher, &payload, slider)
-            };
+            if !reader_protocol.is_active_reader(reader_epoch) {
+                return None;
+            }
+            let ReaderProtocolState {
+                decode_cipher,
+                slider,
+                ..
+            } = reader_protocol;
+            let decode_cipher = decode_cipher.as_ref()?;
+            let decrypted = crypted::decrypt_command(decode_cipher, &payload, slider);
             if let Some((inner_cmd, decrypted, _want_ack)) = decrypted {
                 cmd = inner_cmd;
                 payload = Cow::Owned(decrypted);
@@ -8228,7 +8209,7 @@ impl Client {
         self.rs = 1.0;
         self.used_sliced_limit = false;
         self.reader_ping_state.reset_protocol_session();
-        self.reader_protocol.lock().unwrap().reset();
+        self.reader_protocol.reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
         *self.recvd_slider.lock().unwrap() = Slider::new();
         self.recv_slicer = slicing::SlicingReceiver::new();
@@ -9753,7 +9734,7 @@ mod api_pending_dispatch_tests {
         let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
         let mut payloads = Vec::new();
         let (cmd, payload) = Client::decode_data_read_int_payload_shared(
-            &client.reader_protocol,
+            &mut client.reader_protocol,
             client.current_reader_epoch,
             Command::UI as u8 | COMPRESSED_FLAG,
             &compressed_garbage,
@@ -14381,18 +14362,11 @@ mod service_cmd_tests {
         size_test.extend_from_slice(&packet_num.to_le_bytes());
         size_test.extend_from_slice(&series.to_le_bytes());
         assert!(
-            Client::build_size_ack_payload(&client.reader_protocol, old_epoch, &size_test)
+            Client::build_size_ack_payload(&mut client.reader_protocol, old_epoch, &size_test)
                 .is_none(),
             "a stale receive epoch must not update DataSizeAck or send SizeAck after a new epoch"
         );
-        assert_eq!(
-            client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .data_size_ack_series_num,
-            0
-        );
+        assert_eq!(client.reader_protocol.data_size_ack_series_num, 0);
 
         let mut ack = [0u8; 34];
         ack[0] = 1;
@@ -14436,7 +14410,7 @@ mod service_cmd_tests {
         );
 
         assert!(
-            Client::build_size_ack_payload(&client.reader_protocol, new_epoch, &size_test)
+            Client::build_size_ack_payload(&mut client.reader_protocol, new_epoch, &size_test)
                 .is_some(),
             "the active reader epoch must still perform the same protocol work"
         );
@@ -14655,14 +14629,7 @@ mod service_cmd_tests {
         assert_eq!(ack_payload.len(), size as usize);
         assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
         assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
-        assert_eq!(
-            client
-                .reader_protocol
-                .lock()
-                .unwrap()
-                .data_size_ack_series_num,
-            series
-        );
+        assert_eq!(client.reader_protocol.data_size_ack_series_num, series);
         assert_eq!(client.total_recv, packet.len() as u64);
     }
 

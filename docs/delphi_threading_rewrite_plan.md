@@ -152,6 +152,9 @@ Delphi model по факту:
   stats, ping, handshake, reconnect flags, tokens, and keys are written
   directly into the single `Client` owner, matching Delphi's direct field
   mutation effect.
+- `src/client.rs` - `ReaderProtocolState` is no longer `Arc<Mutex<_>>`.
+  MPSlider, decode cipher, and SizeAck series live directly in the single
+  `Client` owner and are mutated inline from the receive path.
 - `src/client.rs` - old production `spawn_reader` / `ReaderRuntime` path is
   removed. `ProtocolCore::recv_drain_phase` accepts UDP, then
   `process_datagram_inline` handles service commands, Sliced/SlicedACK,
@@ -1329,7 +1332,7 @@ Done:
 - Receive-side stats, Ping updates, handshake tokens/keys/status, reconnect
   flags, and lifecycle-visible auth state now mutate the single `Client` owner
   directly.
-- Kept the remaining epoch-gated shared protocol pieces:
+- At this checkpoint, kept the remaining epoch-gated shared protocol pieces:
   `ReaderProtocolState`, `SendLockState`, and `ReaderPingState`. These protect
   MPSlider/decode cipher, SlicedACK/TmpSlider, and ping adaptive-rate fields
   across socket/session replacement.
@@ -1354,6 +1357,45 @@ Observed quick CPU:
 - `reader avg/max = 661us / 32517us`, `>1ms = 91`.
 - `active_dispatch avg/max = 218us / 22643us`, `>1ms = 2`, `>5ms = 1`.
 - `app_enqueue avg/max = 1109us / 2322us`, `>1ms = 90`, `>5ms = 0`.
+
+### 2026-05-24 - Phase D11 direct ReaderProtocolState
+
+Done:
+
+- Removed the `Arc<Mutex<_>>` wrapper from `ReaderProtocolState`.
+- `MPSlider`, decode cipher, and `DataSizeAck` series now live directly in
+  `Client` and are mutated from the inline receive path, matching Delphi's
+  direct `DataReadInt` field effects more closely.
+- Kept `active_reader_epoch` checks inside the state helpers. They are now a
+  session/socket guard, not a shared-reader synchronization mechanism.
+
+Reason:
+
+- After D9/D10 removed the async decoded bridge and transport mirror,
+  `ReaderProtocolState` no longer had a real concurrent owner. Keeping a mutex
+  around decrypt/slider/SizeAck was Rust-only ceremony and made the code less
+  Delphi-like.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 606 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `23.03s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
+
+Observed quick CPU:
+
+- `reader avg/max = 1008us / 124628us`, `>1ms = 87`, `>5ms = 5`.
+- `active_dispatch avg/max = 1052us / 115741us`, `>1ms = 4`, `>5ms = 2`.
+- `app_enqueue avg/max = 1210us / 3063us`, `>1ms = 83`, `>5ms = 0`.
+
+Note:
+
+- The CPU spikes are still Phase Z work. This D11 step only removes a stale
+  synchronization layer; it does not claim protocol hot-path optimization is
+  complete.
 
 ### 2026-05-24 - FireTest quick profile
 
