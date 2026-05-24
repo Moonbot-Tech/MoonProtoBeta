@@ -101,6 +101,44 @@ folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
 `folder_deleted` tell which parts actually changed state; if both are false the
 dispatcher emits `StratEvent::Ignored`.
 
+## Active Predicates
+
+`StrategySnapshot` exposes exact Delphi helpers for code that needs to reason
+about active strategies without guessing that `checked == active`.
+`active_like_delphi(mode)` mirrors `TStratForm.CheckActive` /
+`bStartCheckedClick`: in `ActiveClient` mode a checked strategy is local-active
+only when it cannot auto-buy and does not run detection on the kernel; in
+`UsingMoonProto` mode the inverse side is active; in `Standalone` mode active is
+just checked.
+
+```rust
+use moonproto::commands::strategy_serializer::{
+    StrategyActiveMode, StrategyKind, StrategySnapshot,
+};
+
+let is_local = strategy.active_like_delphi(StrategyActiveMode::ActiveClient);
+let kind = strategy.kind_like_delphi();
+
+if kind == StrategyKind::NEW_LISTING && strategy.sell_from_asset_like_delphi() {
+    println!("listing sell-from-asset strategy");
+}
+```
+
+`StratsState` also exposes Delphi listing predicates:
+
+```rust
+let has_listing = dispatcher
+    .strats()
+    .is_there_listing_strat_like_delphi(StrategyActiveMode::ActiveClient);
+
+let needs_assets = dispatcher
+    .strats()
+    .is_there_listing_sell_like_delphi(StrategyActiveMode::ActiveClient, is_futures);
+```
+
+These are read helpers only. They do not make the active library send listing
+automation requests by themselves.
+
 ```rust
 use moonproto::commands::strategy_serializer::StrategySnapshot;
 

@@ -14,7 +14,8 @@
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategyBatch, StrategySnapshot,
+    parse_strategy_batch, FieldValue, StrategyActiveMode, StrategyBatch, StrategyKind,
+    StrategySnapshot,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -449,6 +450,40 @@ impl StratsState {
         out
     }
 
+    /// Delphi `TStrategies.IsThereListingStrat`.
+    pub fn is_there_listing_strat_like_delphi(&self, mode: StrategyActiveMode) -> bool {
+        self.snapshots().any(|s| {
+            s.active_like_delphi(mode) && s.kind_like_delphi() == StrategyKind::NEW_LISTING
+        })
+    }
+
+    /// Delphi `TStrategies.IsThereListingSell`.
+    pub fn is_there_listing_sell_like_delphi(
+        &self,
+        mode: StrategyActiveMode,
+        is_futures: bool,
+    ) -> bool {
+        let has_listing_sell = self.snapshots().any(|s| {
+            s.active_like_delphi(mode)
+                && s.kind_like_delphi() == StrategyKind::NEW_LISTING
+                && s.sell_from_asset_like_delphi()
+        });
+        if has_listing_sell {
+            return true;
+        }
+        if is_futures {
+            return false;
+        }
+        self.snapshots().any(|s| {
+            s.active_like_delphi(mode)
+                && s.short_like_delphi()
+                && matches!(
+                    s.kind_like_delphi(),
+                    StrategyKind::MOON_SHOT | StrategyKind::MOON_HOOK
+                )
+        })
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &StrategyInfo)> {
         self.by_id.iter()
     }
@@ -502,6 +537,61 @@ mod tests {
             fields,
         });
         assert_eq!(s.get(100).unwrap().sell_price, 50.5);
+    }
+
+    fn snapshot_for_listing_checks(
+        id: u64,
+        kind: StrategyKind,
+        checked: bool,
+        fields: &[(&str, FieldValue)],
+    ) -> StrategySnapshot {
+        StrategySnapshot {
+            strategy_id: id,
+            strategy_ver: 1,
+            last_date: id,
+            checked,
+            kind: kind.0,
+            path: String::new(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn listing_strategy_helpers_match_delphi_active_predicates() {
+        let mut s = StratsState::new();
+        s.upsert_local_snapshot(snapshot_for_listing_checks(
+            1,
+            StrategyKind::NEW_LISTING,
+            true,
+            &[("SellFromAsset", FieldValue::Bool(true))],
+        ));
+
+        assert!(s.is_there_listing_strat_like_delphi(StrategyActiveMode::ActiveClient));
+        assert!(s.is_there_listing_sell_like_delphi(StrategyActiveMode::ActiveClient, false));
+        assert!(
+            !s.is_there_listing_strat_like_delphi(StrategyActiveMode::UsingMoonProto),
+            "plain listing strategy is local-active in ActiveClient mode, remote-active in UsingMoonProto mode"
+        );
+    }
+
+    #[test]
+    fn listing_sell_helper_uses_short_moonshot_only_for_spot_like_delphi() {
+        let mut s = StratsState::new();
+        s.upsert_local_snapshot(snapshot_for_listing_checks(
+            1,
+            StrategyKind::MOON_SHOT,
+            true,
+            &[("Short", FieldValue::Bool(true))],
+        ));
+
+        assert!(s.is_there_listing_sell_like_delphi(StrategyActiveMode::UsingMoonProto, false));
+        assert!(
+            !s.is_there_listing_sell_like_delphi(StrategyActiveMode::UsingMoonProto, true),
+            "Delphi skips the MoonShot/MoonHook Short fallback when cfg.IsFutures"
+        );
     }
 
     #[test]

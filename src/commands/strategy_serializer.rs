@@ -980,6 +980,96 @@ pub struct StrategySnapshot {
     pub fields: HashMap<String, FieldValue>,
 }
 
+/// Raw Delphi `TStrategyKind` ordinal (`Strategies.pas`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StrategyKind(pub u8);
+
+impl StrategyKind {
+    pub const UNKNOWN: Self = Self(0);
+    pub const TELEGRAM: Self = Self(1);
+    pub const DROPS: Self = Self(2);
+    pub const WALLS: Self = Self(3);
+    pub const VOLUMES: Self = Self(4);
+    pub const PUMP_DETECTION: Self = Self(5);
+    pub const MOON_SHOT: Self = Self(6);
+    pub const V_LITE: Self = Self(7);
+    pub const DELTA: Self = Self(8);
+    pub const WAVES: Self = Self(9);
+    pub const COMBO: Self = Self(10);
+    pub const UDP: Self = Self(11);
+    pub const MANUAL: Self = Self(12);
+    pub const MOON_STRIKE: Self = Self(13);
+    pub const NEW_LISTING: Self = Self(14);
+    pub const LIQUIDATIONS: Self = Self(15);
+    pub const TOP_MARKET: Self = Self(16);
+    pub const EMA: Self = Self(17);
+    pub const SPREAD: Self = Self(18);
+    pub const CHART_WALL: Self = Self(19);
+    pub const MOON_HOOK: Self = Self(20);
+    pub const ACTIVITY: Self = Self(21);
+    pub const ALERTS: Self = Self(22);
+    pub const WATCHER: Self = Self(23);
+}
+
+/// Delphi strategy active-state mode from `TStratForm.CheckActive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StrategyActiveMode {
+    /// `cfg.MoonProtoConfig.ActiveClient = true`.
+    ActiveClient,
+    /// `UsingMoonProto = true` and not `ActiveClient`.
+    UsingMoonProto,
+    /// Standalone MoonBot path, without MoonProto split.
+    Standalone,
+}
+
+impl StrategySnapshot {
+    pub fn kind_like_delphi(&self) -> StrategyKind {
+        StrategyKind(self.kind)
+    }
+
+    pub fn field_bool_or_false(&self, name: &str) -> bool {
+        matches!(self.fields.get(name), Some(FieldValue::Bool(true)))
+    }
+
+    pub fn auto_buy_like_delphi(&self) -> bool {
+        self.field_bool_or_false("AutoBuy")
+    }
+
+    pub fn run_detect_on_kernel_like_delphi(&self) -> bool {
+        self.field_bool_or_false("RunDetectOnKernel")
+    }
+
+    pub fn short_like_delphi(&self) -> bool {
+        self.field_bool_or_false("Short")
+    }
+
+    pub fn sell_from_asset_like_delphi(&self) -> bool {
+        self.field_bool_or_false("SellFromAsset")
+    }
+
+    /// Delphi `TStrategy.CanAutoBuy`.
+    pub fn can_auto_buy_like_delphi(&self) -> bool {
+        (self.auto_buy_like_delphi() || self.kind_like_delphi() == StrategyKind::MOON_SHOT)
+            && self.kind_like_delphi() != StrategyKind::MANUAL
+    }
+
+    /// Delphi `TStratForm.CheckActive` / `bStartCheckedClick` active assignment.
+    pub fn active_like_delphi(&self, mode: StrategyActiveMode) -> bool {
+        match mode {
+            StrategyActiveMode::ActiveClient => {
+                self.checked
+                    && !self.can_auto_buy_like_delphi()
+                    && !self.run_detect_on_kernel_like_delphi()
+            }
+            StrategyActiveMode::UsingMoonProto => {
+                self.checked
+                    && (self.can_auto_buy_like_delphi() || self.run_detect_on_kernel_like_delphi())
+            }
+            StrategyActiveMode::Standalone => self.checked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StrategyBatch {
     pub names: Vec<String>,
@@ -1404,6 +1494,49 @@ mod tests {
             path: path.to_string(),
             fields,
         }
+    }
+
+    fn strategy_with_fields(
+        kind: StrategyKind,
+        checked: bool,
+        fields: &[(&str, FieldValue)],
+    ) -> StrategySnapshot {
+        StrategySnapshot {
+            strategy_id: 1,
+            strategy_ver: 1,
+            last_date: 1,
+            checked,
+            kind: kind.0,
+            path: String::new(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn strategy_active_helpers_match_delphi_check_active_modes() {
+        let listing = strategy_with_fields(StrategyKind::NEW_LISTING, true, &[]);
+        assert!(listing.active_like_delphi(StrategyActiveMode::ActiveClient));
+        assert!(!listing.active_like_delphi(StrategyActiveMode::UsingMoonProto));
+        assert!(listing.active_like_delphi(StrategyActiveMode::Standalone));
+
+        let moonshot = strategy_with_fields(StrategyKind::MOON_SHOT, true, &[]);
+        assert!(
+            moonshot.can_auto_buy_like_delphi(),
+            "Delphi CanAutoBuy is true for MoonShot even when AutoBuy=false"
+        );
+        assert!(!moonshot.active_like_delphi(StrategyActiveMode::ActiveClient));
+        assert!(moonshot.active_like_delphi(StrategyActiveMode::UsingMoonProto));
+
+        let remote_kernel = strategy_with_fields(
+            StrategyKind::NEW_LISTING,
+            true,
+            &[("RunDetectOnKernel", FieldValue::Bool(true))],
+        );
+        assert!(!remote_kernel.active_like_delphi(StrategyActiveMode::ActiveClient));
+        assert!(remote_kernel.active_like_delphi(StrategyActiveMode::UsingMoonProto));
     }
 
     #[test]

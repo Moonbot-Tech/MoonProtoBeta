@@ -4852,3 +4852,32 @@ Conclusion:
 - Do not guess listing-strategy extra sleep/retry from `checked` alone; it needs
   a separate exact `sg.Active` model before any strategy-aware automation can be
   ported.
+
+### 2026-05-24 - Phase 1 partial: exact strategy active predicates
+
+Done:
+
+- Added explicit read helpers for Delphi `TStratForm.CheckActive` /
+  `bStartCheckedClick` semantics.
+- `StrategySnapshot::active_like_delphi(mode)` requires the caller to choose
+  `ActiveClient`, `UsingMoonProto`, or `Standalone`, so Rust code cannot silently
+  collapse `Checked` into `Active`.
+- `StrategySnapshot::can_auto_buy_like_delphi` mirrors
+  `TStrategy.CanAutoBuy`: `(AutoBuy or StrategyKind = sk_MoonShot) and
+  StrategyKind <> sk_Manual`.
+- `StratsState::is_there_listing_strat_like_delphi` and
+  `is_there_listing_sell_like_delphi` mirror `TStrategies.IsThereListingStrat`
+  and `IsThereListingSell`, including the non-futures MoonShot/MoonHook short
+  fallback.
+
+Verification:
+
+- Added regression coverage for ActiveClient vs UsingMoonProto active split,
+  MoonShot `CanAutoBuy`, `RunDetectOnKernel`, NewListing `SellFromAsset`, and
+  the spot-only short fallback.
+
+Still not done:
+
+- These helpers are intentionally read-only. No automatic listing sleep/retry or
+  trading automation is enabled until a separate exact Delphi-owned action path
+  is proven.
