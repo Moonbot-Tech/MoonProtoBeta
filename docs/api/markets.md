@@ -18,9 +18,12 @@ and tests.
 Low-level market response builders use Delphi string serialization: `Word`
 UTF-8 byte length followed by exactly that declared number of bytes.
 
-`CheckBinanceTags` follows the Delphi client: it updates only known markets that
-are present in the response. Markets absent from the response keep their previous
-token tags.
+`CheckBinanceTags` follows the Delphi client: the latest successful response is
+authoritative for tags. Known markets present in the response receive the new
+tags; known markets absent from that response read back as empty tags. A late
+payload read error is the only exception: already-read tags remain applied, and
+old absent tags are not cleared because Delphi reaches the clear-unseen pass only
+after the read loop completes.
 
 `GetMarketsList` follows Delphi merge semantics. The first response populates
 the market list. Later responses update known markets by name and leave old
