@@ -2572,7 +2572,7 @@ impl ProtocolCore<'_> {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
         let decoded = Client::decode_data_read_int_payload_shared(
-            &mut self.client.reader_protocol,
+            &mut self.client.data_read_state,
             raw_cmd,
             payload,
         );
@@ -2613,7 +2613,7 @@ impl ProtocolCore<'_> {
     }
 
     fn on_new_size_test_inline(&mut self, payload: &[u8]) {
-        if let Some(ack) = Client::build_size_ack_payload(&mut self.client.reader_protocol, payload)
+        if let Some(ack) = Client::build_size_ack_payload(&mut self.client.data_read_state, payload)
         {
             if let Some(sock) = self.client.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, true);
@@ -2642,7 +2642,7 @@ impl ProtocolCore<'_> {
             self.client.waiting_hello = false;
         }
         if cmd == Command::WantNewHello {
-            self.client.reader_protocol.reset();
+            self.client.data_read_state.reset();
             self.client.send_lock.lock().unwrap().reset_tmp_slider();
             self.client.used_sliced_limit = false;
             self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
@@ -2924,7 +2924,7 @@ impl ProtocolCore<'_> {
         let encode_cipher = crate::crypto::cipher_from_key(&self.client.encode_key);
         self.client.encode_cipher = Some(encode_cipher.clone());
         self.client
-            .reader_protocol
+            .data_read_state
             .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
 
         let aad = self.client.cfg.client_id.to_le_bytes();
@@ -4058,13 +4058,13 @@ struct SlicedAck {
     datagram_num: u16,
 }
 
-struct ReaderProtocolState {
+struct DataReadState {
     decode_cipher: Option<crate::crypto::Aes128Gcm>,
     slider: Slider,
     data_size_ack_series_num: u16,
 }
 
-impl ReaderProtocolState {
+impl DataReadState {
     fn new() -> Self {
         Self {
             decode_cipher: None,
@@ -4180,11 +4180,10 @@ pub struct Client {
     tmp_send_count: usize, // items in batch
     tmp_send_size: usize, // Delphi TmpSendSize accounting: sum of (payload + header + grouped item header)
 
-    // Receive-side part of Delphi DataReadInt that must survive soft reconnect:
-    // MPSlider replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider
-    // lives in SendLockState so writer copies it atomically with ACK queues.
-    // Mutations are epoch-gated across socket/session replacement.
-    reader_protocol: ReaderProtocolState,
+    // Delphi DataReadInt receive state that survives soft reconnect: MPSlider
+    // replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider lives in
+    // SendLockState so the send phase copies it atomically with ACK queues.
+    data_read_state: DataReadState,
     // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
@@ -4492,7 +4491,7 @@ impl Client {
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
             tmp_send_size: 0,
-            reader_protocol: ReaderProtocolState::new(),
+            data_read_state: DataReadState::new(),
             recvd_slider: Slider::new(),
             total_sent: Arc::new(AtomicU64::new(0)),
             total_recv_shared,
@@ -7251,7 +7250,7 @@ impl Client {
     }
 
     fn build_size_ack_payload(
-        reader_protocol: &mut ReaderProtocolState,
+        data_read_state: &mut DataReadState,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
         let size_test = control::SizeTestData::read(payload)?;
@@ -7259,7 +7258,7 @@ impl Client {
         if (size as usize) < 6 {
             return None;
         }
-        let series = reader_protocol.update_data_size_ack_series_num(size_test.series_num);
+        let series = data_read_state.update_data_size_ack_series_num(size_test.series_num);
         Some(control::SizeTestData::ack_bytes(size, series))
     }
 
@@ -7334,7 +7333,7 @@ impl Client {
         self.net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let (ack_start, ack_words) = self.reader_protocol.build_ack_half();
+        let (ack_start, ack_words) = self.data_read_state.build_ack_half();
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,
@@ -7423,7 +7422,7 @@ impl Client {
     }
 
     fn decode_data_read_int_payload_shared(
-        reader_protocol: &mut ReaderProtocolState,
+        data_read_state: &mut DataReadState,
         raw_cmd: u8,
         data: &[u8],
     ) -> Option<(u8, Vec<u8>)> {
@@ -7438,11 +7437,11 @@ impl Client {
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
             // B-V2-03: используем кэшированный cipher вместо ключа. До handshake
             // (cipher = None) Crypted-пакетов и быть не должно — но защищаемся return.
-            let ReaderProtocolState {
+            let DataReadState {
                 decode_cipher,
                 slider,
                 ..
-            } = reader_protocol;
+            } = data_read_state;
             let decode_cipher = decode_cipher.as_ref()?;
             let decrypted = crypted::decrypt_command(decode_cipher, &payload, slider);
             if let Some((inner_cmd, decrypted, _want_ack)) = decrypted {
@@ -7901,7 +7900,7 @@ impl Client {
         self.total_recv_shared.store(0, Ordering::Relaxed);
         self.rs = 1.0;
         self.used_sliced_limit = false;
-        self.reader_protocol.reset();
+        self.data_read_state.reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
         self.recvd_slider = Slider::new();
         self.recv_slicer = slicing::SlicingReceiver::new();
@@ -9090,7 +9089,7 @@ mod api_pending_dispatch_tests {
     }
 
     #[test]
-    fn reader_decoded_api_response_reaches_pending_receiver_before_run_loop() {
+    fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
         let mut client = Client::new(dummy_cfg());
         let request_uid = 0x7766_5544_3322_1100;
         let rx = client.api_pending.register(request_uid);
@@ -9310,7 +9309,7 @@ mod api_pending_dispatch_tests {
     }
 
     #[test]
-    fn reader_decoded_candles_chunks_complete_receiver_before_run_loop() {
+    fn data_read_candles_chunks_complete_receiver_before_run_loop() {
         let mut client = Client::new(dummy_cfg());
         let (uid, rx) = client.api_request_candles_data_async_registered();
         let chunk0 = [0u8, 0, 2, 0, 1, 2];
@@ -9426,7 +9425,7 @@ mod api_pending_dispatch_tests {
         let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
         let mut payloads = Vec::new();
         let (cmd, payload) = Client::decode_data_read_int_payload_shared(
-            &mut client.reader_protocol,
+            &mut client.data_read_state,
             Command::UI as u8 | COMPRESSED_FLAG,
             &compressed_garbage,
         )
@@ -13465,7 +13464,7 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
-    fn app_send_queue_is_not_blocked_by_pending_reader_decode() {
+    fn app_send_queue_is_not_blocked_by_data_read_delivery() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
         client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
@@ -13620,7 +13619,7 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
-    fn reader_decoded_sliced_payload_bypasses_recv_event_backlog() {
+    fn data_read_sliced_payload_bypasses_recv_event_backlog() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
 
@@ -13657,7 +13656,7 @@ mod event_loop_fairness_tests {
     }
 
     #[test]
-    fn reader_decoded_grouped_payload_applies_recv_effects_once() {
+    fn data_read_grouped_payload_applies_recv_effects_once() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
         let mut grouped = Vec::new();
@@ -14171,7 +14170,7 @@ mod service_cmd_tests {
         assert_eq!(ack_payload.len(), size as usize);
         assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
         assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
-        assert_eq!(client.reader_protocol.data_size_ack_series_num, series);
+        assert_eq!(client.data_read_state.data_size_ack_series_num, series);
         assert_eq!(client.total_recv, packet.len() as u64);
     }
 
@@ -14548,7 +14547,7 @@ mod service_cmd_tests {
     }
 
     #[test]
-    fn reader_decodes_regular_data_without_recv_event_backlog() {
+    fn data_read_decodes_regular_data_without_recv_event_backlog() {
         let _err_emu_guard = err_emu_test_guard();
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_addr = server_sock.local_addr().unwrap();

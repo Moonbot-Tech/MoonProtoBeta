@@ -152,9 +152,9 @@ Delphi model по факту:
   stats, ping, handshake, reconnect flags, tokens, and keys are written
   directly into the single `Client` owner, matching Delphi's direct field
   mutation effect.
-- `src/client.rs` - `ReaderProtocolState` is no longer `Arc<Mutex<_>>`.
+- `src/client.rs` - `DataReadState` is no longer a reader-runtime/shared object.
   MPSlider, decode cipher, and SizeAck series live directly in the single
-  `Client` owner and are mutated inline from the receive path.
+  `Client` owner and are mutated inline from the `DataReadInt` path.
 - `src/client.rs` - stale reader epoch guards are gone. They protected only the
   removed async reader closure; accepted UDP datagrams are now processed by the
   current single-owner `ProtocolCore` directly.
@@ -1568,6 +1568,31 @@ Checks:
 - `cargo test --test fire_test --no-run --quiet`: passed.
 - `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
   passed on prod in `22.10s`: `FIRETEST_QUICK_PASS`.
+
+### 2026-05-24 - Phase D17 renamed receive decode state
+
+Done:
+
+- Renamed the remaining production `ReaderProtocolState` object to
+  `DataReadState`.
+- Renamed the `Client` field from `reader_protocol` to `data_read_state`.
+- Renamed stale `reader_decoded_*` test names to `data_read_*`.
+
+Reason:
+
+- Production reader/runtime/decoded queues are gone. Keeping `Reader*` names on
+  direct `DataReadInt` state made the current single-owner code look like the old
+  two-thread bridge and made Delphi block-by-block review noisier.
+- This is a mechanical naming cleanup only: same fields, same reset/cipher/slider
+  effects, same tests.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test --lib --quiet`: 607 passed.
+- `cargo check --examples --quiet`: passed.
+- `MOONPROTO_FIRETEST_PROFILE=quick cargo test --test fire_test -- --ignored --nocapture`
+  passed on prod in `22.01s`: `FIRETEST_QUICK_PASS`, `ParseFailed=0`.
 
 ### 2026-05-24 - FireTest quick profile
 
