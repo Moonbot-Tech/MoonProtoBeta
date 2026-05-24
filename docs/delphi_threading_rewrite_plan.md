@@ -4509,3 +4509,32 @@ Still not done:
 
 - Continue line-by-line reverse-equivalence for remaining
   `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.
+
+### 2026-05-24 - Phase 1 partial: existing TOrderStatus worker fields
+
+Done:
+
+- Fixed another full `TOrderStatus` parity bug.
+- Delphi uses `TOrderStatus.StratID`, `IsShort`, `EmulatorMode`, route/market
+  identity, and related worker-level fields only on the new-worker path
+  (`ProcessCommandOrder` create branch + `OnMServerOrder`).
+- Existing-worker `BOrderWorker.HandleServerCommand(TOrderStatus)` applies
+  buy/sell compact records, stops, `ImmuneForClicks`, status, and price side
+  effects; it does not rewrite `FIsShort`, emulator mode, strategy, route, or
+  cache/source flags.
+- Rust previously rewrote `market_name`, `currency`, `platform`, `strat_id`,
+  `is_short`, `db_id`, `from_cache`, and `emulator_mode` on every full status.
+- Rust now treats those fields as set-on-create only. Existing full statuses
+  still apply compact orders, stops, immune flag, status, and price side
+  effects.
+- Recorded `spec_pipeline/work/хуйня.md §X.136`.
+
+Verification:
+
+- Added a regression test where the second full `TOrderStatus` changes every
+  worker-level field but only compact/stops/immune/status effects apply.
+
+Still not done:
+
+- Continue line-by-line reverse-equivalence for remaining
+  `ProcessCommandOrder` / `HandleServerCommand` / `DoTheJobVirtual` effects.

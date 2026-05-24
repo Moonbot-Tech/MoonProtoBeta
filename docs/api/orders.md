@@ -60,6 +60,12 @@ order; they do not create a new active order entry when the UID is unknown.
 For a new non-cache `TOrderStatus`, the dispatcher also requires the market
 name to be present in `MarketsState`; otherwise the packet is dropped without
 creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
+Worker identity fields from full `TOrderStatus` (`market_name`,
+`currency`, `platform`, `strat_id`, `is_short`, `db_id`, `from_cache`,
+`emulator_mode`) are set when the local worker is created. Later full statuses
+for the same UID update compact buy/sell orders, stops, immune flag, status,
+and price side effects, but do not rewrite those worker-level fields, matching
+Delphi `BOrderWorker.HandleServerCommand`.
 Incoming client-originated order commands such as `TSetImmuneCommand`,
 `TTurnPanicSellCommand`, join/split/close/sell/move commands, and raw request
 commands are not applied and do not emit `OrderEvent`: in the Delphi receive

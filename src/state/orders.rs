@@ -1421,17 +1421,19 @@ impl Orders {
         let had_pending_vorder = entry.pending_buy_cond_price.is_some();
         let was_status_changed = st.epoch_header.status != entry.status;
         entry.status = st.epoch_header.status;
-        entry.market_name = st.epoch_header.market.market_name.clone();
-        entry.currency = st.epoch_header.market.currency;
-        entry.platform = st.epoch_header.market.platform;
+        if new_order {
+            entry.market_name = st.epoch_header.market.market_name.clone();
+            entry.currency = st.epoch_header.market.currency;
+            entry.platform = st.epoch_header.market.platform;
+            entry.strat_id = st.strat_id;
+            entry.is_short = st.is_short;
+            entry.db_id = st.db_id;
+            entry.from_cache = st.from_cache;
+            entry.emulator_mode = st.emulator_mode;
+        }
         entry.buy_order = buy;
         entry.sell_order = sell;
         entry.stops = st.stops;
-        entry.strat_id = st.strat_id;
-        entry.is_short = st.is_short;
-        entry.db_id = st.db_id;
-        entry.from_cache = st.from_cache;
-        entry.emulator_mode = st.emulator_mode;
         entry.immune_for_clicks = st.immune_for_clicks;
         entry.job_is_done = st.epoch_header.status.is_terminal();
         if pending_local_visual_order {
@@ -1788,6 +1790,52 @@ mod tests {
             }
         ));
         assert!(orders.get(42).is_none());
+    }
+
+    #[test]
+    fn existing_full_status_keeps_worker_identity_fields_like_delphi() {
+        let mut orders = Orders::new();
+        let mut first = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
+        first.epoch_header.market.currency = 1;
+        first.epoch_header.market.platform = 4;
+        first.strat_id = 11;
+        first.is_short = false;
+        first.db_id = 101;
+        first.from_cache = false;
+        first.emulator_mode = false;
+        first.buy_order.actual_price = 10.0;
+        first.stops.sl_level = 1.0;
+        first.immune_for_clicks = false;
+        orders.apply(order_status_cmd(first));
+
+        let mut second = make_status(42, "ETHUSDT", OrderWorkerStatus::BuySet, 2);
+        second.epoch_header.market.currency = 9;
+        second.epoch_header.market.platform = 8;
+        second.strat_id = 22;
+        second.is_short = true;
+        second.db_id = 202;
+        second.from_cache = true;
+        second.emulator_mode = true;
+        second.buy_order.actual_price = 25.0;
+        second.stops.sl_level = 2.0;
+        second.immune_for_clicks = true;
+
+        let (res, ev) = orders.apply(order_status_cmd(second));
+
+        assert_eq!(res, ApplyResult::Applied);
+        assert!(matches!(ev, OrderEvent::Updated(42)));
+        let order = orders.get(42).unwrap();
+        assert_eq!(order.market_name, "BTCUSDT");
+        assert_eq!(order.currency, 1);
+        assert_eq!(order.platform, 4);
+        assert_eq!(order.strat_id, 11);
+        assert!(!order.is_short);
+        assert_eq!(order.db_id, 101);
+        assert!(!order.from_cache);
+        assert!(!order.emulator_mode);
+        assert_eq!(order.buy_order.actual_price, 25.0);
+        assert_eq!(order.stops.sl_level, 2.0);
+        assert!(order.immune_for_clicks);
     }
 
     #[test]
