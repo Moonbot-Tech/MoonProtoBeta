@@ -64,6 +64,9 @@ For every applied market price row, `MarketPrice` also mirrors the Delphi
 post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
 `last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
 `min_lot_size = max(max(bn_step_size, bn_min_qty) * p_last, bn_min_notional)`.
+When funding is included, the same row also updates
+`Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
+mutation in the `HasFunding` branch.
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active

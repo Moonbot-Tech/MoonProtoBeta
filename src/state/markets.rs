@@ -596,7 +596,11 @@ impl MarketsState {
     fn apply_one_market_price_update(&mut self, p: &MarketPriceUpdate, send_funding: bool) {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
             let (bn_step_size, bn_min_qty, bn_min_notional) = {
-                let market = &self.markets[idx];
+                let market = &mut self.markets[idx];
+                if send_funding {
+                    market.funding_rate = p.funding_rate;
+                    market.funding_time = p.funding_time;
+                }
                 (
                     market.bn_step_size,
                     market.bn_min_qty,
@@ -1425,6 +1429,38 @@ mod tests {
             price.min_lot_size, 5.0,
             "Delphi uses Max(Max(step,minQty) * pLast, bnMinNotional)"
         );
+    }
+
+    #[test]
+    fn apply_prices_updates_market_funding_fields_like_delphi() {
+        let mut st = MarketsState::new();
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![mk_market("BTCUSDT", 0)],
+            corr_markets: vec![],
+        });
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: true,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 100.0,
+                ask: 110.0,
+                funding_rate: 0.0125,
+                funding_time: 46000.25,
+                mark_price: 105.0,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+
+        let market = st.get("BTCUSDT").unwrap();
+        assert_eq!(market.funding_rate, 0.0125);
+        assert_eq!(market.funding_time, 46000.25);
+
+        let price = st.price("BTCUSDT").unwrap();
+        assert_eq!(price.funding_rate, 0.0125);
+        assert_eq!(price.funding_time, 46000.25);
     }
 
     #[test]

@@ -4881,3 +4881,19 @@ Still not done:
 - These helpers are intentionally read-only. No automatic listing sleep/retry or
   trading automation is enabled until a separate exact Delphi-owned action path
   is proven.
+
+### 2026-05-24 - Phase 1 partial: UpdateMarketsList funding mutates Market
+
+Done:
+
+- Fixed a public state mismatch in `UpdateMarketsList`.
+- Delphi updates `m.FundingRate` and `m.FundingTime` on the `TMarket` object
+  itself when `HasFunding` is true.
+- Rust previously updated only `MarketPrice.funding_rate/funding_time`, leaving
+  `Market::funding_rate/funding_time` stale for API readers.
+- Rust now mutates both `Market` and `MarketPrice` in the same price-row branch.
+
+Verification:
+
+- Added regression coverage that `Market` and `MarketPrice` funding fields move
+  together after a funding-bearing price update.
