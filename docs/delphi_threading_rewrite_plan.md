@@ -848,6 +848,41 @@ Checks:
 - `cargo check --examples --quiet`: passed.
 - `cargo test --test fire_test --no-run --quiet`: passed.
 
+### 2026-05-24 - Phase C1 callback queue for common run paths
+
+Done:
+
+- Production `Client::run` now delivers raw `(Command, Vec<u8>)` through an
+  unbounded application callback channel. The protocol writer sends owned
+  payloads into the channel and continues.
+- Production `Client::run_with_dispatcher` now delivers typed `Event` values
+  through an unbounded application callback channel after `EventDispatcher`
+  state and active-library actions are applied.
+- `run_with_dispatcher_state` remains inline for now because its callback borrows
+  the live dispatcher state. Moving it requires a separate state-snapshot or
+  state-owner design in Phase D.
+
+Reason:
+
+- This closes the direct user-callback blocking risk for the two common public
+  run paths without changing protocol order: Ping/SlicedACK/API pending/trades
+  and orderbook state still execute inside `ProtocolCore`; only user
+  notification leaves through `AppQueue`.
+
+Checks:
+
+- `cargo fmt --check`: passed.
+- `cargo test raw_run_callback_block_does_not_extend_protocol_writer_tick
+  --quiet`: passed.
+- `cargo test dispatcher_event_callback_block_does_not_extend_protocol_writer_tick
+  --quiet`: passed.
+- `cargo test --lib --quiet`: 601 passed.
+- `cargo check --examples --quiet`: passed.
+- `cargo test --test fire_test --no-run --quiet`: passed.
+- live `cargo test --test fire_test -- --ignored --nocapture`: passed against
+  the configured prod server, including `err_emu=10%` initial health and
+  `err_emu=50%` high-loss simple-ops gates.
+
 ### 2026-05-22 - Phase 3 partial
 
 Done:

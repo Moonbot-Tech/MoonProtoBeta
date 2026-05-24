@@ -81,8 +81,12 @@ inside the same `Client` session maintains the user-requested active-lib state.
 `run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
 for the requested duration, but the MoonProto writer/orchestrator loop runs in a
 dedicated scoped writer thread while the call is active. The UDP reader is a
-separate reader thread. Event/raw callbacks are invoked by that writer thread;
-keep callbacks short and move slow UI/work to another queue or thread.
+separate reader thread. `run` raw callbacks and ordinary
+`run_with_dispatcher` event callbacks are delivered through the application
+callback queue after protocol/domain state is updated, so slow UI work does not
+block ACK/retry/send progress. The call returns after the queued callbacks from
+that run are drained. `run_with_dispatcher_state` still calls inline because it
+lends the current dispatcher state to the callback; keep that callback short.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP

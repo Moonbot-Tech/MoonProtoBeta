@@ -2839,10 +2839,16 @@ impl std::fmt::Debug for ClientConfig {
 /// This callback receives decoded MoonProto command payloads after transport
 /// decrypt/decompress/group handling, but before `EventDispatcher` state
 /// application. Regular applications should use [`Client::run_with_dispatcher`]
-/// instead.
+/// instead. The callback runs from the application callback queue, not inside
+/// the protocol writer tick.
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
+type RawAppEvent = (Command, Vec<u8>);
 
 /// Callback that receives typed events from [`Client::run_with_dispatcher`].
+///
+/// The callback runs from the application callback queue after dispatcher state
+/// has been updated. Blocking this callback does not block protocol ACK/retry
+/// progress.
 pub type EventFn = Box<dyn FnMut(&crate::events::Event) + Send>;
 
 /// Callback that receives an event plus the updated read-only dispatcher state.
@@ -2863,7 +2869,9 @@ pub type EventWithStateFn =
 /// `client_new_data_decoded`) обслуживать оба сценария без
 /// `Arc<Mutex>`-обходов borrow checker.
 pub(crate) enum DispatchSink<'a> {
+    #[cfg(test)]
     Callback(&'a mut OnDataFn),
+    CallbackQueue(&'a mpsc::Sender<RawAppEvent>),
     Buffer(&'a mut Vec<(Command, Vec<u8>)>),
 }
 
@@ -2878,7 +2886,11 @@ impl<'a> DispatchSink<'a> {
     #[inline]
     fn deliver_owned(&mut self, cmd: Command, payload: Vec<u8>) {
         match self {
+            #[cfg(test)]
             Self::Callback(cb) => cb(cmd, &payload),
+            Self::CallbackQueue(tx) => {
+                let _ = tx.send((cmd, payload));
+            }
             Self::Buffer(buf) => buf.push((cmd, payload)),
         }
     }
@@ -2887,17 +2899,22 @@ impl<'a> DispatchSink<'a> {
 /// Режим работы main loop — определяет как доставлять входящие data-пакеты
 /// и нужны ли active-library auto-actions.
 ///
-/// `Callback` — low-level raw path для `Client::run`. Потребитель получает
+/// `CallbackQueue` — low-level raw path для `Client::run`. Потребитель получает
 /// сырые `(Command, &[u8])` и сам решает что с ними делать (обычно — свой
-/// `dispatcher.dispatch_into(...)`).
+/// `dispatcher.dispatch_into(...)`). Production delivery goes through app
+/// queue.
 ///
 /// `Dispatcher` — active-library path для `Client::run_with_dispatcher`. Liба
 /// сама пропускает data-пакеты через `EventDispatcher::dispatch_into_active_actions`,
 /// делает auto-actions (RequestOrderBookFull, trades resend tail-check, indexes
 /// sync gate), потребитель получает уже разобранные типизированные `Event`.
 pub(crate) enum RunMode<'a> {
+    #[cfg(test)]
     Callback {
         on_data: OnDataFn,
+    },
+    CallbackQueue {
+        app_tx: mpsc::Sender<RawAppEvent>,
     },
     Dispatcher {
         dispatcher: &'a mut crate::events::EventDispatcher,
@@ -2915,7 +2932,7 @@ pub(crate) enum RunMode<'a> {
 /// Изоляция позволяет иметь два публичных метода (`run_with_dispatcher` /
 /// `run_with_dispatcher_state`) без дубликации main loop кода.
 pub(crate) enum DispatcherEventFn {
-    EventOnly(EventFn),
+    QueueToCallback(mpsc::Sender<crate::events::Event>),
     EventWithState(EventWithStateFn),
     Queue,
 }
@@ -2927,11 +2944,10 @@ impl DispatcherEventFn {
         dispatcher: &mut crate::events::EventDispatcher,
     ) {
         match self {
-            Self::EventOnly(cb) => {
-                for event in events.iter() {
-                    cb(event);
+            Self::QueueToCallback(tx) => {
+                for event in events.drain(..) {
+                    let _ = tx.send(event);
                 }
-                events.clear();
             }
             Self::EventWithState(cb) => {
                 for event in events.iter() {
@@ -3241,8 +3257,19 @@ impl ProtocolCore<'_> {
         }
 
         match mode {
+            #[cfg(test)]
             RunMode::Callback { on_data } => {
                 let mut sink = DispatchSink::Callback(on_data);
+                self.client.client_new_data_decoded(
+                    cmd,
+                    payload,
+                    api_pending_consumed_by_reader,
+                    candles_chunk_consumed_by_reader,
+                    &mut sink,
+                );
+            }
+            RunMode::CallbackQueue { app_tx } => {
+                let mut sink = DispatchSink::CallbackQueue(app_tx);
                 self.client.client_new_data_decoded(
                     cmd,
                     payload,
@@ -7475,13 +7502,28 @@ impl Client {
     /// Run the client. Spawns reader thread, runs main loop for `duration`.
     /// Matches TMoonProtoUDPClient.Execute.
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
-        // Тонкий wrapper над унифицированным `run_inner`. Low-level raw API для
-        // потребителей которым НЕ нужны active-library
+        // Low-level raw API для потребителей которым НЕ нужны active-library
         // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).
-        // **Для большинства случаев предпочтительнее `run_with_dispatcher`** —
-        // см. его doc-comment.
-        let mode = RunMode::Callback { on_data };
-        self.run_inner(duration, mode);
+        // User callback выполняется через app queue, а не внутри protocol tick.
+        let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
+        thread::scope(|scope| {
+            let app_handle = scope.spawn(move || {
+                let mut on_data = on_data;
+                while let Ok((cmd, payload)) = app_rx.recv() {
+                    on_data(cmd, &payload);
+                }
+            });
+            let writer_handle = scope.spawn(|| {
+                let mut mode = RunMode::CallbackQueue { app_tx };
+                ProtocolCore { client: self }.run(duration, &mut mode);
+            });
+            writer_handle
+                .join()
+                .expect("moonproto writer thread panicked");
+            app_handle
+                .join()
+                .expect("moonproto app callback thread panicked");
+        });
     }
 
     /// Send LogOff and close socket. Call when done.
@@ -7530,18 +7572,35 @@ impl Client {
         dispatcher: &mut crate::events::EventDispatcher,
         on_event: EventFn,
     ) {
-        // Тонкий wrapper над унифицированным `run_inner`. Все active-library
-        // auto-actions (RequestOrderBookFull, trades resend tail-check, indexes
-        // sync gate, ServerTimeDelta apply, server-token state reset) живут
-        // в `dispatch_into_active_actions` + `run_inner`.
-        let mode = RunMode::Dispatcher {
-            dispatcher,
-            on_event: DispatcherEventFn::EventOnly(on_event),
-            event_buf: Vec::with_capacity(8),
-            payload_buf: Vec::with_capacity(4),
-            active_actions_buf: Vec::with_capacity(4),
-        };
-        self.run_inner(duration, mode);
+        // Все active-library auto-actions (RequestOrderBookFull, trades resend
+        // tail-check, indexes sync gate, ServerTimeDelta apply, server-token
+        // state reset) живут в protocol thread. User callback получает уже
+        // готовые события через app queue и не блокирует protocol tick.
+        let (app_tx, app_rx) = mpsc::channel::<crate::events::Event>();
+        thread::scope(|scope| {
+            let app_handle = scope.spawn(move || {
+                let mut on_event = on_event;
+                while let Ok(event) = app_rx.recv() {
+                    on_event(&event);
+                }
+            });
+            let writer_handle = scope.spawn(|| {
+                let mut mode = RunMode::Dispatcher {
+                    dispatcher,
+                    on_event: DispatcherEventFn::QueueToCallback(app_tx),
+                    event_buf: Vec::with_capacity(8),
+                    payload_buf: Vec::with_capacity(4),
+                    active_actions_buf: Vec::with_capacity(4),
+                };
+                ProtocolCore { client: self }.run(duration, &mut mode);
+            });
+            writer_handle
+                .join()
+                .expect("moonproto writer thread panicked");
+            app_handle
+                .join()
+                .expect("moonproto app callback thread panicked");
+        });
     }
 
     /// Same as [`Self::run_with_dispatcher`], but the callback also receives the
@@ -14231,6 +14290,9 @@ mod event_loop_fairness_tests {
     fn run_inner_executes_writer_runtime_on_dedicated_thread() {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        client.prev_auth_status = AuthStatus::AuthDone;
         client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
         client
             .pending_reader_decoded
@@ -14266,7 +14328,120 @@ mod event_loop_fairness_tests {
             .expect("writer callback thread id");
         assert_ne!(
             writer_thread, caller_thread,
-            "WriterRuntime must run on a dedicated writer thread, matching Delphi Execute"
+            "app callback must not run on the caller thread"
+        );
+    }
+
+    #[test]
+    fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::UI as u8,
+                payload: Some(vec![0xAA]),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            client.run(
+                Duration::from_millis(20),
+                Box::new(move |cmd, payload| {
+                    assert_eq!(cmd, Command::UI);
+                    assert_eq!(payload, &[0xAA]);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+            );
+            client
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("raw callback started");
+        thread::sleep(Duration::from_millis(80));
+        release_tx.send(()).unwrap();
+
+        let client = handle.join().expect("client run thread");
+        let snapshot = client.protocol_metrics_snapshot();
+        assert!(
+            snapshot.writer_tick_max_ns < 50_000_000,
+            "blocking raw app callback leaked into protocol tick: max={}ns",
+            snapshot.writer_tick_max_ns
+        );
+    }
+
+    #[test]
+    fn dispatcher_event_callback_block_does_not_extend_protocol_writer_tick() {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        client.authorized = true;
+        client.auth_status = AuthStatus::AuthDone;
+        client.prev_auth_status = AuthStatus::AuthDone;
+        client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0.0f64.to_le_bytes());
+        payload.extend_from_slice(b"queued app event");
+        client
+            .pending_reader_decoded
+            .lock()
+            .unwrap()
+            .push(ReaderDecodedMsg {
+                cmd: Command::LogMsg as u8,
+                payload: Some(payload),
+                api_pending_consumed: false,
+                candles_chunk_consumed: false,
+                recv_bytes: 1,
+                timestamp_ms: 1,
+                epoch: client.current_reader_epoch,
+                apply_recv_effects: true,
+                sliced_stats: None,
+                ping_update: None,
+                handshake_update: None,
+            });
+
+        let mut dispatcher = EventDispatcher::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            client.run_with_dispatcher(
+                Duration::from_millis(20),
+                &mut dispatcher,
+                Box::new(move |event| {
+                    assert!(matches!(event, crate::events::Event::ServerLog { .. }));
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+            );
+            client
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("event callback started");
+        thread::sleep(Duration::from_millis(80));
+        release_tx.send(()).unwrap();
+
+        let client = handle.join().expect("client run thread");
+        let snapshot = client.protocol_metrics_snapshot();
+        assert!(
+            snapshot.writer_tick_max_ns < 50_000_000,
+            "blocking event app callback leaked into protocol tick: max={}ns",
+            snapshot.writer_tick_max_ns
         );
     }
 
