@@ -175,6 +175,15 @@ let value = BaseCurrency::from_byte(wire_byte);
 Known constants match `Vars.pas:TBaseCurrency`. Unknown future ordinals are
 preserved as their original byte instead of being collapsed to
 `BaseCurrency::UNKNOWN`, matching Delphi `TBaseCurrency(resp.ReadByte)`.
+For protocol version `< 2`, the wire payload has no `FuturesType` byte, so
+`Market::futures_type` is `BaseCurrency::EMPTY`, matching the Delphi
+constructor default before `ReadMarketFromStream`.
+
+`Market::listed_type_like_delphi()` returns the Delphi `TListedOnExchange`
+post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
+`ListedType::SPOT`; any other `futures_type` means `ListedType::BOTH`.
+`ListedType` is a raw ordinal wrapper and is not transmitted in the market
+wire payload.
 
 Convenience methods:
 

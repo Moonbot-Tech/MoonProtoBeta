@@ -206,6 +206,33 @@ impl BaseCurrency {
 }
 
 // =============================================================================
+//  TListedOnExchange ordinal (Vars.pas:58)
+// =============================================================================
+
+/// Delphi `TListedOnExchange` raw ordinal from `Vars.pas`.
+///
+/// This value is not sent in `WriteMarketToStream`. Delphi derives
+/// `TMarket.ListedType` after `GetMarketsList` from `FuturesType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ListedType(pub u8);
+
+impl ListedType {
+    pub const UNKNOWN: Self = Self(0);
+    pub const SPOT: Self = Self(1);
+    pub const FUTURES: Self = Self(2);
+    pub const BOTH: Self = Self(3);
+
+    #[allow(non_upper_case_globals)]
+    pub const Unknown: Self = Self::UNKNOWN;
+    #[allow(non_upper_case_globals)]
+    pub const Spot: Self = Self::SPOT;
+    #[allow(non_upper_case_globals)]
+    pub const Futures: Self = Self::FUTURES;
+    #[allow(non_upper_case_globals)]
+    pub const Both: Self = Self::BOTH;
+}
+
+// =============================================================================
 //  Market struct (42 поля)
 // =============================================================================
 
@@ -263,6 +290,18 @@ pub struct Market {
     pub bn_only_isolated: bool,
     // --- v2: FuturesType ---
     pub futures_type: BaseCurrency,
+}
+
+impl Market {
+    /// Delphi `GetMarketsList` post-pass:
+    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
+    pub fn listed_type_like_delphi(&self) -> ListedType {
+        if self.futures_type == BaseCurrency::EMPTY {
+            ListedType::SPOT
+        } else {
+            ListedType::BOTH
+        }
+    }
 }
 
 /// Прочитать `TMarket` из EngineStreamReader (byte-exact с `ReadMarketFromStream`).
@@ -326,7 +365,9 @@ pub(crate) fn read_market_with_local_shift(
     let futures_type = if ver >= 2 {
         BaseCurrency::from_byte(r.read_byte()?)
     } else {
-        BaseCurrency::UNKNOWN
+        // Delphi starts from `TMarket.CreateBase`; v1 payload has no
+        // FuturesType byte, so the constructor default `BC_EMPTY` remains.
+        BaseCurrency::EMPTY
     };
 
     // Backfill MBClassic (см. ReadMarketFromStream MoonProtoSerialization.pas:160).
@@ -891,7 +932,7 @@ mod tests {
             futures_type: if with_v2 {
                 BaseCurrency::USDT
             } else {
-                BaseCurrency::Unknown
+                BaseCurrency::EMPTY
             },
         }
     }
@@ -904,6 +945,43 @@ mod tests {
         let mut r = EngineStreamReader::new(&buf);
         let m2 = read_market_with_local_shift(&mut r, 1, 0.0).unwrap();
         assert_eq!(m, m2);
+        assert_eq!(
+            r.remaining(),
+            1,
+            "Delphi writer always writes FuturesType, but v1 reader leaves it unread"
+        );
+    }
+
+    #[test]
+    fn market_v1_defaults_futures_type_to_empty_like_delphi_create_base() {
+        let mut m = sample_market("BTC", true);
+        m.futures_type = BaseCurrency::UNKNOWN;
+        let mut buf = Vec::new();
+        write_market_with_local_shift(&mut buf, &m, 1, 0.0);
+
+        let mut r = EngineStreamReader::new(&buf);
+        let m2 = read_market_with_local_shift(&mut r, 1, 0.0).unwrap();
+
+        assert_eq!(m2.futures_type, BaseCurrency::EMPTY);
+        assert_eq!(r.remaining(), 1);
+    }
+
+    #[test]
+    fn market_listed_type_matches_delphi_get_markets_list_post_pass() {
+        let mut spot = sample_market("BTC", false);
+        spot.futures_type = BaseCurrency::EMPTY;
+        assert_eq!(spot.listed_type_like_delphi(), ListedType::SPOT);
+
+        let mut both = sample_market("ETH", true);
+        both.futures_type = BaseCurrency::USDT;
+        assert_eq!(both.listed_type_like_delphi(), ListedType::BOTH);
+
+        let mut unknown_non_empty = sample_market("NEW", true);
+        unknown_non_empty.futures_type = BaseCurrency::UNKNOWN;
+        assert_eq!(
+            unknown_non_empty.listed_type_like_delphi(),
+            ListedType::BOTH
+        );
     }
 
     #[test]

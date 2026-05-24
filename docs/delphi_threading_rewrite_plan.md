@@ -4714,3 +4714,29 @@ Still not done:
 - The heavier Delphi `NewMarkets` follow-up actions remain under audit:
   optional full balance refresh, listing-strategy price wait, leverage/position
   setup, and UI/log side effects.
+
+### 2026-05-24 - Phase 1 partial: v1 Market FuturesType default and ListedType helper
+
+Done:
+
+- Fixed a versioned market parse mismatch.
+- Delphi `TMarket.CreateBase` initializes `FuturesType := BC_EMPTY` and
+  `ListedType := L_Unknown`. `ReadMarketFromStream` reads `FuturesType` only
+  when `resp.ver >= 2`, so v1 payloads leave `FuturesType = BC_EMPTY`.
+- Rust v1 parsing previously produced `BaseCurrency::UNKNOWN`; this could make
+  the derived listing state look like futures/both-listed while Delphi treats it
+  as spot-only after `GetMarketsList`.
+- Rust now defaults v1 `Market::futures_type` to `BaseCurrency::EMPTY`.
+- Added `Market::listed_type_like_delphi()` and `ListedType` raw ordinals for
+  the exact Delphi post-pass rule: `BC_EMPTY -> L_Spot`, otherwise `L_Both`.
+- Recorded `spec_pipeline/work/хуйня.md §X.142`.
+
+Verification:
+
+- Added regression coverage for v1 market parsing and derived listed type.
+
+Still not done:
+
+- Continue broader `GetMarketsList` post-processing parity audit:
+  `CheckCorrMarkets`, `CheckCurrencyRefMarkets`, and heavier listing-strategy
+  follow-ups remain open.
