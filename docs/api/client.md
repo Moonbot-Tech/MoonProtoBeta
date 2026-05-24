@@ -291,6 +291,8 @@ intent is used; otherwise the post-init UI command sends `false`. It never
 falls back to `subscribe_trades`, because Delphi uses `cfg.ShowHeatMap` for
 `TMMOrdersSubscribeCommand` and uses a separate
 `Strats.HasActivityStrat or cfg.ShowHeatMap` value for `SubscribeAllTrades`.
+If all-trades was queued before Init, the later registry flush still sends its
+own stored `want_mm`; the post-init UI command does not rewrite that value.
 
 Typed outgoing domain helpers use the same Init gate. Before Init:
 `subscribe_*` / `unsubscribe_*` record the latest registry intent but do not put

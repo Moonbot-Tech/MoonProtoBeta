@@ -5026,3 +5026,33 @@ Verification:
 - Quick prod FireTest passed after the post-init source fix:
   `FIRETEST_QUICK_PASS after 21.01s`, `ParseFailed=0`; log observed the
   post-init MMOrders subscription command independently from all-trades.
+
+### 2026-05-24 - Phase 1 partial: MMOrders registry does not rewrite all-trades
+
+Done:
+
+- Fixed the second half of the MMOrders/all-trades mismatch.
+- Delphi has two distinct callers that write the same server
+  `IsMMOrdersSubscribed` flag:
+  `TMMOrdersSubscribeCommand.Create(...)` and
+  `emk_SubscribeAllTrades.WriteBool(...)`.
+- The UI command does not mutate the stored all-trades subscription parameter.
+  Rust no longer lets post-init `TMMOrdersSubscribeCommand(false)` overwrite a
+  prequeued `SubscribeAllTrades(want_mm=true)`.
+- `ui_mm_subscribe` and post-init MMOrders update only the MMOrders intent.
+  `subscribe_all_trades(want_mm)` keeps its own exact replay bool.
+- If reconnect replays all-trades and a later direct MMOrders intent differs,
+  Rust sends the UI MMOrders command after the all-trades request so the final
+  server flag matches the latest direct intent.
+
+Verification:
+
+- Added coverage for the exact bug: prequeued all-trades `want_mm=true` plus
+  default post-init MMOrders `false` still flushes
+  `emk_SubscribeAllTrades(true)`.
+- Updated registry/reconnect tests for separate all-trades and MMOrders replay,
+  including the delayed reconnect subscribe path.
+- `cargo fmt --all --check`, `cargo test --lib --quiet` (`651 passed`), and
+  `cargo check --examples --quiet` passed.
+- Quick prod FireTest passed after the registry split:
+  `FIRETEST_QUICK_PASS after 22.81s`, `ParseFailed=0`.

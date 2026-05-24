@@ -1511,9 +1511,6 @@ impl ClientSender {
         {
             let mut registry = self.subscription_registry.lock().unwrap();
             registry.mm_orders_sub = Some(subscribe);
-            if let Some(trades_sub) = registry.trades_sub.as_mut() {
-                trades_sub.want_mm = subscribe;
-            }
         }
         let uid = rand::random();
         let raw = crate::commands::ui::build_mm_orders_subscribe(uid, subscribe);
@@ -5618,9 +5615,6 @@ impl Client {
     fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
         let mut registry = self.subscription_registry.lock().unwrap();
         registry.mm_orders_sub = Some(subscribe);
-        if let Some(trades_sub) = registry.trades_sub.as_mut() {
-            trades_sub.want_mm = subscribe;
-        }
     }
 
     fn send_mm_orders_subscribe_cmd(&self, subscribe: bool) {
@@ -5709,10 +5703,15 @@ impl Client {
                 // Delphi does not just replay SubscribeAllTrades; it first sends
                 // UnsubscribeAllTrades, waits 100ms, then subscribes again.
             } else {
-                let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
+                let want_mm = sub.want_mm;
                 self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                     want_mm,
                 ));
+                if let Some(mm_orders) = mm_orders_sub {
+                    if mm_orders != want_mm {
+                        self.send_mm_orders_subscribe_cmd(mm_orders);
+                    }
+                }
             }
         } else if let Some(subscribe) = mm_orders_sub {
             self.send_mm_orders_subscribe_cmd(subscribe);
@@ -5726,7 +5725,12 @@ impl Client {
     fn registry_trades_want_mm(&self) -> Option<bool> {
         let registry = self.subscription_registry.lock().unwrap();
         let sub = registry.trades_sub?;
-        Some(registry.mm_orders_sub.unwrap_or(sub.want_mm))
+        Some(sub.want_mm)
+    }
+
+    fn registry_trades_mm_orders_intent(&self) -> Option<bool> {
+        let registry = self.subscription_registry.lock().unwrap();
+        registry.mm_orders_sub
     }
 
     fn start_trades_reconnect_sequence(&mut self, now_ms: i64) {
@@ -5751,6 +5755,11 @@ impl Client {
                     self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                         want_mm,
                     ));
+                    if let Some(mm_orders) = self.registry_trades_mm_orders_intent() {
+                        if mm_orders != want_mm {
+                            self.send_mm_orders_subscribe_cmd(mm_orders);
+                        }
+                    }
                 }
             }
             return;
@@ -5839,20 +5848,21 @@ impl Client {
             return;
         }
 
-        let (trades_sub, mm_orders_sub, orderbook_subs) = {
+        let (trades_sub, orderbook_subs) = {
             let registry = self.subscription_registry.lock().unwrap();
             (
                 registry.trades_sub,
-                registry.mm_orders_sub,
                 registry.orderbook_subs.iter().cloned().collect::<Vec<_>>(),
             )
         };
 
         if let Some(sub) = trades_sub {
-            let want_mm = mm_orders_sub.unwrap_or(sub.want_mm);
+            let want_mm = sub.want_mm;
             self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
                 want_mm,
             ));
+            let mut registry = self.subscription_registry.lock().unwrap();
+            registry.mm_orders_sub = Some(want_mm);
         }
 
         let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
@@ -9004,6 +9014,13 @@ mod api_pending_dispatch_tests {
         server.send_to(&packet, addr).expect("send test datagram");
     }
 
+    fn subscribe_all_trades_want_mm(payload: &[u8]) -> Option<bool> {
+        if engine_request_method(payload)? != EngineMethod::SubscribeAllTrades {
+            return None;
+        }
+        payload.last().map(|v| *v != 0)
+    }
+
     fn build_engine_response_payload(
         request_uid: u64,
         method: EngineMethod,
@@ -9820,6 +9837,52 @@ mod api_pending_dispatch_tests {
             "Delphi post-init TMMOrdersSubscribeCommand uses cfg.ShowHeatMap, not SubscribeAllTrades want_mm"
         );
     }
+
+    #[test]
+    fn post_init_mm_orders_does_not_overwrite_prequeued_all_trades_want_mm() {
+        let mut client = Client::new(dummy_cfg());
+        client.set_domain_ready(true);
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: true });
+        });
+        let cfg = InitConfig {
+            mm_orders_subscribe: None,
+            ..Default::default()
+        };
+        let dispatcher = EventDispatcher::new();
+        let mut result = InitResult::default();
+
+        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
+        client.send_registry_subscriptions_after_init();
+
+        let mut post_init_mm_orders = None;
+        let mut trades_want_mm = None;
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        for item in sliced.into_iter().chain(high).chain(low) {
+            if let Some(value) = Client::outgoing_mm_orders_subscribe_intent(&item) {
+                post_init_mm_orders = Some(value);
+            }
+            if item.cmd == Command::API.to_byte() {
+                trades_want_mm = subscribe_all_trades_want_mm(&item.data);
+            }
+        }
+
+        assert_eq!(
+            post_init_mm_orders,
+            Some(false),
+            "post-init UI command still mirrors cfg.ShowHeatMap/default false"
+        );
+        assert_eq!(
+            trades_want_mm,
+            Some(true),
+            "the later registry SubscribeAllTrades flush must keep its own want_mm"
+        );
+        assert_eq!(
+            client.with_subscription_registry(|registry| registry.mm_orders_sub),
+            Some(true),
+            "after the later SubscribeAllTrades wire command, reconnect intent follows the final server MMOrders flag"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9953,7 +10016,7 @@ mod client_sender_tests {
             assert!(registry.orderbook_subs.contains("BTCUSDT"));
             assert_eq!(
                 registry.trades_sub,
-                Some(TradesSubscription { want_mm: false })
+                Some(TradesSubscription { want_mm: true })
             );
             assert_eq!(registry.mm_orders_sub, Some(false));
         }
@@ -10479,7 +10542,7 @@ mod client_subscribe_integration_tests {
             assert!(registry.orderbook_subs.contains("BTCUSDT"));
             assert_eq!(
                 registry.trades_sub,
-                Some(TradesSubscription { want_mm: false })
+                Some(TradesSubscription { want_mm: true })
             );
             assert_eq!(registry.mm_orders_sub, Some(false));
         });
@@ -11288,7 +11351,7 @@ mod client_subscribe_integration_tests {
     }
 
     #[test]
-    fn apply_mm_orders_subscribe_updates_registry_and_active_trades_flag() {
+    fn apply_mm_orders_subscribe_keeps_all_trades_want_mm() {
         let mut client = Client::new(dummy_cfg());
         client.subscribe_all_trades(false);
         let _ = client.take_send_queues_for_test(); // drain SubscribeAllTrades send command
@@ -11301,7 +11364,7 @@ mod client_subscribe_integration_tests {
         );
         assert_eq!(
             client.with_subscription_registry(|registry| registry.trades_sub),
-            Some(TradesSubscription { want_mm: true }),
+            Some(TradesSubscription { want_mm: false }),
         );
     }
 }
@@ -12785,7 +12848,7 @@ mod registry_subscription_restore_tests {
     }
 
     #[test]
-    fn restore_trades_uses_latest_mm_orders_flag() {
+    fn restore_trades_replays_mm_orders_override_after_exact_trades_subscribe() {
         let mut client = Client::new(dummy_cfg());
         mark_post_init(&mut client);
         client.with_subscription_registry_mut(|registry| {
@@ -12794,13 +12857,31 @@ mod registry_subscription_restore_tests {
         });
         client.server_token = 1;
         client.restore_registry_subscriptions();
-        let sent = drain_api_requests(&client);
-        assert_eq!(sent.len(), 1);
+        let sent = drain_send_items(&client);
+        let api: Vec<_> = sent
+            .iter()
+            .filter(|item| item.cmd == Command::API.to_byte())
+            .collect();
+        let ui: Vec<_> = sent
+            .iter()
+            .filter(|item| item.cmd == Command::UI.to_byte())
+            .collect();
+        assert_eq!(api.len(), 1);
         assert_eq!(
-            method_id(&sent[0]),
+            method_id(&api[0].data),
             Some(EngineMethod::SubscribeAllTrades.to_byte())
         );
-        assert_eq!(subscribe_all_trades_want_mm(&sent[0]), Some(true));
+        assert_eq!(
+            subscribe_all_trades_want_mm(&api[0].data),
+            Some(false),
+            "SubscribeAllTrades replays its own stored bool"
+        );
+        assert_eq!(ui.len(), 1);
+        assert_eq!(
+            Client::outgoing_mm_orders_subscribe_intent(ui[0]),
+            Some(true),
+            "latest direct MMOrders flag is restored as the separate UI command"
+        );
     }
 
     #[test]
@@ -14990,6 +15071,13 @@ mod reconnect_timing_tests {
             .collect()
     }
 
+    fn subscribe_all_trades_want_mm(payload: &[u8]) -> Option<bool> {
+        if method_id(payload)? != EngineMethod::SubscribeAllTrades.to_byte() {
+            return None;
+        }
+        payload.last().map(|v| *v != 0)
+    }
+
     fn build_engine_response_payload(
         request_uid: u64,
         method: EngineMethod,
@@ -15323,6 +15411,51 @@ mod reconnect_timing_tests {
                 }
             )),
             "after SubscribeOrderBook success confirms current ServerToken, OrderBook packets reach parser"
+        );
+    }
+
+    #[test]
+    fn trades_reconnect_restores_distinct_mm_orders_override_after_delayed_subscribe() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.server_token = 0x2222;
+        client.with_subscription_registry_mut(|registry| {
+            registry.trades_sub = Some(TradesSubscription { want_mm: false });
+            registry.mm_orders_sub = Some(true);
+        });
+
+        client.tick_trades_reconnect_sequence(10_000, 0);
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
+        );
+
+        client.tick_trades_reconnect_sequence(10_100, 0);
+        let sent = drain_send_items(&client);
+        let api: Vec<_> = sent
+            .iter()
+            .filter(|item| item.cmd == Command::API.to_byte())
+            .collect();
+        let ui: Vec<_> = sent
+            .iter()
+            .filter(|item| item.cmd == Command::UI.to_byte())
+            .collect();
+
+        assert_eq!(api.len(), 1);
+        assert_eq!(
+            method_id(&api[0].data),
+            Some(EngineMethod::SubscribeAllTrades.to_byte())
+        );
+        assert_eq!(
+            subscribe_all_trades_want_mm(&api[0].data),
+            Some(false),
+            "delayed reconnect SubscribeAllTrades keeps its exact stored bool"
+        );
+        assert_eq!(ui.len(), 1);
+        assert_eq!(
+            Client::outgoing_mm_orders_subscribe_intent(ui[0]),
+            Some(true),
+            "direct MMOrders intent is restored after the delayed all-trades subscribe"
         );
     }
 

@@ -14,12 +14,14 @@ client.unsubscribe_all_trades();
 
 The subscription is registry-aware. Before Init, subscribe and unsubscribe calls
 update only the registry and send no Engine API wire packet. The one-time Init
-flushes the current registry once. After Init, reconnect replays it
-automatically using the Delphi reconnect sequence: if the current `ServerToken`
-has not yet been observed on `MPC_TradesStream`, the maintenance tick sends
-`emk_UnsubscribeAllTrades`, waits 100 ms, then sends
-`emk_SubscribeAllTrades`. The sequence is retried no more often than once per
-5000 ms until a trades packet for the current `ServerToken` reaches the parser.
+flushes the current registry once using the exact stored `want_mm` value; the
+post-init `TMMOrdersSubscribeCommand` does not rewrite this all-trades value.
+After Init, reconnect replays it automatically using the Delphi reconnect
+sequence: if the current `ServerToken` has not yet been observed on
+`MPC_TradesStream`, the maintenance tick sends `emk_UnsubscribeAllTrades`, waits
+100 ms, then sends `emk_SubscribeAllTrades`. The sequence is retried no more
+often than once per 5000 ms until a trades packet for the current `ServerToken`
+reaches the parser.
 Queuing `emk_SubscribeAllTrades` arms that gate, and a successful response
 refreshes it again. This preserves the Delphi `SendAndWait` effect: the library
 does not immediately unsubscribe from a stream it has just subscribed to while

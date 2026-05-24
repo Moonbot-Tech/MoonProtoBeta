@@ -113,7 +113,9 @@ the reconnect registry immediately. Before Init it sends no wire command; the
 one-time Init uses the latest registry value for the post-init
 `TMMOrdersSubscribeCommand`. After Init, `ui_mm_subscribe` appends the wire
 command to the High send queue, and reconnect restores the latest MM-orders
-intent automatically.
+intent automatically. It does not rewrite the stored
+`subscribe_all_trades(want_mm)` value; Delphi has two separate callers that can
+write the same server MM-orders flag.
 
 ### Version Update
 
