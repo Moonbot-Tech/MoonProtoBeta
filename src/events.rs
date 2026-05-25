@@ -1641,6 +1641,14 @@ impl EventDispatcher {
         );
         self.set_trade_storage_scope(ctx.trades_storage_scope.clone());
 
+        if matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
+            && ctx.trades_storage_scope.is_none()
+        {
+            log::warn!(target: "moonproto::events",
+                "unexpected {:?} received without all-trades subscription; active packet dropped", cmd);
+            return;
+        }
+
         // Server restart / PeerAppToken change: Delphi gates stream parsing with
         // `FLastServerAppToken <> PeerAppToken` until `GetMarketsIndexes` succeeds.
         // Keep the same behavioral guard here. Otherwise old `indexes_synchronized`
@@ -3190,6 +3198,55 @@ mod tests {
     }
 
     #[test]
+    fn active_dispatch_drops_trades_without_subscription_intent() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+            trade_join_capacity: 8,
+        });
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = trades_payload_with_rows(811, 0, 0, &[(0, 100.0, 1.0)]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert!(out.is_empty());
+        assert!(actions.is_empty());
+        assert!(worker.flush(45_000.0));
+        assert!(
+            worker.readers("BTCUSDT").is_none(),
+            "Active Lib must not allocate retained history for unexpected trades without subscription intent"
+        );
+        assert_eq!(
+            d.markets.trade_state("BTCUSDT"),
+            Some(crate::state::markets::MarketTradeState::default()),
+            "Unexpected trades must not update active market trade tail without subscription intent"
+        );
+    }
+
+    #[test]
     fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker() {
         let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
             futures_trades_capacity: 8,
@@ -3868,6 +3925,7 @@ mod tests {
         d.markets.indexes_synchronized = true;
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
+        client.subscribe_all_trades(false);
         let mut out = Vec::new();
         let mut actions = Vec::new();
 

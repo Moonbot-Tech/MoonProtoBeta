@@ -782,6 +782,10 @@ Done:
 - Quick FireTest now also checks that retained futures trades feed the derived
   trade-volume snapshot, so "rows stored but analytics dead" is caught before
   the full candles stress.
+- Active `EventDispatcher::dispatch_into_active_actions` now also enforces the
+  agreed Rust all-trades opt-in gate. The live `Client` loop already dropped
+  unexpected `TradesStream` packets before dispatcher delivery; the dispatcher
+  active path now has the same guard for custom active loops.
 
 Verification:
 
@@ -790,6 +794,10 @@ Verification:
 - Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.72s`,
   retained target trades `futures=3 spot=0`, derived
   `trade_vol_5m=200.5955`, `ParseFailed=0`.
+- After the dispatcher-level trades opt-in guard: `cargo test --lib` OK:
+  717 tests; quick prod FireTest OK: `FIRETEST_QUICK_PASS after 25.60s`,
+  retained target trades `futures=2 spot=0`, derived
+  `trade_vol_5m=551.4910`, `ParseFailed=0`.
 
 ### Phase Z - final full optimization pass
 
