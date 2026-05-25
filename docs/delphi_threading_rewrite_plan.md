@@ -5616,12 +5616,19 @@ Verification:
 - `cargo test --lib` OK: 698 tests.
 - `cargo check --examples` OK.
 
-Still not done:
+Follow-up after this step:
 
-- Retained-history worker batches are still built from the owned public
-  `TradesPacket`. Next step: build `MarketHistoryStreamBatch` in the same
-  borrowed section walk, so retained storage also stops depending on public
-  owned event construction.
+- Retained-history worker batches now come from the same borrowed
+  `DecodedTradesPacket`/`TradeSectionIter` walk that builds the public
+  `TradesPacket`. Active retained storage no longer scans
+  `Event::Trade(TradesEvent::Apply(_))` and no longer depends on the public
+  owned event as its source.
+- Public `TradesEvent::Apply(TradesPacket)` is still emitted for API
+  compatibility. The optimization only removes a Rust-only internal dependency
+  between retained history and public event construction.
+- Verification after the retained-history change:
+  `cargo test active_dispatch_queues_trades_into_history_worker_without_direct_store_write --lib`,
+  `cargo test trades --lib`, and `cargo test dispatcher_ --lib` all pass.
 
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 

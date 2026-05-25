@@ -783,13 +783,29 @@ impl EventDispatcher {
         now_ms: i64,
         out: &mut Vec<Event>,
     ) {
+        self.dispatch_into_with_history(cmd, payload, now_ms, None, out);
+    }
+
+    fn dispatch_into_with_history(
+        &mut self,
+        cmd: Command,
+        payload: &[u8],
+        now_ms: i64,
+        history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) {
         match cmd {
             Command::Order => self.client_new_data_order(payload, now_ms, out),
             Command::OrderBook => self.client_new_data_order_book(payload, now_ms, out),
-            Command::TradesStream => self.client_new_data_trades_stream(payload, now_ms, out),
-            Command::TradesResendResponse => {
-                self.client_new_data_trades_resend_response(payload, now_ms, out)
+            Command::TradesStream => {
+                self.client_new_data_trades_stream(payload, now_ms, history_now_time_days, out)
             }
+            Command::TradesResendResponse => self.client_new_data_trades_resend_response(
+                payload,
+                now_ms,
+                history_now_time_days,
+                out,
+            ),
             Command::Balance => self.client_new_data_balance(payload, out),
             Command::Strat => self.client_new_data_strat(payload, out),
             Command::UI => self.client_new_data_ui(payload, out),
@@ -917,7 +933,13 @@ impl EventDispatcher {
         }
     }
 
-    fn client_new_data_trades_stream(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
+    fn client_new_data_trades_stream(
+        &mut self,
+        payload: &[u8],
+        now_ms: i64,
+        history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) {
         // Active library: блокируем обработку TradesStream пока markets indexes не sync.
         if !self.markets.indexes_synchronized {
             return;
@@ -925,8 +947,12 @@ impl EventDispatcher {
         match decode_trades_packet(payload) {
             Some(decoded) => {
                 let effects = self.trades.on_packet_header(decoded.packet_num, now_ms);
-                let trade_events =
-                    self.collect_known_trades_events_like_delphi(&decoded, effects, now_ms);
+                let trade_events = self.collect_known_trades_events_like_delphi(
+                    &decoded,
+                    effects,
+                    now_ms,
+                    history_now_time_days,
+                );
                 self.apply_trades_events_like_delphi(trade_events, out);
             }
             None => out.push(Self::parse_failed(Command::TradesStream, payload)),
@@ -937,6 +963,7 @@ impl EventDispatcher {
         &mut self,
         payload: &[u8],
         now_ms: i64,
+        history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
         // Delphi `ProcessTradesResendBatch` feeds every inner packet back into
@@ -949,8 +976,12 @@ impl EventDispatcher {
             match decode_trades_packet(&inner) {
                 Some(decoded) => {
                     let effects = self.trades.on_packet_resend_header(decoded.packet_num);
-                    let trade_events =
-                        self.collect_known_trades_events_like_delphi(&decoded, effects, now_ms);
+                    let trade_events = self.collect_known_trades_events_like_delphi(
+                        &decoded,
+                        effects,
+                        now_ms,
+                        history_now_time_days,
+                    );
                     self.apply_trades_events_like_delphi(trade_events, out);
                 }
                 None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
@@ -964,132 +995,46 @@ impl EventDispatcher {
         }
     }
 
-    fn queue_retained_history_batches(&self, events: &[Event], now_time_days: f64) {
-        let Some(handle) = &self.market_history else {
-            return;
-        };
-        for event in events {
-            let Event::Trade(TradesEvent::Apply(pkt)) = event else {
-                continue;
-            };
-            let Some(batch) = self.market_history_batch_from_packet(pkt, now_time_days) else {
-                continue;
-            };
-            handle.send_stream_batch(batch);
-        }
-    }
-
-    fn market_history_batch_from_packet(
-        &self,
-        pkt: &TradesPacket,
-        now_time_days: f64,
-    ) -> Option<MarketHistoryStreamBatch> {
-        let mut sections = Vec::new();
-        for section in &pkt.sections {
-            match section {
-                TradeSection::Trades(rows) => {
-                    let Some(first) = rows.first() else {
-                        continue;
-                    };
-                    let Some(market_name) = self
-                        .markets
-                        .market_name_by_index(first.market_index)
-                        .map(str::to_owned)
-                    else {
-                        continue;
-                    };
-                    let rows = rows
-                        .iter()
-                        .map(|row| MarketHistoryTradeInput {
-                            time_delta_ms: row.time_delta_ms,
-                            price: row.price,
-                            qty: row.qty,
-                        })
-                        .collect::<Vec<_>>();
-                    if first.is_spot {
-                        sections.push(MarketHistoryStreamSection::SpotTrades { market_name, rows });
-                    } else {
-                        let chart_price_step = self
-                            .markets
-                            .price(&market_name)
-                            .map(|price| price.chart_price_step)
-                            .unwrap_or_default();
-                        sections.push(MarketHistoryStreamSection::FuturesTrades {
-                            market_name,
-                            chart_price_step,
-                            rows,
-                        });
-                    }
-                }
-                TradeSection::LiqOrders(rows) => {
-                    let Some(first) = rows.first() else {
-                        continue;
-                    };
-                    let Some(market_name) = self
-                        .markets
-                        .market_name_by_index(first.market_index)
-                        .map(str::to_owned)
-                    else {
-                        continue;
-                    };
-                    let rows = rows
-                        .iter()
-                        .map(|row| MarketHistoryTradeInput {
-                            time_delta_ms: row.time_delta_ms,
-                            price: row.price,
-                            qty: row.qty,
-                        })
-                        .collect::<Vec<_>>();
-                    sections.push(MarketHistoryStreamSection::Liquidations { market_name, rows });
-                }
-                TradeSection::MMOrders(rows) => {
-                    let Some(first) = rows.first() else {
-                        continue;
-                    };
-                    let Some(market_name) = self
-                        .markets
-                        .market_name_by_index(first.market_index)
-                        .map(str::to_owned)
-                    else {
-                        continue;
-                    };
-                    let rows = rows
-                        .iter()
-                        .map(|row| MarketHistoryMMOrderInput {
-                            time_delta_ms: row.time_delta_ms,
-                            vol: row.vol,
-                            q: row.q,
-                            taker: row.taker,
-                        })
-                        .collect::<Vec<_>>();
-                    sections.push(MarketHistoryStreamSection::MMOrders { market_name, rows });
-                }
-                TradeSection::WatcherFills { .. } => {}
-            }
-        }
-
-        if sections.is_empty() {
-            return None;
-        }
-        Some(MarketHistoryStreamBatch {
-            base_time: pkt.base_time,
-            now_time: now_time_days,
-            sections,
-        })
-    }
-
-    fn collect_known_trades_packet_like_delphi(
+    fn collect_known_trades_apply_like_delphi(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
         now_ms: Option<i64>,
+        history_now_time_days: Option<f64>,
     ) -> TradesPacket {
         let mut sections = Vec::new();
+        let collect_history =
+            history_now_time_days.is_some() && self.market_history.is_some() && now_ms.is_some();
+        let mut history_sections = Vec::new();
         for section in decoded.sections() {
             match section {
                 TradeSectionRef::Trades(rows) => {
-                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
-                    {
-                        let mut collected = Vec::with_capacity(rows.len());
+                    let market_index = rows.market_index();
+                    let is_spot = rows.is_spot();
+                    let row_count = rows.len();
+                    if row_count == 0 || self.markets.has_server_market_index(market_index) {
+                        let history_market_name = if collect_history && row_count > 0 {
+                            self.markets
+                                .market_name_by_index(market_index)
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        };
+                        let chart_price_step = if !is_spot {
+                            history_market_name
+                                .as_ref()
+                                .and_then(|name| {
+                                    self.markets.price(name).map(|price| price.chart_price_step)
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            0.0
+                        };
+                        let mut collected = Vec::with_capacity(row_count);
+                        let mut history_rows = if history_market_name.is_some() {
+                            Vec::with_capacity(row_count)
+                        } else {
+                            Vec::new()
+                        };
                         for trade in rows {
                             if let Some(now_ms) = now_ms {
                                 self.markets.apply_trade_tail_row_like_delphi(
@@ -1100,29 +1045,116 @@ impl EventDispatcher {
                                     now_ms,
                                 );
                             }
+                            if history_market_name.is_some() {
+                                history_rows.push(MarketHistoryTradeInput {
+                                    time_delta_ms: trade.time_delta_ms,
+                                    price: trade.price,
+                                    qty: trade.qty,
+                                });
+                            }
                             collected.push(trade);
+                        }
+                        if let Some(market_name) = history_market_name {
+                            if !history_rows.is_empty() {
+                                if is_spot {
+                                    history_sections.push(MarketHistoryStreamSection::SpotTrades {
+                                        market_name,
+                                        rows: history_rows,
+                                    });
+                                } else {
+                                    history_sections.push(
+                                        MarketHistoryStreamSection::FuturesTrades {
+                                            market_name,
+                                            chart_price_step,
+                                            rows: history_rows,
+                                        },
+                                    );
+                                }
+                            }
                         }
                         sections.push(TradeSection::Trades(collected));
                     }
                 }
                 TradeSectionRef::MMOrders(rows) => {
-                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
-                    {
-                        sections.push(TradeSection::MMOrders(rows.collect()));
+                    let market_index = rows.market_index();
+                    let row_count = rows.len();
+                    if row_count == 0 || self.markets.has_server_market_index(market_index) {
+                        let history_market_name = if collect_history && row_count > 0 {
+                            self.markets
+                                .market_name_by_index(market_index)
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        };
+                        let mut collected = Vec::with_capacity(row_count);
+                        let mut history_rows = if history_market_name.is_some() {
+                            Vec::with_capacity(row_count)
+                        } else {
+                            Vec::new()
+                        };
+                        for row in rows {
+                            if history_market_name.is_some() {
+                                history_rows.push(MarketHistoryMMOrderInput {
+                                    time_delta_ms: row.time_delta_ms,
+                                    vol: row.vol,
+                                    q: row.q,
+                                    taker: row.taker,
+                                });
+                            }
+                            collected.push(row);
+                        }
+                        if let Some(market_name) = history_market_name {
+                            if !history_rows.is_empty() {
+                                history_sections.push(MarketHistoryStreamSection::MMOrders {
+                                    market_name,
+                                    rows: history_rows,
+                                });
+                            }
+                        }
+                        sections.push(TradeSection::MMOrders(collected));
                     }
                 }
                 TradeSectionRef::LiqOrders(rows) => {
-                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
-                    {
-                        sections.push(TradeSection::LiqOrders(
-                            rows.map(|trade| LiqOrder {
+                    let market_index = rows.market_index();
+                    let row_count = rows.len();
+                    if row_count == 0 || self.markets.has_server_market_index(market_index) {
+                        let history_market_name = if collect_history && row_count > 0 {
+                            self.markets
+                                .market_name_by_index(market_index)
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        };
+                        let mut collected = Vec::with_capacity(row_count);
+                        let mut history_rows = if history_market_name.is_some() {
+                            Vec::with_capacity(row_count)
+                        } else {
+                            Vec::new()
+                        };
+                        for trade in rows {
+                            if history_market_name.is_some() {
+                                history_rows.push(MarketHistoryTradeInput {
+                                    time_delta_ms: trade.time_delta_ms,
+                                    price: trade.price,
+                                    qty: trade.qty,
+                                });
+                            }
+                            collected.push(LiqOrder {
                                 market_index: trade.market_index,
                                 time_delta_ms: trade.time_delta_ms,
                                 price: trade.price,
                                 qty: trade.qty,
-                            })
-                            .collect(),
-                        ));
+                            });
+                        }
+                        if let Some(market_name) = history_market_name {
+                            if !history_rows.is_empty() {
+                                history_sections.push(MarketHistoryStreamSection::Liquidations {
+                                    market_name,
+                                    rows: history_rows,
+                                });
+                            }
+                        }
+                        sections.push(TradeSection::LiqOrders(collected));
                     }
                 }
                 TradeSectionRef::WatcherFills {
@@ -1140,6 +1172,15 @@ impl EventDispatcher {
                 }
             }
         }
+        if let (Some(handle), Some(now_time)) = (&self.market_history, history_now_time_days) {
+            if !history_sections.is_empty() {
+                handle.send_stream_batch(MarketHistoryStreamBatch {
+                    base_time: decoded.base_time,
+                    now_time,
+                    sections: history_sections,
+                });
+            }
+        }
         TradesPacket {
             base_time: decoded.base_time,
             packet_num: decoded.packet_num,
@@ -1152,13 +1193,17 @@ impl EventDispatcher {
         decoded: &DecodedTradesPacket<'_>,
         effects: Vec<TradesPacketEffect>,
         now_ms: i64,
+        history_now_time_days: Option<f64>,
     ) -> Vec<TradesEvent> {
         let mut packet_for_apply = None;
         let mut events = Vec::with_capacity(effects.len());
         for effect in effects {
             if matches!(&effect, TradesPacketEffect::Apply) && packet_for_apply.is_none() {
-                packet_for_apply =
-                    Some(self.collect_known_trades_packet_like_delphi(decoded, Some(now_ms)));
+                packet_for_apply = Some(self.collect_known_trades_apply_like_delphi(
+                    decoded,
+                    Some(now_ms),
+                    history_now_time_days,
+                ));
             }
             events.push(effect.into_event(&mut packet_for_apply));
         }
@@ -1474,7 +1519,7 @@ impl EventDispatcher {
         }
 
         let start_len = out.len();
-        self.dispatch_into(cmd, payload, now_ms, out);
+        self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
         if self.markets.markets_list_refresh_needed()
             && (self.last_markets_list_refresh_ms == 0
                 || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000)
@@ -1494,10 +1539,6 @@ impl EventDispatcher {
                 && out[start_len..]
                     .iter()
                     .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_))));
-        if processed_trades_packet {
-            self.queue_retained_history_batches(&out[start_len..], ctx.now_time_days);
-        }
-
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
         // RequestFullNeeded для одной и той же книги (corruption detection +
