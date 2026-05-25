@@ -5630,6 +5630,35 @@ Follow-up after this step:
   `cargo test active_dispatch_queues_trades_into_history_worker_without_direct_store_write --lib`,
   `cargo test trades --lib`, and `cargo test dispatcher_ --lib` all pass.
 
+### 2026-05-25 - TradesState FindBucketForPacket structural parity
+
+Done:
+
+- Re-checked Delphi `MoonProtoEngine.pas:ResetGapBuckets`,
+  `FindBucketForPacket`, and `ProcessTradesStream` against Rust
+  `state::trades`.
+- Rust no longer keeps the adjacent-bucket extend logic inline inside
+  `on_packet_header`. It now has one `find_bucket_for_packet(... want_extend
+  ...)` block matching Delphi's method shape: in-range packet returns the
+  bucket, adjacent gap may extend the bucket only while `RetryCount < 2`,
+  one-shot retry refund is applied inside the method, and the extend path
+  updates `last_packet_num` inside the method like Delphi.
+- `reset_gap_buckets(now_ms)` now mirrors Delphi `ResetGapBuckets` by clearing
+  buckets, setting `last_packet_time_ms`, and resetting `trades_started`.
+  Server-token resets call `full_reset_at(now_ms)` so the reset timestamp is the
+  packet-processing time, not an artificial zero.
+
+Verification:
+
+- `cargo test trades --lib` OK: 58 tests.
+- `cargo test dispatcher_ --lib` OK: 41 tests.
+- `cargo test --lib` OK: 700 tests.
+- `cargo check --examples` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.85s`;
+  `reader max=641us`, `writer_cpu max=129us`,
+  `active_dispatch max=3157us max_src=Strat(30) payload=44464`,
+  `app_enqueue max=2341us max_src=TradesStream(33) mode=state`.
+
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
 Delphi source:

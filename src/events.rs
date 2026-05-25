@@ -1480,7 +1480,7 @@ impl EventDispatcher {
             && self.last_known_server_token != 0
             && self.last_known_server_token != current_token
         {
-            self.trades.full_reset();
+            self.trades.full_reset_at(now_ms);
             self.order_books.reset_caches_keep_books();
             log::info!(target: "moonproto::events",
                 "ServerToken changed ({:#x} -> {:#x}) — trades reset + orderbook caches reset",
@@ -1514,7 +1514,7 @@ impl EventDispatcher {
             && current_token != 0
             && self.trades_server_token != current_token
         {
-            self.trades.full_reset();
+            self.trades.full_reset_at(now_ms);
             self.trades_server_token = current_token;
         }
 

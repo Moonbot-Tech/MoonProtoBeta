@@ -214,18 +214,26 @@ impl TradesState {
 
     /// Сбросить все buckets (Delphi `ResetGapBuckets` MoonProtoEngine.pas:1364-1378).
     pub fn reset_buckets(&mut self) {
+        self.reset_gap_buckets(self.last_packet_time_ms);
+    }
+
+    fn reset_gap_buckets(&mut self, now_ms: i64) {
         for b in self.buckets.iter_mut() {
             b.active = false;
         }
         self.used_buckets = 0;
+        self.last_packet_time_ms = now_ms;
+        self.trades_started = false;
     }
 
     /// Полный reset state (например при ServerToken change / reconnect).
     pub fn full_reset(&mut self) {
-        self.reset_buckets();
+        self.full_reset_at(0);
+    }
+
+    pub(crate) fn full_reset_at(&mut self, now_ms: i64) {
+        self.reset_gap_buckets(now_ms);
         self.last_packet_num = 0;
-        self.last_packet_time_ms = 0;
-        self.trades_started = false;
     }
 
     /// Создать новый gap bucket (Delphi `CreateGapBucket` MoonProtoEngine.pas:1380-1430).
@@ -280,9 +288,18 @@ impl TradesState {
         // used_buckets не меняется (slot был занят, остался занят).
     }
 
-    /// Найти bucket для packet_num (только in-range, без extend для простоты).
-    /// Возвращает index или None.
-    fn find_bucket(&self, packet_num: u16) -> Option<usize> {
+    /// Найти bucket для packet_num (Delphi `FindBucketForPacket`).
+    ///
+    /// With `want_extend=true`, this also performs Delphi's adjacent-bucket
+    /// extension and updates `last_packet_num` inside the method, matching the
+    /// Delphi side effect.
+    fn find_bucket_for_packet(
+        &mut self,
+        packet_num: u16,
+        want_extend: bool,
+        new_gap_start: u16,
+        new_gap_end: u16,
+    ) -> Option<usize> {
         if self.used_buckets == 0 {
             return None;
         }
@@ -290,6 +307,40 @@ impl TradesState {
             if b.active && is_packet_in_range(packet_num, b.start_num, b.end_num) {
                 return Some(i);
             }
+        }
+        if !want_extend {
+            return None;
+        }
+        for (i, b) in self.buckets.iter_mut().enumerate() {
+            if !b.active {
+                continue;
+            }
+            if b.retry_count >= 2 || b.end_num != new_gap_start.wrapping_sub(2) {
+                continue;
+            }
+            let old_size = b.end_num.wrapping_sub(b.start_num) as usize + 1;
+            let new_size = new_gap_end.wrapping_sub(b.start_num) as usize + 1;
+            if new_size > MAX_RECVD_SIZE {
+                continue;
+            }
+            if b.recvd.len() < new_size {
+                b.recvd.resize(new_size, false);
+            }
+            if old_size < b.recvd.len() {
+                b.recvd[old_size] = true;
+            }
+            if old_size + 1 < new_size {
+                for recvd in b.recvd[(old_size + 1)..new_size].iter_mut() {
+                    *recvd = false;
+                }
+            }
+            b.end_num = new_gap_end;
+            if b.retry_count >= 1 && !b.refund_used {
+                b.retry_count = b.retry_count.saturating_sub(1);
+                b.refund_used = true;
+            }
+            self.last_packet_num = packet_num;
+            return Some(i);
         }
         None
     }
@@ -321,7 +372,7 @@ impl TradesState {
             && (now_ms - self.last_packet_time_ms).abs() > TRADES_PAUSE_TIMEOUT_MS;
 
         if !self.trades_started || pause_detected {
-            self.reset_buckets();
+            self.reset_gap_buckets(now_ms);
             self.trades_started = true;
             self.last_packet_num = packet_num;
             self.last_packet_time_ms = now_ms;
@@ -358,78 +409,38 @@ impl TradesState {
         // Wrap-safe forward detection: packet_num != last && packet_num != last+1.
         // Различаем forward gap (gap_size небольшой) от backward (resend matching).
 
-        // Сначала проверяем — это packet из существующего bucket?
-        if let Some(idx) = self.find_bucket(packet_num) {
-            let b = &mut self.buckets[idx];
-            let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
-            if recvd_idx < b.recvd.len() {
-                b.recvd[recvd_idx] = true;
-            }
-            let bucket_range = (b.start_num, b.end_num);
-            self.last_packet_time_ms = now_ms;
-            events.push(TradesPacketEffect::GapFilled {
-                packet_num,
-                bucket_seq_range: bucket_range,
-            });
-            events.push(TradesPacketEffect::Apply);
-            return events;
-        }
-
-        // Иначе — forward gap.
         let new_gap_start = last.wrapping_add(1);
         let new_gap_end = packet_num.wrapping_sub(1);
 
-        // === EXTEND existing bucket (Delphi FindBucketForPacket WantExtend, MoonProtoEngine.pas:1461-1479) ===
-        // Если есть bucket с `end_num == new_gap_start - 2` — это значит был sequential
-        // пакет `new_gap_start - 1` между bucket'ом и текущим. Расширяем bucket чтобы
-        // покрыть оба gap'а как один — иначе при packet-loss быстро упрёмся в MAX_GAP_BUCKETS.
-        // packet at position oldSize (= old_end + 1 = sequential packet, который был получен)
-        // помечается как received.
-        let target_end = new_gap_start.wrapping_sub(2); // = last.wrapping_sub(1)
-        let mut extended = false;
-        for b in self.buckets.iter_mut() {
-            if !b.active {
-                continue;
-            }
-            if b.end_num != target_end {
-                continue;
-            }
-            if b.retry_count >= 2 {
-                continue;
-            }
-            let new_size = new_gap_end.wrapping_sub(b.start_num) as usize + 1;
-            if new_size > MAX_RECVD_SIZE {
-                continue;
-            }
-            let old_size = b.end_num.wrapping_sub(b.start_num) as usize + 1;
-            if b.recvd.len() < new_size {
-                b.recvd.resize(new_size, false);
-            }
-            // packet ровно перед NewGapStart (= last sequential, который двинул last_packet_num)
-            // был получен → mark as recvd.
-            if old_size < b.recvd.len() {
-                b.recvd[old_size] = true;
-            }
-            // zero the rest (после oldSize до newSize)
-            if old_size + 1 < new_size {
-                for r in b.recvd[(old_size + 1)..new_size].iter_mut() {
-                    *r = false;
+        // Сначала проверяем — это packet из существующего bucket или соседний
+        // gap, который Delphi `FindBucketForPacket(... WantExtend=True ...)`
+        // расширит внутри того же метода.
+        if let Some(idx) = self.find_bucket_for_packet(packet_num, true, new_gap_start, new_gap_end)
+        {
+            let b = &mut self.buckets[idx];
+            if is_packet_in_range(packet_num, b.start_num, b.end_num) {
+                let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
+                if recvd_idx < b.recvd.len() {
+                    b.recvd[recvd_idx] = true;
                 }
+                let bucket_range = (b.start_num, b.end_num);
+                self.last_packet_time_ms = now_ms;
+                events.push(TradesPacketEffect::GapFilled {
+                    packet_num,
+                    bucket_seq_range: bucket_range,
+                });
+                events.push(TradesPacketEffect::Apply);
+                return events;
             }
-            b.end_num = new_gap_end;
-            if b.retry_count >= 1 && !b.refund_used {
-                b.retry_count = b.retry_count.saturating_sub(1);
-                b.refund_used = true;
-            }
-            extended = true;
             events.push(TradesPacketEffect::GapDetected {
                 start: new_gap_start,
                 end: new_gap_end,
             });
-            break;
         }
-
-        if !extended {
+        if !events
+            .iter()
+            .any(|ev| matches!(ev, TradesPacketEffect::GapDetected { .. }))
+        {
             // Проверяем размер. Слишком большой gap или buckets переполнены.
             if gap_size > MAX_RECVD_SIZE || self.used_buckets >= MAX_GAP_BUCKETS {
                 // Delphi MoonProtoEngine.pas:1649-1658: при overflow сбрасывает buckets,
@@ -443,9 +454,7 @@ impl TradesState {
                 log::warn!(target: "moonproto::trades",
                     "packet_num jump {} -> {} (gap_size={} > MAX_RECVD_SIZE={} or buckets full); resetting gap buckets like Delphi",
                     last, packet_num, gap_size, MAX_RECVD_SIZE);
-                self.reset_buckets();
-                self.trades_started = false;
-                self.last_packet_time_ms = now_ms;
+                self.reset_gap_buckets(now_ms);
                 events.push(TradesPacketEffect::Apply);
                 return events;
             }
@@ -474,7 +483,7 @@ impl TradesState {
     /// Packet-number branch of `ProcessTradesStream(TrackPackets=False)`.
     pub(crate) fn on_packet_resend_header(&mut self, packet_num: u16) -> Vec<TradesPacketEffect> {
         let mut events = Vec::new();
-        if let Some(idx) = self.find_bucket(packet_num) {
+        if let Some(idx) = self.find_bucket_for_packet(packet_num, false, 0, 0) {
             let b = &mut self.buckets[idx];
             let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
             if recvd_idx < b.recvd.len() {
