@@ -596,10 +596,8 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let account_id = read_string(data, &mut pos)?;
 
     // Optional Phase 2 extensions (читаем if !EOF).
-    let recvd_max_payload = if pos + 4 <= data.len() {
-        let v = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        Some(v)
+    let recvd_max_payload = if pos < data.len() {
+        Some(read_i32_zero_tail(data, &mut pos))
     } else {
         None
     };
@@ -1547,6 +1545,23 @@ mod auth_check_tests {
         assert_eq!(resp.known_dexes[0].name, "usdc");
         assert_eq!(resp.known_dexes[1].name, "");
         assert_eq!(resp.known_dexes[1].collateral_token, 0);
+        assert_eq!(resp.hl_dex_market, None);
+        assert_eq!(resp.hl_spot_market, None);
+    }
+
+    #[test]
+    fn auth_check_partial_recvd_max_payload_uses_delphi_read_tail() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0i64).to_le_bytes());
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(0i32).to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&[0x34, 0x12]);
+
+        let resp = parse_auth_check_response(&data).unwrap();
+        assert_eq!(resp.recvd_max_payload, Some(0x1234));
+        assert!(resp.known_dexes.is_empty());
         assert_eq!(resp.hl_dex_market, None);
         assert_eq!(resp.hl_spot_market, None);
     }

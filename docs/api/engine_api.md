@@ -294,10 +294,11 @@ assert_eq!(client.auth_info().map(|a| a.account_id.as_str()), Some(auth.account_
 ```
 
 Mandatory fields are required. The optional Hyperliquid DEX tail is parsed like
-the Delphi client: the declared DEX count creates that many zero-filled
-`THLDexInfo` records, each record is partially overwritten by the remaining
-payload bytes, and a truncated tail does not reject the whole AuthCheck
-response.
+the Delphi client: `RecvdMaxPayload` is a scalar `ReadInt`, so a short tail
+keeps available low bytes and zero-fills the missing bytes. The declared DEX
+count then creates that many zero-filled `THLDexInfo` records, each record is
+partially overwritten by the remaining payload bytes, and a truncated tail does
+not reject the whole AuthCheck response.
 
 `request_auth_check` stores the parsed response in `client.auth_info()`.
 `run_init_sequence` does the same for its mandatory AuthCheck step and also

@@ -5003,6 +5003,9 @@ Done:
   loop: declared `cnt` creates `cnt` zero-filled records, partial bytes
   overwrite the current `THLDexInfo`, and consumed partial bytes are not
   reinterpreted as `HLDexMarket`.
+- 2026-05-26 follow-up: `RecvdMaxPayload` now follows Delphi `ReadInt`
+  tail semantics too: if optional payload has 1-3 bytes after the mandatory
+  fields, Rust keeps those low bytes and zero-fills the missing tail.
 - Rust does not reject the whole AuthCheck response when the optional DEX tail
   is truncated.
 - Recorded `spec_pipeline/work/хуйня.md §X.117`.
@@ -5013,6 +5016,14 @@ Verification:
   present in the payload.
 - Added a parser test proving a partial `THLDexInfo` byte is consumed as record
   data and not reused as `HLDexMarket`.
+- Added a parser test for partial optional `RecvdMaxPayload`.
+- `cargo test engine_api --lib --quiet` OK: 42 tests.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 754 tests.
+- `cargo check --examples --quiet` OK.
+- `git diff --check` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.60s`, `ParseFailed=0`.
 
 Remaining corrupt-tail decision:
 
