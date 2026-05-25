@@ -4971,21 +4971,26 @@ Done:
 - Delphi reads `cnt: Byte`, allocates `KnownDexes`, and loops through
   `THLDexInfo` records with `TMemoryStream.Read`; there is no precheck that
   `cnt * SizeOf(THLDexInfo)` fits the remaining stream.
-- Rust now preserves complete 18-byte `THLDexInfo` records and does not reject
-  the whole AuthCheck response when the optional DEX tail is truncated.
+- 2026-05-26 follow-up: Rust now mirrors the deterministic part of that Delphi
+  loop: declared `cnt` creates `cnt` zero-filled records, partial bytes
+  overwrite the current `THLDexInfo`, and consumed partial bytes are not
+  reinterpreted as `HLDexMarket`.
+- Rust does not reject the whole AuthCheck response when the optional DEX tail
+  is truncated.
 - Recorded `spec_pipeline/work/хуйня.md §X.117`.
 
 Verification:
 
 - Added a parser test for declared count larger than the complete DEX records
   present in the payload.
+- Added a parser test proving a partial `THLDexInfo` byte is consumed as record
+  data and not reused as `HLDexMarket`.
 
-Still not done:
+Remaining corrupt-tail decision:
 
-- Exact Delphi partial-record bytes are intentionally not invented here:
-  `TMemoryStream.Read` into a partially available `THLDexInfo` can leave
-  unread bytes in record storage. This remains a corrupt-tail decision, not a
-  hidden parser cap.
+- `cfg.HLDexMarket := resp.ReadByte` at EOF returns an uninitialized Delphi
+  scalar `Result`. Rust exposes `None` for the absent scalar instead of
+  inventing undefined stack bytes.
 
 ### 2026-05-24 - Phase 1 partial: market Engine API count precheck removed
 

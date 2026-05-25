@@ -571,8 +571,8 @@ pub struct AuthCheckResponse {
 /// Опциональные поля (Phase 2 расширения) парсятся `if !EOF`; их отсутствие = старый сервер,
 /// `parse_auth_check_response` всё равно возвращает `Some` с заполненными обязательными.
 /// DEX tail follows Delphi's soft stream-read shape: the declared `cnt` is read,
-/// complete `THLDexInfo` records are preserved, and a truncated tail does not
-/// reject the whole AuthCheck payload.
+/// `SetLength(KnownDexes, cnt)` creates zero-filled records, and each
+/// `TMemoryStream.Read` partially overwrites one 18-byte `THLDexInfo` slot.
 ///
 /// Byte-exact с Delphi: `MoonProtoEngine.pas:610-633`.
 pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
@@ -618,19 +618,21 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
         let cnt = data[pos] as usize;
         pos += 1;
         const DEX_INFO_SIZE: usize = 18;
-        known_dexes.reserve(cnt.min(data.len().saturating_sub(pos) / DEX_INFO_SIZE));
+        known_dexes.reserve(cnt);
         for _ in 0..cnt {
-            if pos + DEX_INFO_SIZE > data.len() {
-                break;
+            let mut dex = [0u8; DEX_INFO_SIZE];
+            let available = data.len().saturating_sub(pos).min(DEX_INFO_SIZE);
+            if available > 0 {
+                dex[..available].copy_from_slice(&data[pos..pos + available]);
+                pos += available;
             }
             // THLDexInfo packed: [u8 length][15 bytes name][u16 collateral_token]
-            let name_len = data[pos] as usize;
+            let name_len = dex[0] as usize;
             // Защита: name_len по контракту ≤ 15. Если больше — corrupt, используем 15.
             let effective_len = name_len.min(15);
-            let name_bytes = &data[pos + 1..pos + 1 + effective_len];
+            let name_bytes = &dex[1..1 + effective_len];
             let name = decode_utf8_delphi(name_bytes);
-            let collateral_token = u16::from_le_bytes([data[pos + 16], data[pos + 17]]);
-            pos += DEX_INFO_SIZE;
+            let collateral_token = u16::from_le_bytes([dex[16], dex[17]]);
             known_dexes.push(DexInfo {
                 name,
                 collateral_token,
@@ -1500,7 +1502,7 @@ mod auth_check_tests {
     }
 
     #[test]
-    fn auth_check_dex_count_keeps_complete_records_on_truncated_tail_like_delphi_loop() {
+    fn auth_check_dex_count_keeps_declared_zero_tail_records_like_delphi_loop() {
         let mut data = Vec::new();
         data.extend_from_slice(&(0i64).to_le_bytes());
         data.extend_from_slice(&(0u16).to_le_bytes());
@@ -1518,9 +1520,34 @@ mod auth_check_tests {
 
         let resp = parse_auth_check_response(&data).unwrap();
         assert_eq!(resp.recvd_max_payload, Some(1024));
-        assert_eq!(resp.known_dexes.len(), 1);
+        assert_eq!(resp.known_dexes.len(), 2);
         assert_eq!(resp.known_dexes[0].name, "usdc");
+        assert_eq!(resp.known_dexes[1].name, "");
+        assert_eq!(resp.known_dexes[1].collateral_token, 0);
         assert_eq!(resp.hl_dex_market, None);
+        assert_eq!(resp.hl_spot_market, None);
+    }
+
+    #[test]
+    fn auth_check_partial_dex_record_is_not_reused_as_hl_dex_market() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0i64).to_le_bytes());
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(0i32).to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&(0u16).to_le_bytes());
+        data.extend_from_slice(&(1024i32).to_le_bytes());
+        data.push(1);
+        data.push(4); // partial ShortString length byte inside THLDexInfo, not HLDexMarket
+
+        let resp = parse_auth_check_response(&data).unwrap();
+        assert_eq!(resp.known_dexes.len(), 1);
+        assert_eq!(resp.known_dexes[0].name, "\0\0\0\0");
+        assert_eq!(resp.known_dexes[0].collateral_token, 0);
+        assert_eq!(
+            resp.hl_dex_market, None,
+            "Delphi consumed the byte inside DataStream.Read(THLDexInfo); Rust must not treat it as HLDexMarket"
+        );
         assert_eq!(resp.hl_spot_market, None);
     }
 
