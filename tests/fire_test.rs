@@ -707,27 +707,42 @@ impl Session {
     fn apply_completed_candles_snapshots(&mut self) {
         while let Ok(markets) = self.candles_snapshot_rx.try_recv() {
             let total_candles = markets.iter().map(|m| m.candles_5m.len()).sum::<usize>();
+            let target_market = self.snapshot().market;
+            let target_parsed = markets
+                .iter()
+                .find(|m| m.market_name == target_market)
+                .map(|m| m.candles_5m.len())
+                .unwrap_or(0);
             let applied = self.dispatcher.apply_candles_snapshot(&markets);
             let _ = self.history_worker.flush(0.0);
-            let readers = self.history_worker.readers(&self.snapshot().market);
-            let retained = readers
+            let readers = self.history_worker.readers(&target_market);
+            let (retained, capacity) = readers
                 .as_ref()
                 .and_then(|readers| readers.candles_5m.as_ref())
-                .map(|reader| reader.bounds().len)
-                .unwrap_or(0);
+                .map(|reader| (reader.bounds().len, reader.capacity()))
+                .unwrap_or((0, 0));
             println!(
-                "FIRETEST candles active-storage applied={} parsed_candles={} target_retained_candles={}",
-                applied, total_candles, retained
+                "FIRETEST candles active-storage applied={} parsed_candles={} target={} target_parsed_candles={} target_retained_candles={} capacity={}",
+                applied, total_candles, target_market, target_parsed, retained, capacity
             );
             assert!(
-                retained > 0,
-                "FireTest: parsed candles snapshot did not reach Active Lib retained candle storage for target market"
+                target_parsed > 0,
+                "FireTest: parsed candles snapshot did not contain target market {target_market}"
+            );
+            assert!(
+                retained == target_parsed.min(capacity),
+                "FireTest: Active Lib retained candles mismatch for {target_market}: parsed={target_parsed} retained={retained} capacity={capacity}"
             );
             let now_time = delphi_now_raw_for_test();
             let derived = self
                 .history_worker
-                .derived_snapshot(&self.snapshot().market, now_time)
+                .derived_snapshot(&target_market, now_time)
                 .expect("target market should expose derived snapshot after candles apply");
+            assert!(
+                derived.candle_volumes.one_hour > 0.0,
+                "FireTest: retained target candles did not feed one-hour candle volume: {:?}",
+                derived.candle_volumes
+            );
             println!(
                 "FIRETEST candles derived deltas/volumes: combined(15m={:.4}% 1h={:.4}% 24h={:.4}%) candle(15m={:.4}% 1h={:.4}% 24h={:.4}% vol1h={:.2} vol24h={:.2}) trade(1m={:.4}% 5m={:.4}%)",
                 derived.deltas.fifteen_minutes,
@@ -2243,7 +2258,7 @@ fn firetest_history_config() -> MarketHistoryConfig {
         mm_order_companion_capacity: 0,
         last_price_capacity: 64,
         mini_candles_capacity: 0,
-        candles_5m_capacity: 64,
+        candles_5m_capacity: 512,
         trade_join_capacity: 64,
     }
 }

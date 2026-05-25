@@ -782,6 +782,9 @@ Done:
 - Quick FireTest now also checks that retained futures trades feed the derived
   trade-volume snapshot, so "rows stored but analytics dead" is caught before
   the full candles stress.
+- Full FireTest now also verifies the retained-candles side of the same path:
+  the target parsed candle count must be retained up to ring capacity, and the
+  retained target candles must produce positive one-hour candle volume.
 - Active `EventDispatcher::dispatch_into_active_actions` now also enforces the
   agreed Rust all-trades opt-in gate. The live `Client` loop already dropped
   unexpected `TradesStream` packets before dispatcher delivery; the dispatcher
@@ -798,6 +801,9 @@ Verification:
   717 tests; quick prod FireTest OK: `FIRETEST_QUICK_PASS after 25.60s`,
   retained target trades `futures=2 spot=0`, derived
   `trade_vol_5m=551.4910`, `ParseFailed=0`.
+- After the retained-candles FireTest gate: `cargo test --lib` OK: 717 tests;
+  `cargo check --examples` OK; quick prod FireTest OK:
+  `FIRETEST_QUICK_PASS after 23.28s`; full prod FireTest OK after about 183s.
 
 ### Phase Z - final full optimization pass
 
