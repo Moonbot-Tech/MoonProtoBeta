@@ -5739,3 +5739,29 @@ Red flag closed:
   serializer switched to schema visibility this became a correct failure of the
   test payload, not a protocol deviation. FireTest now seeds `sk_Telegram` and
   asserts that the configured field is visible for the seeded kind.
+
+### 2026-05-25 - OrderBook/Trades subscribe reconnect SendAndWait gate parity
+
+Done:
+
+- Re-checked Delphi `TMoonProtoEngine.SendAndWait`,
+  `NeedReconnectAllTrades`, `NeedResubscribeOrderBooks`, and
+  `BMarketHistoryWorker.Execute`.
+- Rust async subscribe path now models the Delphi blocking window:
+  `SubscribeAllTrades` and `SubscribeOrderBook` reconnect retries do not fire
+  while the matching subscribe request is still inside the 12s
+  `SendAndWait`-equivalent timeout.
+- OrderBook reconnect now also stores the last subscribe UID. A non-matching
+  `SubscribeOrderBook` response does not close the pending full-registry replay
+  gate.
+- Initial reconnect check timestamps use the `NEVER_TIME_MS` sentinel so the
+  first check is immediate like Delphi `LastBookReconnectCheck = 0` against
+  `GetTickCount64`.
+
+Verification:
+
+- `cargo test reconnect_timing_tests --lib` OK: 20 tests.
+- `cargo test --lib` OK: 703 tests.
+- `cargo check --examples` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.98s`, `ParseFailed=0`.

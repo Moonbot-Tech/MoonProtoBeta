@@ -181,6 +181,7 @@ const COMPRESSED_FLAG: u8 = 0x80; // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64; // MoonProtoDataStruct.pas:31
 const NEVER_SENT_MS: i64 = i64::MIN / 2; // Эквивалент Delphi LastSentHello=0 при uptime-clock
 const NEVER_TIME_MS: i64 = i64::MIN / 2;
+const NO_PENDING_ENGINE_REQUEST_UID: u64 = u64::MAX;
 const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
 const BIND_FAILED_REPEAT_EVENT_MS: i64 = 50_000;
 const TRADES_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedReconnectAllTrades
@@ -588,6 +589,8 @@ pub struct ClientSender {
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     server_update_sent: Arc<AtomicBool>,
     last_trades_subscribe_request_ms: Arc<AtomicI64>,
+    last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
+    last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
     start: Instant,
 }
 
@@ -931,13 +934,27 @@ impl ClientSender {
 
     /// Fallible variant of [`Self::send_api_request`].
     pub fn try_send_api_request(&self, request_payload: Vec<u8>) -> Result<(), SubscribeError> {
-        let is_subscribe_all_trades =
-            engine_request_method(&request_payload) == Some(EngineMethod::SubscribeAllTrades);
+        let method = engine_request_method(&request_payload);
+        let request_uid = engine_request_uid(&request_payload);
         let result =
             self.try_send_cmd(request_payload, Command::API, SendPriority::Sliced, true, 6);
-        if result.is_ok() && is_subscribe_all_trades {
-            self.last_trades_subscribe_request_ms
-                .store(self.start.elapsed().as_millis() as i64, Ordering::Relaxed);
+        if result.is_ok() {
+            let now_ms = self.start.elapsed().as_millis() as i64;
+            match method {
+                Some(EngineMethod::SubscribeAllTrades) => {
+                    self.last_trades_subscribe_request_ms
+                        .store(now_ms, Ordering::Relaxed);
+                }
+                Some(EngineMethod::SubscribeOrderBook) => {
+                    self.last_orderbook_subscribe_request_ms
+                        .store(now_ms, Ordering::Relaxed);
+                    self.last_orderbook_subscribe_request_uid.store(
+                        request_uid.unwrap_or(NO_PENDING_ENGINE_REQUEST_UID),
+                        Ordering::Relaxed,
+                    );
+                }
+                _ => {}
+            }
         }
         result
     }
@@ -4690,9 +4707,9 @@ pub struct Client {
 
     /// Last queued `emk_SubscribeAllTrades` request, including requests queued
     /// through `ClientSender`. Delphi `SubscribeAllTrades` blocks inside
-    /// `SendAndWait`, so `NeedReconnectAllTrades` cannot run while that request
-    /// is in flight. Rust queues it asynchronously, therefore this timestamp is
-    /// part of the machine-effect gate.
+    /// `SendAndWait` for `FTimeout=12000`, so `NeedReconnectAllTrades` cannot
+    /// run while that request is in flight. Rust queues it asynchronously,
+    /// therefore this timestamp is part of the machine-effect gate.
     last_trades_subscribe_request_ms: Arc<AtomicI64>,
 
     /// Delphi `TMoonProtoEngine.FSubscribedBookServerToken`: current
@@ -4702,6 +4719,14 @@ pub struct Client {
     /// Delphi `TMoonProtoEngine.LastBookReconnectCheck`: 5s throttle for
     /// `NeedResubscribeOrderBooks`.
     last_book_reconnect_check_ms: i64,
+
+    /// Last queued `emk_SubscribeOrderBook` request. Delphi
+    /// `DoSubscribeOrderBooks` blocks in `SendAndWait` for `FTimeout=12000`;
+    /// Rust queues orderbook subscribes asynchronously, so reconnect retry must
+    /// not issue a second batch until the Delphi-equivalent wait window ends or
+    /// a response closes it.
+    last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
+    last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
 
     /// UID of the last full-registry `emk_SubscribeOrderBook` replay. A success
     /// for this UID, unlike a normal one-market subscribe, is allowed to advance
@@ -4841,6 +4866,10 @@ impl Client {
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
         let dispatcher_trades_server_token = Arc::new(AtomicU64::new(0));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
+        let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
+        let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
+        let last_orderbook_subscribe_request_uid =
+            Arc::new(AtomicU64::new(NO_PENDING_ENGINE_REQUEST_UID));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
         // when cfg.ntp_host is set. It periodically updates GlobalMPTimeOffset
@@ -4940,10 +4969,12 @@ impl Client {
             indexes_fetch_in_flight: false,
             update_markets_after_indexes: false,
             restore_orderbooks_after_indexes: false,
-            last_trades_reconnect_check_ms: 0,
-            last_trades_subscribe_request_ms: Arc::new(AtomicI64::new(i64::MIN / 2)),
+            last_trades_reconnect_check_ms: NEVER_TIME_MS,
+            last_trades_subscribe_request_ms,
             subscribed_book_server_token: 0,
-            last_book_reconnect_check_ms: 0,
+            last_book_reconnect_check_ms: NEVER_TIME_MS,
+            last_orderbook_subscribe_request_ms,
+            last_orderbook_subscribe_request_uid,
             pending_orderbook_resubscribe_uid: None,
             pending_trades_resubscribe_after_ms: None,
             debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
@@ -5373,10 +5404,29 @@ impl Client {
     /// Matches Delphi: `TEngineRequest` has explicit `MoonCmdPriority(MPS_Sliced)`,
     /// and `TCommandRegistry.InitRegistry` gives Sliced commands `MaxRetries=6`.
     pub fn send_api_request(&self, request_payload: &[u8]) {
-        if engine_request_method(request_payload) == Some(EngineMethod::SubscribeAllTrades) {
-            self.last_trades_subscribe_request_ms
-                .store(self.now_ms(), Ordering::Relaxed);
+        self.send_api_request_at(request_payload, self.now_ms());
+    }
+
+    fn mark_engine_request_queued_at(&self, request_payload: &[u8], now_ms: i64) {
+        match engine_request_method(request_payload) {
+            Some(EngineMethod::SubscribeAllTrades) => {
+                self.last_trades_subscribe_request_ms
+                    .store(now_ms, Ordering::Relaxed);
+            }
+            Some(EngineMethod::SubscribeOrderBook) => {
+                self.last_orderbook_subscribe_request_ms
+                    .store(now_ms, Ordering::Relaxed);
+                self.last_orderbook_subscribe_request_uid.store(
+                    engine_request_uid(request_payload).unwrap_or(NO_PENDING_ENGINE_REQUEST_UID),
+                    Ordering::Relaxed,
+                );
+            }
+            _ => {}
         }
+    }
+
+    fn send_api_request_at(&self, request_payload: &[u8], now_ms: i64) {
+        self.mark_engine_request_queued_at(request_payload, now_ms);
         self.send_cmd(
             request_payload.to_vec(),
             Command::API,
@@ -5930,6 +5980,12 @@ impl Client {
             subscription_registry: Arc::clone(&self.subscription_registry),
             server_update_sent: Arc::clone(&self.server_update_sent),
             last_trades_subscribe_request_ms: Arc::clone(&self.last_trades_subscribe_request_ms),
+            last_orderbook_subscribe_request_ms: Arc::clone(
+                &self.last_orderbook_subscribe_request_ms,
+            ),
+            last_orderbook_subscribe_request_uid: Arc::clone(
+                &self.last_orderbook_subscribe_request_uid,
+            ),
             start: self._start,
         }
     }
@@ -6168,13 +6224,24 @@ impl Client {
             return;
         }
 
+        let last_subscribe_request_ms = self
+            .last_trades_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        if last_subscribe_request_ms != NEVER_TIME_MS
+            && (now_ms - last_subscribe_request_ms).abs()
+                < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS
+        {
+            return;
+        }
+
         if let Some(due_ms) = self.pending_trades_resubscribe_after_ms {
             if now_ms >= due_ms {
                 self.pending_trades_resubscribe_after_ms = None;
                 if let Some(want_mm) = self.registry_trades_want_mm() {
-                    self.send_api_request(&crate::commands::engine_request::subscribe_all_trades(
-                        want_mm,
-                    ));
+                    self.send_api_request_at(
+                        &crate::commands::engine_request::subscribe_all_trades(want_mm),
+                        now_ms,
+                    );
                     if let Some(mm_orders) = self.registry_trades_mm_orders_intent() {
                         if mm_orders != want_mm {
                             self.send_mm_orders_subscribe_cmd(mm_orders);
@@ -6191,13 +6258,7 @@ impl Client {
         if self.server_token == trades_server_token {
             return;
         }
-        let last_subscribe_request_ms = self
-            .last_trades_subscribe_request_ms
-            .load(Ordering::Relaxed);
-        let reconnect_gate_ms = self
-            .last_trades_reconnect_check_ms
-            .max(last_subscribe_request_ms);
-        if (now_ms - reconnect_gate_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
+        if (now_ms - self.last_trades_reconnect_check_ms).abs() < TRADES_RECONNECT_THROTTLE_MS {
             return;
         }
         self.start_trades_reconnect_sequence(now_ms);
@@ -6208,6 +6269,15 @@ impl Client {
             return false;
         }
         if self.server_token == self.subscribed_book_server_token {
+            return false;
+        }
+        let last_subscribe_request_ms = self
+            .last_orderbook_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        if last_subscribe_request_ms != NEVER_TIME_MS
+            && (now_ms - last_subscribe_request_ms).abs()
+                < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS
+        {
             return false;
         }
         if (now_ms - self.last_book_reconnect_check_ms).abs() < ORDERBOOK_RECONNECT_THROTTLE_MS {
@@ -6230,7 +6300,7 @@ impl Client {
         now_ms: i64,
     ) -> bool {
         self.last_book_reconnect_check_ms = now_ms;
-        match self.send_orderbook_subscribe_batch(orderbook_subs) {
+        match self.send_orderbook_subscribe_batch(orderbook_subs, now_ms) {
             Some(uid) => {
                 self.pending_orderbook_resubscribe_uid = Some(uid);
                 true
@@ -6239,15 +6309,32 @@ impl Client {
         }
     }
 
-    fn send_orderbook_subscribe_batch(&self, orderbook_subs: Vec<String>) -> Option<u64> {
+    fn send_orderbook_subscribe_batch(
+        &self,
+        orderbook_subs: Vec<String>,
+        now_ms: i64,
+    ) -> Option<u64> {
         let refs: Vec<&str> = orderbook_subs.iter().map(String::as_str).collect();
         if !refs.is_empty() {
             let payload = crate::commands::engine_request::subscribe_order_book(&refs);
             let uid = engine_request_uid(&payload);
-            self.send_api_request(&payload);
+            self.send_api_request_at(&payload, now_ms);
             return uid;
         }
         None
+    }
+
+    fn close_orderbook_subscribe_wait_if_matches(&self, request_uid: u64) {
+        if self
+            .last_orderbook_subscribe_request_uid
+            .load(Ordering::Relaxed)
+            == request_uid
+        {
+            self.last_orderbook_subscribe_request_ms
+                .store(NEVER_TIME_MS, Ordering::Relaxed);
+            self.last_orderbook_subscribe_request_uid
+                .store(NO_PENDING_ENGINE_REQUEST_UID, Ordering::Relaxed);
+        }
     }
 
     fn restore_orderbook_subscriptions_from_registry(&mut self) {
@@ -8195,6 +8282,7 @@ impl Client {
             if resp.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
                 self.subscribed_book_server_token = self.server_token;
             }
+            self.close_orderbook_subscribe_wait_if_matches(resp.request_uid);
             if is_reconnect_batch {
                 self.pending_orderbook_resubscribe_uid = None;
             }
@@ -8207,8 +8295,10 @@ impl Client {
         if resp.method == EngineMethod::SubscribeAllTrades && resp.success {
             let now_ms = self.now_ms();
             self.last_trades_reconnect_check_ms = now_ms;
+        }
+        if resp.method == EngineMethod::SubscribeAllTrades {
             self.last_trades_subscribe_request_ms
-                .store(now_ms, Ordering::Relaxed);
+                .store(NEVER_TIME_MS, Ordering::Relaxed);
         }
     }
 
@@ -8219,6 +8309,7 @@ impl Client {
             if meta.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
                 self.subscribed_book_server_token = self.server_token;
             }
+            self.close_orderbook_subscribe_wait_if_matches(meta.request_uid);
             if is_reconnect_batch {
                 self.pending_orderbook_resubscribe_uid = None;
             }
@@ -8227,8 +8318,10 @@ impl Client {
         if meta.method == EngineMethod::SubscribeAllTrades && meta.success {
             let now_ms = self.now_ms();
             self.last_trades_reconnect_check_ms = now_ms;
+        }
+        if meta.method == EngineMethod::SubscribeAllTrades {
             self.last_trades_subscribe_request_ms
-                .store(now_ms, Ordering::Relaxed);
+                .store(NEVER_TIME_MS, Ordering::Relaxed);
         }
     }
 
@@ -10736,6 +10829,9 @@ mod client_sender_tests {
         let domain_ready = Arc::new(AtomicBool::new(true));
         let server_update_sent = Arc::new(AtomicBool::new(false));
         let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(i64::MIN / 2));
+        let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(i64::MIN / 2));
+        let last_orderbook_subscribe_request_uid =
+            Arc::new(AtomicU64::new(NO_PENDING_ENGINE_REQUEST_UID));
         (
             ClientSender {
                 app_queue_alive: Arc::clone(&app_queue_alive),
@@ -10744,6 +10840,8 @@ mod client_sender_tests {
                 subscription_registry: Arc::clone(&subscription_registry),
                 server_update_sent: Arc::clone(&server_update_sent),
                 last_trades_subscribe_request_ms,
+                last_orderbook_subscribe_request_ms,
+                last_orderbook_subscribe_request_uid,
                 start: Instant::now(),
             },
             subscription_registry,
@@ -16345,8 +16443,8 @@ mod reconnect_timing_tests {
         assert_eq!(client.last_book_reconnect_check_ms, 10_000);
 
         assert!(
-            !client.tick_orderbook_reconnect_sequence(14_999),
-            "Delphi LastBookReconnectCheck throttle blocks retries before 5000ms"
+            !client.tick_orderbook_reconnect_sequence(21_999),
+            "Delphi DoSubscribeOrderBooks SendAndWait window blocks retry before FTimeout"
         );
         assert!(drain_send_items(&client).is_empty());
 
@@ -16367,10 +16465,17 @@ mod reconnect_timing_tests {
             client.subscribed_book_server_token, 0x1111,
             "non-reconnect SubscribeOrderBook success must not stop a pending full replay"
         );
+        assert_ne!(
+            client
+                .last_orderbook_subscribe_request_ms
+                .load(Ordering::Relaxed),
+            NEVER_TIME_MS,
+            "non-matching SubscribeOrderBook response must not close the pending batch SendAndWait gate"
+        );
 
         assert!(
-            client.tick_orderbook_reconnect_sequence(15_000),
-            "at exactly 5000ms Delphi allows the next retry"
+            client.tick_orderbook_reconnect_sequence(22_000),
+            "after FTimeout and the 5s throttle, Delphi allows the next retry"
         );
         let second_sent = drain_send_items(&client);
         let second_uid = request_uid(&second_sent[0].data).expect("request uid");
@@ -16396,6 +16501,71 @@ mod reconnect_timing_tests {
             "after confirmed current ServerToken, NeedResubscribeOrderBooks stops"
         );
         assert!(drain_send_items(&client).is_empty());
+    }
+
+    #[test]
+    fn orderbook_reconnect_first_tick_is_immediate_without_inflight_subscribe() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.server_token = 0x2222;
+        client.peer_app_token = 0x3333;
+        client.tracked_indexes_peer_app_token = 0x3333;
+        client.subscribed_book_server_token = 0x1111;
+        client.with_subscription_registry_mut(|registry| {
+            registry.orderbook_subs.insert("BTCUSDT".to_string());
+        });
+
+        assert!(
+            client.tick_orderbook_reconnect_sequence(1),
+            "Delphi LastBookReconnectCheck=0 against GetTickCount64 allows the first reconnect check immediately"
+        );
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeOrderBook.to_byte()]
+        );
+    }
+
+    #[test]
+    fn queued_orderbook_subscribe_blocks_pre_response_reconnect_like_delphi_sendandwait() {
+        let mut client = dummy_client();
+        client.set_domain_ready(true);
+        client.auth_status = AuthStatus::AuthDone;
+        client.authorized = true;
+        client.server_token = 0x2222;
+        client.peer_app_token = 0x3333;
+        client.tracked_indexes_peer_app_token = 0x3333;
+        client.subscribed_book_server_token = 0x1111;
+
+        client.subscribe_orderbook("BTCUSDT");
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeOrderBook.to_byte()]
+        );
+        let requested_at = client
+            .last_orderbook_subscribe_request_ms
+            .load(Ordering::Relaxed);
+        assert!(requested_at >= 0);
+
+        assert!(
+            !client.tick_orderbook_reconnect_sequence(
+                requested_at + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS - 1,
+            ),
+            "DoSubscribeOrderBooks is still inside Delphi FTimeout"
+        );
+        assert!(drain_send_items(&client).is_empty());
+
+        assert!(
+            client.tick_orderbook_reconnect_sequence(
+                requested_at + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS,
+            ),
+            "after FTimeout, NeedResubscribeOrderBooks may send the full BookSubbed batch"
+        );
+        assert_eq!(
+            api_methods(&drain_send_items(&client)),
+            vec![EngineMethod::SubscribeOrderBook.to_byte()]
+        );
     }
 
     #[test]
@@ -16645,25 +16815,25 @@ mod reconnect_timing_tests {
             vec![EngineMethod::SubscribeAllTrades.to_byte()]
         );
 
-        client.tick_trades_reconnect_sequence(14_999, 0);
+        client.tick_trades_reconnect_sequence(22_099, 0);
         assert!(
             drain_send_items(&client).is_empty(),
-            "NeedReconnectAllTrades throttle is strict < 5000ms"
+            "Delphi SendAndWait FTimeout blocks reconnect while SubscribeAllTrades can still return"
         );
-        client.tick_trades_reconnect_sequence(15_000, 0);
+        client.tick_trades_reconnect_sequence(22_100, 0);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
 
-        client.tick_trades_reconnect_sequence(15_100, client.server_token);
+        client.tick_trades_reconnect_sequence(22_200, client.server_token);
         assert_eq!(
             api_methods(&drain_send_items(&client)),
             vec![EngineMethod::SubscribeAllTrades.to_byte()],
             "once UnSubscribeAllTrades ran, the paired delayed SubscribeAllTrades still completes"
         );
 
-        client.tick_trades_reconnect_sequence(20_100, client.server_token);
+        client.tick_trades_reconnect_sequence(22_300, client.server_token);
         assert!(
             drain_send_items(&client).is_empty(),
             "observed current FTradesServerToken stops further retries"
@@ -16735,13 +16905,19 @@ mod reconnect_timing_tests {
             "queued SubscribeAllTrades must arm the Delphi SendAndWait gate"
         );
 
-        client.tick_trades_reconnect_sequence(requested_at + TRADES_RECONNECT_THROTTLE_MS - 1, 0);
+        client.tick_trades_reconnect_sequence(
+            requested_at + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS - 1,
+            0,
+        );
         assert!(
             drain_send_items(&client).is_empty(),
             "NeedReconnectAllTrades must not enqueue UnsubscribeAllTrades while the subscribe request is still inside the Delphi-equivalent gate"
         );
 
-        client.tick_trades_reconnect_sequence(requested_at + TRADES_RECONNECT_THROTTLE_MS, 0);
+        client.tick_trades_reconnect_sequence(
+            requested_at + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS,
+            0,
+        );
         assert_eq!(
             api_methods(&drain_send_items(&client)),
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
