@@ -244,6 +244,20 @@ volumes; the intended precision loss is bounded by one bucket width.
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
 pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64;  // 0.00000001
+pub const DELPHI_MSECS_PER_DAY: f64;         // 86400000.0
+
+pub struct TradesPacketTimeShift;
+
+impl TradesPacketTimeShift {
+    pub fn new() -> Self;
+    pub fn shift_days(&self) -> Option<f64>;
+    pub fn apply_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+    ) -> f64;
+}
 
 pub enum TradeJoinPush {
     Inserted,
@@ -268,6 +282,12 @@ impl TradeJoinBuffer {
     pub fn drain_into(&mut self, out: &mut Vec<TradeHistoryRow>);
 }
 ```
+
+`TradesPacketTimeShift` mirrors Delphi `ProcessTradesStream`: the first
+known/stored row in a packet fixes
+`round((NowTimeX - (BaseTime + TimeDelta / MSecsPerDay)) * 24) / 24`, and every
+later row in that packet reuses the same shift. Unknown-market sections that
+Delphi skips do not fill the shift.
 
 `TradeJoinBuffer` is the Rust active-library equivalent of the Delphi temporary
 `tmpList/tmpTradesRead/tmpTradesWrite` path used by `AddTmpHOrder`. It keeps one

@@ -9,11 +9,41 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::state::seq_ring::{SeqRingRow, SeqRingRowSlot, SeqRingTimedRow};
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
+pub const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
 const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
 pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64 = 0.00000001;
+
+/// Delphi `ProcessTradesStream` per-packet time-shift state.
+///
+/// The first known/stored row in a packet fixes
+/// `TimeShift := round((NowTimeX - RowTime) * 24) / 24`; every later row in the
+/// packet uses the same shift. Unknown-market sections skipped by Delphi do not
+/// fill this value.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct TradesPacketTimeShift {
+    shift_days: Option<f64>,
+}
+
+impl TradesPacketTimeShift {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn shift_days(&self) -> Option<f64> {
+        self.shift_days
+    }
+
+    pub fn apply_like_delphi(&mut self, base_time: f64, time_delta_ms: i16, now_time: f64) -> f64 {
+        let row_time = base_time + f64::from(time_delta_ms) / DELPHI_MSECS_PER_DAY;
+        let shift = *self
+            .shift_days
+            .get_or_insert_with(|| ((now_time - row_time) * 24.0).round() / 24.0);
+        row_time + shift
+    }
+}
 
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
 ///
@@ -644,6 +674,24 @@ mod tests {
                 current: 123.5,
                 real_time: 45_000.25,
             }]
+        );
+    }
+
+    #[test]
+    fn trades_packet_time_shift_is_fixed_by_first_row_like_delphi() {
+        let base_time = 45_000.0;
+        let now_time = base_time + 3.0 / 24.0 + 10.0 / SECONDS_PER_DAY;
+        let mut shift = TradesPacketTimeShift::new();
+
+        let first = shift.apply_like_delphi(base_time, 250, now_time);
+        assert_eq!(shift.shift_days(), Some(3.0 / 24.0));
+        assert_eq!(first, base_time + 250.0 / DELPHI_MSECS_PER_DAY + 3.0 / 24.0);
+
+        let second = shift.apply_like_delphi(base_time, -500, base_time - 5.0);
+        assert_eq!(
+            second,
+            base_time - 500.0 / DELPHI_MSECS_PER_DAY + 3.0 / 24.0,
+            "later rows reuse the first-row TimeShift even if their own Now delta would differ"
         );
     }
 

@@ -612,13 +612,17 @@ Done:
   `AddNewAksPrice(Ask)`: update to `Max(eps, Ask / 5000)` only when `Ask > eps`
   and otherwise keep the previous value. Futures retained join will use this
   instead of a guessed Rust-only aggregation threshold.
+- Added `TradesPacketTimeShift`, matching Delphi `ProcessTradesStream`
+  per-packet time correction: first known/stored row fixes
+  `round((NowTimeX - RowTime) * 24) / 24`, later rows reuse the same shift, and
+  skipped unknown-market sections do not initialize it.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 13 tests.
+- `cargo test history --lib` OK: 17 tests.
 - `cargo test history_store --lib` OK: 3 tests.
-- `cargo test --lib` OK: 687 tests.
+- `cargo test --lib` OK: 688 tests.
 
 ### Phase Z - final full optimization pass
 
