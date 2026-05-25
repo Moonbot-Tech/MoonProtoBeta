@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_price_payload_clears_mark_found_before_first_read_like_delphi() {
+    fn direct_price_payload_clears_mark_found_on_empty_scalar_payload_like_delphi_read() {
         let mut st = MarketsState::new();
         st.apply_markets_list(MarketsListResponse {
             markets: vec![mk_market("BTC", 0), mk_market("ETH", 1)],
@@ -1643,11 +1643,19 @@ mod tests {
         assert!(st.price("BTC").unwrap().mark_price_found);
         assert!(st.price("ETH").unwrap().mark_price_found);
 
-        assert!(st.apply_markets_prices_payload_like_delphi(&[]).is_none());
+        let event = st.apply_markets_prices_payload_like_delphi(&[]).unwrap();
+        assert!(matches!(
+            event,
+            MarketsEvent::PricesUpdated {
+                count: 0,
+                included_funding: false,
+                included_corr: false,
+            }
+        ));
 
         assert!(
             !st.price("BTC").unwrap().mark_price_found,
-            "Delphi clears CurrentMarkPriceFound before ReadBool/ReadInt, even if the payload then fails"
+            "Delphi clears CurrentMarkPriceFound before reading scalar UpdateMarketsList header"
         );
         assert!(!st.price("ETH").unwrap().mark_price_found);
     }

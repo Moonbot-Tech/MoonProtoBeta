@@ -53,12 +53,7 @@ impl<'a> EngineStreamReader<'a> {
     }
 
     pub fn read_u8(&mut self) -> Option<u8> {
-        if self.pos + 1 > self.data.len() {
-            return None;
-        }
-        let v = self.data[self.pos];
-        self.pos += 1;
-        Some(v)
+        Some(self.read_zero_tail::<1>()[0])
     }
     pub fn read_bool(&mut self) -> Option<bool> {
         self.read_u8().map(|b| b != 0)
@@ -68,48 +63,28 @@ impl<'a> EngineStreamReader<'a> {
     }
 
     pub fn read_u16(&mut self) -> Option<u16> {
-        if self.pos + 2 > self.data.len() {
-            return None;
-        }
-        let v = u16::from_le_bytes(self.data[self.pos..self.pos + 2].try_into().unwrap());
-        self.pos += 2;
-        Some(v)
+        Some(u16::from_le_bytes(self.read_zero_tail::<2>()))
     }
     pub fn read_word(&mut self) -> Option<u16> {
         self.read_u16()
     }
 
     pub fn read_i32(&mut self) -> Option<i32> {
-        if self.pos + 4 > self.data.len() {
-            return None;
-        }
-        let v = i32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        Some(v)
+        Some(i32::from_le_bytes(self.read_zero_tail::<4>()))
     }
     pub fn read_int(&mut self) -> Option<i32> {
         self.read_i32()
     }
 
     pub fn read_i64(&mut self) -> Option<i64> {
-        if self.pos + 8 > self.data.len() {
-            return None;
-        }
-        let v = i64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        Some(v)
+        Some(i64::from_le_bytes(self.read_zero_tail::<8>()))
     }
     pub fn read_int64(&mut self) -> Option<i64> {
         self.read_i64()
     }
 
     pub fn read_f64(&mut self) -> Option<f64> {
-        if self.pos + 8 > self.data.len() {
-            return None;
-        }
-        let v = f64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        Some(v)
+        Some(f64::from_le_bytes(self.read_zero_tail::<8>()))
     }
     pub fn read_double(&mut self) -> Option<f64> {
         self.read_f64()
@@ -140,6 +115,16 @@ impl<'a> EngineStreamReader<'a> {
         } else {
             count.min(self.remaining() / min_elem_size)
         }
+    }
+
+    fn read_zero_tail<const N: usize>(&mut self) -> [u8; N] {
+        let mut out = [0u8; N];
+        let available = self.remaining().min(N);
+        if available > 0 {
+            out[..available].copy_from_slice(&self.data[self.pos..self.pos + available]);
+            self.pos += available;
+        }
+        out
     }
 }
 
@@ -1057,6 +1042,68 @@ mod tests {
 
         assert_eq!(count, 2);
         assert_eq!(r.bounded_count_capacity(count, 27), 0);
+    }
+
+    #[test]
+    fn engine_stream_scalars_zero_tail_like_delphi_read_helpers() {
+        let mut r = EngineStreamReader::new(&[0x34, 0x12, 0x78]);
+
+        assert_eq!(r.read_word(), Some(0x1234));
+        assert_eq!(r.read_int(), Some(0x78));
+        assert_eq!(r.read_bool(), Some(false));
+        assert_eq!(r.position(), 3);
+    }
+
+    #[test]
+    fn market_reader_zero_tails_short_fixed_tail_after_valid_strings_like_delphi() {
+        let mut buf = Vec::new();
+        for s in [
+            "BNBTC", "BTC", "BTC", "USDT", "Bitcoin", "BTC", "BTCUSDT", "", "TRADING", "",
+        ] {
+            write_str(&mut buf, s);
+        }
+
+        let mut r = EngineStreamReader::new(&buf);
+        let market = read_market_with_local_shift(&mut r, 1, 0.0).unwrap();
+
+        assert_eq!(market.market_name, "BTCUSDT");
+        assert_eq!(market.market_name_mb_classic, "BTCUSDT");
+        assert_eq!(market.bn_price_precision, 0);
+        assert_eq!(market.bn_delivery_time, 0);
+        assert_eq!(market.bn_tick_size, 0.0);
+        assert!(!market.status_trading);
+        assert_eq!(market.futures_type, BaseCurrency::EMPTY);
+        assert_eq!(r.position(), buf.len());
+    }
+
+    #[test]
+    fn market_prices_row_zero_tails_short_fixed_payload_like_delphi() {
+        let mut buf = Vec::new();
+        buf.push(1); // send_funding
+        buf.extend_from_slice(&1i32.to_le_bytes()); // one market price row
+
+        let parsed = parse_markets_prices_response_with_local_shift(&buf, 0.0).unwrap();
+
+        assert!(parsed.send_funding);
+        assert_eq!(parsed.prices.len(), 1);
+        assert_eq!(parsed.prices[0].m_index, 0);
+        assert_eq!(parsed.prices[0].bid, 0.0);
+        assert_eq!(parsed.prices[0].ask, 0.0);
+        assert_eq!(parsed.prices[0].funding_rate, 0.0);
+        assert_eq!(parsed.prices[0].funding_time, 0.0);
+        assert_eq!(parsed.prices[0].mark_price, 0.0);
+        assert!(!parsed.prices[0].mark_price_found);
+        assert!(!parsed.send_corr_markets);
+    }
+
+    #[test]
+    fn token_tags_string_stays_readbuffer_fail_fast() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(b"BT");
+
+        assert!(parse_token_tags_response(&buf).is_none());
     }
 
     #[test]

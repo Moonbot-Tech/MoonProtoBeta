@@ -6326,3 +6326,34 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 27.11s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: Engine API domain scalar reads follow Delphi helpers
+
+Correction:
+
+- Re-checked `MoonProtoEngineStruct.pas:TEngineStreamCommand.ReadDouble`,
+  `ReadInt`, `ReadWord`, `ReadInt64`, `ReadBool`, and `ReadByte`.
+- These helpers call `FStream.Read(Result, SizeOf(Result))`. The string helper
+  `ReadStr` calls `ReadStringFromStreamUtf8` and stays strict because that path
+  uses `ReadBuffer`.
+- Rust `commands::market::EngineStreamReader` treated all fixed scalar reads as
+  fail-fast. That could turn a short fixed tail in `GetMarketsList`,
+  `UpdateMarketsList`, `CheckBinanceTags`, or related domain payloads into
+  `ParseFailed`, while Delphi would continue after consuming the available
+  bytes.
+- `EngineStreamReader` now keeps the Delphi split: scalar reads consume the
+  available bytes and zero-fill the missing tail; strings remain fail-fast.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.181`.
+
+Verification:
+
+- Added parser/state tests for scalar zero-tail, strict string failure,
+  short market fixed tail, short price row, and empty direct price payload.
+- `cargo test market --lib --quiet` OK: 93 tests.
+- `cargo test --lib --quiet` OK: 751 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.00s`, `ParseFailed=0`.

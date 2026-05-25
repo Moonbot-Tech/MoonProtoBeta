@@ -335,7 +335,11 @@ responses, matching the live server format with `futures_type`.
 Low-level market parsers read collection counts like Delphi `resp.ReadInt`:
 they do not reject a packet only because `count * estimated_item_size` is larger
 than the remaining bytes. Allocation is still bounded by the remaining payload;
-malformed packets fail at the concrete field read.
+malformed string fields fail at the concrete `ReadBuffer` string read. Fixed
+Engine API scalar fields (`ReadInt`, `ReadWord`, `ReadDouble`, `ReadBool`,
+`ReadByte`, `ReadInt64`) follow Delphi `FStream.Read` semantics: available bytes
+are consumed and missing tail bytes are treated as zero in Rust's deterministic
+safe representation.
 
 `EngineStreamReader::read_count()` reads only the signed Delphi count and
 returns it as `usize` when non-negative. Code that needs preallocation should
