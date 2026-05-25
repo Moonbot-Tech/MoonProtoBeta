@@ -773,9 +773,12 @@ Done:
   it from retained futures trades; rollover is handled by the 250ms
   `StoreWorker` maintenance path.
 - Derived snapshots now expose trade volumes/deltas, candle deltas, candle
-  volumes, and the combined deltas view.
+  volumes, LastPrice-line deltas, and the combined deltas view.
 - Candle deltas and candle volumes are calculated in one pass over retained 5m
   rows plus the current candle.
+- LastPrice-line deltas are calculated from the retained `HistoryPrice` line
+  fed by `UpdateMarketsList -> TMarket.AddFrom`, covering the Delphi
+  `CheckHourlyValues` 15m/30m/1h source.
 - The combined 2h/3h/24h delta fields are floored by the combined 1h delta,
   matching Delphi `RecalcPumpQ` (`Last2hDelta/Last3hDelta/Last24hDelta :=
   Max(Last1hDelta, raw_window)`).
@@ -783,7 +786,8 @@ Done:
   bucket conditions: `Last2hDelta` uses `h <= 2`, `Last3hDelta` uses `h <= 3`,
   and `Last24hDelta` uses `h <= 24`. Candle volume fields keep exact window
   semantics because Delphi's volume fields are separate (`HVol`, `HVol3`,
-  `dVol`).
+  `dVol`). All candle windows exclude the exact old boundary, matching Delphi
+  checks like `abs(Now-Time) < 15/MinsInDay` and `h < 72`.
 - Quick FireTest now also checks that retained futures trades feed the derived
   trade-volume snapshot, so "rows stored but analytics dead" is caught before
   the full candles stress.
@@ -814,6 +818,10 @@ Verification:
   `cargo test --lib` OK: 718 tests; `cargo check --examples` OK; quick prod
   FireTest OK: `FIRETEST_QUICK_PASS after 23.39s`; full prod FireTest OK after
   about 174s.
+- After adding LastPrice-line derived deltas and strict old-boundary candle
+  windows: `cargo test --lib` OK: 720 tests; `cargo check --examples` OK;
+  quick prod FireTest OK: `FIRETEST_QUICK_PASS after 27.17s`; `cargo test
+  --test fire_test --no-run` OK.
 
 ### Phase Z - final full optimization pass
 

@@ -644,6 +644,7 @@ impl MarketHistoryStore {
         self.seal_current_candle_if_due(now_time);
         let volumes = self.rolling_volumes.snapshot(now_time);
         let trade_deltas = trade_deltas_from_rolling_volumes(volumes);
+        let last_price_deltas = self.last_price_deltas_one_pass(now_time);
         let candle_bucket = candle_delta_bucket(now_time);
         if self.candle_deltas_dirty || self.candle_deltas_bucket != Some(candle_bucket) {
             let (deltas, volumes) = self.candle_derived_one_pass(now_time);
@@ -655,7 +656,9 @@ impl MarketHistoryStore {
 
         self.derived.trade_volumes = volumes;
         self.derived.trade_deltas = trade_deltas;
-        self.derived.deltas = combine_deltas(trade_deltas, self.derived.candle_deltas);
+        self.derived.last_price_deltas = last_price_deltas;
+        self.derived.deltas =
+            combine_deltas(trade_deltas, self.derived.candle_deltas, last_price_deltas);
     }
 
     fn push_retained_futures_trade(&mut self, row: TradeHistoryRow) {
@@ -744,6 +747,16 @@ impl MarketHistoryStore {
         }
         acc.finish()
     }
+
+    fn last_price_deltas_one_pass(&self, now_time: f64) -> DerivedDeltaSnapshot {
+        let mut acc = LastPriceDeltaAccumulator::new(now_time);
+        if let Some(reader) = self.readers.last_prices.as_ref() {
+            reader.with_last(reader.capacity(), |view| {
+                view.for_each(|row| acc.add(*row));
+            });
+        }
+        acc.finish()
+    }
 }
 
 fn delta_percent(min_price: f64, max_price: f64) -> f64 {
@@ -764,27 +777,51 @@ fn trade_deltas_from_rolling_volumes(volumes: RollingTradeVolumeSnapshot) -> Der
 fn combine_deltas(
     trade_deltas: DerivedDeltaSnapshot,
     candle_deltas: DerivedDeltaSnapshot,
+    last_price_deltas: DerivedDeltaSnapshot,
 ) -> DerivedDeltaSnapshot {
-    let one_hour = trade_deltas.one_hour.max(candle_deltas.one_hour);
+    let one_hour = trade_deltas
+        .one_hour
+        .max(candle_deltas.one_hour)
+        .max(last_price_deltas.one_hour);
     DerivedDeltaSnapshot {
-        one_minute: trade_deltas.one_minute.max(candle_deltas.one_minute),
-        five_minutes: trade_deltas.five_minutes.max(candle_deltas.five_minutes),
+        one_minute: trade_deltas
+            .one_minute
+            .max(candle_deltas.one_minute)
+            .max(last_price_deltas.one_minute),
+        five_minutes: trade_deltas
+            .five_minutes
+            .max(candle_deltas.five_minutes)
+            .max(last_price_deltas.five_minutes),
         fifteen_minutes: trade_deltas
             .fifteen_minutes
-            .max(candle_deltas.fifteen_minutes),
+            .max(candle_deltas.fifteen_minutes)
+            .max(last_price_deltas.fifteen_minutes),
         thirty_minutes: trade_deltas
             .thirty_minutes
-            .max(candle_deltas.thirty_minutes),
+            .max(candle_deltas.thirty_minutes)
+            .max(last_price_deltas.thirty_minutes),
         one_hour,
-        two_hours: one_hour.max(trade_deltas.two_hours.max(candle_deltas.two_hours)),
-        three_hours: one_hour.max(trade_deltas.three_hours.max(candle_deltas.three_hours)),
+        two_hours: one_hour.max(
+            trade_deltas
+                .two_hours
+                .max(candle_deltas.two_hours)
+                .max(last_price_deltas.two_hours),
+        ),
+        three_hours: one_hour.max(
+            trade_deltas
+                .three_hours
+                .max(candle_deltas.three_hours)
+                .max(last_price_deltas.three_hours),
+        ),
         twenty_four_hours: trade_deltas
             .twenty_four_hours
             .max(candle_deltas.twenty_four_hours)
+            .max(last_price_deltas.twenty_four_hours)
             .max(one_hour),
         seventy_two_hours: trade_deltas
             .seventy_two_hours
-            .max(candle_deltas.seventy_two_hours),
+            .max(candle_deltas.seventy_two_hours)
+            .max(last_price_deltas.seventy_two_hours),
     }
 }
 
@@ -814,7 +851,9 @@ impl CandleWindow {
     }
 
     fn add(&mut self, now_time: f64, candle: Candle5mRow) {
-        if candle.time < now_time - self.window_days || candle.time > now_time {
+        // Delphi checks are strict on the old boundary:
+        // `abs(Now-Time) < 15/MinsInDay`, `h < 72`, `h <= 2` -> age < 3h.
+        if candle.time <= now_time - self.window_days || candle.time > now_time {
             return;
         }
         if candle.min_p > 0.0 && (self.min_price <= 0.0 || candle.min_p < self.min_price) {
@@ -906,6 +945,83 @@ impl CandleDerivedAccumulator {
                 seventy_two_hours: self.seventy_two_hours.volume,
             },
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LastPriceWindow {
+    window_days: f64,
+    min_price: f32,
+    max_price: f32,
+}
+
+impl LastPriceWindow {
+    fn new(window_seconds: f64) -> Self {
+        Self {
+            window_days: window_seconds / SECONDS_PER_DAY,
+            min_price: 0.0,
+            max_price: 0.0,
+        }
+    }
+
+    fn add(&mut self, now_time: f64, row: LastPricePoint) {
+        if row.real_time <= now_time - self.window_days || row.real_time > now_time {
+            return;
+        }
+        if row.current <= 0.0 {
+            return;
+        }
+        if self.min_price <= 0.0 || row.current < self.min_price {
+            self.min_price = row.current;
+        }
+        if row.current > self.max_price {
+            self.max_price = row.current;
+        }
+    }
+
+    fn finish_delta(self) -> f64 {
+        delta_percent(f64::from(self.min_price), f64::from(self.max_price))
+    }
+}
+
+struct LastPriceDeltaAccumulator {
+    now_time: f64,
+    one_minute: LastPriceWindow,
+    five_minutes: LastPriceWindow,
+    fifteen_minutes: LastPriceWindow,
+    thirty_minutes: LastPriceWindow,
+    one_hour: LastPriceWindow,
+}
+
+impl LastPriceDeltaAccumulator {
+    fn new(now_time: f64) -> Self {
+        Self {
+            now_time,
+            one_minute: LastPriceWindow::new(60.0),
+            five_minutes: LastPriceWindow::new(5.0 * 60.0),
+            fifteen_minutes: LastPriceWindow::new(15.0 * 60.0),
+            thirty_minutes: LastPriceWindow::new(30.0 * 60.0),
+            one_hour: LastPriceWindow::new(60.0 * 60.0),
+        }
+    }
+
+    fn add(&mut self, row: LastPricePoint) {
+        self.one_minute.add(self.now_time, row);
+        self.five_minutes.add(self.now_time, row);
+        self.fifteen_minutes.add(self.now_time, row);
+        self.thirty_minutes.add(self.now_time, row);
+        self.one_hour.add(self.now_time, row);
+    }
+
+    fn finish(self) -> DerivedDeltaSnapshot {
+        DerivedDeltaSnapshot {
+            one_minute: self.one_minute.finish_delta(),
+            five_minutes: self.five_minutes.finish_delta(),
+            fifteen_minutes: self.fifteen_minutes.finish_delta(),
+            thirty_minutes: self.thirty_minutes.finish_delta(),
+            one_hour: self.one_hour.finish_delta(),
+            ..DerivedDeltaSnapshot::default()
+        }
     }
 }
 
@@ -1100,6 +1216,43 @@ mod tests {
                 real_time: 45_000.0
             }]
         );
+    }
+
+    #[test]
+    fn last_price_history_feeds_delphi_hourly_delta_windows() {
+        let now = 45_000.0;
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 8,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+            trade_join_capacity: 0,
+        });
+
+        store.append_last_price_like_delphi(
+            100.0,
+            now - 50.0 / SECONDS_PER_DAY,
+            99.0,
+            101.0,
+            true,
+            false,
+        );
+        store.append_last_price_like_delphi(130.0, now - 14.0 / 1440.0, 129.0, 131.0, true, false);
+        store.append_last_price_like_delphi(170.0, now - 59.0 / 1440.0, 169.0, 171.0, true, false);
+        store.append_last_price_like_delphi(250.0, now - 60.0 / 1440.0, 249.0, 251.0, true, false);
+
+        store.refresh_derived_analytics(now);
+        let derived = store.derived_snapshot();
+
+        assert!((derived.last_price_deltas.one_minute - 0.0).abs() < 1e-9);
+        assert!((derived.last_price_deltas.fifteen_minutes - 30.0).abs() < 1e-9);
+        assert!((derived.last_price_deltas.thirty_minutes - 30.0).abs() < 1e-9);
+        assert!((derived.last_price_deltas.one_hour - 70.0).abs() < 1e-9);
+        assert!((derived.deltas.one_hour - 70.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1370,13 +1523,19 @@ mod tests {
             seventy_two_hours: 7.0,
             ..DerivedDeltaSnapshot::default()
         };
+        let last_price = DerivedDeltaSnapshot {
+            fifteen_minutes: 13.0,
+            one_hour: 14.0,
+            ..DerivedDeltaSnapshot::default()
+        };
 
-        let combined = combine_deltas(trade, candles);
+        let combined = combine_deltas(trade, candles, last_price);
 
-        assert_eq!(combined.one_hour, 12.0);
-        assert_eq!(combined.two_hours, 12.0);
-        assert_eq!(combined.three_hours, 12.0);
-        assert_eq!(combined.twenty_four_hours, 12.0);
+        assert_eq!(combined.fifteen_minutes, 13.0);
+        assert_eq!(combined.one_hour, 14.0);
+        assert_eq!(combined.two_hours, 14.0);
+        assert_eq!(combined.three_hours, 14.0);
+        assert_eq!(combined.twenty_four_hours, 14.0);
         assert_eq!(
             combined.seventy_two_hours, 7.0,
             "Delphi RecalcPumpQ only floors 2h/3h/24h by Last1hDelta; 72h stays its own source"
@@ -1407,6 +1566,14 @@ mod tests {
                 vol: 1.0,
             },
             Candle5mRow {
+                time: now - 3.0 / 24.0,
+                min_p: 100.0,
+                max_p: 190.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 8.0,
+            },
+            Candle5mRow {
                 time: now - 3.5 / 24.0,
                 min_p: 100.0,
                 max_p: 140.0,
@@ -1422,17 +1589,65 @@ mod tests {
                 open_p: 100.0,
                 vol: 4.0,
             },
+            Candle5mRow {
+                time: now - 25.0 / 24.0,
+                min_p: 100.0,
+                max_p: 220.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 16.0,
+            },
         ]);
 
         store.refresh_derived_analytics(now);
         let derived = store.derived_snapshot();
 
         assert!((derived.candle_deltas.two_hours - 30.0).abs() < 1e-9);
-        assert!((derived.candle_deltas.three_hours - 40.0).abs() < 1e-9);
-        assert!((derived.candle_deltas.twenty_four_hours - 50.0).abs() < 1e-9);
+        assert!((derived.candle_deltas.three_hours - 90.0).abs() < 1e-9);
+        assert!((derived.candle_deltas.twenty_four_hours - 90.0).abs() < 1e-9);
         assert_eq!(
-            derived.candle_volumes.twenty_four_hours, 3.0,
+            derived.candle_volumes.twenty_four_hours, 11.0,
             "candle volumes keep exact 24h semantics; only Delphi long delta fields use h<= bucket windows"
         );
+    }
+
+    #[test]
+    fn candle_windows_exclude_exact_old_boundary_like_delphi() {
+        let now = 45_000.0;
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 8,
+            trade_join_capacity: 0,
+        });
+        store.replace_candles_5m_from_snapshot(&[
+            Candle5mRow {
+                time: now - 15.0 / 1440.0,
+                min_p: 100.0,
+                max_p: 200.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 5.0,
+            },
+            Candle5mRow {
+                time: now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY,
+                min_p: 100.0,
+                max_p: 150.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 3.0,
+            },
+        ]);
+
+        store.refresh_derived_analytics(now);
+        let derived = store.derived_snapshot();
+
+        assert!((derived.candle_deltas.fifteen_minutes - 50.0).abs() < 1e-9);
+        assert_eq!(derived.candle_volumes.fifteen_minutes, 3.0);
     }
 }

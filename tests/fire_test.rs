@@ -26,8 +26,8 @@
 //! Profiles:
 //! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
 //!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
-//!   retained LastPrice/trades, derived trade snapshot, trades + orderbook
-//!   streams, ParseFailed=0, CPU summary.
+//!   retained LastPrice/trades, derived trade/LastPrice snapshot, trades +
+//!   orderbook streams, ParseFailed=0, CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
 //!   health/stress scenario below. Requires `allow_mutation=true`.
 
@@ -2344,11 +2344,13 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
         );
     }
     println!(
-        "OK: quick derived trade_vol_1m={:.4} trade_vol_5m={:.4} trade_delta_1m={:.4}% trade_delta_5m={:.4}% candle_vol_1h={:.4}",
+        "OK: quick derived trade_vol_1m={:.4} trade_vol_5m={:.4} trade_delta_1m={:.4}% trade_delta_5m={:.4}% last_price_delta_15m={:.4}% last_price_delta_1h={:.4}% candle_vol_1h={:.4}",
         derived.trade_volumes.one_minute.total_value(),
         derived.trade_volumes.five_minutes.total_value(),
         derived.trade_deltas.one_minute,
         derived.trade_deltas.five_minutes,
+        derived.last_price_deltas.fifteen_minutes,
+        derived.last_price_deltas.one_hour,
         derived.candle_volumes.one_hour
     );
     log_err_emu_snapshot(

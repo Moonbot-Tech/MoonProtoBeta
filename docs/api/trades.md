@@ -322,17 +322,23 @@ source and are calculated in one pass over retained 5m candles plus the current
 candle for 5m, 15m, 30m, 1h, 2h, 3h, 24h, and 72h windows. Candle volume is the
 total candle quote volume and has no buy/sell split; use `trade_volumes` for
 1m/3m/5m buy/sell totals.
+`MarketDerivedSnapshot::last_price_deltas` is the retained LastPrice line
+source. It follows Delphi's `UpdateMarketsList -> TMarket.AddFrom ->
+HistoryPrice` path and feeds the 15m/30m/1h-style windows exposed to clients.
 
 The long candle delta fields intentionally follow Delphi `RecalcPumpQ` naming,
 not exact wall-clock names: `two_hours` is `Last2hDelta` (`h <= 2`, roughly
 three hourly buckets), `three_hours` is `Last3hDelta` (`h <= 3`, roughly four
 hourly buckets), and `twenty_four_hours` is `Last24hDelta` (`h <= 24`, roughly
-25 hourly buckets). Candle volume fields keep exact window semantics.
+25 hourly buckets). Candle windows use Delphi's strict old boundary, so a row
+exactly at the window start is outside. Candle volume fields keep exact window
+semantics.
 `MarketDerivedSnapshot::deltas` is the combined view:
-per field it keeps the larger value from trade and candle sources, which matches
-the Delphi habit of not lowering a hotter short-window delta with a colder
-source. Matching Delphi `RecalcPumpQ`, combined 2h, 3h, and 24h deltas are also
-floored by the combined 1h delta; 72h remains its own long-window source.
+per field it keeps the larger value from trade, LastPrice-line, and candle
+sources, which matches the Delphi habit of not lowering a hotter short-window
+delta with a colder source. Matching Delphi `RecalcPumpQ`, combined 2h, 3h, and
+24h deltas are also floored by the combined 1h delta; 72h remains its own
+long-window source.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0

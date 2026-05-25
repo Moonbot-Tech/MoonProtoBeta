@@ -509,9 +509,14 @@ pub struct MarketDerivedSnapshot {
     /// `three_hours` is `Last3hDelta` (`h <= 3`, roughly four hours), and
     /// `twenty_four_hours` is `Last24hDelta` (`h <= 24`, roughly 25 hours).
     pub candle_deltas: DerivedDeltaSnapshot,
+    /// Deltas from Delphi's retained LastPrice/HistoryPrice line.
+    ///
+    /// Delphi feeds this line from `UpdateMarketsList -> TMarket.AddFrom` and
+    /// uses it for the 15m/30m/1h derived windows in `CheckHourlyValues`.
+    pub last_price_deltas: DerivedDeltaSnapshot,
     /// Combined convenient view. For each field it is the max of the trade and
-    /// candle source for that window, matching Delphi's "do not lower a hotter
-    /// delta with a colder source" shape.
+    /// retained-history sources for that window, matching Delphi's "do not
+    /// lower a hotter delta with a colder source" shape.
     pub deltas: DerivedDeltaSnapshot,
 }
 
