@@ -662,36 +662,18 @@ fn parse_client_settings(
     };
 
     let coins_black_list_text = read_string(data, pos)?;
-    if *pos + 1 > data.len() {
-        return None;
-    }
-    let use_coins_black_list = data[*pos] != 0;
-    *pos += 1;
+    let use_coins_black_list = read_bool_zero_tail(data, pos);
 
-    if *pos + 4 > data.len() {
-        return None;
-    }
-    let temp_bl_count_raw = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-    *pos += 4;
+    let temp_bl_count_raw = read_i32_zero_tail(data, pos);
     if temp_bl_count_raw < 0 {
         return None;
     }
     let temp_bl_count = temp_bl_count_raw as usize;
-    // Каждый TempBL item занимает минимум string length prefix (2) + TDateTime (8).
-    // Если count физически не помещается в payload, Delphi stream read would fail;
-    // Rust must fail too, not silently truncate and parse tail at a wrong offset.
-    if temp_bl_count > (data.len() - *pos) / 10 {
-        return None;
-    }
     let mut temp_bl_symbols = Vec::with_capacity(temp_bl_count);
     let mut temp_bl_times = Vec::with_capacity(temp_bl_count);
     for _ in 0..temp_bl_count {
         let sym = read_string(data, pos)?;
-        if *pos + 8 > data.len() {
-            return None;
-        }
-        let t = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-        *pos += 8;
+        let t = f64::from_bits(read_u64_zero_tail(data, pos));
         temp_bl_symbols.push(sym);
         temp_bl_times.push(t);
     }
@@ -700,44 +682,24 @@ fn parse_client_settings(
     let mut use_manual_strategy = false;
     let mut manual_strategy_id = 0u64;
     if *pos < data.len() {
-        if *pos + 9 > data.len() {
-            return None;
-        }
-        use_manual_strategy = data[*pos] != 0;
-        *pos += 1;
-        manual_strategy_id = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-        *pos += 8;
+        use_manual_strategy = read_bool_zero_tail(data, pos);
+        manual_strategy_id = read_u64_zero_tail(data, pos);
     }
 
     let free_position_check = if *pos < data.len() {
-        if *pos + 1 > data.len() {
-            return None;
-        }
-        let b = data[*pos] != 0;
-        *pos += 1;
-        b
+        read_bool_zero_tail(data, pos)
     } else {
         fallback.map(|f| f.free_position_check).unwrap_or(false)
     };
 
     let vol_drop_level = if *pos < data.len() {
-        if *pos + 4 > data.len() {
-            return None;
-        }
-        let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        v
+        read_i32_preserve_tail(data, pos, fallback.map(|f| f.vol_drop_level).unwrap_or(0))
     } else {
         fallback.map(|f| f.vol_drop_level).unwrap_or(0)
     };
 
     let use_stop_market = if *pos < data.len() {
-        if *pos + 1 > data.len() {
-            return None;
-        }
-        let b = data[*pos] != 0;
-        *pos += 1;
-        b
+        read_bool_zero_tail(data, pos)
     } else {
         fallback.map(|f| f.use_stop_market).unwrap_or(false)
     };
@@ -944,6 +906,18 @@ fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
     let mut bytes = [0u8; 8];
     read_into_prefix(data, pos, &mut bytes);
     u64::from_le_bytes(bytes)
+}
+
+fn read_i32_zero_tail(data: &[u8], pos: &mut usize) -> i32 {
+    let mut bytes = [0u8; 4];
+    read_into_prefix(data, pos, &mut bytes);
+    i32::from_le_bytes(bytes)
+}
+
+fn read_i32_preserve_tail(data: &[u8], pos: &mut usize, current: i32) -> i32 {
+    let mut bytes = current.to_le_bytes();
+    read_into_prefix(data, pos, &mut bytes);
+    i32::from_le_bytes(bytes)
 }
 
 fn read_u16_preserve_tail(data: &[u8], pos: &mut usize, current: u16) -> u16 {
@@ -1853,6 +1827,70 @@ mod tests {
         raw.push(0);
         raw.extend_from_slice(&count.to_le_bytes());
         raw
+    }
+
+    #[test]
+    fn client_settings_accepts_tail_after_blacklist_string_like_delphi_stream_read() {
+        let mut raw = Vec::new();
+        raw.push(CMD_CLIENT_SETTINGS);
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&7u64.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 41]);
+        write_string(&mut raw, "");
+
+        let fallback = ClientSettingsCommand {
+            free_position_check: true,
+            vol_drop_level: 77,
+            use_stop_market: true,
+            ..ClientSettingsCommand::default()
+        };
+
+        match UICommand::parse_with_client_settings_fallback(&raw, Some(&fallback)).unwrap() {
+            UICommand::ClientSettings(p) => {
+                assert!(!p.use_coins_black_list);
+                assert!(p.temp_bl_symbols.is_empty());
+                assert!(p.free_position_check);
+                assert_eq!(p.vol_drop_level, 77);
+                assert!(p.use_stop_market);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_settings_temp_bl_time_zero_tails_after_valid_string_like_delphi_read() {
+        let mut raw = client_settings_v1_prefix_with_temp_bl_count(1);
+        write_string(&mut raw, "");
+
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::ClientSettings(p) => {
+                assert_eq!(p.temp_bl_symbols, vec!["".to_string()]);
+                assert_eq!(p.temp_bl_times, vec![0.0]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_settings_soft_tail_preserves_existing_i32_high_bytes_like_delphi_read() {
+        let mut raw = client_settings_v1_prefix_with_temp_bl_count(0);
+        raw.push(0); // UseManualStrategy
+        raw.extend_from_slice(&0u64.to_le_bytes());
+        raw.push(1); // FreePositionCheck
+        raw.push(0xAA); // first byte of VolDropLevel only
+
+        let fallback = ClientSettingsCommand {
+            vol_drop_level: 0x1122_3344,
+            ..ClientSettingsCommand::default()
+        };
+
+        match UICommand::parse_with_client_settings_fallback(&raw, Some(&fallback)).unwrap() {
+            UICommand::ClientSettings(p) => {
+                assert!(p.free_position_check);
+                assert_eq!(p.vol_drop_level, 0x1122_33AA);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

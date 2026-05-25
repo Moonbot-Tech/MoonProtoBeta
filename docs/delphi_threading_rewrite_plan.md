@@ -6204,3 +6204,30 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 27.62s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: ClientSettings soft tail Read semantics
+
+Correction:
+
+- Re-checked `MoonProtoUIStruct.pas:TClientSettingsCommand.CreateFromStream`.
+- Rust still treated several post-string settings fields as fail-fast when
+  Delphi reads them with `TMemoryStream.Read`: `UseCoinsBlackList`,
+  `TempBLCount`, each `TempBLTimes[i]`, `UseManualStrategy`,
+  `ManualStrategyID`, `FreePositionCheck`, `VolDropLevel`, and
+  `UseStopMarket`.
+- Fixed the parser split: `ReadStringFromStreamUtf8` fields remain fail-fast
+  because Delphi uses `ReadBuffer`; fixed scalar fields after a valid string use
+  Delphi soft-read/zero-tail. `VolDropLevel` preserves fallback high bytes on a
+  partial read because Delphi assigns `VolDropLevel := cfg.VolDropLevel` before
+  reading.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.177`.
+
+Verification:
+
+- `cargo test --lib --quiet` OK: 740 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.46s`, `ParseFailed=0`.

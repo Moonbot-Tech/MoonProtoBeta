@@ -217,3 +217,11 @@ The same zero-tail rule applies to fixed scalar UI command bodies such as
 `StratStartStop`, `MMOrdersSubscribe`, `ResetProfit`, `ArbActivateNotify`,
 `SwitchDex`, and `SwitchSpot`. Malformed UTF-8 string lengths/content remain a
 parse-failure path because Delphi uses `ReadBuffer` in the UTF-8 string helper.
+
+`ClientSettingsCommand` follows the same Delphi split. UTF-8 strings must be
+complete. Fixed fields after a valid string are soft-read with
+`TMemoryStream.Read`: missing `UseCoinsBlackList`/`TempBLCount` bytes decode as
+false/zero, `TempBLTimes` can zero-tail after a complete symbol string, and
+append-only fields keep the current settings fallback unless at least one byte of
+that field is present. For `VolDropLevel`, a partial read overwrites the low
+little-endian bytes and preserves the high bytes from the fallback value.

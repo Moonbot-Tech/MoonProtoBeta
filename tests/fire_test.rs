@@ -30,6 +30,10 @@
 //!   orderbook streams, ParseFailed=0, CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
 //!   health/stress scenario below. Requires `allow_mutation=true`.
+//!
+//! FireTest checks live full-parse health for all real server packets. Crafted
+//! malformed parser semantics (Delphi `Read` zero-tail vs `ReadBuffer`
+//! fail-fast) belong in deterministic unit/parser tests next to each parser.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
