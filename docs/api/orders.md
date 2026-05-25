@@ -96,6 +96,10 @@ locally. The in-flight timer is Delphi's single worker-level `ReplaceSentTime`,
 not a separate timer per side. `TOrderReplaceResponse` clears only the matching
 flag; the active dispatcher clears `ReplaceSentTime` or the current-side flag
 from the worker tick, matching Delphi `CheckReplaceFlag`.
+`TBulkReplaceNotify` and incoming `TSetImmuneCommand` counted arrays follow
+Delphi `TMemoryStream.Read`: after a valid command prefix, the declared count is
+kept, complete elements are decoded, and short tail elements are zero-filled.
+The active dispatcher still exposes only found/relevant order side effects.
 For replace-response and bulk-replace side selection, Delphi treats only
 `OrderType::Buy` (`O_BUY`) as the buy side; `Sell`, `BuyStop`, and `BuyLimit`
 all use the sell side in the order read model. `OrderType` preserves the raw

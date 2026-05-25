@@ -800,18 +800,37 @@ impl ImmuneItem {
         }
     }
 
-    fn read_from(r: &mut &[u8]) -> Option<Self> {
-        if r.len() < IMMUNE_ITEM_SIZE {
-            return None;
-        }
-        let wire = WireImmuneItem::read_from_bytes(&r[..IMMUNE_ITEM_SIZE]).ok()?;
-        *r = &r[IMMUNE_ITEM_SIZE..];
-        Some(Self::from_wire(wire))
-    }
-
     fn write_to(self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
+}
+
+fn read_zero_tail<const N: usize>(r: &mut &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let n = r.len().min(N);
+    if n > 0 {
+        out[..n].copy_from_slice(&r[..n]);
+        *r = &r[n..];
+    }
+    out
+}
+
+fn read_u8_zero_tail(r: &mut &[u8]) -> u8 {
+    read_zero_tail::<1>(r)[0]
+}
+
+fn read_u16_zero_tail(r: &mut &[u8]) -> u16 {
+    u16::from_le_bytes(read_zero_tail::<2>(r))
+}
+
+fn read_u64_zero_tail(r: &mut &[u8]) -> u64 {
+    u64::from_le_bytes(read_zero_tail::<8>(r))
+}
+
+fn read_immune_item_zero_tail(r: &mut &[u8]) -> ImmuneItem {
+    let bytes = read_zero_tail::<IMMUNE_ITEM_SIZE>(r);
+    let wire = WireImmuneItem::read_from_bytes(&bytes).expect("fixed in-memory immune item");
+    ImmuneItem::from_wire(wire)
 }
 
 // ============================================================================
@@ -1666,11 +1685,7 @@ impl SetImmuneCommand {
         *r = &r[1..];
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
-            if let Some(item) = ImmuneItem::read_from(r) {
-                items.push(item);
-            } else {
-                break;
-            }
+            items.push(read_immune_item_zero_tail(r));
         }
         Some(Self { header, items })
     }
@@ -1833,20 +1848,11 @@ pub struct BulkReplaceNotify {
 impl BulkReplaceNotify {
     pub fn read(r: &mut &[u8]) -> Option<Self> {
         let market = MarketCommandHeader::read(r)?;
-        if r.len() < 1 + 2 {
-            return None;
-        }
-        let order_type = OrderType::from_byte(r[0]);
-        *r = &r[1..];
-        let count = u16::from_le_bytes([r[0], r[1]]) as usize;
-        *r = &r[2..];
+        let order_type = OrderType::from_byte(read_u8_zero_tail(r));
+        let count = read_u16_zero_tail(r) as usize;
         let mut uids = Vec::with_capacity(count);
         for _ in 0..count {
-            if r.len() < 8 {
-                break;
-            }
-            uids.push(u64::from_le_bytes(r[0..8].try_into().unwrap()));
-            *r = &r[8..];
+            uids.push(read_u64_zero_tail(r));
         }
         Some(Self {
             market,
@@ -2538,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_replace_notify_keeps_present_uids_when_count_overstates_remaining_like_delphi_loop() {
+    fn bulk_replace_notify_keeps_declared_count_with_zero_tail_like_delphi_stream_read() {
         let mut raw = Vec::new();
         write_base_command_header(&mut raw, 28, 0xAA);
         raw.push(1);
@@ -2550,14 +2556,14 @@ mod tests {
 
         match TradeCommand::parse(&raw).unwrap() {
             TradeCommand::BulkReplaceNotify(cmd) => {
-                assert_eq!(cmd.uids, vec![0x1122_3344_5566_7788]);
+                assert_eq!(cmd.uids, vec![0x1122_3344_5566_7788, 0]);
             }
             other => panic!("wrong variant: {other:?}"),
         }
     }
 
     #[test]
-    fn set_immune_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+    fn set_immune_keeps_declared_count_with_zero_tail_like_delphi_stream_read() {
         let mut raw = Vec::new();
         write_base_command_header(&mut raw, 22, 0xAA);
         raw.push(2);
@@ -2566,9 +2572,11 @@ mod tests {
 
         match TradeCommand::parse(&raw).unwrap() {
             TradeCommand::SetImmune(cmd) => {
-                assert_eq!(cmd.items.len(), 1);
+                assert_eq!(cmd.items.len(), 2);
                 assert_eq!(cmd.items[0].uid, 0x1122_3344_5566_7788);
                 assert!(cmd.items[0].value);
+                assert_eq!(cmd.items[1].uid, 0);
+                assert!(!cmd.items[1].value);
             }
             other => panic!("wrong variant: {other:?}"),
         }

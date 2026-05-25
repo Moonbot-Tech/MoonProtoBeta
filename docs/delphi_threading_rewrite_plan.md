@@ -6175,3 +6175,32 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 25.88s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: Trade counted arrays keep Delphi zero-tail
+
+Correction:
+
+- Re-checked `MoonProtoTradeStruct.pas:TSetImmuneCommand.CreateFromStream` and
+  `TBulkReplaceNotify.CreateFromStream`.
+- The earlier §§X.114/X.115 fixes removed Rust-only drop-all guards, but still
+  shortened arrays to complete elements actually present. Delphi allocates the
+  declared `Count`/`N` first and reads into zero-initialized array memory with
+  `TMemoryStream.Read`.
+- `BulkReplaceNotify.uids` and `SetImmuneCommand.items` now keep the declared
+  element count after a valid prefix. Missing tail bytes become zero/false;
+  partial UID bytes occupy the low little-endian bytes.
+- `TAllStatuses` was not folded into this correction: its repeated item path
+  dispatches nested `TBaseTradeCommand.FromStream`, and a completely absent
+  nested header depends on Delphi local scalar contents. That remains a separate
+  analysis target, not an accepted deviation.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.176`.
+
+Verification:
+
+- `cargo test --lib --quiet` OK: 737 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 27.62s`, `ParseFailed=0`.
