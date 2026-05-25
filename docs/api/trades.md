@@ -337,6 +337,7 @@ pub struct MarketHistoryConfig {
 }
 
 impl MarketHistoryConfig {
+    pub fn from_system_memory(market_count: usize) -> Self;
     pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self;
     pub fn history_budget_bytes(total_memory_bytes: usize) -> usize;
     pub fn estimated_bytes_per_market(&self) -> usize;
@@ -597,14 +598,17 @@ does not allocate all market histories from `GetMarketsList`; future runtime
 integration creates a store only for markets/categories enabled by the active
 history configuration.
 
-`MarketHistoryConfig::from_total_memory_bytes(total_memory_bytes, market_count)`
-is the RAM-budget helper for init/config code. It budgets about 20% of total
-memory for retained histories, or 25% on machines below 8 GiB, then splits that
-budget across the given market count and categories. When futures retained
-history is enabled, the helper keeps the futures temporary join ring at the
-Delphi `IntTradesBufSize = 1000` size; it must not shrink this ring as a hidden
-memory optimization. `estimated_bytes_per_market` uses the dense row sizes used
-by `SeqRing` and is intended for tests and config diagnostics.
+`MarketHistoryConfig::from_system_memory(market_count)` is the recommended
+RAM-budget helper for init/config code. It probes total physical RAM, falls
+back to fixed `Default` if the OS probe fails, and then delegates to
+`from_total_memory_bytes(total_memory_bytes, market_count)`. The helper budgets
+about 20% of total memory for retained histories, or 25% on machines below 8
+GiB, then splits that budget across the given market count and categories. When
+futures retained history is enabled, the helper keeps the futures temporary
+join ring at the Delphi `IntTradesBufSize = 1000` size; it must not shrink this
+ring as a hidden memory optimization. `estimated_bytes_per_market` uses the
+dense row sizes used by `SeqRing` and is intended for tests and config
+diagnostics.
 
 ## Recovery Behavior
 

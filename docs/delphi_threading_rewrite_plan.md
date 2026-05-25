@@ -755,6 +755,10 @@ Verification:
 - Exposed worker/handle `rolling_volumes(market, now_time)` so the already
   maintained 1/3/5 minute volume accumulators are reachable from the public
   Active Lib API without allocating unknown markets.
+- Added `MarketHistoryConfig::from_system_memory(market_count)`: OS physical
+  RAM probe + fallback to fixed `Default`, then the existing per-market budget
+  sizing helper. This is the API default path for retained history after Init
+  knows market count.
 
 ### Phase Z - final full optimization pass
 

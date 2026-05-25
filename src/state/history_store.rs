@@ -54,6 +54,12 @@ impl Default for MarketHistoryConfig {
 }
 
 impl MarketHistoryConfig {
+    pub fn from_system_memory(market_count: usize) -> Self {
+        system_total_memory_bytes()
+            .map(|total| Self::from_total_memory_bytes(total, market_count))
+            .unwrap_or_default()
+    }
+
     pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self {
         let market_count = market_count.max(1);
         let budget = Self::history_budget_bytes(total_memory_bytes);
@@ -122,6 +128,66 @@ fn capacity_from_share(
         return 0;
     }
     ((budget / denominator) * numerator / row_bytes).min(max_capacity)
+}
+
+fn system_total_memory_bytes() -> Option<usize> {
+    system_total_memory_bytes_impl()
+}
+
+#[cfg(windows)]
+fn system_total_memory_bytes_impl() -> Option<usize> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+
+    let mut status = MemoryStatusEx {
+        dw_length: size_of::<MemoryStatusEx>() as u32,
+        dw_memory_load: 0,
+        ull_total_phys: 0,
+        ull_avail_phys: 0,
+        ull_total_page_file: 0,
+        ull_avail_page_file: 0,
+        ull_total_virtual: 0,
+        ull_avail_virtual: 0,
+        ull_avail_extended_virtual: 0,
+    };
+
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    if ok == 0 {
+        return None;
+    }
+    usize::try_from(status.ull_total_phys).ok()
+}
+
+#[cfg(unix)]
+fn system_total_memory_bytes_impl() -> Option<usize> {
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages <= 0 || page_size <= 0 {
+        return None;
+    }
+    let pages = usize::try_from(pages).ok()?;
+    let page_size = usize::try_from(page_size).ok()?;
+    pages.checked_mul(page_size)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn system_total_memory_bytes_impl() -> Option<usize> {
+    None
 }
 
 #[derive(Clone, Default)]
