@@ -746,6 +746,10 @@ Verification:
 - Follow-up FireTest gate now asserts retained LastPrice from live
   `UpdateMarketsList`; quick prod OK: `FIRETEST_QUICK_PASS after 25.81s`,
   retained LastPrice `current=77568.00781250`, `ParseFailed=0`.
+- Next FireTest gate enables tiny retained futures/spot rings for the target
+  market and asserts that live `TradesStream` rows reach `MarketHistoryWorker`.
+- Quick prod FireTest with this gate OK: `FIRETEST_QUICK_PASS after 22.89s`,
+  retained target trades `futures=1 spot=0`, `ParseFailed=0`.
 
 ### Phase Z - final full optimization pass
 
@@ -1863,7 +1867,8 @@ Done:
   `BaseCheck`, `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`,
   `UpdateMarketsList`, `SubscribeAllTrades`, `SubscribeOrderBook`, first useful
   trades/orderbook/MarketPrice state for the configured market, retained
-  LastPrice from active `UpdateMarketsList`, `ParseFailed=0`, ErrEmu/Sliced
+  LastPrice from active `UpdateMarketsList`, retained target futures/spot
+  trades through `MarketHistoryWorker`, `ParseFailed=0`, ErrEmu/Sliced
   diagnostics, and protocol CPU summary.
 - `quick` intentionally skips the expensive gates: second client, full candles,
   high-loss 50%, order lifecycle, settings/strategy mutation, forced reconnect.
