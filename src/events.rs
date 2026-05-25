@@ -51,11 +51,12 @@ use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::orders::OrderCancelSend;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
-    ApplyResult, BalanceEvent, BalancesState, MarketHistoryHandle, MarketHistoryLastPriceBatch,
-    MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
-    MarketHistoryStreamSection, MarketHistoryTradeInput, MarketsEvent, MarketsState,
-    OrderBookEvent, OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent,
-    StratsState, TradesEvent, TradesPacketEffect, TradesState,
+    ApplyResult, BalanceEvent, BalancesState, Candle5mRow, MarketHistoryCandlesSnapshot,
+    MarketHistoryHandle, MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput,
+    MarketHistoryMMOrderInput, MarketHistoryStreamBatch, MarketHistoryStreamSection,
+    MarketHistoryTradeInput, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent,
+    Orders, SettingsEvent, SettingsState, StratEvent, StratsState, TradeStorageScope, TradesEvent,
+    TradesPacketEffect, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -179,6 +180,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) now_time_days: f64,
     pub(crate) domain_ready: bool,
+    pub(crate) trades_storage_scope: Option<crate::state::TradeStorageScope>,
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) server_base_currency_name: Option<String>,
     pub(crate) server_base_currency_code: Option<u8>,
@@ -195,6 +197,7 @@ impl ActiveDispatchContext {
             server_time_delta_source: client.server_time_delta_handle(),
             now_time_days: crate::client::delphi_now_raw(),
             domain_ready: client.is_domain_ready(),
+            trades_storage_scope: client.trades_storage_scope_intent(),
             copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
                 client.server_info(),
             ),
@@ -303,6 +306,12 @@ pub struct EventDispatcher {
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
+    /// Active Lib retained-storage scope from `Client::subscribe_*trades*`.
+    /// `None` means trades stream is not subscribed and retained trade/candle/
+    /// derived state must stay disabled.
+    trade_storage_scope: Option<TradeStorageScope>,
+    last_market_history_scope: Option<TradeStorageScope>,
+    last_market_history_markets: Vec<String>,
 }
 
 /// Immutable read-model copy delivered to `run_with_dispatcher_state` callbacks.
@@ -641,11 +650,94 @@ impl EventDispatcher {
     /// handle; `MarketHistoryWorker` owns the actual `MarketHistoryStore`s.
     pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
         self.market_history = Some(handle);
+        self.last_market_history_scope = None;
+        self.last_market_history_markets.clear();
+        self.sync_market_history_storage();
     }
 
     /// Disable retained-history batch delivery for this dispatcher.
     pub fn clear_market_history_handle(&mut self) {
         self.market_history = None;
+        self.last_market_history_scope = None;
+        self.last_market_history_markets.clear();
+    }
+
+    pub fn trade_storage_scope(&self) -> Option<&TradeStorageScope> {
+        self.trade_storage_scope.as_ref()
+    }
+
+    /// Apply a full `emk_RequestCandlesData` snapshot to retained Active Lib
+    /// candle storage. The dispatcher keeps the same trades subscription scope:
+    /// if trades storage is disabled or the market is outside
+    /// `subscribe_trades_for`, the snapshot row is ignored.
+    pub fn apply_candles_snapshot(
+        &mut self,
+        markets: &[crate::commands::candles::RequestCandlesMarket],
+    ) -> bool {
+        self.sync_market_history_storage();
+        let Some(handle) = &self.market_history else {
+            return false;
+        };
+        let rows = markets
+            .iter()
+            .filter(|market| self.active_trade_storage_allows_market(&market.market_name))
+            .map(|market| MarketHistoryCandlesSnapshot {
+                market_name: market.market_name.clone(),
+                candles_5m: market
+                    .candles_5m
+                    .iter()
+                    .copied()
+                    .map(Candle5mRow::from_deep_price)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return false;
+        }
+        handle.apply_candles_snapshot(rows)
+    }
+
+    fn set_trade_storage_scope(&mut self, scope: Option<TradeStorageScope>) {
+        if self.trade_storage_scope != scope {
+            self.trade_storage_scope = scope;
+            self.last_market_history_scope = None;
+            self.sync_market_history_storage();
+        }
+    }
+
+    fn market_history_market_names(&self) -> Vec<String> {
+        self.markets
+            .markets
+            .iter()
+            .map(|market| market.bn_market_name.clone())
+            .collect()
+    }
+
+    fn sync_market_history_storage(&mut self) {
+        let Some(handle) = &self.market_history else {
+            return;
+        };
+        let market_names = self.market_history_market_names();
+        if self.last_market_history_scope == self.trade_storage_scope
+            && self.last_market_history_markets == market_names
+        {
+            return;
+        }
+        handle.configure_markets(market_names.clone(), self.trade_storage_scope.clone());
+        self.last_market_history_scope = self.trade_storage_scope.clone();
+        self.last_market_history_markets = market_names;
+    }
+
+    fn active_trade_storage_allows_market(&self, market_name: &str) -> bool {
+        self.trade_storage_scope
+            .as_ref()
+            .is_some_and(|scope| scope.contains(market_name))
+    }
+
+    fn trade_section_visible_to_active_lib(&self, market_name: &str) -> bool {
+        self.trade_storage_scope
+            .as_ref()
+            .map_or(true, |scope| scope.contains(market_name))
     }
 
     pub(crate) fn queue_events<I>(&mut self, events: I)
@@ -1014,13 +1106,21 @@ impl EventDispatcher {
                     let is_spot = rows.is_spot();
                     let row_count = rows.len();
                     if row_count == 0 || self.markets.has_server_market_index(market_index) {
-                        let history_market_name = if collect_history && row_count > 0 {
-                            self.markets
-                                .market_name_by_index(market_index)
-                                .map(str::to_owned)
+                        let market_name = if row_count > 0 {
+                            self.markets.market_name_by_index(market_index)
                         } else {
                             None
                         };
+                        if let Some(market_name) = market_name {
+                            if !self.trade_section_visible_to_active_lib(market_name) {
+                                continue;
+                            }
+                        }
+                        let history_market_name = market_name
+                            .filter(|name| {
+                                collect_history && self.active_trade_storage_allows_market(name)
+                            })
+                            .map(str::to_owned);
                         let chart_price_step = if !is_spot {
                             history_market_name
                                 .as_ref()
@@ -1081,13 +1181,21 @@ impl EventDispatcher {
                     let market_index = rows.market_index();
                     let row_count = rows.len();
                     if row_count == 0 || self.markets.has_server_market_index(market_index) {
-                        let history_market_name = if collect_history && row_count > 0 {
-                            self.markets
-                                .market_name_by_index(market_index)
-                                .map(str::to_owned)
+                        let market_name = if row_count > 0 {
+                            self.markets.market_name_by_index(market_index)
                         } else {
                             None
                         };
+                        if let Some(market_name) = market_name {
+                            if !self.trade_section_visible_to_active_lib(market_name) {
+                                continue;
+                            }
+                        }
+                        let history_market_name = market_name
+                            .filter(|name| {
+                                collect_history && self.active_trade_storage_allows_market(name)
+                            })
+                            .map(str::to_owned);
                         let mut collected = Vec::with_capacity(row_count);
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
@@ -1120,13 +1228,21 @@ impl EventDispatcher {
                     let market_index = rows.market_index();
                     let row_count = rows.len();
                     if row_count == 0 || self.markets.has_server_market_index(market_index) {
-                        let history_market_name = if collect_history && row_count > 0 {
-                            self.markets
-                                .market_name_by_index(market_index)
-                                .map(str::to_owned)
+                        let market_name = if row_count > 0 {
+                            self.markets.market_name_by_index(market_index)
                         } else {
                             None
                         };
+                        if let Some(market_name) = market_name {
+                            if !self.trade_section_visible_to_active_lib(market_name) {
+                                continue;
+                            }
+                        }
+                        let history_market_name = market_name
+                            .filter(|name| {
+                                collect_history && self.active_trade_storage_allows_market(name)
+                            })
+                            .map(str::to_owned);
                         let mut collected = Vec::with_capacity(row_count);
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
@@ -1165,6 +1281,11 @@ impl EventDispatcher {
                     data,
                 } => {
                     if self.markets.has_server_market_index(market_index) {
+                        if let Some(market_name) = self.markets.market_name_by_index(market_index) {
+                            if !self.trade_section_visible_to_active_lib(market_name) {
+                                continue;
+                            }
+                        }
                         sections.push(TradeSection::WatcherFills {
                             market_index,
                             user,
@@ -1376,8 +1497,9 @@ impl EventDispatcher {
                             None
                         }
                     } else {
-                        let wants_history =
-                            self.market_history.is_some() && history_now_time_days.is_some();
+                        let wants_history = self.market_history.is_some()
+                            && history_now_time_days.is_some()
+                            && self.trade_storage_scope.is_some();
                         let mut last_price_rows = Vec::new();
                         let ev = if wants_history {
                             self.markets
@@ -1454,8 +1576,9 @@ impl EventDispatcher {
         if rows.is_empty() {
             return;
         }
-        let rows = rows
+        let rows: Vec<MarketHistoryLastPriceInput> = rows
             .into_iter()
+            .filter(|row| self.active_trade_storage_allows_market(&row.market_name))
             .map(|row| MarketHistoryLastPriceInput {
                 market_name: row.market_name,
                 current: row.current,
@@ -1465,6 +1588,9 @@ impl EventDispatcher {
                 is_base_usdt_market: row.is_base_usdt_market,
             })
             .collect();
+        if rows.is_empty() {
+            return;
+        }
         handle.send_last_price_batch(MarketHistoryLastPriceBatch { now_time, rows });
     }
 
@@ -1513,6 +1639,7 @@ impl EventDispatcher {
             ctx.server_base_currency_name.as_deref(),
             ctx.server_base_currency_code,
         );
+        self.set_trade_storage_scope(ctx.trades_storage_scope.clone());
 
         // Server restart / PeerAppToken change: Delphi gates stream parsing with
         // `FLastServerAppToken <> PeerAppToken` until `GetMarketsIndexes` succeeds.
@@ -1575,6 +1702,7 @@ impl EventDispatcher {
 
         let start_len = out.len();
         self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
+        self.sync_market_history_storage();
         if self.markets.markets_list_refresh_needed()
             && (self.last_markets_list_refresh_ms == 0
                 || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000)
@@ -3026,10 +3154,9 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 8,
         });
-        let readers = worker.ensure_market("BTCUSDT").unwrap();
-        let futures = readers.futures_trades.unwrap();
 
         let mut d = EventDispatcher::new();
         d.set_market_history_handle(worker.handle());
@@ -3038,6 +3165,7 @@ mod tests {
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
+        client.subscribe_all_trades(false);
         let mut out = Vec::new();
         let mut actions = Vec::new();
         let payload = trades_payload_with_rows(801, 0, 0, &[(0, 100.0, 1.0)]);
@@ -3053,6 +3181,7 @@ mod tests {
         );
         assert!(worker.flush(45_000.0));
 
+        let futures = worker.readers("BTCUSDT").unwrap().futures_trades.unwrap();
         let mut rows = Vec::new();
         futures.copy_last(8, &mut rows);
         assert_eq!(rows.len(), 1);
@@ -3070,14 +3199,9 @@ mod tests {
             mm_order_companion_capacity: 8,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 8,
         });
-        let readers = worker.ensure_market("BTCUSDT").unwrap();
-        let futures = readers.futures_trades.clone().unwrap();
-        let spot = readers.spot_trades.clone().unwrap();
-        let liquidations = readers.liquidations.clone().unwrap();
-        let mm_orders = readers.mm_orders.clone().unwrap();
-        let mm_companion = readers.mm_order_companion.clone().unwrap();
 
         let mut d = EventDispatcher::new();
         d.set_market_history_handle(worker.handle());
@@ -3086,6 +3210,7 @@ mod tests {
 
         let mut client = crate::client::Client::new(dummy_client_cfg());
         client.testing_set_domain_ready(true);
+        client.subscribe_all_trades(true);
         let mut out = Vec::new();
         let mut actions = Vec::new();
         let payload = trades_payload_with_all_history_sections(802, 0);
@@ -3100,6 +3225,13 @@ mod tests {
             &mut actions,
         );
         assert!(worker.flush(45_000.0));
+
+        let readers = worker.readers("BTCUSDT").unwrap();
+        let futures = readers.futures_trades.clone().unwrap();
+        let spot = readers.spot_trades.clone().unwrap();
+        let liquidations = readers.liquidations.clone().unwrap();
+        let mm_orders = readers.mm_orders.clone().unwrap();
+        let mm_companion = readers.mm_order_companion.clone().unwrap();
 
         let mut future_rows = Vec::new();
         futures.copy_last(8, &mut future_rows);
@@ -3144,10 +3276,9 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 4,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 0,
         });
-        let readers = worker.ensure_market("BTCUSDT").unwrap();
-        let last_prices = readers.last_prices.unwrap();
 
         let mut btc = event_market("BTCUSDT");
         btc.bn_market_currency = "BTC".to_string();
@@ -3186,6 +3317,7 @@ mod tests {
             server_time_delta_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             now_time_days: 45_000.5,
             domain_ready: true,
+            trades_storage_scope: Some(TradeStorageScope::All),
             copy_max_leverage_from_markets_list: false,
             server_base_currency_name: Some("BTC".to_string()),
             server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
@@ -3195,6 +3327,7 @@ mod tests {
         d.dispatch_into_active_actions(Command::API, &payload, 7_000, &mut out, &ctx, &mut actions);
         assert!(worker.flush(45_000.5));
 
+        let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
         let mut rows = Vec::new();
         last_prices.copy_last(4, &mut rows);
         assert_eq!(rows.len(), 1);

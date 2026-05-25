@@ -9,9 +9,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::state::history::{RollingTradeVolumeSnapshot, TradesPacketTimeShift};
+use crate::state::history::{
+    Candle5mRow, MarketDerivedSnapshot, RollingTradeVolumeSnapshot, TradesPacketTimeShift,
+};
 use crate::state::history_store::{
-    MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry,
+    MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, TradeStorageScope,
 };
 
 const STORE_WORKER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
@@ -78,6 +80,12 @@ pub struct MarketHistoryStreamBatch {
     pub sections: Vec<MarketHistoryStreamSection>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketHistoryCandlesSnapshot {
+    pub market_name: String,
+    pub candles_5m: Vec<Candle5mRow>,
+}
+
 #[derive(Clone)]
 pub struct MarketHistoryHandle {
     tx: mpsc::Sender<MarketHistoryCommand>,
@@ -89,9 +97,9 @@ pub struct MarketHistoryWorker {
 }
 
 enum MarketHistoryCommand {
-    EnsureMarket {
-        market_name: String,
-        reply: mpsc::SyncSender<MarketHistoryReaders>,
+    ConfigureMarkets {
+        market_names: Vec<String>,
+        scope: Option<TradeStorageScope>,
     },
     Readers {
         market_name: String,
@@ -102,8 +110,14 @@ enum MarketHistoryCommand {
         now_time: f64,
         reply: mpsc::SyncSender<Option<RollingTradeVolumeSnapshot>>,
     },
+    DerivedSnapshot {
+        market_name: String,
+        now_time: f64,
+        reply: mpsc::SyncSender<Option<MarketDerivedSnapshot>>,
+    },
     StreamBatch(MarketHistoryStreamBatch),
     LastPriceBatch(MarketHistoryLastPriceBatch),
+    CandlesSnapshot(Vec<MarketHistoryCandlesSnapshot>),
     Flush {
         now_time: f64,
         reply: mpsc::SyncSender<()>,
@@ -125,8 +139,12 @@ impl MarketHistoryWorker {
         self.handle.clone()
     }
 
-    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders> {
-        self.handle.ensure_market(market_name)
+    pub fn configure_markets(
+        &self,
+        market_names: Vec<String>,
+        scope: Option<TradeStorageScope>,
+    ) -> bool {
+        self.handle.configure_markets(market_names, scope)
     }
 
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
@@ -139,6 +157,18 @@ impl MarketHistoryWorker {
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot> {
         self.handle.rolling_volumes(market_name, now_time)
+    }
+
+    pub fn derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.handle.derived_snapshot(market_name, now_time)
+    }
+
+    pub fn apply_candles_snapshot(&self, markets: Vec<MarketHistoryCandlesSnapshot>) -> bool {
+        self.handle.apply_candles_snapshot(markets)
     }
 
     pub fn flush(&self, now_time: f64) -> bool {
@@ -156,15 +186,17 @@ impl Drop for MarketHistoryWorker {
 }
 
 impl MarketHistoryHandle {
-    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    pub fn configure_markets(
+        &self,
+        market_names: Vec<String>,
+        scope: Option<TradeStorageScope>,
+    ) -> bool {
         self.tx
-            .send(MarketHistoryCommand::EnsureMarket {
-                market_name: market_name.to_string(),
-                reply: reply_tx,
+            .send(MarketHistoryCommand::ConfigureMarkets {
+                market_names,
+                scope,
             })
-            .ok()?;
-        reply_rx.recv().ok()
+            .is_ok()
     }
 
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
@@ -194,6 +226,22 @@ impl MarketHistoryHandle {
         reply_rx.recv().ok().flatten()
     }
 
+    pub fn derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(MarketHistoryCommand::DerivedSnapshot {
+                market_name: market_name.to_string(),
+                now_time,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok().flatten()
+    }
+
     /// Queue one decoded trades packet for retained-history storage.
     ///
     /// The channel is intentionally unbounded: retained history must not drop
@@ -212,6 +260,12 @@ impl MarketHistoryHandle {
     pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool {
         self.tx
             .send(MarketHistoryCommand::LastPriceBatch(batch))
+            .is_ok()
+    }
+
+    pub fn apply_candles_snapshot(&self, markets: Vec<MarketHistoryCandlesSnapshot>) -> bool {
+        self.tx
+            .send(MarketHistoryCommand::CandlesSnapshot(markets))
             .is_ok()
     }
 
@@ -240,9 +294,11 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
 
     loop {
         match rx.recv_timeout(STORE_WORKER_RECV_TIMEOUT) {
-            Ok(MarketHistoryCommand::EnsureMarket { market_name, reply }) => {
-                let readers = registry.ensure_market(&market_name).readers();
-                let _ = reply.send(readers);
+            Ok(MarketHistoryCommand::ConfigureMarkets {
+                market_names,
+                scope,
+            }) => {
+                registry.configure_markets(&market_names, scope.as_ref());
             }
             Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
                 let _ = reply.send(registry.readers(&market_name));
@@ -258,6 +314,18 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
                         .map(|store| store.rolling_volumes_snapshot(now_time)),
                 );
             }
+            Ok(MarketHistoryCommand::DerivedSnapshot {
+                market_name,
+                now_time,
+                reply,
+            }) => {
+                if let Some(store) = registry.get_mut(&market_name) {
+                    store.refresh_derived_analytics(now_time);
+                    let _ = reply.send(Some(store.derived_snapshot()));
+                } else {
+                    let _ = reply.send(None);
+                }
+            }
             Ok(MarketHistoryCommand::StreamBatch(batch)) => {
                 last_now_time = batch.now_time;
                 process_stream_batch(&mut registry, batch);
@@ -265,6 +333,9 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
             Ok(MarketHistoryCommand::LastPriceBatch(batch)) => {
                 last_now_time = batch.now_time;
                 process_last_price_batch(&mut registry, batch);
+            }
+            Ok(MarketHistoryCommand::CandlesSnapshot(markets)) => {
+                process_candles_snapshot(&mut registry, markets);
             }
             Ok(MarketHistoryCommand::Flush { now_time, reply }) => {
                 last_now_time = now_time;
@@ -379,10 +450,23 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
     }
 }
 
+fn process_candles_snapshot(
+    registry: &mut MarketHistoryRegistry,
+    markets: Vec<MarketHistoryCandlesSnapshot>,
+) {
+    for market in markets {
+        let Some(store) = registry.get_mut(&market.market_name) else {
+            continue;
+        };
+        store.replace_candles_5m_from_snapshot(&market.candles_5m);
+    }
+}
+
 fn run_store_maintenance(registry: &mut MarketHistoryRegistry, now_time: f64) {
     registry.drain_joined_futures_like_delphi();
     if now_time > 0.0 {
         registry.compact_evicted_futures_like_delphi(now_time);
+        registry.refresh_derived_analytics(now_time);
     }
 }
 
@@ -402,9 +486,11 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 8,
         });
-        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
+        let readers = worker.readers("BTCUSDT").unwrap();
         let futures = readers.futures_trades.unwrap();
 
         let now_time = 45_000.0 + 1.0 / 24.0 + 1.0 / 86_400.0;
@@ -479,9 +565,11 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 4,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 0,
         });
-        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
+        let readers = worker.readers("BTCUSDT").unwrap();
         let last_prices = readers.last_prices.unwrap();
 
         worker
@@ -504,5 +592,56 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].current, 100.5);
         assert_eq!(out[0].real_time, 45_000.25);
+    }
+
+    #[test]
+    fn worker_applies_candles_snapshot_only_for_configured_scope() {
+        let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 4,
+            trade_join_capacity: 0,
+        });
+        assert!(worker.configure_markets(
+            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
+            Some(TradeStorageScope::from_markets(["BTCUSDT"]))
+        ));
+        assert!(worker.apply_candles_snapshot(vec![
+            MarketHistoryCandlesSnapshot {
+                market_name: "BTCUSDT".to_string(),
+                candles_5m: vec![Candle5mRow {
+                    open_p: 100.0,
+                    close_p: 101.0,
+                    max_p: 102.0,
+                    min_p: 99.0,
+                    vol: 10.0,
+                    time: 45_000.0,
+                }],
+            },
+            MarketHistoryCandlesSnapshot {
+                market_name: "ETHUSDT".to_string(),
+                candles_5m: vec![Candle5mRow {
+                    open_p: 10.0,
+                    close_p: 11.0,
+                    max_p: 12.0,
+                    min_p: 9.0,
+                    vol: 1.0,
+                    time: 45_000.0,
+                }],
+            },
+        ]));
+        assert!(worker.flush(45_000.0));
+
+        let btc = worker.readers("BTCUSDT").unwrap().candles_5m.unwrap();
+        let mut out = Vec::new();
+        btc.copy_last(4, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].close_p, 101.0);
+        assert!(worker.readers("ETHUSDT").is_none());
     }
 }

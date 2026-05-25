@@ -30,18 +30,20 @@ pub mod trades;
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
-    prepare_joined_trades_for_retained_append, LastPricePoint, MMOrderCompanionData,
-    MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
+    prepare_joined_trades_for_retained_append, Candle5mRow, CandleVolumeSnapshot,
+    DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow,
+    MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
     TradeHistoryRow, TradeJoinBuffer, TradeJoinPush, TradeVolumeTotals, TradesPacketTimeShift,
     DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 pub use history_store::{
     MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,
+    TradeStorageScope,
 };
 pub use history_worker::{
-    MarketHistoryHandle, MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput,
-    MarketHistoryMMOrderInput, MarketHistoryStreamBatch, MarketHistoryStreamSection,
-    MarketHistoryTradeInput, MarketHistoryWorker,
+    MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryLastPriceBatch,
+    MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
+    MarketHistoryStreamSection, MarketHistoryTradeInput, MarketHistoryWorker,
 };
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{

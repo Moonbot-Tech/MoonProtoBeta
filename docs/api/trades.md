@@ -9,6 +9,7 @@ you run through `Client::run_with_dispatcher`.
 
 ```rust
 client.subscribe_all_trades(false); // false = trades only, true = include MM orders
+client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"]); // retain Active Lib data only for these markets
 client.unsubscribe_all_trades();
 ```
 
@@ -34,6 +35,16 @@ the application asks for it. This is an accepted author decision for the public
 library API. If no all-trades intent is present in the registry, incoming
 `MPC_TradesStream` and `MPC_TradesResendResponse` packets are considered
 unexpected and are dropped instead of being emitted as public events.
+
+`subscribe_all_trades(want_mm)` is the Delphi-shaped default: once the market
+list is known, Active Lib creates retained storage for every known market and
+maintains trades, MM/liquidation rows, LastPrice, 5m candles, and derived
+analytics for them. `subscribe_trades_for(want_mm, markets)` is the accepted
+Rust API deviation for UI clients that want less local memory. It sends the
+same wire `emk_SubscribeAllTrades` command, but Active Lib emits/stores/calculates
+only the listed markets. Passing an empty market list means all markets. Raw
+diagnostic callbacks remain raw protocol callbacks and are not filtered by this
+retained-storage scope.
 
 The public call always updates the reconnect registry immediately. Once Init is
 open, changed subscription intent also appends the wire Engine API request to
@@ -150,17 +161,20 @@ byte. `time_delta_ms` is relative to `TradesPacket::base_time`.
 
 ## Retained History Building Blocks
 
-Retained history is optional active-library storage for trades, spot trades,
-liquidations, MM orders, LastPrice, and mini-candles. The protocol/event path
+Retained history is Active Lib storage for trades, spot trades, liquidations,
+MM orders, LastPrice, 5m candles, mini-candles, and derived analytics. The
+protocol/event path
 does not write these rings directly. It queues decoded stream batches into a
 `MarketHistoryWorker`; that worker owns the per-market stores and is the single
 writer. This keeps protocol receive work bounded while preserving Delphi's
 storage meaning.
 
-Incoming stream batches do not allocate history for every market returned by
-`GetMarketsList`. Call `MarketHistoryWorker::ensure_market(market)` for each
-market you want to retain. Capacities set to `0` disable that retained public
-history category.
+Storage is controlled by the all-trades subscription intent. Without
+`subscribe_all_trades` / `subscribe_trades_for`, no retained trade/candle/derived
+state is created. With `subscribe_all_trades`, the worker creates stores for
+all markets from `GetMarketsList`. With `subscribe_trades_for`, it creates
+stores only for the selected markets. Capacities set to `0` disable that
+retained public history category.
 
 ```rust
 pub struct TradeHistoryRow {
@@ -196,6 +210,46 @@ pub struct MiniCandle {
     pub max_price: f32,
     pub buy_vol: f32,
     pub sell_vol: f32,
+}
+
+pub struct Candle5mRow {
+    pub open_p: f32,
+    pub close_p: f32,
+    pub max_p: f32,
+    pub min_p: f32,
+    pub vol: f32,
+    pub time: f64,
+}
+
+pub struct MarketDerivedSnapshot {
+    pub trade_volumes: RollingTradeVolumeSnapshot,
+    pub candle_volumes: CandleVolumeSnapshot,
+    pub trade_deltas: DerivedDeltaSnapshot,
+    pub candle_deltas: DerivedDeltaSnapshot,
+    pub deltas: DerivedDeltaSnapshot,
+}
+
+pub struct CandleVolumeSnapshot {
+    pub five_minutes: f64,
+    pub fifteen_minutes: f64,
+    pub thirty_minutes: f64,
+    pub one_hour: f64,
+    pub two_hours: f64,
+    pub three_hours: f64,
+    pub twenty_four_hours: f64,
+    pub seventy_two_hours: f64,
+}
+
+pub struct DerivedDeltaSnapshot {
+    pub one_minute: f64,
+    pub five_minutes: f64,
+    pub fifteen_minutes: f64,
+    pub thirty_minutes: f64,
+    pub one_hour: f64,
+    pub two_hours: f64,
+    pub three_hours: f64,
+    pub twenty_four_hours: f64,
+    pub seventy_two_hours: f64,
 }
 ```
 
@@ -233,6 +287,8 @@ pub struct TradeVolumeTotals {
     pub buy_qty: f64,
     pub sell_qty: f64,
     pub trade_count: u32,
+    pub min_price: f32,
+    pub max_price: f32,
 }
 
 pub struct RollingTradeVolumeSnapshot {
@@ -252,10 +308,23 @@ impl RollingTradeVolumes {
 
 `RollingTradeVolumes` uses 5-second buckets and updates from newly received
 trades. It is the active-library derived-state path for 1/3/5 minute buy/sell
-volumes; the intended precision loss is bounded by one bucket width. Call
+volumes and short trade-price deltas; the intended precision loss is bounded by
+one bucket width. Call
 `MarketHistoryWorker::rolling_volumes(market, now_time)` or the same method on
-`MarketHistoryHandle` to read the current derived totals for an already ensured
-market. Unknown markets return `None` and are not allocated by a read.
+`MarketHistoryHandle` to read the current derived totals for an active retained
+market. Unknown or out-of-scope markets return `None` and are not allocated by a
+read.
+
+`MarketDerivedSnapshot::trade_deltas` is the futures-trade source. It is filled
+from the same 5-second buckets as volumes, currently for 1m and 5m windows.
+`MarketDerivedSnapshot::candle_deltas` and `candle_volumes` are the candle
+source and are calculated in one pass over retained 5m candles plus the current
+candle for 5m, 15m, 30m, 1h, 2h, 3h, 24h, and 72h windows. Candle volume is the
+total candle quote volume and has no buy/sell split; use `trade_volumes` for
+1m/3m/5m buy/sell totals. `MarketDerivedSnapshot::deltas` is the combined view:
+per field it keeps the larger value from trade and candle sources, which matches
+the Delphi habit of not lowering a hotter short-window delta with a colder
+source.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
@@ -333,6 +402,7 @@ pub struct MarketHistoryConfig {
     pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
+    pub candles_5m_capacity: usize,
     pub trade_join_capacity: usize,
 }
 
@@ -351,6 +421,7 @@ pub struct MarketHistoryReaders {
     pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
+    pub candles_5m: Option<SeqRingReader<Candle5mRow>>,
 }
 
 pub struct MarketHistoryWorker;
@@ -359,19 +430,24 @@ pub struct MarketHistoryHandle;
 impl MarketHistoryWorker {
     pub fn spawn(default_config: MarketHistoryConfig) -> Self;
     pub fn handle(&self) -> MarketHistoryHandle;
-    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders>;
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
     pub fn rolling_volumes(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot>;
     pub fn flush(&self, now_time: f64) -> bool;
 }
 
 impl EventDispatcher {
     pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle);
     pub fn clear_market_history_handle(&mut self);
+    pub fn apply_candles_snapshot(&mut self, markets: &[RequestCandlesMarket]) -> bool;
 }
 
 pub struct MarketHistoryLastPriceInput {
@@ -389,13 +465,17 @@ pub struct MarketHistoryLastPriceBatch {
 }
 
 impl MarketHistoryHandle {
-    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders>;
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
     pub fn rolling_volumes(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot>;
     pub fn send_stream_batch(&self, batch: MarketHistoryStreamBatch) -> bool;
     pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool;
     pub fn flush(&self, now_time: f64) -> bool;
@@ -488,6 +568,7 @@ impl MarketHistoryStore {
     ) -> (f64, Option<u64>);
     pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
+    pub fn derived_snapshot(&self) -> MarketDerivedSnapshot;
 }
 
 impl MarketHistoryRegistry {
@@ -497,7 +578,6 @@ impl MarketHistoryRegistry {
     pub fn contains_market(&self, market_name: &str) -> bool;
     pub fn get(&self, market_name: &str) -> Option<&MarketHistoryStore>;
     pub fn get_mut(&mut self, market_name: &str) -> Option<&mut MarketHistoryStore>;
-    pub fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore;
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
 }
 ```
@@ -510,14 +590,16 @@ use moonproto::{Client, EventDispatcher};
 use moonproto::state::{MarketHistoryConfig, MarketHistoryWorker};
 
 let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
-let btc = worker.ensure_market("BTCUSDT").expect("history worker alive");
 
 let mut dispatcher = EventDispatcher::new();
 dispatcher.set_market_history_handle(worker.handle());
+client.subscribe_all_trades(false);
 
 client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
     handle_event(event);
 }));
+
+let btc = worker.readers("BTCUSDT").expect("market storage was created by the trades subscription");
 ```
 
 `MarketHistoryStore` is the per-market single-writer side owned by that worker.
@@ -593,10 +675,11 @@ rows cannot be recovered from this retained ring. This is per-consumer state;
 do not share one cursor between independent UI panels, strategy workers, or
 logging loops.
 
-`MarketHistoryRegistry` is an on-demand map of per-market stores. It deliberately
-does not allocate all market histories from `GetMarketsList`; future runtime
-integration creates a store only for markets/categories enabled by the active
-history configuration.
+`MarketHistoryRegistry` is the worker-owned map of per-market stores. Active
+Lib configures it from the current trades subscription and the known
+`GetMarketsList` universe: all markets for `subscribe_all_trades`, or only the
+requested subset for `subscribe_trades_for`. The active dispatcher queues rows
+only for stores allowed by that scope.
 
 `MarketHistoryConfig::from_system_memory(market_count)` is the recommended
 RAM-budget helper for init/config code. It probes total physical RAM, falls
@@ -608,7 +691,10 @@ futures retained history is enabled, the helper keeps the futures temporary
 join ring at the Delphi `IntTradesBufSize = 1000` size; it must not shrink this
 ring as a hidden memory optimization. `estimated_bytes_per_market` uses the
 dense row sizes used by `SeqRing` and is intended for tests and config
-diagnostics.
+diagnostics. `Default` is intentionally conservative because
+`subscribe_all_trades` creates stores for all known markets; use
+`from_system_memory(market_count)` or explicit capacities when a client wants a
+larger retained tail.
 
 ## Recovery Behavior
 

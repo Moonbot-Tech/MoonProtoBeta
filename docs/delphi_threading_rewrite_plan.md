@@ -539,9 +539,11 @@ Derived calculations:
   and is also allowed as a test oracle and CPU red-flag benchmark. Internal
   derived-state production code should still use the incremental form when it
   is straightforward and cheaper.
-- Deltas `(max - min) / min * 100` are deferred to the final optimization pass:
-  compute both on trades and candles. Trades use incremental updates from new
-  rows; candles may use full recalculation when candle data changes.
+- Deltas `(max - min) / min * 100` are computed both on trades and candles.
+  Trades use the same 5-second rolling buckets as 1/3/5 minute volumes.
+  Candles are scanned in one pass over retained 5m rows plus the current candle.
+- Candle volumes for 5m/15m/30m/1h/2h/3h/24h/72h are computed in that same
+  candle pass. A second scan for another window is a CPU red flag.
 - Active Lib maintains candles after the initial candle snapshot: trades update
   the current 5-minute candle; on window rollover the current candle is sealed,
   the next current candle starts, and old candles leave retention.
@@ -699,10 +701,11 @@ Decision:
 - `EventDispatcher` now accepts an optional `MarketHistoryHandle`. The active
   dispatch path converts applied `TradesStream` packets into typed
   `MarketHistoryStreamBatch` values and queues them to the worker.
-- Incoming stream batches do not allocate stores. Runtime/API code must call
-  `MarketHistoryWorker::ensure_market` for every market whose retained history
-  should exist. This avoids allocating rings for all markets returned by
-  `GetMarketsList`.
+- Superseded on 2026-05-25: `ensure_market` was removed from the normal API.
+  Stores are now configured from the trades subscription scope: all known
+  markets for `subscribe_all_trades`, or the selected subset for
+  `subscribe_trades_for`. Without an all-trades subscription, retained
+  trade/candle/derived storage stays disabled.
 - The worker command channel is intentionally unbounded: retained history must
   not drop packets because of an internal Rust-only capacity cap. If memory
   pressure appears, it is a separate backpressure design task, not a hidden

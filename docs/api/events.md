@@ -78,24 +78,27 @@ dropped.
   `TradesResendResponse` packets and sends generated `emk_TradesResend`
   requests;
 - queues decoded trades/MM/liquidation stream batches into the optional
-  retained-history worker when `set_market_history_handle` is configured.
+  retained-history worker when `set_market_history_handle` is configured and
+  an all-trades subscription is active.
 
-Retained history is opt-in:
+Retained history is driven by the all-trades subscription:
 
 ```rust
 use moonproto::EventDispatcher;
 use moonproto::state::{MarketHistoryConfig, MarketHistoryWorker};
 
 let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
-let btc = worker.ensure_market("BTCUSDT").expect("history worker alive");
 
 let mut dispatcher = EventDispatcher::new();
 dispatcher.set_market_history_handle(worker.handle());
+client.subscribe_all_trades(false);
+
+let btc = worker.readers("BTCUSDT");
 ```
 
 The worker owns retained stores and the dispatcher only queues decoded stream
-batches to it. Stream packets do not allocate history for unknown/not-enabled
-markets; call `ensure_market` for each market you want retained readers for.
+batches to it. `subscribe_all_trades` creates stores for known markets;
+`subscribe_trades_for` creates stores only for the selected market names.
 
 ## Event Enum
 

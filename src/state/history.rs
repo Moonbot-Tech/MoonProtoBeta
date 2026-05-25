@@ -277,6 +277,43 @@ impl SeqRingTimedRow for LastPricePoint {
     }
 }
 
+/// Active Lib retained 5-minute candle row.
+///
+/// The source snapshot is Delphi `TDeepPrice` / `TDeepPricePack`, but the row
+/// lives in state because applications read it together with trades and
+/// derived analytics. `buyWall/sellWall` from the wire snapshot are deliberately
+/// not retained here: the library decision is to expose candles, not wall UI
+/// helpers.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct Candle5mRow {
+    pub open_p: f32,
+    pub close_p: f32,
+    pub max_p: f32,
+    pub min_p: f32,
+    pub vol: f32,
+    pub time: f64,
+}
+
+impl Candle5mRow {
+    pub fn from_deep_price(row: crate::commands::candles::DeepPrice) -> Self {
+        Self {
+            open_p: row.open_p,
+            close_p: row.close_p,
+            max_p: row.max_p,
+            min_p: row.min_p,
+            vol: row.vol,
+            time: row.time,
+        }
+    }
+}
+
+impl SeqRingTimedRow for Candle5mRow {
+    fn seq_ring_time(&self) -> f64 {
+        self.time
+    }
+}
+
 /// Delphi `TMiniCandle` used to compact evicted detailed trades.
 ///
 /// Delphi layout is 24 bytes: `Time: TDateTime; Cnt: Integer; MinPrice,
@@ -371,11 +408,20 @@ pub struct TradeVolumeTotals {
     pub buy_qty: f64,
     pub sell_qty: f64,
     pub trade_count: u32,
+    pub min_price: f32,
+    pub max_price: f32,
 }
 
 impl TradeVolumeTotals {
     pub fn total_value(self) -> f64 {
         self.buy_value + self.sell_value
+    }
+
+    pub fn price_delta_percent(self) -> f64 {
+        if self.min_price <= 0.0 || self.max_price <= 0.0 || self.max_price < self.min_price {
+            return 0.0;
+        }
+        (f64::from(self.max_price) / f64::from(self.min_price) - 1.0) * 100.0
     }
 
     fn add_trade(&mut self, row: TradeHistoryRow) {
@@ -388,7 +434,20 @@ impl TradeVolumeTotals {
             self.sell_value += value;
             self.sell_qty += qty;
         }
+        self.add_price(row.price);
         self.trade_count = self.trade_count.saturating_add(1);
+    }
+
+    fn add_price(&mut self, price: f32) {
+        if price <= 0.0 {
+            return;
+        }
+        if self.min_price <= 0.0 || price < self.min_price {
+            self.min_price = price;
+        }
+        if price > self.max_price {
+            self.max_price = price;
+        }
     }
 
     fn add_totals(&mut self, other: Self) {
@@ -397,6 +456,8 @@ impl TradeVolumeTotals {
         self.buy_qty += other.buy_qty;
         self.sell_qty += other.sell_qty;
         self.trade_count = self.trade_count.saturating_add(other.trade_count);
+        self.add_price(other.min_price);
+        self.add_price(other.max_price);
     }
 }
 
@@ -405,6 +466,48 @@ pub struct RollingTradeVolumeSnapshot {
     pub one_minute: TradeVolumeTotals,
     pub three_minutes: TradeVolumeTotals,
     pub five_minutes: TradeVolumeTotals,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DerivedDeltaSnapshot {
+    pub one_minute: f64,
+    pub five_minutes: f64,
+    pub fifteen_minutes: f64,
+    pub thirty_minutes: f64,
+    pub one_hour: f64,
+    pub two_hours: f64,
+    pub three_hours: f64,
+    pub twenty_four_hours: f64,
+    pub seventy_two_hours: f64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CandleVolumeSnapshot {
+    pub five_minutes: f64,
+    pub fifteen_minutes: f64,
+    pub thirty_minutes: f64,
+    pub one_hour: f64,
+    pub two_hours: f64,
+    pub three_hours: f64,
+    pub twenty_four_hours: f64,
+    pub seventy_two_hours: f64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MarketDerivedSnapshot {
+    pub trade_volumes: RollingTradeVolumeSnapshot,
+    /// Total quote volume from retained 5m candles plus the current candle.
+    /// Unlike trade volumes, candles do not carry buy/sell split.
+    pub candle_volumes: CandleVolumeSnapshot,
+    /// Deltas from retained/joined futures trades. Currently populated for
+    /// 1m and 5m windows from the same 5-second buckets as volumes.
+    pub trade_deltas: DerivedDeltaSnapshot,
+    /// Deltas from retained 5m candles plus the current candle.
+    pub candle_deltas: DerivedDeltaSnapshot,
+    /// Combined convenient view. For each field it is the max of the trade and
+    /// candle source for that window, matching Delphi's "do not lower a hotter
+    /// delta with a colder source" shape.
+    pub deltas: DerivedDeltaSnapshot,
 }
 
 /// Incremental rolling volumes for the Active Lib trade history.
@@ -961,13 +1064,20 @@ mod tests {
                 buy_qty: 2.0,
                 sell_qty: 0.0,
                 trade_count: 1,
+                min_price: 100.0,
+                max_price: 100.0,
             }
         );
         assert_eq!(snapshot.three_minutes.buy_value, 200.0);
         assert_eq!(snapshot.three_minutes.sell_value, 600.0);
         assert_eq!(snapshot.three_minutes.trade_count, 2);
+        assert_eq!(snapshot.three_minutes.min_price, 100.0);
+        assert_eq!(snapshot.three_minutes.max_price, 200.0);
         assert_eq!(snapshot.five_minutes.buy_value, 1_400.0);
         assert_eq!(snapshot.five_minutes.sell_value, 600.0);
         assert_eq!(snapshot.five_minutes.trade_count, 3);
+        assert_eq!(snapshot.five_minutes.min_price, 100.0);
+        assert_eq!(snapshot.five_minutes.max_price, 300.0);
+        assert!((snapshot.five_minutes.price_delta_percent() - 200.0).abs() < 1e-9);
     }
 }

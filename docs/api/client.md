@@ -487,6 +487,7 @@ Use registry-aware methods:
 
 ```rust
 client.subscribe_all_trades(false);
+client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"]);
 client.subscribe_orderbook("BTCUSDT");
 client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
 client.unsubscribe_orderbook("BTCUSDT");

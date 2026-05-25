@@ -664,6 +664,23 @@ impl ClientSender {
         }
     }
 
+    /// Subscribe to the all-trades stream while retaining active-library
+    /// history only for the selected markets.
+    ///
+    /// Empty `market_names` means all markets. The wire command is still
+    /// Delphi-compatible `emk_SubscribeAllTrades`; the scope affects only
+    /// Active Lib typed events, retained trades/candles, and derived analytics.
+    pub fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if let Err(e) = self.try_subscribe_trades_for(want_mm, market_names) {
+            log::warn!(target: "moonproto::client",
+                "subscribe_trades_for(want_mm={want_mm}) dropped: {e}");
+        }
+    }
+
     /// Unsubscribe from the all-trades stream and update the reconnect registry.
     pub fn unsubscribe_all_trades(&self) {
         if let Err(e) = self.try_unsubscribe_all_trades() {
@@ -800,18 +817,44 @@ impl ClientSender {
 
     /// Fallible all-trades subscription.
     pub fn try_subscribe_all_trades(&self, want_mm: bool) -> Result<(), SubscribeError> {
+        self.try_subscribe_trades_with_scope(want_mm, crate::state::TradeStorageScope::All)
+    }
+
+    /// Fallible scoped all-trades subscription.
+    pub fn try_subscribe_trades_for<I, S>(
+        &self,
+        want_mm: bool,
+        market_names: I,
+    ) -> Result<(), SubscribeError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.try_subscribe_trades_with_scope(
+            want_mm,
+            crate::state::TradeStorageScope::from_markets(market_names),
+        )
+    }
+
+    fn try_subscribe_trades_with_scope(
+        &self,
+        want_mm: bool,
+        storage_scope: crate::state::TradeStorageScope,
+    ) -> Result<(), SubscribeError> {
         if !self.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        let changed = {
+        let wire_changed = {
             let mut registry = self.subscription_registry.lock().unwrap();
             let new_sub = Some(TradesSubscription { want_mm });
-            let changed = registry.trades_sub != new_sub || registry.mm_orders_sub != Some(want_mm);
+            let wire_changed =
+                registry.trades_sub != new_sub || registry.mm_orders_sub != Some(want_mm);
             registry.trades_sub = Some(TradesSubscription { want_mm });
             registry.mm_orders_sub = Some(want_mm);
-            changed
+            registry.trades_storage_scope = storage_scope;
+            wire_changed
         };
-        if !changed || !self.domain_ready_for_typed_send() {
+        if !wire_changed || !self.domain_ready_for_typed_send() {
             return Ok(());
         }
         self.try_send_api_request(crate::commands::engine_request::subscribe_all_trades(
@@ -4401,6 +4444,7 @@ pub struct TradesSubscription {
 pub(crate) struct SubscriptionRegistry {
     pub orderbook_subs: HashSet<String>,
     pub trades_sub: Option<TradesSubscription>,
+    pub trades_storage_scope: crate::state::TradeStorageScope,
     /// Последний серверный флаг `IsMMOrdersSubscribed`.
     ///
     /// Delphi обновляет его двумя путями: `emk_SubscribeAllTrades` с bool-параметром
@@ -4418,6 +4462,12 @@ pub(crate) struct SubscriptionRegistry {
 #[derive(Debug, Clone, Copy, Default)]
 struct DomainRestoreIntent {
     fetch_indexes: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingTradesUnsubscribe {
+    request_uid: u64,
+    sent_ms: i64,
 }
 
 // =============================================================================
@@ -4735,6 +4785,12 @@ pub struct Client {
 
     /// Delayed `DoSubscribeAllTrades(false)` after Delphi `Sleep(100)` in
     /// `BMarketHistoryWorker.Execute` reconnect branch.
+    ///
+    /// The sleep starts only after `UnSubscribeAllTrades` has completed its
+    /// Delphi `SendAndWait` equivalent. Sending Subscribe after a naked 100ms
+    /// timer is wrong on UDP: a retried Unsubscribe can arrive after Subscribe
+    /// and leave the server-side client unsubscribed.
+    pending_trades_unsubscribe: Option<PendingTradesUnsubscribe>,
     pending_trades_resubscribe_after_ms: Option<i64>,
 
     /// FireTest-only hook: drop every outgoing datagram before socket send.
@@ -4842,6 +4898,14 @@ impl Client {
             .unwrap()
             .trades_sub
             .is_some()
+    }
+
+    pub(crate) fn trades_storage_scope_intent(&self) -> Option<crate::state::TradeStorageScope> {
+        let registry = self.subscription_registry.lock().unwrap();
+        registry
+            .trades_sub
+            .is_some()
+            .then(|| registry.trades_storage_scope.clone())
     }
 
     /// Create a client session from [`ClientConfig`].
@@ -4976,6 +5040,7 @@ impl Client {
             last_orderbook_subscribe_request_ms,
             last_orderbook_subscribe_request_uid,
             pending_orderbook_resubscribe_uid: None,
+            pending_trades_unsubscribe: None,
             pending_trades_resubscribe_after_ms: None,
             debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
             indexes_fetch_started_ms: 0,
@@ -5933,7 +5998,10 @@ impl Client {
     ) -> Result<MergedCandles, mpsc::RecvTimeoutError> {
         let (uid, rx) = self.api_request_candles_data_async_registered();
         match self.run_until_response(dispatcher, &rx, timeout) {
-            Ok(merged) => Ok(merged),
+            Ok(merged) => {
+                dispatcher.apply_candles_snapshot(&merged.markets);
+                Ok(merged)
+            }
             Err(err) => {
                 self.pending_candles.remove(&uid);
                 Err(err)
@@ -6070,6 +6138,18 @@ impl Client {
     /// the remembered intent and sends a fresh subscribe request.
     pub fn subscribe_all_trades(&self, want_mm: bool) {
         self.sender().subscribe_all_trades(want_mm);
+    }
+
+    /// Subscribe to all-trades on the wire, but keep retained Active Lib data
+    /// only for selected markets.
+    ///
+    /// Empty `market_names` means all markets.
+    pub fn subscribe_trades_for<I, S>(&self, want_mm: bool, market_names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.sender().subscribe_trades_for(want_mm, market_names);
     }
 
     /// Unsubscribe from the all-trades stream and remove the registry intent.
@@ -6214,9 +6294,14 @@ impl Client {
             return;
         }
         self.last_trades_reconnect_check_ms = now_ms;
-        self.send_api_request(&crate::commands::engine_request::unsubscribe_all_trades());
-        self.pending_trades_resubscribe_after_ms =
-            Some(now_ms + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
+        let payload = crate::commands::engine_request::unsubscribe_all_trades();
+        let request_uid = engine_request_uid(&payload).unwrap_or(NO_PENDING_ENGINE_REQUEST_UID);
+        self.send_api_request_at(&payload, now_ms);
+        self.pending_trades_unsubscribe = Some(PendingTradesUnsubscribe {
+            request_uid,
+            sent_ms: now_ms,
+        });
+        self.pending_trades_resubscribe_after_ms = None;
     }
 
     fn tick_trades_reconnect_sequence(&mut self, now_ms: i64, trades_server_token: u64) {
@@ -6231,6 +6316,16 @@ impl Client {
             && (now_ms - last_subscribe_request_ms).abs()
                 < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS
         {
+            return;
+        }
+
+        if let Some(pending) = self.pending_trades_unsubscribe {
+            if (now_ms - pending.sent_ms).abs() < crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS {
+                return;
+            }
+            self.pending_trades_unsubscribe = None;
+            self.pending_trades_resubscribe_after_ms =
+                Some(now_ms + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
             return;
         }
 
@@ -6262,6 +6357,18 @@ impl Client {
             return;
         }
         self.start_trades_reconnect_sequence(now_ms);
+    }
+
+    fn close_trades_unsubscribe_wait_if_matches(&mut self, request_uid: u64) {
+        let Some(pending) = self.pending_trades_unsubscribe else {
+            return;
+        };
+        if pending.request_uid != request_uid {
+            return;
+        }
+        self.pending_trades_unsubscribe = None;
+        self.pending_trades_resubscribe_after_ms =
+            Some(self.now_ms() + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS);
     }
 
     fn tick_orderbook_reconnect_sequence(&mut self, now_ms: i64) -> bool {
@@ -8300,6 +8407,9 @@ impl Client {
             self.last_trades_subscribe_request_ms
                 .store(NEVER_TIME_MS, Ordering::Relaxed);
         }
+        if resp.method == EngineMethod::UnsubscribeAllTrades {
+            self.close_trades_unsubscribe_wait_if_matches(resp.request_uid);
+        }
     }
 
     fn apply_engine_response_meta_bookkeeping(&mut self, meta: EngineResponseMeta) {
@@ -8322,6 +8432,9 @@ impl Client {
         if meta.method == EngineMethod::SubscribeAllTrades {
             self.last_trades_subscribe_request_ms
                 .store(NEVER_TIME_MS, Ordering::Relaxed);
+        }
+        if meta.method == EngineMethod::UnsubscribeAllTrades {
+            self.close_trades_unsubscribe_wait_if_matches(meta.request_uid);
         }
     }
 
@@ -12269,6 +12382,9 @@ mod client_subscribe_integration_tests {
             client.with_subscription_registry(|registry| registry.mm_orders_sub),
             Some(true)
         );
+        assert!(
+            client.with_subscription_registry(|registry| registry.trades_storage_scope.is_all())
+        );
         // Повторный с другим want_mm — обновляет registry.
         client.subscribe_all_trades(false);
         assert_eq!(
@@ -12279,6 +12395,31 @@ mod client_subscribe_integration_tests {
             client.with_subscription_registry(|registry| registry.mm_orders_sub),
             Some(false)
         );
+        assert!(
+            client.with_subscription_registry(|registry| registry.trades_storage_scope.is_all())
+        );
+    }
+
+    #[test]
+    fn subscribe_trades_for_sets_storage_scope_without_changing_wire_shape() {
+        let client = ready_client();
+        client.subscribe_trades_for(true, ["ETHUSDT", "BTCUSDT", "ETHUSDT"]);
+        client.with_subscription_registry(|registry| {
+            assert_eq!(
+                registry.trades_sub,
+                Some(TradesSubscription { want_mm: true })
+            );
+            assert_eq!(registry.mm_orders_sub, Some(true));
+            assert!(registry.trades_storage_scope.contains("BTCUSDT"));
+            assert!(registry.trades_storage_scope.contains("ETHUSDT"));
+            assert!(!registry.trades_storage_scope.contains("SOLUSDT"));
+        });
+        let sent = drain_api_requests(&client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            method_id(&sent[0]),
+            Some(EngineMethod::SubscribeAllTrades.to_byte())
+        );
     }
 
     #[test]
@@ -12287,6 +12428,10 @@ mod client_subscribe_integration_tests {
         client.subscribe_all_trades(true);
         client.unsubscribe_all_trades();
         assert!(client.with_subscription_registry(|registry| registry.trades_sub.is_none()));
+        assert!(client.trades_storage_scope_intent().is_none());
+        assert!(crate::events::ActiveDispatchContext::from_client(&client)
+            .trades_storage_scope
+            .is_none());
         assert_eq!(
             client.with_subscription_registry(|registry| registry.mm_orders_sub),
             Some(true),
@@ -16235,14 +16380,44 @@ mod reconnect_timing_tests {
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()],
             "NeedReconnectAllTrades starts with UnSubscribeAllTrades"
         );
+        let unsubscribe_uid =
+            request_uid(&trades_reconnect_sent[0].data).expect("unsubscribe request uid");
 
         client.tick_trades_reconnect_sequence(10_050, 0);
         assert!(
             drain_send_items(&client).is_empty(),
-            "Delphi Sleep(100): SubscribeAllTrades must not be immediate"
+            "Delphi SendAndWait: SubscribeAllTrades must not be sent before UnSubscribeAllTrades response"
         );
 
         client.tick_trades_reconnect_sequence(10_100, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "100ms alone is not enough; the sleep starts after UnSubscribeAllTrades completes"
+        );
+
+        let unsubscribe_response =
+            build_engine_response_payload(unsubscribe_uid, EngineMethod::UnsubscribeAllTrades, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                unsubscribe_response,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        let subscribe_due = client
+            .pending_trades_resubscribe_after_ms
+            .expect("unsubscribe response starts the Delphi Sleep(100) window");
+        client.tick_trades_reconnect_sequence(subscribe_due - 1, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "Delphi Sleep(100): SubscribeAllTrades must not be immediate after UnSubscribeAllTrades response"
+        );
+
+        client.tick_trades_reconnect_sequence(subscribe_due, 0);
         let trades_subscribe_sent = drain_send_items(&client);
         let trades_subscribe_methods = api_methods(&trades_subscribe_sent);
         assert_eq!(
@@ -16378,12 +16553,33 @@ mod reconnect_timing_tests {
         });
 
         client.tick_trades_reconnect_sequence(10_000, 0);
+        let unsubscribe_sent = drain_send_items(&client);
         assert_eq!(
-            api_methods(&drain_send_items(&client)),
+            api_methods(&unsubscribe_sent),
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
+        let unsubscribe_uid = request_uid(&unsubscribe_sent[0].data).expect("request uid");
 
         client.tick_trades_reconnect_sequence(10_100, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "SubscribeAllTrades waits for UnSubscribeAllTrades response"
+        );
+        let unsubscribe_response =
+            build_engine_response_payload(unsubscribe_uid, EngineMethod::UnsubscribeAllTrades, &[]);
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                unsubscribe_response,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        let subscribe_due = client.pending_trades_resubscribe_after_ms.unwrap();
+        client.tick_trades_reconnect_sequence(subscribe_due, 0);
         let sent = drain_send_items(&client);
         let api: Vec<_> = sent
             .iter()
@@ -16805,35 +17001,94 @@ mod reconnect_timing_tests {
         });
 
         client.tick_trades_reconnect_sequence(10_000, 0);
+        let first_unsubscribe = drain_send_items(&client);
         assert_eq!(
-            api_methods(&drain_send_items(&client)),
+            api_methods(&first_unsubscribe),
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
+        let first_unsubscribe_uid = request_uid(&first_unsubscribe[0].data).expect("request uid");
         client.tick_trades_reconnect_sequence(10_100, 0);
-        assert_eq!(
-            api_methods(&drain_send_items(&client)),
-            vec![EngineMethod::SubscribeAllTrades.to_byte()]
-        );
-
-        client.tick_trades_reconnect_sequence(22_099, 0);
         assert!(
             drain_send_items(&client).is_empty(),
-            "Delphi SendAndWait FTimeout blocks reconnect while SubscribeAllTrades can still return"
+            "SubscribeAllTrades waits for UnSubscribeAllTrades response, not only Sleep(100)"
         );
-        client.tick_trades_reconnect_sequence(22_100, 0);
+
+        let first_unsubscribe_response = build_engine_response_payload(
+            first_unsubscribe_uid,
+            EngineMethod::UnsubscribeAllTrades,
+            &[],
+        );
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                first_unsubscribe_response,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        let first_subscribe_due = client.pending_trades_resubscribe_after_ms.unwrap();
+        client.tick_trades_reconnect_sequence(first_subscribe_due, 0);
+        let first_subscribe_sent = drain_send_items(&client);
         assert_eq!(
-            api_methods(&drain_send_items(&client)),
+            api_methods(&first_subscribe_sent),
+            vec![EngineMethod::SubscribeAllTrades.to_byte()]
+        );
+        let first_subscribe_uid = request_uid(&first_subscribe_sent[0].data).expect("request uid");
+
+        let first_subscribe_response = build_engine_response_payload(
+            first_subscribe_uid,
+            EngineMethod::SubscribeAllTrades,
+            &[],
+        );
+        {
+            let mut ignored = Vec::new();
+            let mut sink = DispatchSink::Buffer(&mut ignored);
+            client.client_new_data_decoded(
+                Command::API.to_byte(),
+                first_subscribe_response,
+                false,
+                false,
+                &mut sink,
+            );
+        }
+        let refreshed_at = client.last_trades_reconnect_check_ms;
+        client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS - 1, 0);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "Delphi LastReconnectCheck blocks retry for 5s after SubscribeAllTrades success"
+        );
+        client.tick_trades_reconnect_sequence(refreshed_at + TRADES_RECONNECT_THROTTLE_MS, 0);
+        let second_unsubscribe = drain_send_items(&client);
+        assert_eq!(
+            api_methods(&second_unsubscribe),
             vec![EngineMethod::UnsubscribeAllTrades.to_byte()]
         );
 
-        client.tick_trades_reconnect_sequence(22_200, client.server_token);
+        let unsubscribe_timeout = refreshed_at
+            + TRADES_RECONNECT_THROTTLE_MS
+            + crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS;
+        client.tick_trades_reconnect_sequence(unsubscribe_timeout, client.server_token);
+        assert!(
+            drain_send_items(&client).is_empty(),
+            "UnSubscribeAllTrades timeout starts the paired Sleep(100), it does not send Subscribe immediately"
+        );
+        client.tick_trades_reconnect_sequence(
+            unsubscribe_timeout + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS,
+            client.server_token,
+        );
         assert_eq!(
             api_methods(&drain_send_items(&client)),
             vec![EngineMethod::SubscribeAllTrades.to_byte()],
-            "once UnSubscribeAllTrades ran, the paired delayed SubscribeAllTrades still completes"
+            "after UnSubscribeAllTrades SendAndWait timeout, paired delayed SubscribeAllTrades still completes"
         );
 
-        client.tick_trades_reconnect_sequence(22_300, client.server_token);
+        client.tick_trades_reconnect_sequence(
+            unsubscribe_timeout + TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS + 100,
+            client.server_token,
+        );
         assert!(
             drain_send_items(&client).is_empty(),
             "observed current FTradesServerToken stops further retries"

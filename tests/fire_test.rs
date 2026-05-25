@@ -34,12 +34,14 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
 use moonproto::commands::arb::ArbPayload;
-use moonproto::commands::candles::{parse_request_candles_data_response, CandlesAggregator};
+use moonproto::commands::candles::{
+    parse_request_candles_data_response, CandlesAggregator, RequestCandlesMarket,
+};
 use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
 use moonproto::commands::engine_request;
 use moonproto::commands::strategy_schema::{
@@ -55,7 +57,7 @@ use moonproto::events::Event;
 use moonproto::protocol::Command;
 use moonproto::state::{
     LastPricePoint, MarketHistoryConfig, MarketHistoryWorker, MarketPrice, OrderBookEvent,
-    OrderBookKind, SeqRingReader, SettingsEvent, StratEvent, TradeHistoryRow, TradesEvent,
+    OrderBookKind, SettingsEvent, StratEvent, TradesEvent,
 };
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
@@ -501,9 +503,8 @@ struct Session {
     client: Client,
     dispatcher: EventDispatcher,
     history_worker: MarketHistoryWorker,
-    target_last_prices: Option<SeqRingReader<LastPricePoint>>,
-    target_futures_trades: Option<SeqRingReader<TradeHistoryRow>>,
-    target_spot_trades: Option<SeqRingReader<TradeHistoryRow>>,
+    candles_snapshot_tx: mpsc::Sender<Vec<RequestCandlesMarket>>,
+    candles_snapshot_rx: mpsc::Receiver<Vec<RequestCandlesMarket>>,
     stats: Arc<Mutex<SessionStats>>,
 }
 
@@ -552,17 +553,7 @@ impl Session {
         }));
 
         let history_worker = MarketHistoryWorker::spawn(firetest_history_config());
-        let target_history_readers = history_worker.ensure_market(&cfg.market);
-        let target_last_prices = target_history_readers
-            .as_ref()
-            .and_then(|readers| readers.last_prices.clone());
-        let target_futures_trades = target_history_readers
-            .as_ref()
-            .and_then(|readers| readers.futures_trades.clone());
-        let target_spot_trades = target_history_readers
-            .as_ref()
-            .and_then(|readers| readers.spot_trades.clone());
-
+        let (candles_snapshot_tx, candles_snapshot_rx) = mpsc::channel();
         let mut dispatcher = EventDispatcher::new();
         dispatcher.set_market_history_handle(history_worker.handle());
         if let Some(strategy) = provided_strategy.as_ref() {
@@ -595,9 +586,8 @@ impl Session {
             client,
             dispatcher,
             history_worker,
-            target_last_prices,
-            target_futures_trades,
-            target_spot_trades,
+            candles_snapshot_tx,
+            candles_snapshot_rx,
             stats,
         };
         session.drain_queued();
@@ -606,20 +596,30 @@ impl Session {
 
     fn pump(&mut self, duration: Duration) {
         let stats = Arc::clone(&self.stats);
+        let candles_snapshot_tx = self.candles_snapshot_tx.clone();
         self.client.run_with_dispatcher_state(
             duration,
             &mut self.dispatcher,
-            Box::new(move |event, dispatcher| record_event(&stats, event, dispatcher)),
+            Box::new(move |event, dispatcher| {
+                record_event(&stats, event, dispatcher, Some(&candles_snapshot_tx))
+            }),
         );
         self.drain_queued();
+        self.apply_completed_candles_snapshots();
     }
 
     fn drain_queued(&mut self) {
         let events = self.dispatcher.take_queued_events();
         let snapshot = self.dispatcher.snapshot();
         for event in events {
-            record_event(&self.stats, &event, &snapshot);
+            record_event(
+                &self.stats,
+                &event,
+                &snapshot,
+                Some(&self.candles_snapshot_tx),
+            );
         }
+        self.apply_completed_candles_snapshots();
     }
 
     fn snapshot(&self) -> SessionStats {
@@ -670,7 +670,10 @@ impl Session {
 
     fn target_last_price_tail(&self) -> Option<LastPricePoint> {
         let _ = self.history_worker.flush(0.0);
-        let reader = self.target_last_prices.as_ref()?;
+        let reader = self
+            .history_worker
+            .readers(&self.snapshot().market)?
+            .last_prices?;
         let mut rows = Vec::new();
         reader.copy_last(1, &mut rows);
         rows.into_iter().next()
@@ -678,18 +681,19 @@ impl Session {
 
     fn target_retained_trade_counts(&self) -> (usize, usize) {
         let _ = self.history_worker.flush(0.0);
-        let futures = self
-            .target_futures_trades
+        let readers = self.history_worker.readers(&self.snapshot().market);
+        let futures = readers
             .as_ref()
+            .and_then(|readers| readers.futures_trades.as_ref())
             .map(|reader| {
                 let mut rows = Vec::new();
                 reader.copy_last(64, &mut rows);
                 rows.len()
             })
             .unwrap_or(0);
-        let spot = self
-            .target_spot_trades
+        let spot = readers
             .as_ref()
+            .and_then(|readers| readers.spot_trades.as_ref())
             .map(|reader| {
                 let mut rows = Vec::new();
                 reader.copy_last(64, &mut rows);
@@ -697,6 +701,46 @@ impl Session {
             })
             .unwrap_or(0);
         (futures, spot)
+    }
+
+    fn apply_completed_candles_snapshots(&mut self) {
+        while let Ok(markets) = self.candles_snapshot_rx.try_recv() {
+            let total_candles = markets.iter().map(|m| m.candles_5m.len()).sum::<usize>();
+            let applied = self.dispatcher.apply_candles_snapshot(&markets);
+            let _ = self.history_worker.flush(0.0);
+            let readers = self.history_worker.readers(&self.snapshot().market);
+            let retained = readers
+                .as_ref()
+                .and_then(|readers| readers.candles_5m.as_ref())
+                .map(|reader| reader.bounds().len)
+                .unwrap_or(0);
+            println!(
+                "FIRETEST candles active-storage applied={} parsed_candles={} target_retained_candles={}",
+                applied, total_candles, retained
+            );
+            assert!(
+                retained > 0,
+                "FireTest: parsed candles snapshot did not reach Active Lib retained candle storage for target market"
+            );
+            let now_time = delphi_now_raw_for_test();
+            let derived = self
+                .history_worker
+                .derived_snapshot(&self.snapshot().market, now_time)
+                .expect("target market should expose derived snapshot after candles apply");
+            println!(
+                "FIRETEST candles derived deltas/volumes: combined(15m={:.4}% 1h={:.4}% 24h={:.4}%) candle(15m={:.4}% 1h={:.4}% 24h={:.4}% vol1h={:.2} vol24h={:.2}) trade(1m={:.4}% 5m={:.4}%)",
+                derived.deltas.fifteen_minutes,
+                derived.deltas.one_hour,
+                derived.deltas.twenty_four_hours,
+                derived.candle_deltas.fifteen_minutes,
+                derived.candle_deltas.one_hour,
+                derived.candle_deltas.twenty_four_hours,
+                derived.candle_volumes.one_hour,
+                derived.candle_volumes.twenty_four_hours,
+                derived.trade_deltas.one_minute,
+                derived.trade_deltas.five_minutes
+            );
+        }
     }
 
     fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
@@ -1023,10 +1067,19 @@ fn metric_app_mode_label(mode: u8) -> &'static str {
     }
 }
 
+fn delphi_now_raw_for_test() -> f64 {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    25_569.0 + secs / 86_400.0
+}
+
 fn record_event(
     stats: &Arc<Mutex<SessionStats>>,
     event: &Event,
     dispatcher: &EventDispatcherSnapshot,
+    candles_snapshot_tx: Option<&mpsc::Sender<Vec<RequestCandlesMarket>>>,
 ) {
     let mut st = stats.lock().unwrap();
     st.server_events += 1;
@@ -1276,7 +1329,7 @@ fn record_event(
             log_server_event(&st, event_no, format!("OrderBook {other:?}"));
         }
         Event::EngineResponse(resp) => {
-            record_engine_response(&mut st, event_no, resp);
+            record_engine_response(&mut st, event_no, resp, candles_snapshot_tx);
         }
         Event::Arb { uid, payload } => {
             log_server_event(
@@ -1428,7 +1481,12 @@ fn record_strategy_snapshot(
     }
 }
 
-fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineResponse) {
+fn record_engine_response(
+    st: &mut SessionStats,
+    event_no: u64,
+    resp: &EngineResponse,
+    candles_snapshot_tx: Option<&mpsc::Sender<Vec<RequestCandlesMarket>>>,
+) {
     st.engine_responses += 1;
     *st.engine_method_counts
         .entry(resp.method.to_byte())
@@ -1494,6 +1552,9 @@ fn record_engine_response(st: &mut SessionStats, event_no: u64, resp: &EngineRes
                         };
                         detail.push_str(&format!(" candle_complete {}", summary.summary()));
                         st.candles_complete = Some(summary);
+                        if let Some(tx) = candles_snapshot_tx {
+                            let _ = tx.send(markets);
+                        }
                     }
                     None => {
                         st.parse_failed += 1;
@@ -2181,6 +2242,7 @@ fn firetest_history_config() -> MarketHistoryConfig {
         mm_order_companion_capacity: 0,
         last_price_capacity: 64,
         mini_candles_capacity: 0,
+        candles_5m_capacity: 64,
         trade_join_capacity: 64,
     }
 }

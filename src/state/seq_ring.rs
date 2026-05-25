@@ -202,6 +202,22 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         }
     }
 
+    pub fn replace_seq(&mut self, seq: u64, row: T) -> bool {
+        let mut state = self.inner.state.write();
+        if !state.contains_seq(seq) {
+            return false;
+        }
+        let idx = state.slot_index(seq);
+        state.rows[idx] = row;
+        true
+    }
+
+    pub fn clear(&mut self) {
+        let mut state = self.inner.state.write();
+        state.next_seq = 0;
+        state.len = 0;
+    }
+
     pub fn reader(&self) -> SeqRingReader<T> {
         SeqRingReader {
             inner: Arc::clone(&self.inner),
@@ -523,6 +539,20 @@ mod tests {
                 concurrent_miss: false,
             }
         );
+    }
+
+    #[test]
+    fn replace_seq_updates_retained_slot_without_advancing_sequence() {
+        let (mut writer, reader) = SeqRingWriter::<u64>::new(4).unwrap();
+        writer.push_batch(&[10, 11, 12]);
+
+        assert!(writer.replace_seq(1, 99));
+        assert_eq!(reader.bounds().next_seq, 3);
+
+        let mut out = Vec::new();
+        reader.copy_last(4, &mut out);
+        assert_eq!(out, vec![10, 99, 12]);
+        assert!(!writer.replace_seq(10, 77));
     }
 
     #[test]

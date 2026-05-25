@@ -5,18 +5,21 @@
 //! handles; the dense retained rings use short read/write locks, but the UDP
 //! protocol receive path is not the history writer.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
 
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
-    prepare_joined_trades_for_retained_append, LastPricePoint, MMOrderCompanionData,
-    MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
+    prepare_joined_trades_for_retained_append, Candle5mRow, CandleVolumeSnapshot,
+    DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow,
+    MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
     TradeHistoryRow, TradeJoinBuffer, TradesPacketTimeShift, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
 const EPS_MARKET: f64 = 1e-12;
+const SECONDS_PER_DAY: f64 = 86_400.0;
+const FIVE_MINUTES_DAYS: f64 = 5.0 / (24.0 * 60.0);
 const DELPHI_INT_TRADES_BUF_SIZE: usize = 1_000;
 const GIB: usize = 1024 * 1024 * 1024;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
@@ -24,7 +27,60 @@ const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
 const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
 const LAST_PRICE_SLOT_BYTES: usize = size_of::<LastPricePoint>();
 const MINI_CANDLE_SLOT_BYTES: usize = size_of::<MiniCandle>();
+const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
 const TRADE_JOIN_ROW_BYTES: usize = 16;
+
+/// Active-library retained-history scope for the all-trades stream.
+///
+/// Delphi `SubscribeAllTrades` has no per-market scope: all known markets are
+/// maintained once the stream is enabled. Rust additionally exposes an accepted
+/// API deviation for UI clients that want to retain only a subset locally while
+/// keeping the same wire `emk_SubscribeAllTrades` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TradeStorageScope {
+    All,
+    Markets(BTreeSet<String>),
+}
+
+impl Default for TradeStorageScope {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+impl TradeStorageScope {
+    pub fn all() -> Self {
+        Self::All
+    }
+
+    pub fn from_markets<I, S>(market_names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names = market_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>();
+        if names.is_empty() {
+            Self::All
+        } else {
+            Self::Markets(names)
+        }
+    }
+
+    pub fn contains(&self, market_name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Markets(names) => names.contains(market_name),
+        }
+    }
+
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarketHistoryConfig {
@@ -35,19 +91,21 @@ pub struct MarketHistoryConfig {
     pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
+    pub candles_5m_capacity: usize,
     pub trade_join_capacity: usize,
 }
 
 impl Default for MarketHistoryConfig {
     fn default() -> Self {
         Self {
-            futures_trades_capacity: 100_000,
-            spot_trades_capacity: 100_000,
-            liquidation_capacity: 20_000,
-            mm_orders_capacity: 20_000,
-            mm_order_companion_capacity: 20_000,
-            last_price_capacity: 60_000,
-            mini_candles_capacity: 20_000,
+            futures_trades_capacity: 10_000,
+            spot_trades_capacity: 5_000,
+            liquidation_capacity: 2_000,
+            mm_orders_capacity: 2_000,
+            mm_order_companion_capacity: 2_000,
+            last_price_capacity: 5_000,
+            mini_candles_capacity: 5_000,
+            candles_5m_capacity: 5_000,
             trade_join_capacity: DELPHI_INT_TRADES_BUF_SIZE,
         }
     }
@@ -66,19 +124,21 @@ impl MarketHistoryConfig {
         let per_market_budget = budget / market_count;
 
         let futures_trades_capacity =
-            capacity_from_share(per_market_budget, 35, 100, TRADE_SLOT_BYTES, 200_000);
+            capacity_from_share(per_market_budget, 32, 100, TRADE_SLOT_BYTES, 200_000);
         let spot_trades_capacity =
-            capacity_from_share(per_market_budget, 20, 100, TRADE_SLOT_BYTES, 150_000);
+            capacity_from_share(per_market_budget, 18, 100, TRADE_SLOT_BYTES, 150_000);
         let liquidation_capacity =
-            capacity_from_share(per_market_budget, 8, 100, TRADE_SLOT_BYTES, 50_000);
+            capacity_from_share(per_market_budget, 7, 100, TRADE_SLOT_BYTES, 50_000);
         let mm_orders_capacity =
-            capacity_from_share(per_market_budget, 8, 100, MM_ORDER_SLOT_BYTES, 50_000);
+            capacity_from_share(per_market_budget, 7, 100, MM_ORDER_SLOT_BYTES, 50_000);
         let mm_order_companion_capacity =
-            capacity_from_share(per_market_budget, 8, 100, MM_COMPANION_SLOT_BYTES, 50_000);
+            capacity_from_share(per_market_budget, 7, 100, MM_COMPANION_SLOT_BYTES, 50_000);
         let last_price_capacity =
-            capacity_from_share(per_market_budget, 10, 100, LAST_PRICE_SLOT_BYTES, 80_000);
+            capacity_from_share(per_market_budget, 8, 100, LAST_PRICE_SLOT_BYTES, 80_000);
         let mini_candles_capacity =
-            capacity_from_share(per_market_budget, 8, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
+            capacity_from_share(per_market_budget, 6, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
+        let candles_5m_capacity =
+            capacity_from_share(per_market_budget, 3, 100, CANDLE_5M_SLOT_BYTES, 20_000);
         let trade_join_capacity = if futures_trades_capacity > 0 {
             DELPHI_INT_TRADES_BUF_SIZE
         } else {
@@ -93,6 +153,7 @@ impl MarketHistoryConfig {
             mm_order_companion_capacity,
             last_price_capacity,
             mini_candles_capacity,
+            candles_5m_capacity,
             trade_join_capacity,
         }
     }
@@ -113,6 +174,7 @@ impl MarketHistoryConfig {
             + self.mm_order_companion_capacity * MM_COMPANION_SLOT_BYTES
             + self.last_price_capacity * LAST_PRICE_SLOT_BYTES
             + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES
+            + self.candles_5m_capacity * CANDLE_5M_SLOT_BYTES
             + self.trade_join_capacity * TRADE_JOIN_ROW_BYTES
     }
 }
@@ -199,6 +261,7 @@ pub struct MarketHistoryReaders {
     pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
+    pub candles_5m: Option<SeqRingReader<Candle5mRow>>,
 }
 
 #[derive(Default)]
@@ -235,10 +298,32 @@ impl MarketHistoryRegistry {
         self.stores.get_mut(market_name)
     }
 
-    pub fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
+    pub(crate) fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
         self.stores
             .entry(market_name.to_string())
             .or_insert_with(|| MarketHistoryStore::new(self.default_config))
+    }
+
+    pub fn configure_markets(
+        &mut self,
+        market_names: &[String],
+        scope: Option<&TradeStorageScope>,
+    ) -> usize {
+        let Some(scope) = scope else {
+            self.stores.clear();
+            return 0;
+        };
+
+        let desired = market_names
+            .iter()
+            .filter(|name| scope.contains(name))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.stores.retain(|name, _| desired.contains(name));
+        for name in desired {
+            self.ensure_market(&name);
+        }
+        self.stores.len()
     }
 
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
@@ -260,6 +345,12 @@ impl MarketHistoryRegistry {
             .map(|store| store.compact_evicted_futures_like_delphi(now_time))
             .sum()
     }
+
+    pub fn refresh_derived_analytics(&mut self, now_time: f64) {
+        for store in self.stores.values_mut() {
+            store.refresh_derived_analytics(now_time);
+        }
+    }
 }
 
 pub struct MarketHistoryStore {
@@ -270,12 +361,18 @@ pub struct MarketHistoryStore {
     mm_order_companion: Option<SeqRingWriter<MMOrderCompanionData>>,
     last_prices: Option<SeqRingWriter<LastPricePoint>>,
     mini_candles: Option<SeqRingWriter<MiniCandle>>,
+    candles_5m: Option<SeqRingWriter<Candle5mRow>>,
     readers: MarketHistoryReaders,
     futures_join: TradeJoinBuffer,
     joined_scratch: Vec<TradeHistoryRow>,
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
+    current_candle: Option<Candle5mRow>,
+    current_candle_seq: Option<u64>,
+    candle_deltas_dirty: bool,
+    candle_deltas_bucket: Option<i64>,
+    derived: MarketDerivedSnapshot,
 }
 
 impl MarketHistoryStore {
@@ -292,6 +389,7 @@ impl MarketHistoryStore {
         let (last_prices, last_reader) =
             optional_ring::<LastPricePoint>(config.last_price_capacity);
         let (mini_candles, mini_reader) = optional_ring::<MiniCandle>(config.mini_candles_capacity);
+        let (candles_5m, candles_reader) = optional_ring::<Candle5mRow>(config.candles_5m_capacity);
 
         Self {
             futures_trades,
@@ -301,6 +399,7 @@ impl MarketHistoryStore {
             mm_order_companion,
             last_prices,
             mini_candles,
+            candles_5m,
             readers: MarketHistoryReaders {
                 futures_trades: futures_reader,
                 spot_trades: spot_reader,
@@ -309,12 +408,18 @@ impl MarketHistoryStore {
                 mm_order_companion: mm_companion_reader,
                 last_prices: last_reader,
                 mini_candles: mini_reader,
+                candles_5m: candles_reader,
             },
             futures_join: TradeJoinBuffer::new(config.trade_join_capacity),
             joined_scratch: Vec::new(),
             evicted_futures_for_compaction: Vec::new(),
             mini_scratch: Vec::new(),
             rolling_volumes: RollingTradeVolumes::default(),
+            current_candle: None,
+            current_candle_seq: None,
+            candle_deltas_dirty: false,
+            candle_deltas_bucket: None,
+            derived: MarketDerivedSnapshot::default(),
         }
     }
 
@@ -324,6 +429,31 @@ impl MarketHistoryStore {
 
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
         self.rolling_volumes.snapshot(now_time)
+    }
+
+    pub fn derived_snapshot(&self) -> MarketDerivedSnapshot {
+        self.derived
+    }
+
+    pub fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
+        self.current_candle = candles.last().copied();
+        self.current_candle_seq = None;
+        self.candle_deltas_dirty = true;
+        if let Some(writer) = self.candles_5m.as_mut() {
+            writer.clear();
+            writer.push_batch(candles);
+            if self.current_candle.is_some() {
+                let bounds = writer.bounds();
+                if bounds.len > 0 {
+                    self.current_candle_seq = Some(bounds.next_seq - 1);
+                }
+            }
+        }
+        self.refresh_derived_analytics(
+            self.current_candle
+                .map(|candle| candle.time)
+                .unwrap_or_default(),
+        );
     }
 
     /// Delphi `TMarket.AddFrom` retained LastPrice row.
@@ -394,6 +524,7 @@ impl MarketHistoryStore {
         for row in &rows {
             self.push_retained_futures_trade(*row);
             self.rolling_volumes.add_trade(*row);
+            self.update_current_candle_from_trade(*row);
             appended += 1;
         }
         self.joined_scratch = rows;
@@ -509,12 +640,259 @@ impl MarketHistoryStore {
         self.evicted_futures_for_compaction.len()
     }
 
+    pub fn refresh_derived_analytics(&mut self, now_time: f64) {
+        self.seal_current_candle_if_due(now_time);
+        let volumes = self.rolling_volumes.snapshot(now_time);
+        let trade_deltas = trade_deltas_from_rolling_volumes(volumes);
+        let candle_bucket = candle_delta_bucket(now_time);
+        if self.candle_deltas_dirty || self.candle_deltas_bucket != Some(candle_bucket) {
+            let (deltas, volumes) = self.candle_derived_one_pass(now_time);
+            self.derived.candle_deltas = deltas;
+            self.derived.candle_volumes = volumes;
+            self.candle_deltas_bucket = Some(candle_bucket);
+            self.candle_deltas_dirty = false;
+        }
+
+        self.derived.trade_volumes = volumes;
+        self.derived.trade_deltas = trade_deltas;
+        self.derived.deltas = combine_deltas(trade_deltas, self.derived.candle_deltas);
+    }
+
     fn push_retained_futures_trade(&mut self, row: TradeHistoryRow) {
         if let Some(writer) = self.futures_trades.as_mut() {
             if let Some(evicted) = writer.push_with_evicted(row).1 {
                 self.evicted_futures_for_compaction.push(evicted);
             }
         }
+    }
+
+    fn update_current_candle_from_trade(&mut self, row: TradeHistoryRow) {
+        if row.time <= 0.0 || row.price <= 0.0 {
+            return;
+        }
+        self.seal_current_candle_if_due(row.time);
+        let traded_value = row.traded_value();
+        let mut candle = self.current_candle.unwrap_or_else(|| {
+            self.current_candle_seq = None;
+            Candle5mRow {
+                open_p: row.price,
+                close_p: row.price,
+                max_p: row.price,
+                min_p: row.price,
+                vol: 0.0,
+                time: row.time,
+            }
+        });
+        candle.close_p = row.price;
+        candle.max_p = candle.max_p.max(row.price);
+        candle.min_p = if candle.min_p <= 0.0 {
+            row.price
+        } else {
+            candle.min_p.min(row.price)
+        };
+        candle.vol += traded_value;
+        self.current_candle = Some(candle);
+        self.candle_deltas_dirty = true;
+        self.publish_current_candle();
+    }
+
+    fn seal_current_candle_if_due(&mut self, now_time: f64) {
+        let Some(candle) = self.current_candle else {
+            return;
+        };
+        if now_time > 0.0 && now_time - candle.time >= FIVE_MINUTES_DAYS {
+            if self.current_candle_seq.is_none() {
+                self.publish_current_candle();
+            }
+            self.current_candle = None;
+            self.current_candle_seq = None;
+            self.candle_deltas_dirty = true;
+        }
+    }
+
+    fn publish_current_candle(&mut self) {
+        let Some(candle) = self.current_candle else {
+            self.current_candle_seq = None;
+            return;
+        };
+        let Some(writer) = self.candles_5m.as_mut() else {
+            self.current_candle_seq = None;
+            return;
+        };
+        if let Some(seq) = self.current_candle_seq {
+            if writer.replace_seq(seq, candle) {
+                return;
+            }
+        }
+        self.current_candle_seq = Some(writer.push(candle));
+    }
+
+    fn candle_derived_one_pass(
+        &self,
+        now_time: f64,
+    ) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
+        let mut acc = CandleDerivedAccumulator::new(now_time);
+        if let Some(reader) = self.readers.candles_5m.as_ref() {
+            reader.with_last(reader.capacity(), |view| {
+                view.for_each(|row| acc.add(*row));
+            });
+        }
+        if self.current_candle_seq.is_none() {
+            if let Some(candle) = self.current_candle {
+                acc.add(candle);
+            }
+        }
+        acc.finish()
+    }
+}
+
+fn delta_percent(min_price: f64, max_price: f64) -> f64 {
+    if min_price <= EPS_MARKET || max_price <= EPS_MARKET || max_price < min_price {
+        return 0.0;
+    }
+    (max_price / min_price - 1.0) * 100.0
+}
+
+fn trade_deltas_from_rolling_volumes(volumes: RollingTradeVolumeSnapshot) -> DerivedDeltaSnapshot {
+    DerivedDeltaSnapshot {
+        one_minute: volumes.one_minute.price_delta_percent(),
+        five_minutes: volumes.five_minutes.price_delta_percent(),
+        ..DerivedDeltaSnapshot::default()
+    }
+}
+
+fn combine_deltas(
+    trade_deltas: DerivedDeltaSnapshot,
+    candle_deltas: DerivedDeltaSnapshot,
+) -> DerivedDeltaSnapshot {
+    DerivedDeltaSnapshot {
+        one_minute: trade_deltas.one_minute.max(candle_deltas.one_minute),
+        five_minutes: trade_deltas.five_minutes.max(candle_deltas.five_minutes),
+        fifteen_minutes: trade_deltas
+            .fifteen_minutes
+            .max(candle_deltas.fifteen_minutes),
+        thirty_minutes: trade_deltas
+            .thirty_minutes
+            .max(candle_deltas.thirty_minutes),
+        one_hour: trade_deltas.one_hour.max(candle_deltas.one_hour),
+        two_hours: trade_deltas.two_hours.max(candle_deltas.two_hours),
+        three_hours: trade_deltas.three_hours.max(candle_deltas.three_hours),
+        twenty_four_hours: trade_deltas
+            .twenty_four_hours
+            .max(candle_deltas.twenty_four_hours),
+        seventy_two_hours: trade_deltas
+            .seventy_two_hours
+            .max(candle_deltas.seventy_two_hours),
+    }
+}
+
+fn candle_delta_bucket(now_time: f64) -> i64 {
+    if now_time <= 0.0 {
+        return i64::MIN;
+    }
+    (now_time * SECONDS_PER_DAY / (5.0 * 60.0)).floor() as i64
+}
+
+#[derive(Clone, Copy)]
+struct CandleWindow {
+    window_days: f64,
+    min_price: f32,
+    max_price: f32,
+    volume: f64,
+}
+
+impl CandleWindow {
+    fn new(window_seconds: f64) -> Self {
+        Self {
+            window_days: window_seconds / SECONDS_PER_DAY,
+            min_price: 0.0,
+            max_price: 0.0,
+            volume: 0.0,
+        }
+    }
+
+    fn add(&mut self, now_time: f64, candle: Candle5mRow) {
+        if candle.time < now_time - self.window_days || candle.time > now_time {
+            return;
+        }
+        if candle.min_p > 0.0 && (self.min_price <= 0.0 || candle.min_p < self.min_price) {
+            self.min_price = candle.min_p;
+        }
+        if candle.max_p > self.max_price {
+            self.max_price = candle.max_p;
+        }
+        if candle.vol > 0.0 {
+            self.volume += f64::from(candle.vol);
+        }
+    }
+
+    fn finish_delta(self) -> f64 {
+        delta_percent(f64::from(self.min_price), f64::from(self.max_price))
+    }
+}
+
+struct CandleDerivedAccumulator {
+    now_time: f64,
+    five_minutes: CandleWindow,
+    fifteen_minutes: CandleWindow,
+    thirty_minutes: CandleWindow,
+    one_hour: CandleWindow,
+    two_hours: CandleWindow,
+    three_hours: CandleWindow,
+    twenty_four_hours: CandleWindow,
+    seventy_two_hours: CandleWindow,
+}
+
+impl CandleDerivedAccumulator {
+    fn new(now_time: f64) -> Self {
+        Self {
+            now_time,
+            five_minutes: CandleWindow::new(5.0 * 60.0),
+            fifteen_minutes: CandleWindow::new(15.0 * 60.0),
+            thirty_minutes: CandleWindow::new(30.0 * 60.0),
+            one_hour: CandleWindow::new(60.0 * 60.0),
+            two_hours: CandleWindow::new(2.0 * 60.0 * 60.0),
+            three_hours: CandleWindow::new(3.0 * 60.0 * 60.0),
+            twenty_four_hours: CandleWindow::new(24.0 * 60.0 * 60.0),
+            seventy_two_hours: CandleWindow::new(72.0 * 60.0 * 60.0),
+        }
+    }
+
+    fn add(&mut self, candle: Candle5mRow) {
+        self.five_minutes.add(self.now_time, candle);
+        self.fifteen_minutes.add(self.now_time, candle);
+        self.thirty_minutes.add(self.now_time, candle);
+        self.one_hour.add(self.now_time, candle);
+        self.two_hours.add(self.now_time, candle);
+        self.three_hours.add(self.now_time, candle);
+        self.twenty_four_hours.add(self.now_time, candle);
+        self.seventy_two_hours.add(self.now_time, candle);
+    }
+
+    fn finish(self) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
+        (
+            DerivedDeltaSnapshot {
+                five_minutes: self.five_minutes.finish_delta(),
+                fifteen_minutes: self.fifteen_minutes.finish_delta(),
+                thirty_minutes: self.thirty_minutes.finish_delta(),
+                one_hour: self.one_hour.finish_delta(),
+                two_hours: self.two_hours.finish_delta(),
+                three_hours: self.three_hours.finish_delta(),
+                twenty_four_hours: self.twenty_four_hours.finish_delta(),
+                seventy_two_hours: self.seventy_two_hours.finish_delta(),
+                ..DerivedDeltaSnapshot::default()
+            },
+            CandleVolumeSnapshot {
+                five_minutes: self.five_minutes.volume,
+                fifteen_minutes: self.fifteen_minutes.volume,
+                thirty_minutes: self.thirty_minutes.volume,
+                one_hour: self.one_hour.volume,
+                two_hours: self.two_hours.volume,
+                three_hours: self.three_hours.volume,
+                twenty_four_hours: self.twenty_four_hours.volume,
+                seventy_two_hours: self.seventy_two_hours.volume,
+            },
+        )
     }
 }
 
@@ -569,6 +947,17 @@ mod tests {
     }
 
     #[test]
+    fn default_config_is_safe_for_all_markets_subscription() {
+        let cfg = MarketHistoryConfig::default();
+        let assumed_large_market_universe = 1_000;
+        assert!(
+            cfg.estimated_bytes_per_market() * assumed_large_market_universe
+                < MarketHistoryConfig::history_budget_bytes(8 * GIB),
+            "default config must not become multi-GB when subscribe_all_trades creates stores for all markets"
+        );
+    }
+
+    #[test]
     fn memory_sized_config_keeps_delphi_trade_join_capacity_when_enabled() {
         let cfg = MarketHistoryConfig::from_total_memory_bytes(8 * GIB, 10_000);
         assert!(cfg.futures_trades_capacity > 0);
@@ -577,6 +966,41 @@ mod tests {
         let disabled = MarketHistoryConfig::from_total_memory_bytes(1, usize::MAX);
         assert_eq!(disabled.futures_trades_capacity, 0);
         assert_eq!(disabled.trade_join_capacity, 0);
+    }
+
+    #[test]
+    fn registry_configures_trade_storage_scope_from_known_markets() {
+        let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
+            futures_trades_capacity: 1,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+            trade_join_capacity: 0,
+        });
+        let markets = vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ];
+
+        assert_eq!(
+            registry.configure_markets(&markets, Some(&TradeStorageScope::All)),
+            3
+        );
+        assert!(registry.contains_market("BTCUSDT"));
+        assert!(registry.contains_market("ETHUSDT"));
+
+        let scope = TradeStorageScope::from_markets(["ETHUSDT"]);
+        assert_eq!(registry.configure_markets(&markets, Some(&scope)), 1);
+        assert!(!registry.contains_market("BTCUSDT"));
+        assert!(registry.contains_market("ETHUSDT"));
+
+        assert_eq!(registry.configure_markets(&markets, None), 0);
+        assert!(registry.is_empty());
     }
 
     #[test]
@@ -589,6 +1013,7 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 2,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 4,
         });
 
@@ -632,6 +1057,7 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 4,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 0,
         });
 
@@ -675,6 +1101,7 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 6,
         });
 
@@ -721,6 +1148,7 @@ mod tests {
             mm_order_companion_capacity: 8,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
             trade_join_capacity: 8,
         });
 
@@ -793,6 +1221,7 @@ mod tests {
             mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 8,
+            candles_5m_capacity: 0,
             trade_join_capacity: 8,
         });
 
@@ -813,5 +1242,105 @@ mod tests {
         assert_eq!(out[0].min_price, 100.0);
         assert_eq!(out[0].max_price, 101.0);
         assert_eq!(out[0].buy_vol, 201.0);
+    }
+
+    #[test]
+    fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 8,
+            trade_join_capacity: 8,
+        });
+        let now = 45_000.0;
+        store.replace_candles_5m_from_snapshot(&[
+            Candle5mRow {
+                time: now - 10.0 / 1440.0,
+                min_p: 90.0,
+                max_p: 110.0,
+                close_p: 100.0,
+                open_p: 95.0,
+                vol: 1_000.0,
+            },
+            Candle5mRow {
+                time: now,
+                min_p: 100.0,
+                max_p: 120.0,
+                close_p: 115.0,
+                open_p: 105.0,
+                vol: 2_000.0,
+            },
+        ]);
+
+        let mut candles = Vec::new();
+        store
+            .readers()
+            .candles_5m
+            .unwrap()
+            .copy_last(8, &mut candles);
+        assert_eq!(candles.len(), 2);
+
+        store
+            .push_futures_trade_into_join_like_delphi(trade(now + 1.0 / 86_400.0, 125.0, 2.0), 0.0);
+        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+        candles.clear();
+        store
+            .readers()
+            .candles_5m
+            .unwrap()
+            .copy_last(8, &mut candles);
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[1].close_p, 125.0);
+        assert_eq!(candles[1].max_p, 125.0);
+        assert_eq!(candles[1].vol, 2_250.0);
+
+        store.refresh_derived_analytics(now);
+        let derived = store.derived_snapshot();
+        assert!((derived.candle_deltas.fifteen_minutes - 38.8888888889).abs() < 1e-6);
+        assert_eq!(derived.candle_volumes.fifteen_minutes, 3_250.0);
+        assert_eq!(derived.candle_volumes.one_hour, 3_250.0);
+        assert_eq!(derived.trade_deltas.fifteen_minutes, 0.0);
+        assert!((derived.deltas.fifteen_minutes - 38.8888888889).abs() < 1e-6);
+    }
+
+    #[test]
+    fn retained_trades_update_current_candle_and_derived_volumes() {
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 8,
+            trade_join_capacity: 8,
+        });
+        let now = 45_000.0;
+        store.push_futures_trade_into_join_like_delphi(
+            trade(now - 10.0 / 86_400.0, 100.0, 2.0),
+            0.0,
+        );
+        store.push_futures_trade_into_join_like_delphi(
+            trade(now - 5.0 / 86_400.0, 110.0, -1.0),
+            0.0,
+        );
+        assert_eq!(store.drain_joined_futures_like_delphi(), 2);
+        store.refresh_derived_analytics(now);
+
+        let derived = store.derived_snapshot();
+        assert_eq!(derived.trade_volumes.one_minute.buy_value, 200.0);
+        assert_eq!(derived.trade_volumes.one_minute.sell_value, 110.0);
+        assert_eq!(derived.trade_volumes.one_minute.min_price, 100.0);
+        assert_eq!(derived.trade_volumes.one_minute.max_price, 110.0);
+        assert!((derived.trade_deltas.one_minute - 10.0).abs() < 1e-9);
+        assert_eq!(derived.candle_deltas.one_minute, 0.0);
+        assert_eq!(derived.candle_volumes.five_minutes, 310.0);
+        assert!((derived.deltas.one_minute - 10.0).abs() < 1e-9);
     }
 }
