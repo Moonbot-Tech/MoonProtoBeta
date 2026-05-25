@@ -6265,3 +6265,33 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 26.20s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: EngineResponse tail follows Delphi Read/CopyFrom
+
+Correction:
+
+- Re-checked `MoonProtoEngineStruct.pas:TEngineResponse.CreateFromStream`.
+- Rust treated missing `IsCompressed`, missing `DataSize`, and overdeclared
+  uncompressed `DataSize` as parse failures after a valid `ErrorMsg`.
+- Delphi reads `IsCompressed` and `sz` with `TMemoryStream.Read`, so missing tail
+  bytes become zero. For uncompressed data Delphi uses `FStream.CopyFrom(ms,
+  sz)`, which copies the available remaining bytes instead of requiring the
+  declared size to fit. `ErrorMsg` remains strict because
+  `ReadStringFromStreamUtf8` uses `ReadBuffer`.
+- Rust `parse_engine_response` now keeps that split. Compressed partial bodies
+  still fail if DEFLATE cannot decode them, matching Delphi decompressor
+  exception handling through `DataReadInt`.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.179`.
+
+Verification:
+
+- Added parser tests for missing compression flag, missing data size, and short
+  uncompressed response data after a valid `ErrorMsg`.
+- `cargo test engine_api --lib --quiet` OK: 41 tests.
+- `cargo test --lib --quiet` OK: 744 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.06s`, `ParseFailed=0`.

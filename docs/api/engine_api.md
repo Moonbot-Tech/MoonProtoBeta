@@ -176,6 +176,12 @@ pub struct EngineResponse {
 `ver` is the Delphi `TBaseCommand.ver` from the response header. `method`
 preserves the exact one-byte ordinal that the server sent. `data` is already
 DEFLATE-decompressed when the response was compressed on the wire.
+`TEngineResponse` follows Delphi tail semantics: `error_msg` is a strict
+`ReadBuffer` string and rejects the response when its declared bytes are
+missing; `IsCompressed`, `DataSize`, and uncompressed `Data` use Delphi
+`TMemoryStream.Read`/`CopyFrom` behavior after a valid string, so missing scalar
+tail bytes become zero and an overdeclared uncompressed `DataSize` keeps the
+available bytes.
 
 Transfer asset rows returned by `request_transfer_assets`:
 

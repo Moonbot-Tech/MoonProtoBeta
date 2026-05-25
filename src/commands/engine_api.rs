@@ -259,60 +259,22 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     // Skip Engine TBaseCommand header: CmdId(1) + ver(2) + own_UID(8) = 11 bytes.
     let mut pos = 11usize;
 
-    if pos + 8 > data.len() {
-        return None;
-    }
-    let request_uid = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-    pos += 8;
-
-    if pos + 1 > data.len() {
-        return None;
-    }
-    let method = EngineMethod::from_byte(data[pos]);
-    pos += 1;
-
-    if pos + 1 > data.len() {
-        return None;
-    }
-    let success = data[pos] != 0;
-    pos += 1;
-
-    if pos + 4 > data.len() {
-        return None;
-    }
-    let error_code = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    pos += 4;
+    let request_uid = read_u64_zero_tail(data, &mut pos);
+    let method = EngineMethod::from_byte(read_u8_zero_tail(data, &mut pos));
+    let success = read_u8_zero_tail(data, &mut pos) != 0;
+    let error_code = read_i32_zero_tail(data, &mut pos);
 
     let error_msg = read_string(data, &mut pos)?;
 
-    // IsCompressed + data size
-    if pos + 1 > data.len() {
-        return None;
-    }
-    let is_compressed = data[pos] != 0;
-    pos += 1;
-
-    if pos + 4 > data.len() {
-        return None;
-    }
-    let sz = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    pos += 4;
+    // Delphi uses TMemoryStream.Read for these scalar fields. Missing tail bytes
+    // stay zero after the strict ErrorMsg string has already been read.
+    let is_compressed = read_u8_zero_tail(data, &mut pos) != 0;
+    let sz = read_i32_zero_tail(data, &mut pos);
 
     let response_data = if sz > 0 {
         let sz = sz as usize;
-        let Some(end) = pos.checked_add(sz) else {
-            log::warn!(target: "moonproto::engine_api",
-                "EngineResponse uid={} declares overflowing data size {}",
-                request_uid, sz);
-            return None;
-        };
-        if end > data.len() {
-            log::warn!(target: "moonproto::engine_api",
-                "EngineResponse uid={} declares data size {} but only {} bytes remain",
-                request_uid, sz, data.len().saturating_sub(pos));
-            return None;
-        }
-
+        let available = data.len().saturating_sub(pos);
+        let end = pos + available.min(sz);
         let raw = &data[pos..end];
         if is_compressed {
             use std::io::Read;
@@ -343,6 +305,28 @@ pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
         error_msg,
         data: response_data,
     })
+}
+
+fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    if *pos < data.len() {
+        let n = (data.len() - *pos).min(N);
+        out[..n].copy_from_slice(&data[*pos..*pos + n]);
+        *pos += n;
+    }
+    out
+}
+
+fn read_u8_zero_tail(data: &[u8], pos: &mut usize) -> u8 {
+    read_zero_tail::<1>(data, pos)[0]
+}
+
+fn read_i32_zero_tail(data: &[u8], pos: &mut usize) -> i32 {
+    i32::from_le_bytes(read_zero_tail::<4>(data, pos))
+}
+
+fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
+    u64::from_le_bytes(read_zero_tail::<8>(data, pos))
 }
 
 /// Parse `EngineResponse.data` for `emk_GetBalance` (`EngineMethod::GetBalance`).
@@ -1166,23 +1150,28 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_returns_none_when_compression_flag_is_missing() {
+    fn parse_zero_tails_missing_compression_flag_like_delphi_stream_read() {
         let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
         payload.truncate(11 + 8 + 1 + 1 + 4 + 2);
 
-        assert!(parse_engine_response(&payload).is_none());
+        let resp = parse_engine_response(&payload).expect("missing IsCompressed zero-tails");
+        assert_eq!(resp.request_uid, 100);
+        assert!(resp.success);
+        assert!(resp.data.is_empty());
     }
 
     #[test]
-    fn parse_returns_none_when_data_size_is_missing() {
+    fn parse_zero_tails_missing_data_size_like_delphi_stream_read() {
         let mut payload = build_wire_response(0, 100, EngineMethod::BaseCheck, true, 0, "", &[]);
         payload.truncate(11 + 8 + 1 + 1 + 4 + 2 + 1);
 
-        assert!(parse_engine_response(&payload).is_none());
+        let resp = parse_engine_response(&payload).expect("missing DataSize zero-tails");
+        assert_eq!(resp.request_uid, 100);
+        assert!(resp.data.is_empty());
     }
 
     #[test]
-    fn parse_returns_none_when_declared_data_body_is_truncated() {
+    fn parse_keeps_available_uncompressed_data_when_declared_body_is_short_like_delphi_copyfrom() {
         let mut payload = build_wire_response(
             0,
             100,
@@ -1195,7 +1184,8 @@ mod parse_engine_response_tests {
         let size_pos = payload.len() - 2 - 4;
         payload[size_pos..size_pos + 4].copy_from_slice(&(8i32).to_le_bytes());
 
-        assert!(parse_engine_response(&payload).is_none());
+        let resp = parse_engine_response(&payload).expect("short Data body copies available bytes");
+        assert_eq!(resp.data, vec![0xAA, 0xBB]);
     }
 }
 
