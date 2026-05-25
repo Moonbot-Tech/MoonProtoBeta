@@ -4,9 +4,7 @@
 //! They intentionally mirror Delphi storage records where the record is a
 //! user-visible/history concept rather than only a wire packet.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
-use crate::state::seq_ring::{SeqRingRow, SeqRingRowSlot, SeqRingTimedRow};
+use crate::state::seq_ring::SeqRingTimedRow;
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 pub const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
@@ -52,6 +50,7 @@ impl TradesPacketTimeShift {
 /// means sell. This intentionally uses sign-bit checks, so `-0.0` has the same
 /// machine effect as Delphi's `PCardinal(@Qty)^ and $80000000`.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct TradeHistoryRow {
     pub time: f64,
     pub price: f32,
@@ -76,39 +75,9 @@ impl TradeHistoryRow {
     }
 }
 
-#[derive(Default)]
-pub struct TradeHistoryRowSlot {
-    time_bits: AtomicU64,
-    price_bits: AtomicU32,
-    qty_bits: AtomicU32,
-}
-
-impl SeqRingRow for TradeHistoryRow {
-    type Slot = TradeHistoryRowSlot;
-}
-
 impl SeqRingTimedRow for TradeHistoryRow {
     fn seq_ring_time(&self) -> f64 {
         self.time
-    }
-}
-
-impl SeqRingRowSlot for TradeHistoryRowSlot {
-    type Row = TradeHistoryRow;
-
-    fn store_row(&self, row: Self::Row) {
-        self.time_bits.store(row.time.to_bits(), Ordering::Relaxed);
-        self.price_bits
-            .store(row.price.to_bits(), Ordering::Relaxed);
-        self.qty_bits.store(row.qty.to_bits(), Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        TradeHistoryRow {
-            time: f64::from_bits(self.time_bits.load(Ordering::Relaxed)),
-            price: f32::from_bits(self.price_bits.load(Ordering::Relaxed)),
-            qty: f32::from_bits(self.qty_bits.load(Ordering::Relaxed)),
-        }
     }
 }
 
@@ -260,22 +229,12 @@ pub fn prepare_joined_trades_for_retained_append(
 /// address and color are companion data in Delphi
 /// `TStreamableRingBuffer<TMMOrder, TMMOrderData>` and must be ported as a
 /// separate companion layer, not silently folded into this base row.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct MMOrderHistoryRow {
     pub time: f64,
     pub vol: f64,
     pub q: f64,
-}
-
-#[derive(Default)]
-pub struct MMOrderHistoryRowSlot {
-    time_bits: AtomicU64,
-    vol_bits: AtomicU64,
-    q_bits: AtomicU64,
-}
-
-impl SeqRingRow for MMOrderHistoryRow {
-    type Slot = MMOrderHistoryRowSlot;
 }
 
 impl SeqRingTimedRow for MMOrderHistoryRow {
@@ -284,75 +243,15 @@ impl SeqRingTimedRow for MMOrderHistoryRow {
     }
 }
 
-impl SeqRingRowSlot for MMOrderHistoryRowSlot {
-    type Row = MMOrderHistoryRow;
-
-    fn store_row(&self, row: Self::Row) {
-        self.time_bits.store(row.time.to_bits(), Ordering::Relaxed);
-        self.vol_bits.store(row.vol.to_bits(), Ordering::Relaxed);
-        self.q_bits.store(row.q.to_bits(), Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        MMOrderHistoryRow {
-            time: f64::from_bits(self.time_bits.load(Ordering::Relaxed)),
-            vol: f64::from_bits(self.vol_bits.load(Ordering::Relaxed)),
-            q: f64::from_bits(self.q_bits.load(Ordering::Relaxed)),
-        }
-    }
-}
-
 /// Delphi `TMMOrderData`: companion data for `TMMOrder`.
 ///
 /// Delphi layout is `Taker: THLAddress` (20 bytes) and `Color: TColor`. It is
 /// stored beside the base `TMMOrder` row by slot, not inside the base row.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct MMOrderCompanionData {
     pub taker: [u8; 20],
     pub color: u32,
-}
-
-#[derive(Default)]
-pub struct MMOrderCompanionDataSlot {
-    taker0: AtomicU64,
-    taker1: AtomicU64,
-    taker2: AtomicU32,
-    color: AtomicU32,
-}
-
-impl SeqRingRow for MMOrderCompanionData {
-    type Slot = MMOrderCompanionDataSlot;
-}
-
-impl SeqRingRowSlot for MMOrderCompanionDataSlot {
-    type Row = MMOrderCompanionData;
-
-    fn store_row(&self, row: Self::Row) {
-        self.taker0.store(
-            u64::from_le_bytes(row.taker[0..8].try_into().unwrap()),
-            Ordering::Relaxed,
-        );
-        self.taker1.store(
-            u64::from_le_bytes(row.taker[8..16].try_into().unwrap()),
-            Ordering::Relaxed,
-        );
-        self.taker2.store(
-            u32::from_le_bytes(row.taker[16..20].try_into().unwrap()),
-            Ordering::Relaxed,
-        );
-        self.color.store(row.color, Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        let mut taker = [0u8; 20];
-        taker[0..8].copy_from_slice(&self.taker0.load(Ordering::Relaxed).to_le_bytes());
-        taker[8..16].copy_from_slice(&self.taker1.load(Ordering::Relaxed).to_le_bytes());
-        taker[16..20].copy_from_slice(&self.taker2.load(Ordering::Relaxed).to_le_bytes());
-        MMOrderCompanionData {
-            taker,
-            color: self.color.load(Ordering::Relaxed),
-        }
-    }
 }
 
 pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
@@ -377,20 +276,11 @@ pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
 /// MoonBot draws the brown LastPrice chart line from this history. The source
 /// value is `UpdateMarketsList -> pLast = (Bid + Ask) / 2`, not the trades
 /// stream last trade price.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct LastPricePoint {
     pub current: f32,
     pub real_time: f64,
-}
-
-#[derive(Default)]
-pub struct LastPricePointSlot {
-    current_bits: AtomicU32,
-    real_time_bits: AtomicU64,
-}
-
-impl SeqRingRow for LastPricePoint {
-    type Slot = LastPricePointSlot;
 }
 
 impl SeqRingTimedRow for LastPricePoint {
@@ -399,29 +289,12 @@ impl SeqRingTimedRow for LastPricePoint {
     }
 }
 
-impl SeqRingRowSlot for LastPricePointSlot {
-    type Row = LastPricePoint;
-
-    fn store_row(&self, row: Self::Row) {
-        self.current_bits
-            .store(row.current.to_bits(), Ordering::Relaxed);
-        self.real_time_bits
-            .store(row.real_time.to_bits(), Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        LastPricePoint {
-            current: f32::from_bits(self.current_bits.load(Ordering::Relaxed)),
-            real_time: f64::from_bits(self.real_time_bits.load(Ordering::Relaxed)),
-        }
-    }
-}
-
 /// Delphi `TMiniCandle` used to compact evicted detailed trades.
 ///
 /// Delphi layout is 24 bytes: `Time: TDateTime; Cnt: Integer; MinPrice,
 /// MaxPrice, BuyVol, SellVol: Single`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct MiniCandle {
     pub time: f64,
     pub cnt: i32,
@@ -431,51 +304,9 @@ pub struct MiniCandle {
     pub sell_vol: f32,
 }
 
-#[derive(Default)]
-pub struct MiniCandleSlot {
-    time_bits: AtomicU64,
-    cnt: AtomicU32,
-    min_price_bits: AtomicU32,
-    max_price_bits: AtomicU32,
-    buy_vol_bits: AtomicU32,
-    sell_vol_bits: AtomicU32,
-}
-
-impl SeqRingRow for MiniCandle {
-    type Slot = MiniCandleSlot;
-}
-
 impl SeqRingTimedRow for MiniCandle {
     fn seq_ring_time(&self) -> f64 {
         self.time
-    }
-}
-
-impl SeqRingRowSlot for MiniCandleSlot {
-    type Row = MiniCandle;
-
-    fn store_row(&self, row: Self::Row) {
-        self.time_bits.store(row.time.to_bits(), Ordering::Relaxed);
-        self.cnt.store(row.cnt as u32, Ordering::Relaxed);
-        self.min_price_bits
-            .store(row.min_price.to_bits(), Ordering::Relaxed);
-        self.max_price_bits
-            .store(row.max_price.to_bits(), Ordering::Relaxed);
-        self.buy_vol_bits
-            .store(row.buy_vol.to_bits(), Ordering::Relaxed);
-        self.sell_vol_bits
-            .store(row.sell_vol.to_bits(), Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        MiniCandle {
-            time: f64::from_bits(self.time_bits.load(Ordering::Relaxed)),
-            cnt: self.cnt.load(Ordering::Relaxed) as i32,
-            min_price: f32::from_bits(self.min_price_bits.load(Ordering::Relaxed)),
-            max_price: f32::from_bits(self.max_price_bits.load(Ordering::Relaxed)),
-            buy_vol: f32::from_bits(self.buy_vol_bits.load(Ordering::Relaxed)),
-            sell_vol: f32::from_bits(self.sell_vol_bits.load(Ordering::Relaxed)),
-        }
     }
 }
 

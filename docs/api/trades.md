@@ -342,6 +342,33 @@ pub struct MarketHistoryReaders {
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
 }
 
+pub struct SeqRingCursor;
+
+impl<T> SeqRingReader<T> {
+    pub fn cursor_from_oldest(&self) -> SeqRingCursor;
+    pub fn cursor_from_now(&self) -> SeqRingCursor;
+    pub fn copy_last(&self, limit: usize, out: &mut Vec<T>) -> SeqRingReadMeta;
+    pub fn copy_from_time(
+        &self,
+        time: f64,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> Option<SeqRingReadMeta>;
+    pub fn copy_time_range(
+        &self,
+        from_time: f64,
+        to_time: f64,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> Option<SeqRingReadMeta>;
+    pub fn copy_new_since(
+        &self,
+        cursor: &mut SeqRingCursor,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> SeqRingReadMeta;
+}
+
 pub struct MarketHistoryStore;
 pub struct MarketHistoryRegistry;
 
@@ -429,6 +456,57 @@ the base MM-order ring slot: when a taker address is present, the helper stores
 companion data for that slot.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
+For "only new rows", every consumer keeps its own `SeqRingCursor`; the library
+does not have global consumed/unconsumed state, so UI, strategy code, and logs
+can read the same history independently. Internally `SeqRing` stores rows as a
+dense retained ring under short read/write locks; the protocol receive path is
+not the retained-history writer.
+
+Typical "only new trades" usage:
+
+```rust
+use moonproto::state::{SeqRingCursor, SeqRingReader, TradeHistoryRow};
+
+struct MyTradeConsumer {
+    cursor: SeqRingCursor,
+    scratch: Vec<TradeHistoryRow>,
+}
+
+impl MyTradeConsumer {
+    fn start_from_now(reader: &SeqRingReader<TradeHistoryRow>) -> Self {
+        Self {
+            cursor: reader.cursor_from_now(),
+            scratch: Vec::new(),
+        }
+    }
+
+    fn start_from_retained_tail(reader: &SeqRingReader<TradeHistoryRow>) -> Self {
+        Self {
+            cursor: reader.cursor_from_oldest(),
+            scratch: Vec::new(),
+        }
+    }
+
+    fn poll_new(&mut self, reader: &SeqRingReader<TradeHistoryRow>) {
+        let meta = reader.copy_new_since(&mut self.cursor, 4096, &mut self.scratch);
+        if meta.clipped {
+            on_history_gap(meta.actual_start_seq);
+        }
+        for trade in &self.scratch {
+            on_trade(*trade);
+        }
+    }
+}
+```
+
+`cursor_from_now()` is for live consumers that do not want the already retained
+tail. `cursor_from_oldest()` first drains everything currently retained. If
+`copy_new_since` reports `clipped`, the consumer was slower than retention: the
+returned rows start at the oldest still available row, and the missing older
+rows cannot be recovered from this retained ring. This is per-consumer state;
+do not share one cursor between independent UI panels, strategy workers, or
+logging loops.
+
 `MarketHistoryRegistry` is an on-demand map of per-market stores. It deliberately
 does not allocate all market histories from `GetMarketsList`; future runtime
 integration creates a store only for markets/categories enabled by the active
@@ -438,7 +516,7 @@ history configuration.
 is the RAM-budget helper for init/config code. It budgets about 20% of total
 memory for retained histories, or 25% on machines below 8 GiB, then splits that
 budget across the given market count and categories. `estimated_bytes_per_market`
-uses the storage slot sizes used by `SeqRing` and is intended for tests and
+uses the dense row sizes used by `SeqRing` and is intended for tests and
 config diagnostics.
 
 ## Recovery Behavior

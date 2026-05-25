@@ -1,36 +1,20 @@
-//! Lock-free retained ring for hot active-library histories.
+//! Dense retained ring for hot active-library histories.
 //!
-//! The ring is single-writer / multi-reader. The writer owns
-//! [`SeqRingWriter`] and appends rows with monotonically increasing sequence
-//! numbers. Readers clone [`SeqRingReader`] and copy retained rows by sequence
-//! ranges. Public domain APIs should wrap this in time/N-row helpers; `seq` is
-//! the low-level storage coordinate.
-//!
-//! This module intentionally does not store arbitrary `T: Copy` inside
-//! `UnsafeCell`: a seqlock over non-atomic row bytes is easy to make unsound in
-//! Rust because a reader may copy the same bytes while the writer overwrites
-//! them. Rows are represented by atomic slots instead. The version word gives a
-//! consistent multi-field snapshot; the row fields themselves avoid data races.
+//! The ring is single-writer / multi-reader. The writer side is intended for
+//! `StoreWorker`, not for the UDP protocol reader. Rows are stored as a dense
+//! `Vec<T>` behind a short `parking_lot::RwLock`: appends take the write lock,
+//! readers either copy a simple range or scan a zero-copy read view inside a
+//! closure. This keeps the hot history memory layout close to Delphi's dense
+//! arrays without unsafe aliasing around overwrite-ring slots.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 /// A copyable row that can be stored in [`SeqRing`].
-///
-/// Implement this for fixed hot-path records by providing an atomic slot type
-/// with one atomic field per stored scalar. For floats, store IEEE bits in
-/// `AtomicU32`/`AtomicU64`.
-pub trait SeqRingRow: Copy + Send + Sync + 'static {
-    type Slot: SeqRingRowSlot<Row = Self>;
-}
+pub trait SeqRingRow: Copy + Default + Send + Sync + 'static {}
 
-/// Atomic storage for one [`SeqRingRow`].
-pub trait SeqRingRowSlot: Default + Send + Sync + 'static {
-    type Row: Copy + Send + Sync + 'static;
-
-    fn store_row(&self, row: Self::Row);
-    fn load_row(&self) -> Self::Row;
-}
+impl<T> SeqRingRow for T where T: Copy + Default + Send + Sync + 'static {}
 
 /// Row with a monotonic time coordinate.
 ///
@@ -38,22 +22,6 @@ pub trait SeqRingRowSlot: Default + Send + Sync + 'static {
 /// exposing internal sequence numbers to application code.
 pub trait SeqRingTimedRow: SeqRingRow {
     fn seq_ring_time(&self) -> f64;
-}
-
-impl SeqRingRow for u64 {
-    type Slot = AtomicU64;
-}
-
-impl SeqRingRowSlot for AtomicU64 {
-    type Row = u64;
-
-    fn store_row(&self, row: Self::Row) {
-        AtomicU64::store(self, row, Ordering::Relaxed);
-    }
-
-    fn load_row(&self) -> Self::Row {
-        AtomicU64::load(self, Ordering::Relaxed)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,18 +42,42 @@ pub struct SeqRingBounds {
 pub struct SeqRingReadMeta {
     pub requested_start_seq: u64,
     pub actual_start_seq: u64,
+    /// One past the newest sequence that existed when the read lock was taken.
     pub next_seq: u64,
     pub copied: usize,
     /// Requested start was older than retention.
     pub clipped: bool,
-    /// A slot was overwritten while copying. The caller can retry if it needs a
-    /// fully contiguous view.
+    /// Always false for the dense locked backend: the read lock prevents slot
+    /// overwrite during the copy/view.
     pub concurrent_miss: bool,
+}
+
+/// Per-consumer "read only new rows" cursor.
+///
+/// The cursor deliberately belongs to the caller. Each UI/user/strategy thread
+/// keeps its own cursor, so one consumer reading rows never marks them consumed
+/// for another consumer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SeqRingCursor {
+    next_seq: u64,
+}
+
+impl SeqRingCursor {
+    pub fn from_next_seq(next_seq: u64) -> Self {
+        Self { next_seq }
+    }
+
+    pub fn next_seq(self) -> u64 {
+        self.next_seq
+    }
+
+    pub fn set_next_seq(&mut self, next_seq: u64) {
+        self.next_seq = next_seq;
+    }
 }
 
 pub struct SeqRingWriter<T: SeqRingRow> {
     inner: Arc<SeqRingInner<T>>,
-    next_seq: u64,
 }
 
 #[derive(Clone)]
@@ -93,15 +85,60 @@ pub struct SeqRingReader<T: SeqRingRow> {
     inner: Arc<SeqRingInner<T>>,
 }
 
-struct SeqRingInner<T: SeqRingRow> {
-    slots: Box<[SeqRingSlotState<T>]>,
-    capacity: u64,
-    next_seq: AtomicU64,
+pub struct SeqRingReadView<'a, T: SeqRingRow> {
+    first: &'a [T],
+    second: &'a [T],
+    meta: SeqRingReadMeta,
 }
 
-struct SeqRingSlotState<T: SeqRingRow> {
-    version: AtomicU64,
-    row: T::Slot,
+impl<'a, T: SeqRingRow> SeqRingReadView<'a, T> {
+    pub fn meta(&self) -> SeqRingReadMeta {
+        self.meta
+    }
+
+    pub fn len(&self) -> usize {
+        self.first.len() + self.second.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return the physical slices in sequence order. Wrapped ranges produce two
+    /// slices; callers that do not care about zero-copy should use `copy_to`.
+    pub fn as_slices(&self) -> (&'a [T], &'a [T]) {
+        (self.first, self.second)
+    }
+
+    pub fn for_each<F>(&self, mut f: F)
+    where
+        F: FnMut(&T),
+    {
+        for row in self.first {
+            f(row);
+        }
+        for row in self.second {
+            f(row);
+        }
+    }
+
+    pub fn copy_to(&self, out: &mut Vec<T>) {
+        out.clear();
+        out.reserve(self.len());
+        out.extend_from_slice(self.first);
+        out.extend_from_slice(self.second);
+    }
+}
+
+struct SeqRingInner<T: SeqRingRow> {
+    state: RwLock<SeqRingState<T>>,
+}
+
+struct SeqRingState<T: SeqRingRow> {
+    rows: Box<[T]>,
+    capacity: usize,
+    next_seq: u64,
+    len: usize,
 }
 
 impl<T: SeqRingRow> SeqRingWriter<T> {
@@ -109,22 +146,18 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         if capacity == 0 {
             return Err(SeqRingError::ZeroCapacity);
         }
-        let slots = (0..capacity)
-            .map(|_| SeqRingSlotState {
-                version: AtomicU64::new(0),
-                row: T::Slot::default(),
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let rows = vec![T::default(); capacity].into_boxed_slice();
         let inner = Arc::new(SeqRingInner {
-            slots,
-            capacity: capacity as u64,
-            next_seq: AtomicU64::new(0),
+            state: RwLock::new(SeqRingState {
+                rows,
+                capacity,
+                next_seq: 0,
+                len: 0,
+            }),
         });
         Ok((
             Self {
                 inner: Arc::clone(&inner),
-                next_seq: 0,
             },
             SeqRingReader { inner },
         ))
@@ -140,24 +173,30 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     /// meaning: detailed rows that leave retained history can be folded into
     /// `TMiniCandle`-like aggregates instead of disappearing silently.
     pub fn push_with_evicted(&mut self, row: T) -> (u64, Option<T>) {
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
-
-        let slot = self.inner.slot(seq);
-        let evicted = self.read_evicted_from_slot(slot, seq);
-        slot.version.store(writing_version(seq), Ordering::Release);
-        slot.row.store_row(row);
-        slot.version
-            .store(published_version(seq), Ordering::Release);
-        self.inner
-            .next_seq
-            .store(seq.wrapping_add(1), Ordering::Release);
+        let mut state = self.inner.state.write();
+        let seq = state.next_seq;
+        let idx = state.slot_index(seq);
+        let evicted = if state.len == state.capacity {
+            Some(state.rows[idx])
+        } else {
+            state.len += 1;
+            None
+        };
+        state.rows[idx] = row;
+        state.next_seq = state.next_seq.wrapping_add(1);
         (seq, evicted)
     }
 
     pub fn push_batch(&mut self, rows: &[T]) {
+        let mut state = self.inner.state.write();
         for &row in rows {
-            self.push(row);
+            let seq = state.next_seq;
+            let idx = state.slot_index(seq);
+            if state.len < state.capacity {
+                state.len += 1;
+            }
+            state.rows[idx] = row;
+            state.next_seq = state.next_seq.wrapping_add(1);
         }
     }
 
@@ -170,42 +209,31 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     pub fn bounds(&self) -> SeqRingBounds {
         self.reader().bounds()
     }
-
-    fn read_evicted_from_slot(&self, slot: &SeqRingSlotState<T>, new_seq: u64) -> Option<T> {
-        if new_seq < self.inner.capacity {
-            return None;
-        }
-        let evicted_seq = new_seq - self.inner.capacity;
-        if published_seq(slot.version.load(Ordering::Acquire)) == Some(evicted_seq) {
-            Some(slot.row.load_row())
-        } else {
-            None
-        }
-    }
 }
 
 impl<T: SeqRingRow> SeqRingReader<T> {
     pub fn capacity(&self) -> usize {
-        self.inner.capacity as usize
+        self.inner.state.read().capacity
     }
 
     pub fn bounds(&self) -> SeqRingBounds {
-        let next_seq = self.inner.next_seq.load(Ordering::Acquire);
-        let oldest_seq = next_seq.saturating_sub(self.inner.capacity);
-        SeqRingBounds {
-            oldest_seq,
-            next_seq,
-            len: (next_seq - oldest_seq) as usize,
-            capacity: self.capacity(),
-        }
+        self.inner.state.read().bounds()
+    }
+
+    pub fn cursor_from_oldest(&self) -> SeqRingCursor {
+        SeqRingCursor::from_next_seq(self.bounds().oldest_seq)
+    }
+
+    pub fn cursor_from_now(&self) -> SeqRingCursor {
+        SeqRingCursor::from_next_seq(self.bounds().next_seq)
     }
 
     pub fn read_at_seq(&self, seq: u64) -> Option<T> {
-        let bounds = self.bounds();
-        if seq < bounds.oldest_seq || seq >= bounds.next_seq {
+        let state = self.inner.state.read();
+        if !state.contains_seq(seq) {
             return None;
         }
-        self.read_published_seq(seq)
+        Some(state.row_at_seq(seq))
     }
 
     /// Clears `out` and copies up to `limit` newest rows in sequence order.
@@ -218,35 +246,50 @@ impl<T: SeqRingRow> SeqRingReader<T> {
 
     /// Clears `out` and copies up to `limit` rows starting at `start_seq`.
     pub fn copy_from_seq(&self, start_seq: u64, limit: usize, out: &mut Vec<T>) -> SeqRingReadMeta {
-        out.clear();
+        self.with_from_seq(start_seq, limit, |view| {
+            view.copy_to(out);
+            view.meta()
+        })
+    }
 
+    /// Copy rows after a per-consumer cursor and advance the cursor by exactly
+    /// the copied rows. If the cursor fell behind retention, the read clips to
+    /// the oldest retained row and reports `clipped`.
+    pub fn copy_new_since(
+        &self,
+        cursor: &mut SeqRingCursor,
+        limit: usize,
+        out: &mut Vec<T>,
+    ) -> SeqRingReadMeta {
+        let meta = self.copy_from_seq(cursor.next_seq, limit, out);
+        cursor.next_seq = meta.actual_start_seq + meta.copied as u64;
+        meta
+    }
+
+    /// Lock the dense ring and expose the retained range as zero-copy slices
+    /// for the duration of `f`.
+    pub fn with_from_seq<R, F>(&self, start_seq: u64, limit: usize, f: F) -> R
+    where
+        F: FnOnce(SeqRingReadView<'_, T>) -> R,
+    {
+        let state = self.inner.state.read();
+        let (meta, end_seq) = state.read_meta(start_seq, limit);
+        let (first, second) = state.slices(meta.actual_start_seq, end_seq);
+        f(SeqRingReadView {
+            first,
+            second,
+            meta,
+        })
+    }
+
+    pub fn with_last<R, F>(&self, limit: usize, f: F) -> R
+    where
+        F: FnOnce(SeqRingReadView<'_, T>) -> R,
+    {
         let bounds = self.bounds();
-        let actual_start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
-        let end_seq = actual_start_seq
-            .saturating_add(limit as u64)
-            .min(bounds.next_seq);
-        out.reserve((end_seq - actual_start_seq) as usize);
-
-        let mut concurrent_miss = false;
-        let mut seq = actual_start_seq;
-        while seq < end_seq {
-            if let Some(row) = self.read_published_seq(seq) {
-                out.push(row);
-                seq += 1;
-            } else {
-                concurrent_miss = true;
-                break;
-            }
-        }
-
-        SeqRingReadMeta {
-            requested_start_seq: start_seq,
-            actual_start_seq,
-            next_seq: bounds.next_seq,
-            copied: out.len(),
-            clipped: actual_start_seq != start_seq,
-            concurrent_miss,
-        }
+        let limit = limit.min(bounds.len);
+        let start_seq = bounds.next_seq - limit as u64;
+        self.with_from_seq(start_seq, limit, f)
     }
 
     /// Binary-search a retained monotonic range. `is_before(row)` must return
@@ -255,13 +298,14 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     where
         F: FnMut(T) -> bool,
     {
-        let bounds = self.bounds();
+        let state = self.inner.state.read();
+        let bounds = state.bounds();
         let mut lo = bounds.oldest_seq;
         let mut hi = bounds.next_seq;
 
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let row = self.read_published_seq(mid)?;
+            let row = state.row_at_seq(mid);
             if is_before(row) {
                 lo = mid + 1;
             } else {
@@ -270,23 +314,6 @@ impl<T: SeqRingRow> SeqRingReader<T> {
         }
 
         Some(lo)
-    }
-
-    fn read_published_seq(&self, seq: u64) -> Option<T> {
-        let slot = self.inner.slot(seq);
-        for _ in 0..8 {
-            let v1 = slot.version.load(Ordering::Acquire);
-            if published_seq(v1) != Some(seq) {
-                return None;
-            }
-            let row = slot.row.load_row();
-            let v2 = slot.version.load(Ordering::Acquire);
-            if v1 == v2 {
-                return Some(row);
-            }
-            std::hint::spin_loop();
-        }
-        None
     }
 }
 
@@ -303,10 +330,16 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         limit: usize,
         out: &mut Vec<T>,
     ) -> Option<SeqRingReadMeta> {
-        let time_clipped = self.is_time_before_oldest(time);
-        let start_seq = self.first_seq_at_or_after_time(time)?;
-        let mut meta = self.copy_from_seq(start_seq, limit, out);
+        let state = self.inner.state.read();
+        let time_clipped = state.is_time_before_oldest(time);
+        let start_seq = state.first_seq_at_or_after_time(time);
+        let (mut meta, end_seq) = state.read_meta(start_seq, limit);
         meta.clipped |= time_clipped;
+        let (first, second) = state.slices(meta.actual_start_seq, end_seq);
+        out.clear();
+        out.reserve(meta.copied);
+        out.extend_from_slice(first);
+        out.extend_from_slice(second);
         Some(meta)
     }
 
@@ -318,38 +351,112 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         limit: usize,
         out: &mut Vec<T>,
     ) -> Option<SeqRingReadMeta> {
-        out.clear();
-        let time_clipped = self.is_time_before_oldest(from_time);
-        let start_seq = self.first_seq_at_or_after_time(from_time)?;
-        let bounds = self.bounds();
-        let actual_start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
-        let mut seq = actual_start_seq;
-        let mut concurrent_miss = false;
+        let state = self.inner.state.read();
+        let bounds = state.bounds();
+        let time_clipped = state.is_time_before_oldest(from_time);
+        let start_seq = state
+            .first_seq_at_or_after_time(from_time)
+            .max(bounds.oldest_seq)
+            .min(bounds.next_seq);
 
-        while seq < bounds.next_seq && out.len() < limit {
-            match self.read_published_seq(seq) {
-                Some(row) => {
-                    if row.seq_ring_time() >= to_time {
-                        break;
-                    }
-                    out.push(row);
-                    seq += 1;
-                }
-                None => {
-                    concurrent_miss = true;
-                    break;
-                }
+        out.clear();
+        let mut end_seq = start_seq;
+        while end_seq < bounds.next_seq && out.len() < limit {
+            let row = state.row_at_seq(end_seq);
+            if row.seq_ring_time() >= to_time {
+                break;
             }
+            out.push(row);
+            end_seq += 1;
         }
 
         Some(SeqRingReadMeta {
             requested_start_seq: start_seq,
-            actual_start_seq,
+            actual_start_seq: start_seq,
             next_seq: bounds.next_seq,
             copied: out.len(),
-            clipped: actual_start_seq != start_seq || time_clipped,
-            concurrent_miss,
+            clipped: time_clipped,
+            concurrent_miss: false,
         })
+    }
+}
+
+impl<T: SeqRingRow> SeqRingState<T> {
+    fn bounds(&self) -> SeqRingBounds {
+        let oldest_seq = self.next_seq.saturating_sub(self.len as u64);
+        SeqRingBounds {
+            oldest_seq,
+            next_seq: self.next_seq,
+            len: self.len,
+            capacity: self.capacity,
+        }
+    }
+
+    fn read_meta(&self, start_seq: u64, limit: usize) -> (SeqRingReadMeta, u64) {
+        let bounds = self.bounds();
+        let actual_start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
+        let end_seq = actual_start_seq
+            .saturating_add(limit as u64)
+            .min(bounds.next_seq);
+        let copied = (end_seq - actual_start_seq) as usize;
+        (
+            SeqRingReadMeta {
+                requested_start_seq: start_seq,
+                actual_start_seq,
+                next_seq: bounds.next_seq,
+                copied,
+                clipped: actual_start_seq != start_seq,
+                concurrent_miss: false,
+            },
+            end_seq,
+        )
+    }
+
+    fn contains_seq(&self, seq: u64) -> bool {
+        let bounds = self.bounds();
+        seq >= bounds.oldest_seq && seq < bounds.next_seq
+    }
+
+    fn slot_index(&self, seq: u64) -> usize {
+        (seq % self.capacity as u64) as usize
+    }
+
+    fn row_at_seq(&self, seq: u64) -> T {
+        self.rows[self.slot_index(seq)]
+    }
+
+    fn slices(&self, start_seq: u64, end_seq: u64) -> (&[T], &[T]) {
+        let len = (end_seq - start_seq) as usize;
+        if len == 0 {
+            return (&[], &[]);
+        }
+        let start = self.slot_index(start_seq);
+        let first_len = len.min(self.capacity - start);
+        let second_len = len - first_len;
+        (
+            &self.rows[start..start + first_len],
+            &self.rows[0..second_len],
+        )
+    }
+}
+
+impl<T: SeqRingTimedRow> SeqRingState<T> {
+    fn first_seq_at_or_after_time(&self, time: f64) -> u64 {
+        let bounds = self.bounds();
+        let mut lo = bounds.oldest_seq;
+        let mut hi = bounds.next_seq;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let row = self.row_at_seq(mid);
+            if row.seq_ring_time() < time {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        lo
     }
 
     fn is_time_before_oldest(&self, time: f64) -> bool {
@@ -357,74 +464,24 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         if bounds.len == 0 {
             return false;
         }
-        self.read_published_seq(bounds.oldest_seq)
-            .is_some_and(|row| time < row.seq_ring_time())
-    }
-}
-
-impl<T: SeqRingRow> SeqRingInner<T> {
-    fn slot(&self, seq: u64) -> &SeqRingSlotState<T> {
-        &self.slots[(seq % self.capacity) as usize]
-    }
-}
-
-fn writing_version(seq: u64) -> u64 {
-    published_version(seq) | 1
-}
-
-fn published_version(seq: u64) -> u64 {
-    seq.wrapping_add(1).wrapping_shl(1)
-}
-
-fn published_seq(version: u64) -> Option<u64> {
-    if version >= 2 && version & 1 == 0 {
-        Some((version >> 1) - 1)
-    } else {
-        None
+        time < self.row_at_seq(bounds.oldest_seq).seq_ring_time()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
     use std::thread;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     struct TimedRow {
         time_ms: u64,
         value: u64,
     }
 
-    #[derive(Default)]
-    struct TimedRowSlot {
-        time_ms: AtomicU64,
-        value: AtomicU64,
-    }
-
-    impl SeqRingRow for TimedRow {
-        type Slot = TimedRowSlot;
-    }
-
     impl SeqRingTimedRow for TimedRow {
         fn seq_ring_time(&self) -> f64 {
             self.time_ms as f64
-        }
-    }
-
-    impl SeqRingRowSlot for TimedRowSlot {
-        type Row = TimedRow;
-
-        fn store_row(&self, row: Self::Row) {
-            self.time_ms.store(row.time_ms, Ordering::Relaxed);
-            self.value.store(row.value, Ordering::Relaxed);
-        }
-
-        fn load_row(&self) -> Self::Row {
-            TimedRow {
-                time_ms: self.time_ms.load(Ordering::Relaxed),
-                value: self.value.load(Ordering::Relaxed),
-            }
         }
     }
 
@@ -493,6 +550,46 @@ mod tests {
         let mut out = Vec::new();
         reader.copy_last(2, &mut out);
         assert_eq!(out, vec![12, 13]);
+    }
+
+    #[test]
+    fn zero_copy_view_handles_wrapped_tail() {
+        let (mut writer, reader) = SeqRingWriter::<u64>::new(4).unwrap();
+        writer.push_batch(&[0, 1, 2, 3, 4, 5]);
+
+        let sum = reader.with_from_seq(2, 4, |view| {
+            let (first, second) = view.as_slices();
+            assert_eq!(first, &[2, 3]);
+            assert_eq!(second, &[4, 5]);
+            let mut sum = 0;
+            view.for_each(|value| sum += *value);
+            sum
+        });
+
+        assert_eq!(sum, 14);
+    }
+
+    #[test]
+    fn copy_new_since_uses_per_consumer_cursor() {
+        let (mut writer, reader) = SeqRingWriter::<u64>::new(8).unwrap();
+        writer.push_batch(&[10, 11, 12]);
+
+        let mut a = reader.cursor_from_oldest();
+        let mut b = reader.cursor_from_now();
+        let mut out = Vec::new();
+
+        reader.copy_new_since(&mut a, 2, &mut out);
+        assert_eq!(out, vec![10, 11]);
+        assert_eq!(a.next_seq(), 2);
+
+        writer.push_batch(&[13, 14]);
+        reader.copy_new_since(&mut a, 10, &mut out);
+        assert_eq!(out, vec![12, 13, 14]);
+        assert_eq!(a.next_seq(), 5);
+
+        reader.copy_new_since(&mut b, 10, &mut out);
+        assert_eq!(out, vec![13, 14]);
+        assert_eq!(b.next_seq(), 5);
     }
 
     #[test]

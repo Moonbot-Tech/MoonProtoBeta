@@ -5,6 +5,7 @@
 //! rows without taking locks on the writer path.
 
 use std::collections::HashMap;
+use std::mem::size_of;
 
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
@@ -17,11 +18,11 @@ use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 const EPS_MARKET: f64 = 1e-12;
 const DEFAULT_TRADE_JOIN_CAPACITY: usize = 1_000;
 const GIB: usize = 1024 * 1024 * 1024;
-const TRADE_SLOT_BYTES: usize = 24;
-const MM_ORDER_SLOT_BYTES: usize = 32;
-const MM_COMPANION_SLOT_BYTES: usize = 32;
-const LAST_PRICE_SLOT_BYTES: usize = 24;
-const MINI_CANDLE_SLOT_BYTES: usize = 40;
+const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
+const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
+const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
+const LAST_PRICE_SLOT_BYTES: usize = size_of::<LastPricePoint>();
+const MINI_CANDLE_SLOT_BYTES: usize = size_of::<MiniCandle>();
 const TRADE_JOIN_ROW_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

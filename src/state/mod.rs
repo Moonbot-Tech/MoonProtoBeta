@@ -46,8 +46,8 @@ pub use orders::{
     ApplyResult, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason,
 };
 pub use seq_ring::{
-    SeqRingBounds, SeqRingError, SeqRingReadMeta, SeqRingReader, SeqRingRow, SeqRingRowSlot,
-    SeqRingTimedRow, SeqRingWriter,
+    SeqRingBounds, SeqRingCursor, SeqRingError, SeqRingReadMeta, SeqRingReadView, SeqRingReader,
+    SeqRingRow, SeqRingTimedRow, SeqRingWriter,
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};

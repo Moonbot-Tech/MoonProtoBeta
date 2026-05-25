@@ -510,13 +510,15 @@ Target storage model for hot historical data:
 - User API must not expose internal chunks/wrap/slots. A user that wants to draw
   retained trades asks for a simple view: last N rows, N rows from time T, a
   time range, or a position found by time.
-- Locks on the hot receive/append/read path are forbidden unless metrics prove
-  they are outside the hot path. If Rust memory safety requires atomics/seqlock,
-  keep it in one small module with wrap/retention/concurrent tests.
-- Initial implementation direction: use an atomic row-slot trait, not a generic
-  `UnsafeCell<T>` seqlock. Each retained row type stores its scalar fields in
-  atomics; the ring version word gives a consistent multi-field snapshot. This
-  keeps the Delphi-like lock-free shape without Rust data races.
+- The protocol receive thread must not wait on history scans. Retained history
+  writes are owned by `StoreWorker`, a separate writer thread/layer.
+- Current implementation direction: dense `Vec<T>`/ring behind short
+  `parking_lot::RwLock` sections. This keeps rows as a compact array for full
+  scans, matches Delphi's dense history-array machine effect better than
+  per-field atomics, and remains safe without exposing references to overwrite
+  slots outside a read-locked closure.
+- "Read only new rows" is per consumer: each user/UI/strategy thread owns its
+  own `SeqRingCursor(next_seq)`. The ring does not have global consumed state.
 
 Sizing:
 
@@ -569,8 +571,8 @@ Done:
 - Added `SeqRingWriter::push_with_evicted`, so StoreWorker can compact rows
   that leave retained detailed trade history into `TMiniCandle`-like aggregates
   instead of silently dropping them.
-- Implemented the storage without `unsafe`: row types provide atomic slots, and
-  a per-slot version word verifies that multi-field reads are consistent.
+- Implemented the first storage without `unsafe`: initially row types provided
+  atomic slots and a per-slot version word verified multi-field reads.
 - Added `state::history::TradeHistoryRow`, matching Delphi `TTrade`
   (`Time: TDateTime`, `Price: Single`, signed `Qty: Single`) including Delphi's
   sign-bit `IsBuy` / `SameDirection` semantics.
@@ -630,7 +632,30 @@ Done:
 - Added `MarketHistoryConfig::from_total_memory_bytes`: default capacity sizing
   helper for future init/config wiring. It budgets ~20% of total memory for
   retained histories, or 25% below 8 GiB, then splits the per-market budget
-  across categories using `SeqRing` slot-size estimates.
+  across categories using `SeqRing` dense row-size estimates.
+
+### 2026-05-25 - SeqRing dense locked backend
+
+Decision:
+
+- Replaced the first atomic-field `SeqRing` backend with a dense ring:
+  `Vec<T>`/ring state under `parking_lot::RwLock`.
+- Reason: full scans over 100K trades are a first-class Active Lib use case.
+  Atomic field per scalar made a scan do several atomic loads per row and hid
+  the dense array from optimizer/cache behavior. That is worse than Delphi's
+  compact history arrays for this layer.
+- The protocol thread is not the writer for retained history. `StoreWorker`
+  owns appends, so a short history lock cannot block UDP receive.
+- Added `SeqRingCursor` and `SeqRingReader::copy_new_since`: every consumer
+  keeps its own cursor, so "read only new rows" is per thread/user, not global.
+- Added zero-copy read closures (`with_from_seq`, `with_last`) for fast scans
+  while keeping the lock scoped to the closure.
+
+Previous foundation verification before the dense backend replacement:
+
+- `cargo test seq_ring --lib` OK: 16 tests.
+- `cargo test history --lib` OK: 22 tests.
+- `cargo test history_store --lib` OK: 7 tests.
 
 Verification:
 
@@ -663,6 +688,11 @@ FireTest/stress CPU summaries становятся gate. Любой protocol-own
 sample относится к cold/non-protocol/app work, это надо доказать метриками и
 вынести из protocol loop, а не списывать как "нормально". Никаких accepted
 deviation без отдельного согласования.
+
+Post-publication storage/access review goes after this optimization gate, not
+inside the current parity rewrite: compare dense locked `SeqRing` against
+page/RCU or other history backends on real metrics and only then decide whether
+another backend is worth the complexity.
 
 ## Исторический план и progress log 2026-05-22
 
