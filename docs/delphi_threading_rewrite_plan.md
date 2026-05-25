@@ -608,6 +608,10 @@ Done:
 - Added `MarketHistoryStore::drain_joined_futures_like_delphi`, which drains
   the temp futures buffer through sort/skip-tail before appending to retained
   history and updating 1/3/5 minute rolling volumes.
+- Added `MarketPrice::chart_price_step`, matching Delphi
+  `AddNewAksPrice(Ask)`: update to `Max(eps, Ask / 5000)` only when `Ask > eps`
+  and otherwise keep the previous value. Futures retained join will use this
+  instead of a guessed Rust-only aggregation threshold.
 
 Verification:
 

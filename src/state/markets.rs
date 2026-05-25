@@ -35,6 +35,12 @@ pub struct MarketPrice {
     pub p_last: f64,
     /// Delphi `TMarket.MinLotSize`.
     pub min_lot_size: f64,
+    /// Delphi `TMarket.ChartPriceStep`, updated by `AddNewAksPrice(Ask)`.
+    ///
+    /// Futures retained trade join uses this value for same-price aggregation.
+    /// Delphi updates it only when `Ask > eps`; otherwise the previous value is
+    /// kept.
+    pub chart_price_step: f64,
     /// Funding rate (для perpetual futures), дробь — например `0.0001` = 0.01%.
     pub funding_rate: f64,
     /// Client-local Delphi `TDateTime` момента следующего funding взимания.
@@ -680,6 +686,9 @@ impl MarketsState {
             slot.last_ask = slot.ask;
             slot.p_last = (slot.bid + slot.ask) * 0.5;
             slot.min_lot_size = (bn_step_size.max(bn_min_qty) * slot.p_last).max(bn_min_notional);
+            if slot.ask > EPS_MARKET {
+                slot.chart_price_step = EPS_MARKET.max(slot.ask / 5000.0);
+            }
             if send_funding {
                 slot.funding_rate = p.funding_rate;
                 slot.funding_time = p.funding_time;
@@ -1025,6 +1034,7 @@ fn market_price_from_market(m: &Market) -> MarketPrice {
         last_ask: 0.0,
         p_last: 0.0,
         min_lot_size: 0.0,
+        chart_price_step: 0.0,
         funding_rate: m.funding_rate,
         funding_time: m.funding_time,
         mark_price: 0.0,
@@ -1583,6 +1593,31 @@ mod tests {
         assert_eq!(
             price.min_lot_size, 5.0,
             "Delphi uses Max(Max(step,minQty) * pLast, bnMinNotional)"
+        );
+        assert_eq!(
+            price.chart_price_step,
+            110.0 / 5000.0,
+            "Delphi AddNewAksPrice sets ChartPriceStep from Ask"
+        );
+
+        st.apply_markets_prices(MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 120.0,
+                ask: 0.0,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 0.0,
+                mark_price_found: false,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        assert_eq!(
+            st.price("BTCUSDT").unwrap().chart_price_step,
+            110.0 / 5000.0,
+            "Delphi AddNewAksPrice exits when Ask is zero and keeps previous ChartPriceStep"
         );
     }
 

@@ -67,6 +67,10 @@ For every applied market price row, `MarketPrice` also mirrors the Delphi
 post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
 `last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
 `min_lot_size = max(max(bn_step_size, bn_min_qty) * p_last, bn_min_notional)`.
+`chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
+`AddNewAksPrice(Ask)`: when `Ask > 0`, it becomes `max(eps, Ask / 5000)`;
+when `Ask` is zero/missing, the previous value is kept. Retained futures trade
+join uses this value for same-price aggregation.
 When funding is included, the same row also updates
 `Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
 mutation in the `HasFunding` branch.
@@ -187,6 +191,7 @@ pub struct MarketPrice {
     pub last_ask: f64,
     pub p_last: f64,
     pub min_lot_size: f64,
+    pub chart_price_step: f64,
     pub funding_rate: f64,
     pub funding_time: f64,
     pub mark_price: f64,
