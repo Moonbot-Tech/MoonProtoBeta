@@ -934,8 +934,9 @@ impl EventDispatcher {
         match decode_trades_packet(payload) {
             Some(decoded) => {
                 let effects = self.trades.on_packet_header(decoded.packet_num, now_ms);
-                let trade_events = self.collect_known_trades_events_like_delphi(&decoded, effects);
-                self.apply_trades_events_like_delphi(trade_events, now_ms, out);
+                let trade_events =
+                    self.collect_known_trades_events_like_delphi(&decoded, effects, now_ms);
+                self.apply_trades_events_like_delphi(trade_events, out);
             }
             None => out.push(Self::parse_failed(Command::TradesStream, payload)),
         }
@@ -958,25 +959,16 @@ impl EventDispatcher {
                 Some(decoded) => {
                     let effects = self.trades.on_packet_resend_header(decoded.packet_num);
                     let trade_events =
-                        self.collect_known_trades_events_like_delphi(&decoded, effects);
-                    self.apply_trades_events_like_delphi(trade_events, now_ms, out);
+                        self.collect_known_trades_events_like_delphi(&decoded, effects, now_ms);
+                    self.apply_trades_events_like_delphi(trade_events, out);
                 }
                 None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
             }
         }
     }
 
-    fn apply_trades_events_like_delphi(
-        &mut self,
-        events: Vec<TradesEvent>,
-        now_ms: i64,
-        out: &mut Vec<Event>,
-    ) {
+    fn apply_trades_events_like_delphi(&mut self, events: Vec<TradesEvent>, out: &mut Vec<Event>) {
         for ev in events {
-            if let TradesEvent::Apply(pkt) = &ev {
-                self.markets
-                    .apply_trades_packet_tail_like_delphi(pkt, now_ms);
-            }
             out.push(Event::Trade(ev));
         }
     }
@@ -1096,8 +1088,9 @@ impl EventDispatcher {
     }
 
     fn collect_known_trades_packet_like_delphi(
-        &self,
+        &mut self,
         decoded: &DecodedTradesPacket<'_>,
+        now_ms: Option<i64>,
     ) -> TradesPacket {
         let mut sections = Vec::new();
         for section in decoded.sections() {
@@ -1105,7 +1098,20 @@ impl EventDispatcher {
                 TradeSectionRef::Trades(rows) => {
                     if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
                     {
-                        sections.push(TradeSection::Trades(rows.collect()));
+                        let mut collected = Vec::with_capacity(rows.len());
+                        for trade in rows {
+                            if let Some(now_ms) = now_ms {
+                                self.markets.apply_trade_tail_row_like_delphi(
+                                    trade.market_index,
+                                    trade.is_spot,
+                                    trade.price,
+                                    trade.qty,
+                                    now_ms,
+                                );
+                            }
+                            collected.push(trade);
+                        }
+                        sections.push(TradeSection::Trades(collected));
                     }
                 }
                 TradeSectionRef::MMOrders(rows) => {
@@ -1151,15 +1157,17 @@ impl EventDispatcher {
     }
 
     fn collect_known_trades_events_like_delphi(
-        &self,
+        &mut self,
         decoded: &DecodedTradesPacket<'_>,
         effects: Vec<TradesPacketEffect>,
+        now_ms: i64,
     ) -> Vec<TradesEvent> {
         let mut packet_for_apply = None;
         let mut events = Vec::with_capacity(effects.len());
         for effect in effects {
             if matches!(&effect, TradesPacketEffect::Apply) && packet_for_apply.is_none() {
-                packet_for_apply = Some(self.collect_known_trades_packet_like_delphi(decoded));
+                packet_for_apply =
+                    Some(self.collect_known_trades_packet_like_delphi(decoded, Some(now_ms)));
             }
             events.push(effect.into_event(&mut packet_for_apply));
         }

@@ -16,8 +16,6 @@ use crate::commands::market::{
     CorrMarket, CorrMarketPriceUpdate, EngineStreamReader, Market, MarketPriceUpdate,
     MarketTokenTags, MarketsListResponse, MarketsPricesResponse, TokenTags,
 };
-use crate::commands::trades_stream::{TradeSection, TradesPacket};
-
 const EPS_MARKET: f64 = 1e-12;
 
 /// Per-market price snapshot (обновляется через `emk_UpdateMarketsList`).
@@ -717,38 +715,32 @@ impl MarketsState {
         MarketsEvent::IndexesUpdated { count }
     }
 
-    /// Apply the Delphi `ProcessTradesStream` live market tail side effects.
+    /// Apply the Delphi `ProcessTradesStream` live market tail side effects for
+    /// one already-known trade row.
     ///
-    /// Gap tracking remains in `TradesState`. This method mirrors only the
-    /// bounded per-market tail fields from the parsed trade sections:
-    /// futures trades call the `SetLastTradePrices` tail and update
-    /// `LastGotAllTrades`; spot trades update only `LastGotSpotTrades`.
-    pub(crate) fn apply_trades_packet_tail_like_delphi(&mut self, pkt: &TradesPacket, now_ms: i64) {
-        for section in &pkt.sections {
-            let TradeSection::Trades(trades) = section else {
-                continue;
-            };
-            for trade in trades {
-                let Some(name) = self
-                    .market_name_by_index(trade.market_index)
-                    .map(str::to_owned)
-                else {
-                    continue;
-                };
-                if !self.by_name.contains_key(&name) {
-                    continue;
-                }
-                let state = self.trade_states.entry(name).or_default();
-                if trade.is_spot {
-                    state.apply_spot_trade_like_delphi(now_ms);
-                } else {
-                    state.apply_futures_trade_like_delphi(
-                        f64::from(trade.price),
-                        f64::from(trade.qty),
-                        now_ms,
-                    );
-                }
-            }
+    /// Gap tracking remains in `TradesState`. This mirrors only the bounded
+    /// per-market tail fields: futures trades call the `SetLastTradePrices`
+    /// tail and update `LastGotAllTrades`; spot trades update only
+    /// `LastGotSpotTrades`.
+    pub(crate) fn apply_trade_tail_row_like_delphi(
+        &mut self,
+        market_index: u16,
+        is_spot: bool,
+        price: f32,
+        qty: f32,
+        now_ms: i64,
+    ) {
+        let Some(name) = self.market_name_by_index(market_index).map(str::to_owned) else {
+            return;
+        };
+        if !self.by_name.contains_key(&name) {
+            return;
+        }
+        let state = self.trade_states.entry(name).or_default();
+        if is_spot {
+            state.apply_spot_trade_like_delphi(now_ms);
+        } else {
+            state.apply_futures_trade_like_delphi(f64::from(price), f64::from(qty), now_ms);
         }
     }
 

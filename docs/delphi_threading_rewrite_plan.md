@@ -5409,11 +5409,29 @@ Verification:
 - `cargo test --lib` OK: 698 tests.
 - `cargo check --examples` OK.
 
+### 2026-05-25 - Trades market tail moved before owned event dependency
+
+Done:
+
+- `MarketsState` now exposes a row-level `apply_trade_tail_row_like_delphi`.
+- Active dispatcher applies futures/spot market tail while it collects known
+  trade rows from borrowed `DecodedTradesPacket` sections.
+- `TradesEvent::Apply(TradesPacket)` is no longer the source of market-tail
+  mutation in the active dispatcher; it remains the public compatibility event.
+
+Verification:
+
+- `cargo test trades --lib` OK: 58 tests.
+- `cargo test dispatcher_ --lib` OK: 41 tests.
+- `cargo test --lib` OK: 698 tests.
+- `cargo check --examples` OK.
+
 Still not done:
 
-- Public `TradesEvent::Apply` still carries owned vectors. The next step is to
-  move market tail/history application to borrowed section iteration first, and
-  keep owned event construction as the compatibility notification layer.
+- Retained-history worker batches are still built from the owned public
+  `TradesPacket`. Next step: build `MarketHistoryStreamBatch` in the same
+  borrowed section walk, so retained storage also stops depending on public
+  owned event construction.
 
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
