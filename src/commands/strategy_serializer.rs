@@ -5,7 +5,8 @@
 //! ## Назначение
 //! Парсит RTTI-driven binary snapshot стратегий из payload'а `TStratSnapshot.data`.
 //! Сервер (Delphi MoonBot) использует RTTI для итерации по public-полям `TStrategy`;
-//! Rust-клиент не имеет RTTI, поэтому хранит поля как `HashMap<FieldName, FieldValue>`.
+//! Rust-клиент не имеет RTTI, поэтому хранит поля как `StrategyFields`:
+//! плотный список `(FieldName, FieldValue)` с lookup по имени.
 //! Для typed writer и Delphi `ReadField` TypeID-проверок Rust использует live
 //! `TStratSchema`, полученную от сервера, а не статическую копию `TStrategy`
 //! field order/defaults.
@@ -48,6 +49,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 use super::registry::decode_utf8_delphi;
 use super::strategy_schema::{StrategySchema, StrategySchemaField};
@@ -174,8 +176,9 @@ impl FieldValue {
 //  StrategySnapshot
 // =============================================================================
 
-/// Распакованный snapshot одной стратегии. Поля хранятся в HashMap по имени —
-/// потребитель использует `FieldValue::*` extractors для строгой типизации.
+/// Распакованный snapshot одной стратегии. Поля хранятся в `StrategyFields` по
+/// имени; потребитель использует `FieldValue::*` extractors для строгой
+/// типизации.
 #[derive(Debug, Clone)]
 pub struct StrategySnapshot {
     pub strategy_id: u64,
@@ -186,7 +189,90 @@ pub struct StrategySnapshot {
     pub kind: u8,
     /// Folder path (из PathDict по PathID; пустая строка если PathID out-of-range).
     pub path: String,
-    pub fields: HashMap<String, FieldValue>,
+    pub fields: StrategyFields,
+}
+
+/// Decoded strategy fields keyed by Delphi `NameDict` field name.
+///
+/// This is intentionally a dense vector, not a Rust `HashMap`: Delphi reads a
+/// compact RTTI field stream in order, and each strategy usually has only a
+/// small visible field set. A dense list avoids per-field hashing while keeping
+/// the public ergonomic operations (`get`, `insert`, `iter`).
+#[derive(Debug, Clone, Default)]
+pub struct StrategyFields {
+    entries: Vec<(Arc<str>, FieldValue)>,
+}
+
+impl StrategyFields {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert<K>(&mut self, key: K, value: FieldValue) -> Option<FieldValue>
+    where
+        K: Into<Arc<str>>,
+    {
+        let key = key.into();
+        if let Some((_, existing)) = self
+            .entries
+            .iter_mut()
+            .find(|(name, _)| name.as_ref() == key.as_ref())
+        {
+            return Some(std::mem::replace(existing, value));
+        }
+        self.entries.push((key, value));
+        None
+    }
+
+    #[inline]
+    fn push_deserialized_field(&mut self, key: Arc<str>, value: FieldValue) {
+        // Delphi `TStrategySerializer` writes each RTTI field at most once per
+        // strategy. The hot reader path can append directly; public `insert`
+        // keeps replacement semantics for user-built snapshots.
+        self.entries.push((key, value));
+    }
+
+    pub fn get(&self, key: &str) -> Option<&FieldValue> {
+        self.entries
+            .iter()
+            .find(|(name, _)| name.as_ref() == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Arc<str>, &FieldValue)> {
+        self.entries.iter().map(|(name, value)| (name, value))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl<K> FromIterator<(K, FieldValue)> for StrategyFields
+where
+    K: Into<Arc<str>>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, FieldValue)>>(iter: T) -> Self {
+        let mut fields = Self::new();
+        for (key, value) in iter {
+            fields.insert(key, value);
+        }
+        fields
+    }
 }
 
 /// Raw Delphi `TStrategyKind` ordinal (`Strategies.pas`).
@@ -323,10 +409,21 @@ pub fn parse_strategy_batch_plain_with_schema(
     let mut pos = 0usize;
     let names = read_dict(data, &mut pos)?;
     let paths = read_dict(data, &mut pos)?;
+    let field_names = names
+        .iter()
+        .map(|name| Arc::<str>::from(name.as_str()))
+        .collect::<Vec<_>>();
+    let reader_fields = schema.map(|schema| build_reader_fields(&names, schema));
     let strat_count = read_u16(data, &mut pos)? as usize;
     let mut strategies = Vec::with_capacity(strat_count);
     for _ in 0..strat_count {
-        strategies.push(read_strategy(data, &mut pos, &names, &paths, schema)?);
+        strategies.push(read_strategy(
+            data,
+            &mut pos,
+            &field_names,
+            &paths,
+            reader_fields.as_deref(),
+        )?);
     }
     Some(StrategyBatch {
         names,
@@ -350,12 +447,28 @@ fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     Some(out)
 }
 
+fn build_reader_fields(names: &[String], schema: &StrategySchema) -> Vec<Option<u8>> {
+    // Delphi `TStrategySerializer.BuildReaderProps`: NameDict -> RTTI field
+    // mapping is built once for the whole snapshot, then ReadField only indexes
+    // it by FieldIdx. Do the same instead of scanning schema.fields for every
+    // field of every strategy.
+    let schema_by_name: HashMap<&str, u8> = schema
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.raw_type_id))
+        .collect();
+    names
+        .iter()
+        .map(|name| schema_by_name.get(name.as_str()).copied())
+        .collect()
+}
+
 fn read_strategy(
     data: &[u8],
     pos: &mut usize,
-    names: &[String],
+    field_names: &[Arc<str>],
     paths: &[String],
-    schema: Option<&StrategySchema>,
+    reader_fields: Option<&[Option<u8>]>,
 ) -> Option<StrategySnapshot> {
     let strategy_id = read_u64(data, pos)?;
     let strategy_ver = read_i32(data, pos)?;
@@ -366,21 +479,21 @@ fn read_strategy(
     let path = paths.get(path_id).cloned().unwrap_or_default();
 
     let field_count = read_u16(data, pos)? as usize;
-    let mut fields = HashMap::with_capacity(field_count);
+    let mut fields = StrategyFields::with_capacity(field_count);
 
     for _ in 0..field_count {
         let field_idx = read_u16(data, pos)? as usize;
         let type_id = read_u8(data, pos)?;
         let is_zero = (type_id & TID_ZERO_FLAG) != 0;
         let real_type = type_id & 0x7F;
-        let name = names.get(field_idx);
 
-        if let Some(schema) = schema {
-            let Some(field) = name.and_then(|name| schema.field(name)) else {
+        if let Some(reader_fields) = reader_fields {
+            let Some(expected_type_id) = reader_fields.get(field_idx).and_then(|field| *field)
+            else {
                 skip_field_by_type_id(data, pos, type_id)?;
                 continue;
             };
-            if real_type != field.raw_type_id {
+            if real_type != expected_type_id {
                 skip_field_by_type_id(data, pos, type_id)?;
                 continue;
             }
@@ -394,8 +507,8 @@ fn read_strategy(
         };
 
         if let Some(v) = value {
-            if let Some(name) = name {
-                fields.insert(name.clone(), v);
+            if let Some(name) = field_names.get(field_idx) {
+                fields.push_deserialized_field(Arc::clone(name), v);
             }
             // Иначе — поле известного типа, но имя не в словаре. Поведение Delphi:
             // ReaderProps[idx] = nil → SkipField; в данной точке мы УЖЕ прочитали значение,
@@ -624,7 +737,7 @@ impl<'a> StrategyBatchBuilder<'a> {
             if !field.visible_for_kind(s.kind) {
                 continue;
             }
-            let Some(value) = s.fields.get(&field.name) else {
+            let Some(value) = s.fields.get(field.name.as_str()) else {
                 continue;
             };
             if !strategy_schema_field_should_write(field, value) {
@@ -817,18 +930,12 @@ mod tests {
     }
 
     fn sample_strategy(id: u64, name: &str, path: &str) -> StrategySnapshot {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String(name.to_string()),
-        );
-        fields.insert("OrderSize".to_string(), FieldValue::Double(123.45));
-        fields.insert("KeepAlert".to_string(), FieldValue::Int32(61));
-        fields.insert("AcceptCommands".to_string(), FieldValue::Bool(true));
-        fields.insert(
-            "Comment".to_string(),
-            FieldValue::String("Test strategy".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String(name.to_string()));
+        fields.insert("OrderSize", FieldValue::Double(123.45));
+        fields.insert("KeepAlert", FieldValue::Int32(61));
+        fields.insert("AcceptCommands", FieldValue::Bool(true));
+        fields.insert("Comment", FieldValue::String("Test strategy".to_string()));
         StrategySnapshot {
             strategy_id: id,
             strategy_ver: 1,
@@ -854,7 +961,7 @@ mod tests {
             path: String::new(),
             fields: fields
                 .iter()
-                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .map(|(name, value)| (Arc::<str>::from(*name), value.clone()))
                 .collect(),
         }
     }
@@ -925,16 +1032,13 @@ mod tests {
 
     #[test]
     fn writer_uses_schema_field_order_for_name_dict() {
-        let mut fields = HashMap::new();
-        fields.insert("OrderSize".to_string(), FieldValue::Double(1.0));
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("A".to_string()),
-        );
-        fields.insert("UnknownZ".to_string(), FieldValue::Byte(1));
-        fields.insert("AcceptCommands".to_string(), FieldValue::Bool(true));
-        fields.insert("UnknownA".to_string(), FieldValue::Byte(2));
-        fields.insert("Comment".to_string(), FieldValue::String("C".to_string()));
+        let mut fields = StrategyFields::new();
+        fields.insert("OrderSize", FieldValue::Double(1.0));
+        fields.insert("StrategyName", FieldValue::String("A".to_string()));
+        fields.insert("UnknownZ", FieldValue::Byte(1));
+        fields.insert("AcceptCommands", FieldValue::Bool(true));
+        fields.insert("UnknownA", FieldValue::Byte(2));
+        fields.insert("Comment", FieldValue::String("C".to_string()));
 
         let schema = sample_schema();
         let mut b = StrategyBatchBuilder::new(&schema);
@@ -962,25 +1066,16 @@ mod tests {
 
     #[test]
     fn writer_skips_schema_defaults_unknown_fields_and_type_mismatches() {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Local".to_string()),
-        );
-        fields.insert("KeepAlert".to_string(), FieldValue::Int32(60));
-        fields.insert("UseStopLoss".to_string(), FieldValue::Bool(true));
-        fields.insert("StopLoss".to_string(), FieldValue::Double(-5.0));
-        fields.insert("PendingOrderSpread".to_string(), FieldValue::Double(0.1));
-        fields.insert("DebugLog".to_string(), FieldValue::Bool(false));
-        fields.insert("UnknownA".to_string(), FieldValue::Byte(7));
-        fields.insert(
-            "OrderSize".to_string(),
-            FieldValue::String("wrong type".to_string()),
-        );
-        fields.insert(
-            "SellOrderColor".to_string(),
-            FieldValue::String(String::new()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("Local".to_string()));
+        fields.insert("KeepAlert", FieldValue::Int32(60));
+        fields.insert("UseStopLoss", FieldValue::Bool(true));
+        fields.insert("StopLoss", FieldValue::Double(-5.0));
+        fields.insert("PendingOrderSpread", FieldValue::Double(0.1));
+        fields.insert("DebugLog", FieldValue::Bool(false));
+        fields.insert("UnknownA", FieldValue::Byte(7));
+        fields.insert("OrderSize", FieldValue::String("wrong type".to_string()));
+        fields.insert("SellOrderColor", FieldValue::String(String::new()));
 
         let schema = sample_schema();
         let mut b = StrategyBatchBuilder::new(&schema);
@@ -1036,11 +1131,11 @@ mod tests {
 
     #[test]
     fn zero_flag_encoded_for_zero_values() {
-        let mut fields = HashMap::new();
-        fields.insert("KeepAlert".to_string(), FieldValue::Int32(0));
-        fields.insert("UseStopLoss".to_string(), FieldValue::Bool(false));
-        fields.insert("SignalType".to_string(), FieldValue::String(String::new()));
-        fields.insert("DebugLog".to_string(), FieldValue::Bool(false));
+        let mut fields = StrategyFields::new();
+        fields.insert("KeepAlert", FieldValue::Int32(0));
+        fields.insert("UseStopLoss", FieldValue::Bool(false));
+        fields.insert("SignalType", FieldValue::String(String::new()));
+        fields.insert("DebugLog", FieldValue::Bool(false));
 
         let s = StrategySnapshot {
             strategy_id: 1,
@@ -1109,8 +1204,8 @@ mod tests {
         write_u8_len_bytes(&mut name_bytes, long_name.as_bytes());
         assert_eq!(name_bytes, vec![1, b'N']);
 
-        let mut fields = HashMap::new();
-        fields.insert("Comment".to_string(), FieldValue::String(long_value));
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String(long_value));
 
         let s = StrategySnapshot {
             strategy_id: 1000,

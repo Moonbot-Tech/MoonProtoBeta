@@ -179,7 +179,6 @@ const DEAD_ZONE_MS: i64 = 5000; // MoonProtoUDPClient.pas:799
 const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
 const COMPRESSED_FLAG: u8 = 0x80; // MoonProtoDataStruct.pas:27
 const MIN_SIZE_TO_COMPRESS: usize = 64; // MoonProtoDataStruct.pas:31
-const IMFRIEND_DUPLICATE_DELAY_MS: u64 = 32; // MoonProtoUDPClient.pas:433-436
 const NEVER_SENT_MS: i64 = i64::MIN / 2; // Эквивалент Delphi LastSentHello=0 при uptime-clock
 const NEVER_TIME_MS: i64 = i64::MIN / 2;
 const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
@@ -941,6 +940,61 @@ impl ClientSender {
                 .store(self.start.elapsed().as_millis() as i64, Ordering::Relaxed);
         }
         result
+    }
+
+    pub(crate) fn apply_active_actions<I>(&self, actions: I)
+    where
+        I: IntoIterator<Item = crate::events::ActiveAction>,
+    {
+        if !self.domain_ready_for_typed_send() {
+            return;
+        }
+        for action in actions {
+            match action {
+                crate::events::ActiveAction::RequestMarketsList => {
+                    self.send_api_request(crate::commands::engine_request::get_markets_list());
+                }
+                crate::events::ActiveAction::RequestUpdateMarketsList => {
+                    self.send_api_request(crate::commands::engine_request::update_markets_list());
+                }
+                crate::events::ActiveAction::RequestStrategySchema => {
+                    self.strat_schema_request();
+                }
+                crate::events::ActiveAction::RequestOrderBookFull {
+                    market_index,
+                    book_kind,
+                } => {
+                    self.send_api_request(
+                        crate::commands::engine_request::request_order_book_full(
+                            market_index,
+                            book_kind,
+                        ),
+                    );
+                }
+                crate::events::ActiveAction::SendStrategySnapshot {
+                    server_epoch,
+                    client_max_last_date,
+                    full,
+                    data,
+                } => {
+                    self.strat_send_snapshot_payload(
+                        server_epoch,
+                        client_max_last_date,
+                        full,
+                        &data,
+                    );
+                }
+                crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
+                    self.request_order_status(ctx, &market_name);
+                }
+                crate::events::ActiveAction::OrderCancel { request } => {
+                    self.send_order_cancel_request(request);
+                }
+                crate::events::ActiveAction::TradesResend { payload } => {
+                    self.send_api_request(payload);
+                }
+            }
+        }
     }
 
     fn send_domain_cmd(
@@ -2146,6 +2200,22 @@ type StateAppEvent = (
     Arc<crate::events::EventDispatcherSnapshot>,
 );
 
+pub(crate) enum DispatcherWorkItem {
+    Data {
+        cmd: Command,
+        payload: Vec<u8>,
+        now_ms: i64,
+        ctx: crate::events::ActiveDispatchContext,
+    },
+    DrainDeferredOrderRemovals {
+        now_ms: i64,
+    },
+    TickOrders {
+        now_ms: i64,
+    },
+    ResetOrderbookCachesKeepBooks,
+}
+
 /// Callback that receives typed events from [`Client::run_with_dispatcher`].
 ///
 /// The callback runs from the application callback queue after dispatcher state
@@ -2228,6 +2298,11 @@ pub(crate) enum RunMode<'a> {
         /// Переиспользуемый буфер active-library side effects.
         active_actions_buf: Vec<crate::events::ActiveAction>,
     },
+    DispatcherWorker {
+        tx: mpsc::Sender<DispatcherWorkItem>,
+        /// Переиспользуемый буфер decoded payload'ов перед worker FIFO.
+        payload_buf: Vec<(Command, Vec<u8>)>,
+    },
 }
 
 /// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcherSnapshot)`.
@@ -2245,11 +2320,19 @@ impl DispatcherEventFn {
         events: &mut Vec<crate::events::Event>,
         dispatcher: &mut crate::events::EventDispatcher,
         protocol_metrics: &ProtocolMetrics,
+        source_cmd: Option<Command>,
+        source_payload_len: usize,
     ) {
         if events.is_empty() {
             return;
         }
         let enqueue_start = Instant::now();
+        let event_count = events.len();
+        let mode = match self {
+            Self::QueueToCallback(_) => 1,
+            Self::QueueToStateCallback(_) => 2,
+            Self::Queue => 3,
+        };
         match self {
             Self::QueueToCallback(tx) => {
                 for event in events.drain(..) {
@@ -2266,7 +2349,85 @@ impl DispatcherEventFn {
                 dispatcher.queue_events(events.drain(..));
             }
         }
-        protocol_metrics.record_app_enqueue(enqueue_start.elapsed());
+        protocol_metrics.record_app_enqueue_labeled(
+            enqueue_start.elapsed(),
+            source_cmd.map_or(u8::MAX, Command::to_byte),
+            source_payload_len,
+            event_count,
+            mode,
+        );
+    }
+}
+
+fn run_dispatcher_worker(
+    rx: mpsc::Receiver<DispatcherWorkItem>,
+    dispatcher: &mut crate::events::EventDispatcher,
+    mut on_event: DispatcherEventFn,
+    sender: ClientSender,
+    protocol_metrics: Arc<ProtocolMetrics>,
+    trades_server_token_mirror: Arc<AtomicU64>,
+) {
+    let mut event_buf = Vec::with_capacity(8);
+    let mut active_actions_buf = Vec::with_capacity(4);
+    while let Ok(item) = rx.recv() {
+        match item {
+            DispatcherWorkItem::Data {
+                cmd,
+                payload,
+                now_ms,
+                ctx,
+            } => {
+                event_buf.clear();
+                active_actions_buf.clear();
+                let active_dispatch_start = Instant::now();
+                dispatcher.dispatch_into_active_actions(
+                    cmd,
+                    &payload,
+                    now_ms,
+                    &mut event_buf,
+                    &ctx,
+                    &mut active_actions_buf,
+                );
+                trades_server_token_mirror
+                    .store(dispatcher.trades_server_token(), Ordering::Relaxed);
+                let event_count = event_buf.len();
+                let action_count = active_actions_buf.len();
+                sender.apply_active_actions(active_actions_buf.drain(..));
+                protocol_metrics.record_active_dispatch_labeled(
+                    active_dispatch_start.elapsed(),
+                    cmd.to_byte(),
+                    payload.len(),
+                    event_count,
+                    action_count,
+                );
+                on_event.drain_events(
+                    &mut event_buf,
+                    dispatcher,
+                    &protocol_metrics,
+                    Some(cmd),
+                    payload.len(),
+                );
+            }
+            DispatcherWorkItem::DrainDeferredOrderRemovals { now_ms } => {
+                event_buf.clear();
+                dispatcher.drain_deferred_order_removals_due(now_ms, &mut event_buf);
+                on_event.drain_events(&mut event_buf, dispatcher, &protocol_metrics, None, 0);
+            }
+            DispatcherWorkItem::TickOrders { now_ms } => {
+                event_buf.clear();
+                active_actions_buf.clear();
+                dispatcher.tick_orders_active_actions(
+                    now_ms,
+                    &mut event_buf,
+                    &mut active_actions_buf,
+                );
+                sender.apply_active_actions(active_actions_buf.drain(..));
+                on_event.drain_events(&mut event_buf, dispatcher, &protocol_metrics, None, 0);
+            }
+            DispatcherWorkItem::ResetOrderbookCachesKeepBooks => {
+                dispatcher.reset_orderbook_caches_keep_books();
+            }
+        }
     }
 }
 
@@ -2394,55 +2555,77 @@ impl ProtocolCore<'_> {
     ) -> bool {
         let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
         protocol_metrics.record_recv_packet();
-        let _protocol_timer = protocol_metrics.reader_protocol_timer();
+        let protocol_start = Instant::now();
+        let mut metric_cmd = u8::MAX;
+        let mut metric_payload_len = datagram.len();
 
-        let Some((hdr, payload)) = moonproto_transport::transport_unpack_with_mac(
-            &self.client.mac_ctx,
-            &self.client.cfg.mac_key,
-            datagram,
-            self.client.cfg.mask_ver,
-        ) else {
-            return true;
+        let continue_recv = if let Some((hdr, payload)) =
+            moonproto_transport::transport_unpack_with_mac(
+                &self.client.mac_ctx,
+                &self.client.cfg.mac_key,
+                datagram,
+                self.client.cfg.mask_ver,
+            ) {
+            metric_cmd = Command::from_byte(hdr.cmd).to_byte();
+            metric_payload_len = payload.len();
+
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                    Command::from_byte(hdr.cmd),
+                    hdr.cmd,
+                    datagram.len(),
+                    payload.len()
+                );
+            }
+
+            let timestamp_ms = self.client.now_ms();
+            self.apply_recv_side_effects(recv_bytes, timestamp_ms);
+            let total_recv_after = self
+                .client
+                .total_recv_shared
+                .fetch_add(recv_bytes, Ordering::Relaxed)
+                + recv_bytes;
+
+            if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
+                self.client
+                    .err_emu_diagnostics
+                    .lock()
+                    .unwrap()
+                    .record_packet(hdr.cmd, &payload, decision);
+                if decision.dropped {
+                    Self::on_err_emu_drop_inline(hdr.cmd, &payload);
+                    true
+                } else {
+                    self.handle_command_inline(
+                        hdr.cmd,
+                        &payload,
+                        recv_bytes,
+                        total_recv_after,
+                        timestamp_ms,
+                        mode,
+                    )
+                }
+            } else {
+                self.handle_command_inline(
+                    hdr.cmd,
+                    &payload,
+                    recv_bytes,
+                    total_recv_after,
+                    timestamp_ms,
+                    mode,
+                )
+            }
+        } else {
+            true
         };
 
-        if trace_io_enabled() {
-            eprintln!(
-                "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
-                Command::from_byte(hdr.cmd),
-                hdr.cmd,
-                datagram.len(),
-                payload.len()
-            );
-        }
-
-        let timestamp_ms = self.client.now_ms();
-        self.apply_recv_side_effects(recv_bytes, timestamp_ms);
-        let total_recv_after = self
-            .client
-            .total_recv_shared
-            .fetch_add(recv_bytes, Ordering::Relaxed)
-            + recv_bytes;
-
-        if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
-            self.client
-                .err_emu_diagnostics
-                .lock()
-                .unwrap()
-                .record_packet(hdr.cmd, &payload, decision);
-            if decision.dropped {
-                Self::on_err_emu_drop_inline(hdr.cmd, &payload);
-                return true;
-            }
-        }
-
-        self.handle_command_inline(
-            hdr.cmd,
-            &payload,
-            recv_bytes,
-            total_recv_after,
-            timestamp_ms,
-            mode,
-        )
+        protocol_metrics.record_reader_protocol_labeled(
+            protocol_start.elapsed(),
+            metric_cmd,
+            metric_payload_len,
+        );
+        continue_recv
     }
 
     fn handle_command_inline(
@@ -2681,7 +2864,6 @@ impl ProtocolCore<'_> {
         ) {
             let encrypted = self.apply_who_are_you_hello_and_build_imfriend(hello);
             self.send_command(Command::ImFriend, &encrypted);
-            thread::sleep(Duration::from_millis(IMFRIEND_DUPLICATE_DELAY_MS));
             self.send_command(Command::ImFriend, &encrypted);
             let _ = recv_bytes;
         } else {
@@ -2864,16 +3046,30 @@ impl ProtocolCore<'_> {
     }
 
     fn drain_deferred_order_removals_due(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher {
-            dispatcher,
-            on_event,
-            event_buf,
-            ..
-        } = mode
-        {
-            event_buf.clear();
-            dispatcher.drain_deferred_order_removals_due(cur_tm, event_buf);
-            on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
+        match mode {
+            RunMode::Dispatcher {
+                dispatcher,
+                on_event,
+                event_buf,
+                ..
+            } => {
+                event_buf.clear();
+                dispatcher.drain_deferred_order_removals_due(cur_tm, event_buf);
+                on_event.drain_events(
+                    event_buf,
+                    dispatcher,
+                    &self.client.protocol_metrics,
+                    None,
+                    0,
+                );
+            }
+            RunMode::DispatcherWorker { tx, .. } => {
+                let _ = tx.send(DispatcherWorkItem::DrainDeferredOrderRemovals { now_ms: cur_tm });
+            }
+            #[cfg(test)]
+            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::CallbackQueue { .. } => {}
         }
     }
 
@@ -3032,12 +3228,65 @@ impl ProtocolCore<'_> {
                         &ctx,
                         active_actions_buf,
                     );
+                    let event_count = event_buf.len();
+                    let action_count = active_actions_buf.len();
                     self.client
                         .apply_active_actions(active_actions_buf.drain(..));
-                    self.client
-                        .protocol_metrics
-                        .record_active_dispatch(active_dispatch_start.elapsed());
-                    on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
+                    self.client.protocol_metrics.record_active_dispatch_labeled(
+                        active_dispatch_start.elapsed(),
+                        c.to_byte(),
+                        p.len(),
+                        event_count,
+                        action_count,
+                    );
+                    on_event.drain_events(
+                        event_buf,
+                        dispatcher,
+                        &self.client.protocol_metrics,
+                        Some(c),
+                        p.len(),
+                    );
+                }
+            }
+            RunMode::DispatcherWorker { tx, payload_buf } => {
+                payload_buf.clear();
+                let authorized_before = self.client.authorized;
+                if command == Command::API {
+                    if !candles_chunk_consumed_by_reader {
+                        self.client.process_api_bookkeeping_light(&payload);
+                        payload_buf.push((Command::API, payload));
+                    }
+                } else {
+                    let mut sink = DispatchSink::Buffer(payload_buf);
+                    self.client.client_new_data_decoded(
+                        cmd,
+                        payload,
+                        api_pending_consumed_by_reader,
+                        candles_chunk_consumed_by_reader,
+                        &mut sink,
+                    );
+                }
+                if !authorized_before && !self.client.authorized {
+                    payload_buf.clear();
+                    return;
+                }
+                for (c, p) in payload_buf.drain(..) {
+                    let enqueue_start = Instant::now();
+                    let payload_len = p.len();
+                    let work = DispatcherWorkItem::Data {
+                        cmd: c,
+                        payload: p,
+                        now_ms: cur_tm,
+                        ctx: crate::events::ActiveDispatchContext::from_client(self.client),
+                    };
+                    let _ = tx.send(work);
+                    self.client.protocol_metrics.record_app_enqueue_labeled(
+                        enqueue_start.elapsed(),
+                        c.to_byte(),
+                        payload_len,
+                        1,
+                        4,
+                    );
                 }
             }
         }
@@ -3142,38 +3391,79 @@ impl ProtocolCore<'_> {
     /// from the tail of `ProcessTradesStream`, and Rust mirrors that in
     /// `EventDispatcher::dispatch_into_active_actions`.
     fn periodic_trades_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher { dispatcher, .. } = mode {
-            if cur_tm - self.client.last_trades_tick_ms >= 100 {
-                self.client.last_trades_tick_ms = cur_tm;
-                self.client
-                    .tick_trades_reconnect_sequence(cur_tm, dispatcher.trades_server_token());
-            }
+        if cur_tm - self.client.last_trades_tick_ms < 100 {
+            return;
+        }
+        self.client.last_trades_tick_ms = cur_tm;
+        let trades_server_token = match mode {
+            RunMode::Dispatcher { dispatcher, .. } => dispatcher.trades_server_token(),
+            RunMode::DispatcherWorker { .. } => self
+                .client
+                .dispatcher_trades_server_token
+                .load(Ordering::Relaxed),
+            #[cfg(test)]
+            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => return,
+            #[cfg(not(test))]
+            RunMode::CallbackQueue { .. } => return,
+        };
+        self.client
+            .tick_trades_reconnect_sequence(cur_tm, trades_server_token);
+    }
+
+    fn send_worker_item(mode: &RunMode<'_>, item: DispatcherWorkItem) {
+        if let RunMode::DispatcherWorker { tx, .. } = mode {
+            let _ = tx.send(item);
         }
     }
 
     fn periodic_orderbook_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher { dispatcher, .. } = mode {
-            if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
-                dispatcher.reset_orderbook_caches_keep_books();
+        match mode {
+            RunMode::Dispatcher { dispatcher, .. } => {
+                if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
+                    dispatcher.reset_orderbook_caches_keep_books();
+                }
             }
+            RunMode::DispatcherWorker { .. } => {
+                if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
+                    Self::send_worker_item(mode, DispatcherWorkItem::ResetOrderbookCachesKeepBooks);
+                }
+            }
+            #[cfg(test)]
+            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::CallbackQueue { .. } => {}
         }
     }
 
     fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
-        if let RunMode::Dispatcher {
-            dispatcher,
-            on_event,
-            event_buf,
-            active_actions_buf,
-            ..
-        } = mode
-        {
-            event_buf.clear();
-            active_actions_buf.clear();
-            dispatcher.tick_orders_active_actions(cur_tm, event_buf, active_actions_buf);
-            self.client
-                .apply_active_actions(active_actions_buf.drain(..));
-            on_event.drain_events(event_buf, dispatcher, &self.client.protocol_metrics);
+        match mode {
+            RunMode::Dispatcher {
+                dispatcher,
+                on_event,
+                event_buf,
+                active_actions_buf,
+                ..
+            } => {
+                event_buf.clear();
+                active_actions_buf.clear();
+                dispatcher.tick_orders_active_actions(cur_tm, event_buf, active_actions_buf);
+                self.client
+                    .apply_active_actions(active_actions_buf.drain(..));
+                on_event.drain_events(
+                    event_buf,
+                    dispatcher,
+                    &self.client.protocol_metrics,
+                    None,
+                    0,
+                );
+            }
+            RunMode::DispatcherWorker { tx, .. } => {
+                let _ = tx.send(DispatcherWorkItem::TickOrders { now_ms: cur_tm });
+            }
+            #[cfg(test)]
+            RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::CallbackQueue { .. } => {}
         }
     }
 
@@ -4034,6 +4324,13 @@ struct PartialCandles {
     sender: mpsc::Sender<MergedCandles>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EngineResponseMeta {
+    request_uid: u64,
+    method: EngineMethod,
+    success: bool,
+}
+
 /// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
 struct SentSliced {
     datagram_num: u16,
@@ -4204,6 +4501,7 @@ pub struct Client {
     total_recv_shared: Arc<AtomicU64>,
     err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     protocol_metrics: Arc<ProtocolMetrics>,
+    dispatcher_trades_server_token: Arc<AtomicU64>,
     next_port: u16,
     ping_count: u32,
 
@@ -4435,6 +4733,7 @@ impl Client {
         let total_recv_shared = Arc::new(AtomicU64::new(0));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
+        let dispatcher_trades_server_token = Arc::new(AtomicU64::new(0));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
 
         // Active library F8: acquire the Delphi-style process-level NTP syncer
@@ -4517,6 +4816,7 @@ impl Client {
             total_recv_shared,
             err_emu_diagnostics,
             protocol_metrics,
+            dispatcher_trades_server_token,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
@@ -7012,11 +7312,15 @@ impl Client {
         dispatcher: &mut crate::events::EventDispatcher,
         on_event: EventFn,
     ) {
-        // Все active-library auto-actions (RequestOrderBookFull, trades resend
-        // tail-check, indexes sync gate, ServerTimeDelta apply, server-token
-        // state reset) живут в protocol thread. User callback получает уже
-        // готовые события через app queue и не блокирует protocol tick.
+        // Protocol loop owns transport only. The active-library dispatcher is
+        // processed by a worker thread: this mirrors Delphi `TThread.Queue`
+        // boundaries for heavy domain work and keeps user callbacks away from
+        // UDP receive / ACK / retry progress.
+        let sender = self.sender();
+        let protocol_metrics = Arc::clone(&self.protocol_metrics);
+        let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
         let (app_tx, app_rx) = mpsc::channel::<crate::events::Event>();
+        let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
             let (tx, rx) = mpsc::channel::<LifecycleEvent>();
             *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
@@ -7040,17 +7344,27 @@ impl Client {
                     on_event(&event);
                 }
             });
-            {
-                let mut mode = RunMode::Dispatcher {
+            let dispatcher_handle = scope.spawn(move || {
+                run_dispatcher_worker(
+                    work_rx,
                     dispatcher,
-                    on_event: DispatcherEventFn::QueueToCallback(app_tx),
-                    event_buf: Vec::with_capacity(8),
+                    DispatcherEventFn::QueueToCallback(app_tx),
+                    sender,
+                    protocol_metrics,
+                    trades_server_token_mirror,
+                );
+            });
+            {
+                let mut mode = RunMode::DispatcherWorker {
+                    tx: work_tx,
                     payload_buf: Vec::with_capacity(4),
-                    active_actions_buf: Vec::with_capacity(4),
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
             *lifecycle_app_tx.lock().unwrap() = None;
+            dispatcher_handle
+                .join()
+                .expect("moonproto dispatcher worker thread panicked");
             app_handle
                 .join()
                 .expect("moonproto app callback thread panicked");
@@ -7081,7 +7395,11 @@ impl Client {
         dispatcher: &mut crate::events::EventDispatcher,
         on_event: EventWithStateFn,
     ) {
+        let sender = self.sender();
+        let protocol_metrics = Arc::clone(&self.protocol_metrics);
+        let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
         let (app_tx, app_rx) = mpsc::channel::<StateAppEvent>();
+        let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
             let (tx, rx) = mpsc::channel::<LifecycleEvent>();
             *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
@@ -7105,17 +7423,27 @@ impl Client {
                     on_event(&event, snapshot.as_ref());
                 }
             });
-            {
-                let mut mode = RunMode::Dispatcher {
+            let dispatcher_handle = scope.spawn(move || {
+                run_dispatcher_worker(
+                    work_rx,
                     dispatcher,
-                    on_event: DispatcherEventFn::QueueToStateCallback(app_tx),
-                    event_buf: Vec::with_capacity(8),
+                    DispatcherEventFn::QueueToStateCallback(app_tx),
+                    sender,
+                    protocol_metrics,
+                    trades_server_token_mirror,
+                );
+            });
+            {
+                let mut mode = RunMode::DispatcherWorker {
+                    tx: work_tx,
                     payload_buf: Vec::with_capacity(4),
-                    active_actions_buf: Vec::with_capacity(4),
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
             *lifecycle_app_tx.lock().unwrap() = None;
+            dispatcher_handle
+                .join()
+                .expect("moonproto dispatcher worker thread panicked");
             app_handle
                 .join()
                 .expect("moonproto app callback thread panicked");
@@ -7543,8 +7871,114 @@ impl Client {
         Some(u64::from_le_bytes(uid.try_into().unwrap()))
     }
 
+    fn engine_response_meta_from_payload(payload: &[u8]) -> Option<EngineResponseMeta> {
+        if payload.len() < 11 {
+            return None;
+        }
+        let mut pos = 11usize;
+        let request_uid = u64::from_le_bytes(payload.get(pos..pos + 8)?.try_into().ok()?);
+        pos += 8;
+        let method = EngineMethod::from_byte(*payload.get(pos)?);
+        pos += 1;
+        let success = *payload.get(pos)? != 0;
+        pos += 1;
+        // ErrorCode.
+        payload.get(pos..pos + 4)?;
+        pos += 4;
+        // ErrorMsg string, length-prefixed UTF-8. Skip only; no allocation.
+        let len = u16::from_le_bytes(payload.get(pos..pos + 2)?.try_into().ok()?) as usize;
+        pos += 2;
+        payload.get(pos..pos + len)?;
+        Some(EngineResponseMeta {
+            request_uid,
+            method,
+            success,
+        })
+    }
+
     fn engine_response_method_from_payload(payload: &[u8]) -> Option<EngineMethod> {
         payload.get(19).copied().map(EngineMethod::from_byte)
+    }
+
+    fn apply_engine_response_client_bookkeeping(&mut self, resp: &EngineResponse) {
+        // Active library: auto-clear indexes_fetch_in_flight на ответе
+        // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
+        if resp.method == EngineMethod::GetMarketsIndexes {
+            self.indexes_fetch_in_flight = false;
+            let indexes_payload_ok = resp.success
+                && crate::commands::market::parse_markets_indexes_response(&resp.data).is_some();
+            if indexes_payload_ok {
+                // Запоминаем что для текущего PeerAppToken индексы получены.
+                self.tracked_indexes_peer_app_token = self.peer_app_token;
+                if self.update_markets_after_indexes {
+                    self.update_markets_after_indexes = false;
+                    self.send_api_request(&crate::commands::engine_request::update_markets_list());
+                }
+                if self.restore_orderbooks_after_indexes {
+                    self.restore_orderbooks_after_indexes = false;
+                    self.restore_orderbook_subscriptions_from_registry();
+                }
+            }
+        }
+
+        // Delphi `DoSubscribeOrderBooks`: только успешный ответ подтверждает
+        // текущий `ServerToken`. Для reconnect batch это полный `BookSubbed`
+        // replay; обычная точечная подписка может выставить token только в
+        // initial state, как Delphi `FSubscribedBookServerToken = 0`.
+        if resp.method == EngineMethod::SubscribeOrderBook {
+            let is_reconnect_batch =
+                self.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
+            if resp.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
+                self.subscribed_book_server_token = self.server_token;
+            }
+            if is_reconnect_batch {
+                self.pending_orderbook_resubscribe_uid = None;
+            }
+        }
+
+        // Delphi `TMoonProtoEngine.SubscribeAllTrades`: successful
+        // `emk_SubscribeAllTrades` refreshes `LastReconnectCheck`.
+        // Until the first TradesStream packet updates `FTradesServerToken`,
+        // this 5s gate prevents immediate unsubscribe/resubscribe churn.
+        if resp.method == EngineMethod::SubscribeAllTrades && resp.success {
+            let now_ms = self.now_ms();
+            self.last_trades_reconnect_check_ms = now_ms;
+            self.last_trades_subscribe_request_ms
+                .store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    fn apply_engine_response_meta_bookkeeping(&mut self, meta: EngineResponseMeta) {
+        if meta.method == EngineMethod::SubscribeOrderBook {
+            let is_reconnect_batch =
+                self.pending_orderbook_resubscribe_uid == Some(meta.request_uid);
+            if meta.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
+                self.subscribed_book_server_token = self.server_token;
+            }
+            if is_reconnect_batch {
+                self.pending_orderbook_resubscribe_uid = None;
+            }
+        }
+
+        if meta.method == EngineMethod::SubscribeAllTrades && meta.success {
+            let now_ms = self.now_ms();
+            self.last_trades_reconnect_check_ms = now_ms;
+            self.last_trades_subscribe_request_ms
+                .store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    fn process_api_bookkeeping_light(&mut self, payload: &[u8]) {
+        let Some(meta) = Self::engine_response_meta_from_payload(payload) else {
+            return;
+        };
+        if meta.method == EngineMethod::GetMarketsIndexes {
+            if let Some(resp) = parse_engine_response(payload) {
+                self.apply_engine_response_client_bookkeeping(&resp);
+            }
+        } else {
+            self.apply_engine_response_meta_bookkeeping(meta);
+        }
     }
 
     fn dispatch_api_pending_inline(api_pending: &ApiPending, cmd: u8, payload: &[u8]) -> bool {
@@ -7648,56 +8082,9 @@ impl Client {
             // Если slot не зарегистрирован — fallback на pending registry /
             // on_data для fire-and-forget API users.
 
-            // 2. Active library: auto-clear indexes_fetch_in_flight на ответе
-            // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
-            if resp.method == EngineMethod::GetMarketsIndexes {
-                self.indexes_fetch_in_flight = false;
-                let indexes_payload_ok = resp.success
-                    && crate::commands::market::parse_markets_indexes_response(&resp.data)
-                        .is_some();
-                if indexes_payload_ok {
-                    // Запоминаем что для текущего PeerAppToken индексы получены.
-                    self.tracked_indexes_peer_app_token = self.peer_app_token;
-                    if self.update_markets_after_indexes {
-                        self.update_markets_after_indexes = false;
-                        self.send_api_request(
-                            &crate::commands::engine_request::update_markets_list(),
-                        );
-                    }
-                    if self.restore_orderbooks_after_indexes {
-                        self.restore_orderbooks_after_indexes = false;
-                        self.restore_orderbook_subscriptions_from_registry();
-                    }
-                }
-            }
+            self.apply_engine_response_client_bookkeeping(&resp);
 
-            // 3. Delphi `DoSubscribeOrderBooks`: только успешный ответ подтверждает
-            // текущий `ServerToken`. Для reconnect batch это полный `BookSubbed`
-            // replay; обычная точечная подписка может выставить token только в
-            // initial state, как Delphi `FSubscribedBookServerToken = 0`.
-            if resp.method == EngineMethod::SubscribeOrderBook {
-                let is_reconnect_batch =
-                    self.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
-                if resp.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
-                    self.subscribed_book_server_token = self.server_token;
-                }
-                if is_reconnect_batch {
-                    self.pending_orderbook_resubscribe_uid = None;
-                }
-            }
-
-            // Delphi `TMoonProtoEngine.SubscribeAllTrades`: successful
-            // `emk_SubscribeAllTrades` refreshes `LastReconnectCheck`.
-            // Until the first TradesStream packet updates `FTradesServerToken`,
-            // this 5s gate prevents immediate unsubscribe/resubscribe churn.
-            if resp.method == EngineMethod::SubscribeAllTrades && resp.success {
-                let now_ms = self.now_ms();
-                self.last_trades_reconnect_check_ms = now_ms;
-                self.last_trades_subscribe_request_ms
-                    .store(now_ms, Ordering::Relaxed);
-            }
-
-            // 4. Pending registry (обычный async API).
+            // 2. Pending registry (обычный async API).
             let pending_consumed =
                 api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
             if !pending_consumed || sink.is_buffer() {
@@ -9076,11 +9463,10 @@ mod api_pending_dispatch_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
     use crate::commands::market::build_markets_indexes_response;
-    use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+    use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
     use crate::commands::ui::{build_client_settings, ClientSettingsCommand};
     use crate::events::EventDispatcher;
     use moonproto_transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
-    use std::collections::HashMap;
     use std::net::UdpSocket;
 
     fn write_str8(out: &mut Vec<u8>, value: &str) {
@@ -9891,11 +10277,8 @@ mod api_pending_dispatch_tests {
         let mut dispatcher = EventDispatcher::new();
         apply_comment_strategy_schema(&mut dispatcher);
         dispatcher.set_local_strategy_epoch(55);
-        let mut fields = HashMap::new();
-        fields.insert(
-            "Comment".to_string(),
-            FieldValue::String("post-init".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String("post-init".to_string()));
         let strategy = StrategySnapshot {
             strategy_id: 0x5157,
             strategy_ver: 3,
@@ -13655,14 +14038,23 @@ mod event_loop_fairness_tests {
             Command::UI,
             SendPriority::Sliced,
             false,
-            0,
+            6,
         );
 
-        client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
+        let total_sent_before = client.total_sent();
+        client.run_with_dispatcher_queued(Duration::from_millis(50), &mut dispatcher);
 
         assert!(
-            !client.sending.is_empty(),
+            client.send_lock.lock().unwrap().is_empty(),
             "writer must copy direct Delphi-style send queues without app-event bridge"
+        );
+        assert!(
+            !client.sending.is_empty(),
+            "Sliced item with retry budget must remain in Sending until ACK or retry exhaustion"
+        );
+        assert!(
+            client.total_sent() > total_sent_before,
+            "writer tick must send from copied queue"
         );
     }
 
@@ -14788,7 +15180,7 @@ mod service_cmd_tests {
         assert!(events1.is_empty());
         assert_eq!(
             imfriend1, imfriend2,
-            "Delphi sends the same prepared ImFriend payload twice with Sleep(32)"
+            "Rust keeps Delphi duplicate ImFriend wire effect but removes blocking Sleep(32)"
         );
         let (encode_key, decode_key) =
             crypto::generate_sub_keys(&client.cfg.master_key, server_token);

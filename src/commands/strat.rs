@@ -619,11 +619,9 @@ mod tests {
 
     #[test]
     fn build_snapshot_from_strategies_computes_max_last_date() {
-        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
-        use std::collections::HashMap;
-
-        let mut fields = HashMap::new();
-        fields.insert("Name".to_string(), FieldValue::String("A".to_string()));
+        use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
+        let mut fields = StrategyFields::new();
+        fields.insert("Name", FieldValue::String("A".to_string()));
         let strategies = vec![
             StrategySnapshot {
                 strategy_id: 1,

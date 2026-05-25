@@ -4,6 +4,10 @@
 
 Статус: рабочий документ для перестройки `moonproto`.
 
+Рабочее правило Codex: не останавливаться, пока есть понятная следующая работа
+по плану и нет вилки, требующей решения автора. Статус в чат — только на
+узловых точках, при красном флаге или когда нужен выбор.
+
 ## Уточнение 2026-05-24: machine-effect важнее числа потоков
 
 Два OS-потока Delphi не являются самостоятельным протокольным контрактом.
@@ -1711,7 +1715,7 @@ Done:
 - `WhoAreYou` now follows the Delphi machine-effect order more closely:
   clear `waiting_hello` before decode, apply `ServerToken`/`PeerAppToken`,
   increment `ClientToken`, build/pack the ImFriend hello, generate session keys,
-  encrypt, then send the same `MPC_ImFriend` payload twice with the 32ms pause.
+  encrypt, then send the same `MPC_ImFriend` payload twice.
 - `Fine` now clears `waiting_hello` before decode, like Delphi
   `UDPRead` does before entering `HandleHandShake`.
 - Added regression tests for invalid `WhoAreYou`/`Fine`: invalid encrypted
@@ -1965,7 +1969,8 @@ Done:
 - `MPC_WhoAreYou` now follows the Delphi reader-side handshake block for the
   network effect: reader decrypts the server Hello with `MasterKey`, derives
   session keys, builds `MPC_ImFriend`, sends the same payload twice with the
-  32ms pause, and only queues the resulting state update for main-side fields.
+  agreed no-sleep duplicate deviation, and only queues the resulting state
+  update for main-side fields.
 - `MPC_Fine` now follows the Delphi reader-side handshake exit: reader validates
   the server Hello with `MasterKey` and queues an AuthDone update without
   entering generic recv backlog. Main-side application of that update keeps the
@@ -1986,7 +1991,7 @@ Done:
 - Targeted ErrEmu reader drop test: passed.
 - Targeted reader Ping response test: passed.
 - Targeted writer polling test for `pending_reader_decoded`: passed.
-- Targeted reader `WhoAreYou -> ImFriend, Sleep(32), ImFriend` test: passed.
+- Targeted reader `WhoAreYou -> ImFriend, ImFriend` test: passed.
 - Targeted reader `Fine -> AuthDone` test: passed.
 - Targeted reader hello-control tests for `WrongHello`, `WantNewHello`, and
   `NeedHelloAgain`: passed.
@@ -2177,10 +2182,10 @@ Done:
 - Production reader `MPC_WhoAreYou` handling is now isolated as
   `reader_on_who_are_you`.
 - Production reader `MPC_Fine` handling is now isolated as `reader_on_fine`.
-- `reader_on_who_are_you` keeps Delphi's machine effect: decrypt server Hello
+- `reader_on_who_are_you` keeps Delphi's byte/state effect: decrypt server Hello
   with `MasterKey`, derive session keys, install reader decode cipher, build
-  `ImFriend`, send it twice with the blocking 32ms delay, then queue the
-  handshake state update.
+  `ImFriend`, send it twice without blocking sleep per DEVIATION #37, then
+  queue the handshake state update.
 - `reader_on_fine` keeps Delphi's machine effect: validate encrypted server
   Hello with `MasterKey`, then queue AuthDone update without generic recv
   backlog delivery.
@@ -5414,6 +5419,95 @@ Verification:
 Observed quick CPU remains an open Phase Z / `хуйня.md` CPU red flag, not a
 closed item: reader avg/max `947us/108479us`, active_dispatch avg/max
 `1449us/100399us`, app_enqueue avg/max `891us/2295us`.
+
+### 2026-05-25 - CPU red flag attribution
+
+Added max-sample attribution to `ProtocolMetricsSnapshot`:
+`reader_protocol_max_cmd/payload_len`,
+`active_dispatch_max_cmd/payload_len/events/actions`, and
+`app_enqueue_max_cmd/payload_len/events/mode`.
+
+Verification:
+
+- `cargo test --lib --quiet` OK (`698 passed`).
+- `cargo check --examples --quiet` OK.
+- quick FireTest debug OK: `FIRETEST_QUICK_PASS after 23.32s`.
+- quick FireTest release OK: `FIRETEST_QUICK_PASS after 22.77s`.
+
+Release quick max samples before DEVIATION #37:
+
+- `reader max=32384us cmd=WhoAreYou payload=92` — caused by Delphi-parity
+  blocking `Sleep(32)` between duplicate `ImFriend`
+  (`MoonProtoUDPClient.pas:433-435`), not CPU work.
+- `active_dispatch max=24040us cmd=Strat payload=44460 events=1` — real
+  boundary mismatch: Delphi queues `ProcessStratCommand` through
+  `TThread.Queue`, Rust still decodes/applies the strategy snapshot inside
+  active dispatch.
+- `app_enqueue max=2341us cmd=OrderBook payload=112 mode=state` — Rust-only
+  `run_with_dispatcher_state` snapshot clone inside protocol loop.
+
+Conclusion at that point: CPU red flag was still open, but localized. Next fixes were:
+move `MPC_Strat` heavy apply to the `AppQueue`/worker boundary, remove or make
+cheap the state-callback snapshot clone, and split reader wall-clock blocking
+from actual CPU while deciding how to preserve duplicate `ImFriend` semantics
+without starving the single-owner loop.
+
+Follow-up optimization:
+
+- `StratsState` live apply now moves decoded `StrategySnapshot` values into
+  state instead of cloning every snapshot after parsing.
+- Targeted tests: `cargo test strats --lib --quiet` OK (`22 passed`) and
+  `cargo test dispatcher_routes_strat_to_strats_state --lib --quiet` OK.
+- quick FireTest release after this change: `FIRETEST_QUICK_PASS after 23.56s`;
+  `active_dispatch max` fell from `24040us cmd=Strat payload=44460` to
+  `3229us cmd=API payload=44050`. This proves the snapshot clone was real
+  CPU waste, but the CPU red flag remains open for large init API parsing/apply
+  and state snapshot clone. `WhoAreYou` blocking sleep is handled by
+  DEVIATION #37 below.
+
+Handshake follow-up:
+
+- DEVIATION #37 approved: keep duplicate `MPC_ImFriend` packet but remove
+  Delphi's blocking `Sleep(32)` between the two sends in Rust.
+- Rationale: the duplicate can still cover loss of the first final handshake
+  datagram; loss of `MPC_Fine` is recovered by normal HelloAgain/reconnect
+  logic, because a duplicate `ImFriend` with the same `MixTS` does not make the
+  server send `Fine` again after the first one was accepted.
+- This removes the intentional 32ms wall-clock block from reader CPU metrics
+  instead of teaching FireTest to ignore it.
+
+Dispatcher-worker and Strat follow-up:
+
+- `run_with_dispatcher` / `run_with_dispatcher_state` now hand decoded domain
+  payloads to a dispatcher worker. The protocol owner enqueues the work item and
+  continues ACK/retry/send progress; active parsing/apply, actions, event
+  enqueue, and state-callback snapshot building happen in the worker.
+- `StrategyFields` changed from per-strategy `HashMap<Arc<str>, FieldValue>` to
+  a dense vector container with the same public operations used by the API
+  (`new`, `insert`, `get`, `contains_key`, `iter`, `len`). This matches the
+  Delphi serializer's ordered field stream more closely and removes hash work
+  from large strategy snapshots.
+- The hot deserializer path appends decoded fields directly instead of calling
+  the public replacement-style `insert`. Delphi writes each RTTI field at most
+  once per strategy; avoiding per-field duplicate scans removes the remaining
+  O(n^2) parser waste for 762-strategy live snapshots.
+- Verification after the dense fields change:
+  - `cargo test strategy --lib --quiet` OK (`29 passed`);
+  - `cargo test --lib --quiet` OK (`698 passed`);
+  - quick FireTest release OK: `FIRETEST_QUICK_PASS after 22.52s`.
+  - full FireTest release OK (`178s`): Session A received full candles snapshot
+    (`zipped=2026051`, `markets=664`, `candles=217500`), both sessions
+    `parse_failed=0`, strategy rows `762`.
+- Latest quick CPU after this step:
+  - `reader max=4240us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=134us`;
+  - `active_dispatch max=2604us max_src=API(31) payload=44050`;
+  - `app_enqueue max=2403us max_src=TradesStream(33) payload=24 mode=state`.
+- Result: the concrete `Strat` slow-parser red flag is closed for the measured
+  live snapshot path: it is no longer the max sample and no longer runs in the
+  protocol recv loop. The broader CPU red flag remains open for completed
+  `Sliced` reader work, large init API market parsing/apply, and state snapshot
+  enqueue cost.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 

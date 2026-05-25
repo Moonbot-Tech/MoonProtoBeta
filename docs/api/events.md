@@ -44,12 +44,13 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 
 `run_with_dispatcher` and `run_with_dispatcher_state` block the caller for the
 requested duration while the MoonProto protocol loop runs on that caller thread.
-Event callbacks run through an application
-callback queue after protocol state is updated. Slow callbacks delay return from
-the run call because the queue is drained before return, but they do not block
-ACK/retry/send progress inside the protocol loop. For
-`run_with_dispatcher_state`, building the state snapshot is still protocol-loop
-work; use the plain event callback for hot paths that do not need state reads.
+Decoded domain payloads are handed to an internal dispatcher worker, which owns
+active-library parsing/state apply and then queues public events. Slow callbacks
+delay return from the run call because the callback queue is drained before
+return, but callbacks and dispatcher-heavy work do not block ACK/retry/send
+progress inside the protocol loop. For `run_with_dispatcher_state`, building
+the state snapshot is worker-side work and can still be expensive on hot paths;
+use the plain event callback when the event already carries enough data.
 
 `run_with_dispatcher_state` receives `EventDispatcherSnapshot`. It has the same
 read-only getters used by UI code (`orders()`, `order_books()`, `trades()`,

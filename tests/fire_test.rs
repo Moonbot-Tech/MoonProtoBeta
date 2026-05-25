@@ -46,7 +46,7 @@ use moonproto::commands::strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategySchema,
 };
 use moonproto::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategyKind, StrategySnapshot,
+    parse_strategy_batch, FieldValue, StrategyFields, StrategyKind, StrategySnapshot,
 };
 use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
 use moonproto::commands::trades_stream::TradeSection;
@@ -609,10 +609,11 @@ impl Session {
             .client
             .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
         format!(
-            "recv={} reader(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+            "recv={} reader(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
+            metric_cmd_label(m.reader_protocol_max_cmd, m.reader_protocol_max_payload_len),
             m.reader_protocol_over_100us,
             m.reader_protocol_over_1ms,
             m.reader_protocol_over_5ms,
@@ -623,11 +624,17 @@ impl Session {
             m.writer_cpu_over_5ms,
             avg_us(m.active_dispatch_ns, m.active_dispatch_count),
             m.active_dispatch_max_ns / 1_000,
+            metric_cmd_label(m.active_dispatch_max_cmd, m.active_dispatch_max_payload_len),
+            m.active_dispatch_max_events,
+            m.active_dispatch_max_actions,
             m.active_dispatch_over_100us,
             m.active_dispatch_over_1ms,
             m.active_dispatch_over_5ms,
             avg_us(m.app_enqueue_ns, m.app_enqueue_count),
             m.app_enqueue_max_ns / 1_000,
+            metric_cmd_label(m.app_enqueue_max_cmd, m.app_enqueue_max_payload_len),
+            m.app_enqueue_max_events,
+            metric_app_mode_label(m.app_enqueue_max_mode),
             m.app_enqueue_over_100us,
             m.app_enqueue_over_1ms,
             m.app_enqueue_over_5ms,
@@ -941,6 +948,25 @@ fn avg_us(total_ns: u64, count: u64) -> u64 {
         0
     } else {
         total_ns / count / 1_000
+    }
+}
+
+fn metric_cmd_label(cmd: u8, payload_len: u64) -> String {
+    if cmd == u8::MAX {
+        format!("pre-cmd payload={payload_len}")
+    } else {
+        let c = Command::from_byte(cmd);
+        format!("{}({}) payload={payload_len}", c.name(), c.to_byte())
+    }
+}
+
+fn metric_app_mode_label(mode: u8) -> &'static str {
+    match mode {
+        1 => "callback",
+        2 => "state",
+        3 => "queue",
+        4 => "worker",
+        _ => "none",
     }
 }
 
@@ -1935,7 +1961,7 @@ fn try_select_field(strategy: &StrategySnapshot, preferred: &str) -> Option<Stri
     strategy
         .fields
         .iter()
-        .find_map(|(name, value)| matches!(value, FieldValue::String(_)).then(|| name.clone()))
+        .find_map(|(name, value)| matches!(value, FieldValue::String(_)).then(|| name.to_string()))
 }
 
 fn strategy_field_string<'a>(
@@ -1961,25 +1987,23 @@ fn with_strategy_string(
 ) -> StrategySnapshot {
     strategy.strategy_ver = strategy.strategy_ver.saturating_add(version_bump.max(1));
     strategy.last_date = now_epoch_ms();
-    strategy
-        .fields
-        .insert(field.to_string(), FieldValue::String(value));
+    strategy.fields.insert(field, FieldValue::String(value));
     strategy
 }
 
 fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
     let strategy_id = cfg.strategy_id.unwrap_or(FIRETEST_STRATEGY_ID);
-    let mut fields = HashMap::new();
+    let mut fields = StrategyFields::new();
     fields.insert(
-        "StrategyName".to_string(),
+        "StrategyName",
         FieldValue::String("MoonProto FireTest".to_string()),
     );
     fields.insert(
-        "Comment".to_string(),
+        "Comment",
         FieldValue::String("firetest-initial".to_string()),
     );
-    fields.insert("AcceptCommands".to_string(), FieldValue::Bool(true));
-    fields.insert("OrderSize".to_string(), FieldValue::Double(0.0));
+    fields.insert("AcceptCommands", FieldValue::Bool(true));
+    fields.insert("OrderSize", FieldValue::Double(0.0));
     StrategySnapshot {
         strategy_id,
         strategy_ver: 1,
@@ -2780,7 +2804,7 @@ fn fire_test_active_library_health() {
         .strategy_snapshot(seeded_strategy_id)
         .expect("seeded strategy missing from dispatcher state");
     let field = select_field(&original_strategy, &cfg.strategy_field);
-    let original_field_value = match original_strategy.fields.get(&field) {
+    let original_field_value = match original_strategy.fields.get(field.as_str()) {
         Some(FieldValue::String(value)) => value.clone(),
         _ => panic!("selected field `{field}` missing from seeded strategy"),
     };

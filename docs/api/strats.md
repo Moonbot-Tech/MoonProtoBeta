@@ -5,7 +5,7 @@ delete, sell-price update, checked-state sync, and snapshot requests.
 
 `EventDispatcher` maintains `StratsState` and emits `Event::Strat`. Snapshot
 payloads are decoded automatically into both the lightweight `StrategyInfo`
-state and the full `StrategySnapshot` map. `last_server_epoch` advances only
+state and full `StrategySnapshot` values. `last_server_epoch` advances only
 after the snapshot serializer payload is decoded and applied successfully,
 matching Delphi's `ApplyStratSnapshot` → `cfg.LocalStratEpoch := ServerEpoch`
 order. A malformed snapshot is logged and is not reported as `SnapshotFull` /
@@ -227,13 +227,34 @@ from incoming snapshots. When user code edits local strategies, call
 ## Snapshot Decoder
 
 ```rust
-use moonproto::commands::strategy_serializer::{parse_strategy_batch, FieldValue};
+use moonproto::commands::strategy_serializer::{
+    parse_strategy_batch, FieldValue, StrategyFields,
+};
 
 let batch = parse_strategy_batch(raw_data).expect("bad strategy snapshot");
 for strategy in &batch.strategies {
     if let Some(FieldValue::String(name)) = strategy.fields.get("StrategyName") {
         println!("{}: {}", strategy.strategy_id, name);
     }
+}
+```
+
+`StrategySnapshot.fields` is a `StrategyFields` container, not a standard
+`HashMap`. It stores the decoded fields densely in wire/read order, which avoids
+hash work while parsing large snapshots. The reader path appends fields in the
+Delphi serializer order; `insert` keeps replacement semantics for user-built
+snapshots. The public operations are intentionally small and familiar:
+
+```rust
+let mut fields = StrategyFields::new();
+fields.insert("StrategyName", FieldValue::String("Local".to_string()));
+
+if let Some(FieldValue::String(name)) = fields.get("StrategyName") {
+    println!("{name}");
+}
+
+for (name, value) in fields.iter() {
+    println!("{name} = {value:?}");
 }
 ```
 

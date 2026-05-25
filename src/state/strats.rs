@@ -406,9 +406,28 @@ impl StratsState {
         true
     }
 
+    fn upsert_snapshot_owned(&mut self, s: StrategySnapshot) -> bool {
+        let existed = self.by_id.contains_key(&s.strategy_id);
+        {
+            let entry = self.get_or_insert(s.strategy_id);
+            if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
+                return false;
+            }
+            entry.strategy_ver = s.strategy_ver;
+            entry.last_date = s.last_date;
+            entry.folder_path = s.path.clone();
+            entry.sell_price = Self::sell_price_from_snapshot(&s);
+            entry.checked = s.checked;
+            entry.prev_checked = s.checked;
+        }
+        self.create_folders_for_path(&s.path);
+        self.snapshots_by_id.insert(s.strategy_id, Arc::new(s));
+        true
+    }
+
     /// Применить всю batch стратегий из `TStratSnapshot.data` (DEFLATE-compressed payload).
     /// Возвращает декодированный `StrategyBatch` для дальнейшего использования потребителем
-    /// (поля стратегий доступны как `HashMap<String, FieldValue>`).
+    /// (поля стратегий доступны как `StrategyFields`).
     ///
     /// Возвращает `None` если payload повреждён.
     pub fn apply_snapshot_decoded_with_mode(
@@ -424,6 +443,20 @@ impl StratsState {
             self.upsert_from_snapshot(s);
         }
         Some(batch)
+    }
+
+    pub(crate) fn apply_snapshot_decoded_with_mode_in_place(
+        &mut self,
+        deflate_data: &[u8],
+        full: bool,
+    ) -> Option<usize> {
+        let batch = parse_strategy_batch_with_schema(deflate_data, self.strategy_schema())?;
+        let _ = full;
+        let count = batch.strategies.len();
+        for s in batch.strategies {
+            self.upsert_snapshot_owned(s);
+        }
+        Some(count)
     }
 
     pub fn apply_snapshot_decoded(&mut self, deflate_data: &[u8]) -> Option<StrategyBatch> {
@@ -589,7 +622,7 @@ mod tests {
         StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaField,
         StrategySchemaKind,
     };
-    use crate::commands::strategy_serializer::FieldValue;
+    use crate::commands::strategy_serializer::{FieldValue, StrategyFields};
 
     fn schema_for_strategy_name(kinds: &[u8]) -> StrategySchema {
         StrategySchema {
@@ -632,8 +665,8 @@ mod tests {
     #[test]
     fn snapshot_sets_visible_sell_price_when_field_is_present() {
         let mut s = StratsState::new();
-        let mut fields = HashMap::new();
-        fields.insert("SellPrice".to_string(), FieldValue::Double(50.5));
+        let mut fields = StrategyFields::new();
+        fields.insert("SellPrice", FieldValue::Double(50.5));
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 1,
@@ -661,7 +694,7 @@ mod tests {
             path: String::new(),
             fields: fields
                 .iter()
-                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .map(|(name, value)| (Arc::<str>::from(*name), value.clone()))
                 .collect(),
         }
     }
@@ -704,11 +737,8 @@ mod tests {
     #[test]
     fn delete_removes_entry() {
         let mut s = StratsState::new();
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("A".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("A".to_string()));
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 1,
@@ -747,7 +777,7 @@ mod tests {
             checked: true,
             kind: 1,
             path: "Root/Sub".into(),
-            fields: HashMap::new(),
+            fields: StrategyFields::new(),
         });
 
         let ev = s.apply(StratCommand::Delete(StratDelete {
@@ -779,7 +809,7 @@ mod tests {
             checked: false,
             kind: 1,
             path: "Root/Sub".into(),
-            fields: HashMap::new(),
+            fields: StrategyFields::new(),
         });
         s.apply(StratCommand::Delete(StratDelete {
             strategy_id: 100,
@@ -814,7 +844,7 @@ mod tests {
             checked: false,
             kind: 1,
             path: "Root/Sub".into(),
-            fields: HashMap::new(),
+            fields: StrategyFields::new(),
         });
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 200,
@@ -823,7 +853,7 @@ mod tests {
             checked: false,
             kind: 1,
             path: "Root/Sub/Child".into(),
-            fields: HashMap::new(),
+            fields: StrategyFields::new(),
         });
 
         let ev = s.apply(StratCommand::Delete(StratDelete {
@@ -902,11 +932,8 @@ mod tests {
 
         let schema = schema_for_strategy_name(&[5, 6]);
         let mut b = StrategyBatchBuilder::new(&schema);
-        let mut fields1 = HashMap::new();
-        fields1.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Strat-A".to_string()),
-        );
+        let mut fields1 = StrategyFields::new();
+        fields1.insert("StrategyName", FieldValue::String("Strat-A".to_string()));
         b.write_strategy(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 1,
@@ -916,11 +943,8 @@ mod tests {
             path: "F/A".to_string(),
             fields: fields1,
         });
-        let mut fields2 = HashMap::new();
-        fields2.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Strat-B".to_string()),
-        );
+        let mut fields2 = StrategyFields::new();
+        fields2.insert("StrategyName", FieldValue::String("Strat-B".to_string()));
         b.write_strategy(&StrategySnapshot {
             strategy_id: 200,
             strategy_ver: 2,
@@ -973,11 +997,8 @@ mod tests {
     fn full_snapshot_preserves_missing_strategies_like_delphi() {
         use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
-        let mut old_fields = HashMap::new();
-        old_fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Old".to_string()),
-        );
+        let mut old_fields = StrategyFields::new();
+        old_fields.insert("StrategyName", FieldValue::String("Old".to_string()));
         let mut s = StratsState::new();
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 1,
@@ -989,11 +1010,8 @@ mod tests {
             fields: old_fields,
         });
 
-        let mut new_fields = HashMap::new();
-        new_fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("New".to_string()),
-        );
+        let mut new_fields = StrategyFields::new();
+        new_fields.insert("StrategyName", FieldValue::String("New".to_string()));
         let schema = schema_for_strategy_name(&[1]);
         let mut builder = StrategyBatchBuilder::new(&schema);
         builder.write_strategy(&StrategySnapshot {
@@ -1088,11 +1106,8 @@ mod tests {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
 
         let mut s = StratsState::new();
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Old".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("Old".to_string()));
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
             strategy_ver: 7,
@@ -1126,11 +1141,8 @@ mod tests {
     fn local_checked_delta_waits_for_matching_echo() {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
 
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("A".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("A".to_string()));
         let mut s = StratsState::new();
         s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,
@@ -1194,7 +1206,7 @@ mod tests {
                 checked: false,
                 kind: 1,
                 path: String::new(),
-                fields: HashMap::new(),
+                fields: StrategyFields::new(),
             });
         }
 
@@ -1211,9 +1223,9 @@ mod tests {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
 
         let mut s = StratsState::new();
-        let mut fields = HashMap::new();
+        let mut fields = StrategyFields::new();
         fields.insert(
-            "Comment".to_string(),
+            "Comment",
             FieldValue::String("heavy snapshot stays shared".to_string()),
         );
         s.upsert_local_snapshot(StrategySnapshot {
@@ -1246,11 +1258,8 @@ mod tests {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
 
         let mut s = StratsState::new();
-        let mut fields = HashMap::new();
-        fields.insert(
-            "StrategyName".to_string(),
-            FieldValue::String("Zero".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("Zero".to_string()));
 
         let changed = s.upsert_from_snapshot(&StrategySnapshot {
             strategy_id: 100,

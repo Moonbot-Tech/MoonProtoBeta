@@ -1258,7 +1258,7 @@ impl EventDispatcher {
             } => {
                 if self
                     .strats
-                    .apply_snapshot_decoded_with_mode(raw_data, true)
+                    .apply_snapshot_decoded_with_mode_in_place(raw_data, true)
                     .is_none()
                 {
                     log::warn!(
@@ -1276,7 +1276,7 @@ impl EventDispatcher {
             } => {
                 if self
                     .strats
-                    .apply_snapshot_decoded_with_mode(raw_data, false)
+                    .apply_snapshot_decoded_with_mode_in_place(raw_data, false)
                     .is_none()
                 {
                     log::warn!(
@@ -3876,14 +3876,10 @@ mod tests {
 
     #[test]
     fn snapshot_requested_uses_local_strategies() {
-        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
-        use std::collections::HashMap;
+        use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
 
-        let mut fields = HashMap::new();
-        fields.insert(
-            "Comment".to_string(),
-            FieldValue::String("local".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String("local".to_string()));
         let strategy = StrategySnapshot {
             strategy_id: 0xF17E,
             strategy_ver: 3,
@@ -3946,14 +3942,10 @@ mod tests {
 
     #[test]
     fn snapshot_requested_defers_non_empty_local_strategies_until_schema() {
-        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
-        use std::collections::HashMap;
+        use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
 
-        let mut fields = HashMap::new();
-        fields.insert(
-            "Comment".to_string(),
-            FieldValue::String("late".to_string()),
-        );
+        let mut fields = StrategyFields::new();
+        fields.insert("Comment", FieldValue::String("late".to_string()));
         let strategy = StrategySnapshot {
             strategy_id: 0x51,
             strategy_ver: 1,
@@ -4074,8 +4066,7 @@ mod tests {
 
     #[test]
     fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
-        use crate::commands::strategy_serializer::StrategySnapshot;
-        use std::collections::HashMap;
+        use crate::commands::strategy_serializer::{StrategyFields, StrategySnapshot};
 
         let strategies = vec![
             StrategySnapshot {
@@ -4085,7 +4076,7 @@ mod tests {
                 checked: false,
                 kind: 1,
                 path: String::new(),
-                fields: HashMap::new(),
+                fields: StrategyFields::new(),
             },
             StrategySnapshot {
                 strategy_id: 10,
@@ -4094,7 +4085,7 @@ mod tests {
                 checked: true,
                 kind: 1,
                 path: String::new(),
-                fields: HashMap::new(),
+                fields: StrategyFields::new(),
             },
         ];
         let mut d = EventDispatcher::new();
