@@ -574,12 +574,16 @@ Done:
 - Added `state::history::LastPricePoint`, matching Delphi `THistoricalPrices`
   (`current: Single`, `RealTime: TDateTime`), and `MiniCandle`, matching Delphi
   `TMiniCandle`.
+- Added `compact_trades_to_mini_candles_like_delphi`, matching the
+  `UseTradesCompression` body inside Delphi `TMarket.ResizeOrdersHistory`: group
+  anchor, 5-second split, buy/sell volume, min/max price, and `T1`/`Now`
+  append gates.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 5 tests.
-- `cargo test --lib` OK: 676 tests.
+- `cargo test history --lib` OK: 7 tests.
+- `cargo test --lib` OK: 678 tests.
 
 ### Phase Z - final full optimization pass
 

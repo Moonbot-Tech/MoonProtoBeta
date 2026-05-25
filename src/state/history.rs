@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::state::seq_ring::{SeqRingRow, SeqRingRowSlot, SeqRingTimedRow};
 
+const SECONDS_PER_DAY: f64 = 86_400.0;
+const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
+
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
 ///
 /// Delphi layout is 16 bytes: `Time: TDateTime; Price: Single; Qty: Single`.
@@ -231,6 +234,67 @@ impl SeqRingRowSlot for MiniCandleSlot {
     }
 }
 
+/// Compact detailed trades into Delphi `TMiniCandle` groups.
+///
+/// This mirrors the `UseTradesCompression` body inside Delphi
+/// `TMarket.ResizeOrdersHistory`: the group anchor is the first trade time, a
+/// new candle starts when `abs(anchor - row.Time) > 5 / SecsPerDay`, split
+/// groups are appended only when newer than `last_mini_time` and older than the
+/// resize `now_time`, and the final group only checks `c.Time > last_mini_time`.
+pub fn compact_trades_to_mini_candles_like_delphi(
+    rows: &[TradeHistoryRow],
+    last_mini_time: f64,
+    now_time: f64,
+    out: &mut Vec<MiniCandle>,
+) {
+    let Some(first) = rows.first() else {
+        return;
+    };
+
+    let mut newest_mini_time = last_mini_time;
+    let mut anchor_time = first.time;
+    let mut candle = empty_mini_candle(anchor_time);
+
+    for row in rows {
+        if (anchor_time - row.time).abs() > MINI_CANDLE_SPLIT_DAYS && candle.cnt > 0 {
+            if candle.time > newest_mini_time && candle.time < now_time {
+                out.push(candle);
+                newest_mini_time = candle.time;
+            }
+
+            anchor_time = row.time;
+            candle = empty_mini_candle(anchor_time);
+        }
+
+        if row.is_buy() {
+            candle.buy_vol += row.traded_value();
+        } else {
+            candle.sell_vol += row.traded_value();
+        }
+        if candle.cnt == 0 {
+            candle.min_price = row.price;
+        }
+        candle.max_price = candle.max_price.max(row.price);
+        candle.min_price = candle.min_price.min(row.price);
+        candle.cnt += 1;
+    }
+
+    if candle.cnt > 0 && candle.time > newest_mini_time {
+        out.push(candle);
+    }
+}
+
+fn empty_mini_candle(time: f64) -> MiniCandle {
+    MiniCandle {
+        time,
+        cnt: 0,
+        min_price: 0.0,
+        max_price: 0.0,
+        buy_vol: 0.0,
+        sell_vol: 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +430,90 @@ mod tests {
                     q: 8.25,
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn compacts_trades_to_mini_candles_like_delphi_resize() {
+        let t0 = 45_000.0;
+        let rows = [
+            TradeHistoryRow {
+                time: t0,
+                price: 100.0,
+                qty: 2.0,
+            },
+            TradeHistoryRow {
+                time: t0 + 4.0 / SECONDS_PER_DAY,
+                price: 101.0,
+                qty: -3.0,
+            },
+            TradeHistoryRow {
+                time: t0 + 6.0 / SECONDS_PER_DAY,
+                price: 102.0,
+                qty: 4.0,
+            },
+        ];
+
+        let mut out = Vec::new();
+        compact_trades_to_mini_candles_like_delphi(&rows, 0.0, t0 + 1.0, &mut out);
+
+        assert_eq!(
+            out,
+            vec![
+                MiniCandle {
+                    time: t0,
+                    cnt: 2,
+                    min_price: 100.0,
+                    max_price: 101.0,
+                    buy_vol: 200.0,
+                    sell_vol: 303.0,
+                },
+                MiniCandle {
+                    time: t0 + 6.0 / SECONDS_PER_DAY,
+                    cnt: 1,
+                    min_price: 102.0,
+                    max_price: 102.0,
+                    buy_vol: 408.0,
+                    sell_vol: 0.0,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_trades_skips_split_group_not_newer_than_existing_mini() {
+        let t0 = 45_000.0;
+        let rows = [
+            TradeHistoryRow {
+                time: t0,
+                price: 100.0,
+                qty: 1.0,
+            },
+            TradeHistoryRow {
+                time: t0 + 6.0 / SECONDS_PER_DAY,
+                price: 101.0,
+                qty: 1.0,
+            },
+        ];
+
+        let mut out = Vec::new();
+        compact_trades_to_mini_candles_like_delphi(
+            &rows,
+            t0 + 1.0 / SECONDS_PER_DAY,
+            t0 + 1.0,
+            &mut out,
+        );
+
+        assert_eq!(
+            out,
+            vec![MiniCandle {
+                time: t0 + 6.0 / SECONDS_PER_DAY,
+                cnt: 1,
+                min_price: 101.0,
+                max_price: 101.0,
+                buy_vol: 101.0,
+                sell_vol: 0.0,
+            }]
         );
     }
 }
