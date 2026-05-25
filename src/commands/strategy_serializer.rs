@@ -646,11 +646,13 @@ fn try_read_field_value(data: &[u8], pos: &mut usize, type_id: u8) -> Option<Fie
         TID_DOUBLE => Some(FieldValue::Double(read_f64(data, pos)?)),
         TID_STRING => {
             let len = read_u16(data, pos)? as usize;
-            if *pos + len > data.len() {
-                return None;
+            let mut bytes = vec![0u8; len];
+            let available = data.len().saturating_sub(*pos).min(len);
+            if available > 0 {
+                bytes[..available].copy_from_slice(&data[*pos..*pos + available]);
+                *pos += available;
             }
-            let s = decode_utf8_delphi(&data[*pos..*pos + len]);
-            *pos += len;
+            let s = decode_utf8_delphi(&bytes);
             Some(FieldValue::String(s))
         }
         _ => {
@@ -673,19 +675,13 @@ fn skip_field_by_type_id(data: &[u8], pos: &mut usize, type_id: u8) -> Option<()
         TID_INT64 | TID_UINT64 | TID_DOUBLE => Some(8),
         TID_STRING => {
             let len = read_u16(data, pos)? as usize;
-            if *pos + len > data.len() {
-                return None;
-            }
-            *pos += len;
+            *pos = (*pos + len).min(data.len());
             return Some(());
         }
         _ => Some(8),
     }?;
 
-    if *pos + size > data.len() {
-        return None;
-    }
-    *pos += size;
+    *pos = (*pos + size).min(data.len());
     Some(())
 }
 
@@ -1444,6 +1440,102 @@ mod tests {
             ps.fields.get("Comment"),
             Some(&FieldValue::String("ok".to_string()))
         );
+    }
+
+    #[test]
+    fn string_field_value_zero_fills_short_body_like_delphi_read_field() {
+        let mut plain = Vec::new();
+        // NameDict: one string field.
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.push(7);
+        plain.extend_from_slice(b"Comment");
+        // PathDict
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // StratCount
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Strategy header
+        plain.extend_from_slice(&1u64.to_le_bytes());
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0u64.to_le_bytes());
+        plain.push(0);
+        plain.push(0);
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // FieldCount=1
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Field 0: declared string Len=3, but only one body byte is present.
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        plain.push(TID_STRING);
+        plain.extend_from_slice(&3u16.to_le_bytes());
+        plain.push(b'a');
+
+        let parsed = parse_strategy_batch_plain(&plain).unwrap();
+        let ps = &parsed.strategies[0];
+        assert_eq!(
+            ps.fields.get("Comment"),
+            Some(&FieldValue::String("a\0\0".to_string()))
+        );
+    }
+
+    #[test]
+    fn known_field_type_mismatch_fixed_skip_consumes_short_tail_like_delphi() {
+        let mut plain = Vec::new();
+        // NameDict: OrderSize expects TID_DOUBLE.
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.push(9);
+        plain.extend_from_slice(b"OrderSize");
+        // PathDict
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // StratCount
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Strategy header
+        plain.extend_from_slice(&1u64.to_le_bytes());
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0u64.to_le_bytes());
+        plain.push(0);
+        plain.push(0);
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // FieldCount=1
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Field 0: OrderSize but wire type is Int64; only one byte of the
+        // skipped fixed-size value is present.
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        plain.push(TID_INT64);
+        plain.push(0xAA);
+
+        let schema = schema_for_fields(vec![schema_field("OrderSize", TID_DOUBLE, None, &[0])]);
+        let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
+        assert!(parsed.strategies[0].fields.is_empty());
+    }
+
+    #[test]
+    fn known_field_type_mismatch_string_skip_consumes_short_body_like_delphi() {
+        let mut plain = Vec::new();
+        // NameDict: OrderSize expects TID_DOUBLE.
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.push(9);
+        plain.extend_from_slice(b"OrderSize");
+        // PathDict
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // StratCount
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Strategy header
+        plain.extend_from_slice(&1u64.to_le_bytes());
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0u64.to_le_bytes());
+        plain.push(0);
+        plain.push(0);
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // FieldCount=1
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Field 0: OrderSize but wire type is String; Len is present, body is short.
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        plain.push(TID_STRING);
+        plain.extend_from_slice(&5u16.to_le_bytes());
+        plain.push(b'x');
+
+        let schema = schema_for_fields(vec![schema_field("OrderSize", TID_DOUBLE, None, &[0])]);
+        let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
+        assert!(parsed.strategies[0].fields.is_empty());
     }
 
     #[test]

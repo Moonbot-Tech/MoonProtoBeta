@@ -37,6 +37,17 @@ rejected. For `TStratSchema` / `TStratSnapshot`, a declared data size larger
 than the remaining bytes becomes an empty/malformed payload, matching Delphi's
 `Data=nil` guard.
 
+Inside the compressed `TStrategySerializer` payload, strategy string field
+values are not `ReadBuffer` strings. Delphi reads the `Word` length, allocates a
+`TBytes` of that exact length, and then calls `Stream.Read`; if the body is
+short, the returned string keeps the available bytes and zero-filled tail. The
+Rust parser mirrors that deterministic part and also treats skipped known-field
+type mismatches like Delphi `SkipFieldByTypeID`: a truncated skipped value is
+consumed up to EOF instead of rejecting the whole snapshot. Truncated serializer
+dictionaries and incomplete scalar/header locals are still rejected by Rust,
+because the exact Delphi effect can depend on uninitialized locals or stale
+`NameBuf` bytes in malformed payloads.
+
 ## Reading Strategy State
 
 ```rust

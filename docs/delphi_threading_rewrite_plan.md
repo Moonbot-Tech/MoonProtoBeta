@@ -6401,3 +6401,34 @@ Verification:
 - `git diff --check` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 24.37s`, `ParseFailed=0`.
+
+### 2026-05-26 - StrategySerializer deterministic malformed tails
+
+Correction:
+
+- Re-checked Delphi `StrategySerializer.pas:ReadField` and
+  `SkipFieldByTypeID`.
+- `TID_STRING` field values inside `TStrategySerializer` are not
+  `ReadBuffer` strings. Delphi reads `Len`, calls `SetLength(b, Len)`, then
+  `Stream.Read(b[0], Len)`. If the value body is short after a valid `Len`,
+  `TBytes` keeps a zero-filled tail.
+- `SkipFieldByTypeID` advances the stream position for skipped fixed-size
+  fields and skipped string bodies. A truncated skipped known-field mismatch
+  should not turn the whole snapshot into a Rust parse failure.
+- Rust now zero-fills short serializer string-field bodies and saturates skipped
+  fixed/string values to EOF.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.183`.
+- Still open there: dictionary name/path reads, incomplete `Len` prefixes,
+  incomplete strategy headers, incomplete `FieldIdx`/`TypeID`, and scalar
+  `ReadField` locals. Delphi uses `Stream.Read` for those too, but the effect
+  may depend on uninitialized local variables or stale `NameBuf`, so it is not
+  claimed as closed parity.
+
+Verification:
+
+- Added parser tests for short serializer string field bodies, short skipped
+  fixed-size mismatches, and short skipped string mismatches.
+- `cargo test strategy_serializer --lib --quiet` OK: 20 tests.
