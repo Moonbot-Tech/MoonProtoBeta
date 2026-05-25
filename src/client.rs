@@ -16227,7 +16227,7 @@ pub(crate) fn get_server_time_delta_global() -> f64 {
 
 /// Delphi raw `Now` as UTC TDateTime (days since 1899-12-30), without NTP offset.
 /// Used for `ServerTimeDelta := Ping.InitialTime - Now`.
-fn delphi_now_raw() -> f64 {
+pub(crate) fn delphi_now_raw() -> f64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

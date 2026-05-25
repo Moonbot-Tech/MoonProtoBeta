@@ -75,7 +75,26 @@ dropped.
   registered, sends a fresh application-owned snapshot reply;
 - checks trades-gap recovery after successfully parsed `TradesStream` /
   `TradesResendResponse` packets and sends generated `emk_TradesResend`
-  requests.
+  requests;
+- queues decoded trades/MM/liquidation stream batches into the optional
+  retained-history worker when `set_market_history_handle` is configured.
+
+Retained history is opt-in:
+
+```rust
+use moonproto::EventDispatcher;
+use moonproto::state::{MarketHistoryConfig, MarketHistoryWorker};
+
+let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
+let btc = worker.ensure_market("BTCUSDT").expect("history worker alive");
+
+let mut dispatcher = EventDispatcher::new();
+dispatcher.set_market_history_handle(worker.handle());
+```
+
+The worker owns retained stores and the dispatcher only queues decoded stream
+batches to it. Stream packets do not allocate history for unknown/not-enabled
+markets; call `ensure_market` for each market you want retained readers for.
 
 ## Event Enum
 

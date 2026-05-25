@@ -238,10 +238,10 @@ impl<T: SeqRingRow> SeqRingReader<T> {
 
     /// Clears `out` and copies up to `limit` newest rows in sequence order.
     pub fn copy_last(&self, limit: usize, out: &mut Vec<T>) -> SeqRingReadMeta {
-        let bounds = self.bounds();
-        let limit = limit.min(bounds.len);
-        let start_seq = bounds.next_seq - limit as u64;
-        self.copy_from_seq(start_seq, limit, out)
+        self.with_last(limit, |view| {
+            view.copy_to(out);
+            view.meta()
+        })
     }
 
     /// Clears `out` and copies up to `limit` rows starting at `start_seq`.
@@ -286,10 +286,17 @@ impl<T: SeqRingRow> SeqRingReader<T> {
     where
         F: FnOnce(SeqRingReadView<'_, T>) -> R,
     {
-        let bounds = self.bounds();
+        let state = self.inner.state.read();
+        let bounds = state.bounds();
         let limit = limit.min(bounds.len);
         let start_seq = bounds.next_seq - limit as u64;
-        self.with_from_seq(start_seq, limit, f)
+        let (meta, end_seq) = state.read_meta(start_seq, limit);
+        let (first, second) = state.slices(meta.actual_start_seq, end_seq);
+        f(SeqRingReadView {
+            first,
+            second,
+            meta,
+        })
     }
 
     /// Binary-search a retained monotonic range. `is_before(row)` must return

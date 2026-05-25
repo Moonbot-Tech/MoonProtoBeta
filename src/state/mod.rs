@@ -18,6 +18,7 @@ pub mod balances;
 pub mod epoch;
 pub mod history;
 pub mod history_store;
+pub mod history_worker;
 pub mod markets;
 pub mod order_books;
 pub mod orders;
@@ -36,6 +37,10 @@ pub use history::{
 };
 pub use history_store::{
     MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,
+};
+pub use history_worker::{
+    MarketHistoryHandle, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
+    MarketHistoryStreamSection, MarketHistoryTradeInput, MarketHistoryWorker,
 };
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{

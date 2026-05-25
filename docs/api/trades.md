@@ -150,9 +150,17 @@ byte. `time_delta_ms` is relative to `TradesPacket::base_time`.
 
 ## Retained History Building Blocks
 
-The active-library retained history storage is being wired separately from the
-event stream. The public row types already mirror the Delphi storage records and
-can be used by tools/tests that build retained history explicitly.
+Retained history is optional active-library storage for trades, spot trades,
+liquidations, MM orders, LastPrice, and mini-candles. The protocol/event path
+does not write these rings directly. It queues decoded stream batches into a
+`MarketHistoryWorker`; that worker owns the per-market stores and is the single
+writer. This keeps protocol receive work bounded while preserving Delphi's
+storage meaning.
+
+Incoming stream batches do not allocate history for every market returned by
+`GetMarketsList`. Call `MarketHistoryWorker::ensure_market(market)` for each
+market you want to retain. Capacities set to `0` disable that retained public
+history category.
 
 ```rust
 pub struct TradeHistoryRow {
@@ -342,6 +350,22 @@ pub struct MarketHistoryReaders {
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
 }
 
+pub struct MarketHistoryWorker;
+pub struct MarketHistoryHandle;
+
+impl MarketHistoryWorker {
+    pub fn spawn(default_config: MarketHistoryConfig) -> Self;
+    pub fn handle(&self) -> MarketHistoryHandle;
+    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn flush(&self, now_time: f64) -> bool;
+}
+
+impl EventDispatcher {
+    pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle);
+    pub fn clear_market_history_handle(&mut self);
+}
+
 pub struct SeqRingCursor;
 
 impl<T> SeqRingReader<T> {
@@ -443,11 +467,29 @@ impl MarketHistoryRegistry {
 }
 ```
 
-`MarketHistoryStore` is the per-market single-writer side intended for
-`StoreWorker`. Capacities set to `0` disable only that retained public history
-ring. Futures trades first enter the Delphi-like temporary join buffer and are
-drained into retained history through the sort/skip-tail step. Rows evicted
-from the futures retained ring are buffered for `TMiniCandle` compaction.
+`MarketHistoryWorker` is the retained-history writer. Attach its handle to the
+dispatcher before running the client:
+
+```rust
+use moonproto::{Client, EventDispatcher};
+use moonproto::state::{MarketHistoryConfig, MarketHistoryWorker};
+
+let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
+let btc = worker.ensure_market("BTCUSDT").expect("history worker alive");
+
+let mut dispatcher = EventDispatcher::new();
+dispatcher.set_market_history_handle(worker.handle());
+
+client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+    handle_event(event);
+}));
+```
+
+`MarketHistoryStore` is the per-market single-writer side owned by that worker.
+Capacities set to `0` disable only that retained public history ring. Futures
+trades first enter the Delphi-like temporary join buffer and are drained into
+retained history through the sort/skip-tail step. Rows evicted from the futures
+retained ring are buffered for `TMiniCandle` compaction.
 The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
 shared `TradesPacketTimeShift`, so all retained row types in one packet use the
 same Delphi packet time correction. MM-order companion rows are aligned with

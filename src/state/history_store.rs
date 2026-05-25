@@ -1,8 +1,9 @@
 //! Active-library retained history store.
 //!
-//! `MarketHistoryStore` is the per-market single-writer side that `StoreWorker`
-//! will own. Public code receives cloneable [`SeqRingReader`] handles and reads
-//! rows without taking locks on the writer path.
+//! `MarketHistoryStore` is the per-market single-writer side owned by
+//! `MarketHistoryWorker`. Public code receives cloneable [`SeqRingReader`]
+//! handles; the dense retained rings use short read/write locks, but the UDP
+//! protocol receive path is not the history writer.
 
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -176,6 +177,20 @@ impl MarketHistoryRegistry {
         self.stores
             .get(market_name)
             .map(MarketHistoryStore::readers)
+    }
+
+    pub fn drain_joined_futures_like_delphi(&mut self) -> usize {
+        self.stores
+            .values_mut()
+            .map(MarketHistoryStore::drain_joined_futures_like_delphi)
+            .sum()
+    }
+
+    pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
+        self.stores
+            .values_mut()
+            .map(|store| store.compact_evicted_futures_like_delphi(now_time))
+            .sum()
     }
 }
 

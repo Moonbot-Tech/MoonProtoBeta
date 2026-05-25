@@ -651,18 +651,39 @@ Decision:
 - Added zero-copy read closures (`with_from_seq`, `with_last`) for fast scans
   while keeping the lock scoped to the closure.
 
-Previous foundation verification before the dense backend replacement:
+Verification:
 
 - `cargo test seq_ring --lib` OK: 16 tests.
 - `cargo test history --lib` OK: 22 tests.
 - `cargo test history_store --lib` OK: 7 tests.
+- `cargo test --lib` OK: 695 tests.
+- `cargo check --examples` OK.
+
+### 2026-05-25 - retained history worker first wiring
+
+Decision:
+
+- Added `MarketHistoryWorker`: a retained-history writer thread that owns
+  `MarketHistoryRegistry` and all per-market `MarketHistoryStore` instances.
+- `EventDispatcher` now accepts an optional `MarketHistoryHandle`. The active
+  dispatch path converts applied `TradesStream` packets into typed
+  `MarketHistoryStreamBatch` values and queues them to the worker.
+- Incoming stream batches do not allocate stores. Runtime/API code must call
+  `MarketHistoryWorker::ensure_market` for every market whose retained history
+  should exist. This avoids allocating rings for all markets returned by
+  `GetMarketsList`.
+- The worker command channel is intentionally unbounded: retained history must
+  not drop packets because of an internal Rust-only capacity cap. If memory
+  pressure appears, it is a separate backpressure design task, not a hidden
+  queue-full branch.
+- The UDP protocol receive path still does not own history locks. It only
+  parses/applies protocol state and queues the already-decoded batch.
 
 Verification:
 
-- `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 19 tests.
-- `cargo test history_store --lib` OK: 7 tests.
-- `cargo test --lib` OK: 693 tests.
+- `cargo test history_worker --lib` OK.
+- `cargo test active_dispatch_queues_trades_into_history_worker_without_direct_store_write --lib` OK.
+- `cargo test --lib` OK: 698 tests.
 - `cargo check --examples` OK.
 
 ### Phase Z - final full optimization pass

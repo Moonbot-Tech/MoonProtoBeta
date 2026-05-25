@@ -50,9 +50,10 @@ use crate::protocol::Command;
 use crate::state::orders::OrderCancelSend;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
-    ApplyResult, BalanceEvent, BalancesState, MarketsEvent, MarketsState, OrderBookEvent,
-    OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent, StratsState,
-    TradesEvent, TradesState,
+    ApplyResult, BalanceEvent, BalancesState, MarketHistoryHandle, MarketHistoryMMOrderInput,
+    MarketHistoryStreamBatch, MarketHistoryStreamSection, MarketHistoryTradeInput, MarketsEvent,
+    MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState,
+    StratEvent, StratsState, TradesEvent, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -174,6 +175,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) subscribed_book_server_token: u64,
     pub(crate) round_trip_delay_ms: i64,
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
+    pub(crate) now_time_days: f64,
     pub(crate) domain_ready: bool,
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) server_base_currency_name: Option<String>,
@@ -189,6 +191,7 @@ impl ActiveDispatchContext {
             subscribed_book_server_token: client.subscribed_book_server_token(),
             round_trip_delay_ms: client.round_trip_delay_ms(),
             server_time_delta_source: client.server_time_delta_handle(),
+            now_time_days: crate::client::delphi_now_raw(),
             domain_ready: client.is_domain_ready(),
             copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
                 client.server_info(),
@@ -295,6 +298,9 @@ pub struct EventDispatcher {
     /// callback argument, so they store produced events here for the application
     /// to drain after the helper returns.
     queued_events: AppQueue<Event>,
+    /// Optional retained-history writer. The dispatcher only queues typed
+    /// batches into this handle; the worker owns `MarketHistoryStore`.
+    market_history: Option<MarketHistoryHandle>,
 }
 
 /// Immutable read-model copy delivered to `run_with_dispatcher_state` callbacks.
@@ -624,6 +630,20 @@ impl EventDispatcher {
     /// Drop queued one-shot events without processing them.
     pub fn clear_queued_events(&mut self) {
         self.queued_events.clear();
+    }
+
+    /// Attach a retained-history writer worker.
+    ///
+    /// The dispatcher does not mutate retained history directly. In active
+    /// dispatch mode it only queues typed `TradesStream` batches into this
+    /// handle; `MarketHistoryWorker` owns the actual `MarketHistoryStore`s.
+    pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
+        self.market_history = Some(handle);
+    }
+
+    /// Disable retained-history batch delivery for this dispatcher.
+    pub fn clear_market_history_handle(&mut self) {
+        self.market_history = None;
     }
 
     pub(crate) fn queue_events<I>(&mut self, events: I)
@@ -958,6 +978,120 @@ impl EventDispatcher {
             }
             out.push(Event::Trade(ev));
         }
+    }
+
+    fn queue_retained_history_batches(&self, events: &[Event], now_time_days: f64) {
+        let Some(handle) = &self.market_history else {
+            return;
+        };
+        for event in events {
+            let Event::Trade(TradesEvent::Apply(pkt)) = event else {
+                continue;
+            };
+            let Some(batch) = self.market_history_batch_from_packet(pkt, now_time_days) else {
+                continue;
+            };
+            handle.send_stream_batch(batch);
+        }
+    }
+
+    fn market_history_batch_from_packet(
+        &self,
+        pkt: &TradesPacket,
+        now_time_days: f64,
+    ) -> Option<MarketHistoryStreamBatch> {
+        let mut sections = Vec::new();
+        for section in &pkt.sections {
+            match section {
+                TradeSection::Trades(rows) => {
+                    let Some(first) = rows.first() else {
+                        continue;
+                    };
+                    let Some(market_name) = self
+                        .markets
+                        .market_name_by_index(first.market_index)
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let rows = rows
+                        .iter()
+                        .map(|row| MarketHistoryTradeInput {
+                            time_delta_ms: row.time_delta_ms,
+                            price: row.price,
+                            qty: row.qty,
+                        })
+                        .collect::<Vec<_>>();
+                    if first.is_spot {
+                        sections.push(MarketHistoryStreamSection::SpotTrades { market_name, rows });
+                    } else {
+                        let chart_price_step = self
+                            .markets
+                            .price(&market_name)
+                            .map(|price| price.chart_price_step)
+                            .unwrap_or_default();
+                        sections.push(MarketHistoryStreamSection::FuturesTrades {
+                            market_name,
+                            chart_price_step,
+                            rows,
+                        });
+                    }
+                }
+                TradeSection::LiqOrders(rows) => {
+                    let Some(first) = rows.first() else {
+                        continue;
+                    };
+                    let Some(market_name) = self
+                        .markets
+                        .market_name_by_index(first.market_index)
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let rows = rows
+                        .iter()
+                        .map(|row| MarketHistoryTradeInput {
+                            time_delta_ms: row.time_delta_ms,
+                            price: row.price,
+                            qty: row.qty,
+                        })
+                        .collect::<Vec<_>>();
+                    sections.push(MarketHistoryStreamSection::Liquidations { market_name, rows });
+                }
+                TradeSection::MMOrders(rows) => {
+                    let Some(first) = rows.first() else {
+                        continue;
+                    };
+                    let Some(market_name) = self
+                        .markets
+                        .market_name_by_index(first.market_index)
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let rows = rows
+                        .iter()
+                        .map(|row| MarketHistoryMMOrderInput {
+                            time_delta_ms: row.time_delta_ms,
+                            vol: row.vol,
+                            q: row.q,
+                            taker: row.taker,
+                        })
+                        .collect::<Vec<_>>();
+                    sections.push(MarketHistoryStreamSection::MMOrders { market_name, rows });
+                }
+                TradeSection::WatcherFills { .. } => {}
+            }
+        }
+
+        if sections.is_empty() {
+            return None;
+        }
+        Some(MarketHistoryStreamBatch {
+            base_time: pkt.base_time,
+            now_time: now_time_days,
+            sections,
+        })
     }
 
     fn collect_known_trades_packet_like_delphi(
@@ -1344,6 +1478,9 @@ impl EventDispatcher {
                 && out[start_len..]
                     .iter()
                     .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_))));
+        if processed_trades_packet {
+            self.queue_retained_history_batches(&out[start_len..], ctx.now_time_days);
+        }
 
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
@@ -2762,6 +2899,50 @@ mod tests {
         );
         assert_eq!(st.last_trade_price_ema15, (100.0 * 15.0 + 90.0) / 16.0);
         assert_eq!(st.last_trade_price_ema5, (100.0 * 5.0 + 90.0) / 6.0);
+    }
+
+    #[test]
+    fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 8,
+        });
+        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        let futures = readers.futures_trades.unwrap();
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = trades_payload_with_rows(801, 0, 0, &[(0, 100.0, 1.0)]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(worker.flush(45_000.0));
+
+        let mut rows = Vec::new();
+        futures.copy_last(8, &mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].price, 100.0);
+        assert_eq!(rows[0].qty, 1.0);
     }
 
     #[test]
