@@ -6,9 +6,9 @@
 //! ACK handling, PMTU discovery, and payload commands.
 //!
 //! `moonproto` is an **active session manager**. Transport reconnect,
-//! init-driven subscriptions and index fetches, orderbook full requests, trades
-//! gap recovery, pending Engine API routing, NTP sync, and candle chunk merging
-//! are owned by the library. Before the first Init, transport handshake
+//! init-driven subscriptions and index/schema fetches, orderbook full requests,
+//! trades gap recovery, pending Engine API routing, NTP sync, and candle chunk
+//! merging are owned by the library. Before the first Init, transport handshake
 //! readiness (`Fine`) does not send Engine API requests. After the single Init
 //! for a `Client` session, reconnect restores fresh indexes for indexed streams
 //! and registry subscriptions automatically.

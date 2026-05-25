@@ -9,7 +9,7 @@ Used by terminal UI developers to understand what data arrives from the server.
 |---------|-------------|-------------|--------------|
 | Order | 28 (MPC_Order) | Trading operations | 30 sub-types (new order, status, replace, cancel, etc.) |
 | Balance | 32 (MPC_Balance) | Account balances | 6 sub-types (snapshot, incremental, refresh) |
-| Strategy | 30 (MPC_Strat) | Strategy management | 6 sub-types (snapshot, delete, checked sync) |
+| Strategy | 30 (MPC_Strat) | Strategy management | 9 sub-types (snapshot, delete, checked sync, schema) |
 | UI | 29 (MPC_UI) | Settings and notifications | 15 sub-types |
 | Engine API | 31 (MPC_API) | RPC calls | 31 methods |
 | TradesStream | 33 (MPC_TradesStream) | Real-time trade feed | Single format, sections per market |

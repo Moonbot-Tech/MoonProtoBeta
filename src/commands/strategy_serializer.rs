@@ -6,6 +6,9 @@
 //! Парсит RTTI-driven binary snapshot стратегий из payload'а `TStratSnapshot.data`.
 //! Сервер (Delphi MoonBot) использует RTTI для итерации по public-полям `TStrategy`;
 //! Rust-клиент не имеет RTTI, поэтому хранит поля как `HashMap<FieldName, FieldValue>`.
+//! Для typed writer и Delphi `ReadField` TypeID-проверок Rust использует live
+//! `TStratSchema`, полученную от сервера, а не статическую копию `TStrategy`
+//! field order/defaults.
 //!
 //! ## Wire format (после DEFLATE decompression, raw -15)
 //!
@@ -47,6 +50,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use super::registry::decode_utf8_delphi;
+use super::strategy_schema::{StrategySchema, StrategySchemaField};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
@@ -66,830 +70,6 @@ pub const TID_UINT32: u8 = 8;
 pub const TID_UINT64: u8 = 9;
 pub const TID_SINGLE: u8 = 10;
 pub const TID_ZERO_FLAG: u8 = 0x80;
-
-// Delphi StrategySerializer.SaveStrategyToCompact iterates GetStrategyPropMask,
-// whose base order is TRttiContext.GetType(TStrategy).GetFields filtered to
-// public fields (Strategies.pas:4758-4766). RebuildFiledsList only removes
-// fields from that list, so this declaration order is the stable wire order for
-// any provided snapshot fields.
-const DELPHI_STRATEGY_FIELD_ORDER: &[&str] = &[
-    "StrategyName",
-    "Comment",
-    "LastEditDate",
-    "SignalType",
-    "ChannelName",
-    "ChannelKey",
-    "AcceptCommands",
-    "OnlyEncryptedCommands",
-    "SilentNoCharts",
-    "ReportToTelegram",
-    "ReportTradesToTelegram",
-    "SoundAlert",
-    "SoundKind",
-    "KeepAlert",
-    "AddToChart",
-    "KeepInChart",
-    "EmulatorMode",
-    "DebugLog",
-    "IndependentSignals",
-    "DontWriteLog",
-    "DontKeepOrdersOnChart",
-    "UseCustomColors",
-    "OrderLineKind",
-    "SellOrderColor",
-    "BuyOrderColor",
-    "DynWL_SortBy",
-    "DynWL_SortDesc",
-    "DynWL_Count",
-    "DynBL_SortBy",
-    "DynBL_SortDesc",
-    "DynBL_Count",
-    "Dyn_Refresh",
-    "IgnoreFilters",
-    "IgnoreGatePenalty",
-    "CoinsWhiteList",
-    "CoinsBlackList",
-    "OnlyNewListing",
-    "DontTradeListing",
-    "LeveragedTokens",
-    "ListedType",
-    "CheckAfterBuy",
-    "DontCheckBeforeBuy",
-    "NextDetectPenalty",
-    "PreventWorkingUntil",
-    "IgnoreBase",
-    "BinanceTokenTags",
-    "MinLeverage",
-    "MaxLeverage",
-    "CustomEMA",
-    "MoonIntRiskLevel",
-    "MoonIntStopLevel",
-    "MarkPriceMin",
-    "MarkPriceMax",
-    "IgnoreTime",
-    "WorkingTime",
-    "PenaltyTime",
-    "TradePenaltyTime",
-    "GlobalDetectPenalty",
-    "FundingBefore",
-    "FundingAfter",
-    "IgnorePrice",
-    "MaxBalance",
-    "SamePosition",
-    "MaxPosition",
-    "SessionProfitMin",
-    "SessionProfitMax",
-    "TotalLoss",
-    "WorkingPriceMax",
-    "WorkingPriceMin",
-    "PriceStepMin",
-    "PriceStepMax",
-    "UseBTCPriceStep",
-    "IgnorePing",
-    "MaxPing",
-    "MinPing",
-    "MaxLatency",
-    "BinancePriceBug",
-    "BinancePriceBugMin",
-    "IgnoreVolume",
-    "MinVolume",
-    "MaxVolume",
-    "MinHourlyVolume",
-    "MaxHourlyVolume",
-    "MinHourlyVolFast",
-    "MaxHourlyVolFast",
-    "MinuteVolDeltaMin",
-    "MinuteVolDeltaMax",
-    "UseBV_SV_Filter",
-    "BV_SV_FilterRatio",
-    "BV_SV_FilterRatioMax",
-    "IgnoreDelta",
-    "Delta_3h_Min",
-    "Delta_3h_Max",
-    "Delta_24h_Min",
-    "Delta_24h_Max",
-    "Delta2_Type",
-    "Delta2_Min",
-    "Delta2_Max",
-    "Delta3_Type",
-    "Delta3_Min",
-    "Delta3_Max",
-    "Delta_BTC_Min",
-    "Delta_BTC_Max",
-    "Delta_BTC_24_Min",
-    "Delta_BTC_24_Max",
-    "Delta_BTC_5m_Min",
-    "Delta_BTC_5m_Max",
-    "Delta_BTC_1m_Min",
-    "Delta_BTC_1m_Max",
-    "Delta_Market_Min",
-    "Delta_Market_Max",
-    "Delta_Market_24_Min",
-    "Delta_Market_24_Max",
-    "FilterBy",
-    "FilterMin",
-    "FilterMax",
-    "GlobalFilterPenalty",
-    "DeltaSwitch",
-    "TriggerKey",
-    "TriggerKeyBuy",
-    "TriggerKeyProfit",
-    "TriggerKeyLoss",
-    "ActiveTrigger",
-    "ClearTriggersBelow",
-    "ClearTriggersAbove",
-    "ClearTriggerKeys",
-    "TriggerAllMarkets",
-    "TriggerByKey",
-    "TriggerByAllKeys",
-    "TriggerSeconds",
-    "TriggerKeysBL",
-    "TriggerSecondsBL",
-    "SellByTriggerBL",
-    "CancelByTriggerBL",
-    "IgnoreSession",
-    "SessionLevelsUSDT",
-    "SessionStratMax",
-    "SessionStratIncreaseMax",
-    "SessionStratMin",
-    "SessionStratReduceMin",
-    "SessionResetOnMinus",
-    "SessionPenaltyTime",
-    "SessionPlusCount",
-    "SessionMinusCount",
-    "SessionIncreaseOrder",
-    "SessionIncreaseOrderMax",
-    "SessionReduceOrder",
-    "SessionReduceOrderMin",
-    "SessionResetTime",
-    "AutoBuy",
-    "RunDetectOnKernel",
-    "BuyDelay",
-    "Short",
-    "HFT",
-    "MaxActiveOrders",
-    "MaxOrdersPerMarket",
-    "MaxMarkets",
-    "AutoCancelBuy",
-    "AutoCancelLowerBuy",
-    "CancelBuyAfterSell",
-    "BuyType",
-    "PendingOrderSpread",
-    "OrderSize",
-    "MinFreeBalance",
-    "buyPrice",
-    "buyPriceLastTrade",
-    "buyPriceAbsolute",
-    "Use30SecOldASK",
-    "UseOldPrice",
-    "TlgUseBuyDipWords",
-    "TlgBuyDipPrice",
-    "UsePostOnly",
-    "BuyModifier",
-    "SellModifier",
-    "DetectModifier",
-    "StopLossModifier",
-    "MaxModifier",
-    "Add24hDelta",
-    "Add3hDelta",
-    "AddHourlyDelta",
-    "Add15minDelta",
-    "Add5minDelta",
-    "Add1minDelta",
-    "AddMarketDelta",
-    "AddMarket24Delta",
-    "AddBTCDelta",
-    "AddBTC5mDelta",
-    "AddBTC1mDelta",
-    "AddMarkDelta",
-    "AddPump1h",
-    "AddDump1h",
-    "AddPriceBug",
-    "OrdersCount",
-    "CheckFreeBalance",
-    "BuyPriceStep",
-    "BuyStepKind",
-    "OrderSizeStep",
-    "OrderSizeKind",
-    "CancelBuyStep",
-    "JoinSellKey",
-    "JoinPriceFixed",
-    "IgnoreCancelBuy",
-    "AutoSplitBuy",
-    "AutoSell",
-    "SellPrice",
-    "SellDelay",
-    "SplitPiece",
-    "UseMarketStop",
-    "MarketStopLevel",
-    "SellPriceAbsolute",
-    "SellFromAsset",
-    "SellQuantity",
-    "PriceDownTimer",
-    "PriceDownDelay",
-    "PriceDownPercent",
-    "PriceDownRelative",
-    "PriceDownAllowedDrop",
-    "UseScalpingMode",
-    "SellByFilters",
-    "SellByCustomEMA",
-    "SellEMADelay",
-    "SellEMACheckEnter",
-    "SellLevelDelay",
-    "SellLevelDelayNext",
-    "SellLevelWorkTime",
-    "SellLevelTime",
-    "SellLevelCount",
-    "SellLevelAdjust",
-    "SellLevelRelative",
-    "SellLevelAllowedDrop",
-    "IgnoreSellShot",
-    "SellShotDelay",
-    "SellShotDistance",
-    "SellShotCorridor",
-    "SellShotCalcInterval",
-    "SellShotRaiseWait",
-    "SellShotReplaceDelay",
-    "SellShotPriceDown",
-    "SellShotPriceDownDelay",
-    "SellShotAllowedUp",
-    "SellShotAllowedDown",
-    "IgnoreSellSpread",
-    "SellSpreadReplaceCount",
-    "SellSpreadMinSpread",
-    "SellSpreadDelay",
-    "SellSpreadDistance",
-    "SellSpreadAllowedDrop",
-    "UseSignalStops",
-    "UseStopLoss",
-    "FastStopLoss",
-    "UseMarketOrder",
-    "StopLossEMA",
-    "StopLossDelay",
-    "StopLoss",
-    "StopLossSpread",
-    "StopSpreadAdd1mDelta",
-    "AllowedDrop",
-    "DontSellBelowLiq",
-    "StopAboveLiq",
-    "StopLossFixed",
-    "UseSecondStop",
-    "TimeToSwitch2Stop",
-    "PriceToSwitch2Stop",
-    "SecondStopLoss",
-    "UseStopLoss3",
-    "TimeToSwitchStop3",
-    "PriceToSwitchStop3",
-    "StopLoss3",
-    "AllowedDrop3",
-    "UseTrailing",
-    "TrailingPercent",
-    "TrailingSpread",
-    "TrailingEMA",
-    "UseTakeProfit",
-    "TakeProfit",
-    "UseBV_SV_Stop",
-    "BV_SV_Kind",
-    "BV_SV_TradesN",
-    "BV_SV_Ratio",
-    "BV_SV_Reverse",
-    "BV_SV_TakeProfit",
-    "PanicSellDelisted",
-    "DropsMaxTime",
-    "DropsPriceMA",
-    "DropsLastPriceMA",
-    "DropsPriceDelta",
-    "DropsPriceIsLow",
-    "DropsUseLastPrice",
-    "WallsMaxTime",
-    "WallsPriceDelta",
-    "WallBuyVolDeep",
-    "WallBuyVolume",
-    "WallBuyVolToDailyVol",
-    "WallSellVolToBuy",
-    "WallSellVolDeep",
-    "PumpPriceInterval",
-    "PumpPriceRaise",
-    "PumpBuysPerSec",
-    "PumpVolPerSec",
-    "PumpVolEMA",
-    "PumpMoveTimer",
-    "PumpMovePersent",
-    "PumpUsePrevBuyPrice",
-    "MShotPriceMin",
-    "MShotPrice",
-    "MShotMinusSatoshi",
-    "MShotAdd24hDelta",
-    "MShotAdd3hDelta",
-    "MShotAddHourlyDelta",
-    "MShotAdd15minDelta",
-    "MShotAdd5minDelta",
-    "MShotAdd1minDelta",
-    "MShotAddMarketDelta",
-    "MShotAddBTCDelta",
-    "MShotAddBTC5mDelta",
-    "MShotAddDistance",
-    "MShotAddMarkDelta",
-    "MShotAddPriceBug",
-    "MShotSellAtLastPrice",
-    "MShotSellPriceAdjust",
-    "MShotReplaceDelay",
-    "MShotRaiseWait",
-    "MShotSortBy",
-    "MShotSortDesc",
-    "MShotUsePrice",
-    "MShotRepeatAfterBuy",
-    "MShotRepeatIfProfit",
-    "MShotRepeatIfDrop",
-    "MShotRepeatWait",
-    "MShotRepeatDelay",
-    "VolShortInterval",
-    "VolShortPriseRaise",
-    "VolLongInterval",
-    "VolBvShortToLong",
-    "VolBvLongToHourlyMin",
-    "VolBvLongToHourlyMax",
-    "VolBvLongToDailyMin",
-    "VolBvLongToDailyMax",
-    "VolBvToSvShort",
-    "VolBvShort",
-    "VolSvLong",
-    "VolTakeLongMaxP",
-    "VolAtMinP",
-    "VolAtMaxP",
-    "VolDeltaAtMaxP",
-    "VolDeltaAtMinP",
-    "volBidsDeep",
-    "volBids",
-    "volAsksDeep",
-    "volBidsToAsks",
-    "VLiteT0",
-    "VLiteT1",
-    "VLiteT2",
-    "VLiteT3",
-    "VLiteP1",
-    "VLiteP2",
-    "VLiteP3",
-    "VLiteMaxP",
-    "VLitePDelta1",
-    "VLitePDelta2",
-    "VLiteDelta0",
-    "VLiteMaxSpike",
-    "VLiteV1",
-    "VLiteV2",
-    "VLiteV3",
-    "VLiteWeightedAvg",
-    "VLiteReducedVolumes",
-    "WavesT0",
-    "WavesT1",
-    "WavesT2",
-    "WavesT3",
-    "WavesP1",
-    "WavesP2",
-    "WavesP3",
-    "WavesDelta0",
-    "WavesMaxSpike",
-    "WavesV1",
-    "WavesV2",
-    "WavesV3",
-    "WavesWeightedAvg",
-    "WavesReducedVolumes",
-    "DeltaInterval",
-    "DeltaShortInterval",
-    "DeltaPrice",
-    "DeltaVol",
-    "DeltaVolRaise",
-    "DeltaVolSec",
-    "DeltaLastPrice",
-    "ComboStart",
-    "ComboEnd",
-    "ComboDelayMin",
-    "ComboDelayMax",
-    "MStrikeDepth",
-    "MStrikeVolume",
-    "MStrikeLastBidEMA",
-    "MStrikeAddHourlyDelta",
-    "MStrikeAdd15minDelta",
-    "MStrikeAddMarketDelta",
-    "MStrikeAddBTCDelta",
-    "MStrikeBuyDelay",
-    "MStrikeBuyLevel",
-    "MStrikeBuyRelative",
-    "MStrikeSellLevel",
-    "MStrikeSellAdjust",
-    "MStrikeDirection",
-    "MStrikeWaitDip",
-    "TMBuyPriceLimit",
-    "LiqTime",
-    "LiqCount",
-    "LiqVolumeMin",
-    "LiqVolumeMax",
-    "LiqWaitTime",
-    "LiqWithinTime",
-    "LiqDirection",
-    "LiqSameDirection",
-    "Liq_BV_SV_Time",
-    "Liq_BV_SV_Filter",
-    "DeltaMin",
-    "TMSameDirection",
-    "StrategyPenalty",
-    "TimeInterval",
-    "TradesDensity",
-    "TradesDensityPrev",
-    "TradesCountMin",
-    "PriceIntervals",
-    "PriceIntervalShift",
-    "PriceSpread",
-    "PriceSpreadMax",
-    "IntervalsForBuySpread",
-    "BuyPriceInSpread",
-    "SellPriceInSpread",
-    "BuyOrderReduce",
-    "MinReducedSize",
-    "SpreadRepeatIfProfit",
-    "SpreadFlat",
-    "Spread_BV_SV_Time",
-    "Spread_BV_SV_Max",
-    "Spread_BV_SV_Min",
-    "SpreadPolarityMin",
-    "SpreadPolarityMax",
-    "WallSpread",
-    "WallSize",
-    "RedWall",
-    "MultiTokens",
-    "HookTimeFrame",
-    "HookDetectDepth",
-    "HookDetectDepthMax",
-    "HookAntiPump",
-    "HookPriceRollBack",
-    "HookPriceRollBackMax",
-    "HookRollBackWait",
-    "HookDropMin",
-    "HookDropMax",
-    "HookDirection",
-    "HookOppositeOrder",
-    "HookInterpolate",
-    "HookInitialPrice",
-    "HookPriceDistance",
-    "HookPartFilledDelay",
-    "HookSellLevel",
-    "HookSellFixed",
-    "HookReplaceDelay",
-    "HookRaiseWait",
-    "HookRepeatAfterSell",
-    "HookRepeatIfProfit",
-    "HookDetectMinVolume",
-    "FastShotAlgo",
-    "MMTimeFrame",
-    "MMOrderMin",
-    "MMOrderMax",
-    "MMOrderStep",
-    "UseHookStrategy",
-    "AlertByTrades",
-    "WatchAddress",
-    "WatchDirection",
-    "WatchMinVolume",
-    "WatchMinPosition",
-];
-const DELPHI_STRATEGY_FIELD_TYPES: &[u8] = &[
-    TID_STRING, TID_STRING, TID_STRING, TID_STRING, TID_STRING, TID_STRING, TID_BOOL, TID_BOOL,
-    TID_BOOL, TID_BOOL, TID_BOOL, TID_BOOL, TID_STRING, TID_INT32, TID_INT32, TID_INT32, TID_BOOL,
-    TID_BOOL, TID_BOOL, TID_BOOL, TID_BOOL, TID_BOOL, TID_STRING, TID_STRING, TID_STRING,
-    TID_STRING, TID_BOOL, TID_INT32, TID_STRING, TID_BOOL, TID_INT32, TID_INT32, TID_BOOL,
-    TID_BOOL, TID_STRING, TID_STRING, TID_INT32, TID_INT32, TID_BOOL, TID_STRING, TID_BOOL,
-    TID_BOOL, TID_INT32, TID_INT64, TID_BOOL, TID_STRING, TID_INT32, TID_INT32, TID_STRING,
-    TID_INT32, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_STRING, TID_INT32, TID_INT32,
-    TID_INT32, TID_INT32, TID_INT32, TID_BOOL, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_INT32,
-    TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_BOOL,
-    TID_INT32, TID_INT32, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_INT64, TID_INT64,
-    TID_INT64, TID_INT64, TID_INT32, TID_INT64, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE,
-    TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_STRING, TID_DOUBLE,
-    TID_DOUBLE, TID_STRING, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_STRING, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32,
-    TID_INT32, TID_BOOL, TID_BOOL, TID_BOOL, TID_STRING, TID_BOOL, TID_STRING, TID_BOOL, TID_INT32,
-    TID_STRING, TID_INT32, TID_STRING, TID_BOOL, TID_BOOL, TID_BOOL, TID_DOUBLE, TID_INT32,
-    TID_DOUBLE, TID_INT32, TID_BOOL, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_INT32,
-    TID_INT32, TID_INT32, TID_INT32, TID_BOOL, TID_BOOL, TID_INT32, TID_BOOL, TID_INT32, TID_INT32,
-    TID_INT32, TID_INT32, TID_DOUBLE, TID_INT32, TID_BOOL, TID_STRING, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_BOOL, TID_BOOL, TID_INT32, TID_BOOL, TID_DOUBLE,
-    TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_BOOL, TID_DOUBLE,
-    TID_STRING, TID_DOUBLE, TID_STRING, TID_INT32, TID_INT32, TID_BOOL, TID_BOOL, TID_BOOL,
-    TID_BOOL, TID_DOUBLE, TID_INT32, TID_INT32, TID_BOOL, TID_DOUBLE, TID_BOOL, TID_BOOL,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_BOOL, TID_INT32,
-    TID_STRING, TID_INT32, TID_BOOL, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_INT32,
-    TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_INT32,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_BOOL, TID_BOOL, TID_BOOL,
-    TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE,
-    TID_BOOL, TID_BOOL, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_INT32, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_BOOL, TID_DOUBLE,
-    TID_BOOL, TID_STRING, TID_INT32, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_BOOL, TID_INT32,
-    TID_INT32, TID_INT32, TID_DOUBLE, TID_BOOL, TID_BOOL, TID_INT32, TID_DOUBLE, TID_DOUBLE,
-    TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_STRING, TID_DOUBLE, TID_INT32, TID_DOUBLE,
-    TID_DOUBLE, TID_INT32, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_STRING,
-    TID_BOOL, TID_STRING, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32,
-    TID_DOUBLE, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_BOOL, TID_INT32, TID_INT32, TID_INT32, TID_INT32,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_BOOL, TID_BOOL, TID_INT32, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE,
-    TID_DOUBLE, TID_STRING, TID_STRING, TID_INT32, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_INT32,
-    TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_DOUBLE, TID_BOOL, TID_DOUBLE,
-    TID_BOOL, TID_STRING, TID_BOOL, TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32, TID_INT32,
-    TID_INT32, TID_INT32, TID_STRING, TID_BOOL, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_BOOL,
-    TID_INT32, TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_DOUBLE,
-    TID_DOUBLE, TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_DOUBLE, TID_INT32, TID_BOOL,
-    TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_INT32, TID_INT32, TID_DOUBLE, TID_DOUBLE, TID_BOOL,
-    TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_INT32, TID_INT32, TID_INT32,
-    TID_INT32, TID_INT32, TID_STRING, TID_BOOL, TID_INT32, TID_INT32, TID_INT32, TID_INT32,
-    TID_INT32, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_BOOL, TID_DOUBLE, TID_DOUBLE, TID_BOOL,
-    TID_INT32, TID_INT32, TID_INT32, TID_INT32, TID_STRING, TID_BOOL, TID_STRING, TID_STRING,
-    TID_INT32, TID_INT32,
-];
-fn strategy_field_order_rank(name: &str) -> usize {
-    DELPHI_STRATEGY_FIELD_ORDER
-        .iter()
-        .position(|field| *field == name)
-        .unwrap_or(usize::MAX)
-}
-
-fn strategy_field_expected_type_id(name: &str) -> Option<u8> {
-    DELPHI_STRATEGY_FIELD_TYPES
-        .get(strategy_field_order_rank(name))
-        .copied()
-}
-
-fn strategy_field_should_write(name: &str, value: &FieldValue) -> bool {
-    let Some(expected_type) = strategy_field_expected_type_id(name) else {
-        return false;
-    };
-    if value.type_id() != expected_type {
-        return false;
-    }
-    !strategy_field_value_is_delphi_default(name, value)
-}
-
-fn strategy_field_value_is_delphi_default(name: &str, value: &FieldValue) -> bool {
-    match name {
-        // Delphi defaults for these two strings are `IntToHex(Vars.*OrderColor)`;
-        // the exact value is runtime UI state, so Rust must not treat "" as default.
-        "SellOrderColor" | "BuyOrderColor" => false,
-        "SignalType" => matches!(value, FieldValue::String(v) if v == "DropsDetection"),
-        "ReportTradesToTelegram" => matches!(value, FieldValue::Bool(v) if *v),
-        "SoundKind" => matches!(value, FieldValue::String(v) if v == "TurnOn"),
-        "KeepAlert" => matches!(value, FieldValue::Int32(v) if *v == 60),
-        "OrderLineKind" => matches!(value, FieldValue::String(v) if v == "Solid"),
-        "DynWL_SortBy" => matches!(value, FieldValue::String(v) if v == "Last2hDelta"),
-        "DynWL_SortDesc" => matches!(value, FieldValue::Bool(v) if *v),
-        "DynBL_SortBy" => matches!(value, FieldValue::String(v) if v == "Last2hDelta"),
-        "DynBL_SortDesc" => matches!(value, FieldValue::Bool(v) if *v),
-        "Dyn_Refresh" => matches!(value, FieldValue::Int32(v) if *v == 61),
-        "ListedType" => matches!(value, FieldValue::String(v) if v == "Ignore"),
-        "NextDetectPenalty" => matches!(value, FieldValue::Int32(v) if *v == 30),
-        "MinLeverage" => matches!(value, FieldValue::Int32(v) if *v == 1),
-        "MoonIntRiskLevel" => matches!(value, FieldValue::Int32(v) if *v == 2),
-        "MoonIntStopLevel" => matches!(value, FieldValue::Int32(v) if *v == 4),
-        "MarkPriceMax" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "PenaltyTime" => matches!(value, FieldValue::Int32(v) if *v == 300),
-        "PriceStepMax" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "MinVolume" => matches!(value, FieldValue::Int64(v) if *v == 100),
-        "MaxVolume" => matches!(value, FieldValue::Int64(v) if *v == 100000),
-        "MinHourlyVolume" => matches!(value, FieldValue::Int64(v) if *v == 10),
-        "MaxHourlyVolume" => matches!(value, FieldValue::Int64(v) if *v == 10000),
-        "BV_SV_FilterRatio" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "Delta_3h_Max" => matches!(value, FieldValue::Double(v) if (*v - 20.0).abs() < 1e-10),
-        "Delta_24h_Max" => matches!(value, FieldValue::Double(v) if (*v - 100.0).abs() < 1e-10),
-        "Delta2_Type" => matches!(value, FieldValue::String(v) if v == "1h"),
-        "Delta2_Max" => matches!(value, FieldValue::Double(v) if (*v - 20.0).abs() < 1e-10),
-        "Delta3_Type" => matches!(value, FieldValue::String(v) if v == "1m"),
-        "Delta3_Max" => matches!(value, FieldValue::Double(v) if (*v - 1000.0).abs() < 1e-10),
-        "Delta_BTC_Min" => matches!(value, FieldValue::Double(v) if (*v - -5.0).abs() < 1e-10),
-        "Delta_BTC_Max" => matches!(value, FieldValue::Double(v) if (*v - 5.0).abs() < 1e-10),
-        "Delta_BTC_24_Min" => matches!(value, FieldValue::Double(v) if (*v - -10.0).abs() < 1e-10),
-        "Delta_BTC_24_Max" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "Delta_BTC_5m_Max" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "Delta_BTC_1m_Max" => matches!(value, FieldValue::Double(v) if (*v - 100.0).abs() < 1e-10),
-        "Delta_Market_Min" => matches!(value, FieldValue::Double(v) if (*v - -5.0).abs() < 1e-10),
-        "Delta_Market_Max" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "Delta_Market_24_Min" => {
-            matches!(value, FieldValue::Double(v) if (*v - -10.0).abs() < 1e-10)
-        }
-        "Delta_Market_24_Max" => {
-            matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10)
-        }
-        "FilterBy" => matches!(value, FieldValue::String(v) if v == "Last2hDelta"),
-        "TriggerSeconds" => matches!(value, FieldValue::Int32(v) if *v == 60),
-        "IgnoreSession" => matches!(value, FieldValue::Bool(v) if *v),
-        "SessionLevelsUSDT" => matches!(value, FieldValue::Bool(v) if *v),
-        "SessionIncreaseOrderMax" => matches!(value, FieldValue::Int32(v) if *v == 500),
-        "SessionReduceOrderMin" => matches!(value, FieldValue::Int32(v) if *v == 500),
-        "MaxActiveOrders" => matches!(value, FieldValue::Int32(v) if *v == 10),
-        "MaxOrdersPerMarket" => matches!(value, FieldValue::Int32(v) if *v == 1),
-        "AutoCancelBuy" => matches!(value, FieldValue::Double(v) if (*v - 300.0).abs() < 1e-10),
-        "BuyType" => matches!(value, FieldValue::String(v) if v == "Buy"),
-        "PendingOrderSpread" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "DetectModifier" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "AddPriceBug" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "OrdersCount" => matches!(value, FieldValue::Int32(v) if *v == 1),
-        "BuyPriceStep" => matches!(value, FieldValue::Double(v) if (*v - -1.5).abs() < 1e-10),
-        "BuyStepKind" => matches!(value, FieldValue::String(v) if v == "Linear"),
-        "OrderSizeStep" => matches!(value, FieldValue::Double(v) if (*v - 25.0).abs() < 1e-10),
-        "OrderSizeKind" => matches!(value, FieldValue::String(v) if v == "Linear"),
-        "AutoSell" => matches!(value, FieldValue::Bool(v) if *v),
-        "SellPrice" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "PriceDownDelay" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "PriceDownPercent" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "PriceDownAllowedDrop" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10)
-        }
-        "SellEMACheckEnter" => matches!(value, FieldValue::Bool(v) if *v),
-        "SellLevelTime" => matches!(value, FieldValue::Int32(v) if *v == 3600),
-        "SellLevelCount" => matches!(value, FieldValue::Int32(v) if *v == 1),
-        "SellLevelAdjust" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "SellLevelAllowedDrop" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10)
-        }
-        "IgnoreSellShot" => matches!(value, FieldValue::Bool(v) if *v),
-        "SellShotDistance" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "SellShotCorridor" => matches!(value, FieldValue::Int32(v) if *v == 50),
-        "SellShotCalcInterval" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.6).abs() < 1e-10)
-        }
-        "SellShotRaiseWait" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "SellShotReplaceDelay" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10)
-        }
-        "SellShotAllowedUp" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "SellShotAllowedDown" => {
-            matches!(value, FieldValue::Double(v) if (*v - -0.1).abs() < 1e-10)
-        }
-        "IgnoreSellSpread" => matches!(value, FieldValue::Bool(v) if *v),
-        "SellSpreadReplaceCount" => matches!(value, FieldValue::Int32(v) if *v == 10),
-        "SellSpreadMinSpread" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "SellSpreadDistance" => {
-            matches!(value, FieldValue::Double(v) if (*v - -10.0).abs() < 1e-10)
-        }
-        "SellSpreadAllowedDrop" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.3).abs() < 1e-10)
-        }
-        "UseStopLoss" => matches!(value, FieldValue::Bool(v) if *v),
-        "StopLoss" => matches!(value, FieldValue::Double(v) if (*v - -5.0).abs() < 1e-10),
-        "StopLossSpread" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "StopSpreadAdd1mDelta" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.01).abs() < 1e-10)
-        }
-        "AllowedDrop" => matches!(value, FieldValue::Double(v) if (*v - -99.0).abs() < 1e-10),
-        "TimeToSwitch2Stop" => matches!(value, FieldValue::Int32(v) if *v == 60),
-        "TimeToSwitchStop3" => matches!(value, FieldValue::Int32(v) if *v == 60),
-        "PriceToSwitchStop3" => {
-            matches!(value, FieldValue::Double(v) if (*v - -10.0).abs() < 1e-10)
-        }
-        "AllowedDrop3" => matches!(value, FieldValue::Double(v) if (*v - -99.0).abs() < 1e-10),
-        "UseTrailing" => matches!(value, FieldValue::Bool(v) if *v),
-        "TrailingPercent" => matches!(value, FieldValue::Double(v) if (*v - -3.0).abs() < 1e-10),
-        "TrailingSpread" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "UseTakeProfit" => matches!(value, FieldValue::Bool(v) if *v),
-        "TakeProfit" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "BV_SV_Kind" => matches!(value, FieldValue::String(v) if v == "TradesCount"),
-        "BV_SV_TradesN" => matches!(value, FieldValue::Int32(v) if *v == 100),
-        "BV_SV_Ratio" => matches!(value, FieldValue::Double(v) if (*v - 0.75).abs() < 1e-10),
-        "BV_SV_TakeProfit" => matches!(value, FieldValue::Double(v) if (*v - -1.0).abs() < 1e-10),
-        "PumpPriceInterval" => matches!(value, FieldValue::String(v) if v == "30s"),
-        "PumpPriceRaise" => matches!(value, FieldValue::Double(v) if (*v - 7.0).abs() < 1e-10),
-        "PumpBuysPerSec" => matches!(value, FieldValue::Int32(v) if *v == 15),
-        "PumpVolPerSec" => matches!(value, FieldValue::Double(v) if (*v - 0.8).abs() < 1e-10),
-        "PumpVolEMA" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "PumpMovePersent" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "PumpUsePrevBuyPrice" => matches!(value, FieldValue::Bool(v) if *v),
-        "MShotPriceMin" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "MShotPrice" => matches!(value, FieldValue::Double(v) if (*v - 7.0).abs() < 1e-10),
-        "MShotMinusSatoshi" => matches!(value, FieldValue::Bool(v) if *v),
-        "MShotAddHourlyDelta" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "MShotAddPriceBug" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "MShotSellAtLastPrice" => matches!(value, FieldValue::Bool(v) if *v),
-        "MShotRaiseWait" => matches!(value, FieldValue::Double(v) if (*v - 30.0).abs() < 1e-10),
-        "MShotSortBy" => matches!(value, FieldValue::String(v) if v == "Last2hDelta"),
-        "MShotSortDesc" => matches!(value, FieldValue::Bool(v) if *v),
-        "MShotUsePrice" => matches!(value, FieldValue::String(v) if v == "Trade"),
-        "MShotRepeatWait" => matches!(value, FieldValue::Int32(v) if *v == 5),
-        "VolShortInterval" => matches!(value, FieldValue::Int32(v) if *v == 45),
-        "VolShortPriseRaise" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VolLongInterval" => matches!(value, FieldValue::Int32(v) if *v == 300),
-        "VolBvShortToLong" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "VolBvLongToHourlyMin" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10)
-        }
-        "VolBvLongToHourlyMax" => {
-            matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10)
-        }
-        "VolBvLongToDailyMin" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "VolBvLongToDailyMax" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "VolBvToSvShort" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "VolBvShort" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "VolSvLong" => matches!(value, FieldValue::Double(v) if (*v - 4.0).abs() < 1e-10),
-        "VolAtMinP" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "VolAtMaxP" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "VolDeltaAtMaxP" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "VolDeltaAtMinP" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "volBidsDeep" => matches!(value, FieldValue::Double(v) if (*v - 3.0).abs() < 1e-10),
-        "volBids" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "volAsksDeep" => matches!(value, FieldValue::Double(v) if (*v - 4.0).abs() < 1e-10),
-        "volBidsToAsks" => matches!(value, FieldValue::Double(v) if (*v - 1.5).abs() < 1e-10),
-        "VLiteT0" => matches!(value, FieldValue::Int32(v) if *v == 300),
-        "VLiteT1" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "VLiteT2" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "VLiteT3" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "VLiteP1" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteP2" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteP3" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteMaxP" => matches!(value, FieldValue::Double(v) if (*v - 5.0).abs() < 1e-10),
-        "VLiteDelta0" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "VLiteMaxSpike" => matches!(value, FieldValue::Double(v) if (*v - 7.0).abs() < 1e-10),
-        "VLiteV1" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteV2" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteV3" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "VLiteWeightedAvg" => matches!(value, FieldValue::Bool(v) if *v),
-        "WavesT0" => matches!(value, FieldValue::Int32(v) if *v == 300),
-        "WavesT1" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "WavesT2" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "WavesT3" => matches!(value, FieldValue::Int32(v) if *v == 180),
-        "WavesP1" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "WavesP2" => matches!(value, FieldValue::Double(v) if (*v - -1.0).abs() < 1e-10),
-        "WavesP3" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "WavesDelta0" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "WavesMaxSpike" => matches!(value, FieldValue::Double(v) if (*v - 7.0).abs() < 1e-10),
-        "WavesV1" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "WavesV3" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "WavesWeightedAvg" => matches!(value, FieldValue::Bool(v) if *v),
-        "DeltaInterval" => matches!(value, FieldValue::Int32(v) if *v == 600),
-        "DeltaShortInterval" => matches!(value, FieldValue::Int32(v) if *v == 5),
-        "DeltaPrice" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "DeltaVol" => matches!(value, FieldValue::Double(v) if (*v - 5.0).abs() < 1e-10),
-        "DeltaVolRaise" => matches!(value, FieldValue::Double(v) if (*v - 100.0).abs() < 1e-10),
-        "DeltaVolSec" => matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10),
-        "DeltaLastPrice" => matches!(value, FieldValue::Double(v) if (*v - 0.3).abs() < 1e-10),
-        "ComboDelayMax" => matches!(value, FieldValue::Int32(v) if *v == 600),
-        "MStrikeDepth" => matches!(value, FieldValue::Double(v) if (*v - 10.0).abs() < 1e-10),
-        "MStrikeVolume" => matches!(value, FieldValue::Double(v) if (*v - 0.2).abs() < 1e-10),
-        "MStrikeLastBidEMA" => matches!(value, FieldValue::Int32(v) if *v == 10),
-        "MStrikeAdd15minDelta" => {
-            matches!(value, FieldValue::Double(v) if (*v - 0.1).abs() < 1e-10)
-        }
-        "MStrikeAddMarketDelta" => {
-            matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10)
-        }
-        "MStrikeAddBTCDelta" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "MStrikeBuyRelative" => matches!(value, FieldValue::Bool(v) if *v),
-        "MStrikeSellLevel" => matches!(value, FieldValue::Double(v) if (*v - 80.0).abs() < 1e-10),
-        "MStrikeDirection" => matches!(value, FieldValue::String(v) if v == "OnlyLong"),
-        "TMBuyPriceLimit" => matches!(value, FieldValue::Double(v) if (*v - 500.0).abs() < 1e-10),
-        "LiqTime" => matches!(value, FieldValue::Int32(v) if *v == 15),
-        "LiqCount" => matches!(value, FieldValue::Int32(v) if *v == 5),
-        "LiqVolumeMin" => matches!(value, FieldValue::Int32(v) if *v == 10000),
-        "LiqWithinTime" => matches!(value, FieldValue::Int32(v) if *v == 5000),
-        "LiqDirection" => matches!(value, FieldValue::String(v) if v == "Both"),
-        "LiqSameDirection" => matches!(value, FieldValue::Bool(v) if *v),
-        "Liq_BV_SV_Time" => matches!(value, FieldValue::Int32(v) if *v == 1500),
-        "Liq_BV_SV_Filter" => matches!(value, FieldValue::Double(v) if (*v - 0.5).abs() < 1e-10),
-        "TMSameDirection" => matches!(value, FieldValue::Bool(v) if *v),
-        "StrategyPenalty" => matches!(value, FieldValue::Int32(v) if *v == 2),
-        "TimeInterval" => matches!(value, FieldValue::Double(v) if (*v - 5.0).abs() < 1e-10),
-        "TradesDensity" => matches!(value, FieldValue::Int32(v) if *v == 80),
-        "TradesDensityPrev" => matches!(value, FieldValue::Int32(v) if *v == 20),
-        "PriceIntervals" => matches!(value, FieldValue::Int32(v) if *v == 10),
-        "PriceSpread" => matches!(value, FieldValue::Double(v) if (*v - 0.3).abs() < 1e-10),
-        "IntervalsForBuySpread" => matches!(value, FieldValue::Int32(v) if *v == 3),
-        "BuyPriceInSpread" => matches!(value, FieldValue::Int32(v) if *v == 20),
-        "SellPriceInSpread" => matches!(value, FieldValue::Int32(v) if *v == 80),
-        "BuyOrderReduce" => matches!(value, FieldValue::Int32(v) if *v == 100),
-        "SpreadFlat" => matches!(value, FieldValue::Bool(v) if *v),
-        "Spread_BV_SV_Time" => matches!(value, FieldValue::Int32(v) if *v == 3000),
-        "SpreadPolarityMin" => matches!(value, FieldValue::Int32(v) if *v == -100),
-        "SpreadPolarityMax" => matches!(value, FieldValue::Int32(v) if *v == 100),
-        "HookTimeFrame" => matches!(value, FieldValue::Double(v) if (*v - 2.0).abs() < 1e-10),
-        "HookDetectDepth" => matches!(value, FieldValue::Double(v) if (*v - 1.0).abs() < 1e-10),
-        "HookPriceRollBack" => matches!(value, FieldValue::Int32(v) if *v == 75),
-        "HookDirection" => matches!(value, FieldValue::String(v) if v == "OnlyLong"),
-        "HookInitialPrice" => matches!(value, FieldValue::Int32(v) if *v == 10),
-        "HookPriceDistance" => matches!(value, FieldValue::Int32(v) if *v == 25),
-        "HookSellLevel" => matches!(value, FieldValue::Int32(v) if *v == 50),
-        "HookRaiseWait" => matches!(value, FieldValue::Double(v) if (*v - 30.0).abs() < 1e-10),
-        "FastShotAlgo" => matches!(value, FieldValue::Bool(v) if *v),
-        "MMTimeFrame" => matches!(value, FieldValue::Int32(v) if *v == 45),
-        "MMOrderMin" => matches!(value, FieldValue::Int32(v) if *v == 100),
-        "MMOrderMax" => matches!(value, FieldValue::Int32(v) if *v == 1000),
-        "MMOrderStep" => matches!(value, FieldValue::Int32(v) if *v == 1),
-        "WatchDirection" => matches!(value, FieldValue::String(v) if v == "Both"),
-        _ => value.is_zero(),
-    }
-}
 
 // =============================================================================
 //  FieldValue
@@ -943,6 +123,10 @@ impl FieldValue {
         }
     }
 
+    pub fn matches_type_id(&self, type_id: u8) -> bool {
+        self.type_id() == (type_id & 0x7F)
+    }
+
     /// True если значение эквивалентно zero для своего типа.
     /// Соответствует `IsZeroValue` (StrategySerializer.pas:337-355).
     pub fn is_zero(&self) -> bool {
@@ -957,6 +141,31 @@ impl FieldValue {
             FieldValue::UInt32(v) => *v == 0,
             FieldValue::UInt64(v) => *v == 0,
             FieldValue::Single(v) => v.abs() < 1e-10,
+        }
+    }
+
+    pub fn is_zero_for_type_id(&self, type_id: u8) -> bool {
+        self.matches_type_id(type_id) && self.is_zero()
+    }
+
+    /// Сравнение как Delphi `IsDefaultValue`: float/single через `1e-10`,
+    /// остальные типы точно, и только при совпавшем TypeID.
+    pub fn equals_delphi_value_for_type_id(&self, other: &Self, type_id: u8) -> bool {
+        if !self.matches_type_id(type_id) || !other.matches_type_id(type_id) {
+            return false;
+        }
+        match (type_id & 0x7F, self, other) {
+            (TID_BOOL, FieldValue::Bool(a), FieldValue::Bool(b)) => a == b,
+            (TID_BYTE, FieldValue::Byte(a), FieldValue::Byte(b)) => a == b,
+            (TID_WORD, FieldValue::Word(a), FieldValue::Word(b)) => a == b,
+            (TID_INT32, FieldValue::Int32(a), FieldValue::Int32(b)) => a == b,
+            (TID_UINT32, FieldValue::UInt32(a), FieldValue::UInt32(b)) => a == b,
+            (TID_INT64, FieldValue::Int64(a), FieldValue::Int64(b)) => a == b,
+            (TID_UINT64, FieldValue::UInt64(a), FieldValue::UInt64(b)) => a == b,
+            (TID_SINGLE, FieldValue::Single(a), FieldValue::Single(b)) => (*a - *b).abs() < 1e-10,
+            (TID_DOUBLE, FieldValue::Double(a), FieldValue::Double(b)) => (*a - *b).abs() < 1e-10,
+            (TID_STRING, FieldValue::String(a), FieldValue::String(b)) => a == b,
+            _ => false,
         }
     }
 }
@@ -1083,21 +292,41 @@ pub struct StrategyBatch {
 
 /// Парсинг с DEFLATE-сжатого payload'а (как приходит в `TStratSnapshot.data`).
 pub fn parse_strategy_batch(deflate_bytes: &[u8]) -> Option<StrategyBatch> {
+    parse_strategy_batch_with_schema(deflate_bytes, None)
+}
+
+/// Парсинг payload'а с проверкой полей по live `TStratSchema`.
+///
+/// Если schema передана, reader повторяет Delphi `BuildReaderProps`/`ReadField`:
+/// имя должно существовать в public `TStrategy` schema, а wire TypeID должен
+/// совпасть с RTTI TypeID. Иначе поле пропускается через `SkipFieldByTypeID`.
+/// Без schema функция остаётся generic reader'ом wire-format для диагностики.
+pub fn parse_strategy_batch_with_schema(
+    deflate_bytes: &[u8],
+    schema: Option<&StrategySchema>,
+) -> Option<StrategyBatch> {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed).ok()?;
-    parse_strategy_batch_plain(&decompressed)
+    parse_strategy_batch_plain_with_schema(&decompressed, schema)
 }
 
 /// Парсинг уже распакованного плоского payload'а (для случая если decompression сделан снаружи).
 pub fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
+    parse_strategy_batch_plain_with_schema(data, None)
+}
+
+pub fn parse_strategy_batch_plain_with_schema(
+    data: &[u8],
+    schema: Option<&StrategySchema>,
+) -> Option<StrategyBatch> {
     let mut pos = 0usize;
     let names = read_dict(data, &mut pos)?;
     let paths = read_dict(data, &mut pos)?;
     let strat_count = read_u16(data, &mut pos)? as usize;
     let mut strategies = Vec::with_capacity(strat_count);
     for _ in 0..strat_count {
-        strategies.push(read_strategy(data, &mut pos, &names, &paths)?);
+        strategies.push(read_strategy(data, &mut pos, &names, &paths, schema)?);
     }
     Some(StrategyBatch {
         names,
@@ -1126,6 +355,7 @@ fn read_strategy(
     pos: &mut usize,
     names: &[String],
     paths: &[String],
+    schema: Option<&StrategySchema>,
 ) -> Option<StrategySnapshot> {
     let strategy_id = read_u64(data, pos)?;
     let strategy_ver = read_i32(data, pos)?;
@@ -1145,12 +375,14 @@ fn read_strategy(
         let real_type = type_id & 0x7F;
         let name = names.get(field_idx);
 
-        if let Some(name) = name {
-            if let Some(expected_type) = strategy_field_expected_type_id(name) {
-                if real_type != expected_type {
-                    skip_field_by_type_id(data, pos, type_id)?;
-                    continue;
-                }
+        if let Some(schema) = schema {
+            let Some(field) = name.and_then(|name| schema.field(name)) else {
+                skip_field_by_type_id(data, pos, type_id)?;
+                continue;
+            };
+            if real_type != field.raw_type_id {
+                skip_field_by_type_id(data, pos, type_id)?;
+                continue;
             }
         }
 
@@ -1316,13 +548,13 @@ fn read_f64(d: &[u8], p: &mut usize) -> Option<f64> {
 /// `BeginWrite/WriteStrategy/FinalizeWrite`: dicts, headers, type IDs, zero flag,
 /// raw-deflate и length truncation совпадают с Delphi.
 ///
-/// `StrategySnapshot::fields` may contain a full user-side map, but the writer
-/// serializes only the same wire-visible subset Delphi can write: known public
-/// `TStrategy` fields with the expected TypeID and value different from
-/// `TStrategy.Create` defaults. `SellOrderColor`/`BuyOrderColor` defaults are
-/// runtime `Vars` state in Delphi; omit them unless they are explicit overrides.
-#[derive(Debug, Default)]
-pub struct StrategyBatchBuilder {
+/// Delphi writer идёт по RTTI `TStrategy` + `GetStrategyPropMask`. Rust не
+/// хранит статическую копию этих таблиц: для non-empty snapshot writer требует
+/// live `TStratSchema`, полученную от сервера в Init. Schema даёт тот же порядок
+/// public fields, TypeID, PropMask visibility и non-zero defaults.
+#[derive(Debug)]
+pub struct StrategyBatchBuilder<'a> {
+    schema: &'a StrategySchema,
     name_dict: Vec<String>,
     name_idx: HashMap<String, u16>,
     path_dict: Vec<String>,
@@ -1331,9 +563,23 @@ pub struct StrategyBatchBuilder {
     count: u16,
 }
 
-impl StrategyBatchBuilder {
-    pub fn new() -> Self {
-        Self::default()
+impl<'a> StrategyBatchBuilder<'a> {
+    pub fn new(schema: &'a StrategySchema) -> Self {
+        Self {
+            schema,
+            name_dict: Vec::new(),
+            name_idx: HashMap::new(),
+            path_dict: Vec::new(),
+            path_idx: HashMap::new(),
+            body: Vec::new(),
+            count: 0,
+        }
+    }
+
+    /// Валидный serializer payload с нулём стратегий. Schema не нужна, потому
+    /// что Delphi `FinalizeWrite` для empty batch пишет пустые dicts/body.
+    pub fn empty_payload() -> Vec<u8> {
+        finalize_strategy_batch(Vec::new(), Vec::new(), Vec::new(), 0)
     }
 
     fn name_index(&mut self, name: &str) -> u16 {
@@ -1372,22 +618,19 @@ impl StrategyBatchBuilder {
         self.body.extend_from_slice(&[0u8, 0u8]);
         let mut field_count = 0u16;
 
-        // Delphi iterates public TStrategy fields in RTTI declaration order, then
-        // RebuildFiledsList removes fields that are not in the kind/config PropMask.
-        // Rust snapshots are maps, so we filter back to the exact Delphi field set
-        // before writing: unknown/mismatched/default fields are not wire-visible.
-        let mut entries: Vec<_> = s.fields.iter().collect();
-        entries.sort_by(|a, b| {
-            let ar = strategy_field_order_rank(a.0);
-            let br = strategy_field_order_rank(b.0);
-            ar.cmp(&br).then_with(|| a.0.cmp(b.0))
-        });
-
-        for (name, value) in entries {
-            if !strategy_field_should_write(name, value) {
+        // Schema fields are written in Delphi RTTI declaration order. The
+        // visibility bitset is exactly `GetStrategyPropMask(kind)`.
+        for field in &self.schema.fields {
+            if !field.visible_for_kind(s.kind) {
                 continue;
             }
-            let idx = self.name_index(name);
+            let Some(value) = s.fields.get(&field.name) else {
+                continue;
+            };
+            if !strategy_schema_field_should_write(field, value) {
+                continue;
+            }
+            let idx = self.name_index(&field.name);
             self.body.extend_from_slice(&idx.to_le_bytes());
             write_field(&mut self.body, value);
             field_count = field_count.wrapping_add(1);
@@ -1399,30 +642,49 @@ impl StrategyBatchBuilder {
 
     /// Финализировать в DEFLATE-compressed payload (формат TStratSnapshot.data).
     pub fn finalize(self) -> Vec<u8> {
-        let mut plain = Vec::with_capacity(self.body.len() + 64);
-
-        // NameDict
-        plain.extend_from_slice(&(self.name_dict.len() as u16).to_le_bytes());
-        for n in &self.name_dict {
-            let b = n.as_bytes();
-            // PathLen/NameLen — byte (max 255). Для стратегий имена полей < 255 байт.
-            write_u8_len_bytes(&mut plain, b);
-        }
-        // PathDict
-        plain.extend_from_slice(&(self.path_dict.len() as u16).to_le_bytes());
-        for p in &self.path_dict {
-            let b = p.as_bytes();
-            write_u8_len_bytes(&mut plain, b);
-        }
-        // StratCount + body
-        plain.extend_from_slice(&self.count.to_le_bytes());
-        plain.extend_from_slice(&self.body);
-
-        // DEFLATE compress (raw, без zlib header — Delphi -15)
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&plain).unwrap();
-        encoder.finish().unwrap()
+        finalize_strategy_batch(self.name_dict, self.path_dict, self.body, self.count)
     }
+}
+
+fn strategy_schema_field_should_write(field: &StrategySchemaField, value: &FieldValue) -> bool {
+    if !value.matches_type_id(field.raw_type_id) {
+        return false;
+    }
+    if let Some(default_value) = &field.default_value {
+        return !value.equals_delphi_value_for_type_id(default_value, field.raw_type_id);
+    }
+    !value.is_zero_for_type_id(field.raw_type_id)
+}
+
+fn finalize_strategy_batch(
+    name_dict: Vec<String>,
+    path_dict: Vec<String>,
+    body: Vec<u8>,
+    count: u16,
+) -> Vec<u8> {
+    let mut plain = Vec::with_capacity(body.len() + 64);
+
+    // NameDict
+    plain.extend_from_slice(&(name_dict.len() as u16).to_le_bytes());
+    for n in &name_dict {
+        let b = n.as_bytes();
+        // PathLen/NameLen — byte (max 255). Для стратегий имена полей < 255 байт.
+        write_u8_len_bytes(&mut plain, b);
+    }
+    // PathDict
+    plain.extend_from_slice(&(path_dict.len() as u16).to_le_bytes());
+    for p in &path_dict {
+        let b = p.as_bytes();
+        write_u8_len_bytes(&mut plain, b);
+    }
+    // StratCount + body
+    plain.extend_from_slice(&count.to_le_bytes());
+    plain.extend_from_slice(&body);
+
+    // DEFLATE compress (raw, без zlib header — Delphi -15)
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&plain).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn write_field(out: &mut Vec<u8>, v: &FieldValue) {
@@ -1471,6 +733,88 @@ fn write_u16_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::strategy_schema::{
+        StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaKind,
+    };
+
+    fn schema_field(
+        name: &str,
+        type_id: u8,
+        default_value: Option<FieldValue>,
+        visible_kind_ordinals: &[u8],
+    ) -> StrategySchemaField {
+        StrategySchemaField {
+            name: name.to_string(),
+            raw_type_id: type_id,
+            type_id: StrategyFieldType::from_type_id(type_id),
+            raw_flags: 0,
+            ui_kind: StrategyFieldUiKind::Edit,
+            layout: StrategyFieldLayout::None,
+            default_value,
+            visible_kind_ordinals: visible_kind_ordinals.to_vec(),
+            static_picklist_raw: None,
+            static_picklist: Vec::new(),
+            dynamic_picklist: None,
+        }
+    }
+
+    fn schema_for_fields(fields: Vec<StrategySchemaField>) -> StrategySchema {
+        StrategySchema {
+            format_version: 1,
+            kinds: vec![
+                StrategySchemaKind {
+                    ordinal: 1,
+                    name: "Kind1".to_string(),
+                },
+                StrategySchemaKind {
+                    ordinal: 5,
+                    name: "Kind5".to_string(),
+                },
+            ],
+            fields,
+        }
+    }
+
+    fn sample_schema() -> StrategySchema {
+        schema_for_fields(vec![
+            schema_field("StrategyName", TID_STRING, None, &[1, 5]),
+            schema_field("Comment", TID_STRING, None, &[1, 5]),
+            schema_field("AcceptCommands", TID_BOOL, None, &[1, 5]),
+            schema_field("KeepAlert", TID_INT32, Some(FieldValue::Int32(60)), &[1, 5]),
+            schema_field("OrderSize", TID_DOUBLE, None, &[1, 5]),
+            schema_field(
+                "UseStopLoss",
+                TID_BOOL,
+                Some(FieldValue::Bool(true)),
+                &[1, 5],
+            ),
+            schema_field(
+                "StopLoss",
+                TID_DOUBLE,
+                Some(FieldValue::Double(-5.0)),
+                &[1, 5],
+            ),
+            schema_field(
+                "PendingOrderSpread",
+                TID_DOUBLE,
+                Some(FieldValue::Double(0.1)),
+                &[1, 5],
+            ),
+            schema_field("DebugLog", TID_BOOL, None, &[1, 5]),
+            schema_field(
+                "SellOrderColor",
+                TID_STRING,
+                Some(FieldValue::String("00FF00".to_string())),
+                &[1, 5],
+            ),
+            schema_field(
+                "SignalType",
+                TID_STRING,
+                Some(FieldValue::String("DropsDetection".to_string())),
+                &[1, 5],
+            ),
+        ])
+    }
 
     fn sample_strategy(id: u64, name: &str, path: &str) -> StrategySnapshot {
         let mut fields = HashMap::new();
@@ -1541,8 +885,7 @@ mod tests {
 
     #[test]
     fn empty_batch_roundtrip() {
-        let builder = StrategyBatchBuilder::new();
-        let compressed = builder.finalize();
+        let compressed = StrategyBatchBuilder::empty_payload();
         let parsed = parse_strategy_batch(&compressed).unwrap();
         assert!(parsed.names.is_empty());
         assert!(parsed.paths.is_empty());
@@ -1551,7 +894,8 @@ mod tests {
 
     #[test]
     fn single_strategy_roundtrip() {
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         let s = sample_strategy(100, "Strat-1", "Folder/A");
         b.write_strategy(&s);
         let compressed = b.finalize();
@@ -1580,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_uses_delphi_public_field_order_for_name_dict() {
+    fn writer_uses_schema_field_order_for_name_dict() {
         let mut fields = HashMap::new();
         fields.insert("OrderSize".to_string(), FieldValue::Double(1.0));
         fields.insert(
@@ -1592,7 +936,8 @@ mod tests {
         fields.insert("UnknownA".to_string(), FieldValue::Byte(2));
         fields.insert("Comment".to_string(), FieldValue::String("C".to_string()));
 
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         b.write_strategy(&StrategySnapshot {
             strategy_id: 1,
             strategy_ver: 1,
@@ -1616,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_skips_delphi_defaults_unknown_fields_and_type_mismatches() {
+    fn writer_skips_schema_defaults_unknown_fields_and_type_mismatches() {
         let mut fields = HashMap::new();
         fields.insert(
             "StrategyName".to_string(),
@@ -1637,7 +982,8 @@ mod tests {
             FieldValue::String(String::new()),
         );
 
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         b.write_strategy(&StrategySnapshot {
             strategy_id: 1,
             strategy_ver: 1,
@@ -1673,7 +1019,8 @@ mod tests {
 
     #[test]
     fn multiple_strategies_share_name_dict() {
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         b.write_strategy(&sample_strategy(1, "A", "Folder/X"));
         b.write_strategy(&sample_strategy(2, "B", "Folder/X")); // same path
         b.write_strategy(&sample_strategy(3, "C", "Folder/Y")); // new path
@@ -1700,12 +1047,13 @@ mod tests {
             strategy_ver: 1,
             last_date: 0,
             checked: false,
-            kind: 0,
+            kind: 1,
             path: String::new(),
             fields,
         };
 
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         b.write_strategy(&s);
         let compressed = b.finalize();
 
@@ -1774,7 +1122,8 @@ mod tests {
             fields,
         };
 
-        let mut b = StrategyBatchBuilder::new();
+        let schema = sample_schema();
+        let mut b = StrategyBatchBuilder::new(&schema);
         b.write_strategy(&s);
         let compressed = b.finalize();
         let parsed = parse_strategy_batch(&compressed).unwrap();
@@ -1887,7 +1236,11 @@ mod tests {
         plain.extend_from_slice(&2u16.to_le_bytes());
         plain.extend_from_slice(b"ok");
 
-        let parsed = parse_strategy_batch_plain(&plain).unwrap();
+        let schema = schema_for_fields(vec![
+            schema_field("OrderSize", TID_DOUBLE, None, &[0]),
+            schema_field("Comment", TID_STRING, None, &[0]),
+        ]);
+        let parsed = parse_strategy_batch_plain_with_schema(&plain, Some(&schema)).unwrap();
         let ps = &parsed.strategies[0];
         assert!(!ps.fields.contains_key("OrderSize"));
         assert_eq!(

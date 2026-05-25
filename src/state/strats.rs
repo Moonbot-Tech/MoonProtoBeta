@@ -6,15 +6,16 @@
 //!
 //! Сервер шлёт сериализованную пачку стратегий в `TStratSnapshot.data: Vec<u8>` через
 //! `TStrategySerializer` (RTTI-driven). `apply_snapshot_decoded()` парсит этот blob через
-//! `commands::strategy_serializer::parse_strategy_batch` и применяет каждую стратегию в state
+//! `commands::strategy_serializer::parse_strategy_batch_with_schema` и применяет каждую стратегию в state
 //! с Delphi rollback guard по `StrategyLastDate`/`StrategyVer`.
 //! State хранит и lightweight `StrategyInfo`, и полный decoded `StrategySnapshot`.
 //! Поэтому active library может сама отвечать на `TStratSnapshotRequest`, а
 //! приложение может читать последний полный snapshot через public API.
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
+use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategyActiveMode, StrategyBatch, StrategyKind,
+    parse_strategy_batch_with_schema, FieldValue, StrategyActiveMode, StrategyBatch, StrategyKind,
     StrategySnapshot,
 };
 use std::collections::HashMap;
@@ -84,6 +85,18 @@ pub enum StratEvent {
     /// Если приложение ещё не дало стратегий и серверный snapshot ещё не пришёл,
     /// ответом будет корректный пустой `TStratSnapshot`.
     SnapshotRequested { uid: u64 },
+    /// Получена и распарсена schema стратегий (`TStratSchema`, CmdId=8).
+    SchemaApplied {
+        raw_len: usize,
+        format_version: u8,
+        kind_count: usize,
+        field_count: usize,
+    },
+    /// Сервер прислал `TStratSchema`, но raw-deflate/body не распарсились.
+    SchemaParseFailed { raw_len: usize },
+    /// Получен `TStratSchemaRequest` от сервера. Нормальный flow этого не
+    /// требует: schema request является client→server agreed library behavior.
+    SchemaRequested { uid: u64 },
     /// Команда не применима (Unknown).
     Ignored,
 }
@@ -110,6 +123,13 @@ pub struct StratsState {
     /// Серверный epoch последнего применённого snapshot'а — для детекции
     /// out-of-order snapshot'ов после reconnect'а.
     pub last_server_epoch: u64,
+    /// Последний raw `TStratSchema.Data` blob.
+    schema_raw: Option<Arc<Vec<u8>>>,
+    /// Последняя decoded schema стратегий.
+    schema: Option<Arc<StrategySchema>>,
+    schema_revision: u64,
+    schema_failures: u64,
+    schema_last_error: Option<String>,
 }
 
 impl StratsState {
@@ -287,7 +307,37 @@ impl StratsState {
                 }
             }
             StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
+            StratCommand::SchemaRequest { uid } => StratEvent::SchemaRequested { uid },
+            StratCommand::Schema(schema) => self.apply_schema_raw(schema.data),
             StratCommand::Unknown { .. } => StratEvent::Ignored,
+        }
+    }
+
+    fn apply_schema_raw(&mut self, data: Vec<u8>) -> StratEvent {
+        let raw_len = data.len();
+        match StrategySchema::parse_compressed(&data) {
+            Some(schema) => {
+                let format_version = schema.format_version;
+                let kind_count = schema.kinds.len();
+                let field_count = schema.fields.len();
+                self.schema_raw = Some(Arc::new(data));
+                self.schema = Some(Arc::new(schema));
+                self.schema_revision = self.schema_revision.saturating_add(1);
+                self.schema_last_error = None;
+                StratEvent::SchemaApplied {
+                    raw_len,
+                    format_version,
+                    kind_count,
+                    field_count,
+                }
+            }
+            None => {
+                self.schema_failures = self.schema_failures.saturating_add(1);
+                self.schema_last_error = Some(format!(
+                    "failed to parse TStratSchema raw blob ({raw_len} bytes)"
+                ));
+                StratEvent::SchemaParseFailed { raw_len }
+            }
         }
     }
 
@@ -366,7 +416,7 @@ impl StratsState {
         deflate_data: &[u8],
         full: bool,
     ) -> Option<StrategyBatch> {
-        let batch = parse_strategy_batch(deflate_data)?;
+        let batch = parse_strategy_batch_with_schema(deflate_data, self.strategy_schema())?;
         let _ = full;
         // Delphi `ApplyStratSnapshot(IsFull=true)` does not clear strategies
         // absent from the incoming payload. They remain local "Own" strategies.
@@ -450,6 +500,28 @@ impl StratsState {
         out
     }
 
+    /// Последняя schema стратегий, полученная через `TStratSchemaRequest` в Init.
+    pub fn strategy_schema(&self) -> Option<&StrategySchema> {
+        self.schema.as_deref()
+    }
+
+    /// Raw-deflate blob последней schema, как пришёл в `TStratSchema.Data`.
+    pub fn strategy_schema_raw(&self) -> Option<&[u8]> {
+        self.schema_raw.as_deref().map(Vec::as_slice)
+    }
+
+    pub fn strategy_schema_revision(&self) -> u64 {
+        self.schema_revision
+    }
+
+    pub fn strategy_schema_failures(&self) -> u64 {
+        self.schema_failures
+    }
+
+    pub fn strategy_schema_last_error(&self) -> Option<&str> {
+        self.schema_last_error.as_deref()
+    }
+
     /// Delphi `TStrategies.IsThereListingStrat`.
     pub fn is_there_listing_strat_like_delphi(&self, mode: StrategyActiveMode) -> bool {
         self.snapshots().any(|s| {
@@ -499,6 +571,11 @@ impl StratsState {
     pub fn clear(&mut self) {
         self.clear_entries();
         self.last_server_epoch = 0;
+        self.schema_raw = None;
+        self.schema = None;
+        self.schema_revision = 0;
+        self.schema_failures = 0;
+        self.schema_last_error = None;
     }
 }
 
@@ -508,7 +585,37 @@ mod tests {
     use crate::commands::strat::{
         StratCheckedEcho, StratCheckedSync, StratDelete, StratSellPriceUpdate,
     };
+    use crate::commands::strategy_schema::{
+        StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaField,
+        StrategySchemaKind,
+    };
     use crate::commands::strategy_serializer::FieldValue;
+
+    fn schema_for_strategy_name(kinds: &[u8]) -> StrategySchema {
+        StrategySchema {
+            format_version: 1,
+            kinds: kinds
+                .iter()
+                .map(|kind| StrategySchemaKind {
+                    ordinal: *kind,
+                    name: format!("Kind{kind}"),
+                })
+                .collect(),
+            fields: vec![StrategySchemaField {
+                name: "StrategyName".to_string(),
+                raw_type_id: crate::commands::strategy_serializer::TID_STRING,
+                type_id: StrategyFieldType::String,
+                raw_flags: 0,
+                ui_kind: StrategyFieldUiKind::Edit,
+                layout: StrategyFieldLayout::None,
+                default_value: None,
+                visible_kind_ordinals: kinds.to_vec(),
+                static_picklist_raw: None,
+                static_picklist: Vec::new(),
+                dynamic_picklist: None,
+            }],
+        }
+    }
 
     #[test]
     fn sell_price_update_is_ignored_like_delphi_client() {
@@ -793,7 +900,8 @@ mod tests {
     fn apply_snapshot_decoded_upserts_strategies() {
         use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
 
-        let mut b = StrategyBatchBuilder::new();
+        let schema = schema_for_strategy_name(&[5, 6]);
+        let mut b = StrategyBatchBuilder::new(&schema);
         let mut fields1 = HashMap::new();
         fields1.insert(
             "StrategyName".to_string(),
@@ -886,7 +994,8 @@ mod tests {
             "StrategyName".to_string(),
             FieldValue::String("New".to_string()),
         );
-        let mut builder = StrategyBatchBuilder::new();
+        let schema = schema_for_strategy_name(&[1]);
+        let mut builder = StrategyBatchBuilder::new(&schema);
         builder.write_strategy(&StrategySnapshot {
             strategy_id: 2,
             strategy_ver: 1,

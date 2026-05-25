@@ -3780,18 +3780,19 @@ Still not done:
 Done:
 
 - Re-checked `StrategySerializer` against Delphi source.
-- `DELPHI_STRATEGY_FIELD_ORDER` and `DELPHI_STRATEGY_FIELD_TYPES` were compared
-  against `Strategies.pas:TStrategy` public fields: `477/477`, no order/type
-  mismatches.
+- Historical check: the temporary `DELPHI_STRATEGY_FIELD_ORDER` and
+  `DELPHI_STRATEGY_FIELD_TYPES` tables were compared against
+  `Strategies.pas:TStrategy` public fields: `477/477`, no order/type
+  mismatches. These static Rust tables were later removed after live
+  `TStratSchema` support landed.
 - Confirmed Rust writer now emits known fields in Delphi public-field order, not
   the old alphabetical `HashMap` order.
 - Fixed the separate parity risk from `spec_pipeline/work/хуйня.md §X.90`:
   typed `StrategyBatchBuilder` now filters back to Delphi `SaveStrategyToCompact`
   semantics before writing. Unknown fields, wrong TypeID values, and values equal
-  to `TStrategy.Create` defaults are not wire-visible. The only runtime-default
-  caveat is `SellOrderColor`/`BuyOrderColor`: Delphi reads those defaults from
-  current `Vars` color state, so Rust callers should omit them unless they are
-  explicit overrides.
+  to `TStrategy.Create` defaults are not wire-visible. This initial fix used
+  temporary Rust metadata; the current implementation uses the server schema
+  defaults instead, including runtime color defaults.
 
 Still not done:
 
@@ -4816,11 +4817,14 @@ Verification:
 
 Still not done:
 
-- `TMarket.Emulating`, `SetEmuMinPrice`, `SetEmuMaxPrice`,
-  `Markets.SetDelta500`, and `m.AddFrom` are still open because they require
-  broader trade/history state, not just `UpdateMarketsList` payload fields.
 - Continue heavier `NewMarkets` listing-strategy follow-ups and remaining
   active-lib public-state parity.
+- Do not pull the broad Delphi market analytics tail into the active library by
+  inertia. `TMarket.Emulating`, `SetEmuMinPrice` / `SetEmuMaxPrice`,
+  `m.AddFrom` internals, weighted/avg price, bid/ask EMA, `HistoryPrice`,
+  1m/5m avg, coin deltas, `LastPriceEMA`, hourly values, drop detection,
+  `PriceZeroFlag`, resize tasks, history/detection, and `Markets.SetDelta500`
+  are deferred to the final "keep or remove" pass.
 
 ### 2026-05-24 - Phase 1 check: NewMarkets heavier follow-ups classification
 
@@ -5106,6 +5110,125 @@ Verification:
 
 Still not done:
 
-- Full Delphi `AddFrom`, history ring buffers, detection state, `SetEmu*`, and
-  zero-alloc `SectionIter` remain Phase E work. They are not accepted
-  deviations.
+- Zero-alloc `SectionIter` remains Phase E work and is the next concrete
+  protocol/state-shape cleanup.
+- Full Delphi market analytics tail is deferred: `m.Emulating`,
+  `SetEmuMinPrice` / `SetEmuMaxPrice`, `m.AddFrom` internals, weighted/avg
+  price, bid/ask EMA, `HistoryPrice`, 1m/5m avg, coin deltas, `LastPriceEMA`,
+  hourly values, drop detection, `PriceZeroFlag`, resize tasks,
+  history/detection, and `Markets.SetDelta500` are not needed for the current
+  active-library target.
+
+### Final pass - keep/remove broad Delphi market analytics tail
+
+Before declaring protocol/state parity complete, explicitly decide what to keep
+and what to leave out of the active library API/state model:
+
+- `m.Emulating`;
+- `SetEmuMinPrice` / `SetEmuMaxPrice`;
+- `m.AddFrom` internals: weighted/avg price, bid/ask EMA, `HistoryPrice`,
+  1m/5m avg, coin deltas, `LastPriceEMA`, hourly values, drop detection,
+  `PriceZeroFlag`, resize through `TThread.Queue`;
+- trades/history/detection buffers beyond the bounded public trade tail;
+- `Markets.SetDelta500`.
+
+Default for this pass: do not port these fields unless they are required by the
+active library contract or by a later explicitly chosen API.
+
+### Next concrete work - zero-alloc SectionIter for TradesStream
+
+Problem:
+
+- Delphi `ProcessTradesStream` reads `DataStream` section-by-section and
+  row-by-row. For unknown markets it skips `Count * row_size` bytes; for known
+  markets it applies each row immediately.
+- Rust `parse_trades_packet` currently allocates `TradesPacket.sections`, then
+  allocates per-section `Vec<Trade>` / `Vec<MMOrder>` / `Vec<LiqOrder>`, then
+  the dispatcher filters those vectors before `TradesState` and market state
+  consume them.
+- This is machine-effect equivalent for current public events, but worse for
+  the strict porting method: the hot path has an artificial collect/filter layer
+  where Delphi has direct stream iteration.
+
+Target shape:
+
+- Add a borrowed decoded payload type in `commands::trades_stream`, owning only
+  the decompressed buffer when compression was used.
+- Expose `SectionIter` over raw section bytes:
+  - `Trades { market_index, is_spot, rows }`, where rows yield the 10-byte
+    Delphi row as typed fields;
+  - `MMOrders { market_index, has_taker, rows }`;
+  - `LiqOrders { market_index, rows }`;
+  - `WatcherFills { market_index, user, records_raw }`.
+- Keep current `parse_trades_packet -> TradesPacket` as a compatibility
+  collector over `SectionIter`.
+- Then switch the active dispatcher hot path to `SectionIter`: gate unknown
+  markets by skipping rows like Delphi, update `TradesState` by packet header,
+  update market trade tail while iterating, and build public `TradesEvent` only
+  for the API surface that still needs owned data.
+
+Verification:
+
+- Existing `parse_trades_packet` tests must keep passing.
+- Add iterator tests for every section type, truncated rows, unknown ext type,
+  watcher-fill raw record length, and exact position/skip behavior.
+- Quick FireTest after dispatcher switch; full FireTest at the next major gate.
+
+### 2026-05-25 - Strategy schema agreed active-lib behavior
+
+Delphi source:
+
+- `StrategySchemaBuilder.pas` builds a raw-deflate schema blob from live
+  `TStrategy` RTTI and `GetFieldPickInfo`.
+- `MoonProtoStratStruct.pas` adds `TStratSchemaRequest` (CmdId=7) and
+  `TStratSchema` (CmdId=8, Sliced).
+
+Rust action:
+
+- Added `commands::strategy_schema` parser for the schema blob: kinds, fields,
+  TypeID, UI kind, layout/chapter markers, default values, visibility bitset,
+  static picklists, and dynamic picklist source.
+- Extended `MPC_Strat` parser/builders with CmdId 7/8.
+- `StratsState` now stores the latest schema and raw blob.
+- `run_init_sequence` requests schema once during Init after the domain gate
+  opens and before post-init resync. Missing/malformed schema is a critical
+  Init failure.
+- FireTest records schema events and writes
+  `target/firetest_strategy_info_<profile>.txt` with all known schema and
+  decoded strategy snapshot data.
+
+This is a user-approved active-library behavior, not a `DEVIATION.md` entry.
+
+### 2026-05-25 - StrategySerializer now uses live schema, not Rust hardcode
+
+Done:
+
+- Removed the static Rust `TStrategy` field order/type/default tables from
+  `commands::strategy_serializer`.
+- `StrategyBatchBuilder` now requires a live `StrategySchema` for non-empty
+  typed snapshots and writes fields in schema order, filtered by schema
+  visibility (`GetStrategyPropMask`), schema TypeID, and schema defaults.
+- `StratsState::apply_snapshot_decoded_with_mode` uses the stored schema for
+  Delphi `ReadField` TypeID checks. Generic `parse_strategy_batch` remains only
+  a diagnostics reader for payloads parsed without schema.
+- If the server sends `TStratSnapshotRequest` before schema exists and the local
+  strategy list is non-empty, active-lib stores the pending request, sends
+  `TStratSchemaRequest`, and answers after `SchemaApplied`.
+- Empty strategy-list payloads still serialize without schema because Delphi
+  `FinalizeWrite` for an empty batch writes only empty dictionaries/body.
+
+Verification:
+
+- `cargo test --lib` OK, 660 tests.
+- `cargo test --tests --no-run` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 26.47s`.
+- Full prod FireTest OK after fixing the test seed strategy kind.
+
+Red flag closed:
+
+- Full FireTest previously used `kind=0` (`sk_Unknown`) for the local mutable
+  strategy while expecting `Comment` to roundtrip. Live schema marks `Comment`
+  visible for real strategy kinds 1..23, not for `sk_Unknown`. After the
+  serializer switched to schema visibility this became a correct failure of the
+  test payload, not a protocol deviation. FireTest now seeds `sk_Telegram` and
+  asserts that the configured field is visible for the seeded kind.

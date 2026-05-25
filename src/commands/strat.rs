@@ -1,4 +1,4 @@
-//! MPC_Strat канал — 7 подкоманд TBaseStratCommand.
+//! MPC_Strat канал — 9 подкоманд TBaseStratCommand.
 //!
 //! Источник Delphi: `MoonProto/MoonProtoStratStruct.pas` (~408 строк).
 //!
@@ -10,12 +10,15 @@
 //! - 4 — TStratSellPriceUpdate (C→S, UK_StratSellPriceUpdate)
 //! - 5 — TStratCheckedSync (S↔C, Sliced)
 //! - 6 — TStratCheckedEcho (C→S ACK на дельту Checked)
+//! - 7 — TStratSchemaRequest (C→S, empty)
+//! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
 //!
 //! ## Замечание про TStratSnapshot.Data
 //! `Data: bytes(Size)` — это сериализованный bin-формат `TStrategySerializer` (RTTI-driven,
 //! ~1118 строк). Декодер и writer находятся в `commands::strategy_serializer`.
 
 use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
+use super::strategy_schema::StrategySchema;
 use super::strategy_serializer::{
     StrategyBatchBuilder, StrategySnapshot as StrategySerializerSnapshot,
 };
@@ -29,6 +32,8 @@ const CMD_DELETE: u8 = 3;
 const CMD_SELL_PRICE_UPDATE: u8 = 4;
 const CMD_CHECKED_SYNC: u8 = 5;
 const CMD_CHECKED_ECHO: u8 = 6;
+const CMD_SCHEMA_REQUEST: u8 = 7;
+const CMD_SCHEMA: u8 = 8;
 
 /// Один элемент TStratCheckedItem: `StrategyID:UInt64 + Checked:bool` (9 байт).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +124,13 @@ pub struct StratCheckedEcho {
     pub items: Vec<StratCheckedItem>,
 }
 
+/// `TStratSchema` (CmdId=8). Priority=Sliced.
+#[derive(Debug, Clone)]
+pub struct StratSchema {
+    /// Raw-deflate `StrategySchemaBuilder` blob.
+    pub data: Vec<u8>,
+}
+
 /// Все парсимые входящие подкоманды MPC_Strat.
 #[derive(Debug, Clone)]
 pub enum StratCommand {
@@ -128,6 +140,8 @@ pub enum StratCommand {
     SellPriceUpdate(StratSellPriceUpdate),
     CheckedSync(StratCheckedSync),
     CheckedEcho(StratCheckedEcho),
+    SchemaRequest { uid: u64 },
+    Schema(StratSchema),
     Unknown { cmd_id: u8, uid: u64 },
 }
 
@@ -220,6 +234,19 @@ impl StratCommand {
                 let (items, _) = read_checked_items(payload, pos)?;
                 Some(StratCommand::CheckedEcho(StratCheckedEcho { items }))
             }
+            CMD_SCHEMA_REQUEST => Some(StratCommand::SchemaRequest { uid }),
+            CMD_SCHEMA => {
+                if pos + 4 > payload.len() {
+                    return None;
+                }
+                let size = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                if pos + size > payload.len() {
+                    return None;
+                }
+                let data = payload[pos..pos + size].to_vec();
+                Some(StratCommand::Schema(StratSchema { data }))
+            }
             _ => Some(StratCommand::Unknown { cmd_id, uid }),
         }
     }
@@ -255,6 +282,13 @@ pub fn build_snapshot_request(uid: u64) -> Vec<u8> {
     out
 }
 
+/// `TStratSchemaRequest` (CmdId=7).
+pub fn build_schema_request(uid: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11);
+    write_header(&mut out, CMD_SCHEMA_REQUEST, uid);
+    out
+}
+
 /// `TStratSnapshot` (CmdId=2).
 ///
 /// `data` is the compressed `TStrategySerializer` payload (`TStratSnapshot.Data`),
@@ -274,7 +308,7 @@ pub fn build_snapshot(
 ) -> Vec<u8> {
     let empty_payload;
     let data = if data.is_empty() {
-        empty_payload = StrategyBatchBuilder::new().finalize();
+        empty_payload = StrategyBatchBuilder::empty_payload();
         empty_payload.as_slice()
     } else {
         data
@@ -294,14 +328,16 @@ pub fn build_snapshot(
 ///
 /// This is the typed counterpart to Delphi `TStratSnapshot.CreateFromStrats` /
 /// `CreateFromList`: it serializes strategies through `StrategyBatchBuilder`,
-/// computes `ClientMaxLastDate`, and wraps the result as CmdId=2.
+/// computes `ClientMaxLastDate`, and wraps the result as CmdId=2. The builder
+/// needs live `TStratSchema` for Delphi field order/default parity.
 pub fn build_snapshot_from_strategies(
     uid: u64,
     server_epoch: u64,
     full: bool,
+    schema: &StrategySchema,
     strategies: &[StrategySerializerSnapshot],
 ) -> Vec<u8> {
-    let mut builder = StrategyBatchBuilder::new();
+    let mut builder = StrategyBatchBuilder::new(schema);
     let mut client_max_last_date = 0u64;
     for strategy in strategies {
         client_max_last_date = client_max_last_date.max(strategy.last_date);
@@ -364,6 +400,33 @@ fn _silence_unused_const() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::strategy_schema::{
+        StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaField,
+        StrategySchemaKind,
+    };
+
+    fn schema_for_name_field() -> StrategySchema {
+        StrategySchema {
+            format_version: 1,
+            kinds: vec![StrategySchemaKind {
+                ordinal: 1,
+                name: "Kind1".to_string(),
+            }],
+            fields: vec![StrategySchemaField {
+                name: "Name".to_string(),
+                raw_type_id: crate::commands::strategy_serializer::TID_STRING,
+                type_id: StrategyFieldType::String,
+                raw_flags: 0,
+                ui_kind: StrategyFieldUiKind::Edit,
+                layout: StrategyFieldLayout::None,
+                default_value: None,
+                visible_kind_ordinals: vec![1],
+                static_picklist_raw: None,
+                static_picklist: Vec::new(),
+                dynamic_picklist: None,
+            }],
+        }
+    }
 
     #[test]
     fn strat_checked_item_uses_private_wire_struct() {
@@ -396,6 +459,16 @@ mod tests {
         let cmd = StratCommand::parse(&payload).unwrap();
         match cmd {
             StratCommand::SnapshotRequest { uid } => assert_eq!(uid, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_schema_request() {
+        let payload = build_schema_request(43);
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::SchemaRequest { uid } => assert_eq!(uid, 43),
             _ => panic!("wrong variant"),
         }
     }
@@ -523,6 +596,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_with_data() {
+        let mut payload = vec![CMD_SCHEMA, 0x03, 0x00];
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&[9, 8, 7]);
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::Schema(s) => assert_eq!(s.data, vec![9, 8, 7]),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_schema_rejects_truncated_data_like_delphi_nil_data_guard() {
+        let mut payload = vec![CMD_SCHEMA, 0x03, 0x00];
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&4u32.to_le_bytes());
+        payload.extend_from_slice(&[9, 8, 7]);
+        assert!(StratCommand::parse(&payload).is_none());
+    }
+
+    #[test]
     fn build_snapshot_from_strategies_computes_max_last_date() {
         use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
         use std::collections::HashMap;
@@ -549,7 +644,8 @@ mod tests {
                 fields,
             },
         ];
-        let raw = build_snapshot_from_strategies(78, 11, false, &strategies);
+        let schema = schema_for_name_field();
+        let raw = build_snapshot_from_strategies(78, 11, false, &schema, &strategies);
         let cmd = StratCommand::parse(&raw).unwrap();
         match cmd {
             StratCommand::Snapshot(s) => {
@@ -566,7 +662,8 @@ mod tests {
 
     #[test]
     fn build_empty_snapshot_from_strategies_keeps_nonzero_serializer_payload() {
-        let raw = build_snapshot_from_strategies(79, 0, true, &[]);
+        let schema = schema_for_name_field();
+        let raw = build_snapshot_from_strategies(79, 0, true, &schema, &[]);
         let cmd = StratCommand::parse(&raw).unwrap();
         match cmd {
             StratCommand::Snapshot(s) => {

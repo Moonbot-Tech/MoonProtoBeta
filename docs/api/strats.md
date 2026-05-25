@@ -21,6 +21,13 @@ not provide local strategies, the list starts empty and is filled only by server
 snapshots; the current server snapshot is still available through the same read
 API.
 
+`run_init_sequence` also requests the live strategy schema with
+`TStratSchemaRequest` and stores the decoded `TStratSchema` in
+`StratsState`. This is agreed active-library behavior: Rust consumers read
+strategy field metadata from the server instead of carrying a hardcoded copy of
+Delphi `TStrategy` UI metadata. If the schema response is missing, malformed,
+or cannot be decompressed, Init fails and the domain gate does not open.
+
 ## Reading Strategy State
 
 ```rust
@@ -59,6 +66,9 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
                 // Already answered by the dispatcher from its owned strategy list.
                 // The event is emitted for UI/diagnostic awareness.
             }
+            StratEvent::SchemaApplied { kind_count, field_count, .. } => {
+                println!("strategy schema: kinds={kind_count} fields={field_count}");
+            }
             _ => {}
         }
     }
@@ -68,6 +78,61 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 `raw_data` is still present in snapshot events for diagnostics and custom
 decoders, but normal applications should read `state.strategy_snapshot(...)` or
 `state.strategy_snapshots()`.
+
+## Strategy Schema
+
+The schema is the decoded body of Delphi `StrategySchemaBuilder.BuildStrategySchemaBlob`.
+It is sent by the server as `TStratSchema.Data`: raw DEFLATE bytes containing a
+little-endian binary schema.
+
+Public read API:
+
+```rust
+let schema = dispatcher
+    .strats()
+    .strategy_schema()
+    .expect("connect_and_init completed, so schema is available");
+
+for kind in &schema.kinds {
+    println!("kind {} {}", kind.ordinal, kind.name);
+}
+
+for field in &schema.fields {
+    println!(
+        "{} type={} ui={:?} visible_for={:?}",
+        field.name,
+        field.type_id.name(),
+        field.ui_kind,
+        field.visible_kind_ordinals
+    );
+}
+```
+
+`StrategySchema` exposes:
+
+- `format_version`;
+- `kinds`: strategy kind ordinal and server UI name;
+- `fields`: field name, Delphi TypeID, typed field kind, raw flags, UI kind,
+  default value when Delphi marked it non-zero, and visibility bitset decoded
+  to strategy-kind ordinals;
+- `StrategyFieldLayout`: no layout marker, comment, filter class, or chapter
+  class with its chapter name;
+- `static_picklist_raw` and `static_picklist`;
+- `dynamic_picklist`: `UseHookStrategy` means local MoonHook strategies with an
+  empty first item; `ComboStart` / `ComboEnd` mean all local strategies.
+
+Schema TypeIDs use the same value model as strategy snapshots:
+
+```rust
+use moonproto::commands::strategy_schema::{
+    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
+    StrategySchema,
+};
+```
+
+`StrategySchema::parse_compressed(data)` and `StrategySchema::parse_plain(data)`
+are public for protocol tools, but normal clients should read the active
+dispatcher state populated by Init.
 
 ## State
 
@@ -260,31 +325,39 @@ written to the packet body.
 
 The lower-level typed batch API remains available for explicit strategy sends.
 It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
-sends the full CmdId=2 `TStratSnapshot` wire body:
+sends the full CmdId=2 `TStratSnapshot` wire body. Pass the live schema that
+`run_init_sequence` stored in `dispatcher.strats().strategy_schema()`:
 
 ```rust
-client.strat_send_snapshot_batch(server_epoch, true, &strategies);
+let schema = dispatcher
+    .strats()
+    .strategy_schema()
+    .expect("Init fetched TStratSchema");
+
+client.strat_send_snapshot_batch(server_epoch, true, schema, &strategies);
 ```
 
 Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write
 only that declared number of UTF-8 bytes; string field values use a `Word`
-length and write only that declared number of UTF-8 bytes. Known strategy fields
-are emitted in Delphi `TStrategy` public field declaration order, matching
-`GetStrategyPropMask` iteration for the fields present in the snapshot.
+length and write only that declared number of UTF-8 bytes. Strategy fields are
+emitted in live-schema order, which is Delphi `TStrategy` public field
+declaration order. Schema visibility is the Delphi `GetStrategyPropMask`
+bitset, so fields hidden for the strategy kind are not written.
 
 The typed writer applies the same field filter as Delphi `SaveStrategyToCompact`.
-It writes only known public `TStrategy` fields, only when the value has the
-expected Delphi TypeID, and skips values equal to the default `TStrategy.Create`
-value. `SellOrderColor` and `BuyOrderColor` defaults come from Delphi runtime
-`Vars` color state; omit those fields unless they are explicit overrides. If a
-caller already has the exact compressed Delphi serializer bytes, prefer
-`strat_send_snapshot_payload(...)`.
+It writes only schema-known public `TStrategy` fields visible for the strategy
+kind, only when the value has the schema TypeID, and skips values equal to the
+schema default. Defaults come from Delphi `TStrategy.Create` through
+`StrategySchemaBuilder`; runtime color defaults such as `SellOrderColor` and
+`BuyOrderColor` are therefore not hardcoded in Rust. If a caller already has the
+exact compressed Delphi serializer bytes, prefer `strat_send_snapshot_payload(...)`.
 
-When decoding a snapshot, known Delphi strategy fields also keep Delphi
-`ReadField` type checks: if the wire TypeID does not match the expected RTTI
-field type, the value is skipped instead of being exposed as a wrongly typed
-field.
+When decoding a snapshot after schema is available, known Delphi strategy fields
+also keep Delphi `ReadField` type checks through the same schema: if the wire
+TypeID does not match the schema/RTTI field type, the value is skipped instead
+of being exposed as a wrongly typed field. Generic `parse_strategy_batch(...)`
+remains available for diagnostics when no schema is available.
 
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
@@ -299,15 +372,29 @@ dispatcher:
 use moonproto::StrategySnapshotReply;
 use moonproto::commands::strategy_serializer::StrategySnapshot;
 
+let schema = dispatcher
+    .strats()
+    .strategy_schema()
+    .expect("Init fetched TStratSchema")
+    .clone();
+
 dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
     let strategies: Vec<StrategySnapshot> = load_current_strategies();
     let server_epoch = load_local_strategy_epoch();
-    Some(StrategySnapshotReply::from_strategies(server_epoch, true, &strategies))
+    Some(StrategySnapshotReply::from_strategies(
+        server_epoch,
+        true,
+        &schema,
+        &strategies,
+    ))
 });
 ```
 
 The provider must return current application-owned strategies. The dispatcher
 falls back to its owned strategy list when the provider is absent or returns
-`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`. A provider
-that returns `StrategySnapshotReply::from_payload(..., Vec::new())` gets the
-same empty-list normalization as `strat_send_snapshot_payload`.
+`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`. If the server
+requests a non-empty local snapshot before schema has arrived, the dispatcher
+requests `TStratSchema` and sends the pending snapshot after `SchemaApplied`;
+it does not use a stale Rust field table. A provider that returns
+`StrategySnapshotReply::from_payload(..., Vec::new())` gets the same empty-list
+normalization as `strat_send_snapshot_payload`.

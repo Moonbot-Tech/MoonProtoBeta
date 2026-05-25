@@ -31,6 +31,7 @@
 //!   health/stress scenario below. Requires `allow_mutation=true`.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,8 +42,11 @@ use moonproto::commands::arb::ArbPayload;
 use moonproto::commands::candles::{parse_request_candles_data_response, CandlesAggregator};
 use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
 use moonproto::commands::engine_request;
+use moonproto::commands::strategy_schema::{
+    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategySchema,
+};
 use moonproto::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategySnapshot,
+    parse_strategy_batch, FieldValue, StrategyKind, StrategySnapshot,
 };
 use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
 use moonproto::commands::trades_stream::TradeSection;
@@ -323,6 +327,9 @@ struct SessionStats {
     server_logs: u64,
     settings_events: u64,
     strategy_events: u64,
+    strategy_schema_events: u64,
+    strategy_schema_fields: usize,
+    strategy_schema_kinds: usize,
     market_events: u64,
     trades_apply: u64,
     target_trade_packets: u64,
@@ -371,6 +378,9 @@ impl Clone for SessionStats {
             server_logs: self.server_logs,
             settings_events: self.settings_events,
             strategy_events: self.strategy_events,
+            strategy_schema_events: self.strategy_schema_events,
+            strategy_schema_fields: self.strategy_schema_fields,
+            strategy_schema_kinds: self.strategy_schema_kinds,
             market_events: self.market_events,
             trades_apply: self.trades_apply,
             target_trade_packets: self.target_trade_packets,
@@ -433,7 +443,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -445,6 +455,9 @@ impl SessionStats {
             self.server_logs,
             self.settings_events,
             self.strategy_events,
+            self.strategy_schema_events,
+            self.strategy_schema_kinds,
+            self.strategy_schema_fields,
             self.strategies_by_id.len(),
             self.market_events,
             self.trades_apply,
@@ -632,7 +645,13 @@ impl Session {
 
     fn send_strategy_snapshot_batch(&mut self, strategies: &[StrategySnapshot]) {
         self.dispatcher.set_local_strategies(strategies);
-        self.client.strat_send_snapshot_batch(0, false, strategies);
+        let schema = self
+            .dispatcher
+            .strats()
+            .strategy_schema()
+            .expect("FireTest init must fetch TStratSchema before sending strategies");
+        self.client
+            .strat_send_snapshot_batch(0, false, schema, strategies);
     }
 
     fn send_new_order(
@@ -696,6 +715,224 @@ impl Session {
             st.settings_events += 1;
         }
         st.last_settings = Some(settings.clone());
+    }
+}
+
+fn write_strategy_info_dump(
+    profile: FireProfile,
+    cfg: &FireConfig,
+    sessions: &[(&str, &Session)],
+) -> PathBuf {
+    let path = std::env::var_os("MOONPROTO_FIRETEST_STRATEGY_DUMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join(format!("firetest_strategy_info_{}.txt", profile.as_str()))
+        });
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|err| {
+            panic!(
+                "cannot create strategy dump dir {}: {err}",
+                parent.display()
+            )
+        });
+    }
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "FireTest strategy dump\nprofile={}\nserver={}:{}\nmarket={}\n",
+        profile.as_str(),
+        cfg.host,
+        cfg.port,
+        cfg.market
+    )
+    .unwrap();
+
+    for (label, session) in sessions {
+        append_session_strategy_dump(&mut out, label, session);
+    }
+
+    fs::write(&path, out)
+        .unwrap_or_else(|err| panic!("cannot write strategy dump {}: {err}", path.display()));
+    println!("FIRETEST strategy info dump: {}", path.display());
+    path
+}
+
+fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session) {
+    let stats = session.snapshot();
+    let strats = session.dispatcher.strats();
+    writeln!(
+        out,
+        "## Session {label}\nsummary={}\nschema_revision={} schema_failures={} schema_error={}\n",
+        stats.summary(),
+        strats.strategy_schema_revision(),
+        strats.strategy_schema_failures(),
+        strats.strategy_schema_last_error().unwrap_or("none")
+    )
+    .unwrap();
+
+    if let Some(schema) = strats.strategy_schema() {
+        append_schema_dump(
+            out,
+            strats.strategy_schema_raw().map_or(0, |raw| raw.len()),
+            schema,
+        );
+    } else {
+        writeln!(out, "Schema: <missing>\n").unwrap();
+    }
+
+    let mut snapshots = session.dispatcher.strategy_snapshot_vec();
+    snapshots.sort_by_key(|s| s.strategy_id);
+    writeln!(out, "Strategies: count={}", snapshots.len()).unwrap();
+    for strategy in snapshots {
+        let kind_name = strats
+            .strategy_schema()
+            .and_then(|schema| schema.kind_name(strategy.kind))
+            .unwrap_or("?");
+        writeln!(
+            out,
+            "- id={} ver={} last_date={} checked={} kind={}:{} path={} fields={}",
+            strategy.strategy_id,
+            strategy.strategy_ver,
+            strategy.last_date,
+            strategy.checked,
+            strategy.kind,
+            kind_name,
+            strategy.path,
+            strategy.fields.len()
+        )
+        .unwrap();
+        let mut fields: Vec<_> = strategy.fields.iter().collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, value) in fields {
+            writeln!(out, "    {} = {}", name, field_value_text(value)).unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+}
+
+fn append_schema_dump(out: &mut String, raw_len: usize, schema: &StrategySchema) {
+    writeln!(
+        out,
+        "Schema: raw={} version={} kinds={} fields={}",
+        raw_len,
+        schema.format_version,
+        schema.kinds.len(),
+        schema.fields.len()
+    )
+    .unwrap();
+    writeln!(out, "Kinds:").unwrap();
+    for kind in &schema.kinds {
+        writeln!(out, "- {} {}", kind.ordinal, kind.name).unwrap();
+    }
+
+    writeln!(out, "Chapters/Layout markers:").unwrap();
+    for field in &schema.fields {
+        match &field.layout {
+            StrategyFieldLayout::ChapterClass { value, chapter } => {
+                writeln!(
+                    out,
+                    "- field={} chapter_class={} chapter={}",
+                    field.name, value, chapter
+                )
+                .unwrap();
+            }
+            StrategyFieldLayout::FilterClass(value) => {
+                writeln!(out, "- field={} filter_class={}", field.name, value).unwrap();
+            }
+            StrategyFieldLayout::Comment(value) => {
+                writeln!(out, "- field={} comment={}", field.name, value).unwrap();
+            }
+            StrategyFieldLayout::None => {}
+        }
+    }
+
+    writeln!(out, "Fields:").unwrap();
+    for field in &schema.fields {
+        let visible = field
+            .visible_kind_ordinals
+            .iter()
+            .map(|ord| format!("{}:{}", ord, schema.kind_name(*ord).unwrap_or("?")))
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(
+            out,
+            "- {} type={}({}) ui={} flags=0x{:02X} default={} visible=[{}] layout={} static_picklist={} dynamic_picklist={}",
+            field.name,
+            field.raw_type_id,
+            field.type_id.name(),
+            ui_kind_text(field.ui_kind),
+            field.raw_flags,
+            field
+                .default_value
+                .as_ref()
+                .map(field_value_text)
+                .unwrap_or_else(|| "none".to_string()),
+            visible,
+            layout_text(&field.layout),
+            field
+                .static_picklist_raw
+                .as_deref()
+                .map(|raw| short_text(raw, 220))
+                .unwrap_or_else(|| "none".to_string()),
+            field
+                .dynamic_picklist
+                .as_ref()
+                .map(dynamic_picklist_text)
+                .unwrap_or_else(|| "none".to_string())
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+fn ui_kind_text(kind: StrategyFieldUiKind) -> &'static str {
+    match kind {
+        StrategyFieldUiKind::Edit => "edit",
+        StrategyFieldUiKind::Checkbox => "checkbox",
+        StrategyFieldUiKind::Combo => "combo",
+        StrategyFieldUiKind::Color => "color",
+        StrategyFieldUiKind::Unknown(_) => "unknown",
+    }
+}
+
+fn layout_text(layout: &StrategyFieldLayout) -> String {
+    match layout {
+        StrategyFieldLayout::None => "none".to_string(),
+        StrategyFieldLayout::Comment(value) => format!("comment({})", short_text(value, 120)),
+        StrategyFieldLayout::FilterClass(value) => {
+            format!("filter_class({})", short_text(value, 120))
+        }
+        StrategyFieldLayout::ChapterClass { value, chapter } => format!(
+            "chapter_class(value={}, chapter={})",
+            short_text(value, 120),
+            short_text(chapter, 120)
+        ),
+    }
+}
+
+fn dynamic_picklist_text(value: &StrategyDynamicPicklist) -> String {
+    match value {
+        StrategyDynamicPicklist::HookStrategies => "hook_strategies".to_string(),
+        StrategyDynamicPicklist::AllStrategies => "all_strategies".to_string(),
+        StrategyDynamicPicklist::FieldName(name) => format!("field_name({name})"),
+    }
+}
+
+fn field_value_text(value: &FieldValue) -> String {
+    match value {
+        FieldValue::Bool(v) => v.to_string(),
+        FieldValue::Int32(v) => v.to_string(),
+        FieldValue::Int64(v) => v.to_string(),
+        FieldValue::Double(v) => format!("{v:.12}"),
+        FieldValue::String(v) => format!("{:?}", short_text(v, 260)),
+        FieldValue::Byte(v) => v.to_string(),
+        FieldValue::Word(v) => v.to_string(),
+        FieldValue::UInt32(v) => v.to_string(),
+        FieldValue::UInt64(v) => v.to_string(),
+        FieldValue::Single(v) => format!("{v:.7}"),
     }
 }
 
@@ -771,6 +1008,34 @@ fn record_event(
                 "SnapshotPartial",
                 *server_epoch,
                 raw_data,
+            );
+        }
+        Event::Strat(StratEvent::SchemaApplied {
+            raw_len,
+            format_version,
+            kind_count,
+            field_count,
+        }) => {
+            st.strategy_events += 1;
+            st.strategy_schema_events += 1;
+            st.strategy_schema_kinds = *kind_count;
+            st.strategy_schema_fields = *field_count;
+            log_server_event(
+                &st,
+                event_no,
+                format!(
+                    "Strat SchemaApplied raw={} version={} kinds={} fields={}",
+                    raw_len, format_version, kind_count, field_count
+                ),
+            );
+        }
+        Event::Strat(StratEvent::SchemaParseFailed { raw_len }) => {
+            st.strategy_events += 1;
+            st.parse_failed += 1;
+            log_server_event(
+                &st,
+                event_no,
+                format!("Strat SchemaParseFailed raw={raw_len}"),
             );
         }
         Event::Strat(other) => {
@@ -1407,12 +1672,21 @@ where
 }
 
 fn has_initial_health(st: &SessionStats) -> bool {
-    st.connected_now && st.trades_apply > 0 && st.orderbook_apply > 0 && st.parse_failed == 0
+    st.connected_now
+        && st.strategy_schema_events > 0
+        && st.strategy_schema_kinds > 0
+        && st.strategy_schema_fields > 0
+        && st.trades_apply > 0
+        && st.orderbook_apply > 0
+        && st.parse_failed == 0
 }
 
 fn has_quick_health(st: &SessionStats) -> bool {
     st.connected_now
         && st.parse_failed == 0
+        && st.strategy_schema_events > 0
+        && st.strategy_schema_kinds > 0
+        && st.strategy_schema_fields > 0
         && st.has_engine_method(EngineMethod::BaseCheck)
         && st.has_engine_method(EngineMethod::AuthCheck)
         && st.has_engine_method(EngineMethod::GetMarketsList)
@@ -1711,10 +1985,35 @@ fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
         strategy_ver: 1,
         last_date: now_epoch_ms(),
         checked: false,
-        kind: 0,
+        kind: StrategyKind::TELEGRAM.0,
         path: "FireTest".to_string(),
         fields,
     }
+}
+
+fn assert_strategy_field_visible_for_firetest(
+    session: &Session,
+    cfg: &FireConfig,
+    strategy: &StrategySnapshot,
+) {
+    let schema = session
+        .dispatcher
+        .strats()
+        .strategy_schema()
+        .expect("FireTest strategy schema must be loaded before local strategy mutation");
+    let field = schema.field(&cfg.strategy_field).unwrap_or_else(|| {
+        panic!(
+            "FireTest strategy_field `{}` is absent from schema",
+            cfg.strategy_field
+        )
+    });
+    assert!(
+        field.visible_for_kind(strategy.kind),
+        "FireTest strategy_field `{}` is not visible for kind {}:{}; choose a schema-visible field/kind pair",
+        cfg.strategy_field,
+        strategy.kind,
+        schema.kind_name(strategy.kind).unwrap_or("?")
+    );
 }
 
 fn now_epoch_ms() -> u64 {
@@ -1849,6 +2148,7 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
         &a.client.err_emu_diagnostics_snapshot(),
     );
     println!("FIRETEST CPU quick A: {}", a.protocol_summary());
+    write_strategy_info_dump(FireProfile::Quick, &cfg, &[("A", &a)]);
 
     assert_eq!(st.parse_failed, 0, "quick FireTest saw ParseFailed");
     assert!(
@@ -2403,11 +2703,14 @@ fn fire_test_active_library_health() {
 
     let mut a = Session::connect("A", &cfg, keys, Some(seeded_strategy.clone()));
     let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
+    assert_strategy_field_visible_for_firetest(&a, &cfg, &seeded_strategy);
+    assert_strategy_field_visible_for_firetest(&b, &cfg, &seeded_strategy);
     assert!(
         a.strategy_snapshot(seeded_strategy_id).is_some()
             && b.strategy_snapshot(seeded_strategy_id).is_some(),
         "FireTest local strategies must be available through EventDispatcher API before stream checks"
     );
+    write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
 
     assert!(
         pump_pair_until(&mut a, &mut b, cfg.wait, "initial health", |a, b| {
@@ -2600,5 +2903,6 @@ fn fire_test_active_library_health() {
 
     pump_pair_for(&mut a, &mut b, Duration::from_millis(200));
     log_protocol_cpu_pair("final", &a, &b);
+    write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
     println!("FIRETEST_PASS");
 }

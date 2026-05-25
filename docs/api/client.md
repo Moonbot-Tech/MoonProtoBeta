@@ -245,6 +245,15 @@ maintains the user-requested active-lib state for that `Client` session.
 Init always sends `GetMarketsIndexes` and records the payload size in
 `InitResult::indexes_response_bytes`, because trades, orderbooks, and
 `UpdateMarketsList` price rows depend on the current server `mIndex` mapping.
+Init also sends `TStratSchemaRequest` and records
+`InitResult::strategy_schema_raw_bytes`,
+`InitResult::strategy_schema_kind_count`, and
+`InitResult::strategy_schema_field_count`. The decoded schema is stored in
+`dispatcher.strats().strategy_schema()` and contains strategy kinds, fields,
+TypeIDs, UI kind, picklists, visibility, and chapter/layout markers. This is
+agreed active-library behavior: clients use the live server schema for strategy
+UI metadata and typed `TStrategySerializer` snapshot writes instead of a
+hardcoded Rust copy of Delphi `TStrategy` fields/defaults.
 Periodic market refresh starts only after init opens the domain gate, so
 BaseCheck/AuthCheck are not delayed by early background refresh traffic.
 Critical BaseCheck/AuthCheck waits use the same default as Delphi
@@ -278,12 +287,13 @@ mode, including the raw `Client::run` callback. This matches the Delphi
 `InitDone` gate for `Order`, `Strat`, `Balance`, `TradesStream`,
 `TradesResendResponse`, `OrderBook`, and `UI` pushes. Engine API responses and
 transport service packets are not part of this domain gate, because Init itself
-depends on Engine API. Once init succeeds, the helper sends the Delphi post-init
-refresh set in Delphi order: order snapshot request, full client strategy
-snapshot from the dispatcher-owned local strategy list, settings request,
-MM-orders subscription state, and balance refresh request. When the server later
-sends `TStratSnapshotRequest`, the dispatcher replies from the same current
-local strategy list; an empty list is a valid non-empty serializer payload.
+depends on Engine API. Once the Engine API init block succeeds, the helper opens
+the domain gate, requests `TStratSchema`, then sends the post-init refresh set:
+order snapshot request, full client strategy snapshot from the dispatcher-owned
+local strategy list, settings request, MM-orders subscription state, and balance
+refresh request. When the server later sends `TStratSnapshotRequest`, the
+dispatcher replies from the same current local strategy list; an empty list is a
+valid non-empty serializer payload.
 `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value. If it is `None`, a previously queued `ui_mm_subscribe`

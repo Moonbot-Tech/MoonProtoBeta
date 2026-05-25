@@ -1632,6 +1632,12 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
+    /// Send `TStratSchemaRequest`.
+    pub fn strat_schema_request(&self) {
+        let raw = crate::commands::strat::build_schema_request(rand::random());
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+    }
+
     fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
         self.send_domain_cmd_keyed(
             raw,
@@ -1663,10 +1669,15 @@ impl ClientSender {
     }
 
     /// Send `TStratSnapshot` from decoded strategy snapshots.
+    ///
+    /// `schema` must be the live `TStratSchema` fetched during Init; typed
+    /// strategy serialization uses it for Delphi field order, PropMask
+    /// visibility, TypeID checks, and defaults.
     pub fn strat_send_snapshot_batch(
         &self,
         server_epoch: u64,
         full: bool,
+        schema: &crate::commands::strategy_schema::StrategySchema,
         strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
     ) {
         let uid: u64 = rand::random();
@@ -1674,6 +1685,7 @@ impl ClientSender {
             uid,
             server_epoch,
             full,
+            schema,
             strategies,
         );
         self.send_strat_snapshot_command(raw);
@@ -6674,6 +6686,17 @@ impl Client {
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
+    /// Send `TStratSchemaRequest` (Strat CmdId=7, High).
+    ///
+    /// Agreed active-library behavior: one-time Init requests the live Delphi
+    /// strategy schema from the server and stores the decoded result in
+    /// `EventDispatcher::strats().strategy_schema()`. Public callers normally
+    /// read that state instead of sending this manually.
+    pub fn strat_schema_request(&self) {
+        let raw = crate::commands::strat::build_schema_request(rand::random());
+        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
+    }
+
     fn send_strat_snapshot_command(&self, raw: Vec<u8>) {
         self.send_domain_cmd_keyed(
             raw,
@@ -6715,11 +6738,13 @@ impl Client {
     ///
     /// This is the high-level counterpart to Delphi `CreateFromStrats` /
     /// `CreateFromList`: it serializes the batch, computes `ClientMaxLastDate`,
-    /// and sends a valid CmdId=2 packet.
+    /// and sends a valid CmdId=2 packet. `schema` must be the live
+    /// `TStratSchema` fetched during Init.
     pub fn strat_send_snapshot_batch(
         &self,
         server_epoch: u64,
         full: bool,
+        schema: &crate::commands::strategy_schema::StrategySchema,
         strategies: &[crate::commands::strategy_serializer::StrategySnapshot],
     ) {
         let uid: u64 = rand::random();
@@ -6727,6 +6752,7 @@ impl Client {
             uid,
             server_epoch,
             full,
+            schema,
             strategies,
         );
         self.send_strat_snapshot_command(raw);
@@ -7226,6 +7252,9 @@ impl Client {
                 }
                 crate::events::ActiveAction::RequestUpdateMarketsList => {
                     self.send_api_request(&crate::commands::engine_request::update_markets_list());
+                }
+                crate::events::ActiveAction::RequestStrategySchema => {
+                    self.strat_schema_request();
                 }
                 crate::events::ActiveAction::RequestOrderBookFull {
                     market_index,
@@ -8287,6 +8316,12 @@ pub struct InitResult {
     pub indexes_response_bytes: usize,
     /// Payload size in bytes for the `UpdateMarketsList` response.
     pub update_markets_response_bytes: usize,
+    /// Raw `TStratSchema.Data` size from the mandatory Init schema request.
+    pub strategy_schema_raw_bytes: usize,
+    /// Number of strategy kinds in the decoded Init schema.
+    pub strategy_schema_kind_count: usize,
+    /// Number of public `TStrategy` fields in the decoded Init schema.
+    pub strategy_schema_field_count: usize,
     /// Whether post-init resync commands were enqueued.
     pub post_init_resync_sent: bool,
     /// Whether init requested the all-trades subscription.
@@ -8654,13 +8689,76 @@ fn malformed_required_engine_step(
     InitError::CriticalStepFailed { step, message }
 }
 
+fn run_required_strategy_schema_step(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    result: &mut InitResult,
+    timeout: Duration,
+) -> Result<(), InitError> {
+    const STEP: &str = "TStratSchemaRequest";
+    const TICK: Duration = Duration::from_millis(50);
+
+    let schema_revision_before = dispatcher.strats().strategy_schema_revision();
+    let schema_failures_before = dispatcher.strats().strategy_schema_failures();
+    let start = Instant::now();
+    let mut next_request_at = start + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
+    client.strat_schema_request();
+
+    loop {
+        if dispatcher.strats().strategy_schema_revision() != schema_revision_before {
+            let Some(schema) = dispatcher.strats().strategy_schema() else {
+                let message = "schema revision advanced but schema state is empty".to_string();
+                result.errors.push(format!("{STEP}: {message}"));
+                return Err(InitError::CriticalStepFailed {
+                    step: STEP,
+                    message,
+                });
+            };
+            result.strategy_schema_raw_bytes = dispatcher
+                .strats()
+                .strategy_schema_raw()
+                .map_or(0, |raw| raw.len());
+            result.strategy_schema_kind_count = schema.kinds.len();
+            result.strategy_schema_field_count = schema.fields.len();
+            return Ok(());
+        }
+
+        if dispatcher.strats().strategy_schema_failures() != schema_failures_before {
+            let message = dispatcher
+                .strats()
+                .strategy_schema_last_error()
+                .unwrap_or("strategy schema parse failed")
+                .to_string();
+            result.errors.push(format!("{STEP}: {message}"));
+            return Err(InitError::CriticalStepFailed {
+                step: STEP,
+                message,
+            });
+        }
+
+        let Some(remaining) = timeout_remaining(start, timeout) else {
+            result.errors.push(format!("{STEP}: timeout"));
+            return Err(InitError::CriticalStepTimedOut(STEP));
+        };
+
+        let now = Instant::now();
+        if now >= next_request_at {
+            client.strat_schema_request();
+            next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
+        }
+
+        client.run_with_dispatcher_queued(remaining.min(TICK), dispatcher);
+    }
+}
+
 /// Run the MoonBot-compatible one-time domain initialization sequence.
 ///
 /// Call this after transport authorization, or use [`connect_and_init`] to wait
 /// for authorization and init in one helper. A successful run opens the
 /// dispatcher domain gate and sends the Delphi post-init refresh set:
-/// order snapshot, client strategy snapshot, settings request, MM-orders
-/// subscription flag, balance refresh, and optional stream subscriptions.
+/// strategy schema request, order snapshot, client strategy snapshot, settings
+/// request, MM-orders subscription flag, balance refresh, and optional stream
+/// subscriptions.
 /// Incoming `TStratSnapshotRequest` is still answered from the same
 /// library-owned strategy state.
 ///
@@ -8793,6 +8891,16 @@ pub fn run_init_sequence(
         fetch_indexes: true,
     };
     client.set_domain_ready(true);
+
+    // Agreed active-library behavior: unlike the Delphi UI client, the Rust
+    // library asks the server for the live strategy schema during Init so API
+    // consumers get field types, picklists, visibility and chapters without
+    // hardcoded Rust copies of TStrategy metadata.
+    if let Err(err) = run_required_strategy_schema_step(client, dispatcher, &mut result, timeout) {
+        client.set_domain_ready(false);
+        return Err(err);
+    }
+
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
     client.send_registry_subscriptions_after_init();
 
@@ -8829,13 +8937,16 @@ fn send_post_init_resync(
     result: &mut InitResult,
 ) {
     client.request_all_statuses(rand::random());
-    let snapshot = dispatcher.local_strategy_snapshot_reply();
-    client.strat_send_snapshot_payload(
-        snapshot.server_epoch,
-        snapshot.client_max_last_date,
-        snapshot.full,
-        &snapshot.data,
-    );
+    if let Some(snapshot) = dispatcher.local_strategy_snapshot_reply() {
+        client.strat_send_snapshot_payload(
+            snapshot.server_epoch,
+            snapshot.client_max_last_date,
+            snapshot.full,
+            &snapshot.data,
+        );
+    } else {
+        client.strat_schema_request();
+    }
     client.ui_settings_request();
     let registry_mm_orders = client.subscription_registry.lock().unwrap().mm_orders_sub;
     let mm_orders = cfg
@@ -8971,6 +9082,55 @@ mod api_pending_dispatch_tests {
     use moonproto_transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
     use std::collections::HashMap;
     use std::net::UdpSocket;
+
+    fn write_str8(out: &mut Vec<u8>, value: &str) {
+        out.push(value.len() as u8);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn deflate_raw(data: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn apply_comment_strategy_schema(dispatcher: &mut EventDispatcher) {
+        let mut body = Vec::new();
+        body.push(crate::commands::strategy_schema::SCHEMA_FORMAT_VERSION);
+        body.push(1); // kind_count
+        body.push(1); // kind ordinal
+        write_str8(&mut body, "Kind1");
+        body.extend_from_slice(&1u16.to_le_bytes()); // field_count
+        write_str8(&mut body, "Comment");
+        body.push(crate::commands::strategy_serializer::TID_STRING);
+        body.push(0);
+        body.push(1); // visible for kind 1
+
+        let data = deflate_raw(&body);
+        let mut payload = Vec::new();
+        payload.push(8); // TStratSchema
+        payload.extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&data);
+
+        let mut out = Vec::new();
+        dispatcher.dispatch_into(Command::Strat, &payload, 0, &mut out);
+        assert!(out.iter().any(|ev| {
+            matches!(
+                ev,
+                crate::events::Event::Strat(crate::state::StratEvent::SchemaApplied {
+                    kind_count: 1,
+                    field_count: 1,
+                    ..
+                })
+            )
+        }));
+    }
 
     fn dummy_cfg() -> ClientConfig {
         ClientConfig {
@@ -9729,6 +9889,7 @@ mod api_pending_dispatch_tests {
             ..Default::default()
         };
         let mut dispatcher = EventDispatcher::new();
+        apply_comment_strategy_schema(&mut dispatcher);
         dispatcher.set_local_strategy_epoch(55);
         let mut fields = HashMap::new();
         fields.insert(

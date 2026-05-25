@@ -19,6 +19,7 @@ pub mod market;
 pub mod order_book;
 pub mod registry;
 pub mod strat;
+pub mod strategy_schema;
 pub mod strategy_serializer;
 pub mod trade;
 pub mod trades_stream;
@@ -32,6 +33,10 @@ pub use engine_api::{
     AuthCheckResponse, DexInfo, EngineMethod, EngineResponse,
 };
 pub use order_book::{OrderBookUpdate, OrderLevel};
+pub use strategy_schema::{
+    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
+    StrategySchema, StrategySchemaField, StrategySchemaKind,
+};
 pub use trade::{
     AllStatuses, BulkReplaceNotify, CorridorUpdate, DoClosePositionCommand, DoSellOrderCommand,
     FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCmdType, MoveAllBuysCommand,

@@ -38,6 +38,7 @@ use crate::commands::market::parse_markets_indexes_response;
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
+use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
 use crate::commands::trades_stream::{parse_trades_packet, TradeSection, TradesPacket};
@@ -80,7 +81,7 @@ impl StrategySnapshotReply {
         data: Vec<u8>,
     ) -> Self {
         let data = if data.is_empty() {
-            crate::commands::strategy_serializer::StrategyBatchBuilder::new().finalize()
+            crate::commands::strategy_serializer::StrategyBatchBuilder::empty_payload()
         } else {
             data
         };
@@ -97,9 +98,15 @@ impl StrategySnapshotReply {
     /// This is the provider-side counterpart of Delphi
     /// `TStratSnapshot.CreateFromStrats`: it serializes the current application
     /// strategy list, computes `ClientMaxLastDate`, and marks the packet as a
-    /// full snapshot by default.
-    pub fn from_strategies(server_epoch: u64, full: bool, strategies: &[StrategySnapshot]) -> Self {
-        let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new();
+    /// full snapshot by default. Pass the live `TStratSchema` fetched during
+    /// Init; Rust does not carry a static Delphi field/default table.
+    pub fn from_strategies(
+        server_epoch: u64,
+        full: bool,
+        schema: &StrategySchema,
+        strategies: &[StrategySnapshot],
+    ) -> Self {
+        let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new(schema);
         let mut client_max_last_date = 0u64;
         for strategy in strategies {
             client_max_last_date = client_max_last_date.max(strategy.last_date);
@@ -198,6 +205,7 @@ fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
 pub(crate) enum ActiveAction {
     RequestMarketsList,
     RequestUpdateMarketsList,
+    RequestStrategySchema,
     RequestOrderBookFull {
         market_index: u16,
         book_kind: u8,
@@ -273,6 +281,10 @@ pub struct EventDispatcher {
     /// override the dispatcher answers from `strats.snapshot_vec()`.
     strategy_snapshot_provider:
         Option<Box<dyn FnMut(u64) -> Option<StrategySnapshotReply> + Send + 'static>>,
+    /// Server asked for local strategies before the live `TStratSchema` was
+    /// available. Non-empty typed strategy serialization waits for schema so
+    /// Rust does not carry a stale hardcoded `TStrategy` field table.
+    pending_strategy_snapshot_request_uid: Option<u64>,
     /// Events produced while a one-shot helper is pumping the client loop.
     ///
     /// Long-running `Client::run_with_dispatcher` delivers events directly to its
@@ -681,19 +693,30 @@ impl EventDispatcher {
         self.strategy_snapshot_provider = None;
     }
 
-    fn strategy_snapshot_reply(&mut self, request_uid: u64) -> StrategySnapshotReply {
+    fn strategy_snapshot_reply(&mut self, request_uid: u64) -> Option<StrategySnapshotReply> {
         self.strategy_snapshot_provider
             .as_mut()
             .and_then(|provider| provider(request_uid))
-            .unwrap_or_else(|| self.local_strategy_snapshot_reply())
+            .or_else(|| self.local_strategy_snapshot_reply())
     }
 
-    pub(crate) fn local_strategy_snapshot_reply(&self) -> StrategySnapshotReply {
-        StrategySnapshotReply::from_strategies(
+    pub(crate) fn local_strategy_snapshot_reply(&self) -> Option<StrategySnapshotReply> {
+        let strategies = self.strats.snapshot_vec();
+        if strategies.is_empty() {
+            return Some(StrategySnapshotReply::from_payload(
+                self.local_strategy_epoch,
+                0,
+                true,
+                Vec::new(),
+            ));
+        }
+        let schema = self.strats.strategy_schema()?;
+        Some(StrategySnapshotReply::from_strategies(
             self.local_strategy_epoch,
             true,
-            &self.strats.snapshot_vec(),
-        )
+            schema,
+            &strategies,
+        ))
     }
 
     /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
@@ -1299,6 +1322,7 @@ impl EventDispatcher {
         // `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ через
         // `TStratSnapshot.CreateFromStrats(Strats)`.
         let mut snapshot_requested_uid: Option<u64> = None;
+        let mut strategy_schema_applied = false;
         // Auto-action 3: OrderEvent::Snapshot → CleanupMissingWorkers.
         // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
         // statuses, then requests exact status for workers absent from the fresh
@@ -1322,6 +1346,10 @@ impl EventDispatcher {
                     snapshot_requested_uid = Some(*uid);
                     false
                 }
+                Event::Strat(crate::state::StratEvent::SchemaApplied { .. }) => {
+                    strategy_schema_applied = true;
+                    false
+                }
                 _ => false,
             };
             if remove_event {
@@ -1339,14 +1367,32 @@ impl EventDispatcher {
             });
         }
         if let Some(uid) = snapshot_requested_uid {
-            let snapshot = self.strategy_snapshot_reply(uid);
-            actions.push(ActiveAction::SendStrategySnapshot {
-                server_epoch: snapshot.server_epoch,
-                client_max_last_date: snapshot.client_max_last_date,
-                full: snapshot.full,
-                data: snapshot.data,
-            });
+            if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
+                actions.push(ActiveAction::SendStrategySnapshot {
+                    server_epoch: snapshot.server_epoch,
+                    client_max_last_date: snapshot.client_max_last_date,
+                    full: snapshot.full,
+                    data: snapshot.data,
+                });
+            } else {
+                self.pending_strategy_snapshot_request_uid = Some(uid);
+                actions.push(ActiveAction::RequestStrategySchema);
+            }
             // Событие всё равно эмиттится в `out` для UI/диагностики.
+        }
+        if strategy_schema_applied {
+            if let Some(uid) = self.pending_strategy_snapshot_request_uid.take() {
+                if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
+                    actions.push(ActiveAction::SendStrategySnapshot {
+                        server_epoch: snapshot.server_epoch,
+                        client_max_last_date: snapshot.client_max_last_date,
+                        full: snapshot.full,
+                        data: snapshot.data,
+                    });
+                } else {
+                    self.pending_strategy_snapshot_request_uid = Some(uid);
+                }
+            }
         }
         if order_snapshot_applied {
             self.cleanup_missing_workers(actions);
@@ -1396,7 +1442,7 @@ mod tests {
     use crate::commands::arb::build_arb_prices;
     use crate::commands::market::{write_market, BaseCurrency, Market, MarketsListResponse};
     use crate::commands::registry::write_string;
-    use crate::commands::strat::build_snapshot_request;
+    use crate::commands::strat::{build_snapshot_request, StratCommand, StratSchema};
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
@@ -1411,6 +1457,50 @@ mod tests {
         SERVER_TIME_DELTA_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_str8(out: &mut Vec<u8>, value: &str) {
+        out.push(value.len() as u8);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn deflate_raw(data: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn comment_strategy_schema_payload() -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.push(crate::commands::strategy_schema::SCHEMA_FORMAT_VERSION);
+        raw.push(1); // kind_count
+        raw.push(1); // kind ordinal
+        write_str8(&mut raw, "Kind1");
+        raw.extend_from_slice(&1u16.to_le_bytes()); // field_count
+        write_str8(&mut raw, "Comment");
+        raw.push(crate::commands::strategy_serializer::TID_STRING);
+        raw.push(0); // edit, no layout/default/picklist
+        raw.push(1); // visibility bitset: visible for kind 1
+
+        deflate_raw(&raw)
+    }
+
+    fn apply_comment_strategy_schema(dispatcher: &mut EventDispatcher) {
+        let ev = dispatcher.strats.apply(StratCommand::Schema(StratSchema {
+            data: comment_strategy_schema_payload(),
+        }));
+        assert!(matches!(
+            ev,
+            StratEvent::SchemaApplied {
+                kind_count: 1,
+                field_count: 1,
+                ..
+            }
+        ));
     }
 
     fn order_book_payload_with(market_index: u16, seq: u16, is_full: bool) -> Vec<u8> {
@@ -3565,6 +3655,7 @@ mod tests {
         };
 
         let mut d = EventDispatcher::new();
+        apply_comment_strategy_schema(&mut d);
         d.set_local_strategy_epoch(55);
         d.set_local_strategies(std::slice::from_ref(&strategy));
         assert_eq!(
@@ -3611,6 +3702,99 @@ mod tests {
             }
         }
         assert!(found, "local strategy snapshot must be sent");
+    }
+
+    #[test]
+    fn snapshot_requested_defers_non_empty_local_strategies_until_schema() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategySnapshot};
+        use std::collections::HashMap;
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "Comment".to_string(),
+            FieldValue::String("late".to_string()),
+        );
+        let strategy = StrategySnapshot {
+            strategy_id: 0x51,
+            strategy_ver: 1,
+            last_date: 77,
+            checked: true,
+            kind: 1,
+            path: String::new(),
+            fields,
+        };
+
+        let mut d = EventDispatcher::new();
+        d.set_local_strategy_epoch(9);
+        d.set_local_strategies(std::slice::from_ref(&strategy));
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let request = crate::commands::strat::build_snapshot_request(500);
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &request,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, ActiveAction::RequestStrategySchema)));
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, ActiveAction::SendStrategySnapshot { .. })));
+        apply_active_actions_for_test(&client, &mut actions);
+        assert!(drain_client_send_items(&client).iter().all(|item| {
+            crate::commands::strat::StratCommand::parse(&item.data)
+                .map(|cmd| !matches!(cmd, crate::commands::strat::StratCommand::Snapshot(_)))
+                .unwrap_or(true)
+        }));
+
+        let schema_data = comment_strategy_schema_payload();
+        let mut schema_payload = Vec::new();
+        schema_payload.push(8); // TStratSchema
+        schema_payload
+            .extend_from_slice(&crate::commands::registry::CURRENT_PROTO_CMD_VER.to_le_bytes());
+        schema_payload.extend_from_slice(&501u64.to_le_bytes());
+        schema_payload.extend_from_slice(&(schema_data.len() as u32).to_le_bytes());
+        schema_payload.extend_from_slice(&schema_data);
+
+        out.clear();
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::Strat,
+            &schema_payload,
+            0,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        apply_active_actions_for_test(&client, &mut actions);
+
+        let mut found_snapshot = false;
+        for item in drain_client_send_items(&client) {
+            if item.cmd != Command::Strat.to_byte() {
+                continue;
+            }
+            let Some(crate::commands::strat::StratCommand::Snapshot(snapshot)) =
+                crate::commands::strat::StratCommand::parse(&item.data)
+            else {
+                continue;
+            };
+            let batch = crate::commands::strategy_serializer::parse_strategy_batch(&snapshot.data)
+                .expect("deferred local strategy snapshot must parse");
+            assert_eq!(snapshot.server_epoch, 9);
+            assert_eq!(snapshot.client_max_last_date, 77);
+            assert_eq!(batch.strategies.len(), 1);
+            assert_eq!(batch.strategies[0].strategy_id, strategy.strategy_id);
+            found_snapshot = true;
+        }
+        assert!(found_snapshot);
     }
 
     #[test]
