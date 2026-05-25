@@ -289,6 +289,53 @@ rows whose time is not newer than the current retained tail plus Delphi `_eps`
 (`0.00000001` days). The output is monotonic, which is required for public
 history reads by time.
 
+```rust
+pub struct MarketHistoryConfig {
+    pub futures_trades_capacity: usize,
+    pub spot_trades_capacity: usize,
+    pub liquidation_capacity: usize,
+    pub mm_orders_capacity: usize,
+    pub last_price_capacity: usize,
+    pub mini_candles_capacity: usize,
+    pub trade_join_capacity: usize,
+}
+
+pub struct MarketHistoryReaders {
+    pub futures_trades: Option<SeqRingReader<TradeHistoryRow>>,
+    pub spot_trades: Option<SeqRingReader<TradeHistoryRow>>,
+    pub liquidations: Option<SeqRingReader<TradeHistoryRow>>,
+    pub mm_orders: Option<SeqRingReader<MMOrderHistoryRow>>,
+    pub last_prices: Option<SeqRingReader<LastPricePoint>>,
+    pub mini_candles: Option<SeqRingReader<MiniCandle>>,
+}
+
+pub struct MarketHistoryStore;
+
+impl MarketHistoryStore {
+    pub fn new(config: MarketHistoryConfig) -> Self;
+    pub fn readers(&self) -> MarketHistoryReaders;
+    pub fn push_futures_trade_into_join_like_delphi(
+        &mut self,
+        row: TradeHistoryRow,
+        chart_price_step: f64,
+    );
+    pub fn drain_joined_futures_like_delphi(&mut self) -> usize;
+    pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
+    pub fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
+    pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64>;
+    pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
+    pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
+}
+```
+
+`MarketHistoryStore` is the per-market single-writer side intended for
+`StoreWorker`. Capacities set to `0` disable only that retained public history
+ring. Futures trades first enter the Delphi-like temporary join buffer and are
+drained into retained history through the sort/skip-tail step. Rows evicted
+from the futures retained ring are buffered for `TMiniCandle` compaction.
+Readers are cloneable handles; application code reads last N rows, from time,
+or a time range through `SeqRingReader` without knowing the writer internals.
+
 ## Recovery Behavior
 
 `TradesState` maintains up to 50 gap buckets. Each bucket retries missing packet

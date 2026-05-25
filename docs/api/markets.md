@@ -232,6 +232,11 @@ Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
 client computes `pLast = (Bid + Ask) / 2`, and the brown LastPrice chart line is
 drawn from `Market.HistoryPrice`.
 
+Retained storage uses `MarketHistoryStore::append_last_price_like_delphi`.
+It appends a `LastPricePoint` only when Delphi `TMarket.AddFrom` would add a
+`HistoryPrice` row: `pLast > 0`, bid or ask is present, and the market is a BTC
+market or a base-USDT market.
+
 `Market::futures_type` uses `BaseCurrency`, a raw Delphi `TBaseCurrency`
 ordinal wrapper:
 

@@ -597,12 +597,24 @@ Done:
 - Added `prepare_joined_trades_for_retained_append`: sorts drained tmp rows and
   skips rows not newer than the retained tail (`_eps = 0.00000001` days) before
   appending to a monotonic `SeqRing`.
+- Added `state::history_store::MarketHistoryStore`, the per-market single
+  writer side intended for `StoreWorker`: retained futures/spot/liquidation/MM
+  rings, LastPrice ring, mini-candle ring, futures `TradeJoinBuffer`, rolling
+  volumes, and evicted-futures buffering for later mini-candle compaction.
+- Added `MarketHistoryStore::append_last_price_like_delphi`, matching the
+  `UpdateMarketsList -> pLast -> TMarket.AddFrom -> HistoryPrice` append gate:
+  append only when `pLast > 0`, bid/ask is present, and the market is BTC or
+  base-USDT.
+- Added `MarketHistoryStore::drain_joined_futures_like_delphi`, which drains
+  the temp futures buffer through sort/skip-tail before appending to retained
+  history and updating 1/3/5 minute rolling volumes.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
 - `cargo test history --lib` OK: 13 tests.
-- `cargo test --lib` OK: 684 tests.
+- `cargo test history_store --lib` OK: 3 tests.
+- `cargo test --lib` OK: 687 tests.
 
 ### Phase Z - final full optimization pass
 
