@@ -4223,6 +4223,24 @@ Still not done:
 - Continue line-by-line reverse-equivalence for remaining `Balance` parser/state
   details, then `Trades`, `OrderBook`, `UI`, and API domain handling.
 
+### 2026-05-26 - Balance base command is recognized and ignored
+
+Done:
+
+- Re-checked Delphi `MoonProtoClient.pas:ClientNewData` and
+  `MoonProtoEngine.pas:ProcessBalanceCommand`.
+- `TBalanceCommandBase` CmdId=1 is a known balance class with only `Epoch`.
+  Delphi routes it through `ProcessBalanceCommand`, then ignores it because it
+  is neither `TBalanceSnapshotFull` nor `TBalanceIncrUpdate`.
+- Rust no longer emits `Event::Raw` for CmdId=1. It parses the known command and
+  leaves state/events unchanged, matching the existing CmdId=2 exact-balance
+  ignored path.
+- Recorded `spec_pipeline/work/хуйня.md §X.168`.
+
+Verification:
+
+- Extended `dispatcher_ignores_exact_balance_command_id_2_like_delphi`.
+
 ### 2026-05-23 - Phase 1 partial: OrderBook recovery and reconnect replay order
 
 Done:

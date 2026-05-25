@@ -1348,7 +1348,7 @@ impl EventDispatcher {
         }
         let body = &payload[11..];
         match sub_cmd_id {
-            2 => {
+            1 | 2 => {
                 if parse_balance(sub_cmd_id, body).is_none() {
                     out.push(Self::parse_failed(Command::Balance, payload));
                 }
@@ -2931,6 +2931,18 @@ mod tests {
         let events = d.dispatch(Command::Balance, &exact_base, 1001);
 
         assert!(events.is_empty());
+        assert_eq!(d.balances.global.btc_balance_total, 1.0);
+        assert_eq!(d.balances.last_epoch, 1);
+
+        let mut base_class = vec![1, 0x03, 0x00];
+        base_class.extend_from_slice(&12u64.to_le_bytes());
+        base_class.extend_from_slice(&3u16.to_le_bytes());
+        let events = d.dispatch(Command::Balance, &base_class, 1002);
+
+        assert!(
+            events.is_empty(),
+            "Delphi parses TBalanceCommandBase and ProcessBalanceCommand ignores it; it must not become Raw"
+        );
         assert_eq!(d.balances.global.btc_balance_total, 1.0);
         assert_eq!(d.balances.last_epoch, 1);
     }
