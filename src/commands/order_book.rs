@@ -4,12 +4,34 @@
 /// Packets arrive SynLZ-compressed. After decompression:
 ///   MarketIndex(2) + Seq(2) + Flags(1) + Glass data
 use crate::compression;
+use zerocopy::byteorder::little_endian::F32 as LeF32;
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// One price level in the order book
 #[derive(Debug, Clone, Copy)]
 pub struct OrderLevel {
     pub rate: f32,
     pub quantity: f32,
+}
+
+/// Delphi `TOrderGlass` wire row in `MoonProtoOrderBook.pas`.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct WireOrderLevel {
+    rate: LeF32,
+    quantity: LeF32,
+}
+
+const ORDER_LEVEL_SIZE: usize = std::mem::size_of::<WireOrderLevel>();
+const _: [(); 8] = [(); ORDER_LEVEL_SIZE];
+
+impl From<WireOrderLevel> for OrderLevel {
+    fn from(wire: WireOrderLevel) -> Self {
+        Self {
+            rate: wire.rate.get(),
+            quantity: wire.quantity.get(),
+        }
+    }
 }
 
 /// Parsed order book update
@@ -52,7 +74,7 @@ pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     let buy_count_raw = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
 
-    let buy_bytes = buy_count_raw.checked_mul(8)?;
+    let buy_bytes = buy_count_raw.checked_mul(ORDER_LEVEL_SIZE)?;
     if buy_bytes > data.len().saturating_sub(pos) {
         return None;
     }
@@ -60,32 +82,24 @@ pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
 
     let mut buys = Vec::with_capacity(buy_count);
     for _ in 0..buy_count {
-        if pos + 8 > data.len() {
+        if pos + ORDER_LEVEL_SIZE > data.len() {
             break;
         }
-        let rate = f32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        let qty = f32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
-        pos += 8;
-        buys.push(OrderLevel {
-            rate,
-            quantity: qty,
-        });
+        let wire = WireOrderLevel::read_from_bytes(&data[pos..pos + ORDER_LEVEL_SIZE]).ok()?;
+        pos += ORDER_LEVEL_SIZE;
+        buys.push(wire.into());
     }
 
     // Sells: remaining bytes / 8
-    let sell_count = (data.len() - pos) / 8;
+    let sell_count = (data.len() - pos) / ORDER_LEVEL_SIZE;
     let mut sells = Vec::with_capacity(sell_count);
     for _ in 0..sell_count {
-        if pos + 8 > data.len() {
+        if pos + ORDER_LEVEL_SIZE > data.len() {
             break;
         }
-        let rate = f32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        let qty = f32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
-        pos += 8;
-        sells.push(OrderLevel {
-            rate,
-            quantity: qty,
-        });
+        let wire = WireOrderLevel::read_from_bytes(&data[pos..pos + ORDER_LEVEL_SIZE]).ok()?;
+        pos += ORDER_LEVEL_SIZE;
+        sells.push(wire.into());
     }
 
     Some(OrderBookUpdate {

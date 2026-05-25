@@ -4066,6 +4066,9 @@ Current status:
 - Converted trades-stream fixed rows/header (`TradesPacketHeader`, 10-byte
   trade/MM/liquidation rows, and 20-byte watcher-fill rows) to private
   zerocopy-backed `Wire*` structs.
+- Converted orderbook `TOrderGlass` 8-byte level rows to private
+  zerocopy-backed `WireOrderLevel` while preserving the existing declared
+  `buyCount` corrupt-tail decision.
 - Converted core fixed wire headers `Hello`, `CryptoHeader`, `SliceHeader`, and
   ACK256 payloads to private zerocopy-backed `Wire*` structs.
 - Converted service packed records `Ping`, `SizeTest`, `ProbeMTU`, and
