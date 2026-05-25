@@ -28,7 +28,7 @@ pub mod trades;
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
     compact_trades_to_mini_candles_like_delphi, LastPricePoint, MMOrderHistoryRow, MiniCandle,
-    TradeHistoryRow,
+    RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradeVolumeTotals,
 };
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{

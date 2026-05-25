@@ -10,6 +10,8 @@ use crate::state::seq_ring::{SeqRingRow, SeqRingRowSlot, SeqRingTimedRow};
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
+const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
+const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
 ///
@@ -295,6 +297,134 @@ fn empty_mini_candle(time: f64) -> MiniCandle {
     }
 }
 
+/// Buy/sell rolling volume totals.
+///
+/// `*_value` is `Price * Abs(Qty)`, matching Delphi volume calculations over
+/// `TTrade`. `*_qty` keeps the coin/base quantity separately for clients that
+/// need it.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct TradeVolumeTotals {
+    pub buy_value: f64,
+    pub sell_value: f64,
+    pub buy_qty: f64,
+    pub sell_qty: f64,
+    pub trade_count: u32,
+}
+
+impl TradeVolumeTotals {
+    pub fn total_value(self) -> f64 {
+        self.buy_value + self.sell_value
+    }
+
+    fn add_trade(&mut self, row: TradeHistoryRow) {
+        let qty = row.quantity() as f64;
+        let value = row.price as f64 * qty;
+        if row.is_buy() {
+            self.buy_value += value;
+            self.buy_qty += qty;
+        } else {
+            self.sell_value += value;
+            self.sell_qty += qty;
+        }
+        self.trade_count = self.trade_count.saturating_add(1);
+    }
+
+    fn add_totals(&mut self, other: Self) {
+        self.buy_value += other.buy_value;
+        self.sell_value += other.sell_value;
+        self.buy_qty += other.buy_qty;
+        self.sell_qty += other.sell_qty;
+        self.trade_count = self.trade_count.saturating_add(other.trade_count);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct RollingTradeVolumeSnapshot {
+    pub one_minute: TradeVolumeTotals,
+    pub three_minutes: TradeVolumeTotals,
+    pub five_minutes: TradeVolumeTotals,
+}
+
+/// Incremental rolling volumes for the Active Lib trade history.
+///
+/// Buckets are 5 seconds wide and cover 5 minutes total. This intentionally
+/// differs from Delphi's expensive scan in `JoinHOrders`, but preserves the
+/// public value being maintained: fast buy/sell trade volume over 1/3/5 minute
+/// windows. The accepted precision loss is bounded by one bucket width.
+#[derive(Debug, Clone)]
+pub struct RollingTradeVolumes {
+    buckets: [TradeVolumeBucket; ROLLING_VOLUME_BUCKETS],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TradeVolumeBucket {
+    bucket_id: i64,
+    totals: TradeVolumeTotals,
+}
+
+impl Default for TradeVolumeBucket {
+    fn default() -> Self {
+        Self {
+            bucket_id: i64::MIN,
+            totals: TradeVolumeTotals::default(),
+        }
+    }
+}
+
+impl Default for RollingTradeVolumes {
+    fn default() -> Self {
+        Self {
+            buckets: [TradeVolumeBucket::default(); ROLLING_VOLUME_BUCKETS],
+        }
+    }
+}
+
+impl RollingTradeVolumes {
+    pub fn add_trade(&mut self, row: TradeHistoryRow) {
+        let bucket_id = volume_bucket_id(row.time);
+        let idx = volume_bucket_index(bucket_id);
+        let bucket = &mut self.buckets[idx];
+        if bucket.bucket_id != bucket_id {
+            *bucket = TradeVolumeBucket {
+                bucket_id,
+                totals: TradeVolumeTotals::default(),
+            };
+        }
+        bucket.totals.add_trade(row);
+    }
+
+    pub fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+        RollingTradeVolumeSnapshot {
+            one_minute: self.window(now_time, 60),
+            three_minutes: self.window(now_time, 3 * 60),
+            five_minutes: self.window(now_time, 5 * 60),
+        }
+    }
+
+    pub fn window(&self, now_time: f64, window_seconds: i64) -> TradeVolumeTotals {
+        let now_bucket = volume_bucket_id(now_time);
+        let buckets_back =
+            (window_seconds + ROLLING_VOLUME_BUCKET_SECONDS - 1) / ROLLING_VOLUME_BUCKET_SECONDS;
+        let oldest_bucket = now_bucket - buckets_back + 1;
+
+        let mut totals = TradeVolumeTotals::default();
+        for bucket in &self.buckets {
+            if bucket.bucket_id >= oldest_bucket && bucket.bucket_id <= now_bucket {
+                totals.add_totals(bucket.totals);
+            }
+        }
+        totals
+    }
+}
+
+fn volume_bucket_id(time: f64) -> i64 {
+    ((time * SECONDS_PER_DAY).floor() as i64).div_euclid(ROLLING_VOLUME_BUCKET_SECONDS)
+}
+
+fn volume_bucket_index(bucket_id: i64) -> usize {
+    bucket_id.rem_euclid(ROLLING_VOLUME_BUCKETS as i64) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +645,51 @@ mod tests {
                 sell_vol: 0.0,
             }]
         );
+    }
+
+    #[test]
+    fn rolling_trade_volumes_maintain_one_three_five_minute_windows() {
+        let now = 45_000.0;
+        let mut volumes = RollingTradeVolumes::default();
+
+        volumes.add_trade(TradeHistoryRow {
+            time: now - 10.0 / SECONDS_PER_DAY,
+            price: 100.0,
+            qty: 2.0,
+        });
+        volumes.add_trade(TradeHistoryRow {
+            time: now - 70.0 / SECONDS_PER_DAY,
+            price: 200.0,
+            qty: -3.0,
+        });
+        volumes.add_trade(TradeHistoryRow {
+            time: now - 200.0 / SECONDS_PER_DAY,
+            price: 300.0,
+            qty: 4.0,
+        });
+        volumes.add_trade(TradeHistoryRow {
+            time: now - 400.0 / SECONDS_PER_DAY,
+            price: 400.0,
+            qty: 5.0,
+        });
+
+        let snapshot = volumes.snapshot(now);
+
+        assert_eq!(
+            snapshot.one_minute,
+            TradeVolumeTotals {
+                buy_value: 200.0,
+                sell_value: 0.0,
+                buy_qty: 2.0,
+                sell_qty: 0.0,
+                trade_count: 1,
+            }
+        );
+        assert_eq!(snapshot.three_minutes.buy_value, 200.0);
+        assert_eq!(snapshot.three_minutes.sell_value, 600.0);
+        assert_eq!(snapshot.three_minutes.trade_count, 2);
+        assert_eq!(snapshot.five_minutes.buy_value, 1_400.0);
+        assert_eq!(snapshot.five_minutes.sell_value, 600.0);
+        assert_eq!(snapshot.five_minutes.trade_count, 3);
     }
 }

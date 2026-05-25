@@ -578,12 +578,16 @@ Done:
   `UseTradesCompression` body inside Delphi `TMarket.ResizeOrdersHistory`: group
   anchor, 5-second split, buy/sell volume, min/max price, and `T1`/`Now`
   append gates.
+- Added `RollingTradeVolumes`: 5-second accumulator buckets for 1/3/5 minute
+  buy/sell `Price * Abs(Qty)` values and quantities. This is the agreed Active
+  Lib implementation direction for cheap derived volumes; precision error is
+  bounded by one bucket width.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 7 tests.
-- `cargo test --lib` OK: 678 tests.
+- `cargo test history --lib` OK: 8 tests.
+- `cargo test --lib` OK: 679 tests.
 
 ### Phase Z - final full optimization pass
 
