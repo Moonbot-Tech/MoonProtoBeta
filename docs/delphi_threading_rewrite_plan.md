@@ -495,6 +495,89 @@ Exit gate: full unit suite, examples check, FireTest, stress under `err_emu=10%`
 
 Exit gate: byte/wire tests, perf counters, FireTest/stress, API docs updated.
 
+### Phase E2 - Active Lib `SeqRing` storage
+
+Target storage model for hot historical data:
+
+- `ProtocolCore` receives/decrypts/decompresses/parses packets and quickly
+  hands typed batches to `StoreWorker`.
+- `StoreWorker` is the single writer for hot retained history and immediately
+  appends incoming rows into per-market `SeqRing`s.
+- `SeqRing` is a single-writer / multi-reader retained ring: monotonic `seq`,
+  independent readers, and retention clipping when a requested start is older
+  than the oldest retained row. `seq`/cursor is an internal mechanism, not a
+  mandatory public API shape.
+- User API must not expose internal chunks/wrap/slots. A user that wants to draw
+  retained trades asks for a simple view: last N rows, N rows from time T, a
+  time range, or a position found by time.
+- Locks on the hot receive/append/read path are forbidden unless metrics prove
+  they are outside the hot path. If Rust memory safety requires atomics/seqlock,
+  keep it in one small module with wrap/retention/concurrent tests.
+- Initial implementation direction: use an atomic row-slot trait, not a generic
+  `UnsafeCell<T>` seqlock. Each retained row type stores its scalar fields in
+  atomics; the ring version word gives a consistent multi-field snapshot. This
+  keeps the Delphi-like lock-free shape without Rust data races.
+
+Sizing:
+
+- history capacities are configured from init/API with defaults;
+- `0` disables retained public history for that category only;
+- protocol-required state remains mandatory even when retained history is off.
+
+Derived calculations:
+
+- `StoreWorker` updates derived state at least every 250 ms.
+- Rolling trade volumes for 1, 3 and 5 minutes use small accumulators, e.g.
+  5-second buckets, and update only from new trades since the previous pass.
+- Full scan over a `SeqRing` is a normal user-facing API for charts/analysis
+  and is also allowed as a test oracle and CPU red-flag benchmark. Internal
+  derived-state production code should still use the incremental form when it
+  is straightforward and cheaper.
+- Deltas `(max - min) / min * 100` are deferred to the final optimization pass:
+  compute both on trades and candles. Trades use incremental updates from new
+  rows; candles may use full recalculation when candle data changes.
+- Active Lib maintains candles after the initial candle snapshot: trades update
+  the current 5-minute candle; on window rollover the current candle is sealed,
+  the next current candle starts, and old candles leave retention.
+- Active Lib stores the current full orderbook, not historical orderbook arrays,
+  unless a later API explicitly asks for history.
+- Active Lib also stores Delphi's LastPrice line separately from detailed
+  trades. Delphi draws the brown chart line from `Market.HistoryPrice`
+  (`THistoricalPrices = current: single + RealTime: TDateTime`). The data
+  source is `UpdateMarketsList`: the server sends `Bid/Ask`, the client
+  computes `pLast = (Bid + Ask) / 2`, and Delphi `TMarket.AddFrom` appends
+  `pLast` into `HistoryPrice`.
+- Delphi compacts old detailed trades into `TMiniCandles` when the large trade
+  array overflows. Rust must preserve that external meaning without array shift:
+  `SeqRing` overflow compacts evicted rows into mini-candles. Exact Delphi
+  thresholds/percentages must be checked before implementation.
+
+### 2026-05-25 - SeqRing storage foundation
+
+Done:
+
+- Added `state::seq_ring`, a single-writer / multi-reader retained ring with
+  monotonic sequences, retention clipping, last-N reads, sequence reads, and
+  time-based helpers (`copy_from_time`, `copy_time_range`).
+- Implemented the storage without `unsafe`: row types provide atomic slots, and
+  a per-slot version word verifies that multi-field reads are consistent.
+- Added `state::history::TradeHistoryRow`, matching Delphi `TTrade`
+  (`Time: TDateTime`, `Price: Single`, signed `Qty: Single`) including Delphi's
+  sign-bit `IsBuy` / `SameDirection` semantics.
+- Added `state::history::MMOrderHistoryRow`, matching Delphi base `TMMOrder`
+  (`Time: TDateTime`, `vol: Double`, `Q: Double`). Delphi taker/color companion
+  data lives in `TStreamableRingBuffer<TMMOrder, TMMOrderData>` and remains a
+  separate follow-up block.
+- Added `state::history::LastPricePoint`, matching Delphi `THistoricalPrices`
+  (`current: Single`, `RealTime: TDateTime`), and `MiniCandle`, matching Delphi
+  `TMiniCandle`.
+
+Verification:
+
+- `cargo test seq_ring --lib` OK: 11 tests.
+- `cargo test history --lib` OK: 5 tests.
+- `cargo test --lib` OK: 675 tests.
+
 ### Phase Z - final full optimization pass
 
 Делать в самом конце, после protocol/runtime parity и после того, как крупные

@@ -16,14 +16,17 @@
 
 pub mod balances;
 pub mod epoch;
+pub mod history;
 pub mod markets;
 pub mod order_books;
 pub mod orders;
+pub mod seq_ring;
 pub mod settings;
 pub mod strats;
 pub mod trades;
 
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
+pub use history::{LastPricePoint, MMOrderHistoryRow, MiniCandle, TradeHistoryRow};
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
@@ -31,6 +34,10 @@ pub use order_books::{
 };
 pub use orders::{
     ApplyResult, Order, OrderEvent, OrderTraceChartPoint, OrderTraceLine, Orders, SellReason,
+};
+pub use seq_ring::{
+    SeqRingBounds, SeqRingError, SeqRingReadMeta, SeqRingReader, SeqRingRow, SeqRingRowSlot,
+    SeqRingTimedRow, SeqRingWriter,
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
