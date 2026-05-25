@@ -5411,6 +5411,10 @@ Verification:
 - Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.89s`,
   `ParseFailed=0`, `err_emu=10%`, target market tail present for `BTCUSDT`.
 
+Observed quick CPU remains an open Phase Z / `хуйня.md` CPU red flag, not a
+closed item: reader avg/max `947us/108479us`, active_dispatch avg/max
+`1449us/100399us`, app_enqueue avg/max `891us/2295us`.
+
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
 Done:
