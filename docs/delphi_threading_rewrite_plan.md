@@ -551,6 +551,13 @@ Derived calculations:
   array overflows. Rust must preserve that external meaning without array shift:
   `SeqRing` overflow compacts evicted rows into mini-candles. Exact Delphi
   thresholds/percentages must be checked before implementation.
+- Detailed futures trade history cannot be appended in raw UDP receive order.
+  Delphi path is `ProcessTradesStream -> wsParseOrdersHistoryAll_Int ->
+  AddTmpHOrder -> JoinHOrders`: temporary ring, adjacent same-direction
+  aggregation, skip rows older/equal than current `OrdersH` tail, then
+  `QuickSortOrders`. StoreWorker must preserve this before using
+  `SeqRingTimedRow` binary-search reads. Red flag recorded as
+  `spec_pipeline/work/хуйня.md §X.158`.
 
 ### 2026-05-25 - SeqRing storage foundation
 
@@ -5208,12 +5215,12 @@ Still not done:
 
 - Zero-alloc `SectionIter` remains Phase E work and is the next concrete
   protocol/state-shape cleanup.
-- Full Delphi market analytics tail is deferred: `m.Emulating`,
-  `SetEmuMinPrice` / `SetEmuMaxPrice`, `m.AddFrom` internals, weighted/avg
-  price, bid/ask EMA, `HistoryPrice`, 1m/5m avg, coin deltas, `LastPriceEMA`,
-  hourly values, drop detection, `PriceZeroFlag`, resize tasks,
-  history/detection, and `Markets.SetDelta500` are not needed for the current
-  active-library target.
+- The old "not needed for active-lib" wording is obsolete after the
+  2026-05-25 Active Lib storage decision. The bounded tail above is closed, but
+  detailed history is now Phase E2 work: `wsParseOrdersHistoryAll_Int ->
+  AddTmpHOrder -> JoinHOrders` aggregation/sorting, spot/liquidation/MM retained
+  histories, `HistoryPrice`, rolling volumes, mini-candle compaction, and the
+  keep/remove decision for broader analytics fields.
 
 ### Final pass - keep/remove broad Delphi market analytics tail
 
@@ -5228,8 +5235,9 @@ and what to leave out of the active library API/state model:
 - trades/history/detection buffers beyond the bounded public trade tail;
 - `Markets.SetDelta500`.
 
-Default for this pass: do not port these fields unless they are required by the
-active library contract or by a later explicitly chosen API.
+Default for this pass: fields required by the Active Lib storage contract are no
+longer optional. Remaining UI-only or strategy-detection-only fields still need
+an explicit keep/remove decision before final parity is declared.
 
 ### Next concrete work - zero-alloc SectionIter for TradesStream
 
