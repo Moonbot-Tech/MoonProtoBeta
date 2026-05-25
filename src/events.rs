@@ -697,11 +697,14 @@ impl EventDispatcher {
         handle.apply_candles_snapshot(rows)
     }
 
-    fn set_trade_storage_scope(&mut self, scope: Option<TradeStorageScope>) {
+    fn set_trade_storage_scope(&mut self, scope: Option<TradeStorageScope>, now_time_days: f64) {
         if self.trade_storage_scope != scope {
             self.trade_storage_scope = scope;
             self.last_market_history_scope = None;
             self.sync_market_history_storage();
+            if self.trade_storage_scope.is_some() {
+                self.queue_current_last_price_history_like_delphi(now_time_days);
+            }
         }
     }
 
@@ -1594,6 +1597,11 @@ impl EventDispatcher {
         handle.send_last_price_batch(MarketHistoryLastPriceBatch { now_time, rows });
     }
 
+    fn queue_current_last_price_history_like_delphi(&self, now_time_days: f64) {
+        let rows = self.markets.current_last_price_history_rows_like_delphi();
+        self.queue_last_price_history_like_delphi(Some(now_time_days), rows);
+    }
+
     fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
         if payload.len() < 8 {
             out.push(Self::parse_failed(Command::LogMsg, payload));
@@ -1639,7 +1647,7 @@ impl EventDispatcher {
             ctx.server_base_currency_name.as_deref(),
             ctx.server_base_currency_code,
         );
-        self.set_trade_storage_scope(ctx.trades_storage_scope.clone());
+        self.set_trade_storage_scope(ctx.trades_storage_scope.clone(), ctx.now_time_days);
 
         if matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
             && ctx.trades_storage_scope.is_none()
@@ -3390,6 +3398,60 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].current, 101.0);
         assert_eq!(rows[0].real_time, 45_000.5);
+    }
+
+    #[test]
+    fn enabling_trade_storage_backfills_current_last_price_history() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 4,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+            trade_join_capacity: 0,
+        });
+
+        let mut btc = event_market("BTCUSDT");
+        btc.bn_market_currency = "BTC".to_string();
+        btc.base_currency = "USDT".to_string();
+        btc.is_btc_market = true;
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        d.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![btc],
+            corr_markets: vec![],
+        });
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let data = build_markets_prices_response(&MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 200.0,
+                ask: 204.0,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 202.0,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        d.markets.apply_markets_prices_payload_like_delphi(&data);
+
+        d.set_trade_storage_scope(Some(TradeStorageScope::All), 45_001.0);
+        assert!(worker.flush(45_001.0));
+
+        let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
+        let mut rows = Vec::new();
+        last_prices.copy_last(4, &mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].current, 202.0);
+        assert_eq!(rows[0].real_time, 45_001.0);
     }
 
     #[test]

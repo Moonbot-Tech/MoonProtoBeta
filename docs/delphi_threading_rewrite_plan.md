@@ -781,6 +781,11 @@ Done:
 - LastPrice-line deltas are calculated from the retained `HistoryPrice` line
   fed by `UpdateMarketsList -> TMarket.AddFrom`, covering the Delphi
   `CheckHourlyValues` 15m/30m/1h source.
+- When trades storage is enabled after Init already applied `UpdateMarketsList`,
+  Rust backfills retained LastPrice rows from current `MarketsState`; otherwise
+  the Active Lib could expose empty `HistoryPrice` until the next periodic
+  market update, which Delphi cannot do because `HistoryPrice` lives on
+  `TMarket` from the start.
 - The combined 2h/3h/24h delta fields are floored by the combined 1h delta,
   matching Delphi `RecalcPumpQ` (`Last2hDelta/Last3hDelta/Last24hDelta :=
   Max(Last1hDelta, raw_window)`).
@@ -829,6 +834,13 @@ Verification:
   `cargo test state::history_store --lib` OK: 17 tests; full
   `cargo test --lib` OK: 721 tests; `cargo check --examples` OK; `cargo test
   --test fire_test --no-run` OK.
+- LastPrice backfill red flag fixed after quick FireTest caught an empty
+  retained LastPrice ring when `UpdateMarketsList` happened before
+  `subscribe_all_trades`: targeted
+  `enabling_trade_storage_backfills_current_last_price_history` OK; full
+  `cargo test --lib` OK: 722 tests; `cargo check --examples` OK; `cargo test
+  --test fire_test --no-run` OK; quick prod FireTest OK:
+  `FIRETEST_QUICK_PASS after 23.63s`; full prod FireTest OK after about 176s.
 
 ### Phase Z - final full optimization pass
 

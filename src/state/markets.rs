@@ -690,6 +690,33 @@ impl MarketsState {
         })
     }
 
+    /// Build retained LastPrice rows from the current market-price state.
+    ///
+    /// This is the Active Lib backfill for the common order:
+    /// Init `UpdateMarketsList` first, `subscribe_all_trades` later. Delphi has
+    /// one always-live `TMarket.HistoryPrice`; Rust creates retained stores only
+    /// after the agreed trades-storage opt-in, so the already-known `pLast`
+    /// values must be copied once when the storage scope becomes active.
+    pub(crate) fn current_last_price_history_rows_like_delphi(
+        &self,
+    ) -> Vec<MarketLastPriceHistoryInput> {
+        let mut rows = Vec::new();
+        for (idx, market) in self.markets.iter().enumerate() {
+            let Some(slot) = self.prices.get(idx) else {
+                continue;
+            };
+            rows.push(MarketLastPriceHistoryInput {
+                market_name: market.bn_market_name.clone(),
+                current: slot.p_last,
+                bid: slot.bid,
+                ask: slot.ask,
+                is_btc_market: market.is_btc_market,
+                is_base_usdt_market: self.market_is_base_usdt_market_like_delphi(market),
+            });
+        }
+        rows
+    }
+
     fn apply_one_market_price_update(
         &mut self,
         p: &MarketPriceUpdate,

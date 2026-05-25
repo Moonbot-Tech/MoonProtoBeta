@@ -326,6 +326,10 @@ total candle quote volume and has no buy/sell split; use `trade_volumes` for
 `MarketDerivedSnapshot::last_price_deltas` is the retained LastPrice line
 source. It follows Delphi's `UpdateMarketsList -> TMarket.AddFrom ->
 HistoryPrice` path and feeds the 15m/30m/1h-style windows exposed to clients.
+If the trades-storage scope is enabled after Init already applied
+`UpdateMarketsList`, the active dispatcher backfills the retained LastPrice line
+from the current market state so the first derived snapshot is not forced to
+wait for the next periodic market update.
 
 The long candle delta fields intentionally follow Delphi `RecalcPumpQ` naming,
 not exact wall-clock names: `two_hours` is `Last2hDelta` (`h <= 2`, roughly
