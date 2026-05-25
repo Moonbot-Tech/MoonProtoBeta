@@ -1510,6 +1510,13 @@ impl EventDispatcher {
 
     /// Delphi equivalent: `TMoonProtoNetClient.ProcessStratCommand`.
     fn process_strat_command(&mut self, cmd_v: StratCommand, out: &mut Vec<Event>) {
+        match &cmd_v {
+            StratCommand::SellPriceUpdate(_)
+            | StratCommand::SchemaRequest { .. }
+            | StratCommand::Skipped { .. }
+            | StratCommand::Unknown { .. } => return,
+            _ => {}
+        }
         let ev = self.strats.apply(cmd_v);
         // Active library: auto-decode strategy snapshot raw bytes
         // в `StratsState`. Раньше app должен был сам вызывать
@@ -1975,7 +1982,10 @@ mod tests {
         MarketsListResponse, MarketsPricesResponse,
     };
     use crate::commands::registry::{write_string, CURRENT_PROTO_CMD_VER};
-    use crate::commands::strat::{build_snapshot_request, StratCommand, StratSchema};
+    use crate::commands::strat::{
+        build_schema_request, build_sell_price_update, build_snapshot_request, StratCommand,
+        StratSchema,
+    };
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
         build_all_statuses_request, BaseCommandHeader, BulkReplaceNotify, MarketCommandHeader,
@@ -2895,6 +2905,50 @@ mod tests {
             Event::Strat(_) => {}
             other => panic!("expected Strat event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn dispatcher_skips_future_version_strat_command_like_delphi_registry() {
+        let mut d = EventDispatcher::new();
+        let mut payload = vec![2, 99, 0];
+        payload.extend_from_slice(&77u64.to_le_bytes());
+        let events = d.dispatch(Command::Strat, &payload, 1000);
+        assert!(
+            events.is_empty(),
+            "Delphi registry returns FSkipped base TBaseStratCommand and ProcessStratCommand has no matching branch"
+        );
+    }
+
+    #[test]
+    fn dispatcher_skips_unknown_strat_command_id_like_delphi_base_command() {
+        let mut d = EventDispatcher::new();
+        let mut payload = vec![250];
+        payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+        payload.extend_from_slice(&77u64.to_le_bytes());
+        let events = d.dispatch(Command::Strat, &payload, 1000);
+        assert!(
+            events.is_empty(),
+            "Delphi unknown Strat CmdId becomes base TBaseStratCommand and is freed without side effect"
+        );
+    }
+
+    #[test]
+    fn dispatcher_skips_inapplicable_incoming_strat_commands_like_delphi_client() {
+        let mut d = EventDispatcher::new();
+
+        let schema_request = build_schema_request(7);
+        let events = d.dispatch(Command::Strat, &schema_request, 1000);
+        assert!(
+            events.is_empty(),
+            "Delphi client has no TStratSchemaRequest receive branch"
+        );
+
+        let sell_price_update = build_sell_price_update(8, 99, 123.45);
+        let events = d.dispatch(Command::Strat, &sell_price_update, 1000);
+        assert!(
+            events.is_empty(),
+            "Delphi client has no TStratSellPriceUpdate receive branch"
+        );
     }
 
     #[test]

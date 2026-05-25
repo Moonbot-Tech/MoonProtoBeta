@@ -134,21 +134,37 @@ pub struct StratSchema {
 /// Все парсимые входящие подкоманды MPC_Strat.
 #[derive(Debug, Clone)]
 pub enum StratCommand {
-    SnapshotRequest { uid: u64 },
+    SnapshotRequest {
+        uid: u64,
+    },
     Snapshot(StratSnapshot),
     Delete(StratDelete),
     SellPriceUpdate(StratSellPriceUpdate),
     CheckedSync(StratCheckedSync),
     CheckedEcho(StratCheckedEcho),
-    SchemaRequest { uid: u64 },
+    SchemaRequest {
+        uid: u64,
+    },
     Schema(StratSchema),
-    Unknown { cmd_id: u8, uid: u64 },
+    /// Header is valid, but protocol version is newer than this library can
+    /// parse. Delphi registry marks this as `FSkipped` and returns the base
+    /// command class.
+    Skipped {
+        cmd_id: u8,
+        uid: u64,
+        ver: u16,
+    },
+    Unknown {
+        cmd_id: u8,
+        uid: u64,
+    },
 }
 
 impl StratCommand {
     /// Распарсить TBaseStratCommand payload (после dispatch'a по MPC_Strat в data_read_int).
     /// Wire-form: `cmd_id(1) + ver(2) + UID(8) + class-specific`.
-    /// Version gate: если `ver > 3` — возвращаем Unknown (forward-compat skip).
+    /// Version gate: если `ver > 3` — возвращаем Skipped (Delphi registry
+    /// `FSkipped` forward-compat path).
     pub fn parse(payload: &[u8]) -> Option<Self> {
         if payload.len() < 11 {
             return None;
@@ -157,7 +173,7 @@ impl StratCommand {
         let ver = u16::from_le_bytes([payload[1], payload[2]]);
         let uid = u64::from_le_bytes(payload[3..11].try_into().unwrap());
         if ver > CURRENT_PROTO_CMD_VER {
-            return Some(StratCommand::Unknown { cmd_id, uid });
+            return Some(StratCommand::Skipped { cmd_id, uid, ver });
         }
         let mut pos = 11usize;
 
@@ -803,15 +819,16 @@ mod tests {
     }
 
     #[test]
-    fn version_gate_returns_unknown() {
-        // ver=99 > CURRENT_PROTO_CMD_VER=3 → Unknown.
+    fn version_gate_returns_skipped_like_delphi_registry() {
+        // ver=99 > CURRENT_PROTO_CMD_VER=3 → Delphi registry FSkipped.
         let mut payload = vec![CMD_SNAPSHOT, 99, 0];
         payload.extend_from_slice(&77u64.to_le_bytes());
         let cmd = StratCommand::parse(&payload).unwrap();
         match cmd {
-            StratCommand::Unknown { cmd_id, uid } => {
+            StratCommand::Skipped { cmd_id, uid, ver } => {
                 assert_eq!(cmd_id, CMD_SNAPSHOT);
                 assert_eq!(uid, 77);
+                assert_eq!(ver, 99);
             }
             _ => panic!("wrong variant"),
         }

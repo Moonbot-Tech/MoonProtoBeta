@@ -166,6 +166,13 @@ folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
 `folder_deleted` tell which parts actually changed state; if both are false the
 dispatcher emits `StratEvent::Ignored`.
 
+Future-version strat commands, unknown strat command ids, incoming
+`TStratSchemaRequest`, and incoming `TStratSellPriceUpdate` do not emit active
+dispatcher events. Delphi turns those into a skipped/base command or has no
+client-side branch, then frees the object without strategy side effects. The
+low-level parser/state APIs still expose `StratCommand::Skipped`,
+`StratCommand::Unknown`, and `StratEvent::Ignored` for explicit diagnostics.
+
 ## Active Predicates
 
 `StrategySnapshot` exposes exact Delphi helpers for code that needs to reason

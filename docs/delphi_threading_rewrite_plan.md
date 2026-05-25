@@ -6070,3 +6070,21 @@ Done:
   produced by the current Delphi-parity state machine.
 - Updated `docs/api/orders.md` so the low-level `ApplyResult` shape is explicit
   in the self-contained API docs.
+
+### 2026-05-26 - Strat skipped/base commands do not emit active events
+
+Done:
+
+- Checked Delphi `TCommandRegistry.FromStream` and
+  `MoonProtoClient.pas:ProcessStratCommand`.
+- Future-version strat packets now parse as
+  `StratCommand::Skipped { cmd_id, uid, ver }`, matching Delphi `FSkipped`.
+- Active `EventDispatcher` ignores `Skipped`, `Unknown`, incoming
+  `TStratSchemaRequest`, and incoming `TStratSellPriceUpdate` because Delphi
+  client has no branch for those base/inapplicable classes.
+- Low-level parser/state diagnostics remain available; the normal active path
+  emits no `Event::Strat(Ignored)` for those packets.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.171`.

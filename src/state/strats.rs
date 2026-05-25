@@ -104,7 +104,10 @@ pub enum StratEvent {
     /// Диагностический вариант для raw parser/users. Client receive path does
     /// not emit it because Delphi client ignores incoming `TStratSchemaRequest`.
     SchemaRequested { uid: u64 },
-    /// Команда не применима (Unknown).
+    /// Low-level diagnostic for commands that the client state does not apply.
+    /// The active dispatcher does not emit this for Delphi-inapplicable
+    /// incoming command classes such as unknown/skipped, schema request, or
+    /// sell-price update.
     Ignored,
 }
 
@@ -371,6 +374,7 @@ impl StratsState {
             // `TStratSchemaRequest`. It is a client->server request handled by
             // the Delphi server, so a server->client copy is freed silently.
             StratCommand::SchemaRequest { .. } => StratEvent::Ignored,
+            StratCommand::Skipped { .. } => StratEvent::Ignored,
             StratCommand::Schema(schema) => self.apply_schema_raw(schema.data),
             StratCommand::Unknown { .. } => StratEvent::Ignored,
         }
