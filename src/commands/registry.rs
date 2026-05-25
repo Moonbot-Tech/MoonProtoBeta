@@ -123,6 +123,20 @@ mod tests {
     }
 
     #[test]
+    fn read_string_rejects_truncated_declared_body_like_delphi_read_buffer() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(b"ab");
+
+        let mut pos = 0;
+        assert!(read_string(&buf, &mut pos).is_none());
+        assert_eq!(
+            pos, 2,
+            "Delphi ReadBuffer has consumed the length before failing on body bytes"
+        );
+    }
+
+    #[test]
     fn decode_utf8_delphi_replaces_incomplete_sequence_with_single_question_mark() {
         assert_eq!(decode_utf8_delphi(&[b'a', 0xE2, 0x82]), "a?");
     }
