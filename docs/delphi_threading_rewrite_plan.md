@@ -5931,6 +5931,13 @@ Verification:
 
 - `cargo test strat --lib --quiet` OK: 67 tests.
 
+Follow-up:
+
+- Incoming `TStratSchemaRequest` is now ignored on the client side, matching
+  Delphi `ProcessStratCommand` which has no client branch for that command.
+  It remains a client->server builder/parser variant for the agreed Init schema
+  request. Recorded `spec_pipeline/work/хуйня.md §X.167`.
+
 ### 2026-05-25 - OrderBook/Trades subscribe reconnect SendAndWait gate parity
 
 Done:

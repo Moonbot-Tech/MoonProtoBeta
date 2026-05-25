@@ -101,8 +101,8 @@ pub enum StratEvent {
     },
     /// Сервер прислал `TStratSchema`, но raw-deflate/body не распарсились.
     SchemaParseFailed { raw_len: usize },
-    /// Получен `TStratSchemaRequest` от сервера. Нормальный flow этого не
-    /// требует: schema request является client→server agreed library behavior.
+    /// Диагностический вариант для raw parser/users. Client receive path does
+    /// not emit it because Delphi client ignores incoming `TStratSchemaRequest`.
     SchemaRequested { uid: u64 },
     /// Команда не применима (Unknown).
     Ignored,
@@ -367,7 +367,10 @@ impl StratsState {
                 }
             }
             StratCommand::SnapshotRequest { uid } => StratEvent::SnapshotRequested { uid },
-            StratCommand::SchemaRequest { uid } => StratEvent::SchemaRequested { uid },
+            // Delphi client `ProcessStratCommand` has no branch for
+            // `TStratSchemaRequest`. It is a client->server request handled by
+            // the Delphi server, so a server->client copy is freed silently.
+            StratCommand::SchemaRequest { .. } => StratEvent::Ignored,
             StratCommand::Schema(schema) => self.apply_schema_raw(schema.data),
             StratCommand::Unknown { .. } => StratEvent::Ignored,
         }
@@ -784,6 +787,13 @@ mod tests {
         }));
         assert!(matches!(ev, StratEvent::Ignored));
         assert_eq!(s.get(100).unwrap().sell_price, 0.0);
+    }
+
+    #[test]
+    fn incoming_schema_request_is_ignored_like_delphi_client() {
+        let mut s = StratsState::new();
+        let ev = s.apply(StratCommand::SchemaRequest { uid: 77 });
+        assert!(matches!(ev, StratEvent::Ignored));
     }
 
     #[test]
