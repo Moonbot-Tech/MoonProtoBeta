@@ -6231,3 +6231,37 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 24.46s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: Trade fixed tails follow Delphi Read semantics
+
+Correction:
+
+- Re-checked `MoonProtoTradeStruct.pas` constructors for `TTradeEpochCommand`,
+  `TNewOrderCommand`, `TOrderStatus`, `TOrderStatusUpdate`,
+  `TOrderReplaceCommand`, `TOrderReplaceResponse`, `TJoinOrdersCommand`,
+  `TSplitOrderCommand`, `TMoveAllSellsCommand`, `TDoClosePositionCommand`,
+  `TDoSellOrderCommand`, `TOrderStopsUpdate`, `TTurnPanicSellCommand`,
+  `TOrderTracePoint`, `TCorridorUpdate`, `TMoveAllBuysCommand`,
+  `TBulkReplaceNotify`, and `TVStopUpdate`.
+- Rust still treated many fixed fields after a valid market string as
+  fail-fast, while Delphi reads those fields with `TMemoryStream.Read`.
+- Fixed the parser split: `ReadStringFromStreamUtf8` / market names remain
+  fail-fast (`ReadBuffer`); fixed scalar and packed-record fields after a
+  valid string now consume available bytes and zero-fill the missing tail.
+- `TAllStatuses` and completely missing nested command headers remain a
+  separate analysis target because Delphi dispatches each nested item through
+  `TBaseTradeCommand.FromStream`.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.178`.
+
+Verification:
+
+- Added parser tests for short declared strings, empty fixed tails after valid
+  market strings, empty epoch/fixed tails after valid market strings, and
+  partial `TOrderStatus` compact-order bytes.
+- `cargo test --lib --quiet` OK: 744 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.20s`, `ParseFailed=0`.

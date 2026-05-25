@@ -100,6 +100,11 @@ from the worker tick, matching Delphi `CheckReplaceFlag`.
 Delphi `TMemoryStream.Read`: after a valid command prefix, the declared count is
 kept, complete elements are decoded, and short tail elements are zero-filled.
 The active dispatcher still exposes only found/relevant order side effects.
+Low-level trade command parsers keep the same Delphi split for malformed tails:
+market/order strings are strict `ReadBuffer` fields and reject the whole command
+when the declared bytes are missing; fixed scalar/record fields after a valid
+string use `TMemoryStream.Read` semantics, consuming available bytes and
+zero-filling missing little-endian tail bytes.
 For replace-response and bulk-replace side selection, Delphi treats only
 `OrderType::Buy` (`O_BUY`) as the buy side; `Sell`, `BuyStop`, and `BuyLimit`
 all use the sell side in the order read model. `OrderType` preserves the raw
