@@ -34,7 +34,7 @@ use moonproto::commands::engine_api::{
     parse_api_expiration_time_response, EngineMethod, EngineResponse, ServerInfo,
 };
 use moonproto::commands::market::parse_token_tags_response;
-use moonproto::commands::strategy_serializer::{parse_strategy_batch, StrategyBatchBuilder};
+use moonproto::commands::strategy_serializer::parse_strategy_batch;
 use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::commands::{parse_get_balance_response, parse_query_hedge_mode_response};
 use moonproto::events::{Event, EventDispatcher};
@@ -1556,25 +1556,14 @@ fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
 fn log_strat_snapshot(label: &str, kind: &str, seq: u64, server_epoch: u64, raw_data: &[u8]) {
     match parse_strategy_batch(raw_data) {
         Some(batch) => {
-            let mut builder = StrategyBatchBuilder::new();
-            for strategy in &batch.strategies {
-                builder.write_strategy(strategy);
-            }
-            let rebuilt = builder.finalize();
-            let rebuilt_count = parse_strategy_batch(&rebuilt)
-                .map(|rebuilt_batch| rebuilt_batch.strategies.len())
-                .unwrap_or(usize::MAX);
             println!(
-                "[{label}] strat snapshot {kind}#{seq} epoch={server_epoch} raw={}B strategies={} names={} paths={} rebuilt={}B rebuilt_strategies={}",
+                "[{label}] strat snapshot {kind}#{seq} epoch={server_epoch} raw={}B strategies={} names={} paths={} rebuilt=skipped_no_schema",
                 raw_data.len(),
                 batch.strategies.len(),
                 batch.names.len(),
                 batch.paths.len(),
-                rebuilt.len(),
-                rebuilt_count
             );
             dump_strat_payload(label, kind, seq, server_epoch, "raw", raw_data);
-            dump_strat_payload(label, kind, seq, server_epoch, "rebuilt", &rebuilt);
         }
         None => println!(
             "[{label}] strat snapshot {kind}#{seq} epoch={server_epoch} raw={}B parse_failed",
