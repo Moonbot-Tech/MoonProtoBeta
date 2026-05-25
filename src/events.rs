@@ -41,7 +41,10 @@ use crate::commands::strat::StratCommand;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
-use crate::commands::trades_stream::{parse_trades_packet, TradeSection, TradesPacket};
+use crate::commands::trades_stream::{
+    decode_trades_packet, DecodedTradesPacket, LiqOrder, TradeSection, TradeSectionRef,
+    TradesPacket,
+};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
 use crate::state::orders::OrderCancelSend;
@@ -908,9 +911,9 @@ impl EventDispatcher {
         if !self.markets.indexes_synchronized {
             return;
         }
-        match parse_trades_packet(payload) {
-            Some(pkt) => {
-                let pkt = self.filter_trades_packet_to_known_markets(pkt);
+        match decode_trades_packet(payload) {
+            Some(decoded) => {
+                let pkt = self.collect_known_trades_packet_like_delphi(&decoded);
                 let trade_events = self.trades.on_packet(pkt, now_ms);
                 self.apply_trades_events_like_delphi(trade_events, now_ms, out);
             }
@@ -931,9 +934,9 @@ impl EventDispatcher {
         }
         let inner_payloads = parse_trades_resend_response(payload);
         for inner in inner_payloads {
-            match parse_trades_packet(&inner) {
-                Some(pkt) => {
-                    let pkt = self.filter_trades_packet_to_known_markets(pkt);
+            match decode_trades_packet(&inner) {
+                Some(decoded) => {
+                    let pkt = self.collect_known_trades_packet_like_delphi(&decoded);
                     let trade_events = self.trades.on_packet_resend(pkt);
                     self.apply_trades_events_like_delphi(trade_events, now_ms, out);
                 }
@@ -957,28 +960,59 @@ impl EventDispatcher {
         }
     }
 
-    fn filter_trades_packet_to_known_markets(&self, mut pkt: TradesPacket) -> TradesPacket {
-        pkt.sections.retain_mut(|section| match section {
-            TradeSection::Trades(trades) => {
-                let had_records = !trades.is_empty();
-                trades.retain(|trade| self.markets.has_server_market_index(trade.market_index));
-                !had_records || !trades.is_empty()
+    fn collect_known_trades_packet_like_delphi(
+        &self,
+        decoded: &DecodedTradesPacket<'_>,
+    ) -> TradesPacket {
+        let mut sections = Vec::new();
+        for section in decoded.sections() {
+            match section {
+                TradeSectionRef::Trades(rows) => {
+                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
+                    {
+                        sections.push(TradeSection::Trades(rows.collect()));
+                    }
+                }
+                TradeSectionRef::MMOrders(rows) => {
+                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
+                    {
+                        sections.push(TradeSection::MMOrders(rows.collect()));
+                    }
+                }
+                TradeSectionRef::LiqOrders(rows) => {
+                    if rows.is_empty() || self.markets.has_server_market_index(rows.market_index())
+                    {
+                        sections.push(TradeSection::LiqOrders(
+                            rows.map(|trade| LiqOrder {
+                                market_index: trade.market_index,
+                                time_delta_ms: trade.time_delta_ms,
+                                price: trade.price,
+                                qty: trade.qty,
+                            })
+                            .collect(),
+                        ));
+                    }
+                }
+                TradeSectionRef::WatcherFills {
+                    market_index,
+                    user,
+                    data,
+                } => {
+                    if self.markets.has_server_market_index(market_index) {
+                        sections.push(TradeSection::WatcherFills {
+                            market_index,
+                            user,
+                            data: data.to_vec(),
+                        });
+                    }
+                }
             }
-            TradeSection::MMOrders(orders) => {
-                let had_records = !orders.is_empty();
-                orders.retain(|order| self.markets.has_server_market_index(order.market_index));
-                !had_records || !orders.is_empty()
-            }
-            TradeSection::LiqOrders(orders) => {
-                let had_records = !orders.is_empty();
-                orders.retain(|order| self.markets.has_server_market_index(order.market_index));
-                !had_records || !orders.is_empty()
-            }
-            TradeSection::WatcherFills { market_index, .. } => {
-                self.markets.has_server_market_index(*market_index)
-            }
-        });
-        pkt
+        }
+        TradesPacket {
+            base_time: decoded.base_time,
+            packet_num: decoded.packet_num,
+            sections,
+        }
     }
 
     fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {

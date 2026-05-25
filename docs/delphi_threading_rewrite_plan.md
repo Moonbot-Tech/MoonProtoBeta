@@ -5174,6 +5174,30 @@ Verification:
   watcher-fill raw record length, and exact position/skip behavior.
 - Quick FireTest after dispatcher switch; full FireTest at the next major gate.
 
+### 2026-05-25 - TradesStream SectionIter first slice
+
+Done:
+
+- Added `DecodedTradesPacket` and borrowed `TradeSectionIter`.
+- `parse_trades_packet` is now a compatibility collector over `SectionIter`,
+  so old public owned events keep their shape.
+- `EventDispatcher` no longer does collect-all then filter. It decodes the
+  packet header/sections first and only collects rows for known markets, matching
+  Delphi's `FindByServerIndex` + `Position += Count * row_size` shape more
+  closely.
+- Added iterator tests for all current section types and truncated tail rows.
+
+Verification:
+
+- `cargo test --lib` OK, 662 tests.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.58s`.
+
+Still not done:
+
+- Gap tracking still receives an owned `TradesPacket`; the next step is to split
+  packet-number tracking from owned public event construction so the dispatcher
+  can process rows even closer to Delphi's `ProcessTradesStream` order.
+
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
 Delphi source:
