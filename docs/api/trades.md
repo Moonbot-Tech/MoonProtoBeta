@@ -148,6 +148,93 @@ pub struct WatcherFill {
 `WatcherFill::is_short()`, `is_open()`, and `is_taker()` decode the Delphi flags
 byte. `time_delta_ms` is relative to `TradesPacket::base_time`.
 
+## Retained History Building Blocks
+
+The active-library retained history storage is being wired separately from the
+event stream. The public row types already mirror the Delphi storage records and
+can be used by tools/tests that build retained history explicitly.
+
+```rust
+pub struct TradeHistoryRow {
+    pub time: f64,  // Delphi TDateTime
+    pub price: f32,
+    pub qty: f32,  // signed: sign bit clear = buy, sign bit set = sell
+}
+
+impl TradeHistoryRow {
+    pub fn quantity(self) -> f32;        // Abs(qty)
+    pub fn is_buy(self) -> bool;         // Delphi sign-bit check
+    pub fn same_direction(self, other: Self) -> bool;
+    pub fn traded_value(self) -> f32;    // price * Abs(qty)
+}
+
+pub struct MMOrderHistoryRow {
+    pub time: f64, // Delphi TDateTime
+    pub vol: f64,
+    pub q: f64,
+}
+
+pub struct MiniCandle {
+    pub time: f64, // Delphi TDateTime
+    pub cnt: i32,
+    pub min_price: f32,
+    pub max_price: f32,
+    pub buy_vol: f32,
+    pub sell_vol: f32,
+}
+```
+
+`TradeHistoryRow` is the retained form for detailed trades and liquidations. It
+matches Delphi `TTrade`: `Time: TDateTime`, `Price: Single`, signed
+`Qty: Single`. Direction uses the raw `Qty` sign bit, so `-0.0` is sell-side,
+matching Delphi `PCardinal(@Qty)^ and $80000000`.
+
+`MMOrderHistoryRow` matches Delphi base `TMMOrder`: `Time`, `vol`, and `Q` are
+stored as doubles. HyperDex taker address/color companion data is a separate
+storage layer; it is not folded into the base row.
+
+```rust
+pub fn compact_trades_to_mini_candles_like_delphi(
+    rows: &[TradeHistoryRow],
+    last_mini_time: f64,
+    now_time: f64,
+    out: &mut Vec<MiniCandle>,
+);
+```
+
+The compaction helper mirrors Delphi `TMarket.ResizeOrdersHistory`: it groups
+detailed trades by a 5-second anchor window, calculates buy/sell volume as
+`Price * Abs(Qty)`, maintains min/max price, and applies the same `T1`/`Now`
+append gates used when old detailed trades are turned into `TMiniCandle`.
+
+```rust
+pub struct TradeVolumeTotals {
+    pub buy_value: f64,
+    pub sell_value: f64,
+    pub buy_qty: f64,
+    pub sell_qty: f64,
+    pub trade_count: u32,
+}
+
+pub struct RollingTradeVolumeSnapshot {
+    pub one_minute: TradeVolumeTotals,
+    pub three_minutes: TradeVolumeTotals,
+    pub five_minutes: TradeVolumeTotals,
+}
+
+pub struct RollingTradeVolumes;
+
+impl RollingTradeVolumes {
+    pub fn add_trade(&mut self, row: TradeHistoryRow);
+    pub fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
+    pub fn window(&self, now_time: f64, window_seconds: i64) -> TradeVolumeTotals;
+}
+```
+
+`RollingTradeVolumes` uses 5-second buckets and updates from newly received
+trades. It is the active-library derived-state path for 1/3/5 minute buy/sell
+volumes; the intended precision loss is bounded by one bucket width.
+
 ## Recovery Behavior
 
 `TradesState` maintains up to 50 gap buckets. Each bucket retries missing packet

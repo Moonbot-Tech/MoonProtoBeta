@@ -218,6 +218,20 @@ pub struct MarketTradeState {
 }
 ```
 
+The retained LastPrice line row is:
+
+```rust
+pub struct LastPricePoint {
+    pub current: f32,
+    pub real_time: f64, // Delphi TDateTime
+}
+```
+
+This row mirrors Delphi `THistoricalPrices`. It is not the last trade price.
+Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
+client computes `pLast = (Bid + Ask) / 2`, and the brown LastPrice chart line is
+drawn from `Market.HistoryPrice`.
+
 `Market::futures_type` uses `BaseCurrency`, a raw Delphi `TBaseCurrency`
 ordinal wrapper:
 
