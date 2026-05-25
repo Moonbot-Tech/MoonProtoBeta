@@ -15,10 +15,10 @@
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::{
-    parse_strategy_batch_with_schema, FieldValue, StrategyActiveMode, StrategyBatch, StrategyKind,
-    StrategySnapshot,
+    parse_strategy_batch_with_schema, parse_strategy_batch_with_schema_field_types, FieldValue,
+    StrategyActiveMode, StrategyBatch, StrategyKind, StrategySnapshot,
 };
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 
 /// Информация по одной стратегии — то что хранится клиентом.
@@ -127,6 +127,9 @@ pub struct StratsState {
     schema_raw: Option<Arc<Vec<u8>>>,
     /// Последняя decoded schema стратегий.
     schema: Option<Arc<StrategySchema>>,
+    /// `TStratSchema` field name -> TypeID cache for Delphi `BuildReaderProps`.
+    /// Stored behind `Arc` so `EventDispatcherSnapshot` clones remain cheap.
+    schema_field_types: Option<Arc<HashMap<String, u8>>>,
     schema_revision: u64,
     schema_failures: u64,
     schema_last_error: Option<String>,
@@ -138,12 +141,17 @@ impl StratsState {
     }
 
     fn get_or_insert(&mut self, strategy_id: u64) -> &mut StrategyInfo {
-        if !self.by_id.contains_key(&strategy_id) {
-            self.order.push(strategy_id);
+        self.get_or_insert_with_existed(strategy_id).1
+    }
+
+    fn get_or_insert_with_existed(&mut self, strategy_id: u64) -> (bool, &mut StrategyInfo) {
+        match self.by_id.entry(strategy_id) {
+            Entry::Occupied(entry) => (true, entry.into_mut()),
+            Entry::Vacant(entry) => {
+                self.order.push(strategy_id);
+                (false, entry.insert(StrategyInfo::new(strategy_id)))
+            }
         }
-        self.by_id
-            .entry(strategy_id)
-            .or_insert_with(|| StrategyInfo::new(strategy_id))
     }
 
     fn clear_entries(&mut self) {
@@ -325,8 +333,14 @@ impl StratsState {
                 let format_version = schema.format_version;
                 let kind_count = schema.kinds.len();
                 let field_count = schema.fields.len();
+                let field_types = schema
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.raw_type_id))
+                    .collect::<HashMap<_, _>>();
                 self.schema_raw = Some(Arc::new(data));
                 self.schema = Some(Arc::new(schema));
+                self.schema_field_types = Some(Arc::new(field_types));
                 self.schema_revision = self.schema_revision.saturating_add(1);
                 self.schema_last_error = None;
                 StratEvent::SchemaApplied {
@@ -392,9 +406,8 @@ impl StratsState {
     /// Обновляет `last_date`, `folder_path`, `checked` из header'а и сохраняет
     /// полный `StrategySnapshot` для API и ответа на `TStratSnapshotRequest`.
     pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) -> bool {
-        let existed = self.by_id.contains_key(&s.strategy_id);
         {
-            let entry = self.get_or_insert(s.strategy_id);
+            let (existed, entry) = self.get_or_insert_with_existed(s.strategy_id);
             if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
                 return false;
             }
@@ -412,9 +425,8 @@ impl StratsState {
     }
 
     fn upsert_snapshot_owned(&mut self, s: StrategySnapshot) -> bool {
-        let existed = self.by_id.contains_key(&s.strategy_id);
         {
-            let entry = self.get_or_insert(s.strategy_id);
+            let (existed, entry) = self.get_or_insert_with_existed(s.strategy_id);
             if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
                 return false;
             }
@@ -440,7 +452,12 @@ impl StratsState {
         deflate_data: &[u8],
         full: bool,
     ) -> Option<StrategyBatch> {
-        let batch = parse_strategy_batch_with_schema(deflate_data, self.strategy_schema())?;
+        let batch = match self.schema_field_types.as_deref() {
+            Some(field_types) => {
+                parse_strategy_batch_with_schema_field_types(deflate_data, Some(field_types))?
+            }
+            None => parse_strategy_batch_with_schema(deflate_data, None)?,
+        };
         let _ = full;
         // Delphi `ApplyStratSnapshot(IsFull=true)` does not clear strategies
         // absent from the incoming payload. They remain local "Own" strategies.
@@ -455,7 +472,12 @@ impl StratsState {
         deflate_data: &[u8],
         full: bool,
     ) -> Option<usize> {
-        let batch = parse_strategy_batch_with_schema(deflate_data, self.strategy_schema())?;
+        let batch = match self.schema_field_types.as_deref() {
+            Some(field_types) => {
+                parse_strategy_batch_with_schema_field_types(deflate_data, Some(field_types))?
+            }
+            None => parse_strategy_batch_with_schema(deflate_data, None)?,
+        };
         let _ = full;
         let count = batch.strategies.len();
         for s in batch.strategies {

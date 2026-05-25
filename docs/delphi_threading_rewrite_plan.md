@@ -5541,6 +5541,19 @@ Dispatcher-worker and Strat follow-up:
   helpers. The protocol recv CPU red flag is also below 1ms in this quick run.
   The broader CPU red flag remains open for large worker-side API market
   parsing/apply and state snapshot enqueue cost.
+- Follow-up Strat parser cleanup: `StratsState` now caches the live
+  `TStratSchema` field-name -> TypeID map behind `Arc` when schema is applied.
+  Live `TStratSnapshot` decode reuses that cache instead of rebuilding a
+  477-field map for every snapshot. `StratsState` upsert now uses one
+  dictionary entry lookup per strategy instead of `contains_key` + `entry`.
+- Quick prod FireTest after the cache/apply cleanup:
+  - `FIRETEST_QUICK_PASS after 23.96s`;
+  - `reader max=692us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=158us`;
+  - `active_dispatch max=2648us max_src=API(31) payload=44028`;
+  - `app_enqueue max=1807us max_src=TradesStream(33) payload=50 mode=state`.
+  This run did not make `Strat` the active-dispatch max; the remaining measured
+  max is worker-side market API apply, not protocol recv.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 

@@ -391,10 +391,18 @@ pub fn parse_strategy_batch_with_schema(
     deflate_bytes: &[u8],
     schema: Option<&StrategySchema>,
 ) -> Option<StrategyBatch> {
+    let schema_field_types = schema.map(build_schema_field_type_map);
+    parse_strategy_batch_with_schema_field_types(deflate_bytes, schema_field_types.as_ref())
+}
+
+pub(crate) fn parse_strategy_batch_with_schema_field_types(
+    deflate_bytes: &[u8],
+    schema_field_types: Option<&HashMap<String, u8>>,
+) -> Option<StrategyBatch> {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed).ok()?;
-    parse_strategy_batch_plain_with_schema(&decompressed, schema)
+    parse_strategy_batch_plain_with_schema_field_types(&decompressed, schema_field_types)
 }
 
 /// Парсинг уже распакованного плоского payload'а (для случая если decompression сделан снаружи).
@@ -406,6 +414,14 @@ pub fn parse_strategy_batch_plain_with_schema(
     data: &[u8],
     schema: Option<&StrategySchema>,
 ) -> Option<StrategyBatch> {
+    let schema_field_types = schema.map(build_schema_field_type_map);
+    parse_strategy_batch_plain_with_schema_field_types(data, schema_field_types.as_ref())
+}
+
+fn parse_strategy_batch_plain_with_schema_field_types(
+    data: &[u8],
+    schema_field_types: Option<&HashMap<String, u8>>,
+) -> Option<StrategyBatch> {
     let mut pos = 0usize;
     let names = read_dict(data, &mut pos)?;
     let paths = read_dict(data, &mut pos)?;
@@ -413,7 +429,8 @@ pub fn parse_strategy_batch_plain_with_schema(
         .iter()
         .map(|name| Arc::<str>::from(name.as_str()))
         .collect::<Vec<_>>();
-    let reader_fields = schema.map(|schema| build_reader_fields(&names, schema));
+    let reader_fields =
+        schema_field_types.map(|field_types| build_reader_fields(&names, field_types));
     let strat_count = read_u16(data, &mut pos)? as usize;
     let mut strategies = Vec::with_capacity(strat_count);
     for _ in 0..strat_count {
@@ -447,19 +464,22 @@ fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn build_reader_fields(names: &[String], schema: &StrategySchema) -> Vec<Option<u8>> {
+fn build_reader_fields(names: &[String], schema_by_name: &HashMap<String, u8>) -> Vec<Option<u8>> {
     // Delphi `TStrategySerializer.BuildReaderProps`: NameDict -> RTTI field
     // mapping is built once for the whole snapshot, then ReadField only indexes
-    // it by FieldIdx. Do the same instead of scanning schema.fields for every
-    // field of every strategy.
-    let schema_by_name: HashMap<&str, u8> = schema
-        .fields
-        .iter()
-        .map(|field| (field.name.as_str(), field.raw_type_id))
-        .collect();
+    // it by FieldIdx. The active library caches the schema name map at
+    // `TStratSchema` apply time, so live snapshots do not rebuild it.
     names
         .iter()
         .map(|name| schema_by_name.get(name.as_str()).copied())
+        .collect()
+}
+
+fn build_schema_field_type_map(schema: &StrategySchema) -> HashMap<String, u8> {
+    schema
+        .fields
+        .iter()
+        .map(|field| (field.name.clone(), field.raw_type_id))
         .collect()
 }
 
