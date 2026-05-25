@@ -53,7 +53,7 @@ use crate::state::{
     ApplyResult, BalanceEvent, BalancesState, MarketHistoryHandle, MarketHistoryMMOrderInput,
     MarketHistoryStreamBatch, MarketHistoryStreamSection, MarketHistoryTradeInput, MarketsEvent,
     MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState,
-    StratEvent, StratsState, TradesEvent, TradesState,
+    StratEvent, StratsState, TradesEvent, TradesPacketEffect, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -933,8 +933,8 @@ impl EventDispatcher {
         }
         match decode_trades_packet(payload) {
             Some(decoded) => {
-                let pkt = self.collect_known_trades_packet_like_delphi(&decoded);
-                let trade_events = self.trades.on_packet(pkt, now_ms);
+                let effects = self.trades.on_packet_header(decoded.packet_num, now_ms);
+                let trade_events = self.collect_known_trades_events_like_delphi(&decoded, effects);
                 self.apply_trades_events_like_delphi(trade_events, now_ms, out);
             }
             None => out.push(Self::parse_failed(Command::TradesStream, payload)),
@@ -956,8 +956,9 @@ impl EventDispatcher {
         for inner in inner_payloads {
             match decode_trades_packet(&inner) {
                 Some(decoded) => {
-                    let pkt = self.collect_known_trades_packet_like_delphi(&decoded);
-                    let trade_events = self.trades.on_packet_resend(pkt);
+                    let effects = self.trades.on_packet_resend_header(decoded.packet_num);
+                    let trade_events =
+                        self.collect_known_trades_events_like_delphi(&decoded, effects);
                     self.apply_trades_events_like_delphi(trade_events, now_ms, out);
                 }
                 None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
@@ -1147,6 +1148,22 @@ impl EventDispatcher {
             packet_num: decoded.packet_num,
             sections,
         }
+    }
+
+    fn collect_known_trades_events_like_delphi(
+        &self,
+        decoded: &DecodedTradesPacket<'_>,
+        effects: Vec<TradesPacketEffect>,
+    ) -> Vec<TradesEvent> {
+        let mut packet_for_apply = None;
+        let mut events = Vec::with_capacity(effects.len());
+        for effect in effects {
+            if matches!(&effect, TradesPacketEffect::Apply) && packet_for_apply.is_none() {
+                packet_for_apply = Some(self.collect_known_trades_packet_like_delphi(decoded));
+            }
+            events.push(effect.into_event(&mut packet_for_apply));
+        }
+        events
     }
 
     fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {

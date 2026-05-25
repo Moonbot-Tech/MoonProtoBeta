@@ -56,4 +56,5 @@ pub use seq_ring::{
 };
 pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
+pub(crate) use trades::TradesPacketEffect;
 pub use trades::{parse_trades_resend_response, TradesEvent, TradesState};

@@ -127,6 +127,62 @@ pub enum TradesEvent {
     },
 }
 
+/// Packet-number effect produced before owned public payload construction.
+///
+/// Delphi decides gap/duplicate/resend bookkeeping from `PacketNum` first and
+/// then continues reading the stream rows. Keeping this separate lets the
+/// dispatcher iterate decoded sections in wire order before it needs to build
+/// the public owned `TradesPacket`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TradesPacketEffect {
+    Apply,
+    GapDetected {
+        start: u16,
+        end: u16,
+    },
+    Duplicate,
+    OutOfOrder {
+        packet_num: u16,
+    },
+    GapFilled {
+        packet_num: u16,
+        bucket_seq_range: (u16, u16),
+    },
+}
+
+impl TradesPacketEffect {
+    pub(crate) fn into_event(self, packet_for_apply: &mut Option<TradesPacket>) -> TradesEvent {
+        match self {
+            Self::Apply => TradesEvent::Apply(
+                packet_for_apply
+                    .take()
+                    .expect("TradesPacketEffect::Apply must appear at most once"),
+            ),
+            Self::GapDetected { start, end } => TradesEvent::GapDetected { start, end },
+            Self::Duplicate => TradesEvent::Duplicate,
+            Self::OutOfOrder { packet_num } => TradesEvent::OutOfOrder { packet_num },
+            Self::GapFilled {
+                packet_num,
+                bucket_seq_range,
+            } => TradesEvent::GapFilled {
+                packet_num,
+                bucket_seq_range,
+            },
+        }
+    }
+}
+
+fn materialize_packet_effects(
+    effects: Vec<TradesPacketEffect>,
+    pkt: TradesPacket,
+) -> Vec<TradesEvent> {
+    let mut packet_for_apply = Some(pkt);
+    effects
+        .into_iter()
+        .map(|effect| effect.into_event(&mut packet_for_apply))
+        .collect()
+}
+
 /// Главный sync state для TradesStream.
 #[derive(Debug, Clone)]
 pub struct TradesState {
@@ -242,8 +298,22 @@ impl TradesState {
     /// Делает то же что Delphi `ProcessTradesStream(TrackPackets=True)` MoonProtoEngine.pas:1553+.
     #[must_use = "TradesEvent's must be processed — пропуск Apply ведёт к потере trades для UI/strategy"]
     pub fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
+        let effects = self.on_packet_header(pkt.packet_num, now_ms);
+        materialize_packet_effects(effects, pkt)
+    }
+
+    /// Packet-number branch of `ProcessTradesStream(TrackPackets=True)`.
+    ///
+    /// This deliberately takes only `packet_num`. Delphi performs this
+    /// bookkeeping before the row-reading loop, so the Rust dispatcher can do
+    /// the same and only build an owned public `TradesPacket` when an `Apply`
+    /// effect is produced.
+    pub(crate) fn on_packet_header(
+        &mut self,
+        packet_num: u16,
+        now_ms: i64,
+    ) -> Vec<TradesPacketEffect> {
         let mut events = Vec::new();
-        let packet_num = pkt.packet_num;
 
         // === Первый пакет ИЛИ долгая пауза → reset ===
         let pause_detected = self.trades_started
@@ -255,7 +325,7 @@ impl TradesState {
             self.trades_started = true;
             self.last_packet_num = packet_num;
             self.last_packet_time_ms = now_ms;
-            events.push(TradesEvent::Apply(pkt));
+            events.push(TradesPacketEffect::Apply);
             return events;
         }
 
@@ -266,8 +336,8 @@ impl TradesState {
         // event, затем Apply того же payload.
         if packet_num == self.last_packet_num {
             self.last_packet_time_ms = now_ms;
-            events.push(TradesEvent::Duplicate);
-            events.push(TradesEvent::Apply(pkt));
+            events.push(TradesPacketEffect::Duplicate);
+            events.push(TradesPacketEffect::Apply);
             return events;
         }
 
@@ -275,7 +345,7 @@ impl TradesState {
         if packet_num == self.last_packet_num.wrapping_add(1) {
             self.last_packet_num = packet_num;
             self.last_packet_time_ms = now_ms;
-            events.push(TradesEvent::Apply(pkt));
+            events.push(TradesPacketEffect::Apply);
             return events;
         }
 
@@ -297,11 +367,11 @@ impl TradesState {
             }
             let bucket_range = (b.start_num, b.end_num);
             self.last_packet_time_ms = now_ms;
-            events.push(TradesEvent::GapFilled {
+            events.push(TradesPacketEffect::GapFilled {
                 packet_num,
                 bucket_seq_range: bucket_range,
             });
-            events.push(TradesEvent::Apply(pkt));
+            events.push(TradesPacketEffect::Apply);
             return events;
         }
 
@@ -352,7 +422,7 @@ impl TradesState {
                 b.refund_used = true;
             }
             extended = true;
-            events.push(TradesEvent::GapDetected {
+            events.push(TradesPacketEffect::GapDetected {
                 start: new_gap_start,
                 end: new_gap_end,
             });
@@ -376,12 +446,12 @@ impl TradesState {
                 self.reset_buckets();
                 self.trades_started = false;
                 self.last_packet_time_ms = now_ms;
-                events.push(TradesEvent::Apply(pkt));
+                events.push(TradesPacketEffect::Apply);
                 return events;
             }
 
             self.create_bucket(new_gap_start, new_gap_end, now_ms);
-            events.push(TradesEvent::GapDetected {
+            events.push(TradesPacketEffect::GapDetected {
                 start: new_gap_start,
                 end: new_gap_end,
             });
@@ -389,7 +459,7 @@ impl TradesState {
 
         self.last_packet_num = packet_num;
         self.last_packet_time_ms = now_ms;
-        events.push(TradesEvent::Apply(pkt));
+        events.push(TradesPacketEffect::Apply);
         events
     }
 
@@ -397,27 +467,31 @@ impl TradesState {
     /// Не двигает last_packet_num, только помечает recvd в buckets.
     /// Delphi `ProcessTradesStream(TrackPackets=False)` ветка (MoonProtoEngine.pas:1667-1675).
     pub fn on_packet_resend(&mut self, pkt: TradesPacket) -> Vec<TradesEvent> {
+        let effects = self.on_packet_resend_header(pkt.packet_num);
+        materialize_packet_effects(effects, pkt)
+    }
+
+    /// Packet-number branch of `ProcessTradesStream(TrackPackets=False)`.
+    pub(crate) fn on_packet_resend_header(&mut self, packet_num: u16) -> Vec<TradesPacketEffect> {
         let mut events = Vec::new();
-        if let Some(idx) = self.find_bucket(pkt.packet_num) {
+        if let Some(idx) = self.find_bucket(packet_num) {
             let b = &mut self.buckets[idx];
-            let recvd_idx = pkt.packet_num.wrapping_sub(b.start_num) as usize;
+            let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
             if recvd_idx < b.recvd.len() {
                 b.recvd[recvd_idx] = true;
             }
             let bucket_range = (b.start_num, b.end_num);
-            events.push(TradesEvent::GapFilled {
-                packet_num: pkt.packet_num,
+            events.push(TradesPacketEffect::GapFilled {
+                packet_num,
                 bucket_seq_range: bucket_range,
             });
         } else {
             // Resend пришёл для давно закрытого bucket'а. Delphi TrackPackets=False
             // не помечает bucket, но всё равно ниже разбирает секции и применяет
             // trades; поэтому отдаём diagnostic OutOfOrder + Apply.
-            events.push(TradesEvent::OutOfOrder {
-                packet_num: pkt.packet_num,
-            });
+            events.push(TradesPacketEffect::OutOfOrder { packet_num });
         }
-        events.push(TradesEvent::Apply(pkt));
+        events.push(TradesPacketEffect::Apply);
         events
     }
 

@@ -5389,11 +5389,31 @@ Verification:
 - `cargo test --lib` OK, 662 tests.
 - Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.58s`.
 
+### 2026-05-25 - Trades packet effect split
+
+Done:
+
+- Added `TradesPacketEffect`: packet-number/gap/duplicate/resend decisions now
+  can be produced from `packet_num` only, before owned public payload
+  construction.
+- Kept public compatibility: `TradesState::on_packet(TradesPacket, now_ms)` and
+  `on_packet_resend(TradesPacket)` still return the same `TradesEvent` shape.
+- Switched active dispatcher live/resend paths to call the packet-header
+  decision first, then collect known sections only when an `Apply` effect needs
+  the public owned `TradesPacket`.
+
+Verification:
+
+- `cargo test trades --lib` OK: 58 tests.
+- `cargo test dispatcher_ --lib` OK: 41 tests.
+- `cargo test --lib` OK: 698 tests.
+- `cargo check --examples` OK.
+
 Still not done:
 
-- Gap tracking still receives an owned `TradesPacket`; the next step is to split
-  packet-number tracking from owned public event construction so the dispatcher
-  can process rows even closer to Delphi's `ProcessTradesStream` order.
+- Public `TradesEvent::Apply` still carries owned vectors. The next step is to
+  move market tail/history application to borrowed section iteration first, and
+  keep owned event construction as the compatibility notification layer.
 
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
