@@ -466,6 +466,19 @@ impl MarketHistoryWorker {
 impl EventDispatcher {
     pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle);
     pub fn clear_market_history_handle(&mut self);
+    pub fn enable_default_market_history(&mut self);
+    pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn market_history_rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn market_history_derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot>;
+    pub fn flush_market_history(&self, now_time: f64) -> bool;
     pub fn apply_candles_snapshot(&mut self, markets: &[RequestCandlesMarket]) -> bool;
 }
 
@@ -601,8 +614,32 @@ impl MarketHistoryRegistry {
 }
 ```
 
-`MarketHistoryWorker` is the retained-history writer. Attach its handle to the
-dispatcher before running the client:
+`EventDispatcher::new()` starts without allocating retained stores. When an
+all-trades scope becomes active, the dispatcher lazily starts a default
+`MarketHistoryWorker`, configures stores from the current `GetMarketsList`
+markets, and keeps the worker as the single writer. This matches the Active Lib
+contract: `subscribe_all_trades` creates retained storage for all known markets;
+`subscribe_trades_for` creates it only for the requested subset.
+
+Read the default worker through the dispatcher:
+
+```rust
+use moonproto::{Client, EventDispatcher};
+
+let mut dispatcher = EventDispatcher::new();
+client.subscribe_all_trades(false);
+
+client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+    handle_event(event);
+}));
+
+let btc = dispatcher
+    .market_history_readers("BTCUSDT")
+    .expect("market storage was created by the trades subscription");
+```
+
+For custom capacities, attach your own worker before the subscription becomes
+active:
 
 ```rust
 use moonproto::{Client, EventDispatcher};
@@ -620,6 +657,9 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 
 let btc = worker.readers("BTCUSDT").expect("market storage was created by the trades subscription");
 ```
+
+`clear_market_history_handle` disables retained-history delivery for the
+dispatcher. `enable_default_market_history` re-enables the lazy default worker.
 
 `MarketHistoryStore` is the per-market single-writer side owned by that worker.
 Capacities set to `0` disable only that retained public history ring. Futures

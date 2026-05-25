@@ -698,8 +698,12 @@ Decision:
 
 - Added `MarketHistoryWorker`: a retained-history writer thread that owns
   `MarketHistoryRegistry` and all per-market `MarketHistoryStore` instances.
-- `EventDispatcher` now accepts an optional `MarketHistoryHandle`. The active
-  dispatch path converts applied `TradesStream` packets into typed
+- `EventDispatcher` accepts a `MarketHistoryHandle` for custom worker/config
+  setups. The normal active-lib path now lazily starts its own default
+  `MarketHistoryWorker` once an all-trades storage scope becomes active, so
+  `subscribe_all_trades` / `subscribe_trades_for` is the semantic storage gate,
+  not a hidden extra worker-registration step.
+- The active dispatch path converts applied `TradesStream` packets into typed
   `MarketHistoryStreamBatch` values and queues them to the worker.
 - Superseded on 2026-05-25: `ensure_market` was removed from the normal API.
   Stores are now configured from the trades subscription scope: all known

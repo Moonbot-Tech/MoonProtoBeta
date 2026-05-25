@@ -77,28 +77,27 @@ dropped.
 - checks trades-gap recovery after successfully parsed `TradesStream` /
   `TradesResendResponse` packets and sends generated `emk_TradesResend`
   requests;
-- queues decoded trades/MM/liquidation stream batches into the optional
-  retained-history worker when `set_market_history_handle` is configured and
-  an all-trades subscription is active.
+- queues decoded trades/MM/liquidation stream batches into retained history
+  when an all-trades subscription is active. By default the dispatcher lazily
+  owns a `MarketHistoryWorker`; `set_market_history_handle` is only for custom
+  capacities or an externally owned worker.
 
 Retained history is driven by the all-trades subscription:
 
 ```rust
 use moonproto::EventDispatcher;
-use moonproto::state::{MarketHistoryConfig, MarketHistoryWorker};
-
-let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
 
 let mut dispatcher = EventDispatcher::new();
-dispatcher.set_market_history_handle(worker.handle());
 client.subscribe_all_trades(false);
 
-let btc = worker.readers("BTCUSDT");
+let btc = dispatcher.market_history_readers("BTCUSDT");
 ```
 
 The worker owns retained stores and the dispatcher only queues decoded stream
 batches to it. `subscribe_all_trades` creates stores for known markets;
-`subscribe_trades_for` creates stores only for the selected market names.
+`subscribe_trades_for` creates stores only for the selected market names. Use
+`MarketHistoryWorker::spawn` + `set_market_history_handle` before subscription
+when you need custom capacities.
 
 ## Event Enum
 

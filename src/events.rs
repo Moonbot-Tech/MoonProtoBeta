@@ -51,12 +51,13 @@ use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::orders::OrderCancelSend;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
-    ApplyResult, BalanceEvent, BalancesState, Candle5mRow, MarketHistoryCandlesSnapshot,
-    MarketHistoryHandle, MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput,
-    MarketHistoryMMOrderInput, MarketHistoryStreamBatch, MarketHistoryStreamSection,
-    MarketHistoryTradeInput, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent,
-    Orders, SettingsEvent, SettingsState, StratEvent, StratsState, TradeStorageScope, TradesEvent,
-    TradesPacketEffect, TradesState,
+    ApplyResult, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
+    MarketHistoryCandlesSnapshot, MarketHistoryConfig, MarketHistoryHandle,
+    MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput, MarketHistoryMMOrderInput,
+    MarketHistoryReaders, MarketHistoryStreamBatch, MarketHistoryStreamSection,
+    MarketHistoryTradeInput, MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookEvent,
+    OrderBooks, OrderEvent, Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState,
+    StratEvent, StratsState, TradeStorageScope, TradesEvent, TradesPacketEffect, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -247,7 +248,6 @@ pub(crate) enum ActiveAction {
 /// Applications should not mutate protocol state directly; state is maintained
 /// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
 /// outbox path used by `Client::run_with_dispatcher`.
-#[derive(Default)]
 pub struct EventDispatcher {
     pub(crate) orders: Orders,
     pub(crate) order_books: OrderBooks,
@@ -306,12 +306,48 @@ pub struct EventDispatcher {
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
+    /// Lazily spawned default retained-history worker.
+    ///
+    /// Delphi has `BMarketHistoryWorker` as part of the active client. Rust also
+    /// allows a custom worker/config via `set_market_history_handle`, but the
+    /// default active-lib path must not require an extra hidden call after
+    /// `subscribe_all_trades`.
+    owned_market_history: Option<MarketHistoryWorker>,
+    market_history_auto_enabled: bool,
     /// Active Lib retained-storage scope from `Client::subscribe_*trades*`.
     /// `None` means trades stream is not subscribed and retained trade/candle/
     /// derived state must stay disabled.
     trade_storage_scope: Option<TradeStorageScope>,
     last_market_history_scope: Option<TradeStorageScope>,
     last_market_history_markets: Vec<String>,
+}
+
+impl Default for EventDispatcher {
+    fn default() -> Self {
+        Self {
+            orders: Orders::default(),
+            order_books: OrderBooks::default(),
+            trades: TradesState::default(),
+            balances: BalancesState::default(),
+            strats: StratsState::default(),
+            settings: SettingsState::default(),
+            markets: MarketsState::default(),
+            local_strategy_epoch: 0,
+            last_known_server_token: 0,
+            last_markets_list_refresh_ms: 0,
+            trades_server_token: 0,
+            server_time_delta_source: None,
+            strategy_snapshot_provider: None,
+            pending_strategy_snapshot_request_uid: None,
+            queued_events: AppQueue::default(),
+            market_history: None,
+            owned_market_history: None,
+            market_history_auto_enabled: true,
+            trade_storage_scope: None,
+            last_market_history_scope: None,
+            last_market_history_markets: Vec::new(),
+        }
+    }
 }
 
 /// Immutable read-model copy delivered to `run_with_dispatcher_state` callbacks.
@@ -649,6 +685,8 @@ impl EventDispatcher {
     /// dispatch mode it only queues typed `TradesStream` batches into this
     /// handle; `MarketHistoryWorker` owns the actual `MarketHistoryStore`s.
     pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
+        self.owned_market_history = None;
+        self.market_history_auto_enabled = false;
         self.market_history = Some(handle);
         self.last_market_history_scope = None;
         self.last_market_history_markets.clear();
@@ -658,8 +696,50 @@ impl EventDispatcher {
     /// Disable retained-history batch delivery for this dispatcher.
     pub fn clear_market_history_handle(&mut self) {
         self.market_history = None;
+        self.owned_market_history = None;
+        self.market_history_auto_enabled = false;
         self.last_market_history_scope = None;
         self.last_market_history_markets.clear();
+    }
+
+    /// Re-enable the default retained-history worker after
+    /// [`Self::clear_market_history_handle`] or a custom handle.
+    ///
+    /// The worker is spawned lazily when trades storage scope is active.
+    pub fn enable_default_market_history(&mut self) {
+        self.market_history_auto_enabled = true;
+        self.ensure_default_market_history_worker();
+        self.sync_market_history_storage();
+    }
+
+    pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+        self.market_history.as_ref()?.readers(market_name)
+    }
+
+    pub fn market_history_rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history
+            .as_ref()?
+            .rolling_volumes(market_name, now_time)
+    }
+
+    pub fn market_history_derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history
+            .as_ref()?
+            .derived_snapshot(market_name, now_time)
+    }
+
+    pub fn flush_market_history(&self, now_time: f64) -> bool {
+        self.market_history
+            .as_ref()
+            .is_some_and(|handle| handle.flush(now_time))
     }
 
     pub fn trade_storage_scope(&self) -> Option<&TradeStorageScope> {
@@ -701,11 +781,32 @@ impl EventDispatcher {
         if self.trade_storage_scope != scope {
             self.trade_storage_scope = scope;
             self.last_market_history_scope = None;
+            self.ensure_default_market_history_worker();
             self.sync_market_history_storage();
             if self.trade_storage_scope.is_some() {
                 self.queue_current_last_price_history_like_delphi(now_time_days);
             }
         }
+    }
+
+    fn ensure_default_market_history_worker(&mut self) {
+        if self.trade_storage_scope.is_none() {
+            if self.owned_market_history.is_some() {
+                self.market_history = None;
+                self.owned_market_history = None;
+                self.last_market_history_scope = None;
+                self.last_market_history_markets.clear();
+            }
+            return;
+        }
+        if !self.market_history_auto_enabled || self.market_history.is_some() {
+            return;
+        }
+        let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
+        self.market_history = Some(worker.handle());
+        self.owned_market_history = Some(worker);
+        self.last_market_history_scope = None;
+        self.last_market_history_markets.clear();
     }
 
     fn market_history_market_names(&self) -> Vec<String> {
@@ -717,6 +818,7 @@ impl EventDispatcher {
     }
 
     fn sync_market_history_storage(&mut self) {
+        self.ensure_default_market_history_worker();
         let Some(handle) = &self.market_history else {
             return;
         };
@@ -3210,6 +3312,42 @@ mod tests {
         assert!(worker.flush(45_000.0));
 
         let futures = worker.readers("BTCUSDT").unwrap().futures_trades.unwrap();
+        let mut rows = Vec::new();
+        futures.copy_last(8, &mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].price, 100.0);
+        assert_eq!(rows[0].qty, 1.0);
+    }
+
+    #[test]
+    fn active_dispatch_lazy_starts_default_history_worker_on_trades_subscription() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        client.subscribe_all_trades(false);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = trades_payload_with_rows(812, 0, 0, &[(0, 100.0, 1.0)]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert!(d.flush_market_history(45_000.0));
+        let futures = d
+            .market_history_readers("BTCUSDT")
+            .expect("default worker should create storage for subscribed all-trades")
+            .futures_trades
+            .expect("default config keeps futures trades");
         let mut rows = Vec::new();
         futures.copy_last(8, &mut rows);
         assert_eq!(rows.len(), 1);
