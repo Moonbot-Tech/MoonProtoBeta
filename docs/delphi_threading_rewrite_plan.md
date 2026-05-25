@@ -779,6 +779,11 @@ Done:
 - The combined 2h/3h/24h delta fields are floored by the combined 1h delta,
   matching Delphi `RecalcPumpQ` (`Last2hDelta/Last3hDelta/Last24hDelta :=
   Max(Last1hDelta, raw_window)`).
+- Long candle delta windows follow Delphi's `h := trunc(24*(Now-Time))`
+  bucket conditions: `Last2hDelta` uses `h <= 2`, `Last3hDelta` uses `h <= 3`,
+  and `Last24hDelta` uses `h <= 24`. Candle volume fields keep exact window
+  semantics because Delphi's volume fields are separate (`HVol`, `HVol3`,
+  `dVol`).
 - Quick FireTest now also checks that retained futures trades feed the derived
   trade-volume snapshot, so "rows stored but analytics dead" is caught before
   the full candles stress.
@@ -804,6 +809,11 @@ Verification:
 - After the retained-candles FireTest gate: `cargo test --lib` OK: 717 tests;
   `cargo check --examples` OK; quick prod FireTest OK:
   `FIRETEST_QUICK_PASS after 23.28s`; full prod FireTest OK after about 183s.
+- After matching Delphi `RecalcPumpQ` long candle delta windows: targeted
+  `candle_long_delta_windows_match_delphi_trunc_hour_buckets` OK;
+  `cargo test --lib` OK: 718 tests; `cargo check --examples` OK; quick prod
+  FireTest OK: `FIRETEST_QUICK_PASS after 23.39s`; full prod FireTest OK after
+  about 174s.
 
 ### Phase Z - final full optimization pass
 

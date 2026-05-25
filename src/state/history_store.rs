@@ -839,10 +839,13 @@ struct CandleDerivedAccumulator {
     fifteen_minutes: CandleWindow,
     thirty_minutes: CandleWindow,
     one_hour: CandleWindow,
-    two_hours: CandleWindow,
-    three_hours: CandleWindow,
-    twenty_four_hours: CandleWindow,
+    two_hours_volume: CandleWindow,
+    three_hours_volume: CandleWindow,
+    twenty_four_hours_volume: CandleWindow,
     seventy_two_hours: CandleWindow,
+    last2h_delta_like_delphi: CandleWindow,
+    last3h_delta_like_delphi: CandleWindow,
+    last24h_delta_like_delphi: CandleWindow,
 }
 
 impl CandleDerivedAccumulator {
@@ -853,10 +856,13 @@ impl CandleDerivedAccumulator {
             fifteen_minutes: CandleWindow::new(15.0 * 60.0),
             thirty_minutes: CandleWindow::new(30.0 * 60.0),
             one_hour: CandleWindow::new(60.0 * 60.0),
-            two_hours: CandleWindow::new(2.0 * 60.0 * 60.0),
-            three_hours: CandleWindow::new(3.0 * 60.0 * 60.0),
-            twenty_four_hours: CandleWindow::new(24.0 * 60.0 * 60.0),
+            two_hours_volume: CandleWindow::new(2.0 * 60.0 * 60.0),
+            three_hours_volume: CandleWindow::new(3.0 * 60.0 * 60.0),
+            twenty_four_hours_volume: CandleWindow::new(24.0 * 60.0 * 60.0),
             seventy_two_hours: CandleWindow::new(72.0 * 60.0 * 60.0),
+            last2h_delta_like_delphi: CandleWindow::new(3.0 * 60.0 * 60.0),
+            last3h_delta_like_delphi: CandleWindow::new(4.0 * 60.0 * 60.0),
+            last24h_delta_like_delphi: CandleWindow::new(25.0 * 60.0 * 60.0),
         }
     }
 
@@ -865,10 +871,13 @@ impl CandleDerivedAccumulator {
         self.fifteen_minutes.add(self.now_time, candle);
         self.thirty_minutes.add(self.now_time, candle);
         self.one_hour.add(self.now_time, candle);
-        self.two_hours.add(self.now_time, candle);
-        self.three_hours.add(self.now_time, candle);
-        self.twenty_four_hours.add(self.now_time, candle);
+        self.two_hours_volume.add(self.now_time, candle);
+        self.three_hours_volume.add(self.now_time, candle);
+        self.twenty_four_hours_volume.add(self.now_time, candle);
         self.seventy_two_hours.add(self.now_time, candle);
+        self.last2h_delta_like_delphi.add(self.now_time, candle);
+        self.last3h_delta_like_delphi.add(self.now_time, candle);
+        self.last24h_delta_like_delphi.add(self.now_time, candle);
     }
 
     fn finish(self) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
@@ -879,9 +888,10 @@ impl CandleDerivedAccumulator {
                 fifteen_minutes: self.fifteen_minutes.finish_delta(),
                 thirty_minutes: self.thirty_minutes.finish_delta(),
                 one_hour: one_hour_delta,
-                two_hours: one_hour_delta.max(self.two_hours.finish_delta()),
-                three_hours: one_hour_delta.max(self.three_hours.finish_delta()),
-                twenty_four_hours: one_hour_delta.max(self.twenty_four_hours.finish_delta()),
+                two_hours: one_hour_delta.max(self.last2h_delta_like_delphi.finish_delta()),
+                three_hours: one_hour_delta.max(self.last3h_delta_like_delphi.finish_delta()),
+                twenty_four_hours: one_hour_delta
+                    .max(self.last24h_delta_like_delphi.finish_delta()),
                 seventy_two_hours: self.seventy_two_hours.finish_delta(),
                 ..DerivedDeltaSnapshot::default()
             },
@@ -890,9 +900,9 @@ impl CandleDerivedAccumulator {
                 fifteen_minutes: self.fifteen_minutes.volume,
                 thirty_minutes: self.thirty_minutes.volume,
                 one_hour: self.one_hour.volume,
-                two_hours: self.two_hours.volume,
-                three_hours: self.three_hours.volume,
-                twenty_four_hours: self.twenty_four_hours.volume,
+                two_hours: self.two_hours_volume.volume,
+                three_hours: self.three_hours_volume.volume,
+                twenty_four_hours: self.twenty_four_hours_volume.volume,
                 seventy_two_hours: self.seventy_two_hours.volume,
             },
         )
@@ -1370,6 +1380,59 @@ mod tests {
         assert_eq!(
             combined.seventy_two_hours, 7.0,
             "Delphi RecalcPumpQ only floors 2h/3h/24h by Last1hDelta; 72h stays its own source"
+        );
+    }
+
+    #[test]
+    fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
+        let now = 45_000.0;
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 8,
+            trade_join_capacity: 0,
+        });
+        store.replace_candles_5m_from_snapshot(&[
+            Candle5mRow {
+                time: now - 2.5 / 24.0,
+                min_p: 100.0,
+                max_p: 130.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 1.0,
+            },
+            Candle5mRow {
+                time: now - 3.5 / 24.0,
+                min_p: 100.0,
+                max_p: 140.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 2.0,
+            },
+            Candle5mRow {
+                time: now - 24.5 / 24.0,
+                min_p: 100.0,
+                max_p: 150.0,
+                close_p: 100.0,
+                open_p: 100.0,
+                vol: 4.0,
+            },
+        ]);
+
+        store.refresh_derived_analytics(now);
+        let derived = store.derived_snapshot();
+
+        assert!((derived.candle_deltas.two_hours - 30.0).abs() < 1e-9);
+        assert!((derived.candle_deltas.three_hours - 40.0).abs() < 1e-9);
+        assert!((derived.candle_deltas.twenty_four_hours - 50.0).abs() < 1e-9);
+        assert_eq!(
+            derived.candle_volumes.twenty_four_hours, 3.0,
+            "candle volumes keep exact 24h semantics; only Delphi long delta fields use h<= bucket windows"
         );
     }
 }

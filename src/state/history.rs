@@ -503,6 +503,11 @@ pub struct MarketDerivedSnapshot {
     /// 1m and 5m windows from the same 5-second buckets as volumes.
     pub trade_deltas: DerivedDeltaSnapshot,
     /// Deltas from retained 5m candles plus the current candle.
+    ///
+    /// Long candle delta fields follow Delphi `RecalcPumpQ` bucket semantics:
+    /// `two_hours` is Delphi `Last2hDelta` (`h <= 2`, roughly three hours),
+    /// `three_hours` is `Last3hDelta` (`h <= 3`, roughly four hours), and
+    /// `twenty_four_hours` is `Last24hDelta` (`h <= 24`, roughly 25 hours).
     pub candle_deltas: DerivedDeltaSnapshot,
     /// Combined convenient view. For each field it is the max of the trade and
     /// candle source for that window, matching Delphi's "do not lower a hotter
