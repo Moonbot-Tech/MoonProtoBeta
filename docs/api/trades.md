@@ -324,7 +324,8 @@ total candle quote volume and has no buy/sell split; use `trade_volumes` for
 1m/3m/5m buy/sell totals. `MarketDerivedSnapshot::deltas` is the combined view:
 per field it keeps the larger value from trade and candle sources, which matches
 the Delphi habit of not lowering a hotter short-window delta with a colder
-source.
+source. Matching Delphi `RecalcPumpQ`, combined 2h, 3h, and 24h deltas are also
+floored by the combined 1h delta; 72h remains its own long-window source.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0

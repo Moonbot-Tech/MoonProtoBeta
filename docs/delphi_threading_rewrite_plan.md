@@ -776,6 +776,9 @@ Done:
   volumes, and the combined deltas view.
 - Candle deltas and candle volumes are calculated in one pass over retained 5m
   rows plus the current candle.
+- The combined 2h/3h/24h delta fields are floored by the combined 1h delta,
+  matching Delphi `RecalcPumpQ` (`Last2hDelta/Last3hDelta/Last24hDelta :=
+  Max(Last1hDelta, raw_window)`).
 - Quick FireTest now also checks that retained futures trades feed the derived
   trade-volume snapshot, so "rows stored but analytics dead" is caught before
   the full candles stress.

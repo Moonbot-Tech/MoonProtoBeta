@@ -765,6 +765,7 @@ fn combine_deltas(
     trade_deltas: DerivedDeltaSnapshot,
     candle_deltas: DerivedDeltaSnapshot,
 ) -> DerivedDeltaSnapshot {
+    let one_hour = trade_deltas.one_hour.max(candle_deltas.one_hour);
     DerivedDeltaSnapshot {
         one_minute: trade_deltas.one_minute.max(candle_deltas.one_minute),
         five_minutes: trade_deltas.five_minutes.max(candle_deltas.five_minutes),
@@ -774,12 +775,13 @@ fn combine_deltas(
         thirty_minutes: trade_deltas
             .thirty_minutes
             .max(candle_deltas.thirty_minutes),
-        one_hour: trade_deltas.one_hour.max(candle_deltas.one_hour),
-        two_hours: trade_deltas.two_hours.max(candle_deltas.two_hours),
-        three_hours: trade_deltas.three_hours.max(candle_deltas.three_hours),
+        one_hour,
+        two_hours: one_hour.max(trade_deltas.two_hours.max(candle_deltas.two_hours)),
+        three_hours: one_hour.max(trade_deltas.three_hours.max(candle_deltas.three_hours)),
         twenty_four_hours: trade_deltas
             .twenty_four_hours
-            .max(candle_deltas.twenty_four_hours),
+            .max(candle_deltas.twenty_four_hours)
+            .max(one_hour),
         seventy_two_hours: trade_deltas
             .seventy_two_hours
             .max(candle_deltas.seventy_two_hours),
@@ -870,15 +872,16 @@ impl CandleDerivedAccumulator {
     }
 
     fn finish(self) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
+        let one_hour_delta = self.one_hour.finish_delta();
         (
             DerivedDeltaSnapshot {
                 five_minutes: self.five_minutes.finish_delta(),
                 fifteen_minutes: self.fifteen_minutes.finish_delta(),
                 thirty_minutes: self.thirty_minutes.finish_delta(),
-                one_hour: self.one_hour.finish_delta(),
-                two_hours: self.two_hours.finish_delta(),
-                three_hours: self.three_hours.finish_delta(),
-                twenty_four_hours: self.twenty_four_hours.finish_delta(),
+                one_hour: one_hour_delta,
+                two_hours: one_hour_delta.max(self.two_hours.finish_delta()),
+                three_hours: one_hour_delta.max(self.three_hours.finish_delta()),
+                twenty_four_hours: one_hour_delta.max(self.twenty_four_hours.finish_delta()),
                 seventy_two_hours: self.seventy_two_hours.finish_delta(),
                 ..DerivedDeltaSnapshot::default()
             },
@@ -1342,5 +1345,31 @@ mod tests {
         assert_eq!(derived.candle_deltas.one_minute, 0.0);
         assert_eq!(derived.candle_volumes.five_minutes, 310.0);
         assert!((derived.deltas.one_minute - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn combined_long_deltas_do_not_drop_below_one_hour_like_delphi() {
+        let trade = DerivedDeltaSnapshot {
+            one_hour: 12.0,
+            ..DerivedDeltaSnapshot::default()
+        };
+        let candles = DerivedDeltaSnapshot {
+            two_hours: 4.0,
+            three_hours: 5.0,
+            twenty_four_hours: 6.0,
+            seventy_two_hours: 7.0,
+            ..DerivedDeltaSnapshot::default()
+        };
+
+        let combined = combine_deltas(trade, candles);
+
+        assert_eq!(combined.one_hour, 12.0);
+        assert_eq!(combined.two_hours, 12.0);
+        assert_eq!(combined.three_hours, 12.0);
+        assert_eq!(combined.twenty_four_hours, 12.0);
+        assert_eq!(
+            combined.seventy_two_hours, 7.0,
+            "Delphi RecalcPumpQ only floors 2h/3h/24h by Last1hDelta; 72h stays its own source"
+        );
     }
 }
