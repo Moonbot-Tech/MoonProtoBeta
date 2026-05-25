@@ -245,6 +245,14 @@ Terminal statuses are `SelLDone`, `SelLAlmostDone`, `BuyCancel`, `BuyFail`,
 ## Events
 
 ```rust
+pub enum ApplyResult {
+    Applied,
+    OutOfOrder,
+    PhaseRollback,
+    OrderNotFound,
+    NotApplicable,
+}
+
 pub enum OrderEvent {
     Created(u64),
     Updated(u64),

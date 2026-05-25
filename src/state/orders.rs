@@ -469,9 +469,6 @@ pub enum ApplyResult {
     OrderNotFound,
     /// Команда не относится к Orders state (например, AllStatusesRequest от клиента).
     NotApplicable,
-    /// Зарезервировано для обратной совместимости старых match-выражений.
-    /// Текущий Delphi-parity state не отбрасывает новые ордера по внутреннему cap.
-    Rejected,
 }
 
 /// Событие, которое сгенерировалось в результате apply.

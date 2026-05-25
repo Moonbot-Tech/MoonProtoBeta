@@ -6002,3 +6002,13 @@ Done:
 Red flag closed:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.169`.
+
+### 2026-05-26 - Orders API no longer exposes dead `Rejected`
+
+Done:
+
+- Removed the unused public `orders::ApplyResult::Rejected` variant. It was a
+  backwards-compatibility stub for a former Rust-only internal cap and is never
+  produced by the current Delphi-parity state machine.
+- Updated `docs/api/orders.md` so the low-level `ApplyResult` shape is explicit
+  in the self-contained API docs.
