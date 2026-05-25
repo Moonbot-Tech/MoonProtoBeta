@@ -131,10 +131,20 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     }
 
     pub fn push(&mut self, row: T) -> u64 {
+        self.push_with_evicted(row).0
+    }
+
+    /// Append a row and return the overwritten row when the ring was full.
+    ///
+    /// `StoreWorker` uses this to preserve Delphi's old-trade compaction
+    /// meaning: detailed rows that leave retained history can be folded into
+    /// `TMiniCandle`-like aggregates instead of disappearing silently.
+    pub fn push_with_evicted(&mut self, row: T) -> (u64, Option<T>) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
 
         let slot = self.inner.slot(seq);
+        let evicted = self.read_evicted_from_slot(slot, seq);
         slot.version.store(writing_version(seq), Ordering::Release);
         slot.row.store_row(row);
         slot.version
@@ -142,7 +152,7 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
         self.inner
             .next_seq
             .store(seq.wrapping_add(1), Ordering::Release);
-        seq
+        (seq, evicted)
     }
 
     pub fn push_batch(&mut self, rows: &[T]) {
@@ -159,6 +169,18 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
 
     pub fn bounds(&self) -> SeqRingBounds {
         self.reader().bounds()
+    }
+
+    fn read_evicted_from_slot(&self, slot: &SeqRingSlotState<T>, new_seq: u64) -> Option<T> {
+        if new_seq < self.inner.capacity {
+            return None;
+        }
+        let evicted_seq = new_seq - self.inner.capacity;
+        if published_seq(slot.version.load(Ordering::Acquire)) == Some(evicted_seq) {
+            Some(slot.row.load_row())
+        } else {
+            None
+        }
     }
 }
 
@@ -458,6 +480,19 @@ mod tests {
         assert_eq!(out, vec![2, 3, 4, 5]);
         assert!(meta.clipped);
         assert_eq!(meta.actual_start_seq, 2);
+    }
+
+    #[test]
+    fn push_with_evicted_returns_overwritten_row() {
+        let (mut writer, reader) = SeqRingWriter::<u64>::new(2).unwrap();
+        assert_eq!(writer.push_with_evicted(10), (0, None));
+        assert_eq!(writer.push_with_evicted(11), (1, None));
+        assert_eq!(writer.push_with_evicted(12), (2, Some(10)));
+        assert_eq!(writer.push_with_evicted(13), (3, Some(11)));
+
+        let mut out = Vec::new();
+        reader.copy_last(2, &mut out);
+        assert_eq!(out, vec![12, 13]);
     }
 
     #[test]

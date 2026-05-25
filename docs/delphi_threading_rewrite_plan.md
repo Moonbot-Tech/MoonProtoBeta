@@ -559,6 +559,9 @@ Done:
 - Added `state::seq_ring`, a single-writer / multi-reader retained ring with
   monotonic sequences, retention clipping, last-N reads, sequence reads, and
   time-based helpers (`copy_from_time`, `copy_time_range`).
+- Added `SeqRingWriter::push_with_evicted`, so StoreWorker can compact rows
+  that leave retained detailed trade history into `TMiniCandle`-like aggregates
+  instead of silently dropping them.
 - Implemented the storage without `unsafe`: row types provide atomic slots, and
   a per-slot version word verifies that multi-field reads are consistent.
 - Added `state::history::TradeHistoryRow`, matching Delphi `TTrade`
@@ -574,9 +577,9 @@ Done:
 
 Verification:
 
-- `cargo test seq_ring --lib` OK: 11 tests.
+- `cargo test seq_ring --lib` OK: 13 tests.
 - `cargo test history --lib` OK: 5 tests.
-- `cargo test --lib` OK: 675 tests.
+- `cargo test --lib` OK: 676 tests.
 
 ### Phase Z - final full optimization pass
 
