@@ -2807,6 +2807,54 @@ impl ProtocolCore<'_> {
         }
     }
 
+    fn data_read_int_owned_inline(
+        &mut self,
+        raw_cmd: u8,
+        payload: Vec<u8>,
+        recv_bytes: u64,
+        timestamp_ms: i64,
+        apply_recv_effects: bool,
+        sliced_stats: Option<ReaderSlicedStats>,
+        mode: &mut RunMode<'_>,
+    ) {
+        if apply_recv_effects {
+            self.apply_recv_side_effects(recv_bytes, timestamp_ms);
+        }
+        let Some((cmd, payload)) = Client::decode_data_read_int_payload_owned(
+            &mut self.client.data_read_state,
+            raw_cmd,
+            payload,
+        ) else {
+            return;
+        };
+        let api_pending_consumed =
+            Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
+        let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(
+            &mut self.client.pending_candles,
+            cmd,
+            &payload,
+            timestamp_ms,
+        );
+        if let Some(stats) = sliced_stats.as_ref() {
+            self.client
+                .err_emu_diagnostics
+                .lock()
+                .unwrap()
+                .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, &payload);
+        }
+        if let Some(stats) = sliced_stats {
+            self.apply_reader_sliced_stats(stats);
+        }
+        self.client_new_data(
+            cmd,
+            payload,
+            api_pending_consumed,
+            candles_chunk_consumed,
+            timestamp_ms,
+            mode,
+        );
+    }
+
     fn on_new_size_test_inline(&mut self, payload: &[u8]) {
         if let Some(ack) = Client::build_size_ack_payload(&mut self.client.data_read_state, payload)
         {
@@ -2928,9 +2976,9 @@ impl ProtocolCore<'_> {
         }
 
         if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
-            self.data_read_int_inline(
+            self.data_read_int_owned_inline(
                 cmd,
-                &payload,
+                payload,
                 recv_bytes,
                 timestamp_ms,
                 false,
@@ -7863,6 +7911,40 @@ impl Client {
         Some((cmd, payload.into_owned()))
     }
 
+    fn decode_data_read_int_payload_owned(
+        data_read_state: &mut DataReadState,
+        raw_cmd: u8,
+        data: Vec<u8>,
+    ) -> Option<(u8, Vec<u8>)> {
+        let mut cmd = raw_cmd;
+        let mut payload = data;
+
+        if Command::from_byte(cmd & 0x7F) == Command::Crypted {
+            let DataReadState {
+                decode_cipher,
+                slider,
+                ..
+            } = data_read_state;
+            let decode_cipher = decode_cipher.as_ref()?;
+            let decrypted = crypted::decrypt_command(decode_cipher, &payload, slider);
+            if let Some((inner_cmd, decrypted, _want_ack)) = decrypted {
+                cmd = inner_cmd;
+                payload = decrypted;
+            } else {
+                return None;
+            }
+        }
+
+        if cmd & COMPRESSED_FLAG != 0 {
+            cmd &= 0x7F;
+            if let Some(decompressed) = compression::mp_decompress(&payload) {
+                payload = decompressed;
+            }
+        }
+
+        Some((cmd, payload))
+    }
+
     fn engine_response_request_uid_from_payload(payload: &[u8]) -> Option<u64> {
         // Engine response payload includes 11-byte TBaseCommand header, then
         // RequestUID. This is enough to cheaply check ApiPending without
@@ -10145,6 +10227,28 @@ mod api_pending_dispatch_tests {
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].0, Command::UI);
         assert_eq!(payloads[0].1, compressed_garbage);
+    }
+
+    #[test]
+    fn owned_data_read_keeps_plain_sliced_payload_allocation() {
+        let mut client = Client::new(dummy_cfg());
+        let payload = vec![1, 2, 3, 4, 5];
+        let ptr = payload.as_ptr();
+
+        let (cmd, decoded) = Client::decode_data_read_int_payload_owned(
+            &mut client.data_read_state,
+            Command::API.to_byte(),
+            payload,
+        )
+        .expect("plain owned payload must decode");
+
+        assert_eq!(cmd, Command::API.to_byte());
+        assert_eq!(decoded, vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            decoded.as_ptr(),
+            ptr,
+            "plain Sliced completion already owns the buffer; reader must not clone it"
+        );
     }
 
     #[test]

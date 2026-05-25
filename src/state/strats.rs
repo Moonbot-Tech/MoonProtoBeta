@@ -169,6 +169,11 @@ impl StratsState {
             return;
         }
 
+        let full_key = Self::folder_key(path);
+        if self.folders_by_key.contains_key(&full_key) {
+            return;
+        }
+
         let mut current = String::new();
         for part in path.split('/') {
             if !current.is_empty() {

@@ -5491,6 +5491,11 @@ Dispatcher-worker and Strat follow-up:
   the public replacement-style `insert`. Delphi writes each RTTI field at most
   once per strategy; avoiding per-field duplicate scans removes the remaining
   O(n^2) parser waste for 762-strategy live snapshots.
+- Follow-up CPU cleanup: Sliced completion now keeps the already-owned
+  assembled payload instead of cloning it through the borrowed DataRead path;
+  `StratsState::create_folders_for_path` returns early when the full folder is
+  already known, avoiding repeated lowercase/split work on repeated strategy
+  paths.
 - Verification after the dense fields change:
   - `cargo test strategy --lib --quiet` OK (`29 passed`);
   - `cargo test --lib --quiet` OK (`698 passed`);
@@ -5499,10 +5504,11 @@ Dispatcher-worker and Strat follow-up:
     (`zipped=2026051`, `markets=664`, `candles=217500`), both sessions
     `parse_failed=0`, strategy rows `762`.
 - Latest quick CPU after this step:
-  - `reader max=4240us max_src=Sliced(17) payload=1442`;
-  - `writer_cpu max=134us`;
-  - `active_dispatch max=2604us max_src=API(31) payload=44050`;
-  - `app_enqueue max=2403us max_src=TradesStream(33) payload=24 mode=state`.
+  - after the follow-up cleanup quick FireTest still passes after `23.47s`;
+  - `reader max=3921us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=148us`;
+  - `active_dispatch max=3783us max_src=Strat(30) payload=44459`;
+  - `app_enqueue max=2217us max_src=TradesStream(33) payload=73 mode=state`.
 - Result: the concrete `Strat` slow-parser red flag is closed for the measured
   live snapshot path: it is no longer the max sample and no longer runs in the
   protocol recv loop. The broader CPU red flag remains open for completed
