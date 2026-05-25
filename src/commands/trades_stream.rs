@@ -380,8 +380,17 @@ pub struct TradeSectionIter<'a> {
 }
 
 impl<'a> TradeSectionIter<'a> {
-    fn complete_rows(&self, count: usize, row_size: usize) -> usize {
-        count.min((self.data.len().saturating_sub(self.pos)) / row_size)
+    fn take_complete_row_bytes(&mut self, count: usize, row_size: usize) -> &'a [u8] {
+        let available = self.data.len().saturating_sub(self.pos);
+        let rows = count.min(available / row_size);
+        let start = self.pos;
+        let end = start + rows * row_size;
+        self.pos = end;
+        if count * row_size > available {
+            self.pos = self.data.len();
+            self.done = true;
+        }
+        &self.data[start..end]
     }
 }
 
@@ -410,13 +419,11 @@ impl<'a> Iterator for TradeSectionIter<'a> {
                 }
                 let count = self.data[self.pos] as usize;
                 self.pos += 1;
-                let rows = self.complete_rows(count, TRADE_ROW_SIZE);
-                let start = self.pos;
-                self.pos += rows * TRADE_ROW_SIZE;
+                let data = self.take_complete_row_bytes(count, TRADE_ROW_SIZE);
                 Some(TradeSectionRef::Trades(TradeRows {
                     market_index,
                     is_spot: section_type == 2,
-                    data: &self.data[start..self.pos],
+                    data,
                     pos: 0,
                 }))
             }
@@ -428,13 +435,11 @@ impl<'a> Iterator for TradeSectionIter<'a> {
                 let count = self.data[self.pos] as usize;
                 self.pos += 1;
                 let row_size = TRADE_ROW_SIZE + if self.has_taker { 20 } else { 0 };
-                let rows = self.complete_rows(count, row_size);
-                let start = self.pos;
-                self.pos += rows * row_size;
+                let data = self.take_complete_row_bytes(count, row_size);
                 Some(TradeSectionRef::MMOrders(MMOrderRows {
                     market_index,
                     has_taker: self.has_taker,
-                    data: &self.data[start..self.pos],
+                    data,
                     pos: 0,
                 }))
             }
@@ -453,13 +458,11 @@ impl<'a> Iterator for TradeSectionIter<'a> {
                         }
                         let count = self.data[self.pos] as usize;
                         self.pos += 1;
-                        let rows = self.complete_rows(count, TRADE_ROW_SIZE);
-                        let start = self.pos;
-                        self.pos += rows * TRADE_ROW_SIZE;
+                        let data = self.take_complete_row_bytes(count, TRADE_ROW_SIZE);
                         Some(TradeSectionRef::LiqOrders(TradeRows {
                             market_index,
                             is_spot: false,
-                            data: &self.data[start..self.pos],
+                            data,
                             pos: 0,
                         }))
                     }
@@ -806,5 +809,31 @@ mod tests {
             panic!("expected owned trades");
         };
         assert_eq!(trades.len(), 1);
+    }
+
+    #[test]
+    fn section_iter_consumes_truncated_declared_rows_instead_of_reparsing_tail() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&79u16.to_le_bytes());
+        payload.extend_from_slice(&5u16.to_le_bytes());
+        payload.push(2);
+        payload.extend_from_slice(&trade_row_bytes(1, 100.0, 0.5));
+        payload.extend_from_slice(&[0, 0, 0]); // malformed tail of declared row #2.
+        payload.push(0);
+
+        let decoded = decode_trades_packet(&payload).expect("decoded packet");
+        let mut sections = decoded.sections();
+        let TradeSectionRef::Trades(rows) = sections.next().expect("trades section") else {
+            panic!("expected trades");
+        };
+        assert_eq!(rows.collect::<Vec<_>>().len(), 1);
+        assert!(
+            sections.next().is_none(),
+            "Delphi reaches stream end while reading the declared rows; the partial tail must not become a fake empty section"
+        );
+
+        let owned = parse_trades_packet(&payload).expect("owned packet");
+        assert_eq!(owned.sections.len(), 1);
     }
 }

@@ -5659,6 +5659,28 @@ Verification:
   `active_dispatch max=3157us max_src=Strat(30) payload=44464`,
   `app_enqueue max=2341us max_src=TradesStream(33) mode=state`.
 
+### 2026-05-25 - TradesStream truncated row tail does not become a fake section
+
+Done:
+
+- Re-checked Delphi `ProcessTradesStream` section loop. Normal trades,
+  MMOrders, and LiqOrders read exactly the declared `Count` rows. If the stream
+  is malformed/truncated inside that declared row range, Delphi reaches the end
+  of the stream while reading those rows and does not reinterpret the remaining
+  row bytes as a new section header.
+- Rust `TradeSectionIter` previously yielded only complete rows but left a
+  multi-byte malformed tail available to the next iterator step. A 3-byte tail
+  after one complete row could become a fake empty section.
+- `TradeSectionIter` now consumes the declared row byte range up to stream end:
+  it still yields only complete typed rows, but marks the iterator done when the
+  declared rows are truncated.
+
+Verification:
+
+- Added
+  `section_iter_consumes_truncated_declared_rows_instead_of_reparsing_tail`.
+- `cargo test section_iter --lib` OK: 3 tests.
+
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
 Delphi source:
