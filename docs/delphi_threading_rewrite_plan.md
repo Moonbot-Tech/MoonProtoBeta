@@ -623,13 +623,18 @@ Done:
 - Added aligned MM-order companion storage and `hl_address_color_like_delphi`.
   This mirrors `TStreamableRingBuffer<TMMOrder,TMMOrderData>` slot pairing and
   Delphi `HLAddressColor` instead of storing taker/color as a detached list.
+- Added `MarketHistoryRegistry`, an on-demand map of per-market stores. Runtime
+  integration must not allocate full retained rings for every market just
+  because `GetMarketsList` returned it; stores are created for enabled
+  markets/categories.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
 - `cargo test history --lib` OK: 19 tests.
-- `cargo test history_store --lib` OK: 4 tests.
-- `cargo test --lib` OK: 690 tests.
+- `cargo test history_store --lib` OK: 5 tests.
+- `cargo test --lib` OK: 691 tests.
+- `cargo check --examples` OK.
 
 ### Phase Z - final full optimization pass
 

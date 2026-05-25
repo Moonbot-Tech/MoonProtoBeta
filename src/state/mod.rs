@@ -34,7 +34,9 @@ pub use history::{
     TradeHistoryRow, TradeJoinBuffer, TradeJoinPush, TradeVolumeTotals, TradesPacketTimeShift,
     DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS, DELPHI_TRADE_TAIL_EPS_DAYS,
 };
-pub use history_store::{MarketHistoryConfig, MarketHistoryReaders, MarketHistoryStore};
+pub use history_store::{
+    MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,
+};
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,

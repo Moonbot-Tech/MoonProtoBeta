@@ -4,6 +4,8 @@
 //! will own. Public code receives cloneable [`SeqRingReader`] handles and reads
 //! rows without taking locks on the writer path.
 
+use std::collections::HashMap;
+
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
     prepare_joined_trades_for_retained_append, LastPricePoint, MMOrderCompanionData,
@@ -51,6 +53,53 @@ pub struct MarketHistoryReaders {
     pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
+}
+
+#[derive(Default)]
+pub struct MarketHistoryRegistry {
+    default_config: MarketHistoryConfig,
+    stores: HashMap<String, MarketHistoryStore>,
+}
+
+impl MarketHistoryRegistry {
+    pub fn new(default_config: MarketHistoryConfig) -> Self {
+        Self {
+            default_config,
+            stores: HashMap::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.stores.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stores.is_empty()
+    }
+
+    pub fn contains_market(&self, market_name: &str) -> bool {
+        self.stores.contains_key(market_name)
+    }
+
+    pub fn get(&self, market_name: &str) -> Option<&MarketHistoryStore> {
+        self.stores.get(market_name)
+    }
+
+    pub fn get_mut(&mut self, market_name: &str) -> Option<&mut MarketHistoryStore> {
+        self.stores.get_mut(market_name)
+    }
+
+    pub fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
+        self.stores
+            .entry(market_name.to_string())
+            .or_insert_with(|| MarketHistoryStore::new(self.default_config))
+    }
+
+    pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+        self.stores
+            .get(market_name)
+            .map(MarketHistoryStore::readers)
+    }
 }
 
 pub struct MarketHistoryStore {
@@ -343,6 +392,49 @@ mod tests {
 
     fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {
         TradeHistoryRow { time, price, qty }
+    }
+
+    #[test]
+    fn registry_allocates_market_history_on_demand() {
+        let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
+            futures_trades_capacity: 2,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 2,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 4,
+        });
+
+        assert!(registry.is_empty());
+        assert!(registry.readers("BTCUSDT").is_none());
+
+        registry
+            .ensure_market("BTCUSDT")
+            .append_last_price_like_delphi(100.0, 45_000.0, 99.0, 101.0, true, false);
+        registry
+            .ensure_market("ETHUSDT")
+            .push_futures_trade_into_join_like_delphi(trade(45_000.0, 10.0, 1.0), 0.01);
+
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains_market("BTCUSDT"));
+        assert!(registry.contains_market("ETHUSDT"));
+
+        let mut last_prices = Vec::new();
+        registry
+            .readers("BTCUSDT")
+            .unwrap()
+            .last_prices
+            .unwrap()
+            .copy_last(10, &mut last_prices);
+        assert_eq!(
+            last_prices,
+            vec![LastPricePoint {
+                current: 100.0,
+                real_time: 45_000.0,
+            }]
+        );
     }
 
     #[test]

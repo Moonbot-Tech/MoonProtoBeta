@@ -337,6 +337,7 @@ pub struct MarketHistoryReaders {
 }
 
 pub struct MarketHistoryStore;
+pub struct MarketHistoryRegistry;
 
 impl MarketHistoryStore {
     pub fn new(config: MarketHistoryConfig) -> Self;
@@ -396,6 +397,17 @@ impl MarketHistoryStore {
     pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
 }
+
+impl MarketHistoryRegistry {
+    pub fn new(default_config: MarketHistoryConfig) -> Self;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn contains_market(&self, market_name: &str) -> bool;
+    pub fn get(&self, market_name: &str) -> Option<&MarketHistoryStore>;
+    pub fn get_mut(&mut self, market_name: &str) -> Option<&mut MarketHistoryStore>;
+    pub fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore;
+    pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+}
 ```
 
 `MarketHistoryStore` is the per-market single-writer side intended for
@@ -411,6 +423,10 @@ the base MM-order ring slot: when a taker address is present, the helper stores
 companion data for that slot.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
+`MarketHistoryRegistry` is an on-demand map of per-market stores. It deliberately
+does not allocate all market histories from `GetMarketsList`; future runtime
+integration creates a store only for markets/categories enabled by the active
+history configuration.
 
 ## Recovery Behavior
 
