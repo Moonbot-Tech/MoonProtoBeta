@@ -4069,6 +4069,9 @@ Current status:
 - Converted orderbook `TOrderGlass` 8-byte level rows to private
   zerocopy-backed `WireOrderLevel` while preserving the existing declared
   `buyCount` corrupt-tail decision.
+- Converted AuthCheck `THLDexInfo` 18-byte records to private
+  zerocopy-backed `WireDexInfo`; the parser still keeps Delphi's zero-filled
+  partial-read tail.
 - Converted core fixed wire headers `Hello`, `CryptoHeader`, `SliceHeader`, and
   ACK256 payloads to private zerocopy-backed `Wire*` structs.
 - Converted service packed records `Ping`, `SizeTest`, `ProbeMTU`, and

@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime};
 use super::registry::write_string;
 use super::registry::{decode_utf8_delphi, read_string};
 use flate2::read::DeflateDecoder;
+use zerocopy::byteorder::little_endian::U16 as LeU16;
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
@@ -522,6 +524,29 @@ pub struct DexInfo {
     pub collateral_token: u16,
 }
 
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct WireDexInfo {
+    short_string_name: [u8; 16],
+    collateral_token: LeU16,
+}
+
+const DEX_INFO_SIZE: usize = std::mem::size_of::<WireDexInfo>();
+const _: [(); 18] = [(); DEX_INFO_SIZE];
+
+impl From<WireDexInfo> for DexInfo {
+    fn from(wire: WireDexInfo) -> Self {
+        let name_len = wire.short_string_name[0] as usize;
+        // Защита: name_len по контракту <= 15. Если больше - corrupt, используем 15.
+        let effective_len = name_len.min(15);
+        let name_bytes = &wire.short_string_name[1..1 + effective_len];
+        Self {
+            name: decode_utf8_delphi(name_bytes),
+            collateral_token: wire.collateral_token.get(),
+        }
+    }
+}
+
 /// Распакованный ответ на `emk_AuthCheck` (Engine method 2).
 ///
 /// Содержит данные привязки клиента к биржевому аккаунту + информацию о доступных
@@ -617,7 +642,6 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     if recvd_max_payload.is_some() && pos < data.len() {
         let cnt = data[pos] as usize;
         pos += 1;
-        const DEX_INFO_SIZE: usize = 18;
         known_dexes.reserve(cnt);
         for _ in 0..cnt {
             let mut dex = [0u8; DEX_INFO_SIZE];
@@ -627,16 +651,8 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
                 pos += available;
             }
             // THLDexInfo packed: [u8 length][15 bytes name][u16 collateral_token]
-            let name_len = dex[0] as usize;
-            // Защита: name_len по контракту ≤ 15. Если больше — corrupt, используем 15.
-            let effective_len = name_len.min(15);
-            let name_bytes = &dex[1..1 + effective_len];
-            let name = decode_utf8_delphi(name_bytes);
-            let collateral_token = u16::from_le_bytes([dex[16], dex[17]]);
-            known_dexes.push(DexInfo {
-                name,
-                collateral_token,
-            });
+            let wire = WireDexInfo::read_from_bytes(&dex).ok()?;
+            known_dexes.push(wire.into());
         }
         // hl_dex_market и hl_spot_market следуют сразу после массива.
         if pos < data.len() {
