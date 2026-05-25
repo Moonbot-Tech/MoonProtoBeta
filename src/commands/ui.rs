@@ -449,7 +449,7 @@ impl UICommand {
             CMD_SETTINGS_REQUEST => Some(UICommand::SettingsRequest { uid }),
 
             CMD_STRAT_START_STOP => {
-                let is_start = read_bool(payload, &mut pos)?;
+                let is_start = read_bool_zero_tail(payload, &mut pos);
                 Some(UICommand::StratStartStop(StratStartStop { uid, is_start }))
             }
 
@@ -472,7 +472,7 @@ impl UICommand {
             }
 
             CMD_MM_ORDERS_SUBSCRIBE => {
-                let subscribe = read_bool(payload, &mut pos)?;
+                let subscribe = read_bool_zero_tail(payload, &mut pos);
                 Some(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
                     uid,
                     subscribe,
@@ -481,7 +481,7 @@ impl UICommand {
 
             CMD_UPDATE_VERSION => {
                 let version_name = read_string(payload, &mut pos)?;
-                let is_release = read_bool(payload, &mut pos)?;
+                let is_release = read_bool_zero_tail(payload, &mut pos);
                 Some(UICommand::UpdateVersion(UpdateVersion {
                     uid,
                     version_name,
@@ -490,15 +490,9 @@ impl UICommand {
             }
 
             CMD_EMU_TRADES => {
-                if pos + 2 + 8 + 2 > payload.len() {
-                    return None;
-                }
-                let m_index = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
-                pos += 2;
-                let base_time = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                pos += 8;
-                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
-                pos += 2;
+                let m_index = read_u16_zero_tail(payload, &mut pos);
+                let base_time = f64::from_bits(read_u64_zero_tail(payload, &mut pos));
+                let count = read_u16_zero_tail(payload, &mut pos) as usize;
                 let mut points = Vec::with_capacity(count);
                 for _ in 0..count {
                     points.push(EmuTradePoint::read_from_delphi_stream(payload, &mut pos));
@@ -571,18 +565,12 @@ impl UICommand {
             }
 
             CMD_RESET_PROFIT => {
-                if pos + 1 > payload.len() {
-                    return None;
-                }
-                let reset_kind = payload[pos];
+                let reset_kind = read_u8_zero_tail(payload, &mut pos);
                 Some(UICommand::ResetProfit(ResetProfit { uid, reset_kind }))
             }
 
             CMD_ARB_ACTIVATE_NOTIFY => {
-                if pos + 8 > payload.len() {
-                    return None;
-                }
-                let arb_valid = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                let arb_valid = f64::from_bits(read_u64_zero_tail(payload, &mut pos));
                 Some(UICommand::ArbActivateNotify(ArbActivateNotify {
                     uid,
                     arb_valid,
@@ -591,27 +579,26 @@ impl UICommand {
 
             CMD_SWITCH_DEX => {
                 // ShortString[15]: byte length + up to 15 bytes content. Total wire = 16 bytes.
-                if pos + 16 > payload.len() {
-                    return None;
-                }
-                let len = payload[pos] as usize;
-                let len = len.min(15);
-                let name_bytes = &payload[pos + 1..pos + 1 + len];
-                let dex_name = decode_utf8_delphi(name_bytes);
+                let dex_name = read_short_string15_zero_tail(payload, &mut pos);
                 Some(UICommand::SwitchDex(SwitchDex { uid, dex_name }))
             }
 
             CMD_SWITCH_SPOT => {
-                if pos + 1 > payload.len() {
-                    return None;
-                }
-                let spot_index = payload[pos];
+                let spot_index = read_u8_zero_tail(payload, &mut pos);
                 Some(UICommand::SwitchSpot(SwitchSpot { uid, spot_index }))
             }
 
             _ => Some(UICommand::Unknown { cmd_id, uid }),
         }
     }
+}
+
+fn read_short_string15_zero_tail(data: &[u8], pos: &mut usize) -> String {
+    let mut bytes = [0u8; 16];
+    read_into_prefix(data, pos, &mut bytes);
+    let len = bytes[0] as usize;
+    let len = len.min(15);
+    decode_utf8_delphi(&bytes[1..1 + len])
 }
 
 // =============================================================================
@@ -931,6 +918,16 @@ fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
     Some(v)
 }
 
+fn read_bool_zero_tail(data: &[u8], pos: &mut usize) -> bool {
+    read_u8_zero_tail(data, pos) != 0
+}
+
+fn read_u8_zero_tail(data: &[u8], pos: &mut usize) -> u8 {
+    let mut bytes = [0u8; 1];
+    read_into_prefix(data, pos, &mut bytes);
+    bytes[0]
+}
+
 fn read_u16_zero_tail(data: &[u8], pos: &mut usize) -> u16 {
     let mut bytes = [0u8; 2];
     read_into_prefix(data, pos, &mut bytes);
@@ -941,6 +938,12 @@ fn read_u32_zero_tail(data: &[u8], pos: &mut usize) -> u32 {
     let mut bytes = [0u8; 4];
     read_into_prefix(data, pos, &mut bytes);
     u32::from_le_bytes(bytes)
+}
+
+fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    read_into_prefix(data, pos, &mut bytes);
+    u64::from_le_bytes(bytes)
 }
 
 fn read_u16_preserve_tail(data: &[u8], pos: &mut usize, current: u16) -> u16 {
@@ -1488,6 +1491,69 @@ mod tests {
                 assert_eq!(t.markets, vec![123]);
                 assert_eq!(t.keys, vec![9, 0]);
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ui_fixed_scalar_commands_use_zero_tail_like_delphi_stream_read() {
+        match UICommand::parse(&header_bytes(CMD_STRAT_START_STOP, 1)).unwrap() {
+            UICommand::StratStartStop(s) => assert!(!s.is_start),
+            _ => panic!("wrong variant"),
+        }
+
+        match UICommand::parse(&header_bytes(CMD_MM_ORDERS_SUBSCRIBE, 2)).unwrap() {
+            UICommand::MMOrdersSubscribe(s) => assert!(!s.subscribe),
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_UPDATE_VERSION, 3);
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::UpdateVersion(s) => {
+                assert_eq!(s.version_name, "");
+                assert!(!s.is_release);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_EMU_TRADES, 4);
+        raw.push(0x34);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::EmuTrades(e) => {
+                assert_eq!(e.m_index, 0x34);
+                assert_eq!(e.base_time.to_bits(), 0);
+                assert!(e.points.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        match UICommand::parse(&header_bytes(CMD_RESET_PROFIT, 5)).unwrap() {
+            UICommand::ResetProfit(r) => assert_eq!(r.reset_kind, 0),
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_ARB_ACTIVATE_NOTIFY, 6);
+        raw.push(1);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::ArbActivateNotify(a) => assert_eq!(a.arb_valid.to_bits(), 1),
+            _ => panic!("wrong variant"),
+        }
+
+        match UICommand::parse(&header_bytes(CMD_SWITCH_DEX, 7)).unwrap() {
+            UICommand::SwitchDex(s) => assert_eq!(s.dex_name, ""),
+            _ => panic!("wrong variant"),
+        }
+
+        let mut raw = header_bytes(CMD_SWITCH_DEX, 8);
+        raw.extend_from_slice(&[3, b'A']);
+        match UICommand::parse(&raw).unwrap() {
+            UICommand::SwitchDex(s) => assert_eq!(s.dex_name.as_bytes(), b"A\0\0"),
+            _ => panic!("wrong variant"),
+        }
+
+        match UICommand::parse(&header_bytes(CMD_SWITCH_SPOT, 9)).unwrap() {
+            UICommand::SwitchSpot(s) => assert_eq!(s.spot_index, 0),
             _ => panic!("wrong variant"),
         }
     }

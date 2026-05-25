@@ -6126,3 +6126,22 @@ Correction:
 Red flag:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.173`.
+
+### 2026-05-26 - UI fixed scalar short-body parity
+
+Done:
+
+- Re-checked simple UI constructors that read fixed scalar fields with
+  `TMemoryStream.Read`.
+- Rust no longer returns `ParseFailed` for short bodies of
+  `TStratStartStopCommand`, `TMMOrdersSubscribeCommand`, the fixed prefix of
+  `TEmuTradesCommand`, `TResetProfitCommand`, `TArbActivateNotify`,
+  `TSwitchDexCommand`, `TSwitchSpotCommand`, and `TUpdateVersionCommand`
+  `IsRelease` after a valid string.
+- Those parsers now keep Delphi zero-tail/preserve-low-byte behavior.
+- String `ReadStringFromStreamUtf8` malformed tails are not included in this
+  fix because Delphi uses `ReadBuffer` there.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.174`.

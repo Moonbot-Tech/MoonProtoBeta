@@ -212,3 +212,8 @@ Counted low-level UI arrays mirror Delphi `TMemoryStream.Read` behavior. For
 `StratStartStopV2.items`, `EmuTrades.points`, and `TriggerManage.markets/keys`,
 the parser keeps the declared `Count`; if the payload tail is truncated, missing
 bytes are zero/`false` and partial little-endian scalar bytes are preserved.
+
+The same zero-tail rule applies to fixed scalar UI command bodies such as
+`StratStartStop`, `MMOrdersSubscribe`, `ResetProfit`, `ArbActivateNotify`,
+`SwitchDex`, and `SwitchSpot`. Malformed UTF-8 string lengths/content remain a
+parse-failure path because Delphi uses `ReadBuffer` in the UTF-8 string helper.
