@@ -33,6 +33,23 @@ pub struct MarketHistoryMMOrderInput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MarketHistoryLastPriceInput {
+    pub market_name: String,
+    pub current: f64,
+    pub bid: f64,
+    pub ask: f64,
+    pub is_btc_market: bool,
+    pub is_base_usdt_market: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketHistoryLastPriceBatch {
+    /// Delphi `NowTimeX := Now` captured in `UpdateMarketsList`.
+    pub now_time: f64,
+    pub rows: Vec<MarketHistoryLastPriceInput>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum MarketHistoryStreamSection {
     FuturesTrades {
         market_name: String,
@@ -81,6 +98,7 @@ enum MarketHistoryCommand {
         reply: mpsc::SyncSender<Option<MarketHistoryReaders>>,
     },
     StreamBatch(MarketHistoryStreamBatch),
+    LastPriceBatch(MarketHistoryLastPriceBatch),
     Flush {
         now_time: f64,
         reply: mpsc::SyncSender<()>,
@@ -157,6 +175,17 @@ impl MarketHistoryHandle {
             .is_ok()
     }
 
+    /// Queue `UpdateMarketsList -> TMarket.AddFrom -> HistoryPrice` rows.
+    ///
+    /// The channel is intentionally unbounded for the same reason as stream
+    /// batches: retained history must not drop rows because of a hidden
+    /// Rust-only capacity cap.
+    pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool {
+        self.tx
+            .send(MarketHistoryCommand::LastPriceBatch(batch))
+            .is_ok()
+    }
+
     /// Test/tool barrier: all previously sent batches are processed before this
     /// call returns, then futures temp rows are drained and evicted rows compacted.
     pub fn flush(&self, now_time: f64) -> bool {
@@ -193,6 +222,10 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
                 last_now_time = batch.now_time;
                 process_stream_batch(&mut registry, batch);
             }
+            Ok(MarketHistoryCommand::LastPriceBatch(batch)) => {
+                last_now_time = batch.now_time;
+                process_last_price_batch(&mut registry, batch);
+            }
             Ok(MarketHistoryCommand::Flush { now_time, reply }) => {
                 last_now_time = now_time;
                 run_store_maintenance(&mut registry, now_time);
@@ -209,6 +242,25 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
             run_store_maintenance(&mut registry, last_now_time);
             last_maintenance = Instant::now();
         }
+    }
+}
+
+fn process_last_price_batch(
+    registry: &mut MarketHistoryRegistry,
+    batch: MarketHistoryLastPriceBatch,
+) {
+    for row in batch.rows {
+        let Some(store) = registry.get_mut(&row.market_name) else {
+            continue;
+        };
+        store.append_last_price_like_delphi(
+            row.current,
+            batch.now_time,
+            row.bid,
+            row.ask,
+            row.is_btc_market,
+            row.is_base_usdt_market,
+        );
     }
 }
 
@@ -364,5 +416,42 @@ mod tests {
             worker.readers("ETHUSDT").is_none(),
             "stream batches must not allocate retained histories for every market"
         );
+    }
+
+    #[test]
+    fn worker_stores_last_price_batch_for_enabled_market() {
+        let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 4,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 0,
+        });
+        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        let last_prices = readers.last_prices.unwrap();
+
+        worker
+            .handle()
+            .send_last_price_batch(MarketHistoryLastPriceBatch {
+                now_time: 45_000.25,
+                rows: vec![MarketHistoryLastPriceInput {
+                    market_name: "BTCUSDT".to_string(),
+                    current: 100.5,
+                    bid: 100.0,
+                    ask: 101.0,
+                    is_btc_market: true,
+                    is_base_usdt_market: false,
+                }],
+            });
+        assert!(worker.flush(45_000.25));
+
+        let mut out = Vec::new();
+        last_prices.copy_last(4, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].current, 100.5);
+        assert_eq!(out[0].real_time, 45_000.25);
     }
 }

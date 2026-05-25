@@ -49,6 +49,16 @@ pub struct MarketPrice {
     pub mark_price_found: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MarketLastPriceHistoryInput {
+    pub market_name: String,
+    pub current: f64,
+    pub bid: f64,
+    pub ask: f64,
+    pub is_btc_market: bool,
+    pub is_base_usdt_market: bool,
+}
+
 /// Delphi `TBaseCurrencyPrice` analogue, keyed by `base_currency`.
 ///
 /// The reference fields store market names instead of raw pointers. They are
@@ -624,13 +634,26 @@ impl MarketsState {
         &mut self,
         data: &[u8],
     ) -> Option<MarketsEvent> {
-        self.apply_markets_prices_payload_with_local_shift(data, current_local_time_shift_minutes())
+        self.apply_markets_prices_payload_collecting_last_price_like_delphi(data, None)
+    }
+
+    pub(crate) fn apply_markets_prices_payload_collecting_last_price_like_delphi(
+        &mut self,
+        data: &[u8],
+        last_price_rows: Option<&mut Vec<MarketLastPriceHistoryInput>>,
+    ) -> Option<MarketsEvent> {
+        self.apply_markets_prices_payload_with_local_shift(
+            data,
+            current_local_time_shift_minutes(),
+            last_price_rows,
+        )
     }
 
     fn apply_markets_prices_payload_with_local_shift(
         &mut self,
         data: &[u8],
         local_shift_minutes: f64,
+        mut last_price_rows: Option<&mut Vec<MarketLastPriceHistoryInput>>,
     ) -> Option<MarketsEvent> {
         for slot in &mut self.prices {
             slot.mark_price_found = false;
@@ -643,7 +666,11 @@ impl MarketsState {
         for _ in 0..count {
             let update =
                 read_market_price_update_like_delphi(&mut r, send_funding, local_shift_minutes)?;
-            self.apply_one_market_price_update(&update, send_funding);
+            if let Some(row) = self.apply_one_market_price_update(&update, send_funding) {
+                if let Some(rows) = last_price_rows.as_deref_mut() {
+                    rows.push(row);
+                }
+            }
         }
 
         let send_corr_markets = r.read_bool()?;
@@ -663,8 +690,16 @@ impl MarketsState {
         })
     }
 
-    fn apply_one_market_price_update(&mut self, p: &MarketPriceUpdate, send_funding: bool) {
+    fn apply_one_market_price_update(
+        &mut self,
+        p: &MarketPriceUpdate,
+        send_funding: bool,
+    ) -> Option<MarketLastPriceHistoryInput> {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
+            let market_name = self.markets[idx].bn_market_name.clone();
+            let is_btc_market = self.markets[idx].is_btc_market;
+            let is_base_usdt_market =
+                self.market_is_base_usdt_market_like_delphi(&self.markets[idx]);
             let (bn_step_size, bn_min_qty, bn_min_notional) = {
                 let market = &mut self.markets[idx];
                 if send_funding {
@@ -693,9 +728,49 @@ impl MarketsState {
             }
             slot.mark_price = p.mark_price;
             slot.mark_price_found = p.mark_price_found;
+            Some(MarketLastPriceHistoryInput {
+                market_name,
+                current: slot.p_last,
+                bid: slot.bid,
+                ask: slot.ask,
+                is_btc_market,
+                is_base_usdt_market,
+            })
         } else if self.price_row_points_to_missing_market(p.m_index) {
             self.markets_list_refresh_needed = true;
+            None
+        } else {
+            None
         }
+    }
+
+    fn market_is_base_usdt_market_like_delphi(&self, market: &Market) -> bool {
+        let market_name = market.bn_market_name.as_str();
+        if let Some(base_currency) = self.server_base_currency_name.as_deref() {
+            if let Some(base_price) = self.base_currency_price(base_currency) {
+                if base_price
+                    .usdt_market
+                    .as_deref()
+                    .is_some_and(|name| same_text_ascii(name, market_name))
+                    || base_price
+                        .usdt_rev_market
+                        .as_deref()
+                        .is_some_and(|name| same_text_ascii(name, market_name))
+                {
+                    return true;
+                }
+            }
+            if !same_text_ascii(base_currency, "USDT")
+                && same_text_ascii(&market.bn_market_currency, base_currency)
+                && same_text_ascii(&market.base_currency, "USDT")
+            {
+                return true;
+            }
+        }
+
+        same_text_ascii(market_name, "BTCUSDT")
+            || same_text_ascii(market_name, "BTC_USDT")
+            || (market.is_btc_market && same_text_ascii(&market.base_currency, "USDT"))
     }
 
     fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
@@ -1662,7 +1737,7 @@ mod tests {
         data.extend_from_slice(&1i32.to_le_bytes());
         data.extend_from_slice(&10u16.to_le_bytes()); // broken corr market string
 
-        let ev = st.apply_markets_prices_payload_with_local_shift(&data, 0.0);
+        let ev = st.apply_markets_prices_payload_with_local_shift(&data, 0.0, None);
 
         assert!(ev.is_none());
         let price = st.price("BTCUSDT").unwrap();

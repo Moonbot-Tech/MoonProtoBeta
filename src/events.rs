@@ -47,13 +47,15 @@ use crate::commands::trades_stream::{
 };
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
+use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::orders::OrderCancelSend;
 use crate::state::parse_trades_resend_response;
 use crate::state::{
-    ApplyResult, BalanceEvent, BalancesState, MarketHistoryHandle, MarketHistoryMMOrderInput,
-    MarketHistoryStreamBatch, MarketHistoryStreamSection, MarketHistoryTradeInput, MarketsEvent,
-    MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState,
-    StratEvent, StratsState, TradesEvent, TradesPacketEffect, TradesState,
+    ApplyResult, BalanceEvent, BalancesState, MarketHistoryHandle, MarketHistoryLastPriceBatch,
+    MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
+    MarketHistoryStreamSection, MarketHistoryTradeInput, MarketsEvent, MarketsState,
+    OrderBookEvent, OrderBooks, OrderEvent, Orders, SettingsEvent, SettingsState, StratEvent,
+    StratsState, TradesEvent, TradesPacketEffect, TradesState,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -809,7 +811,7 @@ impl EventDispatcher {
             Command::Balance => self.client_new_data_balance(payload, out),
             Command::Strat => self.client_new_data_strat(payload, out),
             Command::UI => self.client_new_data_ui(payload, out),
-            Command::API => self.client_new_data_api(payload, out),
+            Command::API => self.client_new_data_api(payload, history_now_time_days, out),
             Command::LogMsg => self.client_new_data_log_msg(payload, out),
             _ => out.push(Event::Raw {
                 cmd,
@@ -1342,15 +1344,25 @@ impl EventDispatcher {
         }
     }
 
-    fn client_new_data_api(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+    fn client_new_data_api(
+        &mut self,
+        payload: &[u8],
+        history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) {
         match parse_engine_response(payload) {
-            Some(resp) => self.process_api_command(resp, out),
+            Some(resp) => self.process_api_command(resp, history_now_time_days, out),
             None => out.push(Self::parse_failed(Command::API, payload)),
         }
     }
 
     /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.
-    fn process_api_command(&mut self, resp: EngineResponse, out: &mut Vec<Event>) {
+    fn process_api_command(
+        &mut self,
+        resp: EngineResponse,
+        history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) {
         let extra_event: Option<Event> = if resp.success {
             match resp.method {
                 EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
@@ -1363,13 +1375,31 @@ impl EventDispatcher {
                         } else {
                             None
                         }
-                    } else if let Some(ev) = self
-                        .markets
-                        .apply_markets_prices_payload_like_delphi(&resp.data)
-                    {
-                        Some(Event::Markets(ev))
                     } else {
-                        None
+                        let wants_history =
+                            self.market_history.is_some() && history_now_time_days.is_some();
+                        let mut last_price_rows = Vec::new();
+                        let ev = if wants_history {
+                            self.markets
+                                .apply_markets_prices_payload_collecting_last_price_like_delphi(
+                                    &resp.data,
+                                    Some(&mut last_price_rows),
+                                )
+                        } else {
+                            self.markets
+                                .apply_markets_prices_payload_like_delphi(&resp.data)
+                        };
+                        if let Some(ev) = ev {
+                            if wants_history {
+                                self.queue_last_price_history_like_delphi(
+                                    history_now_time_days,
+                                    last_price_rows,
+                                );
+                            }
+                            Some(Event::Markets(ev))
+                        } else {
+                            None
+                        }
                     }
                 }
                 EngineMethod::GetMarketsIndexes => {
@@ -1411,6 +1441,31 @@ impl EventDispatcher {
             out.push(ev);
         }
         out.push(Event::EngineResponse(resp));
+    }
+
+    fn queue_last_price_history_like_delphi(
+        &self,
+        history_now_time_days: Option<f64>,
+        rows: Vec<MarketLastPriceHistoryInput>,
+    ) {
+        let (Some(handle), Some(now_time)) = (&self.market_history, history_now_time_days) else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let rows = rows
+            .into_iter()
+            .map(|row| MarketHistoryLastPriceInput {
+                market_name: row.market_name,
+                current: row.current,
+                bid: row.bid,
+                ask: row.ask,
+                is_btc_market: row.is_btc_market,
+                is_base_usdt_market: row.is_base_usdt_market,
+            })
+            .collect();
+        handle.send_last_price_batch(MarketHistoryLastPriceBatch { now_time, rows });
     }
 
     fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
@@ -1668,7 +1723,10 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
-    use crate::commands::market::{write_market, BaseCurrency, Market, MarketsListResponse};
+    use crate::commands::market::{
+        build_markets_prices_response, write_market, BaseCurrency, Market, MarketPriceUpdate,
+        MarketsListResponse, MarketsPricesResponse,
+    };
     use crate::commands::registry::write_string;
     use crate::commands::strat::{build_snapshot_request, StratCommand, StratSchema};
     use crate::commands::trade::trace_flags;
@@ -3000,6 +3058,74 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].price, 100.0);
         assert_eq!(rows[0].qty, 1.0);
+    }
+
+    #[test]
+    fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_delphi_addfrom() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 0,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 4,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 0,
+        });
+        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        let last_prices = readers.last_prices.unwrap();
+
+        let mut btc = event_market("BTCUSDT");
+        btc.bn_market_currency = "BTC".to_string();
+        btc.base_currency = "USDT".to_string();
+        btc.is_btc_market = true;
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        d.markets.apply_markets_list(MarketsListResponse {
+            markets: vec![btc],
+            corr_markets: vec![],
+        });
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let data = build_markets_prices_response(&MarketsPricesResponse {
+            send_funding: false,
+            prices: vec![MarketPriceUpdate {
+                m_index: 0,
+                bid: 100.0,
+                ask: 102.0,
+                funding_rate: 0.0,
+                funding_time: 0.0,
+                mark_price: 101.0,
+                mark_price_found: true,
+            }],
+            send_corr_markets: false,
+            corr_prices: vec![],
+        });
+        let payload = api_response_payload_ver(3, EngineMethod::UpdateMarketsList, &data);
+        let ctx = ActiveDispatchContext {
+            peer_app_token: 0,
+            market_indexes_current_for_peer: true,
+            server_token: 0,
+            subscribed_book_server_token: 0,
+            round_trip_delay_ms: 50,
+            server_time_delta_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            now_time_days: 45_000.5,
+            domain_ready: true,
+            copy_max_leverage_from_markets_list: false,
+            server_base_currency_name: Some("BTC".to_string()),
+            server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
+        };
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        d.dispatch_into_active_actions(Command::API, &payload, 7_000, &mut out, &ctx, &mut actions);
+        assert!(worker.flush(45_000.5));
+
+        let mut rows = Vec::new();
+        last_prices.copy_last(4, &mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].current, 101.0);
+        assert_eq!(rows[0].real_time, 45_000.5);
     }
 
     #[test]

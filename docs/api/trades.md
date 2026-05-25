@@ -365,6 +365,24 @@ impl EventDispatcher {
     pub fn clear_market_history_handle(&mut self);
 }
 
+pub struct MarketHistoryLastPriceInput {
+    pub market_name: String,
+    pub current: f64,
+    pub bid: f64,
+    pub ask: f64,
+    pub is_btc_market: bool,
+    pub is_base_usdt_market: bool,
+}
+
+pub struct MarketHistoryLastPriceBatch {
+    pub now_time: f64,
+    pub rows: Vec<MarketHistoryLastPriceInput>,
+}
+
+impl MarketHistoryHandle {
+    pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool;
+}
+
 pub struct SeqRingCursor;
 
 impl<T> SeqRingReader<T> {
@@ -495,6 +513,11 @@ same Delphi packet time correction. MM-order companion rows are aligned with
 the base MM-order ring slot: when a taker address is present, the helper stores
 `TMMOrderData` with Delphi `HLAddressColor`; otherwise it stores default
 companion data for that slot.
+LastPrice rows are produced from active `UpdateMarketsList`, not from trades:
+the dispatcher computes `pLast = (Bid + Ask) / 2` in the same market-price
+apply block and queues a `MarketHistoryLastPriceBatch`; the worker then applies
+the Delphi `TMarket.AddFrom` gate before appending to the retained LastPrice
+ring.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
 Futures retained rows preserve append order, not guaranteed timestamp order:

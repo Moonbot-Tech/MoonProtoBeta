@@ -717,6 +717,33 @@ Verification:
 - `cargo test --lib` OK: 698 tests.
 - `cargo check --examples` OK.
 
+### 2026-05-25 - LastPrice history wired from UpdateMarketsList
+
+Done:
+
+- Re-checked Delphi `TMoonProtoEngine.UpdateMarketsList`: after applying
+  `Bid/Ask`, it computes `pLast = (Bid + Ask) / 2`, updates
+  `ChartPriceStep`/delta state, then calls `If m.pLast > _epsM then m.AddFrom`.
+- Re-checked Delphi `TMarket.AddFrom`: `HistoryPrice` receives the brown
+  LastPrice row only inside the `IsBTCMarket or IsBaseUSDTMarket` gate and only
+  when the row has a real bid or ask.
+- Rust active dispatcher now collects LastPrice rows during
+  `UpdateMarketsList` apply and queues `MarketHistoryLastPriceBatch` into
+  `MarketHistoryWorker`. The worker writes them through
+  `MarketHistoryStore::append_last_price_like_delphi`.
+- This closes the gap where Rust had the store helper but no live active path
+  feeding it from `UpdateMarketsList`.
+
+Verification:
+
+- Added worker and active-dispatch tests for LastPrice batch storage.
+- `cargo test last_price --lib --quiet` OK: 5 tests.
+- `cargo fmt --all --check` OK.
+- `cargo test --lib --quiet` OK: 707 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 24.11s`, `ParseFailed=0`,
+  err_emu actual drop `9.97%`.
+
 ### Phase Z - final full optimization pass
 
 Делать в самом конце, после protocol/runtime parity и после того, как крупные

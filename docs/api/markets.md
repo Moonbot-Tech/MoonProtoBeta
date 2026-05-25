@@ -241,6 +241,9 @@ Retained storage uses `MarketHistoryStore::append_last_price_like_delphi`.
 It appends a `LastPricePoint` only when Delphi `TMarket.AddFrom` would add a
 `HistoryPrice` row: `pLast > 0`, bid or ask is present, and the market is a BTC
 market or a base-USDT market.
+When `EventDispatcher` has a `MarketHistoryWorker` handle, active
+`UpdateMarketsList` processing queues these rows into that worker immediately;
+the UDP/protocol loop does not write the retained ring directly.
 
 `Market::futures_type` uses `BaseCurrency`, a raw Delphi `TBaseCurrency`
 ordinal wrapper:
