@@ -298,7 +298,7 @@ impl MarketHistoryRegistry {
         self.stores.get_mut(market_name)
     }
 
-    pub(crate) fn ensure_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
+    fn insert_configured_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
         self.stores
             .entry(market_name.to_string())
             .or_insert_with(|| MarketHistoryStore::new(self.default_config))
@@ -321,7 +321,7 @@ impl MarketHistoryRegistry {
             .collect::<HashSet<_>>();
         self.stores.retain(|name, _| desired.contains(name));
         for name in desired {
-            self.ensure_market(&name);
+            self.insert_configured_market(&name);
         }
         self.stores.len()
     }
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_allocates_market_history_on_demand() {
+    fn registry_allocates_market_history_only_from_configured_scope() {
         let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
             futures_trades_capacity: 2,
             spot_trades_capacity: 0,
@@ -1149,11 +1149,17 @@ mod tests {
         assert!(registry.is_empty());
         assert!(registry.readers("BTCUSDT").is_none());
 
+        registry.configure_markets(
+            &["BTCUSDT".to_string(), "ETHUSDT".to_string()],
+            Some(&TradeStorageScope::All),
+        );
         registry
-            .ensure_market("BTCUSDT")
+            .get_mut("BTCUSDT")
+            .unwrap()
             .append_last_price_like_delphi(100.0, 45_000.0, 99.0, 101.0, true, false);
         registry
-            .ensure_market("ETHUSDT")
+            .get_mut("ETHUSDT")
+            .unwrap()
             .push_futures_trade_into_join_like_delphi(trade(45_000.0, 10.0, 1.0), 0.01);
 
         assert_eq!(registry.len(), 2);

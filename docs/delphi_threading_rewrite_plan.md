@@ -842,6 +842,27 @@ Verification:
   --test fire_test --no-run` OK; quick prod FireTest OK:
   `FIRETEST_QUICK_PASS after 23.63s`; full prod FireTest OK after about 176s.
 
+### 2026-05-26 - internal retained-store creation name cleaned up
+
+Done:
+
+- Re-checked the retained-history scope rule: stream batches, LastPrice batches,
+  and candle snapshots use `registry.get_mut(...)` and do not allocate unknown
+  or out-of-scope markets.
+- Removed the internal `ensure_market` helper name from code. Store creation is
+  now named and used only as `insert_configured_market` inside
+  `configure_markets`, i.e. only from the `subscribe_all_trades` /
+  `subscribe_trades_for` scope.
+- Updated the registry unit test so it proves allocation from configured scope,
+  not ad-hoc on-demand allocation.
+
+Verification:
+
+- `cargo test history_store --lib --quiet` OK: 17 tests.
+- `cargo test history --lib --quiet` OK: 40 tests.
+- `cargo test history_worker --lib --quiet` OK: 7 tests.
+- `cargo test seq_ring --lib --quiet` OK: 18 tests.
+
 ### Phase Z - final full optimization pass
 
 Делать в самом конце, после protocol/runtime parity и после того, как крупные
