@@ -67,6 +67,14 @@ count: i32 LE
 candles: N × TDeepPrice (28 bytes each)
 ```
 
+This parser follows the Delphi `TMemoryStream.Read` behavior used by
+`GetCoinCardCandles`: `count` is a scalar `Read`, so missing count bytes become
+zero and `count <= 0` returns an empty list. Candle records are read as one
+packed `TDeepPrice` array; if the server payload ends in the middle of the array,
+the available bytes are kept and the missing record tail is zero-filled. This is
+different from strict string fields elsewhere in Engine API, which use
+`ReadBuffer` and reject truncated declared strings.
+
 ## emk_RequestCandlesData — chunked response (one-shot helper recommended)
 
 The server replies with multiple `EngineResponse` packets carrying the same

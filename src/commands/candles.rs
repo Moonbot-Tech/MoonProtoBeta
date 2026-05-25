@@ -96,6 +96,17 @@ impl DeepPrice {
         Some(Self::from_wire(wire))
     }
 
+    fn read_from_delphi_stream(data: &[u8], pos: &mut usize) -> Option<Self> {
+        let mut bytes = [0u8; DEEP_PRICE_SIZE];
+        let available = data.len().saturating_sub(*pos).min(DEEP_PRICE_SIZE);
+        if available > 0 {
+            bytes[..available].copy_from_slice(&data[*pos..*pos + available]);
+            *pos += available;
+        }
+        let wire = WireDeepPrice::read_from_bytes(&bytes).ok()?;
+        Some(Self::from_wire(wire))
+    }
+
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
@@ -182,26 +193,18 @@ pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u
 /// `data` — `EngineResponse.data` (уже распакованный DEFLATE).
 pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     let mut pos = 0usize;
-    if pos + 4 > data.len() {
-        return None;
-    }
-    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    pos += 4;
-    // DoS guard: отрицательный count или count*DEEP_PRICE_SIZE overflow.
-    if count_raw < 0 {
-        log::warn!(target: "moonproto::candles", "negative count {} rejected", count_raw);
-        return None;
+    let count_raw = i32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
+    if count_raw <= 0 {
+        return Some(Vec::new());
     }
     let count = count_raw as usize;
-    let required = count.saturating_mul(DEEP_PRICE_SIZE);
-    if required > data.len().saturating_sub(pos) {
-        log::warn!(target: "moonproto::candles",
-            "count={} requires {} bytes but only {} remaining", count, required, data.len() - pos);
+    let mut out = Vec::new();
+    if out.try_reserve_exact(count).is_err() {
+        log::warn!(target: "moonproto::candles", "coin-card candle count {} cannot be allocated", count);
         return None;
     }
-    let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        out.push(DeepPrice::read_from(data, &mut pos)?);
+        out.push(DeepPrice::read_from_delphi_stream(data, &mut pos)?);
     }
     Some(out)
 }
@@ -412,6 +415,16 @@ fn read_u8(data: &[u8], pos: &mut usize) -> Option<u8> {
     let value = data[*pos];
     *pos += 1;
     Some(value)
+}
+
+fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    let available = data.len().saturating_sub(*pos).min(N);
+    if available > 0 {
+        out[..available].copy_from_slice(&data[*pos..*pos + available]);
+        *pos += available;
+    }
+    out
 }
 
 fn read_i32(data: &[u8], pos: &mut usize) -> Option<i32> {
@@ -738,6 +751,58 @@ mod tests {
         // Parse
         let parsed = parse_coin_card_candles_response(&buf).unwrap();
         assert_eq!(parsed, candles);
+    }
+
+    #[test]
+    fn coin_card_candles_response_matches_delphi_read_tails() {
+        assert_eq!(parse_coin_card_candles_response(&[]), Some(Vec::new()));
+        assert_eq!(
+            parse_coin_card_candles_response(&(-1i32).to_le_bytes()),
+            Some(Vec::new())
+        );
+
+        let mut partial = Vec::new();
+        partial.extend_from_slice(&(1i32).to_le_bytes());
+        partial.extend_from_slice(&101.5f32.to_le_bytes());
+
+        let parsed = parse_coin_card_candles_response(&partial).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].open_p, 101.5);
+        assert_eq!(parsed[0].close_p, 0.0);
+        assert_eq!(parsed[0].max_p, 0.0);
+        assert_eq!(parsed[0].min_p, 0.0);
+        assert_eq!(parsed[0].vol, 0.0);
+        assert_eq!(parsed[0].time, 0.0);
+    }
+
+    #[test]
+    fn coin_card_candles_response_zero_fills_missing_records_like_delphi_array_read() {
+        let first = DeepPrice {
+            open_p: 100.0,
+            close_p: 105.0,
+            max_p: 110.0,
+            min_p: 95.0,
+            vol: 500.0,
+            time: 45000.0,
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(2i32).to_le_bytes());
+        first.write_to(&mut bytes);
+
+        let parsed = parse_coin_card_candles_response(&bytes).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], first);
+        assert_eq!(
+            parsed[1],
+            DeepPrice {
+                open_p: 0.0,
+                close_p: 0.0,
+                max_p: 0.0,
+                min_p: 0.0,
+                vol: 0.0,
+                time: 0.0,
+            }
+        );
     }
 
     #[test]

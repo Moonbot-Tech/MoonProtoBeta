@@ -336,10 +336,8 @@ fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
 /// bytes are ignored so newer servers can append fields without breaking old
 /// consumers.
 pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
-    if data.len() < 8 {
-        return None;
-    }
-    Some(f64::from_le_bytes(data[0..8].try_into().unwrap()))
+    let mut pos = 0usize;
+    Some(f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos)))
 }
 
 /// Parse `EngineResponse.data` for `emk_QueryHedgeMode`
@@ -349,7 +347,8 @@ pub fn parse_get_balance_response(data: &[u8]) -> Option<f64> {
 /// `MoonProtoEngineServer.pas:341-344` (`resp.WriteBool(hedgeMode)`). Extra
 /// trailing bytes are ignored for forward compatibility.
 pub fn parse_query_hedge_mode_response(data: &[u8]) -> Option<bool> {
-    data.first().map(|&v| v != 0)
+    let mut pos = 0usize;
+    Some(read_u8_zero_tail(data, &mut pos) != 0)
 }
 
 /// API-key expiration time returned by `emk_CheckAPIExpirationTime`.
@@ -419,11 +418,9 @@ impl ApiExpirationTime {
 /// bytes are ignored so newer servers can append fields without breaking old
 /// consumers.
 pub fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTime> {
-    if data.len() < 8 {
-        return None;
-    }
+    let mut pos = 0usize;
     Some(ApiExpirationTime::from_delphi_time(f64::from_le_bytes(
-        data[0..8].try_into().unwrap(),
+        read_zero_tail::<8>(data, &mut pos),
     )))
 }
 
@@ -460,29 +457,17 @@ pub struct TransferAsset {
 /// ```
 pub fn parse_update_transfer_assets_response(data: &[u8]) -> Option<Vec<TransferAsset>> {
     let mut pos = 0usize;
-    if data.len() < 4 {
-        return None;
-    }
-    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    pos += 4;
-    if count_raw < 0 {
-        log::warn!(target: "moonproto::engine_api",
-            "UpdateTransferAssets: negative count {} rejected",
-            count_raw);
-        return None;
+    let count_raw = read_i32_zero_tail(data, &mut pos);
+    if count_raw <= 0 {
+        return Some(Vec::new());
     }
 
     let count = count_raw as usize;
     let mut assets = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         let currency = read_string(data, &mut pos)?;
-        if pos + 16 > data.len() {
-            return None;
-        }
-        let amount = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
+        let amount = f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos));
+        let total = f64::from_le_bytes(read_zero_tail::<8>(data, &mut pos));
         assets.push(TransferAsset {
             currency,
             amount,
@@ -1039,7 +1024,13 @@ mod parse_engine_response_tests {
         data.extend_from_slice(&[0xAA, 0xBB]);
 
         assert_eq!(parse_get_balance_response(&data), Some(1234.5));
-        assert_eq!(parse_get_balance_response(&data[..7]), None);
+        let mut short = [0u8; 8];
+        short[..7].copy_from_slice(&data[..7]);
+        assert_eq!(
+            parse_get_balance_response(&data[..7]),
+            Some(f64::from_le_bytes(short))
+        );
+        assert_eq!(parse_get_balance_response(&[]), Some(0.0));
     }
 
     #[test]
@@ -1047,7 +1038,7 @@ mod parse_engine_response_tests {
         assert_eq!(parse_query_hedge_mode_response(&[0]), Some(false));
         assert_eq!(parse_query_hedge_mode_response(&[1]), Some(true));
         assert_eq!(parse_query_hedge_mode_response(&[2, 0xAA]), Some(true));
-        assert_eq!(parse_query_hedge_mode_response(&[]), None);
+        assert_eq!(parse_query_hedge_mode_response(&[]), Some(false));
     }
 
     #[test]
@@ -1057,7 +1048,20 @@ mod parse_engine_response_tests {
 
         let parsed = parse_api_expiration_time_response(&data).unwrap();
         assert_eq!(parsed.delphi_time(), 45_000.25);
-        assert_eq!(parse_api_expiration_time_response(&data[..7]), None);
+        let mut short = [0u8; 8];
+        short[..7].copy_from_slice(&data[..7]);
+        assert_eq!(
+            parse_api_expiration_time_response(&data[..7])
+                .unwrap()
+                .delphi_time(),
+            f64::from_le_bytes(short)
+        );
+        assert_eq!(
+            parse_api_expiration_time_response(&[])
+                .unwrap()
+                .delphi_time(),
+            0.0
+        );
     }
 
     #[test]
@@ -1108,11 +1112,11 @@ mod parse_engine_response_tests {
     }
 
     #[test]
-    fn parse_update_transfer_assets_response_rejects_bad_payloads() {
-        assert_eq!(parse_update_transfer_assets_response(&[]), None);
+    fn parse_update_transfer_assets_response_matches_read_vs_readbuffer_tails() {
+        assert_eq!(parse_update_transfer_assets_response(&[]), Some(Vec::new()));
         assert_eq!(
             parse_update_transfer_assets_response(&(-1i32).to_le_bytes()),
-            None
+            Some(Vec::new())
         );
 
         let mut truncated = Vec::new();
@@ -1120,7 +1124,20 @@ mod parse_engine_response_tests {
         truncated.extend_from_slice(&(4u16).to_le_bytes());
         truncated.extend_from_slice(b"USDT");
         truncated.extend_from_slice(&(12.5f64).to_le_bytes());
-        assert_eq!(parse_update_transfer_assets_response(&truncated), None);
+        assert_eq!(
+            parse_update_transfer_assets_response(&truncated),
+            Some(vec![TransferAsset {
+                currency: "USDT".to_string(),
+                amount: 12.5,
+                total: 0.0,
+            }])
+        );
+
+        let mut bad_string = Vec::new();
+        bad_string.extend_from_slice(&(1i32).to_le_bytes());
+        bad_string.extend_from_slice(&(4u16).to_le_bytes());
+        bad_string.extend_from_slice(b"USD");
+        assert_eq!(parse_update_transfer_assets_response(&bad_string), None);
     }
 
     #[test]

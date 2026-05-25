@@ -159,6 +159,19 @@ The typed parser is also available as
 `count:i32 + count * (currency:string, amount:f64, total:f64)`, matching Delphi
 `Markets.FAssets[EKind]`.
 
+Typed scalar response parsers follow Delphi stream semantics exactly:
+
+- `parse_get_balance_response`: reads one `Double` with Delphi `Read`; a short
+  fixed tail keeps available low bytes and zero-fills the missing bytes.
+- `parse_query_hedge_mode_response`: reads one `Boolean` byte with Delphi
+  `Read`; an empty payload is `false`.
+- `parse_api_expiration_time_response`: reads one Delphi `TDateTime` `Double`
+  with Delphi `Read`; an empty payload is `0.0` and therefore unknown.
+- `parse_update_transfer_assets_response`: reads `count` with Delphi `Read`;
+  `count <= 0` means no rows. Each row's `currency` is a strict `ReadBuffer`
+  string and rejects a truncated declared string. `amount` and `total` are
+  scalar `Double` fields and short fixed tails zero-fill like Delphi `Read`.
+
 ## EngineResponse
 
 ```rust

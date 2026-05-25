@@ -6357,3 +6357,36 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 26.00s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: small Engine API responses follow Delphi `Read` tails
+
+Correction:
+
+- Re-checked Delphi Engine API response readers:
+  `GetBalance`, `QueryHedgeMode`, `CheckAPIExpirationTime`,
+  `UpdateTransferAssets`, and `GetCoinCardCandles`.
+- Fixed scalar fields read through Delphi `Read`: short fixed tails keep
+  available low bytes and zero-fill the missing bytes. This applies to balance
+  `Double`, hedge `Boolean`, expiration `Double`, transfer-asset `count`,
+  transfer-asset `amount/total`, coin-card candle `count`, and packed
+  `TDeepPrice` array bytes.
+- Kept string fields strict where Delphi uses `ReadBuffer`. A truncated
+  `UpdateTransferAssets.currency` declared string still rejects the response.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.182`.
+
+Verification:
+
+- Added parser tests for short scalar tails, strict transfer-asset string
+  truncation, short transfer scalar row tail, empty/negative counts, partial
+  coin-card candle records, and missing coin-card records.
+- `cargo test engine_api --lib --quiet` OK: 41 tests.
+- `cargo test candles --lib --quiet` OK: 24 tests.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 753 tests.
+- `cargo check --examples --quiet` OK.
+- `git diff --check` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.37s`, `ParseFailed=0`.
