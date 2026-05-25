@@ -6435,23 +6435,26 @@ Verification:
 
 ### 2026-05-26 - RequestCandlesData malformed partial-apply red flag
 
-Opened, not fixed:
-
 - Re-checked Delphi `MarketsU.pas:TMarkets.ApplyRecvdStream`.
 - Valid live candles are covered by the full FireTest gate, but malformed
-  decompressed candle bodies are not yet proven 1:1.
+  decompressed candle bodies were not yet proven 1:1.
 - Delphi applies each known market while reading the stream. If a later market,
   candle row, or wall tail fails inside the outer `try/except`, already applied
   markets can remain mutated.
-- Rust `parse_request_candles_data_response` currently builds the full
-  `Vec<RequestCandlesMarket>` first and rejects early on count/record remaining
-  prechecks. The active path applies only after the full parse succeeds.
+- Rust public `parse_request_candles_data_response` stays strict, but the
+  registered active path now falls back to an internal partial parser when the
+  strict parse fails.
+- Closed deterministic prior-market case: a valid complete market followed by a
+  truncated later market no longer cancels the complete prior market in the
+  active `MergedCandles.markets` result.
+- Still open in `хуйня.md §X.184`: exact corrupt tails inside the currently
+  malformed market, especially `TDeepPricePack` and `TWallData` partial
+  `AStream.Read` effects, because Delphi may depend on local packed-record
+  bytes that Rust must not invent as initialized data.
 - Recorded `spec_pipeline/work/хуйня.md §X.184`.
 
-Next:
+Verification:
 
-- Add a crafted state test with one valid market followed by a truncated second
-  market/wall tail.
-- Then decide and implement either a Delphi-shaped internal direct-apply parser
-  for active candles or an explicitly documented safe all-or-nothing policy if
-  the exact Delphi corrupt effect depends on unsafe local packed-record tails.
+- Added
+  `request_candles_data_partial_parser_keeps_complete_prior_markets`.
+- `cargo test candles --lib --quiet` OK: 25 tests.

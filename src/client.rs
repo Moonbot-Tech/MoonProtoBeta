@@ -14,8 +14,9 @@
 
 use crate::api_pending::ApiPending;
 use crate::commands::candles::{
-    parse_coin_card_candles_response, parse_request_candles_data_response, CandlesAggregator,
-    CandlesChunkResult, DeepPrice, RequestCandlesMarket,
+    parse_coin_card_candles_response, parse_request_candles_data_response,
+    parse_request_candles_data_response_partial_like_delphi, CandlesAggregator, CandlesChunkResult,
+    DeepPrice, RequestCandlesMarket,
 };
 use crate::commands::engine_api::{
     parse_api_expiration_time_response, parse_auth_check_response, parse_base_check_response,
@@ -8616,8 +8617,12 @@ impl Client {
         if let CandlesChunkResult::Complete(zipped_data) = chunk_result {
             let markets = parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
                 log::warn!(target: "moonproto::client",
-                    "candles aggregator merged but parse failed for uid={} ({} bytes)", uid, zipped_data.len());
-                Vec::new()
+                    "candles aggregator merged but strict parse failed for uid={} ({} bytes); trying Delphi partial apply",
+                    uid,
+                    zipped_data.len()
+                );
+                parse_request_candles_data_response_partial_like_delphi(&zipped_data)
+                    .unwrap_or_default()
             });
             if let Some(partial) = pending_candles.remove(&uid) {
                 let _ = partial.sender.send(MergedCandles {

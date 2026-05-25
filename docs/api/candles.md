@@ -109,6 +109,15 @@ are aggregated from the receive-side DataReadInt path. Completed streams signal
 the `MergedCandles` receiver before the consumed chunks are considered for raw
 callbacks or `EventDispatcher` delivery.
 
+For live registered requests the client first tries the strict
+`parse_request_candles_data_response` parser. If a merged zlib stream is
+malformed after one or more complete market entries, the internal active path
+falls back to the Delphi-shaped partial parser and keeps those complete prior
+markets. This mirrors the deterministic part of Delphi
+`TMarkets.ApplyRecvdStream`, which mutates each market while reading the stream.
+Packed-record/wall tails inside the currently malformed market are still treated
+safely by Rust and are not exposed as initialized market data.
+
 `MergedCandles`:
 ```rust
 pub struct MergedCandles {
@@ -166,6 +175,11 @@ client.api_request_candles_data();
 //       }
 //   }
 ```
+
+The public low-level `parse_request_candles_data_response` parser is strict: it
+returns `None` if the merged stream is malformed. The partial fallback described
+above is an internal active-library compatibility path for registered
+`RequestCandlesData` requests.
 
 ### Chunk wire format
 

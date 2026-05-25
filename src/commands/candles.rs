@@ -236,6 +236,15 @@ pub fn parse_request_candles_data_response(
     )
 }
 
+pub(crate) fn parse_request_candles_data_response_partial_like_delphi(
+    zipped_data: &[u8],
+) -> Option<Vec<RequestCandlesMarket>> {
+    parse_request_candles_data_response_partial_with_local_shift(
+        zipped_data,
+        current_local_time_shift_minutes(),
+    )
+}
+
 fn parse_request_candles_data_response_with_local_shift(
     zipped_data: &[u8],
     local_time_shift_minutes: f64,
@@ -318,6 +327,102 @@ fn parse_request_candles_data_response_with_local_shift(
         }
         let buy_wall = read_wall_data(&data, &mut pos)?;
         let sell_wall = read_wall_data(&data, &mut pos)?;
+        markets.push(RequestCandlesMarket {
+            market_name,
+            candles_5m,
+            buy_wall,
+            sell_wall,
+        });
+    }
+
+    Some(markets)
+}
+
+fn parse_request_candles_data_response_partial_with_local_shift(
+    zipped_data: &[u8],
+    local_time_shift_minutes: f64,
+) -> Option<Vec<RequestCandlesMarket>> {
+    let mut decoder = ZlibDecoder::new(zipped_data);
+    let mut data = Vec::new();
+    if let Err(e) = decoder.read_to_end(&mut data) {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData zlib decode failed: {e}");
+        return None;
+    }
+
+    let mut pos = 0usize;
+    let legacy_count = read_i32(&data, &mut pos)?;
+    let ver = read_u8(&data, &mut pos)?;
+    if ver > 2 {
+        log::warn!(target: "moonproto::candles", "RequestCandlesData unsupported version {ver}");
+        return None;
+    }
+
+    let count_raw = if ver > 1 {
+        read_i32(&data, &mut pos)?
+    } else {
+        legacy_count
+    };
+    let server_time_shift_minutes = read_f64(&data, &mut pos)?;
+    let time_shift_days =
+        (local_time_shift_minutes.round() - server_time_shift_minutes) / MINS_IN_DAY;
+
+    if count_raw <= 0 {
+        return Some(Vec::new());
+    }
+
+    let count = count_raw as usize;
+    let mut markets = Vec::new();
+    for _ in 0..count {
+        let Some(market_name) = read_delphi_utf16_string(&data, &mut pos) else {
+            break;
+        };
+        let Some(candle_count_raw) = read_i32(&data, &mut pos) else {
+            break;
+        };
+        if candle_count_raw < 0 {
+            break;
+        }
+        let candle_count = candle_count_raw as usize;
+        let record_size = if ver >= 2 {
+            DEEP_PRICE_PACK_SIZE
+        } else {
+            DEEP_PRICE_PACK_OLD_SIZE
+        };
+        let Some(required) = candle_count.checked_mul(record_size) else {
+            break;
+        };
+        if required > data.len().saturating_sub(pos) {
+            break;
+        }
+
+        let mut candles_5m = Vec::new();
+        if candles_5m.try_reserve_exact(candle_count).is_err() {
+            break;
+        }
+        let mut ok = true;
+        for _ in 0..candle_count {
+            let candle = if ver >= 2 {
+                read_deep_price_pack(&data, &mut pos)
+            } else {
+                read_deep_price_pack_old(&data, &mut pos)
+            };
+            let Some(mut candle) = candle else {
+                ok = false;
+                break;
+            };
+            candle.time += time_shift_days;
+            candles_5m.push(candle);
+        }
+        if !ok {
+            break;
+        }
+
+        let Some(buy_wall) = read_wall_data(&data, &mut pos) else {
+            break;
+        };
+        let Some(sell_wall) = read_wall_data(&data, &mut pos) else {
+            break;
+        };
         markets.push(RequestCandlesMarket {
             market_name,
             candles_5m,
@@ -952,11 +1057,33 @@ mod tests {
         plain.extend_from_slice(&i32::MAX.to_le_bytes());
         plain.extend_from_slice(&0f64.to_le_bytes());
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&plain).unwrap();
-        let zipped = encoder.finish().unwrap();
+        let zipped = zip_plain(&plain);
 
         assert!(parse_request_candles_data_response(&zipped).is_none());
+    }
+
+    #[test]
+    fn request_candles_data_partial_parser_keeps_complete_prior_markets() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        plain.push(2);
+        plain.extend_from_slice(&2i32.to_le_bytes());
+        plain.extend_from_slice(&0f64.to_le_bytes());
+        write_candles_market(&mut plain, "BTCUSDT", 45_000.0);
+        plain.extend_from_slice(&7u16.to_le_bytes());
+        plain.extend_from_slice(&('E' as u16).to_le_bytes());
+
+        let zipped = zip_plain(&plain);
+
+        assert!(parse_request_candles_data_response(&zipped).is_none());
+        let markets =
+            parse_request_candles_data_response_partial_with_local_shift(&zipped, 0.0).unwrap();
+        assert_eq!(markets.len(), 1);
+        assert_eq!(markets[0].market_name, "BTCUSDT");
+        assert_eq!(markets[0].candles_5m.len(), 1);
+        assert_eq!(markets[0].candles_5m[0].time, 45_000.0);
+        assert_eq!(markets[0].buy_wall[0].vol, 10.0);
+        assert_eq!(markets[0].sell_wall[3].count, 13);
     }
 
     #[test]
@@ -992,6 +1119,20 @@ mod tests {
         }
     }
 
+    fn write_candles_market(out: &mut Vec<u8>, market: &str, time: f64) {
+        write_delphi_utf16_string(out, market);
+        out.extend_from_slice(&1i32.to_le_bytes());
+        write_deep_price_pack(out, 101.0, 99.0, 12.5, time);
+        for i in 0i32..4 {
+            out.extend_from_slice(&(10.0 + i as f32).to_le_bytes());
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+        for i in 0i32..4 {
+            out.extend_from_slice(&(20.0 + i as f32).to_le_bytes());
+            out.extend_from_slice(&(10 + i).to_le_bytes());
+        }
+    }
+
     fn write_deep_price_pack(out: &mut Vec<u8>, max_p: f32, min_p: f32, vol: f32, time: f64) {
         let wire = WireDeepPricePack {
             max_p: LeF32::new(max_p),
@@ -1000,6 +1141,12 @@ mod tests {
             time: LeF64::new(time),
         };
         out.extend_from_slice(wire.as_bytes());
+    }
+
+    fn zip_plain(plain: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(plain).unwrap();
+        encoder.finish().unwrap()
     }
 
     #[test]
