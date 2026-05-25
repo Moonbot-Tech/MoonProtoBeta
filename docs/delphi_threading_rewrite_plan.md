@@ -743,6 +743,9 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 24.11s`, `ParseFailed=0`,
   err_emu actual drop `9.97%`.
+- Follow-up FireTest gate now asserts retained LastPrice from live
+  `UpdateMarketsList`; quick prod OK: `FIRETEST_QUICK_PASS after 25.81s`,
+  retained LastPrice `current=77568.00781250`, `ParseFailed=0`.
 
 ### Phase Z - final full optimization pass
 
@@ -1859,8 +1862,9 @@ Done:
 - `quick` checks `connect_and_init`/AuthDone/InitDone, live Engine API methods
   `BaseCheck`, `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`,
   `UpdateMarketsList`, `SubscribeAllTrades`, `SubscribeOrderBook`, first useful
-  trades/orderbook/MarketPrice state for the configured market, `ParseFailed=0`,
-  ErrEmu/Sliced diagnostics, and protocol CPU summary.
+  trades/orderbook/MarketPrice state for the configured market, retained
+  LastPrice from active `UpdateMarketsList`, `ParseFailed=0`, ErrEmu/Sliced
+  diagnostics, and protocol CPU summary.
 - `quick` intentionally skips the expensive gates: second client, full candles,
   high-loss 50%, order lifecycle, settings/strategy mutation, forced reconnect.
 - Verification policy from this point:

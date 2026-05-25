@@ -26,7 +26,7 @@
 //! Profiles:
 //! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
 //!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
-//!   trades + orderbook streams, ParseFailed=0, CPU summary.
+//!   retained LastPrice, trades + orderbook streams, ParseFailed=0, CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
 //!   health/stress scenario below. Requires `allow_mutation=true`.
 
@@ -54,7 +54,8 @@ use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
 use moonproto::protocol::Command;
 use moonproto::state::{
-    MarketPrice, OrderBookEvent, OrderBookKind, SettingsEvent, StratEvent, TradesEvent,
+    LastPricePoint, MarketHistoryConfig, MarketHistoryWorker, MarketPrice, OrderBookEvent,
+    OrderBookKind, SeqRingReader, SettingsEvent, StratEvent, TradesEvent,
 };
 use moonproto::{
     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
@@ -499,6 +500,8 @@ impl SessionStats {
 struct Session {
     client: Client,
     dispatcher: EventDispatcher,
+    history_worker: MarketHistoryWorker,
+    target_last_prices: Option<SeqRingReader<LastPricePoint>>,
     stats: Arc<Mutex<SessionStats>>,
 }
 
@@ -546,7 +549,13 @@ impl Session {
             println!("LIFECYCLE->{lifecycle_label}: {event:?}");
         }));
 
+        let history_worker = MarketHistoryWorker::spawn(firetest_history_config());
+        let target_last_prices = history_worker
+            .ensure_market(&cfg.market)
+            .and_then(|readers| readers.last_prices);
+
         let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_market_history_handle(history_worker.handle());
         if let Some(strategy) = provided_strategy.as_ref() {
             dispatcher.set_local_strategies(std::slice::from_ref(strategy));
             println!(
@@ -576,6 +585,8 @@ impl Session {
         let mut session = Self {
             client,
             dispatcher,
+            history_worker,
+            target_last_prices,
             stats,
         };
         session.drain_queued();
@@ -644,6 +655,14 @@ impl Session {
             m.send_phase_max_ns / 1_000,
             m.public_event_queue_len
         )
+    }
+
+    fn target_last_price_tail(&self) -> Option<LastPricePoint> {
+        let _ = self.history_worker.flush(0.0);
+        let reader = self.target_last_prices.as_ref()?;
+        let mut rows = Vec::new();
+        reader.copy_last(1, &mut rows);
+        rows.into_iter().next()
     }
 
     fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
@@ -2119,6 +2138,19 @@ fn quick_profile_config(cfg: &FireConfig) -> FireConfig {
     quick
 }
 
+fn firetest_history_config() -> MarketHistoryConfig {
+    MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        mm_order_companion_capacity: 0,
+        last_price_capacity: 64,
+        mini_candles_capacity: 0,
+        trade_join_capacity: 0,
+    }
+}
+
 fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     let start = Instant::now();
     let cfg = quick_profile_config(cfg);
@@ -2165,6 +2197,18 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     println!(
         "OK: quick market consistency [{}]",
         st.market_probe_summary()
+    );
+    let last_price = a
+        .target_last_price_tail()
+        .expect("quick FireTest did not retain LastPrice from UpdateMarketsList");
+    assert!(
+        last_price.current > 0.0,
+        "quick retained LastPrice must be positive, got {:?}",
+        last_price
+    );
+    println!(
+        "OK: quick retained LastPrice current={:.8} time={:.8}",
+        last_price.current, last_price.real_time
     );
     log_err_emu_snapshot(
         "quick 10% gate",
