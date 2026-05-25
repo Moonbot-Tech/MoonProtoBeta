@@ -29,7 +29,8 @@ pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
     compact_trades_to_mini_candles_like_delphi, LastPricePoint, MMOrderCompanionData,
     MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
-    TradeHistoryRow, TradeVolumeTotals,
+    TradeHistoryRow, TradeJoinBuffer, TradeJoinPush, TradeVolumeTotals,
+    DELPHI_SAME_TRADES_TIME_DAYS,
 };
 pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{

@@ -12,6 +12,7 @@ const SECONDS_PER_DAY: f64 = 86_400.0;
 const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
+pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
 
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
 ///
@@ -19,7 +20,7 @@ const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as 
 /// `Qty` is signed exactly like Delphi: sign bit clear means buy, sign bit set
 /// means sell. This intentionally uses sign-bit checks, so `-0.0` has the same
 /// machine effect as Delphi's `PCardinal(@Qty)^ and $80000000`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct TradeHistoryRow {
     pub time: f64,
     pub price: f32,
@@ -78,6 +79,126 @@ impl SeqRingRowSlot for TradeHistoryRowSlot {
             qty: f32::from_bits(self.qty_bits.load(Ordering::Relaxed)),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeJoinPush {
+    Inserted,
+    AggregatedPrev1,
+    AggregatedPrev2,
+    Full,
+}
+
+/// Delphi `AddTmpHOrder`-style temporary trade ring.
+///
+/// The ring keeps one slot empty, exactly like the Delphi check
+/// `If nextWrite = tmpTradesRead then exit`. New rows aggregate into the
+/// previous one or previous two rows when direction, price step, and
+/// `SameTradesTime` match; otherwise they are appended at `tmpTradesWrite`.
+pub struct TradeJoinBuffer {
+    rows: Vec<TradeHistoryRow>,
+    read: usize,
+    write: usize,
+    len: usize,
+}
+
+impl TradeJoinBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            rows: vec![TradeHistoryRow::default(); capacity],
+            read: 0,
+            write: 0,
+            len: 0,
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn push_like_delphi(
+        &mut self,
+        row: TradeHistoryRow,
+        chart_price_step: f64,
+        same_trades_time_days: f64,
+    ) -> TradeJoinPush {
+        let capacity = self.capacity();
+        if capacity == 0 {
+            return TradeJoinPush::Full;
+        }
+        let next_write = (self.write + 1) % capacity;
+        if next_write == self.read {
+            return TradeJoinPush::Full;
+        }
+
+        let prev1 = (self.write + capacity - 1) % capacity;
+        let prev2 = (self.write + capacity - 2) % capacity;
+
+        if self.len >= 1
+            && can_aggregate_tmp_trade(
+                self.rows[prev1],
+                row,
+                chart_price_step,
+                same_trades_time_days,
+            )
+        {
+            self.rows[prev1].qty += row.qty;
+            return TradeJoinPush::AggregatedPrev1;
+        }
+
+        if self.len >= 2
+            && can_aggregate_tmp_trade(
+                self.rows[prev2],
+                row,
+                chart_price_step,
+                same_trades_time_days,
+            )
+        {
+            self.rows[prev2].qty += row.qty;
+            return TradeJoinPush::AggregatedPrev2;
+        }
+
+        self.rows[self.write] = row;
+        self.write = next_write;
+        self.len += 1;
+        TradeJoinPush::Inserted
+    }
+
+    /// Drain retained temporary rows in read order, like `JoinHOrders` taking a
+    /// snapshot from `tmpTradesRead` to `tmpTradesWrite`.
+    pub fn drain_into(&mut self, out: &mut Vec<TradeHistoryRow>) {
+        out.clear();
+        out.reserve(self.len);
+        let capacity = self.capacity();
+        if capacity == 0 {
+            return;
+        }
+        for offset in 0..self.len {
+            out.push(self.rows[(self.read + offset) % capacity]);
+        }
+        self.read = self.write;
+        self.len = 0;
+    }
+}
+
+fn can_aggregate_tmp_trade(
+    prev: TradeHistoryRow,
+    row: TradeHistoryRow,
+    chart_price_step: f64,
+    same_trades_time_days: f64,
+) -> bool {
+    prev.time > 1.0
+        && row.same_direction(prev)
+        && ((prev.price - row.price).abs() as f64) < chart_price_step
+        && (prev.time - row.time).abs() < same_trades_time_days
 }
 
 /// Delphi `TMMOrder`: main market-maker history row.
@@ -580,6 +701,136 @@ mod tests {
                 qty: -1.25,
             }]
         );
+    }
+
+    #[test]
+    fn trade_join_buffer_aggregates_previous_one_like_add_tmp_h_order() {
+        let mut buf = TradeJoinBuffer::new(4);
+        let t = 45_000.0;
+
+        assert_eq!(
+            buf.push_like_delphi(
+                TradeHistoryRow {
+                    time: t,
+                    price: 100.0,
+                    qty: 1.0,
+                },
+                0.1,
+                DELPHI_SAME_TRADES_TIME_DAYS,
+            ),
+            TradeJoinPush::Inserted
+        );
+        assert_eq!(
+            buf.push_like_delphi(
+                TradeHistoryRow {
+                    time: t + 0.1 / SECONDS_PER_DAY,
+                    price: 100.05,
+                    qty: 2.0,
+                },
+                0.1,
+                DELPHI_SAME_TRADES_TIME_DAYS,
+            ),
+            TradeJoinPush::AggregatedPrev1
+        );
+
+        let mut out = Vec::new();
+        buf.drain_into(&mut out);
+        assert_eq!(
+            out,
+            vec![TradeHistoryRow {
+                time: t,
+                price: 100.0,
+                qty: 3.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn trade_join_buffer_aggregates_previous_two_like_add_tmp_h_order() {
+        let mut buf = TradeJoinBuffer::new(5);
+        let t = 45_000.0;
+        buf.push_like_delphi(
+            TradeHistoryRow {
+                time: t,
+                price: 100.0,
+                qty: 1.0,
+            },
+            0.1,
+            DELPHI_SAME_TRADES_TIME_DAYS,
+        );
+        buf.push_like_delphi(
+            TradeHistoryRow {
+                time: t,
+                price: 101.0,
+                qty: -1.0,
+            },
+            0.1,
+            DELPHI_SAME_TRADES_TIME_DAYS,
+        );
+
+        assert_eq!(
+            buf.push_like_delphi(
+                TradeHistoryRow {
+                    time: t + 0.1 / SECONDS_PER_DAY,
+                    price: 100.05,
+                    qty: 2.0,
+                },
+                0.1,
+                DELPHI_SAME_TRADES_TIME_DAYS,
+            ),
+            TradeJoinPush::AggregatedPrev2
+        );
+
+        let mut out = Vec::new();
+        buf.drain_into(&mut out);
+        assert_eq!(
+            out,
+            vec![
+                TradeHistoryRow {
+                    time: t,
+                    price: 100.0,
+                    qty: 3.0,
+                },
+                TradeHistoryRow {
+                    time: t,
+                    price: 101.0,
+                    qty: -1.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn trade_join_buffer_keeps_one_empty_slot_like_delphi_ring() {
+        let mut buf = TradeJoinBuffer::new(3);
+        let t = 45_000.0;
+        for i in 0..2 {
+            assert_eq!(
+                buf.push_like_delphi(
+                    TradeHistoryRow {
+                        time: t + i as f64 / SECONDS_PER_DAY,
+                        price: 100.0 + i as f32,
+                        qty: 1.0,
+                    },
+                    0.0,
+                    DELPHI_SAME_TRADES_TIME_DAYS,
+                ),
+                TradeJoinPush::Inserted
+            );
+        }
+        assert_eq!(
+            buf.push_like_delphi(
+                TradeHistoryRow {
+                    time: t + 2.0 / SECONDS_PER_DAY,
+                    price: 102.0,
+                    qty: 1.0,
+                },
+                0.0,
+                DELPHI_SAME_TRADES_TIME_DAYS,
+            ),
+            TradeJoinPush::Full
+        );
+        assert_eq!(buf.len(), 2);
     }
 
     #[test]

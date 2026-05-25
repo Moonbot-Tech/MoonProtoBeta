@@ -241,6 +241,40 @@ impl RollingTradeVolumes {
 trades. It is the active-library derived-state path for 1/3/5 minute buy/sell
 volumes; the intended precision loss is bounded by one bucket width.
 
+```rust
+pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
+
+pub enum TradeJoinPush {
+    Inserted,
+    AggregatedPrev1,
+    AggregatedPrev2,
+    Full,
+}
+
+pub struct TradeJoinBuffer;
+
+impl TradeJoinBuffer {
+    pub fn new(capacity: usize) -> Self;
+    pub fn capacity(&self) -> usize;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn push_like_delphi(
+        &mut self,
+        row: TradeHistoryRow,
+        chart_price_step: f64,
+        same_trades_time_days: f64,
+    ) -> TradeJoinPush;
+    pub fn drain_into(&mut self, out: &mut Vec<TradeHistoryRow>);
+}
+```
+
+`TradeJoinBuffer` is the Rust active-library equivalent of the Delphi temporary
+`tmpList/tmpTradesRead/tmpTradesWrite` path used by `AddTmpHOrder`. It keeps one
+ring slot empty, returns `Full` instead of overwriting unread rows, and tries to
+aggregate the new row into previous one or previous two rows before appending.
+The aggregation checks the same direction, `ChartPriceStep`, and
+`SameTradesTime`.
+
 ## Recovery Behavior
 
 `TradesState` maintains up to 50 gap buckets. Each bucket retries missing packet
