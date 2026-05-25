@@ -53,6 +53,7 @@ pub const STRAT_CHECKED_ITEM_SIZE: usize = std::mem::size_of::<WireStratCheckedI
 const _: [(); 9] = [(); STRAT_CHECKED_ITEM_SIZE];
 
 impl StratCheckedItem {
+    #[cfg(test)]
     fn from_wire(wire: WireStratCheckedItem) -> Self {
         Self {
             strategy_id: wire.strategy_id.get(),
@@ -67,6 +68,7 @@ impl StratCheckedItem {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos + STRAT_CHECKED_ITEM_SIZE > data.len() {
             return None;
@@ -76,6 +78,26 @@ impl StratCheckedItem {
                 .ok()?;
         *pos += STRAT_CHECKED_ITEM_SIZE;
         Some(Self::from_wire(wire))
+    }
+
+    pub(crate) fn read_from_delphi_stream(data: &[u8], pos: &mut usize) -> Self {
+        let mut strategy_id = [0u8; 8];
+        let id_bytes = data.len().saturating_sub(*pos).min(8);
+        if id_bytes > 0 {
+            strategy_id[..id_bytes].copy_from_slice(&data[*pos..*pos + id_bytes]);
+            *pos += id_bytes;
+        }
+        let checked = if *pos < data.len() {
+            let checked = data[*pos] != 0;
+            *pos += 1;
+            checked
+        } else {
+            false
+        };
+        Self {
+            strategy_id: u64::from_le_bytes(strategy_id),
+            checked,
+        }
     }
 
     pub(crate) fn write_to(self, out: &mut Vec<u8>) {
@@ -285,23 +307,7 @@ fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratChecke
     pos += 2;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        let mut strategy_id = [0u8; 8];
-        let id_bytes = payload.len().saturating_sub(pos).min(8);
-        if id_bytes > 0 {
-            strategy_id[..id_bytes].copy_from_slice(&payload[pos..pos + id_bytes]);
-            pos += id_bytes;
-        }
-        let checked = if pos < payload.len() {
-            let checked = payload[pos] != 0;
-            pos += 1;
-            checked
-        } else {
-            false
-        };
-        items.push(StratCheckedItem {
-            strategy_id: u64::from_le_bytes(strategy_id),
-            checked,
-        });
+        items.push(StratCheckedItem::read_from_delphi_stream(payload, &mut pos));
     }
     Some((items, pos))
 }

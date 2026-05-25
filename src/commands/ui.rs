@@ -146,6 +146,7 @@ const EMU_TRADE_POINT_SIZE: usize = std::mem::size_of::<WireEmuTradePoint>();
 const _: [(); 6] = [(); EMU_TRADE_POINT_SIZE];
 
 impl EmuTradePoint {
+    #[cfg(test)]
     fn from_wire(wire: WireEmuTradePoint) -> Self {
         Self {
             time_delta_ms: wire.time_delta_ms.get(),
@@ -160,6 +161,7 @@ impl EmuTradePoint {
         }
     }
 
+    #[cfg(test)]
     fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < EMU_TRADE_POINT_SIZE {
             return None;
@@ -167,6 +169,13 @@ impl EmuTradePoint {
         Some(Self::from_wire(
             WireEmuTradePoint::read_from_bytes(&data[..EMU_TRADE_POINT_SIZE]).ok()?,
         ))
+    }
+
+    fn read_from_delphi_stream(data: &[u8], pos: &mut usize) -> Self {
+        Self {
+            time_delta_ms: read_u16_zero_tail(data, pos),
+            price: f32::from_bits(read_u32_zero_tail(data, pos)),
+        }
     }
 
     fn write_to(self, out: &mut Vec<u8>) {
@@ -451,15 +460,9 @@ impl UICommand {
                 }
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut items = Vec::with_capacity(
-                    count.min((payload.len() - pos) / super::strat::STRAT_CHECKED_ITEM_SIZE),
-                );
+                let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
-                    if let Some(item) = StratCheckedItem::read_from(payload, &mut pos) {
-                        items.push(item);
-                    } else {
-                        break;
-                    }
+                    items.push(StratCheckedItem::read_from_delphi_stream(payload, &mut pos));
                 }
                 Some(UICommand::StratStartStopV2(StratStartStopV2 {
                     uid,
@@ -496,15 +499,9 @@ impl UICommand {
                 pos += 8;
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut points =
-                    Vec::with_capacity(count.min((payload.len() - pos) / EMU_TRADE_POINT_SIZE));
+                let mut points = Vec::with_capacity(count);
                 for _ in 0..count {
-                    if let Some(point) = EmuTradePoint::from_bytes(&payload[pos..]) {
-                        pos += EMU_TRADE_POINT_SIZE;
-                        points.push(point);
-                    } else {
-                        break;
-                    }
+                    points.push(EmuTradePoint::read_from_delphi_stream(payload, &mut pos));
                 }
                 Some(UICommand::EmuTrades(EmuTrades {
                     uid,
@@ -561,33 +558,9 @@ impl UICommand {
                 pos += 1;
                 let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
                 pos += 2;
-                let mut markets = Vec::with_capacity(count.min((payload.len() - pos) / 2));
-                for _ in 0..count {
-                    if pos + 2 > payload.len() {
-                        break;
-                    }
-                    markets.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
-                    pos += 2;
-                }
-                if pos + 2 > payload.len() {
-                    return Some(UICommand::TriggerManage(TriggerManage {
-                        uid,
-                        action,
-                        all_markets,
-                        markets,
-                        keys: Vec::new(),
-                    }));
-                }
-                let count = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
-                pos += 2;
-                let mut keys = Vec::with_capacity(count.min((payload.len() - pos) / 2));
-                for _ in 0..count {
-                    if pos + 2 > payload.len() {
-                        break;
-                    }
-                    keys.push(u16::from_le_bytes([payload[pos], payload[pos + 1]]));
-                    pos += 2;
-                }
+                let markets = read_word_array_zero_tail(payload, &mut pos, count);
+                let keys_count = read_u16_preserve_tail(payload, &mut pos, count as u16) as usize;
+                let keys = read_word_array_zero_tail(payload, &mut pos, keys_count);
                 Some(UICommand::TriggerManage(TriggerManage {
                     uid,
                     action,
@@ -956,6 +929,40 @@ fn read_bool(data: &[u8], pos: &mut usize) -> Option<bool> {
     let v = data[*pos] != 0;
     *pos += 1;
     Some(v)
+}
+
+fn read_u16_zero_tail(data: &[u8], pos: &mut usize) -> u16 {
+    let mut bytes = [0u8; 2];
+    read_into_prefix(data, pos, &mut bytes);
+    u16::from_le_bytes(bytes)
+}
+
+fn read_u32_zero_tail(data: &[u8], pos: &mut usize) -> u32 {
+    let mut bytes = [0u8; 4];
+    read_into_prefix(data, pos, &mut bytes);
+    u32::from_le_bytes(bytes)
+}
+
+fn read_u16_preserve_tail(data: &[u8], pos: &mut usize, current: u16) -> u16 {
+    let mut bytes = current.to_le_bytes();
+    read_into_prefix(data, pos, &mut bytes);
+    u16::from_le_bytes(bytes)
+}
+
+fn read_word_array_zero_tail(data: &[u8], pos: &mut usize, count: usize) -> Vec<u16> {
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(read_u16_zero_tail(data, pos));
+    }
+    values
+}
+
+fn read_into_prefix(data: &[u8], pos: &mut usize, dst: &mut [u8]) {
+    let n = data.len().saturating_sub(*pos).min(dst.len());
+    if n > 0 {
+        dst[..n].copy_from_slice(&data[*pos..*pos + n]);
+        *pos += n;
+    }
 }
 
 // =============================================================================
@@ -1402,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_word_count_parsers_keep_present_items_when_count_overstates_remaining_like_delphi_loop() {
+    fn ui_word_count_parsers_keep_declared_count_with_zero_tail_like_delphi_stream() {
         let mut raw = header_bytes(CMD_STRAT_START_STOP_V2, 42);
         raw.push(1);
         raw.extend_from_slice(&2u16.to_le_bytes());
@@ -1412,10 +1419,16 @@ mod tests {
             UICommand::StratStartStopV2(s) => {
                 assert_eq!(
                     s.items,
-                    vec![StratCheckedItem {
-                        strategy_id: 10,
-                        checked: true,
-                    }]
+                    vec![
+                        StratCheckedItem {
+                            strategy_id: 10,
+                            checked: true,
+                        },
+                        StratCheckedItem {
+                            strategy_id: 0,
+                            checked: false,
+                        },
+                    ]
                 );
             }
             _ => panic!("wrong variant"),
@@ -1431,10 +1444,16 @@ mod tests {
             UICommand::EmuTrades(e) => {
                 assert_eq!(
                     e.points,
-                    vec![EmuTradePoint {
-                        time_delta_ms: 123,
-                        price: -77.5,
-                    }]
+                    vec![
+                        EmuTradePoint {
+                            time_delta_ms: 123,
+                            price: -77.5,
+                        },
+                        EmuTradePoint {
+                            time_delta_ms: 0,
+                            price: 0.0,
+                        },
+                    ]
                 );
             }
             _ => panic!("wrong variant"),
@@ -1447,8 +1466,12 @@ mod tests {
         raw.extend_from_slice(&123u16.to_le_bytes());
         match UICommand::parse(&raw).unwrap() {
             UICommand::TriggerManage(t) => {
-                assert_eq!(t.markets, vec![123]);
-                assert!(t.keys.is_empty());
+                assert_eq!(t.markets, vec![123, 0]);
+                assert_eq!(
+                    t.keys,
+                    vec![0, 0],
+                    "Delphi reuses the previous local Count when the second Count read gets EOF"
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1463,7 +1486,7 @@ mod tests {
         match UICommand::parse(&raw).unwrap() {
             UICommand::TriggerManage(t) => {
                 assert_eq!(t.markets, vec![123]);
-                assert_eq!(t.keys, vec![9]);
+                assert_eq!(t.keys, vec![9, 0]);
             }
             _ => panic!("wrong variant"),
         }

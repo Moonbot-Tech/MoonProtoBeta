@@ -6104,3 +6104,25 @@ Done:
 Red flag:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.172`.
+
+### 2026-05-26 - Correction: UI counted arrays keep Delphi zero-tail
+
+Correction:
+
+- Re-checked `MoonProtoUIStruct.pas:TStratStartStopCommandV2`,
+  `TEmuTradesCommand`, and `TTriggerManageCommand`.
+- The previous §X.116 wording was too weak: Delphi does not shorten counted
+  arrays to the number of complete elements actually present. It calls
+  `SetLength(..., Count)` first, then `TMemoryStream.Read` copies whatever
+  bytes remain into zero-initialized array storage.
+- Rust now keeps the declared `Count` for those UI arrays and fills missing
+  tail bytes with zero/false. Partial scalar bytes are kept in the low little
+  endian bytes, matching Delphi memory writes.
+- `TTriggerManageCommand` uses one local `Count` variable twice. If the second
+  `ms.Read(Count, SizeOf(Count))` reaches EOF, Delphi reuses the previous
+  count. Rust now preserves that machine effect instead of returning an empty
+  `keys` array.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.173`.

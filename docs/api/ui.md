@@ -207,3 +207,8 @@ registry `FSkipped`. `UICommand::Unknown { cmd_id, uid }` means the version is
 supported but no UI command class is registered for that `cmd_id`. The active
 dispatcher ignores both variants: they do not mutate `SettingsState` and do not
 emit `Event::Settings`, matching Delphi client behavior.
+
+Counted low-level UI arrays mirror Delphi `TMemoryStream.Read` behavior. For
+`StratStartStopV2.items`, `EmuTrades.points`, and `TriggerManage.markets/keys`,
+the parser keeps the declared `Count`; if the payload tail is truncated, missing
+bytes are zero/`false` and partial little-endian scalar bytes are preserved.
