@@ -2370,6 +2370,7 @@ fn run_dispatcher_worker(
     dispatcher: &mut crate::events::EventDispatcher,
     mut on_event: DispatcherEventFn,
     sender: ClientSender,
+    api_pending: Arc<ApiPending>,
     protocol_metrics: Arc<ProtocolMetrics>,
     trades_server_token_mirror: Arc<AtomicU64>,
 ) {
@@ -2399,6 +2400,7 @@ fn run_dispatcher_worker(
                 let event_count = event_buf.len();
                 let action_count = active_actions_buf.len();
                 sender.apply_active_actions(active_actions_buf.drain(..));
+                dispatch_api_pending_from_events(&api_pending, &event_buf);
                 protocol_metrics.record_active_dispatch_labeled(
                     active_dispatch_start.elapsed(),
                     cmd.to_byte(),
@@ -2438,6 +2440,22 @@ fn run_dispatcher_worker(
             }
         }
     }
+}
+
+fn dispatch_api_pending_from_events(
+    api_pending: &ApiPending,
+    events: &[crate::events::Event],
+) -> bool {
+    let mut consumed = false;
+    for event in events {
+        let crate::events::Event::EngineResponse(resp) = event else {
+            continue;
+        };
+        if api_pending.contains(resp.request_uid) {
+            consumed |= api_pending.dispatch(resp.clone()).is_none();
+        }
+    }
+    consumed
 }
 
 fn wait_dispatcher_worker_barrier(tx: &mpsc::Sender<DispatcherWorkItem>) {
@@ -2793,8 +2811,14 @@ impl ProtocolCore<'_> {
         let (cmd, payload) = decoded
             .map(|(cmd, payload)| (cmd, Some(payload)))
             .unwrap_or((raw_cmd, None));
+        let dispatch_api_pending_in_reader = !matches!(mode, RunMode::DispatcherWorker { .. });
         let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
-            Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, payload)
+            dispatch_api_pending_in_reader
+                && Client::dispatch_api_pending_inline(
+                    self.client.api_pending.as_ref(),
+                    cmd,
+                    payload,
+                )
         });
         let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
             Client::dispatch_candles_chunk_inline(
@@ -2846,8 +2870,8 @@ impl ProtocolCore<'_> {
         ) else {
             return;
         };
-        let api_pending_consumed =
-            Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
+        let api_pending_consumed = !matches!(mode, RunMode::DispatcherWorker { .. })
+            && Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
         let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(
             &mut self.client.pending_candles,
             cmd,
@@ -7401,6 +7425,7 @@ impl Client {
         let sender = self.sender();
         let protocol_metrics = Arc::clone(&self.protocol_metrics);
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let api_pending = Arc::clone(&self.api_pending);
         let (app_tx, app_rx) = mpsc::channel::<crate::events::Event>();
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
@@ -7432,6 +7457,7 @@ impl Client {
                     dispatcher,
                     DispatcherEventFn::QueueToCallback(app_tx),
                     sender,
+                    api_pending,
                     protocol_metrics,
                     trades_server_token_mirror,
                 );
@@ -7480,6 +7506,7 @@ impl Client {
         let sender = self.sender();
         let protocol_metrics = Arc::clone(&self.protocol_metrics);
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let api_pending = Arc::clone(&self.api_pending);
         let (app_tx, app_rx) = mpsc::channel::<StateAppEvent>();
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
@@ -7511,6 +7538,7 @@ impl Client {
                     dispatcher,
                     DispatcherEventFn::QueueToStateCallback(app_tx),
                     sender,
+                    api_pending,
                     protocol_metrics,
                     trades_server_token_mirror,
                 );
@@ -7566,6 +7594,7 @@ impl Client {
         let sender = self.sender();
         let protocol_metrics = Arc::clone(&self.protocol_metrics);
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let api_pending = Arc::clone(&self.api_pending);
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
             let (tx, rx) = mpsc::channel::<LifecycleEvent>();
@@ -7590,6 +7619,7 @@ impl Client {
                     dispatcher,
                     DispatcherEventFn::Queue,
                     sender,
+                    api_pending,
                     protocol_metrics,
                     trades_server_token_mirror,
                 );
@@ -7651,6 +7681,7 @@ impl Client {
         let sender = self.sender();
         let protocol_metrics = Arc::clone(&self.protocol_metrics);
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let api_pending = Arc::clone(&self.api_pending);
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
             let (tx, rx) = mpsc::channel::<LifecycleEvent>();
@@ -7677,6 +7708,7 @@ impl Client {
                     dispatcher,
                     DispatcherEventFn::Queue,
                     sender,
+                    api_pending,
                     protocol_metrics,
                     trades_server_token_mirror,
                 );

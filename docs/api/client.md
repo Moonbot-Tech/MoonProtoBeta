@@ -392,8 +392,10 @@ The response is delivered only while the client loop is running. Direct
 `recv_timeout` is correct only when another thread is already running the
 client.
 While the client loop is active, registered Engine API responses are delivered
-to their receiver from the receive-side DataReadInt path before dispatcher event
-delivery. The same payload still reaches `EventDispatcher` for state updates.
+to their receiver by the active dispatcher worker after the same payload has
+updated `EventDispatcher` state. The low-level raw `run` path still dispatches
+pending receivers from receive-side DataReadInt because it intentionally has no
+active dispatcher worker.
 `run_until_response` uses the same dispatcher-worker queued-event behavior as
 typed one-shot helpers and returns only after the worker has processed all
 earlier queued domain work.

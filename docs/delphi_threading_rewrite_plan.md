@@ -5522,11 +5522,25 @@ Dispatcher-worker and Strat follow-up:
   - `writer_cpu max=153us`;
   - `active_dispatch max=2813us max_src=API(31) payload=44031`;
   - `app_enqueue max=2021us max_src=TradesStream(33) payload=50 mode=state`.
+- Follow-up API pending fix: in dispatcher-worker modes, registered Engine API
+  receivers are now fulfilled by the dispatcher worker after the worker parsed
+  the same `Event::EngineResponse`; the reader only does cheap UID/meta checks
+  plus existing candles aggregation. This removes duplicate full
+  `EngineResponse` parse/decompress from protocol recv and keeps heavy API
+  payload work on the worker. The raw `Client::run` path still dispatches
+  pending receivers from DataReadInt because it has no active dispatcher worker.
+- Quick prod FireTest after pending moved to worker:
+  - `FIRETEST_QUICK_PASS after 23.88s`;
+  - `reader max=688us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=124us`;
+  - `active_dispatch max=3010us max_src=API(31) payload=44025`;
+  - `app_enqueue max=2041us max_src=TradesStream(33) payload=24 mode=state`.
 - Result: the concrete `Strat` slow-parser boundary red flag is closed for the
   measured live snapshot path: it is worker-side, no longer max, and no longer
   blocks protocol recv in either long-running dispatcher mode or sync init/wait
-  helpers. The broader CPU red flag remains open for completed `Sliced` reader
-  work, large init API market parsing/apply, and state snapshot enqueue cost.
+  helpers. The protocol recv CPU red flag is also below 1ms in this quick run.
+  The broader CPU red flag remains open for large worker-side API market
+  parsing/apply and state snapshot enqueue cost.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
