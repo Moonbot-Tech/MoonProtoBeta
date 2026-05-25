@@ -252,7 +252,10 @@ impl RollingTradeVolumes {
 
 `RollingTradeVolumes` uses 5-second buckets and updates from newly received
 trades. It is the active-library derived-state path for 1/3/5 minute buy/sell
-volumes; the intended precision loss is bounded by one bucket width.
+volumes; the intended precision loss is bounded by one bucket width. Call
+`MarketHistoryWorker::rolling_volumes(market, now_time)` or the same method on
+`MarketHistoryHandle` to read the current derived totals for an already ensured
+market. Unknown markets return `None` and are not allocated by a read.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
@@ -357,6 +360,11 @@ impl MarketHistoryWorker {
     pub fn handle(&self) -> MarketHistoryHandle;
     pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders>;
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot>;
     pub fn flush(&self, now_time: f64) -> bool;
 }
 
@@ -380,7 +388,16 @@ pub struct MarketHistoryLastPriceBatch {
 }
 
 impl MarketHistoryHandle {
+    pub fn ensure_market(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
+    pub fn rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn send_stream_batch(&self, batch: MarketHistoryStreamBatch) -> bool;
     pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool;
+    pub fn flush(&self, now_time: f64) -> bool;
 }
 
 pub struct SeqRingCursor;

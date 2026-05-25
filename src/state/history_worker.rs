@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::state::history::TradesPacketTimeShift;
+use crate::state::history::{RollingTradeVolumeSnapshot, TradesPacketTimeShift};
 use crate::state::history_store::{
     MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry,
 };
@@ -97,6 +97,11 @@ enum MarketHistoryCommand {
         market_name: String,
         reply: mpsc::SyncSender<Option<MarketHistoryReaders>>,
     },
+    RollingVolumes {
+        market_name: String,
+        now_time: f64,
+        reply: mpsc::SyncSender<Option<RollingTradeVolumeSnapshot>>,
+    },
     StreamBatch(MarketHistoryStreamBatch),
     LastPriceBatch(MarketHistoryLastPriceBatch),
     Flush {
@@ -126,6 +131,14 @@ impl MarketHistoryWorker {
 
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
         self.handle.readers(market_name)
+    }
+
+    pub fn rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.handle.rolling_volumes(market_name, now_time)
     }
 
     pub fn flush(&self, now_time: f64) -> bool {
@@ -159,6 +172,22 @@ impl MarketHistoryHandle {
         self.tx
             .send(MarketHistoryCommand::Readers {
                 market_name: market_name.to_string(),
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok().flatten()
+    }
+
+    pub fn rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(MarketHistoryCommand::RollingVolumes {
+                market_name: market_name.to_string(),
+                now_time,
                 reply: reply_tx,
             })
             .ok()?;
@@ -217,6 +246,17 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
             }
             Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
                 let _ = reply.send(registry.readers(&market_name));
+            }
+            Ok(MarketHistoryCommand::RollingVolumes {
+                market_name,
+                now_time,
+                reply,
+            }) => {
+                let _ = reply.send(
+                    registry
+                        .get(&market_name)
+                        .map(|store| store.rolling_volumes_snapshot(now_time)),
+                );
             }
             Ok(MarketHistoryCommand::StreamBatch(batch)) => {
                 last_now_time = batch.now_time;
@@ -391,6 +431,17 @@ mod tests {
         assert_eq!(
             out[0].time,
             45_000.0 + 250.0 / DELPHI_MSECS_PER_DAY + 1.0 / 24.0
+        );
+
+        let volumes = worker
+            .rolling_volumes("BTCUSDT", out[0].time)
+            .expect("enabled market should expose rolling volumes");
+        assert_eq!(volumes.one_minute.buy_value, 200.0);
+        assert_eq!(volumes.one_minute.sell_value, 0.0);
+        assert_eq!(volumes.five_minutes.trade_count, 1);
+        assert!(
+            worker.rolling_volumes("ETHUSDT", out[0].time).is_none(),
+            "rolling volume reads must not allocate unknown markets"
         );
     }
 

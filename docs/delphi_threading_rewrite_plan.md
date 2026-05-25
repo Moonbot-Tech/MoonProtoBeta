@@ -752,6 +752,9 @@ Verification:
   retained target trades `futures=1 spot=0`, `ParseFailed=0`.
 - Added dispatcher-to-worker unit coverage for all retained stream section
   kinds: futures, spot, liquidation, MM orders, and MM companion rows.
+- Exposed worker/handle `rolling_volumes(market, now_time)` so the already
+  maintained 1/3/5 minute volume accumulators are reachable from the public
+  Active Lib API without allocating unknown markets.
 
 ### Phase Z - final full optimization pass
 
