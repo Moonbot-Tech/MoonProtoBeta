@@ -128,6 +128,59 @@ impl SeqRingRowSlot for MMOrderHistoryRowSlot {
     }
 }
 
+/// Delphi `TMMOrderData`: companion data for `TMMOrder`.
+///
+/// Delphi layout is `Taker: THLAddress` (20 bytes) and `Color: TColor`. It is
+/// stored beside the base `TMMOrder` row by slot, not inside the base row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MMOrderCompanionData {
+    pub taker: [u8; 20],
+    pub color: u32,
+}
+
+#[derive(Default)]
+pub struct MMOrderCompanionDataSlot {
+    taker0: AtomicU64,
+    taker1: AtomicU64,
+    taker2: AtomicU32,
+    color: AtomicU32,
+}
+
+impl SeqRingRow for MMOrderCompanionData {
+    type Slot = MMOrderCompanionDataSlot;
+}
+
+impl SeqRingRowSlot for MMOrderCompanionDataSlot {
+    type Row = MMOrderCompanionData;
+
+    fn store_row(&self, row: Self::Row) {
+        self.taker0.store(
+            u64::from_le_bytes(row.taker[0..8].try_into().unwrap()),
+            Ordering::Relaxed,
+        );
+        self.taker1.store(
+            u64::from_le_bytes(row.taker[8..16].try_into().unwrap()),
+            Ordering::Relaxed,
+        );
+        self.taker2.store(
+            u32::from_le_bytes(row.taker[16..20].try_into().unwrap()),
+            Ordering::Relaxed,
+        );
+        self.color.store(row.color, Ordering::Relaxed);
+    }
+
+    fn load_row(&self) -> Self::Row {
+        let mut taker = [0u8; 20];
+        taker[0..8].copy_from_slice(&self.taker0.load(Ordering::Relaxed).to_le_bytes());
+        taker[8..16].copy_from_slice(&self.taker1.load(Ordering::Relaxed).to_le_bytes());
+        taker[16..20].copy_from_slice(&self.taker2.load(Ordering::Relaxed).to_le_bytes());
+        MMOrderCompanionData {
+            taker,
+            color: self.color.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.
 ///
 /// Delphi layout is `packed record current: Single; RealTime: TDateTime`.
@@ -561,6 +614,20 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn mm_order_companion_data_roundtrips_through_seq_ring() {
+        let (mut writer, reader) = SeqRingWriter::<MMOrderCompanionData>::new(2).unwrap();
+        let row = MMOrderCompanionData {
+            taker: [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            ],
+            color: 0xAABB_CCDD,
+        };
+        writer.push(row);
+
+        assert_eq!(reader.read_at_seq(0), Some(row));
     }
 
     #[test]

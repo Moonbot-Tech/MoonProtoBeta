@@ -571,6 +571,8 @@ Done:
   (`Time: TDateTime`, `vol: Double`, `Q: Double`). Delphi taker/color companion
   data lives in `TStreamableRingBuffer<TMMOrder, TMMOrderData>` and remains a
   separate follow-up block.
+- Added `state::history::MMOrderCompanionData`, matching Delphi `TMMOrderData`
+  (`Taker: THLAddress`, `Color: TColor`) as a separate fixed companion row.
 - Added `state::history::LastPricePoint`, matching Delphi `THistoricalPrices`
   (`current: Single`, `RealTime: TDateTime`), and `MiniCandle`, matching Delphi
   `TMiniCandle`.
@@ -586,8 +588,8 @@ Done:
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 8 tests.
-- `cargo test --lib` OK: 679 tests.
+- `cargo test history --lib` OK: 9 tests.
+- `cargo test --lib` OK: 680 tests.
 
 ### Phase Z - final full optimization pass
 

@@ -174,6 +174,11 @@ pub struct MMOrderHistoryRow {
     pub q: f64,
 }
 
+pub struct MMOrderCompanionData {
+    pub taker: [u8; 20],
+    pub color: u32,
+}
+
 pub struct MiniCandle {
     pub time: f64, // Delphi TDateTime
     pub cnt: i32,
@@ -191,7 +196,8 @@ matching Delphi `PCardinal(@Qty)^ and $80000000`.
 
 `MMOrderHistoryRow` matches Delphi base `TMMOrder`: `Time`, `vol`, and `Q` are
 stored as doubles. HyperDex taker address/color companion data is a separate
-storage layer; it is not folded into the base row.
+storage layer; it is not folded into the base row. `MMOrderCompanionData`
+matches Delphi `TMMOrderData`: `Taker: THLAddress` and `Color: TColor`.
 
 ```rust
 pub fn compact_trades_to_mini_candles_like_delphi(
