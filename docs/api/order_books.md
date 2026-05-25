@@ -135,6 +135,13 @@ pub struct TopOfBook {
     pub ask: Option<OrderBookLevel>,
 }
 
+pub enum ApplyResult {
+    Applied,
+    AppliedFromCache,
+    Cached,
+    Stale,
+}
+
 pub enum OrderBookEvent {
     Apply {
         market_index: u16,
@@ -168,6 +175,8 @@ Delphi `TOrderGlass` state.
   often than every 5 seconds.
 - The first diff may be applied without a prior full snapshot when the local
   sequence is still zero, matching the server-side Delphi behavior.
+- Applied book depth is not capped by the Rust library; full snapshots and diffs
+  keep the same level count that the Delphi active code keeps.
 
 `EventDispatcher` drops orderbook packets until `MarketsState.indexes_synchronized`
 is true, preventing new server indexes from being applied to old local mappings

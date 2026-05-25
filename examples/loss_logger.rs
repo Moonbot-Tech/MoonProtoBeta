@@ -50,7 +50,6 @@ struct Counters {
     ob_diff: AtomicU64,
     ob_stale: AtomicU64,
     ob_cached: AtomicU64,
-    ob_no_full_yet: AtomicU64,
     parse_failed: AtomicU64,
     server_logs: AtomicU64,
 }
@@ -71,7 +70,6 @@ impl Counters {
             ob_diff: AtomicU64::new(0),
             ob_stale: AtomicU64::new(0),
             ob_cached: AtomicU64::new(0),
-            ob_no_full_yet: AtomicU64::new(0),
             parse_failed: AtomicU64::new(0),
             server_logs: AtomicU64::new(0),
         }
@@ -391,13 +389,6 @@ fn main() {
                                         market_index, book_kind, seq
                                     ));
                                 }
-                                OBApplyResult::NoFullYet => {
-                                    counters_cb.ob_no_full_yet.fetch_add(1, Ordering::Relaxed);
-                                    events_to_log.push(format!(
-                                        "[OB-NO-FULL] mkt={} bk={} seq={} (diff before first full)",
-                                        market_index, book_kind, seq
-                                    ));
-                                }
                                 _ => {}
                             }
                         }
@@ -529,7 +520,7 @@ fn main() {
         t0,
         &format!(
             "[FINAL] trades_apply={} gap_det={} gap_fill={} bkt_rec={} bkt_lost={} | \
-             ob_full={} ob_diff={} ob_cached={} ob_no_full_yet={} | \
+             ob_full={} ob_diff={} ob_cached={} | \
              parse_fail={} srv_logs={}",
             counters.trades_apply.load(Ordering::Relaxed),
             counters.gap_detected.load(Ordering::Relaxed),
@@ -539,7 +530,6 @@ fn main() {
             counters.ob_full.load(Ordering::Relaxed),
             counters.ob_diff.load(Ordering::Relaxed),
             counters.ob_cached.load(Ordering::Relaxed),
-            counters.ob_no_full_yet.load(Ordering::Relaxed),
             counters.parse_failed.load(Ordering::Relaxed),
             counters.server_logs.load(Ordering::Relaxed),
         ),

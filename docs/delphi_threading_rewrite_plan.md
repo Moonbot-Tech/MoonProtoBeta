@@ -5981,3 +5981,24 @@ Verification:
 - `cargo check --examples` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 26.98s`, `ParseFailed=0`.
+
+### 2026-05-26 - OrderBook diff has no 5000-level Rust cap
+
+Done:
+
+- Checked current Delphi `EngineBase.pas:TMarketEngine.ApplyOrderBookDiffKeepZero`.
+  It computes `n := Min(5000, N)`, but the following `SetLength` and `Move`
+  use `N`, not `n`, so the active code does not truncate the applied book to
+  5000 levels.
+- Removed the Rust-only `ORDER_BOOK_DIFF_MAX_LEVELS` truncation from
+  `state::order_books::apply_order_book_diff_keep_zero`.
+- Replaced the old mistaken regression test with coverage that proves a
+  5001-level book can grow past 5000 after a diff, matching current Delphi
+  machine effect.
+- Removed the dead public `ApplyResult::NoFullYet` variant and its example
+  counter: after the strict parity fix, first diff without full is applied like
+  Delphi and this reason can no longer be produced.
+
+Red flag closed:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.169`.
