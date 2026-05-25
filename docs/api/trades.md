@@ -256,7 +256,6 @@ volumes; the intended precision loss is bounded by one bucket width.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
-pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64;  // 0.00000001
 pub const DELPHI_MSECS_PER_DAY: f64;         // 86400000.0
 
 pub struct TradesPacketTimeShift;
@@ -312,15 +311,15 @@ The aggregation checks the same direction, `ChartPriceStep`, and
 ```rust
 pub fn prepare_joined_trades_for_retained_append(
     rows: &mut Vec<TradeHistoryRow>,
-    last_retained_time: Option<f64>,
 );
 ```
 
 This helper is used after draining `TradeJoinBuffer` and before appending rows
-to retained `SeqRing` history. It sorts the drained batch by `time` and removes
-rows whose time is not newer than the current retained tail plus Delphi `_eps`
-(`0.00000001` days). The output is monotonic, which is required for public
-history reads by time.
+to retained `SeqRing` history. In the active Delphi path,
+`BMarketHistoryWorker` calls `JoinHOrders(0, NowTime, false, true)`, so
+`DontSort=true`: drained tmp-ring rows are appended in ring read order, without
+sorting and without dropping late resend rows that are older than the retained
+tail. The helper is intentionally a no-op marker for that machine effect.
 
 ```rust
 pub struct MarketHistoryConfig {
@@ -488,8 +487,8 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 `MarketHistoryStore` is the per-market single-writer side owned by that worker.
 Capacities set to `0` disable only that retained public history ring. Futures
 trades first enter the Delphi-like temporary join buffer and are drained into
-retained history through the sort/skip-tail step. Rows evicted from the futures
-retained ring are buffered for `TMiniCandle` compaction.
+retained history in Delphi `DontSort=true` ring-read order. Rows evicted from
+the futures retained ring are buffered for `TMiniCandle` compaction.
 The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
 shared `TradesPacketTimeShift`, so all retained row types in one packet use the
 same Delphi packet time correction. MM-order companion rows are aligned with
@@ -498,6 +497,10 @@ the base MM-order ring slot: when a taker address is present, the helper stores
 companion data for that slot.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
+Futures retained rows preserve append order, not guaranteed timestamp order:
+`copy_from_time` starts from the first retained sequence whose row time is at or
+after the requested time, and `copy_time_range` scans retained rows and returns
+only rows inside the requested time interval.
 For "only new rows", every consumer keeps its own `SeqRingCursor`; the library
 does not have global consumed/unconsumed state, so UI, strategy code, and logs
 can read the same history independently. Internally `SeqRing` stores rows as a
@@ -557,9 +560,11 @@ history configuration.
 `MarketHistoryConfig::from_total_memory_bytes(total_memory_bytes, market_count)`
 is the RAM-budget helper for init/config code. It budgets about 20% of total
 memory for retained histories, or 25% on machines below 8 GiB, then splits that
-budget across the given market count and categories. `estimated_bytes_per_market`
-uses the dense row sizes used by `SeqRing` and is intended for tests and
-config diagnostics.
+budget across the given market count and categories. When futures retained
+history is enabled, the helper keeps the futures temporary join ring at the
+Delphi `IntTradesBufSize = 1000` size; it must not shrink this ring as a hidden
+memory optimization. `estimated_bytes_per_market` uses the dense row sizes used
+by `SeqRing` and is intended for tests and config diagnostics.
 
 ## Recovery Behavior
 

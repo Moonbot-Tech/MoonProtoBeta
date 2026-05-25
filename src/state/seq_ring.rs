@@ -16,10 +16,12 @@ pub trait SeqRingRow: Copy + Default + Send + Sync + 'static {}
 
 impl<T> SeqRingRow for T where T: Copy + Default + Send + Sync + 'static {}
 
-/// Row with a monotonic time coordinate.
+/// Row with a domain time coordinate.
 ///
 /// Domain APIs use this to expose "from time T" and "time range" reads without
-/// exposing internal sequence numbers to application code.
+/// exposing internal sequence numbers to application code. The retained futures
+/// history preserves Delphi append order and can contain late resend rows, so
+/// timed reads scan the retained sequence instead of assuming monotonic time.
 pub trait SeqRingTimedRow: SeqRingRow {
     fn seq_ring_time(&self) -> f64;
 }
@@ -326,11 +328,16 @@ impl<T: SeqRingRow> SeqRingReader<T> {
 
 impl<T: SeqRingTimedRow> SeqRingReader<T> {
     pub fn first_seq_at_or_after_time(&self, time: f64) -> Option<u64> {
-        self.lower_bound_seq_by(|row| row.seq_ring_time() < time)
+        Some(self.inner.state.read().first_seq_at_or_after_time(time))
     }
 
-    /// Clears `out` and copies up to `limit` rows starting at the first row
-    /// whose time is `>= time`.
+    /// Clears `out` and copies up to `limit` rows starting at the first retained
+    /// sequence whose time is `>= time`.
+    ///
+    /// Rows are returned in retained append order. If later rows have older
+    /// timestamps because a resend arrived late, they are still returned; use
+    /// [`Self::copy_time_range`] when every returned row must satisfy a time
+    /// predicate.
     pub fn copy_from_time(
         &self,
         time: f64,
@@ -338,7 +345,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         out: &mut Vec<T>,
     ) -> Option<SeqRingReadMeta> {
         let state = self.inner.state.read();
-        let time_clipped = state.is_time_before_oldest(time);
+        let time_clipped = state.is_time_before_retained_min(time);
         let start_seq = state.first_seq_at_or_after_time(time);
         let (mut meta, end_seq) = state.read_meta(start_seq, limit);
         meta.clipped |= time_clipped;
@@ -360,20 +367,20 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
     ) -> Option<SeqRingReadMeta> {
         let state = self.inner.state.read();
         let bounds = state.bounds();
-        let time_clipped = state.is_time_before_oldest(from_time);
+        let time_clipped = state.is_time_before_retained_min(from_time);
         let start_seq = state
             .first_seq_at_or_after_time(from_time)
             .max(bounds.oldest_seq)
             .min(bounds.next_seq);
 
         out.clear();
+        out.reserve(limit.min(bounds.len));
         let mut end_seq = start_seq;
         while end_seq < bounds.next_seq && out.len() < limit {
             let row = state.row_at_seq(end_seq);
-            if row.seq_ring_time() >= to_time {
-                break;
+            if row.seq_ring_time() >= from_time && row.seq_ring_time() < to_time {
+                out.push(row);
             }
-            out.push(row);
             end_seq += 1;
         }
 
@@ -450,28 +457,24 @@ impl<T: SeqRingRow> SeqRingState<T> {
 impl<T: SeqRingTimedRow> SeqRingState<T> {
     fn first_seq_at_or_after_time(&self, time: f64) -> u64 {
         let bounds = self.bounds();
-        let mut lo = bounds.oldest_seq;
-        let mut hi = bounds.next_seq;
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let row = self.row_at_seq(mid);
-            if row.seq_ring_time() < time {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+        for seq in bounds.oldest_seq..bounds.next_seq {
+            if self.row_at_seq(seq).seq_ring_time() >= time {
+                return seq;
             }
         }
-
-        lo
+        bounds.next_seq
     }
 
-    fn is_time_before_oldest(&self, time: f64) -> bool {
+    fn is_time_before_retained_min(&self, time: f64) -> bool {
         let bounds = self.bounds();
         if bounds.len == 0 {
             return false;
         }
-        time < self.row_at_seq(bounds.oldest_seq).seq_ring_time()
+        let mut min_time = self.row_at_seq(bounds.oldest_seq).seq_ring_time();
+        for seq in (bounds.oldest_seq + 1)..bounds.next_seq {
+            min_time = min_time.min(self.row_at_seq(seq).seq_ring_time());
+        }
+        time < min_time
     }
 }
 
@@ -692,6 +695,67 @@ mod tests {
                 },
                 TimedRow {
                     time_ms: 1_750,
+                    value: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_reads_scan_append_order_when_times_are_not_monotonic() {
+        let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
+        writer.push(TimedRow {
+            time_ms: 1_000,
+            value: 0,
+        });
+        writer.push(TimedRow {
+            time_ms: 2_000,
+            value: 1,
+        });
+        writer.push(TimedRow {
+            time_ms: 1_500,
+            value: 2,
+        });
+        writer.push(TimedRow {
+            time_ms: 2_250,
+            value: 3,
+        });
+
+        assert_eq!(reader.first_seq_at_or_after_time(1_750.0), Some(1));
+
+        let mut out = Vec::new();
+        let meta = reader.copy_from_time(1_750.0, 10, &mut out).unwrap();
+        assert_eq!(meta.actual_start_seq, 1);
+        assert_eq!(
+            out,
+            vec![
+                TimedRow {
+                    time_ms: 2_000,
+                    value: 1,
+                },
+                TimedRow {
+                    time_ms: 1_500,
+                    value: 2,
+                },
+                TimedRow {
+                    time_ms: 2_250,
+                    value: 3,
+                },
+            ]
+        );
+
+        reader
+            .copy_time_range(1_750.0, 2_500.0, 10, &mut out)
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                TimedRow {
+                    time_ms: 2_000,
+                    value: 1,
+                },
+                TimedRow {
+                    time_ms: 2_250,
                     value: 3,
                 },
             ]

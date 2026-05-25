@@ -12,7 +12,6 @@ const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
-pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64 = 0.00000001;
 
 /// Delphi `ProcessTradesStream` per-packet time-shift state.
 ///
@@ -201,26 +200,15 @@ fn can_aggregate_tmp_trade(
         && (prev.time - row.time).abs() < same_trades_time_days
 }
 
-/// Prepare a drained `TradeJoinBuffer` batch for append into a time-sorted
-/// retained history.
+/// Prepare a drained `TradeJoinBuffer` batch for retained append.
 ///
-/// Delphi `JoinHOrders` appends only rows newer than the current `OrdersH` tail
-/// and then sorts the combined array. `SeqRing` cannot sort old retained rows,
-/// so StoreWorker must sort the new batch and skip old/equal tail rows before
-/// appending. The resulting batch is monotonic and safe for `SeqRingTimedRow`
-/// binary-search reads.
-pub fn prepare_joined_trades_for_retained_append(
-    rows: &mut Vec<TradeHistoryRow>,
-    last_retained_time: Option<f64>,
-) {
-    rows.sort_by(|left, right| left.time.total_cmp(&right.time));
-    if let Some(last_time) = last_retained_time {
-        let keep_from = rows
-            .iter()
-            .position(|row| row.time > last_time + DELPHI_TRADE_TAIL_EPS_DAYS)
-            .unwrap_or(rows.len());
-        rows.drain(0..keep_from);
-    }
+/// Active Delphi uses `BMarketHistoryWorker -> JoinHOrders(0, NowTime, false,
+/// true)`: `DontSort=true` copies the tmp-ring snapshot directly into
+/// `OrdersH`. It does not sort and does not skip rows older than the retained
+/// tail. The Rust retained history must therefore preserve tmp-ring read order,
+/// including late resend rows.
+pub fn prepare_joined_trades_for_retained_append(_rows: &mut Vec<TradeHistoryRow>) {
+    // No-op by design: the drained tmp-ring is already in Delphi read order.
 }
 
 /// Delphi `TMMOrder`: main market-maker history row.
@@ -752,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_joined_trades_sorts_and_skips_existing_tail() {
+    fn prepare_joined_trades_keeps_read_order_like_dontsort_join_h_orders() {
         let t = 45_000.0;
         let mut rows = vec![
             TradeHistoryRow {
@@ -772,19 +760,24 @@ mod tests {
             },
         ];
 
-        prepare_joined_trades_for_retained_append(&mut rows, Some(t + 1.0 / SECONDS_PER_DAY));
+        prepare_joined_trades_for_retained_append(&mut rows);
 
         assert_eq!(
             rows,
             vec![
                 TradeHistoryRow {
-                    time: t + 2.0 / SECONDS_PER_DAY,
-                    price: 102.0,
+                    time: t + 3.0 / SECONDS_PER_DAY,
+                    price: 103.0,
                     qty: 1.0,
                 },
                 TradeHistoryRow {
-                    time: t + 3.0 / SECONDS_PER_DAY,
-                    price: 103.0,
+                    time: t,
+                    price: 100.0,
+                    qty: 1.0,
+                },
+                TradeHistoryRow {
+                    time: t + 2.0 / SECONDS_PER_DAY,
+                    price: 102.0,
                     qty: 1.0,
                 },
             ]

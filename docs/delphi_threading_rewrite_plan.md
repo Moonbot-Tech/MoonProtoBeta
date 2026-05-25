@@ -557,13 +557,13 @@ Derived calculations:
   array overflows. Rust must preserve that external meaning without array shift:
   `SeqRing` overflow compacts evicted rows into mini-candles. Exact Delphi
   thresholds/percentages must be checked before implementation.
-- Detailed futures trade history cannot be appended in raw UDP receive order.
-  Delphi path is `ProcessTradesStream -> wsParseOrdersHistoryAll_Int ->
-  AddTmpHOrder -> JoinHOrders`: temporary ring, adjacent same-direction
-  aggregation, skip rows older/equal than current `OrdersH` tail, then
-  `QuickSortOrders`. StoreWorker must preserve this before using
-  `SeqRingTimedRow` binary-search reads. Red flag recorded as
-  `spec_pipeline/work/хуйня.md §X.158`.
+- Detailed futures trade history is appended in the active Delphi tmp-ring read
+  order. The live path is `ProcessTradesStream ->
+  wsParseOrdersHistoryAll_Int -> AddTmpHOrder`, then
+  `BMarketHistoryWorker -> JoinHOrders(0, NowTime, false, true)`. The final
+  `true` is `DontSort`, so there is no sort and no skip-tail step. Late
+  UDP/resend rows remain late in retained history; time-based public reads must
+  scan/filter instead of relying on monotonic row timestamps.
 
 ### 2026-05-25 - SeqRing storage foundation
 
@@ -571,7 +571,9 @@ Done:
 
 - Added `state::seq_ring`, a single-writer / multi-reader retained ring with
   monotonic sequences, retention clipping, last-N reads, sequence reads, and
-  time-based helpers (`copy_from_time`, `copy_time_range`).
+  time-based helpers (`copy_from_time`, `copy_time_range`). Time-based helpers
+  scan retained rows because futures trade timestamps are not guaranteed
+  monotonic after UDP gap/resend recovery.
 - Added `SeqRingWriter::push_with_evicted`, so StoreWorker can compact rows
   that leave retained detailed trade history into `TMiniCandle`-like aggregates
   instead of silently dropping them.
@@ -600,9 +602,9 @@ Done:
 - Added `TradeJoinBuffer`, matching the active `AddTmpHOrder` temporary ring:
   one empty slot, prev1/prev2 same-direction aggregation, `ChartPriceStep`, and
   Delphi `SameTradesTime = 0.2 / SecondsPerDay`.
-- Added `prepare_joined_trades_for_retained_append`: sorts drained tmp rows and
-  skips rows not newer than the retained tail (`_eps = 0.00000001` days) before
-  appending to a monotonic `SeqRing`.
+- Added `prepare_joined_trades_for_retained_append`: now an explicit no-op
+  marker for Delphi `JoinHOrders(..., DontSort=true)`. Drained tmp rows are kept
+  in ring read order; no sort, no skip-tail.
 - Added `state::history_store::MarketHistoryStore`, the per-market single
   writer side intended for `StoreWorker`: retained futures/spot/liquidation/MM
   rings, LastPrice ring, mini-candle ring, futures `TradeJoinBuffer`, rolling
@@ -612,8 +614,8 @@ Done:
   append only when `pLast > 0`, bid/ask is present, and the market is BTC or
   base-USDT.
 - Added `MarketHistoryStore::drain_joined_futures_like_delphi`, which drains
-  the temp futures buffer through sort/skip-tail before appending to retained
-  history and updating 1/3/5 minute rolling volumes.
+  the temp futures buffer directly into retained history, matching
+  `JoinHOrders(..., DontSort=true)`, and updates 1/3/5 minute rolling volumes.
 - Added `MarketPrice::chart_price_step`, matching Delphi
   `AddNewAksPrice(Ask)`: update to `Max(eps, Ask / 5000)` only when `Ask > eps`
   and otherwise keep the previous value. Futures retained join will use this
@@ -662,6 +664,31 @@ Verification:
 - `cargo test history_store --lib` OK: 7 tests.
 - `cargo test --lib` OK: 695 tests.
 - `cargo check --examples` OK.
+
+### 2026-05-25 - Retained futures trades keep Delphi DontSort order
+
+Done:
+
+- Re-checked the active Delphi path:
+  `BMarketHistoryWorker.Execute -> m.JoinHOrders(0, NowTime, false, true)`.
+  The final `true` is `DontSort`, so live futures trades are copied from
+  `tmpList/tmpTradesRead/tmpTradesWrite` directly into retained history.
+- Removed the Rust-only sort/skip-tail retained append step.
+- `SeqRing` time-based helpers no longer assume timestamp monotonicity; they
+  scan/filter retained rows because late UDP/resend rows remain late.
+- The RAM-sized config helper now keeps the futures temp join ring at Delphi
+  `IntTradesBufSize = 1000` whenever futures retained history is enabled.
+- Recorded the decision in root `library_decisions.md` and the closed red flag
+  in `spec_pipeline/work/хуйня.md §X.161`.
+
+Verification:
+
+- `cargo test seq_ring --lib` OK.
+- `cargo test history --lib` OK.
+- `cargo test --lib` OK: `704 passed`.
+- `cargo check --examples` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 26.08s`, `ParseFailed=0`,
+  err_emu actual drop `10.57%`.
 
 ### 2026-05-25 - retained history worker first wiring
 

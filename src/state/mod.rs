@@ -33,7 +33,7 @@ pub use history::{
     prepare_joined_trades_for_retained_append, LastPricePoint, MMOrderCompanionData,
     MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
     TradeHistoryRow, TradeJoinBuffer, TradeJoinPush, TradeVolumeTotals, TradesPacketTimeShift,
-    DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS, DELPHI_TRADE_TAIL_EPS_DAYS,
+    DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 pub use history_store::{
     MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,

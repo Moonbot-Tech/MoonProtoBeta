@@ -17,7 +17,7 @@ use crate::state::history::{
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
 const EPS_MARKET: f64 = 1e-12;
-const DEFAULT_TRADE_JOIN_CAPACITY: usize = 1_000;
+const DELPHI_INT_TRADES_BUF_SIZE: usize = 1_000;
 const GIB: usize = 1024 * 1024 * 1024;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
@@ -48,7 +48,7 @@ impl Default for MarketHistoryConfig {
             mm_order_companion_capacity: 20_000,
             last_price_capacity: 60_000,
             mini_candles_capacity: 20_000,
-            trade_join_capacity: DEFAULT_TRADE_JOIN_CAPACITY,
+            trade_join_capacity: DELPHI_INT_TRADES_BUF_SIZE,
         }
     }
 }
@@ -73,9 +73,11 @@ impl MarketHistoryConfig {
             capacity_from_share(per_market_budget, 10, 100, LAST_PRICE_SLOT_BYTES, 80_000);
         let mini_candles_capacity =
             capacity_from_share(per_market_budget, 8, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
-        let trade_join_capacity = futures_trades_capacity
-            .min(DEFAULT_TRADE_JOIN_CAPACITY)
-            .max(usize::from(futures_trades_capacity > 0) * 8);
+        let trade_join_capacity = if futures_trades_capacity > 0 {
+            DELPHI_INT_TRADES_BUF_SIZE
+        } else {
+            0
+        };
 
         Self {
             futures_trades_capacity,
@@ -316,12 +318,10 @@ impl MarketHistoryStore {
     }
 
     /// Drain the temporary futures buffer into retained history, preserving the
-    /// `JoinHOrders` sort/skip-tail shape before appending to the monotonic
-    /// `SeqRing`.
+    /// active Delphi `JoinHOrders(..., DontSort=true)` copy-direct shape.
     pub fn drain_joined_futures_like_delphi(&mut self) -> usize {
         self.futures_join.drain_into(&mut self.joined_scratch);
-        let last_time = last_trade_time(self.readers.futures_trades.as_ref());
-        prepare_joined_trades_for_retained_append(&mut self.joined_scratch, last_time);
+        prepare_joined_trades_for_retained_append(&mut self.joined_scratch);
 
         let mut appended = 0usize;
         let rows = std::mem::take(&mut self.joined_scratch);
@@ -464,13 +464,6 @@ where
     (Some(writer), Some(reader))
 }
 
-fn last_trade_time(reader: Option<&SeqRingReader<TradeHistoryRow>>) -> Option<f64> {
-    let reader = reader?;
-    let mut out = Vec::new();
-    reader.copy_last(1, &mut out);
-    out.first().map(|row| row.time)
-}
-
 fn last_mini_time(reader: Option<&SeqRingReader<MiniCandle>>) -> Option<f64> {
     let reader = reader?;
     let mut out = Vec::new();
@@ -494,7 +487,7 @@ mod tests {
         let total_estimated = cfg.estimated_bytes_per_market() * market_count;
 
         assert!(cfg.futures_trades_capacity > cfg.spot_trades_capacity);
-        assert!(cfg.trade_join_capacity <= DEFAULT_TRADE_JOIN_CAPACITY);
+        assert_eq!(cfg.trade_join_capacity, DELPHI_INT_TRADES_BUF_SIZE);
         assert!(
             total_estimated <= MarketHistoryConfig::history_budget_bytes(total),
             "history defaults should fit the configured memory budget"
@@ -507,6 +500,17 @@ mod tests {
         let large = 16 * GIB;
         assert_eq!(MarketHistoryConfig::history_budget_bytes(small), small / 4);
         assert_eq!(MarketHistoryConfig::history_budget_bytes(large), large / 5);
+    }
+
+    #[test]
+    fn memory_sized_config_keeps_delphi_trade_join_capacity_when_enabled() {
+        let cfg = MarketHistoryConfig::from_total_memory_bytes(8 * GIB, 10_000);
+        assert!(cfg.futures_trades_capacity > 0);
+        assert_eq!(cfg.trade_join_capacity, DELPHI_INT_TRADES_BUF_SIZE);
+
+        let disabled = MarketHistoryConfig::from_total_memory_bytes(1, usize::MAX);
+        assert_eq!(disabled.futures_trades_capacity, 0);
+        assert_eq!(disabled.trade_join_capacity, 0);
     }
 
     #[test]
@@ -594,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn futures_join_sorts_skips_tail_and_updates_volumes() {
+    fn futures_join_drains_direct_like_dontsort_and_updates_volumes() {
         let base = 45_000.0;
         let sec = |s: f64| base + s / 86_400.0;
         let mut store = MarketHistoryStore::new(MarketHistoryConfig {
@@ -614,7 +618,7 @@ mod tests {
         store.push_futures_trade_into_join_like_delphi(trade(sec(9.0), 90.0, 1.0), 0.01);
         store.push_futures_trade_into_join_like_delphi(trade(sec(12.0), 120.0, -2.0), 0.01);
         store.push_futures_trade_into_join_like_delphi(trade(sec(11.0), 110.0, 3.0), 0.01);
-        assert_eq!(store.drain_joined_futures_like_delphi(), 2);
+        assert_eq!(store.drain_joined_futures_like_delphi(), 3);
 
         let mut out = Vec::new();
         store
@@ -626,15 +630,16 @@ mod tests {
             out,
             vec![
                 trade(sec(10.0), 100.0, 1.0),
+                trade(sec(9.0), 90.0, 1.0),
+                trade(sec(12.0), 120.0, -2.0),
                 trade(sec(11.0), 110.0, 3.0),
-                trade(sec(12.0), 120.0, -2.0)
             ]
         );
 
         let volumes = store.rolling_volumes_snapshot(sec(12.0));
-        assert_eq!(volumes.five_minutes.buy_value, 430.0);
+        assert_eq!(volumes.five_minutes.buy_value, 520.0);
         assert_eq!(volumes.five_minutes.sell_value, 240.0);
-        assert_eq!(volumes.five_minutes.trade_count, 3);
+        assert_eq!(volumes.five_minutes.trade_count, 4);
     }
 
     #[test]
