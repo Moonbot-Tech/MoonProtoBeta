@@ -9583,7 +9583,7 @@ pub fn run_init_sequence(
 
 fn send_post_init_resync(
     client: &mut Client,
-    dispatcher: &crate::events::EventDispatcher,
+    dispatcher: &mut crate::events::EventDispatcher,
     cfg: &InitConfig,
     result: &mut InitResult,
 ) {
@@ -10577,7 +10577,7 @@ mod api_pending_dispatch_tests {
         dispatcher.set_local_strategies(std::slice::from_ref(&strategy));
         let mut result = InitResult::default();
 
-        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
+        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
 
         assert!(result.post_init_resync_sent);
 
@@ -10650,10 +10650,10 @@ mod api_pending_dispatch_tests {
             subscribe_trades: Some(true),
             ..Default::default()
         };
-        let dispatcher = EventDispatcher::new();
+        let mut dispatcher = EventDispatcher::new();
         let mut result = InitResult::default();
 
-        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
+        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
 
         let mut mm_orders_value = None;
         let (sliced, high, low) = client.take_send_queues_for_test();
@@ -10681,10 +10681,10 @@ mod api_pending_dispatch_tests {
             mm_orders_subscribe: None,
             ..Default::default()
         };
-        let dispatcher = EventDispatcher::new();
+        let mut dispatcher = EventDispatcher::new();
         let mut result = InitResult::default();
 
-        send_post_init_resync(&mut client, &dispatcher, &cfg, &mut result);
+        send_post_init_resync(&mut client, &mut dispatcher, &cfg, &mut result);
         client.send_registry_subscriptions_after_init();
 
         let mut post_init_mm_orders = None;

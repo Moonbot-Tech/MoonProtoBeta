@@ -723,22 +723,13 @@ impl EventDispatcher {
             .or_else(|| self.local_strategy_snapshot_reply())
     }
 
-    pub(crate) fn local_strategy_snapshot_reply(&self) -> Option<StrategySnapshotReply> {
-        let strategies = self.strats.snapshot_vec();
-        if strategies.is_empty() {
-            return Some(StrategySnapshotReply::from_payload(
-                self.local_strategy_epoch,
-                0,
-                true,
-                Vec::new(),
-            ));
-        }
-        let schema = self.strats.strategy_schema()?;
-        Some(StrategySnapshotReply::from_strategies(
+    pub(crate) fn local_strategy_snapshot_reply(&mut self) -> Option<StrategySnapshotReply> {
+        let cache = self.strats.snapshot_payload_cache()?;
+        Some(StrategySnapshotReply::from_payload(
             self.local_strategy_epoch,
+            cache.client_max_last_date,
             true,
-            schema,
-            &strategies,
+            cache.data.clone(),
         ))
     }
 

@@ -400,9 +400,37 @@ pub(crate) fn parse_strategy_batch_with_schema_field_types(
     schema_field_types: Option<&HashMap<String, u8>>,
 ) -> Option<StrategyBatch> {
     let mut decoder = DeflateDecoder::new(deflate_bytes);
-    let mut decompressed = Vec::new();
+    let mut decompressed = Vec::with_capacity(strategy_plain_capacity_hint(deflate_bytes.len()));
     decoder.read_to_end(&mut decompressed).ok()?;
     parse_strategy_batch_plain_with_schema_field_types(&decompressed, schema_field_types)
+}
+
+pub(crate) fn parse_strategy_batch_for_each_with_schema_field_types<F>(
+    deflate_bytes: &[u8],
+    schema_field_types: Option<&HashMap<String, u8>>,
+    mut on_strategy: F,
+) -> Option<usize>
+where
+    F: FnMut(StrategySnapshot),
+{
+    let mut decoder = DeflateDecoder::new(deflate_bytes);
+    let mut decompressed = Vec::with_capacity(strategy_plain_capacity_hint(deflate_bytes.len()));
+    decoder.read_to_end(&mut decompressed).ok()?;
+    parse_strategy_batch_plain_for_each_with_schema_field_types(
+        &decompressed,
+        schema_field_types,
+        &mut on_strategy,
+    )
+}
+
+fn strategy_plain_capacity_hint(deflate_len: usize) -> usize {
+    // Live strategy snapshots are raw-deflate RTTI streams with many repeated
+    // field names/zero values; prod 44KB payloads currently inflate to ~1.5MB.
+    // Delphi reads a contiguous memory stream, so pre-sizing keeps Rust from
+    // repeatedly reallocating/copying the decompressed stream before parsing it.
+    deflate_len
+        .saturating_mul(40)
+        .clamp(4 * 1024, 8 * 1024 * 1024)
 }
 
 /// Парсинг уже распакованного плоского payload'а (для случая если decompression сделан снаружи).
@@ -449,6 +477,33 @@ fn parse_strategy_batch_plain_with_schema_field_types(
     })
 }
 
+fn parse_strategy_batch_plain_for_each_with_schema_field_types<F>(
+    data: &[u8],
+    schema_field_types: Option<&HashMap<String, u8>>,
+    on_strategy: &mut F,
+) -> Option<usize>
+where
+    F: FnMut(StrategySnapshot),
+{
+    let mut pos = 0usize;
+    let field_names = read_dict_arc(data, &mut pos)?;
+    let paths = read_dict(data, &mut pos)?;
+    let reader_fields =
+        schema_field_types.map(|field_types| build_reader_fields_arc(&field_names, field_types));
+    let strat_count = read_u16(data, &mut pos)? as usize;
+    for _ in 0..strat_count {
+        let strategy = read_strategy(
+            data,
+            &mut pos,
+            &field_names,
+            &paths,
+            reader_fields.as_deref(),
+        )?;
+        on_strategy(strategy);
+    }
+    Some(strat_count)
+}
+
 fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     let count = read_u16(data, pos)? as usize;
     let mut out = Vec::with_capacity(count);
@@ -464,6 +519,21 @@ fn read_dict(data: &[u8], pos: &mut usize) -> Option<Vec<String>> {
     Some(out)
 }
 
+fn read_dict_arc(data: &[u8], pos: &mut usize) -> Option<Vec<Arc<str>>> {
+    let count = read_u16(data, pos)? as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u8(data, pos)? as usize;
+        if *pos + len > data.len() {
+            return None;
+        }
+        let s = decode_utf8_delphi(&data[*pos..*pos + len]);
+        *pos += len;
+        out.push(Arc::<str>::from(s));
+    }
+    Some(out)
+}
+
 fn build_reader_fields(names: &[String], schema_by_name: &HashMap<String, u8>) -> Vec<Option<u8>> {
     // Delphi `TStrategySerializer.BuildReaderProps`: NameDict -> RTTI field
     // mapping is built once for the whole snapshot, then ReadField only indexes
@@ -472,6 +542,18 @@ fn build_reader_fields(names: &[String], schema_by_name: &HashMap<String, u8>) -
     names
         .iter()
         .map(|name| schema_by_name.get(name.as_str()).copied())
+        .collect()
+}
+
+fn build_reader_fields_arc(
+    names: &[Arc<str>],
+    schema_by_name: &HashMap<String, u8>,
+) -> Vec<Option<u8>> {
+    // Same reader-prop table as `build_reader_fields`, but the active apply
+    // path does not need the public `Vec<String>` returned by generic parser.
+    names
+        .iter()
+        .map(|name| schema_by_name.get(name.as_ref()).copied())
         .collect()
 }
 

@@ -15,11 +15,18 @@
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::{
-    parse_strategy_batch_with_schema, parse_strategy_batch_with_schema_field_types, FieldValue,
-    StrategyActiveMode, StrategyBatch, StrategyKind, StrategySnapshot,
+    parse_strategy_batch_for_each_with_schema_field_types, parse_strategy_batch_with_schema,
+    parse_strategy_batch_with_schema_field_types, FieldValue, StrategyActiveMode, StrategyBatch,
+    StrategyKind, StrategySnapshot,
 };
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub(crate) struct StrategySnapshotPayloadCache {
+    pub client_max_last_date: u64,
+    pub data: Vec<u8>,
+}
 
 /// Информация по одной стратегии — то что хранится клиентом.
 #[derive(Debug, Clone)]
@@ -130,6 +137,8 @@ pub struct StratsState {
     /// `TStratSchema` field name -> TypeID cache for Delphi `BuildReaderProps`.
     /// Stored behind `Arc` so `EventDispatcherSnapshot` clones remain cheap.
     schema_field_types: Option<Arc<HashMap<String, u8>>>,
+    /// Cached `TStrategySerializer` payload for `TStratSnapshot.CreateFromStrats`.
+    snapshot_payload_cache: Option<Arc<StrategySnapshotPayloadCache>>,
     schema_revision: u64,
     schema_failures: u64,
     schema_last_error: Option<String>,
@@ -159,6 +168,36 @@ impl StratsState {
         self.order.clear();
         self.folders_by_key.clear();
         self.snapshots_by_id.clear();
+        self.invalidate_snapshot_payload_cache();
+    }
+
+    fn invalidate_snapshot_payload_cache(&mut self) {
+        self.snapshot_payload_cache = None;
+    }
+
+    fn set_snapshot_payload_cache_from_wire(
+        &mut self,
+        client_max_last_date: u64,
+        deflate_data: &[u8],
+    ) {
+        self.snapshot_payload_cache = Some(Arc::new(StrategySnapshotPayloadCache {
+            client_max_last_date,
+            data: deflate_data.to_vec(),
+        }));
+    }
+
+    fn update_snapshot_payload_cache_after_apply(
+        &mut self,
+        applied_count: usize,
+        client_max_last_date: u64,
+        deflate_data: &[u8],
+        changed: bool,
+    ) {
+        if applied_count == self.snapshots_by_id.len() {
+            self.set_snapshot_payload_cache_from_wire(client_max_last_date, deflate_data);
+        } else if changed {
+            self.invalidate_snapshot_payload_cache();
+        }
     }
 
     fn folder_key(path: &str) -> String {
@@ -198,6 +237,7 @@ impl StratsState {
         if removed {
             self.order.retain(|id| *id != strategy_id);
             self.snapshots_by_id.remove(&strategy_id);
+            self.invalidate_snapshot_payload_cache();
         }
         removed
     }
@@ -289,6 +329,7 @@ impl StratsState {
             StratCommand::SellPriceUpdate(_) => StratEvent::Ignored,
             StratCommand::CheckedSync(s) => {
                 let mut changed = 0;
+                let mut snapshot_payload_changed = false;
                 for it in &s.items {
                     if let Some(entry) = self.by_id.get_mut(&it.strategy_id) {
                         if entry.checked != it.checked {
@@ -299,8 +340,14 @@ impl StratsState {
                     }
                     if let Some(snapshot) = self.snapshots_by_id.get_mut(&it.strategy_id) {
                         let snapshot = Arc::make_mut(snapshot);
-                        snapshot.checked = it.checked;
+                        if snapshot.checked != it.checked {
+                            snapshot.checked = it.checked;
+                            snapshot_payload_changed = true;
+                        }
                     }
+                }
+                if snapshot_payload_changed {
+                    self.invalidate_snapshot_payload_cache();
                 }
                 StratEvent::CheckedSynced {
                     changed,
@@ -341,6 +388,7 @@ impl StratsState {
                 self.schema_raw = Some(Arc::new(data));
                 self.schema = Some(Arc::new(schema));
                 self.schema_field_types = Some(Arc::new(field_types));
+                self.invalidate_snapshot_payload_cache();
                 self.schema_revision = self.schema_revision.saturating_add(1);
                 self.schema_last_error = None;
                 StratEvent::SchemaApplied {
@@ -400,6 +448,7 @@ impl StratsState {
         }
         self.create_folders_for_path(&s.path);
         self.snapshots_by_id.insert(s.strategy_id, Arc::new(s));
+        self.invalidate_snapshot_payload_cache();
     }
 
     /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
@@ -421,10 +470,11 @@ impl StratsState {
         self.create_folders_for_path(&s.path);
         self.snapshots_by_id
             .insert(s.strategy_id, Arc::new(s.clone()));
+        self.invalidate_snapshot_payload_cache();
         true
     }
 
-    fn upsert_snapshot_owned(&mut self, s: StrategySnapshot) -> bool {
+    fn upsert_snapshot_owned_without_cache_invalidation(&mut self, s: StrategySnapshot) -> bool {
         {
             let (existed, entry) = self.get_or_insert_with_existed(s.strategy_id);
             if existed && entry.last_date >= s.last_date && entry.strategy_ver >= s.strategy_ver {
@@ -461,9 +511,19 @@ impl StratsState {
         let _ = full;
         // Delphi `ApplyStratSnapshot(IsFull=true)` does not clear strategies
         // absent from the incoming payload. They remain local "Own" strategies.
+        let count = batch.strategies.len();
+        let mut changed = false;
+        let mut client_max_last_date = 0u64;
         for s in &batch.strategies {
-            self.upsert_from_snapshot(s);
+            client_max_last_date = client_max_last_date.max(s.last_date);
+            changed |= self.upsert_from_snapshot(s);
         }
+        self.update_snapshot_payload_cache_after_apply(
+            count,
+            client_max_last_date,
+            deflate_data,
+            changed,
+        );
         Some(batch)
     }
 
@@ -472,17 +532,24 @@ impl StratsState {
         deflate_data: &[u8],
         full: bool,
     ) -> Option<usize> {
-        let batch = match self.schema_field_types.as_deref() {
-            Some(field_types) => {
-                parse_strategy_batch_with_schema_field_types(deflate_data, Some(field_types))?
-            }
-            None => parse_strategy_batch_with_schema(deflate_data, None)?,
-        };
         let _ = full;
-        let count = batch.strategies.len();
-        for s in batch.strategies {
-            self.upsert_snapshot_owned(s);
-        }
+        let field_types = self.schema_field_types.clone();
+        let mut changed = false;
+        let mut client_max_last_date = 0u64;
+        let count = parse_strategy_batch_for_each_with_schema_field_types(
+            deflate_data,
+            field_types.as_deref(),
+            |s| {
+                client_max_last_date = client_max_last_date.max(s.last_date);
+                changed |= self.upsert_snapshot_owned_without_cache_invalidation(s);
+            },
+        )?;
+        self.update_snapshot_payload_cache_after_apply(
+            count,
+            client_max_last_date,
+            deflate_data,
+            changed,
+        );
         Some(count)
     }
 
@@ -507,6 +574,7 @@ impl StratsState {
         if let Some(snapshot) = self.snapshots_by_id.get_mut(&strategy_id) {
             let snapshot = Arc::make_mut(snapshot);
             snapshot.checked = checked;
+            self.invalidate_snapshot_payload_cache();
         }
         true
     }
@@ -558,6 +626,35 @@ impl StratsState {
             }
         }
         out
+    }
+
+    pub(crate) fn snapshot_payload_cache(&mut self) -> Option<Arc<StrategySnapshotPayloadCache>> {
+        if let Some(cache) = &self.snapshot_payload_cache {
+            return Some(Arc::clone(cache));
+        }
+
+        if self.snapshots_by_id.is_empty() {
+            let cache = Arc::new(StrategySnapshotPayloadCache {
+                client_max_last_date: 0,
+                data: crate::commands::strategy_serializer::StrategyBatchBuilder::empty_payload(),
+            });
+            self.snapshot_payload_cache = Some(Arc::clone(&cache));
+            return Some(cache);
+        }
+
+        let schema = Arc::clone(self.schema.as_ref()?);
+        let mut builder = crate::commands::strategy_serializer::StrategyBatchBuilder::new(&schema);
+        let mut client_max_last_date = 0u64;
+        for strategy in self.snapshots() {
+            client_max_last_date = client_max_last_date.max(strategy.last_date);
+            builder.write_strategy(strategy);
+        }
+        let cache = Arc::new(StrategySnapshotPayloadCache {
+            client_max_last_date,
+            data: builder.finalize(),
+        });
+        self.snapshot_payload_cache = Some(Arc::clone(&cache));
+        Some(cache)
     }
 
     /// Последняя schema стратегий, полученная через `TStratSchemaRequest` в Init.
@@ -1009,6 +1106,83 @@ mod tests {
             batch.strategies[0].fields.get("StrategyName"),
             Some(&FieldValue::String("Strat-A".to_string()))
         );
+        let cache = s
+            .snapshot_payload_cache
+            .as_ref()
+            .expect("complete incoming snapshot seeds serialized reply cache");
+        assert_eq!(cache.client_max_last_date, 1737000000001);
+        assert_eq!(cache.data, payload);
+    }
+
+    #[test]
+    fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
+        use crate::commands::strategy_serializer::{FieldValue, StrategyBatchBuilder};
+
+        let schema = schema_for_strategy_name(&[5]);
+        let mut fields = StrategyFields::new();
+        fields.insert("StrategyName", FieldValue::String("Cached".to_string()));
+        let mut b = StrategyBatchBuilder::new(&schema);
+        b.write_strategy(&StrategySnapshot {
+            strategy_id: 777,
+            strategy_ver: 1,
+            last_date: 1737000000042,
+            checked: true,
+            kind: 5,
+            path: "Cache".to_string(),
+            fields,
+        });
+        let payload = b.finalize();
+
+        let mut s = StratsState::new();
+        let count = s
+            .apply_snapshot_decoded_with_mode_in_place(&payload, false)
+            .unwrap();
+
+        assert_eq!(count, 1);
+        let cache = s
+            .snapshot_payload_cache
+            .as_ref()
+            .expect("active complete snapshot seeds serialized reply cache");
+        assert_eq!(cache.client_max_last_date, 1737000000042);
+        assert_eq!(cache.data, payload);
+
+        let ev = s.apply(StratCommand::CheckedSync(StratCheckedSync {
+            items: vec![StratCheckedItem {
+                strategy_id: 777,
+                checked: true,
+            }],
+            is_delta: false,
+        }));
+        assert!(matches!(
+            ev,
+            StratEvent::CheckedSynced {
+                changed: 0,
+                is_delta: false
+            }
+        ));
+        assert!(
+            s.snapshot_payload_cache.is_some(),
+            "no-op checked sync must not discard serialized reply cache"
+        );
+
+        let ev = s.apply(StratCommand::CheckedSync(StratCheckedSync {
+            items: vec![StratCheckedItem {
+                strategy_id: 777,
+                checked: false,
+            }],
+            is_delta: true,
+        }));
+        assert!(matches!(
+            ev,
+            StratEvent::CheckedSynced {
+                changed: 1,
+                is_delta: true
+            }
+        ));
+        assert!(
+            s.snapshot_payload_cache.is_none(),
+            "real checked change mutates serialized snapshot payload"
+        );
     }
 
     #[test]
@@ -1063,6 +1237,10 @@ mod tests {
         );
         assert!(s.get(2).is_some());
         assert!(s.snapshot(2).is_some());
+        assert!(
+            s.snapshot_payload_cache.is_none(),
+            "a subset payload must not be reused as full local snapshot reply"
+        );
     }
 
     #[test]

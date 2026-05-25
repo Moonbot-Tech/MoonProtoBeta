@@ -5555,6 +5555,50 @@ Dispatcher-worker and Strat follow-up:
   This run did not make `Strat` the active-dispatch max; the remaining measured
   max is worker-side market API apply, not protocol recv.
 
+Finished small Strat optimization step:
+
+- Local `TStratSnapshotRequest` replies now use a cached serialized
+  `TStrategySerializer` payload in `StratsState`. The cache is invalidated when
+  schema/snapshot/checked state changes. This keeps the wire reply identical for
+  unchanged state, but avoids rebuilding and raw-deflating all local strategies
+  for every small request command.
+- The active-only snapshot apply path now streams decoded strategies directly
+  into `StratsState` instead of first building a public `StrategyBatch` vector.
+  The public parser still returns `names/paths/strategies`; live apply does not
+  need those public containers. Raw-deflate output is pre-sized from a bounded
+  capacity hint to avoid repeated realloc/copy while inflating the known
+  serializer stream.
+- Quick prod FireTest after this finished step:
+  - `FIRETEST_QUICK_PASS after 22.03s`;
+  - `reader max=787us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=168us`;
+  - `active_dispatch max=4196us max_src=Strat(30) payload=44462`;
+  - `app_enqueue max=3517us max_src=LogMsg(27) payload=84 mode=state`.
+- Follow-up full prod FireTest after fixing no-op `TStratCheckedSync` cache
+  invalidation:
+  - `FIRETEST_PASS`, `finished in 175.81s`;
+  - full candles snapshot under `err_emu=10%` completed after `3.01s`;
+  - Client A CPU: `reader max=698us`, `writer_cpu max=699us`,
+    `active_dispatch max=3419us max_src=Strat(30) payload=44462`,
+    `app_enqueue max=3215us max_src=TradesStream(33) mode=state`;
+  - Client B CPU: `reader max=551us`, `writer_cpu max=120us`,
+    `active_dispatch max=2245us max_src=API(31) payload=44042`,
+    `app_enqueue max=2340us max_src=TradesStream(33) mode=state`.
+  The previous full-run red flag where a small `TStratSnapshotRequest`
+  (`payload=11`) triggered about `19ms` of full snapshot rebuild is closed:
+  no-op checked sync no longer drops the cached serialized reply payload.
+- Current accepted boundary: the remaining `~3.5-4.2ms` worker-side
+  `TStrategySerializer` parse/apply cost is not protocol recv work. The measured
+  live payload is about `44KB` compressed, `~1.5MB` after raw-deflate, `762`
+  strategies and about `58K` fields.
+- Phase Z must build a small Delphi console benchmark and a Rust benchmark that
+  both read the exact same saved `TStratSnapshot.Data` file from FireTest/stress
+  dumps and measure only serializer parse/apply, with no UDP, Sliced, callbacks,
+  logging, or active-session machinery. Compare pure Delphi
+  `TStrategySerializer.LoadStrategiesFromStream`/`ApplyStratSnapshot` timing
+  against Rust `parse_strategy_batch*`/`StratsState` apply. Only after that
+  decide whether parser changes are required.
+
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
 Done:
