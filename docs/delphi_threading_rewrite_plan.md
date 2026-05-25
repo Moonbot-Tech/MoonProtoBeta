@@ -772,6 +772,8 @@ Done:
 - `MarketHistoryStore` keeps the last 5m candle as current candle and updates
   it from retained futures trades; rollover is handled by the 250ms
   `StoreWorker` maintenance path.
+- A futures trade after the 5-minute boundary seals the previous current candle
+  row and starts a new current candle row.
 - Derived snapshots now expose trade volumes/deltas, candle deltas, candle
   volumes, LastPrice-line deltas, and the combined deltas view.
 - Candle deltas and candle volumes are calculated in one pass over retained 5m
@@ -821,6 +823,11 @@ Verification:
 - After adding LastPrice-line derived deltas and strict old-boundary candle
   windows: `cargo test --lib` OK: 720 tests; `cargo check --examples` OK;
   quick prod FireTest OK: `FIRETEST_QUICK_PASS after 27.17s`; `cargo test
+  --test fire_test --no-run` OK.
+- Candle rollover unit gate:
+  `futures_trades_roll_current_candle_after_five_minutes` OK;
+  `cargo test state::history_store --lib` OK: 17 tests; full
+  `cargo test --lib` OK: 721 tests; `cargo check --examples` OK; `cargo test
   --test fire_test --no-run` OK.
 
 ### Phase Z - final full optimization pass

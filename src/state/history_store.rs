@@ -1475,6 +1475,49 @@ mod tests {
     }
 
     #[test]
+    fn futures_trades_roll_current_candle_after_five_minutes() {
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 8,
+            trade_join_capacity: 8,
+        });
+        let now = 45_000.0;
+        store.replace_candles_5m_from_snapshot(&[Candle5mRow {
+            time: now,
+            min_p: 100.0,
+            max_p: 110.0,
+            close_p: 105.0,
+            open_p: 101.0,
+            vol: 1_000.0,
+        }]);
+
+        let next_time = now + 6.0 / 1440.0;
+        store.push_futures_trade_into_join_like_delphi(trade(next_time, 120.0, 2.0), 0.0);
+        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+
+        let mut candles = Vec::new();
+        store
+            .readers()
+            .candles_5m
+            .unwrap()
+            .copy_last(8, &mut candles);
+
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].time, now);
+        assert_eq!(candles[0].close_p, 105.0);
+        assert_eq!(candles[1].time, next_time);
+        assert_eq!(candles[1].open_p, 120.0);
+        assert_eq!(candles[1].close_p, 120.0);
+        assert_eq!(candles[1].vol, 240.0);
+    }
+
+    #[test]
     fn retained_trades_update_current_candle_and_derived_volumes() {
         let mut store = MarketHistoryStore::new(MarketHistoryConfig {
             futures_trades_capacity: 8,

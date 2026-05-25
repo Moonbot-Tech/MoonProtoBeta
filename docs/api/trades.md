@@ -226,6 +226,7 @@ pub struct MarketDerivedSnapshot {
     pub candle_volumes: CandleVolumeSnapshot,
     pub trade_deltas: DerivedDeltaSnapshot,
     pub candle_deltas: DerivedDeltaSnapshot,
+    pub last_price_deltas: DerivedDeltaSnapshot,
     pub deltas: DerivedDeltaSnapshot,
 }
 
