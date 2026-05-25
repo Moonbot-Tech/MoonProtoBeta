@@ -26,7 +26,8 @@
 //! Profiles:
 //! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
 //!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
-//!   retained LastPrice/trades, trades + orderbook streams, ParseFailed=0, CPU summary.
+//!   retained LastPrice/trades, derived trade snapshot, trades + orderbook
+//!   streams, ParseFailed=0, CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
 //!   health/stress scenario below. Requires `allow_mutation=true`.
 
@@ -2314,6 +2315,26 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     println!(
         "OK: quick retained trades futures={} spot={}",
         futures_retained, spot_retained
+    );
+    let market = a.snapshot().market;
+    let derived = a
+        .history_worker
+        .derived_snapshot(&market, delphi_now_raw_for_test())
+        .expect("quick FireTest retained target market must expose derived snapshot");
+    if futures_retained > 0 {
+        assert!(
+            derived.trade_volumes.five_minutes.total_value() > 0.0,
+            "quick FireTest retained futures trades but derived trade volume stayed zero: {:?}",
+            derived.trade_volumes
+        );
+    }
+    println!(
+        "OK: quick derived trade_vol_1m={:.4} trade_vol_5m={:.4} trade_delta_1m={:.4}% trade_delta_5m={:.4}% candle_vol_1h={:.4}",
+        derived.trade_volumes.one_minute.total_value(),
+        derived.trade_volumes.five_minutes.total_value(),
+        derived.trade_deltas.one_minute,
+        derived.trade_deltas.five_minutes,
+        derived.candle_volumes.one_hour
     );
     log_err_emu_snapshot(
         "quick 10% gate",

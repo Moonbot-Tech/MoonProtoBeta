@@ -763,6 +763,31 @@ Verification:
   sizing helper. This is the API default path for retained history after Init
   knows market count.
 
+### 2026-05-25 - retained candles and derived analytics live gate
+
+Done:
+
+- Active retained candles now receive the completed `RequestCandlesData`
+  snapshot through `EventDispatcher::apply_candles_snapshot`.
+- `MarketHistoryStore` keeps the last 5m candle as current candle and updates
+  it from retained futures trades; rollover is handled by the 250ms
+  `StoreWorker` maintenance path.
+- Derived snapshots now expose trade volumes/deltas, candle deltas, candle
+  volumes, and the combined deltas view.
+- Candle deltas and candle volumes are calculated in one pass over retained 5m
+  rows plus the current candle.
+- Quick FireTest now also checks that retained futures trades feed the derived
+  trade-volume snapshot, so "rows stored but analytics dead" is caught before
+  the full candles stress.
+
+Verification:
+
+- `cargo test --lib` OK: 715 tests.
+- `cargo check --examples` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.72s`,
+  retained target trades `futures=3 spot=0`, derived
+  `trade_vol_5m=200.5955`, `ParseFailed=0`.
+
 ### Phase Z - final full optimization pass
 
 Делать в самом конце, после protocol/runtime parity и после того, как крупные
