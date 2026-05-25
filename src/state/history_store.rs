@@ -7,7 +7,7 @@
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, prepare_joined_trades_for_retained_append,
     LastPricePoint, MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
-    TradeHistoryRow, TradeJoinBuffer, DELPHI_SAME_TRADES_TIME_DAYS,
+    TradeHistoryRow, TradeJoinBuffer, TradesPacketTimeShift, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
@@ -147,6 +147,24 @@ impl MarketHistoryStore {
             .push_like_delphi(row, chart_price_step, DELPHI_SAME_TRADES_TIME_DAYS);
     }
 
+    pub fn push_futures_stream_trade_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        chart_price_step: f64,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> f64 {
+        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
+        self.push_futures_trade_into_join_like_delphi(
+            TradeHistoryRow { time, price, qty },
+            chart_price_step,
+        );
+        time
+    }
+
     /// Drain the temporary futures buffer into retained history, preserving the
     /// `JoinHOrders` sort/skip-tail shape before appending to the monotonic
     /// `SeqRing`.
@@ -171,12 +189,58 @@ impl MarketHistoryStore {
         self.spot_trades.as_mut().map(|writer| writer.push(row))
     }
 
+    pub fn append_spot_stream_trade_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>) {
+        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
+        let seq = self.append_spot_trade_like_delphi(TradeHistoryRow { time, price, qty });
+        (time, seq)
+    }
+
     pub fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
         self.liquidations.as_mut().map(|writer| writer.push(row))
     }
 
+    pub fn append_liquidation_stream_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>) {
+        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
+        let seq = self.append_liquidation_like_delphi(TradeHistoryRow { time, price, qty });
+        (time, seq)
+    }
+
     pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64> {
         self.mm_orders.as_mut().map(|writer| writer.push(row))
+    }
+
+    pub fn append_mm_stream_order_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        vol: f32,
+        q: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>) {
+        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
+        let seq = self.append_mm_order_like_delphi(MMOrderHistoryRow {
+            time,
+            vol: f64::from(vol),
+            q: f64::from(q),
+        });
+        (time, seq)
     }
 
     /// Fold detailed futures rows evicted from `SeqRing` into retained
@@ -333,6 +397,59 @@ mod tests {
         assert_eq!(volumes.five_minutes.buy_value, 430.0);
         assert_eq!(volumes.five_minutes.sell_value, 240.0);
         assert_eq!(volumes.five_minutes.trade_count, 3);
+    }
+
+    #[test]
+    fn stream_append_helpers_share_delphi_packet_time_shift() {
+        let base = 45_000.0;
+        let now = base + 2.0 / 24.0 + 3.0 / 86_400.0;
+        let mut shift = TradesPacketTimeShift::new();
+        let mut store = MarketHistoryStore::new(MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 8,
+            liquidation_capacity: 8,
+            mm_orders_capacity: 8,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 8,
+        });
+
+        let fut_time = store
+            .push_futures_stream_trade_like_delphi(base, 100, now, 100.0, 1.0, 0.01, &mut shift);
+        let (mm_time, mm_seq) =
+            store.append_mm_stream_order_like_delphi(base, 200, base - 10.0, 5.0, -2.0, &mut shift);
+        let (spot_time, spot_seq) = store.append_spot_stream_trade_like_delphi(
+            base,
+            -300,
+            base - 10.0,
+            90.0,
+            -1.0,
+            &mut shift,
+        );
+        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+
+        assert_eq!(shift.shift_days(), Some(2.0 / 24.0));
+        assert_eq!(fut_time, base + 100.0 / 86_400_000.0 + 2.0 / 24.0);
+        assert_eq!(mm_time, base + 200.0 / 86_400_000.0 + 2.0 / 24.0);
+        assert_eq!(spot_time, base - 300.0 / 86_400_000.0 + 2.0 / 24.0);
+        assert_eq!(mm_seq, Some(0));
+        assert_eq!(spot_seq, Some(0));
+
+        let readers = store.readers();
+        let mut trades = Vec::new();
+        readers.futures_trades.unwrap().copy_last(1, &mut trades);
+        assert_eq!(trades[0].time, fut_time);
+
+        let mut mm_orders = Vec::new();
+        readers.mm_orders.unwrap().copy_last(1, &mut mm_orders);
+        assert_eq!(
+            mm_orders,
+            vec![MMOrderHistoryRow {
+                time: mm_time,
+                vol: 5.0,
+                q: -2.0,
+            }]
+        );
     }
 
     #[test]

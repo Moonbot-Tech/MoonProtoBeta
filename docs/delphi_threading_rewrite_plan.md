@@ -616,13 +616,17 @@ Done:
   per-packet time correction: first known/stored row fixes
   `round((NowTimeX - RowTime) * 24) / 24`, later rows reuse the same shift, and
   skipped unknown-market sections do not initialize it.
+- Added `MarketHistoryStore::*_stream_*_like_delphi` helpers for
+  futures/spot/liquidation/MM rows. These are the explicit bridge from
+  `TradesStream` section rows to retained storage: compute Delphi shifted row
+  time, then append through the correct retained path.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 17 tests.
-- `cargo test history_store --lib` OK: 3 tests.
-- `cargo test --lib` OK: 688 tests.
+- `cargo test history --lib` OK: 18 tests.
+- `cargo test history_store --lib` OK: 4 tests.
+- `cargo test --lib` OK: 689 tests.
 
 ### Phase Z - final full optimization pass
 

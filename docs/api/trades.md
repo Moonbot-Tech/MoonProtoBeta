@@ -339,10 +339,47 @@ impl MarketHistoryStore {
         row: TradeHistoryRow,
         chart_price_step: f64,
     );
+    pub fn push_futures_stream_trade_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        chart_price_step: f64,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> f64;
     pub fn drain_joined_futures_like_delphi(&mut self) -> usize;
     pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
+    pub fn append_spot_stream_trade_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>);
     pub fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
+    pub fn append_liquidation_stream_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        price: f32,
+        qty: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>);
     pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64>;
+    pub fn append_mm_stream_order_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+        vol: f32,
+        q: f32,
+        time_shift: &mut TradesPacketTimeShift,
+    ) -> (f64, Option<u64>);
     pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
 }
@@ -353,6 +390,9 @@ impl MarketHistoryStore {
 ring. Futures trades first enter the Delphi-like temporary join buffer and are
 drained into retained history through the sort/skip-tail step. Rows evicted
 from the futures retained ring are buffered for `TMiniCandle` compaction.
+The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
+shared `TradesPacketTimeShift`, so all retained row types in one packet use the
+same Delphi packet time correction.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
 
