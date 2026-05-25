@@ -104,6 +104,12 @@ valid trades packet queued `emk_TradesResend` for the listed packet numbers.
 The dispatcher still emits `Apply(packet)` for duplicate/resend payloads when
 Delphi would parse the payload.
 
+Before an `Apply(packet)` event is emitted, `Client::run_with_dispatcher` also
+updates `MarketsState::trade_state(market)` for every known futures/spot trade
+row. This mirrors the bounded Delphi `ProcessTradesStream` tail: futures trades
+update `LastGotAllTrades` and the `SetLastTradePrices` fields, while spot trades
+only update `LastGotSpotTrades`.
+
 ## Public Types
 
 ```rust

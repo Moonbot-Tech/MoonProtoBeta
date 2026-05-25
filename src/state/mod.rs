@@ -24,7 +24,7 @@ pub mod strats;
 pub mod trades;
 
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
-pub use markets::{MarketPrice, MarketsEvent, MarketsState};
+pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
 pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
     OrderBookSnapshot, OrderBooks, TopOfBook,

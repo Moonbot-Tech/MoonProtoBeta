@@ -71,6 +71,15 @@ When funding is included, the same row also updates
 `Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
 mutation in the `HasFunding` branch.
 
+Trades stream packets also update the bounded live trade tail kept by Delphi on
+`TMarket`. For futures trade rows, the dispatcher updates
+`MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
+`last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
+`last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
+`TradesEvent::Apply`. Spot trade rows update only
+`last_got_spot_trades_ms`, matching Delphi's spot branch which exits before
+`SetLastTradePrices`.
+
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
 dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
@@ -162,6 +171,7 @@ pub struct MarketsState {
     pub corr_prices: HashMap<String, f64>,
     pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
     pub ref_btc_corr_markets: HashMap<String, String>,
+    pub trade_states: HashMap<String, MarketTradeState>,
     pub token_tags: HashMap<String, TokenTags>,
     pub market_indexes: Vec<String>,
     pub indexes_synchronized: bool,
@@ -192,6 +202,19 @@ pub struct BaseCurrencyPrice {
     pub usdt_rev_market: Option<String>,
     pub usdt_corr_market: Option<String>,
     pub usdt_rev_corr_market: Option<String>,
+}
+```
+
+```rust
+pub struct MarketTradeState {
+    pub last_got_all_trades_ms: i64,
+    pub last_got_spot_trades_ms: i64,
+    pub last_trade_price: f64,
+    pub last_buy_price: f64,
+    pub last_sell_price: f64,
+    pub last_trade_price_ema15: f64,
+    pub last_trade_price_ema5: f64,
+    pub last_trade_was_sell: bool,
 }
 ```
 
@@ -235,6 +258,7 @@ dispatcher.markets().price("BTCUSDT");
 dispatcher.markets().price_by_index(0);
 dispatcher.markets().ref_btc_corr_market("DOGEUSDT");
 dispatcher.markets().base_currency_price("BTC");
+dispatcher.markets().trade_state("BTCUSDT");
 dispatcher.markets().tags("BTCUSDT");
 dispatcher.markets().market_count();
 dispatcher.markets().corr_count();

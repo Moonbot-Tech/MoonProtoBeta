@@ -5079,3 +5079,33 @@ Verification:
   `unsubscribe_all_orderbooks()` and no packet for an empty registry.
 - `cargo fmt --all --check`, `cargo test --lib --quiet` (`652 passed`), and
   `cargo check --examples --quiet` passed.
+
+### 2026-05-24 - Phase E partial: TradesStream live market tail state
+
+Done:
+
+- Fixed the first direct-state part of the `MPC_TradesStream` mismatch.
+- Delphi `TMoonProtoEngine.ProcessTradesStream` tracks packet gaps first, then
+  applies each known market trade inline through `wsParseOrdersHistoryAll_Int`.
+  For futures rows that tail sets `LastGotAllTrades` and calls
+  `TMarket.SetLastTradePrices`; for spot rows it updates `LastGotSpotTrades`
+  and exits before `SetLastTradePrices`.
+- Rust previously maintained only `TradesState` gap/retry state and emitted
+  `TradesEvent::Apply(pkt)`; it did not mutate any market live trade tail.
+- `MarketsState` now has `MarketTradeState` keyed by market name. The dispatcher
+  applies the bounded Delphi tail before emitting `TradesEvent::Apply`:
+  `last_got_all_trades_ms`, `last_got_spot_trades_ms`, `last_trade_price`,
+  `last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
+  `last_trade_price_ema5`, and `last_trade_was_sell`.
+- Recorded `spec_pipeline/work/хуйня.md §X.156`.
+
+Verification:
+
+- Added regression tests for futures `SetLastTradePrices` tail and spot not
+  overwriting futures tail.
+
+Still not done:
+
+- Full Delphi `AddFrom`, history ring buffers, detection state, `SetEmu*`, and
+  zero-alloc `SectionIter` remain Phase E work. They are not accepted
+  deviations.

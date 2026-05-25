@@ -16,6 +16,7 @@ use crate::commands::market::{
     CorrMarket, CorrMarketPriceUpdate, EngineStreamReader, Market, MarketPriceUpdate,
     MarketTokenTags, MarketsListResponse, MarketsPricesResponse, TokenTags,
 };
+use crate::commands::trades_stream::{TradeSection, TradesPacket};
 
 const EPS_MARKET: f64 = 1e-12;
 
@@ -68,6 +69,59 @@ impl BaseCurrencyPrice {
     }
 }
 
+/// Delphi `TMarket` live trade tail fields maintained from `MPC_TradesStream`.
+///
+/// This is intentionally separate from the wire `Market` snapshot: Delphi does
+/// not send these fields in `GetMarketsList`, but it mutates them inline while
+/// processing trades.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketTradeState {
+    /// Delphi `TMarket.LastGotAllTrades` (`GetTimeMS`) for futures trades.
+    pub last_got_all_trades_ms: i64,
+    /// Delphi `TMarket.LastGotSpotTrades` (`GetTimeMS`) for spot trades.
+    pub last_got_spot_trades_ms: i64,
+    /// Delphi `TMarket.LastTradePrice`.
+    pub last_trade_price: f64,
+    /// Delphi `TMarket.LastBuyPrice`; yes, Delphi updates this on `O_Sell`.
+    pub last_buy_price: f64,
+    /// Delphi `TMarket.LastSellPrice`; Delphi updates this on `O_Buy`.
+    pub last_sell_price: f64,
+    /// Delphi `TMarket.LastTradePriceEMA15`.
+    pub last_trade_price_ema15: f64,
+    /// Delphi `TMarket.LastTradePriceEMA5`.
+    pub last_trade_price_ema5: f64,
+    /// Delphi `TMarket.LastTradeKind = O_Sell`.
+    pub last_trade_was_sell: bool,
+}
+
+impl MarketTradeState {
+    fn apply_futures_trade_like_delphi(&mut self, price: f64, qty: f64, now_ms: i64) {
+        let is_sell = qty < 0.0;
+        self.last_got_all_trades_ms = now_ms;
+        self.last_trade_price = price;
+        self.last_trade_was_sell = is_sell;
+
+        if self.last_trade_price_ema15 < EPS_MARKET {
+            self.last_trade_price_ema15 = price;
+        }
+        if self.last_trade_price_ema5 < EPS_MARKET {
+            self.last_trade_price_ema5 = price;
+        }
+        self.last_trade_price_ema15 = (self.last_trade_price_ema15 * 15.0 + price) / 16.0;
+        self.last_trade_price_ema5 = (self.last_trade_price_ema5 * 5.0 + price) / 6.0;
+
+        if is_sell {
+            self.last_buy_price = price;
+        } else {
+            self.last_sell_price = price;
+        }
+    }
+
+    fn apply_spot_trade_like_delphi(&mut self, now_ms: i64) {
+        self.last_got_spot_trades_ms = now_ms;
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
     /// Маркеты в порядке `mIndex` (как они приходят в `emk_GetMarketsList`).
@@ -84,6 +138,11 @@ pub struct MarketsState {
     pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
     /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
     pub ref_btc_corr_markets: HashMap<String, String>,
+    /// Live trade tail state keyed by `bn_market_name`.
+    ///
+    /// Delphi stores these fields directly on `TMarket`; Rust keeps the wire
+    /// market snapshot clean and stores the non-wire live tail here.
+    pub trade_states: HashMap<String, MarketTradeState>,
     /// Теги монет, key = `market_name`.
     pub token_tags: HashMap<String, TokenTags>,
     /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
@@ -210,6 +269,9 @@ impl MarketsState {
         self.by_name.reserve(markets.len());
         for (i, m) in markets.iter().enumerate() {
             self.by_name.insert(m.bn_market_name.clone(), i);
+            self.trade_states
+                .entry(m.bn_market_name.clone())
+                .or_default();
         }
 
         self.token_tags
@@ -320,6 +382,9 @@ impl MarketsState {
 
         let idx = self.markets.len();
         self.by_name.insert(market.bn_market_name.clone(), idx);
+        self.trade_states
+            .entry(market.bn_market_name.clone())
+            .or_default();
         self.prices.push(market_price_from_market(&market));
         self.markets.push(market);
         true
@@ -643,6 +708,41 @@ impl MarketsState {
         MarketsEvent::IndexesUpdated { count }
     }
 
+    /// Apply the Delphi `ProcessTradesStream` live market tail side effects.
+    ///
+    /// Gap tracking remains in `TradesState`. This method mirrors only the
+    /// bounded per-market tail fields from the parsed trade sections:
+    /// futures trades call the `SetLastTradePrices` tail and update
+    /// `LastGotAllTrades`; spot trades update only `LastGotSpotTrades`.
+    pub(crate) fn apply_trades_packet_tail_like_delphi(&mut self, pkt: &TradesPacket, now_ms: i64) {
+        for section in &pkt.sections {
+            let TradeSection::Trades(trades) = section else {
+                continue;
+            };
+            for trade in trades {
+                let Some(name) = self
+                    .market_name_by_index(trade.market_index)
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                if !self.by_name.contains_key(&name) {
+                    continue;
+                }
+                let state = self.trade_states.entry(name).or_default();
+                if trade.is_spot {
+                    state.apply_spot_trade_like_delphi(now_ms);
+                } else {
+                    state.apply_futures_trade_like_delphi(
+                        f64::from(trade.price),
+                        f64::from(trade.qty),
+                        now_ms,
+                    );
+                }
+            }
+        }
+    }
+
     /// Mark current market indexes as stale after server process restart.
     ///
     /// The old `market_indexes` vector is intentionally kept for diagnostics and for
@@ -771,6 +871,16 @@ impl MarketsState {
                 .iter()
                 .find(|(key, _)| same_text_ascii(key, base_currency))
                 .map(|(_, value)| value)
+        })
+    }
+
+    /// Delphi `TMarket` live trade tail state for a known market.
+    pub fn trade_state(&self, market_name: &str) -> Option<MarketTradeState> {
+        self.by_name.contains_key(market_name).then(|| {
+            self.trade_states
+                .get(market_name)
+                .copied()
+                .unwrap_or_default()
         })
     }
 

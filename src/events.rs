@@ -751,7 +751,7 @@ impl EventDispatcher {
             Command::OrderBook => self.client_new_data_order_book(payload, now_ms, out),
             Command::TradesStream => self.client_new_data_trades_stream(payload, now_ms, out),
             Command::TradesResendResponse => {
-                self.client_new_data_trades_resend_response(payload, out)
+                self.client_new_data_trades_resend_response(payload, now_ms, out)
             }
             Command::Balance => self.client_new_data_balance(payload, out),
             Command::Strat => self.client_new_data_strat(payload, out),
@@ -888,16 +888,19 @@ impl EventDispatcher {
         match parse_trades_packet(payload) {
             Some(pkt) => {
                 let pkt = self.filter_trades_packet_to_known_markets(pkt);
-                // Flatten: каждое TradesEvent пушится в out отдельно — без nested Vec.
-                for ev in self.trades.on_packet(pkt, now_ms) {
-                    out.push(Event::Trade(ev));
-                }
+                let trade_events = self.trades.on_packet(pkt, now_ms);
+                self.apply_trades_events_like_delphi(trade_events, now_ms, out);
             }
             None => out.push(Self::parse_failed(Command::TradesStream, payload)),
         }
     }
 
-    fn client_new_data_trades_resend_response(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+    fn client_new_data_trades_resend_response(
+        &mut self,
+        payload: &[u8],
+        now_ms: i64,
+        out: &mut Vec<Event>,
+    ) {
         // Delphi `ProcessTradesResendBatch` feeds every inner packet back into
         // `ProcessTradesStream(..., False)`, so the same fresh-index gate applies.
         if !self.markets.indexes_synchronized {
@@ -908,12 +911,26 @@ impl EventDispatcher {
             match parse_trades_packet(&inner) {
                 Some(pkt) => {
                     let pkt = self.filter_trades_packet_to_known_markets(pkt);
-                    for ev in self.trades.on_packet_resend(pkt) {
-                        out.push(Event::Trade(ev));
-                    }
+                    let trade_events = self.trades.on_packet_resend(pkt);
+                    self.apply_trades_events_like_delphi(trade_events, now_ms, out);
                 }
                 None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
             }
+        }
+    }
+
+    fn apply_trades_events_like_delphi(
+        &mut self,
+        events: Vec<TradesEvent>,
+        now_ms: i64,
+        out: &mut Vec<Event>,
+    ) {
+        for ev in events {
+            if let TradesEvent::Apply(pkt) = &ev {
+                self.markets
+                    .apply_trades_packet_tail_like_delphi(pkt, now_ms);
+            }
+            out.push(Event::Trade(ev));
         }
     }
 
@@ -2593,6 +2610,60 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_applies_futures_trades_to_market_tail_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let payload = trades_payload_with_rows(800, 0, 0, &[(0, 100.0, 1.0), (1, 90.0, -2.0)]);
+        let events = d.dispatch(Command::TradesStream, &payload, 7_000);
+
+        assert!(events
+            .iter()
+            .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_)))));
+        let st = d
+            .markets
+            .trade_state("BTCUSDT")
+            .expect("known market trade state");
+        assert_eq!(st.last_got_all_trades_ms, 7_000);
+        assert_eq!(st.last_trade_price, 90.0);
+        assert!(st.last_trade_was_sell);
+        assert_eq!(
+            st.last_sell_price, 100.0,
+            "Delphi SetLastTradePrices writes LastSellPrice on O_Buy"
+        );
+        assert_eq!(
+            st.last_buy_price, 90.0,
+            "Delphi SetLastTradePrices writes LastBuyPrice on O_Sell"
+        );
+        assert_eq!(st.last_trade_price_ema15, (100.0 * 15.0 + 90.0) / 16.0);
+        assert_eq!(st.last_trade_price_ema5, (100.0 * 5.0 + 90.0) / 6.0);
+    }
+
+    #[test]
+    fn dispatcher_spot_trades_do_not_overwrite_futures_tail_like_delphi() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let futures = trades_payload_with_rows(900, 0, 0, &[(0, 100.0, 1.0)]);
+        let _ = d.dispatch(Command::TradesStream, &futures, 7_000);
+        let spot = trades_payload_with_rows(901, 2, 0, &[(0, 120.0, -1.0)]);
+        let _ = d.dispatch(Command::TradesStream, &spot, 8_000);
+
+        let st = d
+            .markets
+            .trade_state("BTCUSDT")
+            .expect("known market trade state");
+        assert_eq!(st.last_got_all_trades_ms, 7_000);
+        assert_eq!(st.last_got_spot_trades_ms, 8_000);
+        assert_eq!(
+            st.last_trade_price, 100.0,
+            "Delphi spot branch exits before SetLastTradePrices"
+        );
+    }
+
+    #[test]
     fn dispatcher_order_not_blocked_by_indexes_sync() {
         // Order channel не зависит от market_idx → не должен блокироваться indexes_sync.
         let mut d = EventDispatcher::new();
@@ -2938,6 +3009,27 @@ mod tests {
             payload.extend_from_slice(&(i as i16).to_le_bytes());
             payload.extend_from_slice(&(100.0f32 + i as f32).to_le_bytes());
             payload.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        payload.push(0); // packet flags: uncompressed, no taker flag.
+        payload
+    }
+
+    fn trades_payload_with_rows(
+        packet_num: u16,
+        section_type: u16,
+        market_index: u16,
+        rows: &[(i16, f32, f32)],
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&packet_num.to_le_bytes());
+        let market_index_and_flags = market_index | (section_type << 14);
+        payload.extend_from_slice(&market_index_and_flags.to_le_bytes());
+        payload.push(rows.len() as u8);
+        for (time_delta, price, qty) in rows {
+            payload.extend_from_slice(&time_delta.to_le_bytes());
+            payload.extend_from_slice(&price.to_le_bytes());
+            payload.extend_from_slice(&qty.to_le_bytes());
         }
         payload.push(0); // packet flags: uncompressed, no taker flag.
         payload
