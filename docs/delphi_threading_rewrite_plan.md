@@ -6295,3 +6295,34 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 22.06s`, `ParseFailed=0`.
+
+### 2026-05-26 - Correction: Strat fixed tails and delete string split
+
+Correction:
+
+- Re-checked `MoonProtoStratStruct.pas:TStratSnapshot.CreateFromStream`,
+  `TStratDelete.CreateFromStream`, `TStratSellPriceUpdate.CreateFromStream`,
+  and `TStratSchema.CreateFromStream`.
+- Rust treated short fixed tails in snapshot/delete/sell-price as parse
+  failures, while Delphi reads those object fields with `TMemoryStream.Read`.
+- Rust also used `unwrap_or_default()` for malformed `TStratDelete.FolderPath`.
+  Delphi calls `ReadStringFromStreamUtf8` when any folder-path bytes remain, so
+  an incomplete declared string raises and the command is not applied.
+- Rust now zero-tails fixed strat fields, rejects truncated delete folder
+  strings, and maps `TStratSchema` overdeclared `Size` to an empty malformed
+  payload, matching Delphi `Data=nil` later-fail behavior.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.180`.
+
+Verification:
+
+- Added parser tests for short snapshot fixed tail, short delete strategy ID,
+  truncated delete folder string, short sell-price update, and schema
+  `Size > remaining`.
+- `cargo test strat --lib --quiet` OK: 74 tests.
+- `cargo test --lib --quiet` OK: 747 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 27.11s`, `ParseFailed=0`.

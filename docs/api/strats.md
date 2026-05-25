@@ -28,6 +28,15 @@ strategy field metadata from the server instead of carrying a hardcoded copy of
 Delphi `TStrategy` UI metadata. If the schema response is missing, malformed,
 or cannot be decompressed, Init fails and the domain gate does not open.
 
+Low-level strategy command parsing follows Delphi tail rules. Fixed fields in
+`TStratSnapshot`, `TStratDelete`, and `TStratSellPriceUpdate` use
+`TMemoryStream.Read` semantics after a valid header, so missing scalar bytes are
+zero-filled. `TStratDelete.FolderPath` is a strict `ReadBuffer` string: if the
+folder-path length/body is present but incomplete, the whole command is
+rejected. For `TStratSchema` / `TStratSnapshot`, a declared data size larger
+than the remaining bytes becomes an empty/malformed payload, matching Delphi's
+`Data=nil` guard.
+
 ## Reading Strategy State
 
 ```rust

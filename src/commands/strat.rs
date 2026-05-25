@@ -203,18 +203,10 @@ impl StratCommand {
             CMD_SNAPSHOT_REQUEST => Some(StratCommand::SnapshotRequest { uid }),
             CMD_SNAPSHOT => {
                 // ServerEpoch:UInt64(8) + ClientMaxLastDate:UInt64(8) + Size:Cardinal(4) + Full:bool(1) + Data:bytes(Size)
-                if pos + 8 + 8 + 4 + 1 > payload.len() {
-                    return None;
-                }
-                let server_epoch = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                pos += 8;
-                let client_max_last_date =
-                    u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                pos += 8;
-                let size = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
-                pos += 4;
-                let full = payload[pos] != 0;
-                pos += 1;
+                let server_epoch = read_u64_zero_tail(payload, &mut pos);
+                let client_max_last_date = read_u64_zero_tail(payload, &mut pos);
+                let size = read_u32_zero_tail(payload, &mut pos) as usize;
+                let full = read_u8_zero_tail(payload, &mut pos) != 0;
                 let data = if pos + size > payload.len() {
                     // Delphi `TStratSnapshot.CreateFromStream`: declared Size
                     // larger than remaining bytes sets `Data := nil`, seeks to
@@ -236,14 +228,10 @@ impl StratCommand {
                 }))
             }
             CMD_DELETE => {
-                if pos + 8 > payload.len() {
-                    return None;
-                }
-                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                pos += 8;
+                let strategy_id = read_u64_zero_tail(payload, &mut pos);
                 // Soft-read folder_path
                 let folder_path = if pos < payload.len() {
-                    read_string(payload, &mut pos).unwrap_or_default()
+                    read_string(payload, &mut pos)?
                 } else {
                     String::new()
                 };
@@ -253,12 +241,8 @@ impl StratCommand {
                 }))
             }
             CMD_SELL_PRICE_UPDATE => {
-                if pos + 16 > payload.len() {
-                    return None;
-                }
-                let strategy_id = u64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
-                pos += 8;
-                let sell_price = f64::from_le_bytes(payload[pos..pos + 8].try_into().unwrap());
+                let strategy_id = read_u64_zero_tail(payload, &mut pos);
+                let sell_price = f64::from_le_bytes(read_zero_tail::<8>(payload, &mut pos));
                 Some(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
                     strategy_id,
                     sell_price,
@@ -288,15 +272,38 @@ impl StratCommand {
                 }
                 let size = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
-                if pos + size > payload.len() {
-                    return None;
-                }
-                let data = payload[pos..pos + size].to_vec();
+                let data = if pos + size > payload.len() {
+                    Vec::new()
+                } else {
+                    payload[pos..pos + size].to_vec()
+                };
                 Some(StratCommand::Schema(StratSchema { data }))
             }
             _ => Some(StratCommand::Unknown { cmd_id, uid }),
         }
     }
+}
+
+fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    if *pos < data.len() {
+        let n = (data.len() - *pos).min(N);
+        out[..n].copy_from_slice(&data[*pos..*pos + n]);
+        *pos += n;
+    }
+    out
+}
+
+fn read_u8_zero_tail(data: &[u8], pos: &mut usize) -> u8 {
+    read_zero_tail::<1>(data, pos)[0]
+}
+
+fn read_u32_zero_tail(data: &[u8], pos: &mut usize) -> u32 {
+    u32::from_le_bytes(read_zero_tail::<4>(data, pos))
+}
+
+fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
+    u64::from_le_bytes(read_zero_tail::<8>(data, pos))
 }
 
 fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratCheckedItem>, usize)> {
@@ -538,6 +545,62 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_short_fixed_tail_zero_tails_like_delphi_stream_read() {
+        let mut payload = vec![CMD_SNAPSHOT, 0x03, 0x00];
+        payload.extend_from_slice(&42u64.to_le_bytes());
+        payload.extend_from_slice(&0x34u16.to_le_bytes());
+
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 0x34);
+                assert_eq!(s.client_max_last_date, 0);
+                assert!(!s.full);
+                assert!(s.data.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn delete_short_strategy_id_zero_tails_but_truncated_folder_string_rejects() {
+        let mut short_id = vec![CMD_DELETE, 0x03, 0x00];
+        short_id.extend_from_slice(&7u64.to_le_bytes());
+        short_id.extend_from_slice(&0x1122u16.to_le_bytes());
+
+        match StratCommand::parse(&short_id).unwrap() {
+            StratCommand::Delete(d) => {
+                assert_eq!(d.strategy_id, 0x1122);
+                assert!(d.folder_path.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let mut bad_folder = build_delete(8, 555, "Folder");
+        bad_folder.truncate(bad_folder.len() - 2);
+        assert!(
+            StratCommand::parse(&bad_folder).is_none(),
+            "FolderPath uses ReadStringFromStreamUtf8/ReadBuffer and must reject a truncated declared string"
+        );
+    }
+
+    #[test]
+    fn sell_price_update_short_fixed_tail_zero_tails_like_delphi_stream_read() {
+        let mut payload = vec![CMD_SELL_PRICE_UPDATE, 0x03, 0x00];
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&0x7788u16.to_le_bytes());
+
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::SellPriceUpdate(u) => {
+                assert_eq!(u.strategy_id, 0x7788);
+                assert_eq!(u.sell_price, 0.0);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn parse_checked_sync_with_items() {
         let items = vec![
             StratCheckedItem {
@@ -728,12 +791,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_schema_rejects_truncated_data_like_delphi_nil_data_guard() {
+    fn parse_schema_size_over_remaining_becomes_empty_data_like_delphi_nil_data_guard() {
         let mut payload = vec![CMD_SCHEMA, 0x03, 0x00];
         payload.extend_from_slice(&1u64.to_le_bytes());
         payload.extend_from_slice(&4u32.to_le_bytes());
         payload.extend_from_slice(&[9, 8, 7]);
-        assert!(StratCommand::parse(&payload).is_none());
+        match StratCommand::parse(&payload).unwrap() {
+            StratCommand::Schema(s) => {
+                assert!(
+                    s.data.is_empty(),
+                    "Delphi sets Data=nil when declared Size is larger than remaining bytes"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
