@@ -4272,6 +4272,28 @@ Verification:
 
 - Extended `dispatcher_ignores_exact_balance_command_id_2_like_delphi`.
 
+### 2026-05-26 - UI skipped/unknown commands do not emit Settings events
+
+Done:
+
+- Re-checked Delphi `TCommandRegistry.FromStream`: if command `ver` is newer
+  than `Current_Proto_CmdVer`, it returns a base command with `FSkipped := true`.
+- Re-checked `MoonProtoClient.pas:ClientNewData(MPC_UI)`: skipped UI commands
+  are log-only, and unknown UI `cmd_id` becomes `TBaseUICommand` then is freed
+  without any settings/UI domain action.
+- Rust low-level `UICommand::parse` now exposes future-version packets as
+  `UICommand::Skipped { cmd_id, uid, ver }` instead of collapsing them into
+  `Unknown`.
+- Active `EventDispatcher` ignores both `UICommand::Skipped` and
+  `UICommand::Unknown`, so they no longer emit public `Event::Settings`.
+- Recorded `spec_pipeline/work/хуйня.md §X.170`; API docs describe the
+  low-level parser variants and active-dispatcher skip rule.
+
+Verification:
+
+- Added dispatcher regression tests for future-version UI and unknown UI
+  subcommand id.
+
 ### 2026-05-23 - Phase 1 partial: OrderBook recovery and reconnect replay order
 
 Done:

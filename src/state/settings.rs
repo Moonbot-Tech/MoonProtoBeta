@@ -83,6 +83,9 @@ pub enum SettingsEvent {
     DexSwitched(SwitchDex),
     /// Сменился текущий spot (0=Crypto, 1=Predict).
     SpotSwitched(SwitchSpot),
+    /// Команда с будущей версией. Low-level state API can surface it, while
+    /// `EventDispatcher` skips it like Delphi registry `FSkipped`.
+    Skipped { cmd_id: u8, uid: u64, ver: u16 },
     /// Неизвестная подкоманда (forward-compat).
     Unknown { cmd_id: u8, uid: u64 },
 }
@@ -150,6 +153,8 @@ impl SettingsState {
                 self.current_spot = Some(s.spot_index);
                 SettingsEvent::SpotSwitched(s)
             }
+
+            UICommand::Skipped { cmd_id, uid, ver } => SettingsEvent::Skipped { cmd_id, uid, ver },
 
             UICommand::Unknown { cmd_id, uid } => SettingsEvent::Unknown { cmd_id, uid },
         }

@@ -385,6 +385,13 @@ pub enum UICommand {
     ArbActivateNotify(ArbActivateNotify),
     SwitchDex(SwitchDex),
     SwitchSpot(SwitchSpot),
+    /// Command header is well-formed, but the command version is newer than
+    /// this library can parse. Delphi registry marks this as `FSkipped`.
+    Skipped {
+        cmd_id: u8,
+        uid: u64,
+        ver: u16,
+    },
     Unknown {
         cmd_id: u8,
         uid: u64,
@@ -394,7 +401,8 @@ pub enum UICommand {
 impl UICommand {
     /// Распарсить TBaseUICommand payload (после dispatch'а по MPC_UI в data_read_int).
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
-    /// Version gate: ver > 3 → Unknown.
+    /// Version gate: ver > 3 → [`UICommand::Skipped`], matching Delphi
+    /// registry `FSkipped`.
     pub fn parse(payload: &[u8]) -> Option<Self> {
         Self::parse_with_client_settings_fallback(payload, None)
     }
@@ -419,7 +427,7 @@ impl UICommand {
         let ver = u16::from_le_bytes([payload[1], payload[2]]);
         let uid = u64::from_le_bytes(payload[3..11].try_into().unwrap());
         if ver > CURRENT_PROTO_CMD_VER {
-            return Some(UICommand::Unknown { cmd_id, uid });
+            return Some(UICommand::Skipped { cmd_id, uid, ver });
         }
         let mut pos = 11usize;
 
@@ -1778,13 +1786,14 @@ mod tests {
     }
 
     #[test]
-    fn version_gate_returns_unknown() {
+    fn version_gate_returns_skipped_like_delphi_registry() {
         let mut payload = vec![CMD_CLIENT_SETTINGS, 99, 0];
         payload.extend_from_slice(&77u64.to_le_bytes());
         match UICommand::parse(&payload).unwrap() {
-            UICommand::Unknown { cmd_id, uid } => {
+            UICommand::Skipped { cmd_id, uid, ver } => {
                 assert_eq!(cmd_id, CMD_CLIENT_SETTINGS);
                 assert_eq!(uid, 77);
+                assert_eq!(ver, 99);
             }
             _ => panic!("wrong variant"),
         }

@@ -1562,6 +1562,7 @@ impl EventDispatcher {
             payload,
             Some(self.settings.client_settings_parse_fallback()),
         ) {
+            Some(UICommand::Skipped { .. } | UICommand::Unknown { .. }) => {}
             Some(cmd_v) => {
                 let ev = self.settings.apply(cmd_v);
                 out.push(Event::Settings(ev));
@@ -1973,7 +1974,7 @@ mod tests {
         build_markets_prices_response, write_market, BaseCurrency, Market, MarketPriceUpdate,
         MarketsListResponse, MarketsPricesResponse,
     };
-    use crate::commands::registry::write_string;
+    use crate::commands::registry::{write_string, CURRENT_PROTO_CMD_VER};
     use crate::commands::strat::{build_snapshot_request, StratCommand, StratSchema};
     use crate::commands::trade::trace_flags;
     use crate::commands::trade::{
@@ -2170,6 +2171,39 @@ mod tests {
         assert_eq!(settings.s_price, [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
         assert_eq!(settings.sb_num, 6);
         assert_eq!(settings.join_sell_kind, 2);
+    }
+
+    #[test]
+    fn dispatcher_skips_future_version_ui_command_like_delphi_registry() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut payload = vec![1u8]; // TClientSettingsCommand cmd_id.
+        payload.extend_from_slice(&(CURRENT_PROTO_CMD_VER + 1).to_le_bytes());
+        payload.extend_from_slice(&77u64.to_le_bytes());
+        payload.extend_from_slice(&[0xAA; 16]);
+
+        let events = dispatcher.dispatch(Command::UI, &payload, 0);
+
+        assert!(
+            events.is_empty(),
+            "Delphi logs FSkipped UI commands but emits no UI/settings side effect"
+        );
+        assert!(dispatcher.settings().client_settings.is_none());
+    }
+
+    #[test]
+    fn dispatcher_skips_unknown_ui_command_id_like_delphi_base_ui_command() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut payload = vec![250u8]; // no registered TBaseUICommand descendant.
+        payload.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());
+        payload.extend_from_slice(&88u64.to_le_bytes());
+        payload.extend_from_slice(&[0xBB; 8]);
+
+        let events = dispatcher.dispatch(Command::UI, &payload, 0);
+
+        assert!(
+            events.is_empty(),
+            "Delphi frees unknown TBaseUICommand without a public Settings event"
+        );
     }
 
     fn balance_payload(cmd_id: u8, uid: u64, epoch: u16, btc_total: f64) -> Vec<u8> {

@@ -199,4 +199,11 @@ let command = UICommand::parse(payload).expect("bad UI payload");
 ```
 
 `EventDispatcher` performs this parsing and applies `SettingsState`
-automatically.
+automatically for known, supported UI commands.
+
+`UICommand::Skipped { cmd_id, uid, ver }` means the command header is valid but
+`ver` is newer than the current protocol command version. This mirrors Delphi
+registry `FSkipped`. `UICommand::Unknown { cmd_id, uid }` means the version is
+supported but no UI command class is registered for that `cmd_id`. The active
+dispatcher ignores both variants: they do not mutate `SettingsState` and do not
+emit `Event::Settings`, matching Delphi client behavior.

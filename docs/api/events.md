@@ -127,6 +127,12 @@ markets-related response was applied, followed by `Event::EngineResponse(...)`.
 the failure path and exists so live diagnostics can dump exact bytes instead of
 guessing from `cmd/len`.
 
+For `Command::UI`, future-version UI commands and unknown UI subcommand ids are
+recognized by the low-level parser as `UICommand::Skipped` or
+`UICommand::Unknown`, but the active dispatcher ignores them. They do not emit
+`Event::Settings`, matching Delphi `TCommandRegistry.FSkipped` and
+`TBaseUICommand` fallback behavior.
+
 `Command` is a raw one-byte Delphi `TMoonProtoCommand` ordinal wrapper. Known
 channels are constants such as `Command::Order`; unknown channel bytes are
 preserved in `Event::Raw`/`Event::ParseFailed`. Use `Command::from_byte(raw)`
