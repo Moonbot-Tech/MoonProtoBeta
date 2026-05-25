@@ -5509,11 +5509,24 @@ Dispatcher-worker and Strat follow-up:
   - `writer_cpu max=148us`;
   - `active_dispatch max=3783us max_src=Strat(30) payload=44459`;
   - `app_enqueue max=2217us max_src=TradesStream(33) payload=73 mode=state`.
-- Result: the concrete `Strat` slow-parser red flag is closed for the measured
-  live snapshot path: it is no longer the max sample and no longer runs in the
-  protocol recv loop. The broader CPU red flag remains open for completed
-  `Sliced` reader work, large init API market parsing/apply, and state snapshot
-  enqueue cost.
+- Follow-up worker-boundary fix: `run_until_response`, `connect_and_init`,
+  `run_init_sequence`, and the public one-shot wait helpers now pump domain
+  apply through the dispatcher worker instead of the old inline queued
+  dispatcher path. `run_until_response` keeps one worker alive for the whole
+  wait and uses a FIFO `Barrier` work item before returning a receiver value, so
+  dispatcher state/events before that response are already applied. The old
+  inline `RunMode::Dispatcher` path is `cfg(test)` only.
+- Quick prod FireTest after this boundary fix:
+  - `FIRETEST_QUICK_PASS after 22.83s`;
+  - `reader max=1245us max_src=Sliced(17) payload=1442`;
+  - `writer_cpu max=153us`;
+  - `active_dispatch max=2813us max_src=API(31) payload=44031`;
+  - `app_enqueue max=2021us max_src=TradesStream(33) payload=50 mode=state`.
+- Result: the concrete `Strat` slow-parser boundary red flag is closed for the
+  measured live snapshot path: it is worker-side, no longer max, and no longer
+  blocks protocol recv in either long-running dispatcher mode or sync init/wait
+  helpers. The broader CPU red flag remains open for completed `Sliced` reader
+  work, large init API market parsing/apply, and state snapshot enqueue cost.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 

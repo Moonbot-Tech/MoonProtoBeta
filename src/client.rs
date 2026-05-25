@@ -2214,6 +2214,9 @@ pub(crate) enum DispatcherWorkItem {
         now_ms: i64,
     },
     ResetOrderbookCachesKeepBooks,
+    Barrier {
+        done: mpsc::Sender<()>,
+    },
 }
 
 /// Callback that receives typed events from [`Client::run_with_dispatcher`].
@@ -2288,6 +2291,7 @@ pub(crate) enum RunMode<'a> {
     CallbackQueue {
         app_tx: mpsc::Sender<RawAppEvent>,
     },
+    #[cfg(test)]
     Dispatcher {
         dispatcher: &'a mut crate::events::EventDispatcher,
         on_event: DispatcherEventFn,
@@ -2303,6 +2307,8 @@ pub(crate) enum RunMode<'a> {
         /// Переиспользуемый буфер decoded payload'ов перед worker FIFO.
         payload_buf: Vec<(Command, Vec<u8>)>,
     },
+    #[cfg(not(test))]
+    _Lifetime(std::marker::PhantomData<&'a ()>),
 }
 
 /// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcherSnapshot)`.
@@ -2427,7 +2433,20 @@ fn run_dispatcher_worker(
             DispatcherWorkItem::ResetOrderbookCachesKeepBooks => {
                 dispatcher.reset_orderbook_caches_keep_books();
             }
+            DispatcherWorkItem::Barrier { done } => {
+                let _ = done.send(());
+            }
         }
+    }
+}
+
+fn wait_dispatcher_worker_barrier(tx: &mpsc::Sender<DispatcherWorkItem>) {
+    let (done_tx, done_rx) = mpsc::channel();
+    if tx
+        .send(DispatcherWorkItem::Barrier { done: done_tx })
+        .is_ok()
+    {
+        let _ = done_rx.recv();
     }
 }
 
@@ -3095,6 +3114,7 @@ impl ProtocolCore<'_> {
 
     fn drain_deferred_order_removals_due(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         match mode {
+            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -3118,6 +3138,8 @@ impl ProtocolCore<'_> {
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::_Lifetime(_) => {}
         }
     }
 
@@ -3240,6 +3262,7 @@ impl ProtocolCore<'_> {
                     &mut sink,
                 );
             }
+            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -3337,6 +3360,8 @@ impl ProtocolCore<'_> {
                     );
                 }
             }
+            #[cfg(not(test))]
+            RunMode::_Lifetime(_) => {}
         }
     }
 
@@ -3444,6 +3469,7 @@ impl ProtocolCore<'_> {
         }
         self.client.last_trades_tick_ms = cur_tm;
         let trades_server_token = match mode {
+            #[cfg(test)]
             RunMode::Dispatcher { dispatcher, .. } => dispatcher.trades_server_token(),
             RunMode::DispatcherWorker { .. } => self
                 .client
@@ -3453,6 +3479,8 @@ impl ProtocolCore<'_> {
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => return,
             #[cfg(not(test))]
             RunMode::CallbackQueue { .. } => return,
+            #[cfg(not(test))]
+            RunMode::_Lifetime(_) => return,
         };
         self.client
             .tick_trades_reconnect_sequence(cur_tm, trades_server_token);
@@ -3466,6 +3494,7 @@ impl ProtocolCore<'_> {
 
     fn periodic_orderbook_reconnect_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         match mode {
+            #[cfg(test)]
             RunMode::Dispatcher { dispatcher, .. } => {
                 if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
                     dispatcher.reset_orderbook_caches_keep_books();
@@ -3480,11 +3509,14 @@ impl ProtocolCore<'_> {
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::_Lifetime(_) => {}
         }
     }
 
     fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         match mode {
+            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -3512,6 +3544,8 @@ impl ProtocolCore<'_> {
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::CallbackQueue { .. } => {}
+            #[cfg(not(test))]
+            RunMode::_Lifetime(_) => {}
         }
     }
 
@@ -6444,7 +6478,7 @@ impl Client {
             };
 
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher_queued(tick, dispatcher);
+            self.run_with_dispatcher_worker_queued(tick, dispatcher);
         }
     }
 
@@ -6872,7 +6906,7 @@ impl Client {
             }
 
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher_queued(tick, dispatcher);
+            self.run_with_dispatcher_worker_queued(tick, dispatcher);
         }
     }
 
@@ -7198,7 +7232,7 @@ impl Client {
 
             let first_new_event = dispatcher.queued_event_count();
             let tick = remaining.min(TICK);
-            self.run_with_dispatcher_queued(tick, dispatcher);
+            self.run_with_dispatcher_worker_queued(tick, dispatcher);
             if dispatcher.queued_events()[first_new_event..]
                 .iter()
                 .any(|event| {
@@ -7508,6 +7542,7 @@ impl Client {
         }
     }
 
+    #[cfg(test)]
     fn run_with_dispatcher_queued(
         &mut self,
         duration: Duration,
@@ -7521,6 +7556,66 @@ impl Client {
             active_actions_buf: Vec::with_capacity(4),
         };
         self.run_inner(duration, mode);
+    }
+
+    fn run_with_dispatcher_worker_queued(
+        &mut self,
+        duration: Duration,
+        dispatcher: &mut crate::events::EventDispatcher,
+    ) {
+        let sender = self.sender();
+        let protocol_metrics = Arc::clone(&self.protocol_metrics);
+        let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
+        thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
+            let dispatcher_handle = scope.spawn(move || {
+                run_dispatcher_worker(
+                    work_rx,
+                    dispatcher,
+                    DispatcherEventFn::Queue,
+                    sender,
+                    protocol_metrics,
+                    trades_server_token_mirror,
+                );
+            });
+            {
+                let mut mode = RunMode::DispatcherWorker {
+                    tx: work_tx,
+                    payload_buf: Vec::with_capacity(4),
+                };
+                ProtocolCore { client: self }.run(duration, &mut mode);
+            }
+            *lifecycle_app_tx.lock().unwrap() = None;
+            dispatcher_handle
+                .join()
+                .expect("moonproto dispatcher worker thread panicked");
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
+        });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
+        }
     }
 
     /// Wait for a `Receiver<T>` while continuing to pump the UDP client loop.
@@ -7553,34 +7648,88 @@ impl Client {
         timeout: Duration,
     ) -> Result<T, mpsc::RecvTimeoutError> {
         let start = Instant::now();
-        loop {
-            match rx.try_recv() {
-                Ok(resp) => return Ok(resp),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(mpsc::RecvTimeoutError::Disconnected);
+        let sender = self.sender();
+        let protocol_metrics = Arc::clone(&self.protocol_metrics);
+        let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
+        let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
+        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
+            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+            (rx, cb)
+        });
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
+        let mut result: Option<Result<T, mpsc::RecvTimeoutError>> = None;
+
+        thread::scope(|scope| {
+            let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
+                scope.spawn(move || {
+                    let mut cb = cb;
+                    while let Ok(event) = rx.recv() {
+                        cb(event);
+                    }
+                    cb
+                })
+            });
+            let dispatcher_handle = scope.spawn(move || {
+                run_dispatcher_worker(
+                    work_rx,
+                    dispatcher,
+                    DispatcherEventFn::Queue,
+                    sender,
+                    protocol_metrics,
+                    trades_server_token_mirror,
+                );
+            });
+            {
+                let barrier_tx = work_tx.clone();
+                let mut mode = RunMode::DispatcherWorker {
+                    tx: work_tx,
+                    payload_buf: Vec::with_capacity(4),
+                };
+                loop {
+                    match rx.try_recv() {
+                        Ok(resp) => {
+                            wait_dispatcher_worker_barrier(&barrier_tx);
+                            result = Some(Ok(resp));
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            result = Some(Err(mpsc::RecvTimeoutError::Disconnected));
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    let Some(remaining) = timeout_remaining(start, timeout) else {
+                        result = Some(Err(mpsc::RecvTimeoutError::Timeout));
+                        break;
+                    };
+                    let tick = remaining.min(Duration::from_millis(DELPHI_SEND_AND_WAIT_POLL_MS));
+                    ProtocolCore { client: self }.run(tick, &mut mode);
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
             }
-            let Some(remaining) = timeout_remaining(start, timeout) else {
-                return Err(mpsc::RecvTimeoutError::Timeout);
-            };
-            let tick = remaining.min(Duration::from_millis(DELPHI_SEND_AND_WAIT_POLL_MS));
-            self.run_with_dispatcher_queued(tick, dispatcher);
+            *lifecycle_app_tx.lock().unwrap() = None;
+            dispatcher_handle
+                .join()
+                .expect("moonproto dispatcher worker thread panicked");
+            if let Some(handle) = lifecycle_handle {
+                restored_lifecycle_cb = Some(
+                    handle
+                        .join()
+                        .expect("moonproto lifecycle callback thread panicked"),
+                );
+            }
+        });
+        if restored_lifecycle_cb.is_some() {
+            self.lifecycle_cb = restored_lifecycle_cb;
         }
+        result.expect("run_until_response loop must always set result")
     }
 
-    /// Унифицированный main loop. Закрывает дубликацию `run`/`run_with_dispatcher`
-    /// которая существовала с момента введения active library (rust_quality #1 +
-    /// delphi_dev #2 audits). Любой fix в loop body (новый cleanup, новый periodic
-    /// check, новое поведение recv/send) делается ОДИН раз.
-    ///
-    /// Различия двух режимов локализованы в:
-    ///   - `ProtocolCore::client_new_data(...)` — куда доставлять decoded payload
-    ///     (Callback sink для `run`; Buffer sink +
-    ///     dispatcher.dispatch_into_active для `run_with_dispatcher`).
-    ///   - В Dispatcher mode `dispatch_into_active_actions` делает trades
-    ///     resend tail-check после valid trades packets. Для Callback mode
-    ///     потребитель сам решает что делать с TradesEvent.
+    /// Test-only inline dispatcher oracle. Production active-library paths use
+    /// `DispatcherWorker`; this remains only for focused unit tests that need a
+    /// synchronous dispatcher without spawning worker/app queues.
+    #[cfg(test)]
     fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
         let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
             let (tx, rx) = mpsc::channel::<LifecycleEvent>();
@@ -7614,6 +7763,7 @@ impl Client {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_active_actions<I>(&self, actions: I)
     where
         I: IntoIterator<Item = crate::events::ActiveAction>,
@@ -8932,7 +9082,7 @@ pub fn connect_and_init(
     cfg: ConnectConfig,
 ) -> Result<InitResult, ConnectError> {
     if !client.is_authorized() {
-        client.run_with_dispatcher_queued(cfg.connect_timeout, dispatcher);
+        client.run_with_dispatcher_worker_queued(cfg.connect_timeout, dispatcher);
     }
 
     if !client.is_authorized() {
@@ -9056,7 +9206,7 @@ fn wait_auth_done_after_server_update(
         if client.is_authorized() {
             break;
         }
-        client.run_with_dispatcher_queued(
+        client.run_with_dispatcher_worker_queued(
             Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS),
             dispatcher,
         );
@@ -9075,7 +9225,7 @@ fn run_base_check_delphi(
     let mut status = run_base_check_once(client, dispatcher, result, timeout)?;
     if waiting_update && !status.is_ok() {
         for _ in 0..DELPHI_BASE_CHECK_UPDATE_RETRIES {
-            client.run_with_dispatcher_queued(retry_pause, dispatcher);
+            client.run_with_dispatcher_worker_queued(retry_pause, dispatcher);
             status = run_base_check_once(client, dispatcher, result, timeout)?;
             if status.is_ok() {
                 break;
@@ -9216,7 +9366,7 @@ fn run_required_strategy_schema_step(
             next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
         }
 
-        client.run_with_dispatcher_queued(remaining.min(TICK), dispatcher);
+        client.run_with_dispatcher_worker_queued(remaining.min(TICK), dispatcher);
     }
 }
 
@@ -9278,7 +9428,7 @@ pub fn run_init_sequence(
     // the retry branch's final gate is the second AuthCheck.
     let used_init_auth_retry = !base_status.is_ok() || !auth_status.is_ok();
     if used_init_auth_retry {
-        client.run_with_dispatcher_queued(
+        client.run_with_dispatcher_worker_queued(
             Duration::from_millis(DELPHI_INIT_AUTH_RETRY_PAUSE_MS),
             dispatcher,
         );
@@ -9393,7 +9543,7 @@ pub fn run_init_sequence(
         || cfg.subscribe_trades.is_some()
         || !cfg.subscribe_orderbooks.is_empty()
     {
-        client.run_with_dispatcher_queued(Duration::from_millis(100), dispatcher);
+        client.run_with_dispatcher_worker_queued(Duration::from_millis(100), dispatcher);
     }
 
     Ok(result)

@@ -91,7 +91,7 @@ that run are drained. `Client::on_lifecycle` notifications use the same queued
 delivery during run calls. `run_with_dispatcher_state` also uses the application
 callback queue; it receives an `EventDispatcherSnapshot`, not the live
 dispatcher, so slow UI work cannot stall protocol ACK/retry/send progress. The
-snapshot copy itself is still protocol-loop work; for high-rate hot paths prefer
+snapshot copy itself is dispatcher-worker work; for high-rate hot paths prefer
 `run_with_dispatcher` unless the callback needs the read model.
 
 User/API sends append directly to the client's unbounded Delphi-style
@@ -201,9 +201,10 @@ The snapshot also separates CPU-ish protocol work from wall-clock waits:
 `writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `reader_protocol_*`
 is the protocol recv path, and `active_dispatch_*` / `app_enqueue_*` measure the
 typed active-library worker path before user callbacks. In
-`run_with_dispatcher*`, heavy domain parsing/state apply is worker-side work;
-it is still measured because millisecond samples are performance red flags, but
-they do not block ACK/retry/send progress in the protocol recv loop. The
+`run_with_dispatcher*`, `connect_and_init`, `run_init_sequence`, and the
+one-shot wait helpers, heavy domain parsing/state apply is worker-side work. It
+is still measured because millisecond samples are performance red flags, but it
+does not block ACK/retry/send progress in the protocol recv loop. The
 `*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are coarse red flags for
 unexpectedly heavy blocks. These are wall-clock durations of code sections, not
 OS CPU counters, but they intentionally exclude network waits and user callback
@@ -243,8 +244,11 @@ println!("orderbooks subscribed: {}", result.orderbooks_subscribed);
 ```
 
 The helper keeps the client loop running while it waits for the connection and
-for each Engine API response. It fills `client.server_info()` after `BaseCheck`
-and `client.auth_info()` after a successful `AuthCheck`.
+for each Engine API response. Domain apply work is handed to the dispatcher
+worker; when a wait helper returns, a FIFO barrier has already confirmed that
+dispatcher state/events queued before the response were applied. It fills
+`client.server_info()` after `BaseCheck` and `client.auth_info()` after a
+successful `AuthCheck`.
 
 Init is a one-time step for a `Client` session. After it succeeds, do not call
 `run_init_sequence` again just because the UDP transport reconnected; the library
@@ -390,8 +394,9 @@ client.
 While the client loop is active, registered Engine API responses are delivered
 to their receiver from the receive-side DataReadInt path before dispatcher event
 delivery. The same payload still reaches `EventDispatcher` for state updates.
-`run_until_response` uses the same queued-event behavior as typed one-shot
-helpers.
+`run_until_response` uses the same dispatcher-worker queued-event behavior as
+typed one-shot helpers and returns only after the worker has processed all
+earlier queued domain work.
 
 Use `request_engine_response` when a custom Engine API payload needs
 caller-scoped timeout cleanup. Raw `api_*` receivers keep their pending slot
