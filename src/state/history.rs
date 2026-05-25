@@ -13,6 +13,7 @@ const MINI_CANDLE_SPLIT_DAYS: f64 = 5.0 / SECONDS_PER_DAY;
 const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
+pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64 = 0.00000001;
 
 /// Delphi `TTrade`: detailed trade/liquidation row stored in market history.
 ///
@@ -199,6 +200,28 @@ fn can_aggregate_tmp_trade(
         && row.same_direction(prev)
         && ((prev.price - row.price).abs() as f64) < chart_price_step
         && (prev.time - row.time).abs() < same_trades_time_days
+}
+
+/// Prepare a drained `TradeJoinBuffer` batch for append into a time-sorted
+/// retained history.
+///
+/// Delphi `JoinHOrders` appends only rows newer than the current `OrdersH` tail
+/// and then sorts the combined array. `SeqRing` cannot sort old retained rows,
+/// so StoreWorker must sort the new batch and skip old/equal tail rows before
+/// appending. The resulting batch is monotonic and safe for `SeqRingTimedRow`
+/// binary-search reads.
+pub fn prepare_joined_trades_for_retained_append(
+    rows: &mut Vec<TradeHistoryRow>,
+    last_retained_time: Option<f64>,
+) {
+    rows.sort_by(|left, right| left.time.total_cmp(&right.time));
+    if let Some(last_time) = last_retained_time {
+        let keep_from = rows
+            .iter()
+            .position(|row| row.time > last_time + DELPHI_TRADE_TAIL_EPS_DAYS)
+            .unwrap_or(rows.len());
+        rows.drain(0..keep_from);
+    }
 }
 
 /// Delphi `TMMOrder`: main market-maker history row.
@@ -831,6 +854,46 @@ mod tests {
             TradeJoinPush::Full
         );
         assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn prepare_joined_trades_sorts_and_skips_existing_tail() {
+        let t = 45_000.0;
+        let mut rows = vec![
+            TradeHistoryRow {
+                time: t + 3.0 / SECONDS_PER_DAY,
+                price: 103.0,
+                qty: 1.0,
+            },
+            TradeHistoryRow {
+                time: t,
+                price: 100.0,
+                qty: 1.0,
+            },
+            TradeHistoryRow {
+                time: t + 2.0 / SECONDS_PER_DAY,
+                price: 102.0,
+                qty: 1.0,
+            },
+        ];
+
+        prepare_joined_trades_for_retained_append(&mut rows, Some(t + 1.0 / SECONDS_PER_DAY));
+
+        assert_eq!(
+            rows,
+            vec![
+                TradeHistoryRow {
+                    time: t + 2.0 / SECONDS_PER_DAY,
+                    price: 102.0,
+                    qty: 1.0,
+                },
+                TradeHistoryRow {
+                    time: t + 3.0 / SECONDS_PER_DAY,
+                    price: 103.0,
+                    qty: 1.0,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -243,6 +243,7 @@ volumes; the intended precision loss is bounded by one bucket width.
 
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
+pub const DELPHI_TRADE_TAIL_EPS_DAYS: f64;  // 0.00000001
 
 pub enum TradeJoinPush {
     Inserted,
@@ -274,6 +275,19 @@ ring slot empty, returns `Full` instead of overwriting unread rows, and tries to
 aggregate the new row into previous one or previous two rows before appending.
 The aggregation checks the same direction, `ChartPriceStep`, and
 `SameTradesTime`.
+
+```rust
+pub fn prepare_joined_trades_for_retained_append(
+    rows: &mut Vec<TradeHistoryRow>,
+    last_retained_time: Option<f64>,
+);
+```
+
+This helper is used after draining `TradeJoinBuffer` and before appending rows
+to retained `SeqRing` history. It sorts the drained batch by `time` and removes
+rows whose time is not newer than the current retained tail plus Delphi `_eps`
+(`0.00000001` days). The output is monotonic, which is required for public
+history reads by time.
 
 ## Recovery Behavior
 

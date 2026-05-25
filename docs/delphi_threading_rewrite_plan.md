@@ -594,12 +594,15 @@ Done:
 - Added `TradeJoinBuffer`, matching the active `AddTmpHOrder` temporary ring:
   one empty slot, prev1/prev2 same-direction aggregation, `ChartPriceStep`, and
   Delphi `SameTradesTime = 0.2 / SecondsPerDay`.
+- Added `prepare_joined_trades_for_retained_append`: sorts drained tmp rows and
+  skips rows not newer than the retained tail (`_eps = 0.00000001` days) before
+  appending to a monotonic `SeqRing`.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 12 tests.
-- `cargo test --lib` OK: 683 tests.
+- `cargo test history --lib` OK: 13 tests.
+- `cargo test --lib` OK: 684 tests.
 
 ### Phase Z - final full optimization pass
 
