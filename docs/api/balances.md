@@ -4,10 +4,14 @@ Account and market balances: full snapshots plus incremental updates.
 
 ## Overview
 
-The balance channel uses three related command IDs:
-- **cmd_id=2 (`TBalanceCommand`)**: the Delphi registry can parse it, but the reference client does not apply it to balance state.
+The balance channel uses these incoming command IDs:
+- **cmd_id=0/1/2/5 and unknown ids**: the Delphi registry can parse or
+  base-class them, but the reference client does not apply them to balance
+  state and the active dispatcher emits no event.
 - **cmd_id=3 (full snapshot)**: markets missing from the snapshot are **reset** to default values; global totals are updated.
 - **cmd_id=4 (incremental)**: merges market rows and optionally updates global totals (gated by `global_changed: bool`).
+- **cmd_id=6 (`TArbPricesCommand`)**: compact arb relay, exposed as
+  `Event::Arb` after active dispatcher filtering.
 
 The sync state is `BalancesState`. The key is `market_name: String`, for example `"BTCUSDT"`.
 When using `EventDispatcher`, balance rows are applied only for markets present
@@ -192,8 +196,12 @@ Commands whose `ver` is greater than the current MoonProto command version are
 skipped before balance parsing, matching Delphi `TCommandRegistry.FromStream`.
 
 `cmd_id=2` shares the full-snapshot wire layout, but `EventDispatcher` ignores
-it after parsing because Delphi `ProcessBalanceCommand` only applies exact
-`TBalanceSnapshotFull` and `TBalanceIncrUpdate` objects.
+it because Delphi `ProcessBalanceCommand` only applies exact
+`TBalanceSnapshotFull` and `TBalanceIncrUpdate` objects. The same active
+dispatcher skip rule applies to `TBaseBalanceCommand` (`cmd_id=0`),
+`TBalanceCommandBase` (`cmd_id=1`), `TRequestBalanceRefresh` (`cmd_id=5`), and
+unknown balance subcommands: they do not become `Event::Raw` or
+`Event::ParseFailed`.
 
 The `flags` bitmask defines which `BalanceItem` fields are present in the payload.
 Omitted fields decode to their command defaults. Applying an item replaces the

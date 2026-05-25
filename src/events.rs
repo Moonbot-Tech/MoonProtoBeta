@@ -1450,11 +1450,7 @@ impl EventDispatcher {
         }
         let body = &payload[11..];
         match sub_cmd_id {
-            1 | 2 => {
-                if parse_balance(sub_cmd_id, body).is_none() {
-                    out.push(Self::parse_failed(Command::Balance, payload));
-                }
-            }
+            0 | 1 | 2 | 5 => {}
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
                     let known_markets = self.markets.by_name.keys().cloned().collect::<Vec<_>>();
@@ -1475,10 +1471,7 @@ impl EventDispatcher {
                 }
                 None => out.push(Self::parse_failed(Command::Balance, payload)),
             },
-            _ => out.push(Event::Raw {
-                cmd: Command::Balance,
-                payload: payload.to_vec(),
-            }),
+            _ => {}
         }
     }
 
@@ -1977,6 +1970,7 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
 mod tests {
     use super::*;
     use crate::commands::arb::build_arb_prices;
+    use crate::commands::balance::build_request_balance_refresh;
     use crate::commands::market::{
         build_markets_prices_response, write_market, BaseCurrency, Market, MarketPriceUpdate,
         MarketsListResponse, MarketsPricesResponse,
@@ -3108,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_ignores_exact_balance_command_id_2_like_delphi() {
+    fn dispatcher_ignores_balance_base_request_and_unknown_like_delphi_registry() {
         let mut d = EventDispatcher::new();
 
         let full = balance_payload(3, 10, 1, 1.0);
@@ -3135,6 +3129,37 @@ mod tests {
         );
         assert_eq!(d.balances.global.btc_balance_total, 1.0);
         assert_eq!(d.balances.last_epoch, 1);
+
+        let mut base_command = vec![0, 0x03, 0x00];
+        base_command.extend_from_slice(&13u64.to_le_bytes());
+        let events = d.dispatch(Command::Balance, &base_command, 1003);
+        assert!(
+            events.is_empty(),
+            "Delphi unknown/base balance command is not TBalanceCommandBase and is ignored"
+        );
+
+        let request_refresh = build_request_balance_refresh(14);
+        let events = d.dispatch(Command::Balance, &request_refresh, 1004);
+        assert!(
+            events.is_empty(),
+            "TRequestBalanceRefresh is client->server; Delphi client has no receive side effect"
+        );
+
+        let mut unknown = vec![250, 0x03, 0x00];
+        unknown.extend_from_slice(&15u64.to_le_bytes());
+        let events = d.dispatch(Command::Balance, &unknown, 1005);
+        assert!(
+            events.is_empty(),
+            "Delphi registry maps unknown balance CmdId to TBaseBalanceCommand and ignores it"
+        );
+
+        let mut malformed_ignored = vec![2, 0x03, 0x00];
+        malformed_ignored.extend_from_slice(&16u64.to_le_bytes());
+        let events = d.dispatch(Command::Balance, &malformed_ignored, 1006);
+        assert!(
+            events.is_empty(),
+            "malformed ignored balance command must not become ParseFailed because Delphi applies no state branch"
+        );
     }
 
     #[test]

@@ -6088,3 +6088,19 @@ Done:
 Red flag:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.171`.
+
+### 2026-05-26 - Balance base/request/unknown commands are active-silent
+
+Done:
+
+- Checked Delphi `MoonProtoClient.pas:ClientNewData(MPC_Balance)` and
+  `MoonProtoEngine.pas:ProcessBalanceCommand`.
+- Active `EventDispatcher` now ignores incoming balance `CmdId=0/1/2/5` and
+  unknown balance subcommands without producing `Event::Raw` or
+  `Event::ParseFailed`.
+- `CmdId=3/4` still apply balance state; `CmdId=6` still emits typed
+  `Event::Arb` after payload parsing/filtering.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.172`.
