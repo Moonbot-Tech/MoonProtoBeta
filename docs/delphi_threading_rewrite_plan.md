@@ -5408,6 +5408,8 @@ Verification:
 - `cargo test dispatcher_ --lib` OK: 41 tests.
 - `cargo test --lib` OK: 698 tests.
 - `cargo check --examples` OK.
+- Quick prod FireTest OK: `FIRETEST_QUICK_PASS after 23.89s`,
+  `ParseFailed=0`, `err_emu=10%`, target market tail present for `BTCUSDT`.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
