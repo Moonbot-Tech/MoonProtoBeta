@@ -89,12 +89,9 @@ pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
 pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     let mut pos = 0usize;
 
-    // Epoch (2 bytes)
-    if pos + 2 > data.len() {
-        return None;
-    }
-    let epoch = u16::from_le_bytes([data[pos], data[pos + 1]]);
-    pos += 2;
+    // Delphi reads fixed fields with TStream.Read into zero-initialized object
+    // fields. Short reads keep the unread tail zero and do not raise.
+    let epoch = read_u16_zero_tail(data, &mut pos);
 
     let mut result = BalanceUpdate {
         cmd_id,
@@ -109,59 +106,34 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
 
     if cmd_id == 4 {
         // Incremental: GlobalChanged flag gates global fields
-        if pos >= data.len() {
-            return Some(result);
-        }
-        result.global_changed = data[pos] != 0;
-        pos += 1;
+        result.global_changed = read_bool_zero_tail(data, &mut pos);
 
         if result.global_changed {
-            if pos + 32 > data.len() {
-                return Some(result);
-            }
-            result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            result.special_coin_balance =
-                f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
+            result.btc_balance_total = read_f64_zero_tail(data, &mut pos);
+            result.btc_balance_locked = read_f64_zero_tail(data, &mut pos);
+            result.btc_balance_full = read_f64_zero_tail(data, &mut pos);
+            result.special_coin_balance = read_f64_zero_tail(data, &mut pos);
         }
     } else {
         // Full: always has global fields
-        if pos + 32 > data.len() {
-            return Some(result);
-        }
-        result.btc_balance_total = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        result.btc_balance_locked = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        result.btc_balance_full = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        result.special_coin_balance = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
+        result.btc_balance_total = read_f64_zero_tail(data, &mut pos);
+        result.btc_balance_locked = read_f64_zero_tail(data, &mut pos);
+        result.btc_balance_full = read_f64_zero_tail(data, &mut pos);
+        result.special_coin_balance = read_f64_zero_tail(data, &mut pos);
     }
 
-    // Count
-    if pos + 4 > data.len() {
-        return Some(result);
-    }
-    let count_raw = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    pos += 4;
+    let count_raw = read_i32_zero_tail(data, &mut pos);
 
     if count_raw <= 0 {
         return Some(result);
     }
     let count = count_raw as usize;
 
-    // Items
     for _ in 0..count {
         if let Some(item) = read_balance_item(data, &mut pos) {
             result.items.push(item);
         } else {
-            break;
+            return None;
         }
     }
 
@@ -172,13 +144,8 @@ pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
 fn read_balance_item(data: &[u8], pos: &mut usize) -> Option<BalanceItem> {
     let market_name = read_string(data, pos)?;
 
-    if *pos + 12 > data.len() {
-        return None;
-    } // hash(8) + flags(4)
-    let balance_hash = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-    *pos += 8;
-    let flags = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-    *pos += 4;
+    let balance_hash = read_u64_zero_tail(data, pos);
+    let flags = read_u32_zero_tail(data, pos);
 
     let mut item = BalanceItem {
         market_name,
@@ -219,10 +186,8 @@ fn read_balance_item(data: &[u8], pos: &mut usize) -> Option<BalanceItem> {
 fn read_flagged_f64(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32) -> f64 {
     let present = (flags & (1 << *bit)) != 0;
     *bit += 1;
-    if present && *pos + 8 <= data.len() {
-        let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-        *pos += 8;
-        v
+    if present {
+        read_f64_zero_tail(data, pos)
     } else {
         0.0
     }
@@ -231,13 +196,45 @@ fn read_flagged_f64(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32) -> 
 fn read_flagged_i32(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32, default: i32) -> i32 {
     let present = (flags & (1 << *bit)) != 0;
     *bit += 1;
-    if present && *pos + 4 <= data.len() {
-        let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-        *pos += 4;
-        v
+    if present {
+        read_i32_zero_tail(data, pos)
     } else {
         default
     }
+}
+
+fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    let available = data.len().saturating_sub(*pos).min(N);
+    if available > 0 {
+        out[..available].copy_from_slice(&data[*pos..*pos + available]);
+        *pos += available;
+    }
+    out
+}
+
+fn read_bool_zero_tail(data: &[u8], pos: &mut usize) -> bool {
+    read_zero_tail::<1>(data, pos)[0] != 0
+}
+
+fn read_u16_zero_tail(data: &[u8], pos: &mut usize) -> u16 {
+    u16::from_le_bytes(read_zero_tail::<2>(data, pos))
+}
+
+fn read_u32_zero_tail(data: &[u8], pos: &mut usize) -> u32 {
+    u32::from_le_bytes(read_zero_tail::<4>(data, pos))
+}
+
+fn read_u64_zero_tail(data: &[u8], pos: &mut usize) -> u64 {
+    u64::from_le_bytes(read_zero_tail::<8>(data, pos))
+}
+
+fn read_i32_zero_tail(data: &[u8], pos: &mut usize) -> i32 {
+    i32::from_le_bytes(read_zero_tail::<4>(data, pos))
+}
+
+fn read_f64_zero_tail(data: &[u8], pos: &mut usize) -> f64 {
+    f64::from_le_bytes(read_zero_tail::<8>(data, pos))
 }
 
 #[cfg(test)]
@@ -264,16 +261,42 @@ mod tests {
     }
 
     #[test]
-    fn balance_parser_keeps_present_items_when_count_overstates_remaining_like_delphi_loop() {
+    fn balance_parser_rejects_when_count_reaches_missing_next_item_string_like_delphi_readbuffer() {
         let item = zero_flags_item("BTCUSDT", 99);
         let payload = full_balance_payload_with_count(2, &item);
 
+        assert!(parse_balance(3, &payload).is_none());
+    }
+
+    #[test]
+    fn balance_parser_zero_tails_short_fixed_fields_like_delphi_stream_read() {
+        let mut item = Vec::new();
+        super::super::registry::write_string(&mut item, "BTCUSDT");
+        // Short BalanceHash keeps present low bytes; Flags are absent and stay zero.
+        item.extend_from_slice(&[0x34, 0x12]);
+
+        let payload = full_balance_payload_with_count(1, &item);
         let parsed = parse_balance(3, &payload).unwrap();
 
         assert_eq!(parsed.items.len(), 1);
         assert_eq!(parsed.items[0].market_name, "BTCUSDT");
-        assert_eq!(parsed.items[0].balance_hash, 99);
+        assert_eq!(parsed.items[0].balance_hash, 0x1234);
         assert_eq!(parsed.items[0].leverage_x, 1);
+    }
+
+    #[test]
+    fn balance_parser_zero_tails_present_flagged_field_and_consumes_tail() {
+        let mut item = Vec::new();
+        super::super::registry::write_string(&mut item, "BTCUSDT");
+        item.extend_from_slice(&99u64.to_le_bytes());
+        item.extend_from_slice(&1u32.to_le_bytes()); // InitialBalance present
+        item.extend_from_slice(&[0x01, 0x02]); // short f64 payload
+
+        let payload = full_balance_payload_with_count(1, &item);
+        let parsed = parse_balance(3, &payload).unwrap();
+
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].initial_balance.to_bits(), 0x0201);
     }
 
     #[test]
@@ -289,10 +312,8 @@ mod tests {
 fn read_flagged_u8(data: &[u8], pos: &mut usize, flags: u32, bit: &mut u32, default: u8) -> u8 {
     let present = (flags & (1 << *bit)) != 0;
     *bit += 1;
-    if present && *pos < data.len() {
-        let v = data[*pos];
-        *pos += 1;
-        v
+    if present {
+        read_zero_tail::<1>(data, pos)[0]
     } else {
         default
     }

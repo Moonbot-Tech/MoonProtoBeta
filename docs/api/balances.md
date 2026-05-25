@@ -210,6 +210,14 @@ stored row with the decoded item, except `max_value`: Delphi only updates
 previous `max_value` when the decoded value is zero or otherwise not greater than
 `1e-8`.
 
+Fixed scalar fields are read like Delphi `TMemoryStream.Read`: a short body keeps
+the bytes that are present, zero-fills the missing high bytes, advances by the
+bytes consumed, and does not make the command fail. `market_name` is different:
+Delphi `ReadStringFromStreamUtf8` uses `ReadBuffer`, so an incomplete string
+length or body rejects the whole balance command. If `count` reaches an item whose
+string cannot be read, the active dispatcher reports `ParseFailed` and applies no
+partial balance update.
+
 ## Related API Surface
 
 `TArbPricesCommand` also uses the MPC_Balance channel (`CmdId=6`).

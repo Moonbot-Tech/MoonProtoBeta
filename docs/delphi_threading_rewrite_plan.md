@@ -6145,3 +6145,33 @@ Done:
 Red flag:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.174`.
+
+### 2026-05-26 - Correction: Balance item tails follow Read vs ReadBuffer
+
+Correction:
+
+- Re-checked `MoonProtoBalanceStruct.pas:TBalanceCommand.CreateFromStream`,
+  `TBalanceIncrUpdate.CreateFromStream`, `TBalanceItem.ReadFromStream`, and
+  `Vars.pas:ReadStringFromStreamUtf8`.
+- The earlier §X.112 fix removed the bad `Count * min_item_size` pre-drop, but
+  its test overstated Delphi behavior. Delphi does not keep already parsed
+  items if `Count` reaches a next item whose `MarketName` string cannot be read:
+  `ReadStringFromStreamUtf8` uses `ReadBuffer`, raises, and `DataReadInt`
+  catches/logs the command without applying it.
+- Fixed Balance fixed-field parsing to match Delphi `TMemoryStream.Read`:
+  `epoch`, global doubles, `count`, `BalanceHash`, `Flags`, and present flagged
+  scalar bytes read partial low bytes, zero-fill missing tail bytes, and advance
+  stream position instead of returning early or reusing tail bytes.
+- `BalanceItem` string tails remain fail-fast because Delphi strings use
+  `ReadBuffer`, not `Read`.
+
+Red flag:
+
+- Recorded `spec_pipeline/work/хуйня.md §X.175`.
+
+Verification:
+
+- `cargo test --lib --quiet` OK: 737 tests.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 25.88s`, `ParseFailed=0`.
