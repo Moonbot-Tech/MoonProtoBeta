@@ -620,13 +620,16 @@ Done:
   futures/spot/liquidation/MM rows. These are the explicit bridge from
   `TradesStream` section rows to retained storage: compute Delphi shifted row
   time, then append through the correct retained path.
+- Added aligned MM-order companion storage and `hl_address_color_like_delphi`.
+  This mirrors `TStreamableRingBuffer<TMMOrder,TMMOrderData>` slot pairing and
+  Delphi `HLAddressColor` instead of storing taker/color as a detached list.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
-- `cargo test history --lib` OK: 18 tests.
+- `cargo test history --lib` OK: 19 tests.
 - `cargo test history_store --lib` OK: 4 tests.
-- `cargo test --lib` OK: 689 tests.
+- `cargo test --lib` OK: 690 tests.
 
 ### Phase Z - final full optimization pass
 

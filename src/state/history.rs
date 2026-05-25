@@ -306,7 +306,7 @@ impl SeqRingRowSlot for MMOrderHistoryRowSlot {
 ///
 /// Delphi layout is `Taker: THLAddress` (20 bytes) and `Color: TColor`. It is
 /// stored beside the base `TMMOrder` row by slot, not inside the base row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MMOrderCompanionData {
     pub taker: [u8; 20],
     pub color: u32,
@@ -353,6 +353,22 @@ impl SeqRingRowSlot for MMOrderCompanionDataSlot {
             color: self.color.load(Ordering::Relaxed),
         }
     }
+}
+
+pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
+    let mut r = 0u8;
+    let mut g = 0u8;
+    let mut b = 0u8;
+    for (idx, byte) in taker.into_iter().enumerate() {
+        match idx % 3 {
+            0 => r ^= byte,
+            1 => g ^= byte,
+            _ => b ^= byte,
+        }
+    }
+
+    let scale = |x: u8| -> u32 { ((u32::from(x) * 5) >> 3) + 80 };
+    0xFF00_0000 | (scale(r) << 16) | (scale(g) << 8) | scale(b)
 }
 
 /// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.
@@ -990,6 +1006,15 @@ mod tests {
         writer.push(row);
 
         assert_eq!(reader.read_at_seq(0), Some(row));
+    }
+
+    #[test]
+    fn hl_address_color_matches_delphi_xor_scale() {
+        let mut taker = [0u8; 20];
+        for (idx, byte) in taker.iter_mut().enumerate() {
+            *byte = idx as u8;
+        }
+        assert_eq!(hl_address_color_like_delphi(taker), 0xFF62_5360);
     }
 
     #[test]

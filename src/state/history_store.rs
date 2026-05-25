@@ -5,8 +5,9 @@
 //! rows without taking locks on the writer path.
 
 use crate::state::history::{
-    compact_trades_to_mini_candles_like_delphi, prepare_joined_trades_for_retained_append,
-    LastPricePoint, MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
+    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
+    prepare_joined_trades_for_retained_append, LastPricePoint, MMOrderCompanionData,
+    MMOrderHistoryRow, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
     TradeHistoryRow, TradeJoinBuffer, TradesPacketTimeShift, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
@@ -20,6 +21,7 @@ pub struct MarketHistoryConfig {
     pub spot_trades_capacity: usize,
     pub liquidation_capacity: usize,
     pub mm_orders_capacity: usize,
+    pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub trade_join_capacity: usize,
@@ -32,6 +34,7 @@ impl Default for MarketHistoryConfig {
             spot_trades_capacity: 100_000,
             liquidation_capacity: 20_000,
             mm_orders_capacity: 20_000,
+            mm_order_companion_capacity: 20_000,
             last_price_capacity: 60_000,
             mini_candles_capacity: 20_000,
             trade_join_capacity: DEFAULT_TRADE_JOIN_CAPACITY,
@@ -45,6 +48,7 @@ pub struct MarketHistoryReaders {
     pub spot_trades: Option<SeqRingReader<TradeHistoryRow>>,
     pub liquidations: Option<SeqRingReader<TradeHistoryRow>>,
     pub mm_orders: Option<SeqRingReader<MMOrderHistoryRow>>,
+    pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
 }
@@ -54,6 +58,7 @@ pub struct MarketHistoryStore {
     spot_trades: Option<SeqRingWriter<TradeHistoryRow>>,
     liquidations: Option<SeqRingWriter<TradeHistoryRow>>,
     mm_orders: Option<SeqRingWriter<MMOrderHistoryRow>>,
+    mm_order_companion: Option<SeqRingWriter<MMOrderCompanionData>>,
     last_prices: Option<SeqRingWriter<LastPricePoint>>,
     mini_candles: Option<SeqRingWriter<MiniCandle>>,
     readers: MarketHistoryReaders,
@@ -73,6 +78,8 @@ impl MarketHistoryStore {
         let (liquidations, liq_reader) =
             optional_ring::<TradeHistoryRow>(config.liquidation_capacity);
         let (mm_orders, mm_reader) = optional_ring::<MMOrderHistoryRow>(config.mm_orders_capacity);
+        let (mm_order_companion, mm_companion_reader) =
+            optional_ring::<MMOrderCompanionData>(config.mm_order_companion_capacity);
         let (last_prices, last_reader) =
             optional_ring::<LastPricePoint>(config.last_price_capacity);
         let (mini_candles, mini_reader) = optional_ring::<MiniCandle>(config.mini_candles_capacity);
@@ -82,6 +89,7 @@ impl MarketHistoryStore {
             spot_trades,
             liquidations,
             mm_orders,
+            mm_order_companion,
             last_prices,
             mini_candles,
             readers: MarketHistoryReaders {
@@ -89,6 +97,7 @@ impl MarketHistoryStore {
                 spot_trades: spot_reader,
                 liquidations: liq_reader,
                 mm_orders: mm_reader,
+                mm_order_companion: mm_companion_reader,
                 last_prices: last_reader,
                 mini_candles: mini_reader,
             },
@@ -222,7 +231,19 @@ impl MarketHistoryStore {
     }
 
     pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64> {
-        self.mm_orders.as_mut().map(|writer| writer.push(row))
+        self.append_mm_order_with_companion_like_delphi(row, None)
+    }
+
+    pub fn append_mm_order_with_companion_like_delphi(
+        &mut self,
+        row: MMOrderHistoryRow,
+        companion: Option<MMOrderCompanionData>,
+    ) -> Option<u64> {
+        let seq = self.mm_orders.as_mut().map(|writer| writer.push(row))?;
+        if let Some(writer) = self.mm_order_companion.as_mut() {
+            writer.push(companion.unwrap_or_default());
+        }
+        Some(seq)
     }
 
     pub fn append_mm_stream_order_like_delphi(
@@ -232,14 +253,22 @@ impl MarketHistoryStore {
         now_time: f64,
         vol: f32,
         q: f32,
+        taker: Option<[u8; 20]>,
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>) {
         let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
-        let seq = self.append_mm_order_like_delphi(MMOrderHistoryRow {
-            time,
-            vol: f64::from(vol),
-            q: f64::from(q),
+        let companion = taker.map(|taker| MMOrderCompanionData {
+            taker,
+            color: hl_address_color_like_delphi(taker),
         });
+        let seq = self.append_mm_order_with_companion_like_delphi(
+            MMOrderHistoryRow {
+                time,
+                vol: f64::from(vol),
+                q: f64::from(q),
+            },
+            companion,
+        );
         (time, seq)
     }
 
@@ -323,6 +352,7 @@ mod tests {
             spot_trades_capacity: 0,
             liquidation_capacity: 0,
             mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
             last_price_capacity: 4,
             mini_candles_capacity: 0,
             trade_join_capacity: 0,
@@ -365,6 +395,7 @@ mod tests {
             spot_trades_capacity: 0,
             liquidation_capacity: 0,
             mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             trade_join_capacity: 6,
@@ -409,6 +440,7 @@ mod tests {
             spot_trades_capacity: 8,
             liquidation_capacity: 8,
             mm_orders_capacity: 8,
+            mm_order_companion_capacity: 8,
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             trade_join_capacity: 8,
@@ -416,8 +448,16 @@ mod tests {
 
         let fut_time = store
             .push_futures_stream_trade_like_delphi(base, 100, now, 100.0, 1.0, 0.01, &mut shift);
-        let (mm_time, mm_seq) =
-            store.append_mm_stream_order_like_delphi(base, 200, base - 10.0, 5.0, -2.0, &mut shift);
+        let taker = [7u8; 20];
+        let (mm_time, mm_seq) = store.append_mm_stream_order_like_delphi(
+            base,
+            200,
+            base - 10.0,
+            5.0,
+            -2.0,
+            Some(taker),
+            &mut shift,
+        );
         let (spot_time, spot_seq) = store.append_spot_stream_trade_like_delphi(
             base,
             -300,
@@ -450,6 +490,19 @@ mod tests {
                 q: -2.0,
             }]
         );
+
+        let mut companions = Vec::new();
+        readers
+            .mm_order_companion
+            .unwrap()
+            .copy_last(1, &mut companions);
+        assert_eq!(
+            companions,
+            vec![MMOrderCompanionData {
+                taker,
+                color: hl_address_color_like_delphi(taker),
+            }]
+        );
     }
 
     #[test]
@@ -459,6 +512,7 @@ mod tests {
             spot_trades_capacity: 0,
             liquidation_capacity: 0,
             mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
             last_price_capacity: 0,
             mini_candles_capacity: 8,
             trade_join_capacity: 8,

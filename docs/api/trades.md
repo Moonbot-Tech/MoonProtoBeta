@@ -179,6 +179,8 @@ pub struct MMOrderCompanionData {
     pub color: u32,
 }
 
+pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32;
+
 pub struct MiniCandle {
     pub time: f64, // Delphi TDateTime
     pub cnt: i32,
@@ -198,6 +200,9 @@ matching Delphi `PCardinal(@Qty)^ and $80000000`.
 stored as doubles. HyperDex taker address/color companion data is a separate
 storage layer; it is not folded into the base row. `MMOrderCompanionData`
 matches Delphi `TMMOrderData`: `Taker: THLAddress` and `Color: TColor`.
+`hl_address_color_like_delphi` mirrors Delphi `HLAddressColor`: XOR address
+bytes into R/G/B accumulators by index modulo 3, scale each channel with
+`(x * 5 >> 3) + 80`, and set alpha to `0xFF`.
 
 ```rust
 pub fn compact_trades_to_mini_candles_like_delphi(
@@ -315,6 +320,7 @@ pub struct MarketHistoryConfig {
     pub spot_trades_capacity: usize,
     pub liquidation_capacity: usize,
     pub mm_orders_capacity: usize,
+    pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub trade_join_capacity: usize,
@@ -325,6 +331,7 @@ pub struct MarketHistoryReaders {
     pub spot_trades: Option<SeqRingReader<TradeHistoryRow>>,
     pub liquidations: Option<SeqRingReader<TradeHistoryRow>>,
     pub mm_orders: Option<SeqRingReader<MMOrderHistoryRow>>,
+    pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
 }
@@ -371,6 +378,11 @@ impl MarketHistoryStore {
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>);
     pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64>;
+    pub fn append_mm_order_with_companion_like_delphi(
+        &mut self,
+        row: MMOrderHistoryRow,
+        companion: Option<MMOrderCompanionData>,
+    ) -> Option<u64>;
     pub fn append_mm_stream_order_like_delphi(
         &mut self,
         base_time: f64,
@@ -378,6 +390,7 @@ impl MarketHistoryStore {
         now_time: f64,
         vol: f32,
         q: f32,
+        taker: Option<[u8; 20]>,
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>);
     pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
@@ -392,7 +405,10 @@ drained into retained history through the sort/skip-tail step. Rows evicted
 from the futures retained ring are buffered for `TMiniCandle` compaction.
 The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
 shared `TradesPacketTimeShift`, so all retained row types in one packet use the
-same Delphi packet time correction.
+same Delphi packet time correction. MM-order companion rows are aligned with
+the base MM-order ring slot: when a taker address is present, the helper stores
+`TMMOrderData` with Delphi `HLAddressColor`; otherwise it stores default
+companion data for that slot.
 Readers are cloneable handles; application code reads last N rows, from time,
 or a time range through `SeqRingReader` without knowing the writer internals.
 
