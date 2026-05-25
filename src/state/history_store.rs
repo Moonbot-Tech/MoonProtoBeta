@@ -16,6 +16,13 @@ use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
 const EPS_MARKET: f64 = 1e-12;
 const DEFAULT_TRADE_JOIN_CAPACITY: usize = 1_000;
+const GIB: usize = 1024 * 1024 * 1024;
+const TRADE_SLOT_BYTES: usize = 24;
+const MM_ORDER_SLOT_BYTES: usize = 32;
+const MM_COMPANION_SLOT_BYTES: usize = 32;
+const LAST_PRICE_SLOT_BYTES: usize = 24;
+const MINI_CANDLE_SLOT_BYTES: usize = 40;
+const TRADE_JOIN_ROW_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarketHistoryConfig {
@@ -42,6 +49,75 @@ impl Default for MarketHistoryConfig {
             trade_join_capacity: DEFAULT_TRADE_JOIN_CAPACITY,
         }
     }
+}
+
+impl MarketHistoryConfig {
+    pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self {
+        let market_count = market_count.max(1);
+        let budget = Self::history_budget_bytes(total_memory_bytes);
+        let per_market_budget = budget / market_count;
+
+        let futures_trades_capacity =
+            capacity_from_share(per_market_budget, 35, 100, TRADE_SLOT_BYTES, 200_000);
+        let spot_trades_capacity =
+            capacity_from_share(per_market_budget, 20, 100, TRADE_SLOT_BYTES, 150_000);
+        let liquidation_capacity =
+            capacity_from_share(per_market_budget, 8, 100, TRADE_SLOT_BYTES, 50_000);
+        let mm_orders_capacity =
+            capacity_from_share(per_market_budget, 8, 100, MM_ORDER_SLOT_BYTES, 50_000);
+        let mm_order_companion_capacity =
+            capacity_from_share(per_market_budget, 8, 100, MM_COMPANION_SLOT_BYTES, 50_000);
+        let last_price_capacity =
+            capacity_from_share(per_market_budget, 10, 100, LAST_PRICE_SLOT_BYTES, 80_000);
+        let mini_candles_capacity =
+            capacity_from_share(per_market_budget, 8, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
+        let trade_join_capacity = futures_trades_capacity
+            .min(DEFAULT_TRADE_JOIN_CAPACITY)
+            .max(usize::from(futures_trades_capacity > 0) * 8);
+
+        Self {
+            futures_trades_capacity,
+            spot_trades_capacity,
+            liquidation_capacity,
+            mm_orders_capacity,
+            mm_order_companion_capacity,
+            last_price_capacity,
+            mini_candles_capacity,
+            trade_join_capacity,
+        }
+    }
+
+    pub fn history_budget_bytes(total_memory_bytes: usize) -> usize {
+        if total_memory_bytes < 8 * GIB {
+            total_memory_bytes / 4
+        } else {
+            total_memory_bytes / 5
+        }
+    }
+
+    pub fn estimated_bytes_per_market(&self) -> usize {
+        self.futures_trades_capacity * TRADE_SLOT_BYTES
+            + self.spot_trades_capacity * TRADE_SLOT_BYTES
+            + self.liquidation_capacity * TRADE_SLOT_BYTES
+            + self.mm_orders_capacity * MM_ORDER_SLOT_BYTES
+            + self.mm_order_companion_capacity * MM_COMPANION_SLOT_BYTES
+            + self.last_price_capacity * LAST_PRICE_SLOT_BYTES
+            + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES
+            + self.trade_join_capacity * TRADE_JOIN_ROW_BYTES
+    }
+}
+
+fn capacity_from_share(
+    budget: usize,
+    numerator: usize,
+    denominator: usize,
+    row_bytes: usize,
+    max_capacity: usize,
+) -> usize {
+    if budget == 0 || row_bytes == 0 || denominator == 0 {
+        return 0;
+    }
+    ((budget / denominator) * numerator / row_bytes).min(max_capacity)
 }
 
 #[derive(Clone, Default)]
@@ -392,6 +468,29 @@ mod tests {
 
     fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {
         TradeHistoryRow { time, price, qty }
+    }
+
+    #[test]
+    fn memory_sized_config_stays_inside_budget() {
+        let total = 16 * GIB;
+        let market_count = 1_000;
+        let cfg = MarketHistoryConfig::from_total_memory_bytes(total, market_count);
+        let total_estimated = cfg.estimated_bytes_per_market() * market_count;
+
+        assert!(cfg.futures_trades_capacity > cfg.spot_trades_capacity);
+        assert!(cfg.trade_join_capacity <= DEFAULT_TRADE_JOIN_CAPACITY);
+        assert!(
+            total_estimated <= MarketHistoryConfig::history_budget_bytes(total),
+            "history defaults should fit the configured memory budget"
+        );
+    }
+
+    #[test]
+    fn small_memory_config_uses_larger_fraction() {
+        let small = 4 * GIB;
+        let large = 16 * GIB;
+        assert_eq!(MarketHistoryConfig::history_budget_bytes(small), small / 4);
+        assert_eq!(MarketHistoryConfig::history_budget_bytes(large), large / 5);
     }
 
     #[test]

@@ -326,6 +326,12 @@ pub struct MarketHistoryConfig {
     pub trade_join_capacity: usize,
 }
 
+impl MarketHistoryConfig {
+    pub fn from_total_memory_bytes(total_memory_bytes: usize, market_count: usize) -> Self;
+    pub fn history_budget_bytes(total_memory_bytes: usize) -> usize;
+    pub fn estimated_bytes_per_market(&self) -> usize;
+}
+
 pub struct MarketHistoryReaders {
     pub futures_trades: Option<SeqRingReader<TradeHistoryRow>>,
     pub spot_trades: Option<SeqRingReader<TradeHistoryRow>>,
@@ -427,6 +433,13 @@ or a time range through `SeqRingReader` without knowing the writer internals.
 does not allocate all market histories from `GetMarketsList`; future runtime
 integration creates a store only for markets/categories enabled by the active
 history configuration.
+
+`MarketHistoryConfig::from_total_memory_bytes(total_memory_bytes, market_count)`
+is the RAM-budget helper for init/config code. It budgets about 20% of total
+memory for retained histories, or 25% on machines below 8 GiB, then splits that
+budget across the given market count and categories. `estimated_bytes_per_market`
+uses the storage slot sizes used by `SeqRing` and is intended for tests and
+config diagnostics.
 
 ## Recovery Behavior
 

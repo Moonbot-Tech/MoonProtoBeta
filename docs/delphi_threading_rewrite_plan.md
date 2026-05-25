@@ -627,13 +627,17 @@ Done:
   integration must not allocate full retained rings for every market just
   because `GetMarketsList` returned it; stores are created for enabled
   markets/categories.
+- Added `MarketHistoryConfig::from_total_memory_bytes`: default capacity sizing
+  helper for future init/config wiring. It budgets ~20% of total memory for
+  retained histories, or 25% below 8 GiB, then splits the per-market budget
+  across categories using `SeqRing` slot-size estimates.
 
 Verification:
 
 - `cargo test seq_ring --lib` OK: 13 tests.
 - `cargo test history --lib` OK: 19 tests.
-- `cargo test history_store --lib` OK: 5 tests.
-- `cargo test --lib` OK: 691 tests.
+- `cargo test history_store --lib` OK: 7 tests.
+- `cargo test --lib` OK: 693 tests.
 - `cargo check --examples` OK.
 
 ### Phase Z - final full optimization pass
