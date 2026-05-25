@@ -836,4 +836,70 @@ mod tests {
         let owned = parse_trades_packet(&payload).expect("owned packet");
         assert_eq!(owned.sections.len(), 1);
     }
+
+    #[test]
+    fn section_iter_stops_on_unknown_ext_type_like_delphi_exit() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&80u16.to_le_bytes());
+
+        payload.extend_from_slice(&5u16.to_le_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&trade_row_bytes(1, 100.0, 0.5));
+
+        payload.extend_from_slice(&(0xC000u16 | 6).to_le_bytes());
+        payload.push(99); // unknown ExtType: Delphi logs and exits ProcessTradesStream.
+
+        payload.extend_from_slice(&7u16.to_le_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&trade_row_bytes(2, 101.0, 0.75));
+        payload.push(0);
+
+        let decoded = decode_trades_packet(&payload).expect("decoded packet");
+        let mut sections = decoded.sections();
+        let TradeSectionRef::Trades(rows) = sections.next().expect("first section") else {
+            panic!("expected first trades section");
+        };
+        assert_eq!(rows.collect::<Vec<_>>().len(), 1);
+        assert!(
+            sections.next().is_none(),
+            "Delphi exits on an unknown extended section; bytes after it must not be parsed as another section"
+        );
+
+        let owned = parse_trades_packet(&payload).expect("owned packet");
+        assert_eq!(owned.sections.len(), 1);
+    }
+
+    #[test]
+    fn section_iter_stops_on_truncated_watcher_fills_like_delphi_row_read() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&81u16.to_le_bytes());
+
+        payload.extend_from_slice(&5u16.to_le_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&trade_row_bytes(1, 100.0, 0.5));
+
+        payload.extend_from_slice(&(0xC000u16 | 9).to_le_bytes());
+        payload.push(1); // ExtType WatcherFills
+        payload.extend_from_slice(&[0xAB; 20]);
+        payload.push(2); // declared two 20-byte records
+        payload.extend_from_slice(&watcher_fill_bytes());
+        payload.extend_from_slice(&[0xEE; 3]); // partial second record
+        payload.push(0);
+
+        let decoded = decode_trades_packet(&payload).expect("decoded packet");
+        let mut sections = decoded.sections();
+        let TradeSectionRef::Trades(rows) = sections.next().expect("first section") else {
+            panic!("expected first trades section");
+        };
+        assert_eq!(rows.collect::<Vec<_>>().len(), 1);
+        assert!(
+            sections.next().is_none(),
+            "Delphi reaches stream end while reading watcher-fill rows; the partial tail must not become another section"
+        );
+
+        let owned = parse_trades_packet(&payload).expect("owned packet");
+        assert_eq!(owned.sections.len(), 1);
+    }
 }

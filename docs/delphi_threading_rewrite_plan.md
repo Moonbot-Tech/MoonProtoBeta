@@ -5835,6 +5835,23 @@ Verification:
   `section_iter_consumes_truncated_declared_rows_instead_of_reparsing_tail`.
 - `cargo test section_iter --lib` OK: 3 tests.
 
+### 2026-05-26 - TradesStream SectionIter malformed-section proof edges
+
+Done:
+
+- Added the remaining SectionIter proof tests promised in the Phase E target:
+  unknown extended section type and truncated WatcherFills rows.
+- Delphi `ProcessTradesStream` exits on an unknown `ExtType` and does not parse
+  later bytes as another section. Rust `TradeSectionIter` now has a pinned test
+  for the same stop behavior.
+- Delphi reaches stream end while reading declared WatcherFills rows when the
+  declared `Count * 20` bytes are truncated. Rust now has a pinned test that the
+  partial watcher-fill tail is not reinterpreted as another section.
+
+Verification:
+
+- `cargo test section_iter --lib --quiet` OK: 5 tests.
+
 ### 2026-05-25 - Strategy schema agreed active-lib behavior
 
 Delphi source:
@@ -5893,6 +5910,26 @@ Red flag closed:
   serializer switched to schema visibility this became a correct failure of the
   test payload, not a protocol deviation. FireTest now seeds `sk_Telegram` and
   asserts that the configured field is visible for the seeded kind.
+
+### 2026-05-26 - Strat parser malformed tails match Delphi stream reads
+
+Done:
+
+- Re-checked Delphi `MoonProtoStratStruct.pas` constructors and
+  `MoonProtoClient.pas:ProcessStratCommand`.
+- `TStratSnapshot` with declared `Size` larger than remaining bytes no longer
+  becomes a generic Rust `ParseFailed`. It follows Delphi's invalid snapshot
+  path: parsed command, empty/invalid `data`, serializer decode fails, no
+  epoch/state apply and no SnapshotFull/Partial event.
+- `TStratCheckedSync` / `TStratCheckedEcho` no longer pre-drop the whole
+  command when `Count` overstates remaining bytes. They read the declared count
+  with Delphi `ms.Read` semantics: dynamic-array zero tail, partial
+  `StrategyID` low bytes, missing `Checked=false`.
+- Recorded `spec_pipeline/work/хуйня.md §X.166`.
+
+Verification:
+
+- `cargo test strat --lib --quiet` OK: 67 tests.
 
 ### 2026-05-25 - OrderBook/Trades subscribe reconnect SendAndWait gate parity
 

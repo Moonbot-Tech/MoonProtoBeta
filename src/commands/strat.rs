@@ -177,10 +177,19 @@ impl StratCommand {
                 pos += 4;
                 let full = payload[pos] != 0;
                 pos += 1;
-                if pos + size > payload.len() {
-                    return None;
-                }
-                let data = payload[pos..pos + size].to_vec();
+                let data = if pos + size > payload.len() {
+                    // Delphi `TStratSnapshot.CreateFromStream`: declared Size
+                    // larger than remaining bytes sets `Data := nil`, seeks to
+                    // stream end, and lets `ProcessStratCommand` reject the
+                    // invalid snapshot without applying epoch/state. Rust has
+                    // no nil stream in this public struct; an empty payload
+                    // follows the same later path as a malformed Size=0
+                    // snapshot: serializer decode fails and no Snapshot event
+                    // is emitted.
+                    Vec::new()
+                } else {
+                    payload[pos..pos + size].to_vec()
+                };
                 Some(StratCommand::Snapshot(StratSnapshot {
                     server_epoch,
                     client_max_last_date,
@@ -260,7 +269,23 @@ fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratChecke
     pos += 2;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        items.push(StratCheckedItem::read_from(payload, &mut pos)?);
+        let mut strategy_id = [0u8; 8];
+        let id_bytes = payload.len().saturating_sub(pos).min(8);
+        if id_bytes > 0 {
+            strategy_id[..id_bytes].copy_from_slice(&payload[pos..pos + id_bytes]);
+            pos += id_bytes;
+        }
+        let checked = if pos < payload.len() {
+            let checked = payload[pos] != 0;
+            pos += 1;
+            checked
+        } else {
+            false
+        };
+        items.push(StratCheckedItem {
+            strategy_id: u64::from_le_bytes(strategy_id),
+            checked,
+        });
     }
     Some((items, pos))
 }
@@ -514,6 +539,53 @@ mod tests {
     }
 
     #[test]
+    fn checked_items_read_declared_count_with_zero_tail_like_delphi_stream() {
+        let mut payload = vec![CMD_CHECKED_SYNC, 0x03, 0x00];
+        payload.extend_from_slice(&7u64.to_le_bytes());
+        payload.extend_from_slice(&3u16.to_le_bytes());
+        StratCheckedItem {
+            strategy_id: 100,
+            checked: true,
+        }
+        .write_to(&mut payload);
+        payload.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::CheckedSync(s) => {
+                assert_eq!(s.items.len(), 3);
+                assert_eq!(
+                    s.items[0],
+                    StratCheckedItem {
+                        strategy_id: 100,
+                        checked: true
+                    }
+                );
+                assert_eq!(
+                    s.items[1],
+                    StratCheckedItem {
+                        strategy_id: 0x0102_0304,
+                        checked: false
+                    },
+                    "Delphi dynamic array items are zero-initialized; a short Read leaves the missing high bytes and bool as zero"
+                );
+                assert_eq!(
+                    s.items[2],
+                    StratCheckedItem {
+                        strategy_id: 0,
+                        checked: false
+                    }
+                );
+                assert!(
+                    s.is_delta,
+                    "missing trailing IsDelta byte keeps Delphi old-packet default"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn checked_word_count_builders_write_only_declared_wrapped_count_like_delphi() {
         let items: Vec<_> = (0..65_537u64)
             .map(|i| StratCheckedItem {
@@ -539,6 +611,31 @@ mod tests {
         match cmd {
             StratCommand::CheckedEcho(e) => {
                 assert_eq!(e.items, vec![items[0]]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_snapshot_declared_size_over_remaining_as_invalid_snapshot_like_delphi() {
+        let mut payload = vec![CMD_SNAPSHOT, 0x03, 0x00];
+        payload.extend_from_slice(&42u64.to_le_bytes());
+        payload.extend_from_slice(&99u64.to_le_bytes());
+        payload.extend_from_slice(&77u64.to_le_bytes());
+        payload.extend_from_slice(&8u32.to_le_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&[1, 2, 3]);
+
+        let cmd = StratCommand::parse(&payload).unwrap();
+        match cmd {
+            StratCommand::Snapshot(s) => {
+                assert_eq!(s.server_epoch, 99);
+                assert_eq!(s.client_max_last_date, 77);
+                assert!(s.full);
+                assert!(
+                    s.data.is_empty(),
+                    "Delphi sets Data=nil and ProcessStratCommand rejects the snapshot without applying epoch/state"
+                );
             }
             _ => panic!("wrong variant"),
         }
