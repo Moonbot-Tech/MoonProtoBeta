@@ -3061,6 +3061,80 @@ mod tests {
     }
 
     #[test]
+    fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 8,
+            liquidation_capacity: 8,
+            mm_orders_capacity: 8,
+            mm_order_companion_capacity: 8,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            trade_join_capacity: 8,
+        });
+        let readers = worker.ensure_market("BTCUSDT").unwrap();
+        let futures = readers.futures_trades.clone().unwrap();
+        let spot = readers.spot_trades.clone().unwrap();
+        let liquidations = readers.liquidations.clone().unwrap();
+        let mm_orders = readers.mm_orders.clone().unwrap();
+        let mm_companion = readers.mm_order_companion.clone().unwrap();
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = trades_payload_with_all_history_sections(802, 0);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(worker.flush(45_000.0));
+
+        let mut future_rows = Vec::new();
+        futures.copy_last(8, &mut future_rows);
+        assert_eq!(future_rows.len(), 1);
+        assert_eq!(future_rows[0].price, 100.0);
+        assert_eq!(future_rows[0].qty, 1.0);
+
+        let mut spot_rows = Vec::new();
+        spot.copy_last(8, &mut spot_rows);
+        assert_eq!(spot_rows.len(), 1);
+        assert_eq!(spot_rows[0].price, 101.0);
+        assert_eq!(spot_rows[0].qty, -2.0);
+
+        let mut liq_rows = Vec::new();
+        liquidations.copy_last(8, &mut liq_rows);
+        assert_eq!(liq_rows.len(), 1);
+        assert_eq!(liq_rows[0].price, 102.0);
+        assert_eq!(liq_rows[0].qty, -3.0);
+
+        let mut mm_rows = Vec::new();
+        mm_orders.copy_last(8, &mut mm_rows);
+        assert_eq!(mm_rows.len(), 1);
+        assert_eq!(mm_rows[0].vol, 5.0);
+        assert_eq!(mm_rows[0].q, -4.0);
+
+        let mut companion_rows = Vec::new();
+        mm_companion.copy_last(8, &mut companion_rows);
+        assert_eq!(companion_rows.len(), 1);
+        assert_eq!(
+            companion_rows[0],
+            crate::state::MMOrderCompanionData::default()
+        );
+    }
+
+    #[test]
     fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_delphi_addfrom() {
         let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
             futures_trades_capacity: 0,
@@ -3521,6 +3595,52 @@ mod tests {
         }
         payload.push(0); // packet flags: uncompressed, no taker flag.
         payload
+    }
+
+    fn trades_payload_with_all_history_sections(packet_num: u16, market_index: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&packet_num.to_le_bytes());
+
+        push_trades_section(&mut payload, 0, market_index, &[(0, 100.0, 1.0)]);
+        push_trades_section(&mut payload, 2, market_index, &[(1, 101.0, -2.0)]);
+        push_liquidation_section(&mut payload, market_index, &[(2, 102.0, -3.0)]);
+        push_trades_section(&mut payload, 1, market_index, &[(3, 5.0, -4.0)]);
+
+        payload.push(0); // packet flags: uncompressed, no taker flag.
+        payload
+    }
+
+    fn push_trades_section(
+        payload: &mut Vec<u8>,
+        section_type: u16,
+        market_index: u16,
+        rows: &[(i16, f32, f32)],
+    ) {
+        let market_index_and_flags = market_index | (section_type << 14);
+        payload.extend_from_slice(&market_index_and_flags.to_le_bytes());
+        payload.push(rows.len() as u8);
+        for (time_delta, price, qty) in rows {
+            payload.extend_from_slice(&time_delta.to_le_bytes());
+            payload.extend_from_slice(&price.to_le_bytes());
+            payload.extend_from_slice(&qty.to_le_bytes());
+        }
+    }
+
+    fn push_liquidation_section(
+        payload: &mut Vec<u8>,
+        market_index: u16,
+        rows: &[(i16, f32, f32)],
+    ) {
+        let market_index_and_flags = market_index | (3 << 14);
+        payload.extend_from_slice(&market_index_and_flags.to_le_bytes());
+        payload.push(0); // ext type: liquidation orders.
+        payload.push(rows.len() as u8);
+        for (time_delta, price, qty) in rows {
+            payload.extend_from_slice(&time_delta.to_le_bytes());
+            payload.extend_from_slice(&price.to_le_bytes());
+            payload.extend_from_slice(&qty.to_le_bytes());
+        }
     }
 
     fn trades_resend_response_payload(inner: &[u8]) -> Vec<u8> {

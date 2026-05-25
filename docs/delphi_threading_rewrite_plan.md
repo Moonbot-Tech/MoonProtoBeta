@@ -750,6 +750,8 @@ Verification:
   market and asserts that live `TradesStream` rows reach `MarketHistoryWorker`.
 - Quick prod FireTest with this gate OK: `FIRETEST_QUICK_PASS after 22.89s`,
   retained target trades `futures=1 spot=0`, `ParseFailed=0`.
+- Added dispatcher-to-worker unit coverage for all retained stream section
+  kinds: futures, spot, liquidation, MM orders, and MM companion rows.
 
 ### Phase Z - final full optimization pass
 
