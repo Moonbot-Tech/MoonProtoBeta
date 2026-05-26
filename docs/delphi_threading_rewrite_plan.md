@@ -6717,8 +6717,10 @@ Done:
 - `encrypt_with_cipher` uses one output buffer for `IV | Tag | Ciphertext` and
   encrypts the padded plaintext slice in-place. Wire layout is unchanged.
 
-Not done:
+Follow-up done:
 
-- Sliced receive flat-buffer reassembly remains open for a separate
-  protocol-memory pass. The current sorted `(BlockNum, Vec<u8>)` shape preserves
-  Delphi malformed-block behavior; flattening it needs its own proof/tests.
+- Sliced receive reassembly now stores block payloads in one dense
+  `block_payloads` buffer plus fixed `BlockNum -> span` metadata. Iterating
+  block numbers `0..=255` keeps the Delphi sorted-list machine effect, including
+  malformed `BlockNum > MaxBlockNum` behavior, while removing one heap `Vec` per
+  received block.

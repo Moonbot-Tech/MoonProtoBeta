@@ -111,7 +111,12 @@ impl SliceHeader {
     }
 }
 
-// `Slice` (тип одного блока с header'ом) представлен парой `(BlockNum, payload)`.
+#[derive(Debug, Clone, Copy, Default)]
+struct BlockSpan {
+    offset: u32,
+    len: u32,
+    present: bool,
+}
 
 /// Tracks all blocks of one datagram being received
 #[derive(Debug)]
@@ -122,7 +127,8 @@ pub struct SlicedData {
     // BlockNum > MaxBlockNum. Keep the same machine effect: ACK the actual
     // BlockNum, insert by BlockNum if not a duplicate, and use Count ==
     // BlocksCount as the completion test.
-    blocks: Vec<(u8, Vec<u8>)>,
+    block_spans: [BlockSpan; 256],
+    block_payloads: Vec<u8>,
     received_count: usize,
     completion_returned: bool,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
@@ -135,7 +141,8 @@ impl SlicedData {
         Self {
             datagram_num,
             blocks_count: count,
-            blocks: Vec::with_capacity(count),
+            block_spans: [BlockSpan::default(); 256],
+            block_payloads: Vec::new(),
             received_count: 0,
             completion_returned: false,
             ack_flags: [0u8; 32],
@@ -144,23 +151,24 @@ impl SlicedData {
     }
 
     /// Receive a piece. Returns true if this completes the datagram.
-    pub fn receive_piece(&mut self, block_num: u8, payload: Vec<u8>) -> bool {
+    pub fn receive_piece(&mut self, block_num: u8, payload: &[u8]) -> bool {
         let idx = block_num as usize;
 
         // Set ACK flag (set of byte semantics: byte index = block_num / 8, bit = block_num % 8)
         self.ack_flags[idx / 8] |= 1 << (idx % 8);
 
-        match self
-            .blocks
-            .binary_search_by_key(&block_num, |(block, _)| *block)
-        {
-            Ok(_) => {
-                self.dup_count = self.dup_count.saturating_add(1);
-            }
-            Err(insert_at) => {
-                self.blocks.insert(insert_at, (block_num, payload));
-                self.received_count += 1;
-            }
+        let span = &mut self.block_spans[idx];
+        if span.present {
+            self.dup_count = self.dup_count.saturating_add(1);
+        } else {
+            let offset = self.block_payloads.len();
+            self.block_payloads.extend_from_slice(payload);
+            *span = BlockSpan {
+                offset: offset as u32,
+                len: payload.len() as u32,
+                present: true,
+            };
+            self.received_count += 1;
         }
 
         self.received_count == self.blocks_count
@@ -177,16 +185,24 @@ impl SlicedData {
         if !self.is_complete() {
             return None;
         }
-        // B-V2-09 fix: prealloc capacity по сумме block sizes — избегаем re-alloc'ов
-        // в extend_from_slice. На больших Sliced сообщениях (~50KB) это экономит ~10
-        // re-alloc'ов с растущей capacity до финального размера.
-        let total: usize = self.blocks.iter().map(|(_, b)| b.len()).sum();
+        // B-V2-09/B-V2-14: receive pieces live in one dense buffer plus
+        // BlockNum->span metadata. Iterating block numbers 0..255 preserves the
+        // same sorted-by-BlockNum effect as Delphi's sorted slice list, including
+        // malformed BlockNum > MaxBlockNum cases.
+        let total = self.block_payloads.len();
         let mut cmd = 0u8;
         let mut saw_block_zero = false;
         let mut result = Vec::with_capacity(total.saturating_sub(1));
 
-        for (block_num, data) in &self.blocks {
-            if *block_num == 0 {
+        for block_num in 0..=u8::MAX {
+            let span = self.block_spans[block_num as usize];
+            if !span.present {
+                continue;
+            }
+            let offset = span.offset as usize;
+            let len = span.len as usize;
+            let data = &self.block_payloads[offset..offset + len];
+            if block_num == 0 {
                 saw_block_zero = true;
                 if let Some((&first, rest)) = data.split_first() {
                     cmd = first; // TMoonProtoCommand byte
@@ -320,7 +336,7 @@ impl SlicingReceiver {
             }
         };
 
-        let block_data = payload[SLICE_HEADER_SIZE..].to_vec();
+        let block_data = &payload[SLICE_HEADER_SIZE..];
         let datagram_num = hdr.datagram_num;
         let mut action = "existing";
 
@@ -633,15 +649,14 @@ mod tests {
             .receiving
             .get(&55)
             .expect("completed datagram stays until caller removal")
-            .blocks
-            .len();
+            .received_count;
 
         let (assembled, ack) = recv.on_new_sliced(&later_block_same_datagram);
 
         assert!(assembled.is_none());
         assert!(ack[..32].iter().all(|byte| *byte == 0xFF));
         assert_eq!(
-            recv.receiving.get(&55).unwrap().blocks.len(),
+            recv.receiving.get(&55).unwrap().received_count,
             before_blocks,
             "after completion Rust must emulate Delphi post-removal path without adding later pieces"
         );
