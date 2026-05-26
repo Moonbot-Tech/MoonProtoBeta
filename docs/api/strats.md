@@ -360,12 +360,13 @@ wire packet also carries the start/stop action. Both helpers keep
 `prev_checked` unchanged until the server confirms with `TStratCheckedEcho` or
 `TStratCheckedSync`.
 
-The explicit `client.strat_checked_sync(&items, true)`,
-`client.strat_checked_echo(&items)`, and
+The explicit `client.strat_checked_sync(&items, true)` and
 `client.ui_strat_start_stop_v2(is_start, &items)` methods remain available for
 protocol tools that already have the exact Delphi `Items` array. Regular
 applications should prefer the dispatcher helpers so the library-owned strategy
-state stays authoritative.
+state stays authoritative. `TStratCheckedEcho` is inbound only: the Delphi
+server sends it as an ACK after applying a client `TStratCheckedSync` delta,
+and client code must not send it.
 
 Checked-item arrays are serialized with Delphi `Word Count` semantics: the
 outgoing count is the low 16 bits, and only that declared number of items is

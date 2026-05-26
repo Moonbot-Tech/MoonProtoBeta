@@ -1327,15 +1327,6 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::Strat, SendPriority::Sliced, true, 6);
     }
 
-    /// Send `TStratCheckedEcho` with explicit items.
-    ///
-    /// This is normally a server response path; public use is for protocol tools
-    /// that already own the exact Delphi `Items` array.
-    pub fn strat_checked_echo(&self, items: &[crate::commands::strat::StratCheckedItem]) {
-        let raw = crate::commands::strat::build_checked_echo(rand::random(), items);
-        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
-    }
-
     /// Send `TRequestBalanceRefresh`.
     pub fn balance_request_refresh(&self) {
         let raw = crate::commands::balance::build_request_balance_refresh(rand::random());

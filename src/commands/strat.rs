@@ -9,7 +9,7 @@
 //! - 3 — TStratDelete (S↔C)
 //! - 4 — TStratSellPriceUpdate (C→S, UK_StratSellPriceUpdate)
 //! - 5 — TStratCheckedSync (S↔C, Sliced)
-//! - 6 — TStratCheckedEcho (C→S ACK на дельту Checked)
+//! - 6 — TStratCheckedEcho (S→C ACK на дельту Checked)
 //! - 7 — TStratSchemaRequest (C→S, empty)
 //! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
 //!
@@ -140,7 +140,7 @@ pub struct StratCheckedSync {
     pub is_delta: bool,
 }
 
-/// `TStratCheckedEcho` (CmdId=6) — клиентский ACK на дельту.
+/// `TStratCheckedEcho` (CmdId=6) — server ACK на клиентскую дельту.
 #[derive(Debug, Clone)]
 pub struct StratCheckedEcho {
     pub items: Vec<StratCheckedItem>,
@@ -437,8 +437,12 @@ pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) 
     out
 }
 
-/// `TStratCheckedEcho` (CmdId=6).
-pub fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8> {
+/// `TStratCheckedEcho` (CmdId=6, server → client).
+///
+/// Crate-internal test helper: Delphi clients receive this command, but do not
+/// send it.
+#[cfg(test)]
+pub(crate) fn build_checked_echo(uid: u64, items: &[StratCheckedItem]) -> Vec<u8> {
     let count = items.len() as u16;
     let count_usize = usize::from(count);
     let mut out = Vec::with_capacity(11 + 2 + count_usize * 9);

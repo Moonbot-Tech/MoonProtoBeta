@@ -7375,3 +7375,23 @@ Verification:
   `FIRETEST_QUICK_PASS after 23.18s`, `ParseFailed=0`, err_emu actual drop
   `8.01%`, retained futures rows present, derived snapshot present,
   `reader max=586us`, `writer_cpu max=144us`.
+
+### 2026-05-26 - remove client-side TStratCheckedEcho API
+
+Done:
+
+- Closed `хуйня.md §X.188`: Delphi server creates `TStratCheckedEcho` only as
+  ACK to a client `TStratCheckedSync(IsDelta=true)`, and has no incoming
+  server-side branch for client-sent Echo.
+- Removed public `Client::strat_checked_echo` and
+  `ClientSender::strat_checked_echo`.
+- Kept `build_checked_echo` only as `cfg(test)` crate-internal helper for
+  parsing/server→client unit-test payloads.
+- Fixed comments/API docs: Echo is inbound-only `S→C ACK`; checked changes are
+  sent by `TStratCheckedSync`.
+
+Verification:
+
+- `cargo test checked_word_count_builders_write_only_declared_wrapped_count_like_delphi --lib --quiet` OK.
+- `cargo test --lib --quiet` OK: 767 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
