@@ -29,11 +29,10 @@ pub mod trades;
 
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
-    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
-    prepare_joined_trades_for_retained_append, Candle5mRow, CandleVolumeSnapshot,
-    DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow,
-    MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
-    TradeHistoryRow, TradeJoinBuffer, TradeJoinPush, TradeVolumeTotals, TradesPacketTimeShift,
+    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
+    CandleVolumeSnapshot, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
+    MMOrderHistoryRow, MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot,
+    RollingTradeVolumes, TradeHistoryRow, TradeVolumeTotals, TradesPacketTimeShift,
     DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 pub use history_store::{

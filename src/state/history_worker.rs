@@ -55,7 +55,6 @@ pub struct MarketHistoryLastPriceBatch {
 pub enum MarketHistoryStreamSection {
     FuturesTrades {
         market_name: String,
-        chart_price_step: f64,
         rows: Vec<MarketHistoryTradeInput>,
     },
     SpotTrades {
@@ -380,22 +379,17 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
 
     for section in batch.sections {
         match section {
-            MarketHistoryStreamSection::FuturesTrades {
-                market_name,
-                chart_price_step,
-                rows,
-            } => {
+            MarketHistoryStreamSection::FuturesTrades { market_name, rows } => {
                 let Some(store) = registry.get_mut(&market_name) else {
                     continue;
                 };
                 for row in rows {
-                    store.push_futures_stream_trade_like_delphi(
+                    store.append_futures_stream_trade_like_delphi(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
                         row.price,
                         row.qty,
-                        chart_price_step,
                         &mut time_shift,
                     );
                 }
@@ -463,7 +457,6 @@ fn process_candles_snapshot(
 }
 
 fn run_store_maintenance(registry: &mut MarketHistoryRegistry, now_time: f64) {
-    registry.drain_joined_futures_like_delphi();
     if now_time > 0.0 {
         registry.compact_evicted_futures_like_delphi(now_time);
         registry.refresh_derived_analytics(now_time);
@@ -487,7 +480,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
         assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
         let readers = worker.readers("BTCUSDT").unwrap();
@@ -499,7 +491,6 @@ mod tests {
             now_time,
             sections: vec![MarketHistoryStreamSection::FuturesTrades {
                 market_name: "BTCUSDT".to_string(),
-                chart_price_step: 0.01,
                 rows: vec![MarketHistoryTradeInput {
                     time_delta_ms: 250,
                     price: 100.0,
@@ -566,7 +557,6 @@ mod tests {
             last_price_capacity: 4,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
         assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
         let readers = worker.readers("BTCUSDT").unwrap();
@@ -605,7 +595,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 4,
-            trade_join_capacity: 0,
         });
         assert!(worker.configure_markets(
             vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],

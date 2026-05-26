@@ -2319,7 +2319,6 @@ fn firetest_history_config() -> MarketHistoryConfig {
         last_price_capacity: 64,
         mini_candles_capacity: 0,
         candles_5m_capacity: 512,
-        trade_join_capacity: 64,
     }
 }
 

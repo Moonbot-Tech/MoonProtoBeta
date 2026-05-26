@@ -80,137 +80,6 @@ impl SeqRingTimedRow for TradeHistoryRow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TradeJoinPush {
-    Inserted,
-    AggregatedPrev1,
-    AggregatedPrev2,
-    Full,
-}
-
-/// Delphi `AddTmpHOrder`-style temporary trade ring.
-///
-/// The ring keeps one slot empty, exactly like the Delphi check
-/// `If nextWrite = tmpTradesRead then exit`. New rows aggregate into the
-/// previous one or previous two rows when direction, price step, and
-/// `SameTradesTime` match; otherwise they are appended at `tmpTradesWrite`.
-pub struct TradeJoinBuffer {
-    rows: Vec<TradeHistoryRow>,
-    read: usize,
-    write: usize,
-    len: usize,
-}
-
-impl TradeJoinBuffer {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            rows: vec![TradeHistoryRow::default(); capacity],
-            read: 0,
-            write: 0,
-            len: 0,
-        }
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn push_like_delphi(
-        &mut self,
-        row: TradeHistoryRow,
-        chart_price_step: f64,
-        same_trades_time_days: f64,
-    ) -> TradeJoinPush {
-        let capacity = self.capacity();
-        if capacity == 0 {
-            return TradeJoinPush::Full;
-        }
-        let next_write = (self.write + 1) % capacity;
-        if next_write == self.read {
-            return TradeJoinPush::Full;
-        }
-
-        let prev1 = (self.write + capacity - 1) % capacity;
-        let prev2 = (self.write + capacity - 2) % capacity;
-
-        if self.len >= 1
-            && can_aggregate_tmp_trade(
-                self.rows[prev1],
-                row,
-                chart_price_step,
-                same_trades_time_days,
-            )
-        {
-            self.rows[prev1].qty += row.qty;
-            return TradeJoinPush::AggregatedPrev1;
-        }
-
-        if self.len >= 2
-            && can_aggregate_tmp_trade(
-                self.rows[prev2],
-                row,
-                chart_price_step,
-                same_trades_time_days,
-            )
-        {
-            self.rows[prev2].qty += row.qty;
-            return TradeJoinPush::AggregatedPrev2;
-        }
-
-        self.rows[self.write] = row;
-        self.write = next_write;
-        self.len += 1;
-        TradeJoinPush::Inserted
-    }
-
-    /// Drain retained temporary rows in read order, like `JoinHOrders` taking a
-    /// snapshot from `tmpTradesRead` to `tmpTradesWrite`.
-    pub fn drain_into(&mut self, out: &mut Vec<TradeHistoryRow>) {
-        out.clear();
-        out.reserve(self.len);
-        let capacity = self.capacity();
-        if capacity == 0 {
-            return;
-        }
-        for offset in 0..self.len {
-            out.push(self.rows[(self.read + offset) % capacity]);
-        }
-        self.read = self.write;
-        self.len = 0;
-    }
-}
-
-fn can_aggregate_tmp_trade(
-    prev: TradeHistoryRow,
-    row: TradeHistoryRow,
-    chart_price_step: f64,
-    same_trades_time_days: f64,
-) -> bool {
-    prev.time > 1.0
-        && row.same_direction(prev)
-        && ((prev.price - row.price).abs() as f64) < chart_price_step
-        && (prev.time - row.time).abs() < same_trades_time_days
-}
-
-/// Prepare a drained `TradeJoinBuffer` batch for retained append.
-///
-/// Active Delphi uses `BMarketHistoryWorker -> JoinHOrders(0, NowTime, false,
-/// true)`: `DontSort=true` copies the tmp-ring snapshot directly into
-/// `OrdersH`. It does not sort and does not skip rows older than the retained
-/// tail. The Rust retained history must therefore preserve tmp-ring read order,
-/// including late resend rows.
-pub fn prepare_joined_trades_for_retained_append(_rows: &mut Vec<TradeHistoryRow>) {
-    // No-op by design: the drained tmp-ring is already in Delphi read order.
-}
-
 /// Delphi `TMMOrder`: main market-maker history row.
 ///
 /// Delphi layout is `Time: TDateTime; vol: Double; Q: Double`. Optional taker
@@ -569,18 +438,30 @@ impl RollingTradeVolumes {
     }
 
     pub fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
-        RollingTradeVolumeSnapshot {
-            one_minute: self.window(now_time, 60),
-            three_minutes: self.window(now_time, 3 * 60),
-            five_minutes: self.window(now_time, 5 * 60),
+        let now_bucket = volume_bucket_id(now_time);
+        let one_minute_oldest = oldest_volume_bucket(now_bucket, 60);
+        let three_minutes_oldest = oldest_volume_bucket(now_bucket, 3 * 60);
+        let five_minutes_oldest = oldest_volume_bucket(now_bucket, 5 * 60);
+
+        let mut snapshot = RollingTradeVolumeSnapshot::default();
+        for bucket in &self.buckets {
+            if bucket.bucket_id < five_minutes_oldest || bucket.bucket_id > now_bucket {
+                continue;
+            }
+            snapshot.five_minutes.add_totals(bucket.totals);
+            if bucket.bucket_id >= three_minutes_oldest {
+                snapshot.three_minutes.add_totals(bucket.totals);
+            }
+            if bucket.bucket_id >= one_minute_oldest {
+                snapshot.one_minute.add_totals(bucket.totals);
+            }
         }
+        snapshot
     }
 
     pub fn window(&self, now_time: f64, window_seconds: i64) -> TradeVolumeTotals {
         let now_bucket = volume_bucket_id(now_time);
-        let buckets_back =
-            (window_seconds + ROLLING_VOLUME_BUCKET_SECONDS - 1) / ROLLING_VOLUME_BUCKET_SECONDS;
-        let oldest_bucket = now_bucket - buckets_back + 1;
+        let oldest_bucket = oldest_volume_bucket(now_bucket, window_seconds);
 
         let mut totals = TradeVolumeTotals::default();
         for bucket in &self.buckets {
@@ -590,6 +471,12 @@ impl RollingTradeVolumes {
         }
         totals
     }
+}
+
+fn oldest_volume_bucket(now_bucket: i64, window_seconds: i64) -> i64 {
+    let buckets_back =
+        (window_seconds + ROLLING_VOLUME_BUCKET_SECONDS - 1) / ROLLING_VOLUME_BUCKET_SECONDS;
+    now_bucket - buckets_back + 1
 }
 
 fn volume_bucket_id(time: f64) -> i64 {
@@ -719,181 +606,6 @@ mod tests {
                 price: 101.0,
                 qty: -1.25,
             }]
-        );
-    }
-
-    #[test]
-    fn trade_join_buffer_aggregates_previous_one_like_add_tmp_h_order() {
-        let mut buf = TradeJoinBuffer::new(4);
-        let t = 45_000.0;
-
-        assert_eq!(
-            buf.push_like_delphi(
-                TradeHistoryRow {
-                    time: t,
-                    price: 100.0,
-                    qty: 1.0,
-                },
-                0.1,
-                DELPHI_SAME_TRADES_TIME_DAYS,
-            ),
-            TradeJoinPush::Inserted
-        );
-        assert_eq!(
-            buf.push_like_delphi(
-                TradeHistoryRow {
-                    time: t + 0.1 / SECONDS_PER_DAY,
-                    price: 100.05,
-                    qty: 2.0,
-                },
-                0.1,
-                DELPHI_SAME_TRADES_TIME_DAYS,
-            ),
-            TradeJoinPush::AggregatedPrev1
-        );
-
-        let mut out = Vec::new();
-        buf.drain_into(&mut out);
-        assert_eq!(
-            out,
-            vec![TradeHistoryRow {
-                time: t,
-                price: 100.0,
-                qty: 3.0,
-            }]
-        );
-    }
-
-    #[test]
-    fn trade_join_buffer_aggregates_previous_two_like_add_tmp_h_order() {
-        let mut buf = TradeJoinBuffer::new(5);
-        let t = 45_000.0;
-        buf.push_like_delphi(
-            TradeHistoryRow {
-                time: t,
-                price: 100.0,
-                qty: 1.0,
-            },
-            0.1,
-            DELPHI_SAME_TRADES_TIME_DAYS,
-        );
-        buf.push_like_delphi(
-            TradeHistoryRow {
-                time: t,
-                price: 101.0,
-                qty: -1.0,
-            },
-            0.1,
-            DELPHI_SAME_TRADES_TIME_DAYS,
-        );
-
-        assert_eq!(
-            buf.push_like_delphi(
-                TradeHistoryRow {
-                    time: t + 0.1 / SECONDS_PER_DAY,
-                    price: 100.05,
-                    qty: 2.0,
-                },
-                0.1,
-                DELPHI_SAME_TRADES_TIME_DAYS,
-            ),
-            TradeJoinPush::AggregatedPrev2
-        );
-
-        let mut out = Vec::new();
-        buf.drain_into(&mut out);
-        assert_eq!(
-            out,
-            vec![
-                TradeHistoryRow {
-                    time: t,
-                    price: 100.0,
-                    qty: 3.0,
-                },
-                TradeHistoryRow {
-                    time: t,
-                    price: 101.0,
-                    qty: -1.0,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn trade_join_buffer_keeps_one_empty_slot_like_delphi_ring() {
-        let mut buf = TradeJoinBuffer::new(3);
-        let t = 45_000.0;
-        for i in 0..2 {
-            assert_eq!(
-                buf.push_like_delphi(
-                    TradeHistoryRow {
-                        time: t + i as f64 / SECONDS_PER_DAY,
-                        price: 100.0 + i as f32,
-                        qty: 1.0,
-                    },
-                    0.0,
-                    DELPHI_SAME_TRADES_TIME_DAYS,
-                ),
-                TradeJoinPush::Inserted
-            );
-        }
-        assert_eq!(
-            buf.push_like_delphi(
-                TradeHistoryRow {
-                    time: t + 2.0 / SECONDS_PER_DAY,
-                    price: 102.0,
-                    qty: 1.0,
-                },
-                0.0,
-                DELPHI_SAME_TRADES_TIME_DAYS,
-            ),
-            TradeJoinPush::Full
-        );
-        assert_eq!(buf.len(), 2);
-    }
-
-    #[test]
-    fn prepare_joined_trades_keeps_read_order_like_dontsort_join_h_orders() {
-        let t = 45_000.0;
-        let mut rows = vec![
-            TradeHistoryRow {
-                time: t + 3.0 / SECONDS_PER_DAY,
-                price: 103.0,
-                qty: 1.0,
-            },
-            TradeHistoryRow {
-                time: t,
-                price: 100.0,
-                qty: 1.0,
-            },
-            TradeHistoryRow {
-                time: t + 2.0 / SECONDS_PER_DAY,
-                price: 102.0,
-                qty: 1.0,
-            },
-        ];
-
-        prepare_joined_trades_for_retained_append(&mut rows);
-
-        assert_eq!(
-            rows,
-            vec![
-                TradeHistoryRow {
-                    time: t + 3.0 / SECONDS_PER_DAY,
-                    price: 103.0,
-                    qty: 1.0,
-                },
-                TradeHistoryRow {
-                    time: t,
-                    price: 100.0,
-                    qty: 1.0,
-                },
-                TradeHistoryRow {
-                    time: t + 2.0 / SECONDS_PER_DAY,
-                    price: 102.0,
-                    qty: 1.0,
-                },
-            ]
         );
     }
 

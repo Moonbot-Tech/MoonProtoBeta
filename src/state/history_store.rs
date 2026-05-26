@@ -1,4 +1,4 @@
-//! Active-library retained history store.
+﻿//! Active-library retained history store.
 //!
 //! `MarketHistoryStore` is the per-market single-writer side owned by
 //! `MarketHistoryWorker`. Public code receives cloneable [`SeqRingReader`]
@@ -9,18 +9,16 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
 
 use crate::state::history::{
-    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi,
-    prepare_joined_trades_for_retained_append, Candle5mRow, CandleVolumeSnapshot,
-    DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow,
-    MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes,
-    TradeHistoryRow, TradeJoinBuffer, TradesPacketTimeShift, DELPHI_SAME_TRADES_TIME_DAYS,
+    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
+    CandleVolumeSnapshot, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
+    MMOrderHistoryRow, MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot,
+    RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
 const EPS_MARKET: f64 = 1e-12;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const FIVE_MINUTES_DAYS: f64 = 5.0 / (24.0 * 60.0);
-const DELPHI_INT_TRADES_BUF_SIZE: usize = 1_000;
 const GIB: usize = 1024 * 1024 * 1024;
 const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
@@ -28,7 +26,6 @@ const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
 const LAST_PRICE_SLOT_BYTES: usize = size_of::<LastPricePoint>();
 const MINI_CANDLE_SLOT_BYTES: usize = size_of::<MiniCandle>();
 const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
-const TRADE_JOIN_ROW_BYTES: usize = 16;
 
 /// Active-library retained-history scope for the all-trades stream.
 ///
@@ -92,7 +89,6 @@ pub struct MarketHistoryConfig {
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub candles_5m_capacity: usize,
-    pub trade_join_capacity: usize,
 }
 
 impl Default for MarketHistoryConfig {
@@ -106,7 +102,6 @@ impl Default for MarketHistoryConfig {
             last_price_capacity: 5_000,
             mini_candles_capacity: 5_000,
             candles_5m_capacity: 5_000,
-            trade_join_capacity: DELPHI_INT_TRADES_BUF_SIZE,
         }
     }
 }
@@ -139,11 +134,6 @@ impl MarketHistoryConfig {
             capacity_from_share(per_market_budget, 6, 100, MINI_CANDLE_SLOT_BYTES, 50_000);
         let candles_5m_capacity =
             capacity_from_share(per_market_budget, 3, 100, CANDLE_5M_SLOT_BYTES, 20_000);
-        let trade_join_capacity = if futures_trades_capacity > 0 {
-            DELPHI_INT_TRADES_BUF_SIZE
-        } else {
-            0
-        };
 
         Self {
             futures_trades_capacity,
@@ -154,7 +144,6 @@ impl MarketHistoryConfig {
             last_price_capacity,
             mini_candles_capacity,
             candles_5m_capacity,
-            trade_join_capacity,
         }
     }
 
@@ -175,7 +164,6 @@ impl MarketHistoryConfig {
             + self.last_price_capacity * LAST_PRICE_SLOT_BYTES
             + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES
             + self.candles_5m_capacity * CANDLE_5M_SLOT_BYTES
-            + self.trade_join_capacity * TRADE_JOIN_ROW_BYTES
     }
 }
 
@@ -332,13 +320,6 @@ impl MarketHistoryRegistry {
             .map(MarketHistoryStore::readers)
     }
 
-    pub fn drain_joined_futures_like_delphi(&mut self) -> usize {
-        self.stores
-            .values_mut()
-            .map(MarketHistoryStore::drain_joined_futures_like_delphi)
-            .sum()
-    }
-
     pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
         self.stores
             .values_mut()
@@ -363,8 +344,6 @@ pub struct MarketHistoryStore {
     mini_candles: Option<SeqRingWriter<MiniCandle>>,
     candles_5m: Option<SeqRingWriter<Candle5mRow>>,
     readers: MarketHistoryReaders,
-    futures_join: TradeJoinBuffer,
-    joined_scratch: Vec<TradeHistoryRow>,
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
@@ -410,8 +389,6 @@ impl MarketHistoryStore {
                 mini_candles: mini_reader,
                 candles_5m: candles_reader,
             },
-            futures_join: TradeJoinBuffer::new(config.trade_join_capacity),
-            joined_scratch: Vec::new(),
             evicted_futures_for_compaction: Vec::new(),
             mini_scratch: Vec::new(),
             rolling_volumes: RollingTradeVolumes::default(),
@@ -484,52 +461,25 @@ impl MarketHistoryStore {
         })
     }
 
-    /// Delphi futures trade path: `AddTmpHOrder` first, retained append later
-    /// through `JoinHOrders`.
-    pub fn push_futures_trade_into_join_like_delphi(
-        &mut self,
-        row: TradeHistoryRow,
-        chart_price_step: f64,
-    ) {
-        self.futures_join
-            .push_like_delphi(row, chart_price_step, DELPHI_SAME_TRADES_TIME_DAYS);
+    pub fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+        let seq = self.push_retained_futures_trade(row)?;
+        self.rolling_volumes.add_trade(row);
+        self.update_current_candle_from_trade(row);
+        Some(seq)
     }
 
-    pub fn push_futures_stream_trade_like_delphi(
+    pub fn append_futures_stream_trade_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
         now_time: f64,
         price: f32,
         qty: f32,
-        chart_price_step: f64,
         time_shift: &mut TradesPacketTimeShift,
     ) -> f64 {
         let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
-        self.push_futures_trade_into_join_like_delphi(
-            TradeHistoryRow { time, price, qty },
-            chart_price_step,
-        );
+        self.append_futures_trade_like_delphi(TradeHistoryRow { time, price, qty });
         time
-    }
-
-    /// Drain the temporary futures buffer into retained history, preserving the
-    /// active Delphi `JoinHOrders(..., DontSort=true)` copy-direct shape.
-    pub fn drain_joined_futures_like_delphi(&mut self) -> usize {
-        self.futures_join.drain_into(&mut self.joined_scratch);
-        prepare_joined_trades_for_retained_append(&mut self.joined_scratch);
-
-        let mut appended = 0usize;
-        let rows = std::mem::take(&mut self.joined_scratch);
-        for row in &rows {
-            self.push_retained_futures_trade(*row);
-            self.rolling_volumes.add_trade(*row);
-            self.update_current_candle_from_trade(*row);
-            appended += 1;
-        }
-        self.joined_scratch = rows;
-        self.joined_scratch.clear();
-        appended
     }
 
     pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
@@ -661,11 +611,15 @@ impl MarketHistoryStore {
             combine_deltas(trade_deltas, self.derived.candle_deltas, last_price_deltas);
     }
 
-    fn push_retained_futures_trade(&mut self, row: TradeHistoryRow) {
+    fn push_retained_futures_trade(&mut self, row: TradeHistoryRow) -> Option<u64> {
         if let Some(writer) = self.futures_trades.as_mut() {
-            if let Some(evicted) = writer.push_with_evicted(row).1 {
+            let (seq, evicted) = writer.push_with_evicted(row);
+            if let Some(evicted) = evicted {
                 self.evicted_futures_for_compaction.push(evicted);
             }
+            Some(seq)
+        } else {
+            None
         }
     }
 
@@ -1060,7 +1014,6 @@ mod tests {
         let total_estimated = cfg.estimated_bytes_per_market() * market_count;
 
         assert!(cfg.futures_trades_capacity > cfg.spot_trades_capacity);
-        assert_eq!(cfg.trade_join_capacity, DELPHI_INT_TRADES_BUF_SIZE);
         assert!(
             total_estimated <= MarketHistoryConfig::history_budget_bytes(total),
             "history defaults should fit the configured memory budget"
@@ -1087,17 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_sized_config_keeps_delphi_trade_join_capacity_when_enabled() {
-        let cfg = MarketHistoryConfig::from_total_memory_bytes(8 * GIB, 10_000);
-        assert!(cfg.futures_trades_capacity > 0);
-        assert_eq!(cfg.trade_join_capacity, DELPHI_INT_TRADES_BUF_SIZE);
-
-        let disabled = MarketHistoryConfig::from_total_memory_bytes(1, usize::MAX);
-        assert_eq!(disabled.futures_trades_capacity, 0);
-        assert_eq!(disabled.trade_join_capacity, 0);
-    }
-
-    #[test]
     fn registry_configures_trade_storage_scope_from_known_markets() {
         let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
             futures_trades_capacity: 1,
@@ -1108,7 +1050,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
         let markets = vec![
             "BTCUSDT".to_string(),
@@ -1143,7 +1084,6 @@ mod tests {
             last_price_capacity: 2,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 4,
         });
 
         assert!(registry.is_empty());
@@ -1160,7 +1100,7 @@ mod tests {
         registry
             .get_mut("ETHUSDT")
             .unwrap()
-            .push_futures_trade_into_join_like_delphi(trade(45_000.0, 10.0, 1.0), 0.01);
+            .append_futures_trade_like_delphi(trade(45_000.0, 10.0, 1.0));
 
         assert_eq!(registry.len(), 2);
         assert!(registry.contains_market("BTCUSDT"));
@@ -1193,7 +1133,6 @@ mod tests {
             last_price_capacity: 4,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
 
         assert_eq!(
@@ -1236,7 +1175,6 @@ mod tests {
             last_price_capacity: 8,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
 
         store.append_last_price_like_delphi(
@@ -1262,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn futures_join_drains_direct_like_dontsort_and_updates_volumes() {
+    fn futures_trades_append_directly_and_update_volumes() {
         let base = 45_000.0;
         let sec = |s: f64| base + s / 86_400.0;
         let mut store = MarketHistoryStore::new(MarketHistoryConfig {
@@ -1274,16 +1212,25 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 6,
         });
 
-        store.push_futures_trade_into_join_like_delphi(trade(sec(10.0), 100.0, 1.0), 0.01);
-        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+        assert_eq!(
+            store.append_futures_trade_like_delphi(trade(sec(10.0), 100.0, 1.0)),
+            Some(0)
+        );
 
-        store.push_futures_trade_into_join_like_delphi(trade(sec(9.0), 90.0, 1.0), 0.01);
-        store.push_futures_trade_into_join_like_delphi(trade(sec(12.0), 120.0, -2.0), 0.01);
-        store.push_futures_trade_into_join_like_delphi(trade(sec(11.0), 110.0, 3.0), 0.01);
-        assert_eq!(store.drain_joined_futures_like_delphi(), 3);
+        assert_eq!(
+            store.append_futures_trade_like_delphi(trade(sec(9.0), 90.0, 1.0)),
+            Some(1)
+        );
+        assert_eq!(
+            store.append_futures_trade_like_delphi(trade(sec(12.0), 120.0, -2.0)),
+            Some(2)
+        );
+        assert_eq!(
+            store.append_futures_trade_like_delphi(trade(sec(11.0), 110.0, 3.0)),
+            Some(3)
+        );
 
         let mut out = Vec::new();
         store
@@ -1321,11 +1268,10 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
 
-        let fut_time = store
-            .push_futures_stream_trade_like_delphi(base, 100, now, 100.0, 1.0, 0.01, &mut shift);
+        let fut_time =
+            store.append_futures_stream_trade_like_delphi(base, 100, now, 100.0, 1.0, &mut shift);
         let taker = [7u8; 20];
         let (mm_time, mm_seq) = store.append_mm_stream_order_like_delphi(
             base,
@@ -1344,8 +1290,6 @@ mod tests {
             -1.0,
             &mut shift,
         );
-        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
-
         assert_eq!(shift.shift_days(), Some(2.0 / 24.0));
         assert_eq!(fut_time, base + 100.0 / 86_400_000.0 + 2.0 / 24.0);
         assert_eq!(mm_time, base + 200.0 / 86_400_000.0 + 2.0 / 24.0);
@@ -1394,16 +1338,15 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 8,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
 
         for i in 0..4 {
-            store.push_futures_trade_into_join_like_delphi(
-                trade(10.0 + i as f64 / 86_400.0, 100.0 + i as f32, 1.0),
-                0.0,
-            );
+            store.append_futures_trade_like_delphi(trade(
+                10.0 + i as f64 / 86_400.0,
+                100.0 + i as f32,
+                1.0,
+            ));
         }
-        assert_eq!(store.drain_joined_futures_like_delphi(), 4);
         assert_eq!(store.pending_evicted_futures_for_compaction(), 2);
         assert_eq!(store.compact_evicted_futures_like_delphi(20.0), 1);
 
@@ -1427,7 +1370,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 8,
-            trade_join_capacity: 8,
         });
         let now = 45_000.0;
         store.replace_candles_5m_from_snapshot(&[
@@ -1457,9 +1399,7 @@ mod tests {
             .copy_last(8, &mut candles);
         assert_eq!(candles.len(), 2);
 
-        store
-            .push_futures_trade_into_join_like_delphi(trade(now + 1.0 / 86_400.0, 125.0, 2.0), 0.0);
-        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+        store.append_futures_trade_like_delphi(trade(now + 1.0 / 86_400.0, 125.0, 2.0));
         candles.clear();
         store
             .readers()
@@ -1491,7 +1431,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 8,
-            trade_join_capacity: 8,
         });
         let now = 45_000.0;
         store.replace_candles_5m_from_snapshot(&[Candle5mRow {
@@ -1504,8 +1443,7 @@ mod tests {
         }]);
 
         let next_time = now + 6.0 / 1440.0;
-        store.push_futures_trade_into_join_like_delphi(trade(next_time, 120.0, 2.0), 0.0);
-        assert_eq!(store.drain_joined_futures_like_delphi(), 1);
+        store.append_futures_trade_like_delphi(trade(next_time, 120.0, 2.0));
 
         let mut candles = Vec::new();
         store
@@ -1534,18 +1472,10 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 8,
-            trade_join_capacity: 8,
         });
         let now = 45_000.0;
-        store.push_futures_trade_into_join_like_delphi(
-            trade(now - 10.0 / 86_400.0, 100.0, 2.0),
-            0.0,
-        );
-        store.push_futures_trade_into_join_like_delphi(
-            trade(now - 5.0 / 86_400.0, 110.0, -1.0),
-            0.0,
-        );
-        assert_eq!(store.drain_joined_futures_like_delphi(), 2);
+        store.append_futures_trade_like_delphi(trade(now - 10.0 / 86_400.0, 100.0, 2.0));
+        store.append_futures_trade_like_delphi(trade(now - 5.0 / 86_400.0, 110.0, -1.0));
         store.refresh_derived_analytics(now);
 
         let derived = store.derived_snapshot();
@@ -1603,7 +1533,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 8,
-            trade_join_capacity: 0,
         });
         store.replace_candles_5m_from_snapshot(&[
             Candle5mRow {
@@ -1672,7 +1601,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 8,
-            trade_join_capacity: 0,
         });
         store.replace_candles_5m_from_snapshot(&[
             Candle5mRow {

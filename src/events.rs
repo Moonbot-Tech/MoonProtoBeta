@@ -1225,16 +1225,6 @@ impl EventDispatcher {
                                 collect_history && self.active_trade_storage_allows_market(name)
                             })
                             .map(str::to_owned);
-                        let chart_price_step = if !is_spot {
-                            history_market_name
-                                .as_ref()
-                                .and_then(|name| {
-                                    self.markets.price(name).map(|price| price.chart_price_step)
-                                })
-                                .unwrap_or_default()
-                        } else {
-                            0.0
-                        };
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
                         } else {
@@ -1269,7 +1259,6 @@ impl EventDispatcher {
                                     history_sections.push(
                                         MarketHistoryStreamSection::FuturesTrades {
                                             market_name,
-                                            chart_price_step,
                                             rows: history_rows,
                                         },
                                     );
@@ -3381,7 +3370,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
 
         let mut d = EventDispatcher::new();
@@ -3462,7 +3450,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
 
         let mut d = EventDispatcher::new();
@@ -3511,7 +3498,6 @@ mod tests {
             last_price_capacity: 0,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 8,
         });
 
         let mut d = EventDispatcher::new();
@@ -3588,7 +3574,6 @@ mod tests {
             last_price_capacity: 4,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
 
         let mut btc = event_market("BTCUSDT");
@@ -3657,7 +3642,6 @@ mod tests {
             last_price_capacity: 4,
             mini_candles_capacity: 0,
             candles_5m_capacity: 0,
-            trade_join_capacity: 0,
         });
 
         let mut btc = event_market("BTCUSDT");

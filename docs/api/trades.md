@@ -350,29 +350,6 @@ impl TradesPacketTimeShift {
         now_time: f64,
     ) -> f64;
 }
-
-pub enum TradeJoinPush {
-    Inserted,
-    AggregatedPrev1,
-    AggregatedPrev2,
-    Full,
-}
-
-pub struct TradeJoinBuffer;
-
-impl TradeJoinBuffer {
-    pub fn new(capacity: usize) -> Self;
-    pub fn capacity(&self) -> usize;
-    pub fn len(&self) -> usize;
-    pub fn is_empty(&self) -> bool;
-    pub fn push_like_delphi(
-        &mut self,
-        row: TradeHistoryRow,
-        chart_price_step: f64,
-        same_trades_time_days: f64,
-    ) -> TradeJoinPush;
-    pub fn drain_into(&mut self, out: &mut Vec<TradeHistoryRow>);
-}
 ```
 
 `TradesPacketTimeShift` mirrors Delphi `ProcessTradesStream`: the first
@@ -381,25 +358,18 @@ known/stored row in a packet fixes
 later row in that packet reuses the same shift. Unknown-market sections that
 Delphi skips do not fill the shift.
 
-`TradeJoinBuffer` is the Rust active-library equivalent of the Delphi temporary
-`tmpList/tmpTradesRead/tmpTradesWrite` path used by `AddTmpHOrder`. It keeps one
-ring slot empty, returns `Full` instead of overwriting unread rows, and tries to
-aggregate the new row into previous one or previous two rows before appending.
-The aggregation checks the same direction, `ChartPriceStep`, and
-`SameTradesTime`.
+Delphi has a temporary `tmpList/tmpTradesRead/tmpTradesWrite` ring in
+`AddTmpHOrder`, but that is not a public Active Lib API concept. Delphi uses it
+as a UI/storage bridge: the chart draws already-retained `OrdersH` and overlays
+fresh tmp-ring trades until the worker moves them into `OrdersH`. The Rust Active
+Lib storage contract is simpler: the StoreWorker writes accepted futures trades
+directly into retained `SeqRing` storage and updates rolling volumes/current
+candle from that same accepted row stream. There is no public `TradeJoinBuffer`
+contract.
 
-```rust
-pub fn prepare_joined_trades_for_retained_append(
-    rows: &mut Vec<TradeHistoryRow>,
-);
-```
-
-This helper is used after draining `TradeJoinBuffer` and before appending rows
-to retained `SeqRing` history. In the active Delphi path,
-`BMarketHistoryWorker` calls `JoinHOrders(0, NowTime, false, true)`, so
-`DontSort=true`: drained tmp-ring rows are appended in ring read order, without
-sorting and without dropping late resend rows that are older than the retained
-tail. The helper is intentionally a no-op marker for that machine effect.
+Retained futures trade order is receive/store order. The library does not sort
+late UDP/resend rows by timestamp; time-based reads scan/filter retained rows
+instead of relying on monotonic timestamps.
 
 ```rust
 pub struct MarketHistoryConfig {
@@ -411,7 +381,6 @@ pub struct MarketHistoryConfig {
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub candles_5m_capacity: usize,
-    pub trade_join_capacity: usize,
 }
 
 impl MarketHistoryConfig {
@@ -535,22 +504,16 @@ pub struct MarketHistoryRegistry;
 impl MarketHistoryStore {
     pub fn new(config: MarketHistoryConfig) -> Self;
     pub fn readers(&self) -> MarketHistoryReaders;
-    pub fn push_futures_trade_into_join_like_delphi(
-        &mut self,
-        row: TradeHistoryRow,
-        chart_price_step: f64,
-    );
-    pub fn push_futures_stream_trade_like_delphi(
+    pub fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
+    pub fn append_futures_stream_trade_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
         now_time: f64,
         price: f32,
         qty: f32,
-        chart_price_step: f64,
         time_shift: &mut TradesPacketTimeShift,
     ) -> f64;
-    pub fn drain_joined_futures_like_delphi(&mut self) -> usize;
     pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
     pub fn append_spot_stream_trade_like_delphi(
         &mut self,
@@ -652,9 +615,10 @@ dispatcher. `enable_default_market_history` re-enables the lazy default worker.
 
 `MarketHistoryStore` is the per-market single-writer side owned by that worker.
 Capacities set to `0` disable only that retained public history ring. Futures
-trades first enter the Delphi-like temporary join buffer and are drained into
-retained history in Delphi `DontSort=true` ring-read order. Rows evicted from
-the futures retained ring are buffered for `TMiniCandle` compaction.
+trades append directly into retained `SeqRing` storage in StoreWorker receive
+order; there is no temporary join buffer in the Rust Active Lib storage path.
+Rows evicted from the futures retained ring are buffered for `TMiniCandle`
+compaction.
 The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
 shared `TradesPacketTimeShift`, so all retained row types in one packet use the
 same Delphi packet time correction. MM-order companion rows are aligned with
@@ -734,12 +698,11 @@ RAM-budget helper for init/config code. It probes total physical RAM, falls
 back to fixed `Default` if the OS probe fails, and then delegates to
 `from_total_memory_bytes(total_memory_bytes, market_count)`. The helper budgets
 about 20% of total memory for retained histories, or 25% on machines below 8
-GiB, then splits that budget across the given market count and categories. When
-futures retained history is enabled, the helper keeps the futures temporary
-join ring at the Delphi `IntTradesBufSize = 1000` size; it must not shrink this
-ring as a hidden memory optimization. `estimated_bytes_per_market` uses the
-dense row sizes used by `SeqRing` and is intended for tests and config
-diagnostics. `Default` is intentionally conservative because
+GiB, then splits that budget across the given market count and categories. There
+is no separate futures temporary join-ring budget in Rust Active Lib; accepted
+futures trades go straight into retained `SeqRing` storage.
+`estimated_bytes_per_market` uses the dense row sizes used by `SeqRing` and is
+intended for tests and config diagnostics. `Default` is intentionally conservative because
 `subscribe_all_trades` creates stores for all known markets; use
 `from_system_memory(market_count)` or explicit capacities when a client wants a
 larger retained tail.

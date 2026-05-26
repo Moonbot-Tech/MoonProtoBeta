@@ -559,13 +559,15 @@ Derived calculations:
   array overflows. Rust must preserve that external meaning without array shift:
   `SeqRing` overflow compacts evicted rows into mini-candles. Exact Delphi
   thresholds/percentages must be checked before implementation.
-- Detailed futures trade history is appended in the active Delphi tmp-ring read
-  order. The live path is `ProcessTradesStream ->
-  wsParseOrdersHistoryAll_Int -> AddTmpHOrder`, then
-  `BMarketHistoryWorker -> JoinHOrders(0, NowTime, false, true)`. The final
-  `true` is `DontSort`, so there is no sort and no skip-tail step. Late
-  UDP/resend rows remain late in retained history; time-based public reads must
-  scan/filter instead of relying on monotonic row timestamps.
+- Detailed futures trades must not copy Delphi's temporary UI/storage bridge as
+  the Rust production storage model. Delphi `AddTmpHOrder` writes to
+  `tmpList/tmpTradesRead/tmpTradesWrite`, and the chart draws both retained
+  `OrdersH` and the fresh tmp-ring before `BMarketHistoryWorker` moves rows into
+  `OrdersH`. Active Lib should have one retained source: `StoreWorker` appends
+  accepted futures rows directly into `SeqRing` and updates rolling
+  volumes/current candle from that same stream. Late UDP/resend rows remain late;
+  time-based public reads must scan/filter instead of relying on monotonic row
+  timestamps.
 
 ### 2026-05-25 - SeqRing storage foundation
 
@@ -601,27 +603,23 @@ Done:
   buy/sell `Price * Abs(Qty)` values and quantities. This is the agreed Active
   Lib implementation direction for cheap derived volumes; precision error is
   bounded by one bucket width.
-- Added `TradeJoinBuffer`, matching the active `AddTmpHOrder` temporary ring:
-  one empty slot, prev1/prev2 same-direction aggregation, `ChartPriceStep`, and
-  Delphi `SameTradesTime = 0.2 / SecondsPerDay`.
-- Added `prepare_joined_trades_for_retained_append`: now an explicit no-op
-  marker for Delphi `JoinHOrders(..., DontSort=true)`. Drained tmp rows are kept
-  in ring read order; no sort, no skip-tail.
+- Removed the wrong production `TradeJoinBuffer` direction. Delphi's temp ring
+  is a UI/storage bridge, not the Active Lib retained-history model. StoreWorker
+  now appends futures trades directly into retained `SeqRing`.
 - Added `state::history_store::MarketHistoryStore`, the per-market single
   writer side intended for `StoreWorker`: retained futures/spot/liquidation/MM
-  rings, LastPrice ring, mini-candle ring, futures `TradeJoinBuffer`, rolling
-  volumes, and evicted-futures buffering for later mini-candle compaction.
+  rings, LastPrice ring, mini-candle ring, rolling volumes, and evicted-futures
+  buffering for later mini-candle compaction.
 - Added `MarketHistoryStore::append_last_price_like_delphi`, matching the
   `UpdateMarketsList -> pLast -> TMarket.AddFrom -> HistoryPrice` append gate:
   append only when `pLast > 0`, bid/ask is present, and the market is BTC or
   base-USDT.
-- Added `MarketHistoryStore::drain_joined_futures_like_delphi`, which drains
-  the temp futures buffer directly into retained history, matching
-  `JoinHOrders(..., DontSort=true)`, and updates 1/3/5 minute rolling volumes.
+- Removed delayed temp-ring drain; the accepted target is direct StoreWorker
+  append into retained `SeqRing`.
 - Added `MarketPrice::chart_price_step`, matching Delphi
   `AddNewAksPrice(Ask)`: update to `Max(eps, Ask / 5000)` only when `Ask > eps`
-  and otherwise keep the previous value. Futures retained join will use this
-  instead of a guessed Rust-only aggregation threshold.
+  and otherwise keep the previous value. It remains market-price metadata; Rust
+  retained trade storage no longer uses it for a temp join path.
 - Added `TradesPacketTimeShift`, matching Delphi `ProcessTradesStream`
   per-packet time correction: first known/stored row fixes
   `round((NowTimeX - RowTime) * 24) / 24`, later rows reuse the same shift, and
@@ -669,6 +667,12 @@ Verification:
 
 ### 2026-05-25 - Retained futures trades keep Delphi DontSort order
 
+Superseded correction 2026-05-26: this block fixed a real sort/skip-tail bug,
+but incorrectly treated Delphi `tmpList/tmpTradesRead/tmpTradesWrite` as the Rust
+production storage model. Later Delphi chart reading showed the tmp-ring is a
+fresh-trade overlay in addition to retained `OrdersH`. Active Lib target is
+direct `StoreWorker -> SeqRing` append with scan/filter time reads.
+
 Done:
 
 - Re-checked the active Delphi path:
@@ -678,8 +682,8 @@ Done:
 - Removed the Rust-only sort/skip-tail retained append step.
 - `SeqRing` time-based helpers no longer assume timestamp monotonicity; they
   scan/filter retained rows because late UDP/resend rows remain late.
-- The RAM-sized config helper now keeps the futures temp join ring at Delphi
-  `IntTradesBufSize = 1000` whenever futures retained history is enabled.
+- The RAM-sized temp join-ring decision is obsolete and the production temp join
+  capacity was removed under the direct `StoreWorker -> SeqRing` target.
 - Recorded the decision in root `library_decisions.md` and the closed red flag
   in `spec_pipeline/work/хуйня.md §X.161`.
 
@@ -6605,3 +6609,46 @@ Verification:
   `FIRETEST_QUICK_PASS after 24.31s`, `ParseFailed=0`,
   err_emu actual drop `9.71%`, retained futures rows present, derived snapshot
   present.
+
+### 2026-05-26 - Futures retained trades use direct StoreWorker -> SeqRing
+
+Correction:
+
+- Re-checked Delphi chart/storage path after the first Rust implementation had
+  copied `AddTmpHOrder` as a production retained-history buffer.
+- Delphi `tmpList/tmpTradesRead/tmpTradesWrite` is a UI/storage bridge: chart
+  draws retained `OrdersH` and then overlays the fresh tmp-ring until
+  `BMarketHistoryWorker` moves rows into `OrdersH`.
+- Active Lib target is not that historical two-source UI shape. It has one
+  retained source: `StoreWorker` appends accepted futures rows directly into
+  `SeqRing`, and derived state updates from the same accepted stream.
+
+Done:
+
+- Removed production `TradeJoinBuffer`, `TradeJoinPush`,
+  `prepare_joined_trades_for_retained_append`, `trade_join_capacity`,
+  `futures_join`, `joined_scratch`, and delayed
+  `drain_joined_futures_like_delphi`.
+- `MarketHistoryWorker` no longer drains a temp futures buffer during
+  maintenance. `MarketHistoryStreamSection::FuturesTrades` now carries only the
+  market name and rows; `chart_price_step` is no longer part of retained trade
+  storage.
+- `MarketHistoryStore::append_futures_stream_trade_like_delphi` applies
+  `TradesPacketTimeShift`, appends directly into retained futures `SeqRing`,
+  updates rolling volumes, and updates the current candle from that row.
+- API docs and `library_decisions.md` now state explicitly that Rust Active Lib
+  has no temporary futures join buffer and retained order is StoreWorker receive
+  order.
+- Recorded and closed `spec_pipeline/work/хуйня.md
+  §X.ACTIVE_TRADES_TMP_RING`.
+
+Verification:
+
+- `cargo fmt --check` OK.
+- `cargo test --lib` OK: 754 passed, 1 ignored.
+- `cargo test --tests --no-run` OK.
+- `cargo check --examples` OK.
+- Quick prod FireTest release OK after this removal:
+  `FIRETEST_QUICK_PASS after 22.78s`, `ParseFailed=0`, err_emu actual drop
+  `9.07%`, retained futures rows present, derived snapshot present, reader max
+  `590us`, writer CPU max `134us`.
