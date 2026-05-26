@@ -6850,6 +6850,27 @@ Verification:
   `FIRETEST_QUICK_PASS after 22.90s`, `ParseFailed=0`,
   `reader max=580us`, `writer_cpu max=146us`, `active_dispatch max=3219us`
   on `Strat(30)`.
+
+### 2026-05-26 - `client.rs` send queue/UKey split
+
+Done:
+
+- Moved `SendPriority`, `UniqueKey`, `UK_*`, `SendItem`, `SendQueues`,
+  `SendLockState`, and `initial_retry_left` into `src/client/send_queue.rs`.
+- Public low-level API paths stay re-exported from `client.rs`.
+- Queue fields/methods that existing unit tests inspect remain crate-visible
+  only. No Delphi `DataToSend*`, UKey dedup, ACK snapshot, or TmpSlider
+  machine effect changed.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.53s`, `ParseFailed=0`,
+  `reader max=719us`, `writer_cpu max=138us`, `active_dispatch max=3977us`
+  on `Strat(30)`.
 - Quick prod FireTest release after the sender split OK:
   `FIRETEST_QUICK_PASS after 25.10s`, `ParseFailed=0`,
   `reader max=676us`, `writer_cpu max=153us`.
