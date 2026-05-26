@@ -34,12 +34,10 @@ use std::sync::Arc;
 use crate::app_queue::AppQueue;
 use crate::commands::arb::ArbPayload;
 use crate::commands::engine_api::{EngineResponse, ServerInfo};
-use crate::commands::registry::decode_utf8_delphi;
-use crate::commands::strat::StratCommand;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{OrderType, TradeCtx};
-use crate::commands::ui::{ClientSettingsCommand, UICommand};
+use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
 use crate::state::orders::OrderCancelSend;
 use crate::state::{
@@ -54,7 +52,9 @@ mod api;
 mod balance;
 mod order_book;
 mod orders;
+mod strat;
 mod trades;
+mod ui;
 
 /// Fresh strategy snapshot override returned by the application for a server
 /// `TStratSnapshotRequest`.
@@ -1102,98 +1102,6 @@ impl EventDispatcher {
                 payload: payload.to_vec(),
             }),
         }
-    }
-
-    fn client_new_data_strat(&mut self, payload: &[u8], out: &mut Vec<Event>) {
-        match StratCommand::parse(payload) {
-            Some(cmd_v) => self.process_strat_command(cmd_v, out),
-            None => out.push(Self::parse_failed(Command::Strat, payload)),
-        }
-    }
-
-    /// Delphi equivalent: `TMoonProtoNetClient.ProcessStratCommand`.
-    fn process_strat_command(&mut self, cmd_v: StratCommand, out: &mut Vec<Event>) {
-        match &cmd_v {
-            StratCommand::SellPriceUpdate(_)
-            | StratCommand::SchemaRequest { .. }
-            | StratCommand::Skipped { .. }
-            | StratCommand::Unknown { .. } => return,
-            _ => {}
-        }
-        let ev = self.strats.apply(cmd_v);
-        // Active library: auto-decode strategy snapshot raw bytes
-        // в `StratsState`. Раньше app должен был сам вызывать
-        // `strats.apply_snapshot_decoded(raw_data)` — теперь либа
-        // делает это сама на SnapshotFull/Partial event'ах.
-        match &ev {
-            crate::state::StratEvent::SnapshotFull {
-                server_epoch,
-                raw_data,
-            } => {
-                if self
-                    .strats
-                    .apply_snapshot_decoded_with_mode_in_place(raw_data, true)
-                    .is_none()
-                {
-                    log::warn!(
-                        target: "moonproto::events",
-                        "failed to decode full strategy snapshot payload ({} bytes)",
-                        raw_data.len()
-                    );
-                    return;
-                }
-                self.strats.last_server_epoch = *server_epoch;
-            }
-            crate::state::StratEvent::SnapshotPartial {
-                server_epoch,
-                raw_data,
-            } => {
-                if self
-                    .strats
-                    .apply_snapshot_decoded_with_mode_in_place(raw_data, false)
-                    .is_none()
-                {
-                    log::warn!(
-                        target: "moonproto::events",
-                        "failed to decode partial strategy snapshot payload ({} bytes)",
-                        raw_data.len()
-                    );
-                    return;
-                }
-                self.strats.last_server_epoch = *server_epoch;
-            }
-            _ => {}
-        }
-        out.push(Event::Strat(ev));
-    }
-
-    fn client_new_data_ui(&mut self, payload: &[u8], out: &mut Vec<Event>) {
-        match UICommand::parse_with_client_settings_fallback(
-            payload,
-            Some(self.settings.client_settings_parse_fallback()),
-        ) {
-            Some(UICommand::Skipped { .. } | UICommand::Unknown { .. }) => {}
-            Some(UICommand::NewMarketNotify(_)) => {
-                self.markets.markets_list_refresh_needed = true;
-                self.force_markets_list_refresh = true;
-            }
-            Some(cmd_v) => {
-                if let Some(ev) = self.settings.apply(cmd_v) {
-                    out.push(Event::Settings(ev));
-                }
-            }
-            None => out.push(Self::parse_failed(Command::UI, payload)),
-        }
-    }
-
-    fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
-        if payload.len() < 8 {
-            out.push(Self::parse_failed(Command::LogMsg, payload));
-            return;
-        }
-        let time = f64::from_le_bytes(payload[0..8].try_into().unwrap());
-        let msg = decode_utf8_delphi(&payload[8..]);
-        out.push(Event::ServerLog { time, msg });
     }
 
     /// Active-library parser step used by `Client::run_with_dispatcher`.

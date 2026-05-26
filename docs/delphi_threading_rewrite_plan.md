@@ -7604,3 +7604,28 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EventDispatcher` Strat/UI/Log block split
+
+Done:
+
+- Moved `MPC_Strat` active dispatch into `events/strat.rs`.
+- Moved `MPC_UI` and `MPC_LogMsg` active dispatch into `events/ui.rs`.
+- Kept machine-effect order unchanged:
+  strategy parse -> skip request/unknown kinds -> apply strategy state ->
+  auto-decode snapshot payload -> emit `Event::Strat`; UI parse -> handle
+  `TNewMarketNotifyCommand` internal refresh flags -> settings apply; LogMsg
+  parse `TDateTime + UTF-8 rest`.
+- This is a readability/publication split only. No protocol timing, parser
+  behavior, settings state, strategy snapshot behavior, or public event shape
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.54s`, `ParseFailed=0`, err_emu actual drop
+  `11.02%`, retained futures rows present, derived snapshot present,
+  `reader max=628us`, `writer_cpu max=125us`, `GetMarketsList apply=2577us`.
