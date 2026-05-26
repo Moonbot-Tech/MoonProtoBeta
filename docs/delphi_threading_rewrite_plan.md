@@ -6694,3 +6694,31 @@ Verification:
   `FIRETEST_QUICK_PASS after 24.17s`, `ParseFailed=0`, err_emu actual drop
   `12.32%`, retained futures rows present, derived snapshot present, reader max
   `773us`, writer CPU max `131us`.
+
+### 2026-05-26 - hot-path closure pass after journal_review.md
+
+Done:
+
+- Removed Rust-only `Arc` wrappers from `Client`-owned counters
+  `crypt_msg_counter`, `total_sent`, and `total_recv_shared`; they were not
+  shared handles and remain plain atomics with the same ordering.
+- Added a subscription intent summary beside `SubscriptionRegistry`: atomic
+  `trades_subscribed` / `has_orderbook_subs` plus a retained
+  `TradeStorageScope` snapshot. Registry remains the source of truth; hot
+  receive/tick checks no longer lock it for boolean intent checks.
+- `ActiveDispatchContext` carries an `Arc<TradeStorageScope>` snapshot and
+  `EventDispatcher` clones the concrete scope only when it changes, not on
+  every packet.
+- `copy_send_ack_and_check_sening_data` now reuses `Client` scratch buffers for
+  copied Sliced/High/Low queues and SlicedACKs. The Delphi phase order is
+  unchanged: `GetCopySendList -> GetCopyAcks -> CopyRecvdData -> CheckSeningData`.
+- `flush_send_batch` keeps `tmp_send_buf` capacity after sending instead of
+  dropping the buffer on every flush.
+- `encrypt_with_cipher` uses one output buffer for `IV | Tag | Ciphertext` and
+  encrypts the padded plaintext slice in-place. Wire layout is unchanged.
+
+Not done:
+
+- Sliced receive flat-buffer reassembly remains open for a separate
+  protocol-memory pass. The current sorted `(BlockNum, Vec<u8>)` shape preserves
+  Delphi malformed-block behavior; flattening it needs its own proof/tests.

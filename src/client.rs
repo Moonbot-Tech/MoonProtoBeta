@@ -477,11 +477,12 @@ impl SendLockState {
         sliced: &mut Vec<SendItem>,
         high: &mut Vec<SendItem>,
         low: &mut Vec<SendItem>,
-    ) -> (Vec<SlicedAck>, Option<Slider>) {
+        acks: &mut Vec<SlicedAck>,
+    ) -> Option<Slider> {
         self.send_queues.take_into(sliced, high, low);
-        let acks = std::mem::take(&mut self.incoming_sliced_acks);
+        acks.append(&mut self.incoming_sliced_acks);
         let recvd = self.copy_tmp_slider();
-        (acks, recvd)
+        recvd
     }
 
     fn push_sliced_ack(&mut self, ack: SlicedAck) {
@@ -593,10 +594,23 @@ struct ClientSenderShared {
     domain_ready: Arc<AtomicBool>,
     send_lock: Arc<Mutex<SendLockState>>,
     subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
+    subscription_summary: Arc<SubscriptionRegistrySummary>,
+    subscription_trades_scope:
+        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
     server_update_sent: Arc<AtomicBool>,
     last_trades_subscribe_request_ms: Arc<AtomicI64>,
     last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
     last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
+}
+
+impl ClientSenderShared {
+    fn refresh_subscription_summary(&self, registry: &SubscriptionRegistry) {
+        refresh_subscription_summary(
+            &self.subscription_summary,
+            &self.subscription_trades_scope,
+            registry,
+        );
+    }
 }
 
 impl ClientSender {
@@ -701,13 +715,12 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         let market_name = market_name.to_string();
-        let newly_added = self
-            .shared
-            .subscription_registry
-            .lock()
-            .unwrap()
-            .orderbook_subs
-            .insert(market_name.clone());
+        let newly_added = {
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let newly_added = registry.orderbook_subs.insert(market_name.clone());
+            self.shared.refresh_subscription_summary(&registry);
+            newly_added
+        };
         if newly_added && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::subscribe_order_book(&[
                 &market_name,
@@ -722,13 +735,12 @@ impl ClientSender {
             return Err(SubscribeError::Disconnected);
         }
         let market_name = market_name.to_string();
-        let removed = self
-            .shared
-            .subscription_registry
-            .lock()
-            .unwrap()
-            .orderbook_subs
-            .remove(&market_name);
+        let removed = {
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let removed = registry.orderbook_subs.remove(&market_name);
+            self.shared.refresh_subscription_summary(&registry);
+            removed
+        };
         if removed && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_order_book(&[
                 &market_name,
@@ -761,6 +773,7 @@ impl ClientSender {
                     new_names.push(market_name);
                 }
             }
+            self.shared.refresh_subscription_summary(&registry);
         }
         if !new_names.is_empty() && self.domain_ready_for_typed_send() {
             let refs: Vec<&str> = new_names.iter().map(String::as_str).collect();
@@ -795,6 +808,7 @@ impl ClientSender {
                     removed_names.push(market_name);
                 }
             }
+            self.shared.refresh_subscription_summary(&registry);
         }
         if !removed_names.is_empty() && self.domain_ready_for_typed_send() {
             let refs: Vec<&str> = removed_names.iter().map(String::as_str).collect();
@@ -812,7 +826,9 @@ impl ClientSender {
         }
         let removed_names = {
             let mut registry = self.shared.subscription_registry.lock().unwrap();
-            registry.orderbook_subs.drain().collect::<Vec<_>>()
+            let removed_names = registry.orderbook_subs.drain().collect::<Vec<_>>();
+            self.shared.refresh_subscription_summary(&registry);
+            removed_names
         };
         if removed_names.is_empty() || !self.domain_ready_for_typed_send() {
             return Ok(());
@@ -860,6 +876,7 @@ impl ClientSender {
             registry.trades_sub = Some(TradesSubscription { want_mm });
             registry.mm_orders_sub = Some(want_mm);
             registry.trades_storage_scope = storage_scope;
+            self.shared.refresh_subscription_summary(&registry);
             wire_changed
         };
         if !wire_changed || !self.domain_ready_for_typed_send() {
@@ -875,14 +892,12 @@ impl ClientSender {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        let had_subscription = self
-            .shared
-            .subscription_registry
-            .lock()
-            .unwrap()
-            .trades_sub
-            .take()
-            .is_some();
+        let had_subscription = {
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
+            let had_subscription = registry.trades_sub.take().is_some();
+            self.shared.refresh_subscription_summary(&registry);
+            had_subscription
+        };
         if had_subscription && self.domain_ready_for_typed_send() {
             self.try_send_api_request(crate::commands::engine_request::unsubscribe_all_trades())?;
         }
@@ -3820,50 +3835,60 @@ impl ProtocolCore<'_> {
     }
 
     fn copy_send_ack_and_check_sening_data(&mut self, cur_tm: i64) {
-        let mut copy_send_list = Vec::new();
-        let mut copy_send_list_h = Vec::new();
-        let mut copy_send_list_l = Vec::new();
+        let mut copy_send_list = std::mem::take(&mut self.client.copy_send_sliced);
+        let mut copy_send_list_h = std::mem::take(&mut self.client.copy_send_high);
+        let mut copy_send_list_l = std::mem::take(&mut self.client.copy_send_low);
+        let mut copy_acks = std::mem::take(&mut self.client.copy_sliced_acks);
 
         // Delphi `Execute` under `SendLock`:
         // GetCopySendList; GetCopyAcks; FClient.CopyRecvdData.
-        let copy_acks = self.get_copy_send_lock_snapshot(
+        self.get_copy_send_lock_snapshot(
             &mut copy_send_list,
             &mut copy_send_list_h,
             &mut copy_send_list_l,
+            &mut copy_acks,
         );
 
         self.check_sening_data(
-            copy_send_list,
-            copy_send_list_h,
-            copy_send_list_l,
-            copy_acks,
+            &copy_send_list,
+            &mut copy_send_list_h,
+            &copy_send_list_l,
+            &mut copy_acks,
             cur_tm,
         );
+        copy_send_list.clear();
+        copy_send_list_h.clear();
+        copy_send_list_l.clear();
+        copy_acks.clear();
+        self.client.copy_send_sliced = copy_send_list;
+        self.client.copy_send_high = copy_send_list_h;
+        self.client.copy_send_low = copy_send_list_l;
+        self.client.copy_sliced_acks = copy_acks;
     }
 
     fn check_sening_data(
         &mut self,
-        copy_send_list: Vec<SendItem>,
-        copy_send_list_h: Vec<SendItem>,
-        copy_send_list_l: Vec<SendItem>,
-        copy_acks: Vec<SlicedAck>,
+        copy_send_list: &[SendItem],
+        copy_send_list_h: &mut [SendItem],
+        copy_send_list_l: &[SendItem],
+        copy_acks: &mut Vec<SlicedAck>,
         cur_tm: i64,
     ) {
         // Delphi `CheckSeningData`: Sliced CopySendList first, then SlicedACK,
         // then regular H ACK bitmap, High send/retry, first Low flush, Sliced
         // retry, remaining Low flush. Keep this exact protocol order.
-        self.apply_sliced_send_u_key_cleanup(&copy_send_list);
-        for item in &copy_send_list {
+        self.apply_sliced_send_u_key_cleanup(copy_send_list);
+        for item in copy_send_list {
             self.create_sliced_and_send(item);
         }
         self.apply_copy_acks(copy_acks, cur_tm);
         self.apply_regular_hl_ack();
-        self.apply_high_send_u_key_cleanup(&copy_send_list_h);
-        for mut item in copy_send_list_h {
-            self.send_h_item(&mut item, cur_tm);
+        self.apply_high_send_u_key_cleanup(copy_send_list_h);
+        for item in copy_send_list_h {
+            self.send_h_item(item, cur_tm);
         }
         self.retry_pending_h(cur_tm);
-        self.send_low_items_around_sliced_retry(&copy_send_list_l, cur_tm);
+        self.send_low_items_around_sliced_retry(copy_send_list_l, cur_tm);
     }
 
     fn get_copy_send_lock_snapshot(
@@ -3871,17 +3896,17 @@ impl ProtocolCore<'_> {
         sliced: &mut Vec<SendItem>,
         h_items: &mut Vec<SendItem>,
         l_items: &mut Vec<SendItem>,
-    ) -> Vec<SlicedAck> {
-        let (acks, tmp_slider) = self
+        acks: &mut Vec<SlicedAck>,
+    ) {
+        let tmp_slider = self
             .client
             .send_lock
             .lock()
             .unwrap()
-            .take_send_snapshot(sliced, h_items, l_items);
+            .take_send_snapshot(sliced, h_items, l_items, acks);
         if let Some(tmp_slider) = tmp_slider {
             self.client.recvd_slider = tmp_slider;
         }
-        acks
     }
 
     #[cfg(test)]
@@ -3889,7 +3914,9 @@ impl ProtocolCore<'_> {
         let mut sliced = Vec::new();
         let mut high = Vec::new();
         let mut low = Vec::new();
-        self.get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low)
+        let mut acks = Vec::new();
+        self.get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low, &mut acks);
+        acks
     }
 
     #[cfg(test)]
@@ -3917,8 +3944,8 @@ impl ProtocolCore<'_> {
         }
     }
 
-    fn apply_copy_acks(&mut self, copy_acks: Vec<SlicedAck>, cur_tm: i64) {
-        for ack in copy_acks {
+    fn apply_copy_acks(&mut self, copy_acks: &mut Vec<SlicedAck>, cur_tm: i64) {
+        for ack in copy_acks.drain(..) {
             self.client.apply_sliced_ack(ack, cur_tm);
         }
     }
@@ -4409,18 +4436,22 @@ impl ProtocolCore<'_> {
 
         if self.client.tmp_send_count > 1 {
             // Send as MPC_Grouped
-            let payload = std::mem::take(&mut self.client.tmp_send_buf);
+            let mut payload = std::mem::take(&mut self.client.tmp_send_buf);
             self.send_command(Command::Grouped, &payload);
+            payload.clear();
+            self.client.tmp_send_buf = payload;
         } else {
             // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
             // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
-            let buf = std::mem::take(&mut self.client.tmp_send_buf);
+            let mut buf = std::mem::take(&mut self.client.tmp_send_buf);
             if buf.len() >= 3 {
                 let cmd = buf[0];
                 // sz прочитан только для slicing data (после 3 байт group-header'а).
                 let data = &buf[3..];
                 self.send_command_raw(cmd, data);
             }
+            buf.clear();
+            self.client.tmp_send_buf = buf;
         }
         self.client.tmp_send_count = 0;
         self.client.tmp_send_size = 0;
@@ -4496,6 +4527,42 @@ pub(crate) struct SubscriptionRegistry {
     /// новый серверный client-state стартует с false, поэтому active library должна
     /// воспроизвести последний известный intent в init/API слое.
     pub mm_orders_sub: Option<bool>,
+}
+
+#[derive(Default)]
+pub(crate) struct SubscriptionRegistrySummary {
+    trades_subscribed: AtomicBool,
+    has_orderbook_subs: AtomicBool,
+}
+
+impl SubscriptionRegistrySummary {
+    fn update_from(&self, registry: &SubscriptionRegistry) {
+        self.trades_subscribed
+            .store(registry.trades_sub.is_some(), Ordering::Relaxed);
+        self.has_orderbook_subs
+            .store(!registry.orderbook_subs.is_empty(), Ordering::Relaxed);
+    }
+
+    fn trades_subscribed(&self) -> bool {
+        self.trades_subscribed.load(Ordering::Relaxed)
+    }
+
+    fn has_orderbook_subs(&self) -> bool {
+        self.has_orderbook_subs.load(Ordering::Relaxed)
+    }
+}
+
+fn refresh_subscription_summary(
+    summary: &SubscriptionRegistrySummary,
+    trades_scope: &parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>,
+    registry: &SubscriptionRegistry,
+) {
+    summary.update_from(registry);
+    let scope = registry
+        .trades_sub
+        .is_some()
+        .then(|| Arc::new(registry.trades_storage_scope.clone()));
+    *trades_scope.write() = scope;
 }
 
 /// Что единственный пользовательский Init заказал у доменного слоя.
@@ -4667,7 +4734,7 @@ pub struct Client {
     last_need_hello_again: i64,
     prev_cycle_tm: i64, // for ActualSleepTime EMA
 
-    crypt_msg_counter: Arc<AtomicU64>,
+    crypt_msg_counter: AtomicU64,
     send_datagram_num: u16,
 
     round_trip_delay: i64,
@@ -4705,6 +4772,10 @@ pub struct Client {
     tmp_send_buf: Vec<u8>, // accumulated Grouped payload
     tmp_send_count: usize, // items in batch
     tmp_send_size: usize, // Delphi TmpSendSize accounting: sum of (payload + header + grouped item header)
+    copy_send_sliced: Vec<SendItem>,
+    copy_send_high: Vec<SendItem>,
+    copy_send_low: Vec<SendItem>,
+    copy_sliced_acks: Vec<SlicedAck>,
 
     // Delphi DataReadInt receive state that survives soft reconnect: MPSlider
     // replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider lives in
@@ -4714,8 +4785,8 @@ pub struct Client {
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
     recvd_slider: Slider,
-    total_sent: Arc<AtomicU64>,
-    total_recv_shared: Arc<AtomicU64>,
+    total_sent: AtomicU64,
+    total_recv_shared: AtomicU64,
     err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     protocol_metrics: Arc<ProtocolMetrics>,
     dispatcher_trades_server_token: Arc<AtomicU64>,
@@ -4747,6 +4818,9 @@ pub struct Client {
     /// До Init transport handshake не отправляет этот реестр. После Init reconnect
     /// сам восстанавливает registry через текущие keys / market mapping.
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
+    subscription_summary: Arc<SubscriptionRegistrySummary>,
+    subscription_trades_scope:
+        Arc<parking_lot::RwLock<Option<Arc<crate::state::TradeStorageScope>>>>,
 
     /// Shared mirror of [`Self::domain_ready`] for [`ClientSender`].
     ///
@@ -4937,19 +5011,16 @@ pub struct Client {
 
 impl Client {
     fn has_trades_subscription_intent(&self) -> bool {
-        self.subscription_registry
-            .lock()
-            .unwrap()
-            .trades_sub
-            .is_some()
+        self.subscription_summary.trades_subscribed()
     }
 
-    pub(crate) fn trades_storage_scope_intent(&self) -> Option<crate::state::TradeStorageScope> {
-        let registry = self.subscription_registry.lock().unwrap();
-        registry
-            .trades_sub
-            .is_some()
-            .then(|| registry.trades_storage_scope.clone())
+    pub(crate) fn trades_storage_scope_intent(
+        &self,
+    ) -> Option<Arc<crate::state::TradeStorageScope>> {
+        if !self.subscription_summary.trades_subscribed() {
+            return None;
+        }
+        self.subscription_trades_scope.read().clone()
     }
 
     /// Create a client session from [`ClientConfig`].
@@ -4969,7 +5040,8 @@ impl Client {
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
-        let total_recv_shared = Arc::new(AtomicU64::new(0));
+        let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
+        let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
         let dispatcher_trades_server_token = Arc::new(AtomicU64::new(0));
@@ -5029,7 +5101,7 @@ impl Client {
             last_socket_recreate: i64::MIN / 2,
             last_need_hello_again: i64::MIN / 2,
             prev_cycle_tm: 0,
-            crypt_msg_counter: Arc::new(AtomicU64::new(0)),
+            crypt_msg_counter: AtomicU64::new(0),
             send_datagram_num: 0,
             round_trip_delay: 0,
             actual_pmtu: 508,
@@ -5053,10 +5125,14 @@ impl Client {
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
             tmp_send_size: 0,
+            copy_send_sliced: Vec::new(),
+            copy_send_high: Vec::new(),
+            copy_send_low: Vec::new(),
+            copy_sliced_acks: Vec::new(),
             data_read_state: DataReadState::new(),
             recvd_slider: Slider::new(),
-            total_sent: Arc::new(AtomicU64::new(0)),
-            total_recv_shared,
+            total_sent: AtomicU64::new(0),
+            total_recv_shared: AtomicU64::new(0),
             err_emu_diagnostics,
             protocol_metrics,
             dispatcher_trades_server_token,
@@ -5069,6 +5145,8 @@ impl Client {
             prev_auth_status: AuthStatus::Base,
             cached_server_addr: None,
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
+            subscription_summary,
+            subscription_trades_scope,
             domain_ready_flag,
             domain_restore: DomainRestoreIntent::default(),
             was_ever_connected: false,
@@ -5506,7 +5584,17 @@ impl Client {
         f: impl FnOnce(&mut SubscriptionRegistry) -> R,
     ) -> R {
         let mut registry = self.subscription_registry.lock().unwrap();
-        f(&mut registry)
+        let result = f(&mut registry);
+        self.refresh_subscription_summary(&registry);
+        result
+    }
+
+    fn refresh_subscription_summary(&self, registry: &SubscriptionRegistry) {
+        refresh_subscription_summary(
+            &self.subscription_summary,
+            &self.subscription_trades_scope,
+            registry,
+        );
     }
 
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
@@ -6091,6 +6179,8 @@ impl Client {
                 domain_ready: Arc::clone(&self.domain_ready_flag),
                 send_lock: Arc::clone(&self.send_lock),
                 subscription_registry: Arc::clone(&self.subscription_registry),
+                subscription_summary: Arc::clone(&self.subscription_summary),
+                subscription_trades_scope: Arc::clone(&self.subscription_trades_scope),
                 server_update_sent: Arc::clone(&self.server_update_sent),
                 last_trades_subscribe_request_ms: Arc::clone(
                     &self.last_trades_subscribe_request_ms,
@@ -6219,6 +6309,7 @@ impl Client {
     fn apply_mm_orders_subscribe_intent(&mut self, subscribe: bool) {
         let mut registry = self.subscription_registry.lock().unwrap();
         registry.mm_orders_sub = Some(subscribe);
+        self.refresh_subscription_summary(&registry);
     }
 
     fn send_mm_orders_subscribe_cmd(&self, subscribe: bool) {
@@ -6235,10 +6326,9 @@ impl Client {
     }
 
     fn domain_restore_needs_indexes(&self) -> bool {
-        let registry = self.subscription_registry.lock().unwrap();
         self.domain_restore.fetch_indexes
-            || registry.trades_sub.is_some()
-            || !registry.orderbook_subs.is_empty()
+            || self.subscription_summary.trades_subscribed()
+            || self.subscription_summary.has_orderbook_subs()
     }
 
     fn send_markets_indexes_restore_request(&mut self, now_ms: i64) {
@@ -6260,10 +6350,8 @@ impl Client {
             return;
         }
 
-        let orderbooks_need_fresh_indexes = {
-            let registry = self.subscription_registry.lock().unwrap();
-            !registry.orderbook_subs.is_empty() && !self.market_indexes_current_for_peer()
-        };
+        let orderbooks_need_fresh_indexes = self.subscription_summary.has_orderbook_subs()
+            && !self.market_indexes_current_for_peer();
         if orderbooks_need_fresh_indexes {
             self.restore_orderbooks_after_indexes = true;
         }
@@ -10982,6 +11070,8 @@ mod client_sender_tests {
         Arc<AtomicBool>,
     ) {
         let subscription_registry = Arc::new(Mutex::new(SubscriptionRegistry::default()));
+        let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
+        let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let app_queue_alive = Arc::new(AtomicBool::new(true));
         let domain_ready = Arc::new(AtomicBool::new(true));
@@ -10997,6 +11087,8 @@ mod client_sender_tests {
                     domain_ready: Arc::clone(&domain_ready),
                     send_lock: Arc::clone(&send_lock),
                     subscription_registry: Arc::clone(&subscription_registry),
+                    subscription_summary,
+                    subscription_trades_scope,
                     server_update_sent: Arc::clone(&server_update_sent),
                     last_trades_subscribe_request_ms,
                     last_orderbook_subscribe_request_ms,
@@ -13391,8 +13483,8 @@ mod pmtu_tests {
             let mut writer = ProtocolCore {
                 client: &mut client,
             };
-            let copy_acks = writer.get_copy_acks();
-            writer.apply_copy_acks(copy_acks, 300);
+            let mut copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(&mut copy_acks, 300);
         }
         assert_eq!(
             client.sending[0].retry_count, 0,
@@ -13413,8 +13505,8 @@ mod pmtu_tests {
             let mut writer = ProtocolCore {
                 client: &mut client,
             };
-            let copy_acks = writer.get_copy_acks();
-            writer.apply_copy_acks(copy_acks, 300);
+            let mut copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(&mut copy_acks, 300);
         }
         assert_eq!(
             client.sending[0].retry_count, 4,
@@ -13459,8 +13551,8 @@ mod pmtu_tests {
             let mut writer = ProtocolCore {
                 client: &mut client,
             };
-            let copy_acks = writer.get_copy_acks();
-            writer.apply_copy_acks(copy_acks, 100);
+            let mut copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(&mut copy_acks, 100);
         }
 
         assert_eq!(client.sending.len(), 1);
@@ -13491,8 +13583,8 @@ mod pmtu_tests {
             let mut writer = ProtocolCore {
                 client: &mut client,
             };
-            let copy_acks = writer.get_copy_acks();
-            writer.apply_copy_acks(copy_acks, 200);
+            let mut copy_acks = writer.get_copy_acks();
+            writer.apply_copy_acks(&mut copy_acks, 200);
         }
         assert!(
             client.sending.is_empty(),
@@ -13571,10 +13663,11 @@ mod pmtu_tests {
         let mut sliced = Vec::new();
         let mut high = Vec::new();
         let mut low = Vec::new();
-        let acks = ProtocolCore {
+        let mut acks = Vec::new();
+        ProtocolCore {
             client: &mut client,
         }
-        .get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low);
+        .get_copy_send_lock_snapshot(&mut sliced, &mut high, &mut low, &mut acks);
 
         assert_eq!(sliced.len(), 1);
         assert!(high.is_empty());

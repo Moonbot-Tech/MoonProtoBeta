@@ -69,26 +69,26 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
     };
     let mut iv_bytes = [0u8; IV_SIZE];
     iv_bytes.copy_from_slice(wire_iv.as_bytes());
-    let nonce = Nonce::from_slice(&iv_bytes);
-
     // PKCS7 padding
     let block_size = 16usize;
     let padding = block_size - (plaintext.len() % block_size);
-    let mut padded = Vec::with_capacity(plaintext.len() + padding);
-    padded.extend_from_slice(plaintext);
-    padded.resize(plaintext.len() + padding, padding as u8);
+    let cipher_offset = IV_SIZE + 16;
+    let total_len = cipher_offset + plaintext.len() + padding;
+    let mut output = Vec::with_capacity(total_len);
+    output.extend_from_slice(&iv_bytes);
+    output.resize(cipher_offset, 0);
+    output.extend_from_slice(plaintext);
+    output.resize(total_len, padding as u8);
+    let nonce = Nonce::from_slice(&iv_bytes);
 
     // Encrypt in-place — `expect` invariant: AES-GCM fails только при ≥ 16 EiB payload,
     // что невозможно в MoonProto (PMTU < 8KB → одно сообщение).
     let tag = cipher
-        .encrypt_in_place_detached(nonce, aad, &mut padded)
+        .encrypt_in_place_detached(nonce, aad, &mut output[cipher_offset..])
         .expect("AES-GCM payload < 16 EiB — invariant satisfied by MTU");
 
     // Output: IV(12) + Tag(16) + Ciphertext
-    let mut output = Vec::with_capacity(IV_SIZE + 16 + padded.len());
-    output.extend_from_slice(&iv_bytes);
-    output.extend_from_slice(tag.as_slice());
-    output.extend_from_slice(&padded);
+    output[IV_SIZE..cipher_offset].copy_from_slice(tag.as_slice());
     output
 }
 

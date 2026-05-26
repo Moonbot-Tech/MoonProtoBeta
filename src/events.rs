@@ -195,7 +195,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) server_time_delta_source: Arc<AtomicU64>,
     pub(crate) now_time_days: f64,
     pub(crate) domain_ready: bool,
-    pub(crate) trades_storage_scope: Option<crate::state::TradeStorageScope>,
+    pub(crate) trades_storage_scope: Option<Arc<crate::state::TradeStorageScope>>,
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) server_base_currency_name: Option<String>,
     pub(crate) server_base_currency_code: Option<u8>,
@@ -816,9 +816,9 @@ impl EventDispatcher {
         handle.apply_candles_snapshot(rows)
     }
 
-    fn set_trade_storage_scope(&mut self, scope: Option<TradeStorageScope>, now_time_days: f64) {
-        if self.trade_storage_scope != scope {
-            self.trade_storage_scope = scope;
+    fn set_trade_storage_scope(&mut self, scope: Option<&TradeStorageScope>, now_time_days: f64) {
+        if self.trade_storage_scope.as_ref() != scope {
+            self.trade_storage_scope = scope.cloned();
             self.last_market_history_scope = None;
             self.ensure_default_market_history_worker();
             self.sync_market_history_storage();
@@ -1774,7 +1774,7 @@ impl EventDispatcher {
             ctx.server_base_currency_name.as_deref(),
             ctx.server_base_currency_code,
         );
-        self.set_trade_storage_scope(ctx.trades_storage_scope.clone(), ctx.now_time_days);
+        self.set_trade_storage_scope(ctx.trades_storage_scope.as_deref(), ctx.now_time_days);
 
         if matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
             && ctx.trades_storage_scope.is_none()
@@ -3693,7 +3693,7 @@ mod tests {
             server_time_delta_source: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             now_time_days: 45_000.5,
             domain_ready: true,
-            trades_storage_scope: Some(TradeStorageScope::All),
+            trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
             copy_max_leverage_from_markets_list: false,
             server_base_currency_name: Some("BTC".to_string()),
             server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
@@ -3753,7 +3753,7 @@ mod tests {
         });
         d.markets.apply_markets_prices_payload_like_delphi(&data);
 
-        d.set_trade_storage_scope(Some(TradeStorageScope::All), 45_001.0);
+        d.set_trade_storage_scope(Some(&TradeStorageScope::All), 45_001.0);
         assert!(worker.flush(45_001.0));
 
         let last_prices = worker.readers("BTCUSDT").unwrap().last_prices.unwrap();
