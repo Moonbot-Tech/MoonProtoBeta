@@ -32,7 +32,6 @@ impl EventDispatcher {
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
-        let mut extra_events = Vec::new();
         if resp.success {
             match resp.method {
                 EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
@@ -41,10 +40,10 @@ impl EventDispatcher {
                             .markets
                             .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
                         {
-                            extra_events.push(Event::Markets(ev));
+                            out.push(Event::Markets(ev));
                             let new_markets = self.markets.take_new_markets_added();
                             if !new_markets.is_empty() {
-                                extra_events.push(Event::Markets(MarketsEvent::NewMarketsAdded {
+                                out.push(Event::Markets(MarketsEvent::NewMarketsAdded {
                                     names: new_markets,
                                 }));
                             }
@@ -71,14 +70,14 @@ impl EventDispatcher {
                                     last_price_rows,
                                 );
                             }
-                            extra_events.push(Event::Markets(ev));
+                            out.push(Event::Markets(ev));
                         }
                     }
                 }
                 EngineMethod::GetMarketsIndexes => {
                     if let Some(names) = parse_markets_indexes_response(&resp.data) {
                         let ev = self.markets.apply_markets_indexes(names);
-                        extra_events.push(Event::Markets(ev));
+                        out.push(Event::Markets(ev));
                     }
                 }
                 EngineMethod::CheckBinanceTags => {
@@ -86,7 +85,7 @@ impl EventDispatcher {
                         .markets
                         .apply_token_tags_payload_like_delphi(&resp.data)
                     {
-                        extra_events.push(Event::Markets(ev));
+                        out.push(Event::Markets(ev));
                     }
                 }
                 EngineMethod::BaseCheck => {
@@ -102,7 +101,6 @@ impl EventDispatcher {
                 _ => {}
             }
         }
-        out.extend(extra_events);
         out.push(Event::EngineResponse(resp));
     }
 
