@@ -7673,3 +7673,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Orders` local worker-action split
+
+Done:
+
+- Moved local outgoing order-worker actions into `state/orders/actions.rs`:
+  local visual marker, move-all pre-send gates, immune-click local mutation,
+  stop/VStop change checks, replace/cancel pending sends, pending-cancel resend
+  tick, and panic-sell local sends.
+- Kept `Orders::apply_at` server-command state-machine in `state/orders.rs`
+  intact for focused Delphi `ProcessCommandOrder` сверка.
+- This is a readability/publication split only. No local mutation order,
+  outgoing command gate, pending resend timing, panic-sell behavior, or public
+  API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
