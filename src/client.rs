@@ -40,12 +40,14 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod bps;
 mod clock;
 mod diagnostics;
 mod init;
 mod metrics;
 mod socket;
 
+pub use bps::BpsCounter;
 pub use clock::set_ntp_offset;
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
@@ -9261,68 +9263,6 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.app_queue_alive.store(false, Ordering::Relaxed);
         self.clear_recv_poller();
-    }
-}
-
-/// O(1) byte-rate counter with about 10 seconds of EMA smoothing.
-///
-/// This mirrors Delphi `TMoonProtoUDPClient.AddBytesCount` without a heap-backed
-/// sliding window.
-///
-/// Algorithm:
-/// - `cur_sec_bytes` accumulates bytes in the current one-second bucket.
-/// - Once a second passes, the bucket is folded into the EMA.
-/// - `bytes_per_sec()` returns the smoothed bytes-per-second value.
-#[derive(Debug, Default)]
-pub struct BpsCounter {
-    /// Bytes accumulated in the current one-second bucket.
-    cur_sec_bytes: u64,
-    /// EMA-smoothed value (`10 * average B/s` in steady state).
-    ema_10sec: u64,
-    /// Timestamp of the current bucket start in milliseconds (`0` means
-    /// uninitialized).
-    last_sec_ms: i64,
-    /// Number of complete seconds accumulated, clamped to 10.
-    stat_sec_count: u8,
-}
-
-impl BpsCounter {
-    /// Create an empty byte-rate counter.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add bytes observed at a monotonic millisecond timestamp.
-    pub fn add(&mut self, bytes: u64, now_ms: i64) {
-        // Первый вызов — просто инициализируем bucket.
-        if self.last_sec_ms == 0 {
-            self.last_sec_ms = now_ms;
-        }
-        // Прошла секунда? Закрываем bucket в EMA / accumulation.
-        if (now_ms - self.last_sec_ms).abs() > 1000 {
-            // Ramp-up (audit_delphi_deviation #2): первые 10 секунд — accumulation, далее EMA.
-            // Так Delphi `MoonProtoUDPClient.pas:113-138` гарантирует точное среднее
-            // с первой секунды (без 10×underestimate).
-            if self.stat_sec_count < 10 {
-                self.ema_10sec = self.ema_10sec.saturating_add(self.cur_sec_bytes);
-                self.stat_sec_count += 1;
-            } else {
-                // EMA: 90% старого + 10% нового. Формула из Delphi: `ema := ema / 10 * 9 + bucket`.
-                self.ema_10sec = (self.ema_10sec / 10) * 9 + self.cur_sec_bytes;
-            }
-            self.cur_sec_bytes = 0;
-            self.last_sec_ms = now_ms;
-        }
-        self.cur_sec_bytes = self.cur_sec_bytes.saturating_add(bytes);
-    }
-
-    /// Return the average bytes per second over the recent smoothing window.
-    ///
-    /// During the first 10 seconds, this divides by the actual number of closed
-    /// buckets instead of by 10, matching Delphi's ramp-up behavior.
-    pub fn bytes_per_sec(&self) -> u64 {
-        let div = self.stat_sec_count.max(1) as u64;
-        self.ema_10sec / div
     }
 }
 

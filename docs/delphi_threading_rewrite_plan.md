@@ -6804,6 +6804,20 @@ Verification:
   `FIRETEST_QUICK_PASS after 25.41s`, `ParseFailed=0`,
   `reader max=721us`, `writer_cpu max=127us`.
 
+### 2026-05-26 - `client.rs` BpsCounter split
+
+Done:
+
+- Moved `BpsCounter` and its tests into `src/client/bps.rs`.
+- `client::BpsCounter` remains re-exported from `client.rs`; no public path or
+  runtime behavior changed.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` init/connect helper split
 
 Done:

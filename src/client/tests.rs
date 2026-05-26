@@ -1,45 +1,6 @@
 use super::*;
 
 #[cfg(test)]
-mod bps_tests {
-    use super::*;
-
-    #[test]
-    fn bps_counter_empty() {
-        let c = BpsCounter::new();
-        assert_eq!(c.bytes_per_sec(), 0);
-    }
-
-    #[test]
-    fn bps_counter_within_second_just_accumulates() {
-        let mut c = BpsCounter::new();
-        c.add(100, 1000);
-        c.add(200, 1500);
-        // Не прошла секунда → ema_10sec не обновился → bytes_per_sec = 0.
-        assert_eq!(c.bytes_per_sec(), 0);
-        // Но bucket собрал 300.
-        assert_eq!(c.cur_sec_bytes, 300);
-    }
-
-    #[test]
-    fn bps_counter_steady_state_converges() {
-        let mut c = BpsCounter::new();
-        // Эмулируем 100 секунд равномерного потока: 1000 байт/сек.
-        // Используем шаг 1100мс между бакетами чтобы условие `> 1000` срабатывало надёжно.
-        for sec in 1..101i64 {
-            let bucket_start = sec * 1100;
-            for _ in 0..10 {
-                c.add(100, bucket_start);
-            }
-        }
-        // EMA должна сойтись к ~10000 (= 10 × 1000 byte/sec — формула Delphi).
-        // bytes_per_sec возвращает ema/10 = ~1000.
-        let bps = c.bytes_per_sec();
-        assert!(bps > 850 && bps < 1100, "bps={}, expected ~1000", bps);
-    }
-}
-
-#[cfg(test)]
 mod api_pending_dispatch_tests {
     use super::*;
     use crate::commands::engine_api::EngineMethod;
