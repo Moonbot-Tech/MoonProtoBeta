@@ -6892,6 +6892,29 @@ Verification:
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 
+### 2026-05-26 - `client.rs` subscription/reconnect API split
+
+Done:
+
+- Moved `Client::sender`, public subscription helpers, subscription registry
+  restore, trades reconnect, orderbook reconnect, and post-init subscription
+  flush helpers into `src/client/subscription_api.rs`.
+- This is the active-library intent layer: it still records exactly the same
+  registry state and queues the same Engine API/UI restore commands. No Init,
+  reconnect, trades, or orderbook protocol order changed.
+- Helpers used by `init.rs`, `protocol_core.rs`, and unit oracle tests are
+  crate-visible only; no public API was added.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 25.73s`, `ParseFailed=0`,
+  `reader max=798us`, `writer_cpu max=152us`, `active_dispatch max=3942us`
+  on `Strat(30)`.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
