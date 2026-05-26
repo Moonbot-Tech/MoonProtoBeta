@@ -6674,7 +6674,9 @@ Done:
   `MarketsEvent::NewMarketsAdded { names }`, emitted only after the refreshed
   list actually inserts markets into `MarketsState`.
 - Removed normal public `ui_new_market_notify` wrappers from `Client` and
-  `ClientSender`; raw `commands::ui` parser/builder remains the wire layer.
+  `ClientSender`; the raw `commands::ui` parser remains the wire layer, while
+  the builder is crate-internal test-only to avoid a production client-send API
+  for this internal inbound command.
 - Added raw `dispatch_into` helper
   `missing_order_status_requests_after_snapshot()` for explicit
   `CleanupMissingWorkers` follow-up requests when the caller is not using the

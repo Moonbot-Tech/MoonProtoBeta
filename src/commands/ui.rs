@@ -1120,8 +1120,12 @@ pub fn build_emu_trades(
     out
 }
 
-/// CmdId=8 `TNewMarketNotifyCommand` (empty).
-pub fn build_new_market_notify(uid: u64) -> Vec<u8> {
+/// CmdId=8 `TNewMarketNotifyCommand` (empty, server → client).
+///
+/// Crate-internal test helper: Active Lib treats this command as an inbound
+/// listing-refresh wake-up, not as client-send API.
+#[cfg(test)]
+pub(crate) fn build_new_market_notify(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_NEW_MARKET_NOTIFY, uid);
     out
