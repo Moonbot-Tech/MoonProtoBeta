@@ -37,18 +37,14 @@ root next to the `moonproto/` directory, not inside the public crate.
 ```text
 server = HOST:PORT
 key = <exported MoonBot key>
-allow_mutation = true
-market = BTCUSDT
-strategy_field = Comment
-# strategy_id = 123456789
-# connect_timeout_secs = 45
-# candles_timeout_secs = 90
-# high_loss_timeout_secs = 60
 ```
 
-`allow_mutation = true` is required for the full FireTest because it changes
-test-server settings/strategy state. The quick profile is the usual fast health
-gate during development.
+This config is only for live tests. A normal application can read the same
+MoonBot key string from env/config/UI and pass it to `moonproto::import_key`.
+The quick FireTest profile is the usual fast health gate during development.
+The full FireTest is destructive/stress-oriented and requires
+`allow_mutation = true`; optional FireTest knobs such as target market,
+strategy field, and timeout overrides are documented in `tests/fire_test.rs`.
 
 For the smaller live smoke test, use environment variables:
 
