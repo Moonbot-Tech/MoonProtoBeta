@@ -6783,3 +6783,20 @@ Verification:
 
 - `cargo test --release bench_firetest_strategy_snapshot_payload --lib -- --ignored --nocapture`
   OK.
+
+### 2026-05-26 - `client.rs` test-tail split
+
+Done:
+
+- Moved the large `#[cfg(test)]` tail from `src/client.rs` into
+  `src/client/tests.rs`.
+- This is a mechanical publication/refactor step only: production protocol code,
+  call order, state ownership, and public API are unchanged.
+- `client.rs` lost 7412 test lines; the remaining production-body split should
+  proceed only by semantic blocks, not by arbitrary line ranges.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
