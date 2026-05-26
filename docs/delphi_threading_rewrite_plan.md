@@ -7966,3 +7966,28 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketHistoryRegistry` split
+
+Done:
+
+- Moved market-level retained-history registry into
+  `state/history_store/registry.rs`.
+- Kept per-market `MarketHistoryStore` append/compact/candle/derived logic in
+  `state/history_store.rs`.
+- Kept exact registry behavior: `scope=None` clears all stores/index slots,
+  scoped markets produce `None` index slots, existing stores are retained only
+  when present in the desired set, and configured names are stored as `Arc<str>`.
+- This is a readability/publication split only. No retained-history
+  configuration, per-index lookup, reader fanout, compaction fanout, or public
+  API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 26.69s`,
+  `ParseFailed=0`, `rx_actual_drop=10.32%`, streams/API/market health OK,
+  retained futures trades `42`, reader max `704us`, writer CPU max `874us`,
+  GetMarketsList apply `2447us`.
