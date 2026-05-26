@@ -68,6 +68,7 @@ mod send_queue;
 mod sender;
 mod session_api;
 mod socket;
+mod socket_lifecycle;
 mod subscription_api;
 mod subscriptions;
 mod transport_state;

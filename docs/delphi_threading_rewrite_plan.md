@@ -8564,3 +8564,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` socket lifecycle split
+
+Done:
+
+- Moved socket/session lifecycle helpers from `client/protocol_helpers.rs` into
+  `client/socket_lifecycle.rs`: `full_reset`, `bind_socket`,
+  `reset_bind_failure_tracking`, and `record_bind_failure`.
+- Kept low-level socket option helpers in `client/socket.rs`; the new module
+  owns only the `Client` methods that mutate session/socket state.
+- This is a readability/publication split only. No reset field set, bind retry
+  count, port wrap, socket buffer setup, inline-reader start, lifecycle event,
+  or reconnect behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
