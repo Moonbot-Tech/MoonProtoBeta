@@ -1,6 +1,7 @@
 //! Read-only dispatcher snapshot for application callbacks.
 
 use super::*;
+use crate::commands::strategy_serializer::StrategySnapshot;
 
 /// Immutable read-model copy delivered to `run_with_dispatcher_state` callbacks.
 ///

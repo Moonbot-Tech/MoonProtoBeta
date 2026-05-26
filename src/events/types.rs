@@ -1,6 +1,8 @@
 //! Public event/read-model types.
 
 use super::*;
+use crate::commands::strategy_schema::StrategySchema;
+use crate::commands::strategy_serializer::StrategySnapshot;
 
 /// Fresh strategy snapshot override returned by the application for a server
 /// `TStratSnapshotRequest`.

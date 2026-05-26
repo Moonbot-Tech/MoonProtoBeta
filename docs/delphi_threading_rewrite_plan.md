@@ -8175,3 +8175,25 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=10.91%`, streams/API/market health OK,
   retained futures trades `3`, reader max `724us`, writer CPU max `146us`,
   GetMarketsList apply `2264us`.
+
+### 2026-05-26 - `EventDispatcher` local strategy API split
+
+Done:
+
+- Moved local strategy API and `TStratSnapshotRequest` reply provider helpers
+  into `events/local_strats.rs`.
+- Kept public methods unchanged: local epoch, strategy list replace/upsert/
+  clear/read, checked delta send, start/stop command helper, and snapshot
+  provider registration.
+- Kept active-path visibility only where existing code needs it:
+  `strategy_snapshot_reply` stays `pub(super)` for active dispatch, and
+  `local_strategy_snapshot_reply` stays `pub(crate)` for init.
+- This is a readability/publication split only. No strategy snapshot payload,
+  epoch, checked-delta, provider fallback, command sending, or public API
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
