@@ -6800,3 +6800,23 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `client.rs` clock/socket helper split
+
+Done:
+
+- Moved process clock/NTP/server-time-delta helpers into `src/client/clock.rs`.
+- Moved UDP socket buffer and DontFragment option helpers into
+  `src/client/socket.rs`.
+- Public/crate paths are preserved by re-export from `client.rs`:
+  `client::set_ntp_offset`, `client::delphi_now_raw`,
+  `client::set_server_time_delta_global`,
+  `client::get_server_time_delta_global`.
+- No protocol order or send/recv state ownership changed; this is a semantic
+  helper split only.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

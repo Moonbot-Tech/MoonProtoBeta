@@ -40,9 +40,12 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod clock;
 mod diagnostics;
 mod metrics;
+mod socket;
 
+pub use clock::set_ntp_offset;
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
 pub use diagnostics::{
@@ -51,6 +54,10 @@ pub use diagnostics::{
 };
 pub use metrics::ProtocolMetricsSnapshot;
 
+pub(crate) use clock::{
+    current_utc_hour_slot, delphi_now, delphi_now_raw, get_server_time_delta_global,
+    set_server_time_delta_global,
+};
 use diagnostics::{
     diagnostic_duplicate_sliced_acks, err_emu_drop_decision, trace_io_enabled,
     ErrEmuDiagnosticsState,
@@ -58,6 +65,7 @@ use diagnostics::{
 #[cfg(test)]
 use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
 use metrics::ProtocolMetrics;
+use socket::{set_dont_fragment_for_socket, set_socket_buffers};
 
 #[inline]
 fn is_domain_push_command(cmd: Command) -> bool {
@@ -10030,193 +10038,3 @@ impl BpsCounter {
 
 #[cfg(test)]
 mod tests;
-
-/// Global NTP time offset (days). Set once at startup by ntp::get_best_ntp.
-/// Matches Delphi GlobalMPTimeOffset.
-static NTP_OFFSET_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Set the process-global NTP correction in seconds.
-///
-/// `ClientConfig::new` normally starts the managed NTP syncer automatically.
-/// This function is exposed for tests and custom tools that manage time sync
-/// outside the client.
-pub fn set_ntp_offset(offset_seconds: f64) {
-    let bits = (offset_seconds / 86400.0).to_bits();
-    NTP_OFFSET_DAYS.store(bits, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn current_utc_hour_slot() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .checked_div(3600)
-        .unwrap_or(0) as i64
-}
-
-fn get_ntp_offset_days() -> f64 {
-    f64::from_bits(NTP_OFFSET_DAYS.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// Process-global fallback для low-level `EventDispatcher::dispatch_into` callers
-/// которые не привязали per-client `ServerTimeDelta` source. Рекомендуемый
-/// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
-/// через `Client::run_with_dispatcher` и **не использует** это global значение.
-///
-/// DEVIATION #23 закрыт: multi-Client больше не страдает от перезаписи —
-/// каждый Client имеет свой `Arc<AtomicU64>` handle.
-static SERVER_TIME_DELTA_DAYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Установить fallback server_time_delta (в днях, как TDateTime).
-/// Вызывается из обработки `MPC_Ping`; потребитель НЕ должен
-/// вызывать напрямую — используй `client.server_time_delta_handle()` для multi-Client.
-pub(crate) fn set_server_time_delta_global(delta_days: f64) {
-    SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Получить fallback server_time_delta (дни). Используется `EventDispatcher` когда
-/// per-Client source не привязан.
-pub(crate) fn get_server_time_delta_global() -> f64 {
-    f64::from_bits(SERVER_TIME_DELTA_DAYS.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// Delphi raw `Now` as UTC TDateTime (days since 1899-12-30), without NTP offset.
-/// Used for `ServerTimeDelta := Ping.InitialTime - Now`.
-pub(crate) fn delphi_now_raw() -> f64 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    25569.0 + secs / 86400.0
-}
-
-/// Delphi TDateTime corrected by NTP offset.
-/// Matches: `Now - GlobalMPTimeZoneOffset + GlobalMPTimeOffset`.
-/// We use UTC directly (no timezone offset needed — TDateTime in MoonProto = UTC).
-fn delphi_now() -> f64 {
-    delphi_now_raw() + get_ntp_offset_days()
-}
-
-/// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
-/// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").
-/// На пиковой нагрузке (~50K packets/sec) маленький ядерный буфер → silent drop.
-/// D-07 + D-08: ошибки больше не игнорируются — логируем как warn (OS может отказать,
-/// например Linux без `net.core.rmem_max ≥ 8MB` молча обрежет до настройки sysctl).
-fn set_socket_buffers(sock: &UdpSocket) {
-    let sock2 = socket2::SockRef::from(sock);
-    if let Err(e) = sock2.set_recv_buffer_size(8 * 1024 * 1024) {
-        warn!("SO_RCVBUF=8MB rejected by OS (probably net.core.rmem_max too small): {e}");
-    }
-    if let Err(e) = sock2.set_send_buffer_size(8 * 1024 * 1024) {
-        warn!("SO_SNDBUF=8MB rejected by OS: {e}");
-    }
-}
-
-/// Cross-platform IP_DONTFRAGMENT / IP_MTU_DISCOVER / IP_DONTFRAG.
-/// Закрывает ARCH §20 (PMTU discovery должен работать на всех платформах, не только Windows).
-/// Без этого SizeAck/ProbeMTUAck отправляются с разрешённой фрагментацией → измерение PMTU
-/// становится ложным → клиент выбирает неоптимальный PMTU → каскадные retransmit'ы.
-///
-/// IPv4 vs IPv6: option name на IPv6 socket'е другой — `IP_DONTFRAGMENT` (v4) НЕ работает
-/// на AF_INET6, нужен `IPV6_DONTFRAG` (или `IPV6_MTU_DISCOVER` на Linux). Без этого dual-stack
-/// клиент (Android/iOS) silently failед бы PMTU detection. См. rust_quality audit #5.
-///
-/// Return value setsockopt проверяется и при ошибке логируется warn (раньше silently
-/// ignored — fingerprinting'у проблемы было не оставлено следов).
-fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
-    // Определяем IPv6 vs IPv4 по local address. Если local_addr вернул ошибку — fallback на IPv4
-    // semantics (большая часть систем — IPv4 по умолчанию).
-    let is_v6 = sock.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::io::AsRawSocket;
-        let raw = sock.as_raw_socket();
-        let val: i32 = if enable { 1 } else { 0 };
-        // IPPROTO_IP=0, IP_DONTFRAGMENT=14; IPPROTO_IPV6=41, IPV6_DONTFRAG=14 (Win 10+ same value).
-        let (level, optname) = if is_v6 { (41, 14) } else { (0, 14) };
-        let rc = unsafe {
-            extern "system" {
-                fn setsockopt(
-                    s: usize,
-                    level: i32,
-                    optname: i32,
-                    optval: *const i8,
-                    optlen: i32,
-                ) -> i32;
-            }
-            setsockopt(
-                raw as usize,
-                level,
-                optname,
-                &val as *const i32 as *const i8,
-                4,
-            )
-        };
-        if rc != 0 {
-            log::warn!(target: "moonproto::client",
-                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (Windows); PMTU discovery may be inaccurate");
-        }
-    }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        use std::os::fd::AsRawFd;
-        let fd = sock.as_raw_fd();
-        // IPv4: IPPROTO_IP=0, IP_MTU_DISCOVER=10, IP_PMTUDISC_DO=2 / DONT=0
-        // IPv6: IPPROTO_IPV6=41, IPV6_MTU_DISCOVER=23, same PMTUDISC values
-        let val: i32 = if enable { 2 } else { 0 };
-        let (level, optname) = if is_v6 { (41, 23) } else { (0, 10) };
-        let rc = unsafe {
-            extern "C" {
-                fn setsockopt(
-                    s: i32,
-                    level: i32,
-                    optname: i32,
-                    optval: *const i8,
-                    optlen: u32,
-                ) -> i32;
-            }
-            setsockopt(fd, level, optname, &val as *const i32 as *const i8, 4)
-        };
-        if rc != 0 {
-            log::warn!(target: "moonproto::client",
-                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (Linux/Android); PMTU discovery may be inaccurate");
-        }
-    }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        use std::os::fd::AsRawFd;
-        let fd = sock.as_raw_fd();
-        // IPv4: IPPROTO_IP=0, IP_DONTFRAG=28
-        // IPv6: IPPROTO_IPV6=41, IPV6_DONTFRAG=62
-        let val: i32 = if enable { 1 } else { 0 };
-        let (level, optname) = if is_v6 { (41, 62) } else { (0, 28) };
-        let rc = unsafe {
-            extern "C" {
-                fn setsockopt(
-                    s: i32,
-                    level: i32,
-                    optname: i32,
-                    optval: *const i8,
-                    optlen: u32,
-                ) -> i32;
-            }
-            setsockopt(fd, level, optname, &val as *const i32 as *const i8, 4)
-        };
-        if rc != 0 {
-            log::warn!(target: "moonproto::client",
-                "set_dont_fragment_for_socket: setsockopt(level={level}, optname={optname}, v6={is_v6}) failed rc={rc} (macOS/iOS); PMTU discovery may be inaccurate");
-        }
-    }
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "ios"
-    )))]
-    {
-        // Other platforms (BSD, etc.) — no-op для безопасности, PMTU discovery не работает.
-        let _ = (sock, enable, is_v6);
-    }
-}
