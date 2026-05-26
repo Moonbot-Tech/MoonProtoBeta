@@ -7906,3 +7906,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `emk_BaseCheck` parser split
+
+Done:
+
+- Moved `ServerInfo`, `exchange_type_flags`, and
+  `parse_base_check_response` into `commands/engine_api/base_check.rs`.
+- Kept public paths unchanged through `commands::engine_api::*` re-exports.
+- Kept Delphi optional-field parsing unchanged: read fields in server order,
+  stop at the first missing/truncated field, and return the partially filled
+  `ServerInfo`.
+- This is a readability/publication split only. No `emk_BaseCheck` field order,
+  truncate tolerance, identity helper behavior, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
