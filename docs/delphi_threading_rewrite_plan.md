@@ -8331,3 +8331,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` diagnostic API consolidation
+
+Done:
+
+- Moved err_emu diagnostics and passive protocol metrics getters from
+  `client.rs` into the existing `client/diagnostic_api.rs` module.
+- Kept diagnostic API names and behavior unchanged:
+  `err_emu_diagnostics_snapshot`, `reset_err_emu_diagnostics`,
+  `protocol_metrics_snapshot`, and
+  `protocol_metrics_snapshot_with_dispatcher`.
+- This is a readability/publication split only. No diagnostics counters,
+  FireTest visibility, protocol metrics, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

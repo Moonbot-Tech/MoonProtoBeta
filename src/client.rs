@@ -627,44 +627,6 @@ impl Client {
         }
     }
 
-    /// Snapshot client-side [`set_err_emu`] counters for live tests.
-    ///
-    /// This does not affect protocol behavior. FireTest uses it to distinguish
-    /// "server did not send", "ErrEmu dropped all retries", and
-    /// "Sliced reassembly/parse failed after packets arrived".
-    pub fn err_emu_diagnostics_snapshot(&self) -> ErrEmuDiagnostics {
-        let configured_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
-        self.err_emu_diagnostics
-            .lock()
-            .unwrap()
-            .snapshot(configured_rate)
-    }
-
-    /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
-    pub fn reset_err_emu_diagnostics(&self) {
-        *self.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
-    }
-
-    /// Snapshot passive protocol loop metrics.
-    ///
-    /// These counters are diagnostics only. They never change retry, ACK,
-    /// reconnect, queueing, or drop decisions. Use this to prove that
-    /// receive-side protocol work and writer send/maintenance phases stay
-    /// bounded while auditing Delphi machine-effect parity.
-    pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
-        self.protocol_metrics.snapshot(0)
-    }
-
-    /// Snapshot protocol metrics and include the current dispatcher public
-    /// event queue length.
-    pub fn protocol_metrics_snapshot_with_dispatcher(
-        &self,
-        dispatcher: &crate::events::EventDispatcher,
-    ) -> ProtocolMetricsSnapshot {
-        self.protocol_metrics
-            .snapshot(dispatcher.queued_event_count())
-    }
-
     /// Test-only setter для `server_token` — позволяет имитировать состояние после
     /// успешного handshake без реального сетевого подключения. Используется в
     /// `events.rs` тестах для проверки `dispatch_into_active` token tracking.
