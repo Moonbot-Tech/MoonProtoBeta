@@ -7549,3 +7549,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EventDispatcher` order block split
+
+Done:
+
+- Moved the Delphi-shaped `ProcessCommandOrder`, `TAllStatuses` snapshot apply,
+  order ticks, pending-cancel resend tick, and `CleanupMissingWorkers` follow-up
+  request logic into `events/orders.rs`.
+- Kept the machine-effect order unchanged: parse order payload, drop forbidden
+  new `FromCache`/unknown-market statuses like Delphi, set server-time delta,
+  apply order state, emit only applied events, then run missing-worker follow-up
+  after snapshots.
+- This is a readability/publication split only; no order state, wire parsing,
+  retry, or public event behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
