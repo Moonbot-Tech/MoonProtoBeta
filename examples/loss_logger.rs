@@ -290,9 +290,8 @@ fn main() {
                     counters_cb.trades_pkts.fetch_add(1, Ordering::Relaxed);
                     {
                         match tev {
-                            TradesEvent::Apply(pkt) => {
+                            TradesEvent::Applied { .. } => {
                                 counters_cb.trades_apply.fetch_add(1, Ordering::Relaxed);
-                                let _ = pkt;
                             }
                             TradesEvent::GapDetected { start, end } => {
                                 counters_cb.gap_detected.fetch_add(1, Ordering::Relaxed);

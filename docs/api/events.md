@@ -105,9 +105,10 @@ when you need custom capacities.
 pub enum Event {
     Order(OrderEvent),
     OrderBook(OrderBookEvent),
-    /// One `TradesEvent` per packet sub-event. If a packet yields multiple
-    /// `TradesEvent`s (e.g. `Apply` + `GapFilled`), each is pushed as its own
-    /// `Event::Trade(...)` — no nested `Vec` allocation (audit_rust_quality #11).
+    /// One `TradesEvent` per packet sub-event. `Applied` is a lightweight
+    /// signal; rows are already in market state / retained SeqRing storage.
+    /// If a packet yields multiple `TradesEvent`s (e.g. `Applied` +
+    /// `GapFilled`), each is pushed as its own `Event::Trade(...)`.
     Trade(TradesEvent),
     Balance(BalanceEvent), // full/incremental balance updates (cmd_id 3/4)
     Arb { uid: u64, payload: ArbPayload },
@@ -188,8 +189,8 @@ directly to its callback.
 |---|---|
 | `Order` | Parses `TradeCommand`, applies `Orders`, emits `Event::Order`. `TAllStatuses` applies each contained status through the same order-command path, then emits a final `OrderEvent::Snapshot`. |
 | `OrderBook` | Drops until market indexes are synchronized, applies `OrderBooks`, emits one or more `Event::OrderBook`. |
-| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, emits one `Event::Trade(TradesEvent)` per sub-event (`Apply` plus diagnostic gap/duplicate/out-of-order events). Duplicate packets also emit `Apply` for their payload. |
-| `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Apply` after `OutOfOrder`. |
+| `TradesStream` | Drops until market indexes are synchronized, applies `TradesState`, updates market tail / retained history, emits one `Event::Trade(TradesEvent)` per sub-event (`Applied` signal plus diagnostic gap/duplicate/out-of-order events). Duplicate packets also emit `Applied` for their payload. |
+| `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Applied` after `OutOfOrder`. |
 | `Balance` | Applies subcommands `3/4`; subcommand `6` becomes typed `Event::Arb` after filtering arb records through the current server `mIndex` map. Base/request/unknown balance subcommands are skipped like Delphi base-class commands. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. Future-version, unknown, and client-inapplicable incoming strat commands are skipped like Delphi base-class commands. |
 | `UI` | Applies settings state and emits `Event::Settings`. Old append-only `TClientSettingsCommand` packets are parsed with the current settings snapshot as Delphi `cfg` fallback. |

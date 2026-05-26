@@ -57,28 +57,20 @@ asynchronously on the `MPC_TradesStream` channel.
 
 ```rust
 use moonproto::Event;
-use moonproto::state::TradesEvent;
-use moonproto::commands::trades_stream::TradeSection;
+use moonproto::state::{SeqRingCursor, TradesEvent};
 
+let mut cursor: Option<SeqRingCursor> = None;
+let mut rows = Vec::new();
 client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
     if let Event::Trade(trade_event) = event {
         match trade_event {
-            TradesEvent::Apply(packet) => {
-                for section in &packet.sections {
-                    match section {
-                        TradeSection::Trades(trades) => {
-                            for trade in trades {
-                                let market_name = state.markets().market_name_by_index(trade.market_index);
-                                on_trade(market_name, trade.is_spot, trade.price, trade.qty);
-                            }
-                        }
-                        TradeSection::MMOrders(orders) => on_mm_orders(orders),
-                        TradeSection::LiqOrders(orders) => on_liquidations(orders),
-                        TradeSection::WatcherFills { market_index, user, .. } => {
-                            let fills = section.watcher_fill_records()
-                                .expect("library emits complete watcher-fill records");
-                            on_watcher_fills(*market_index, user, &fills);
-                        }
+            TradesEvent::Applied { packet_num, .. } => {
+                if let Some(readers) = state.market_history_readers("BTCUSDT") {
+                    if let Some(reader) = readers.futures_trades {
+                        let cursor = cursor.get_or_insert_with(|| reader.cursor_from_now());
+                        rows.clear();
+                        reader.copy_new_since(cursor, 4096, &mut rows);
+                        on_new_trades(packet_num, &rows);
                     }
                 }
             }
@@ -93,18 +85,11 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
 }));
 ```
 
-`qty` sign encodes direction: positive is buy-side, negative is sell-side.
-Use `MarketsState::market_name_by_index` / `market_by_index` to resolve the
-stream `market_index` into the canonical market name. The dispatcher suppresses
-stream events while indexes are stale after a server restart; after the one-time
-Init, reconnect restore sends `GetMarketsIndexes` automatically when trades were
-requested.
-
-Watcher fills are not opaque for applications. The section keeps the original
-raw `data` for compatibility with low-level tools, but regular consumers should
-decode it through `TradeSection::watcher_fill_records()` or
-`parse_watcher_fills(data)` and handle typed `WatcherFill` records together with
-the section-level `market_index` and `user` address.
+`TradesEvent::Applied` is a signal, not the trade payload carrier. Active Lib
+has already applied known rows to `MarketsState::trade_state(market)` and queued
+retained history batches to `MarketHistoryWorker` before this event is emitted.
+Applications read rows through `MarketHistoryReaders` / `SeqRingReader`, using
+their own `SeqRingCursor` when they need "only new rows".
 
 `GapDetected`, `ResendRequested`, `GapFilled`, `BucketClosed`, `Duplicate`, and
 resend-side `OutOfOrder` are diagnostic events. They are useful for
@@ -112,14 +97,18 @@ logging/telemetry, but applications must not drive recovery from them:
 `Client::run_with_dispatcher` sends resend requests and maintains buckets
 automatically. `ResendRequested` means the Delphi-style tail check after a
 valid trades packet queued `emk_TradesResend` for the listed packet numbers.
-The dispatcher still emits `Apply(packet)` for duplicate/resend payloads when
-Delphi would parse the payload.
+The dispatcher still emits `Applied { .. }` for duplicate/resend payloads when
+Delphi would parse the payload and update local state.
 
-Before an `Apply(packet)` event is emitted, `Client::run_with_dispatcher` also
+Before an `Applied { .. }` event is emitted, `Client::run_with_dispatcher` also
 updates `MarketsState::trade_state(market)` for every known futures/spot trade
 row. This mirrors the bounded Delphi `ProcessTradesStream` tail: futures trades
 update `LastGotAllTrades` and the `SetLastTradePrices` fields, while spot trades
 only update `LastGotSpotTrades`.
+
+Low-level tools can still parse raw payloads with
+`parse_trades_packet` / `TradeSection`, including watcher fills, but active
+`Event::Trade` does not allocate an owned `TradesPacket` on the hot path.
 
 ## Public Types
 
@@ -773,7 +762,7 @@ Recovery is best-effort, matching Delphi. Missing packet numbers are requested
 for up to three bucket retry cycles. If the bucket is still incomplete after the
 retry budget, it is closed and the live stream continues; the library does not
 keep flooding the channel for old trades. A late resend packet can still be
-parsed and emitted as `Apply(packet)`, but it no longer reopens the closed
+parsed and emitted as an `Applied` signal, but it no longer reopens the closed
 bucket.
 
 `EventDispatcher` also drops trades packets while market indexes are not

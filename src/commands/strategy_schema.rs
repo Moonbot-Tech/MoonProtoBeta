@@ -9,10 +9,13 @@ use std::io::Read;
 
 use flate2::read::DeflateDecoder;
 
-use super::registry::decode_utf8_delphi;
 use super::strategy_serializer::{
     FieldValue, TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32, TID_INT64, TID_SINGLE, TID_STRING,
     TID_UINT32, TID_UINT64, TID_WORD,
+};
+use super::strict_read::{
+    read_f32, read_f64, read_i32, read_i64, read_str16, read_str8, read_u16, read_u32, read_u64,
+    read_u8,
 };
 
 pub const SCHEMA_FORMAT_VERSION: u8 = 1;
@@ -58,6 +61,11 @@ pub struct StrategySchemaField {
     pub default_value: Option<FieldValue>,
     /// `TStrategyKind` ordinals for which this field is visible.
     pub visible_kind_ordinals: Vec<u8>,
+    /// Same visibility as a hot-path bitset by raw `TStrategyKind` ordinal.
+    ///
+    /// Kept alongside `visible_kind_ordinals`: the vector is the API-readable
+    /// schema dump, the mask is the serializer fast path.
+    pub visible_kind_mask: u32,
     /// Raw pipe string from Delphi `WriteStr16`, when `FLAG_HAS_STATIC` is set.
     pub static_picklist_raw: Option<String>,
     /// Split view of `static_picklist_raw`.
@@ -209,6 +217,7 @@ impl StrategySchema {
                     visible_kind_ordinals.push(kind.ordinal);
                 }
             }
+            let visible_kind_mask = visible_kind_mask(&visible_kind_ordinals);
 
             let static_picklist_raw = if raw_flags & FLAG_HAS_STATIC != 0 {
                 Some(read_str16(data, &mut pos)?)
@@ -234,6 +243,7 @@ impl StrategySchema {
                 layout,
                 default_value,
                 visible_kind_ordinals,
+                visible_kind_mask,
                 static_picklist_raw,
                 static_picklist,
                 dynamic_picklist,
@@ -265,8 +275,22 @@ impl StrategySchema {
 
 impl StrategySchemaField {
     pub fn visible_for_kind(&self, kind: u8) -> bool {
-        self.visible_kind_ordinals.contains(&kind)
+        if kind < 32 {
+            self.visible_kind_mask & (1u32 << kind) != 0
+        } else {
+            self.visible_kind_ordinals.contains(&kind)
+        }
     }
+}
+
+pub(crate) fn visible_kind_mask(ordinals: &[u8]) -> u32 {
+    ordinals.iter().fold(0u32, |mask, &kind| {
+        if kind < 32 {
+            mask | (1u32 << kind)
+        } else {
+            mask
+        }
+    })
 }
 
 fn read_layout(data: &[u8], pos: &mut usize, flags: u8) -> Option<StrategyFieldLayout> {
@@ -312,98 +336,6 @@ fn split_picklist(raw: &str) -> Vec<String> {
     } else {
         raw.split('|').map(str::to_string).collect()
     }
-}
-
-fn read_u8(d: &[u8], p: &mut usize) -> Option<u8> {
-    if *p + 1 > d.len() {
-        return None;
-    }
-    let v = d[*p];
-    *p += 1;
-    Some(v)
-}
-
-fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
-    if *p + 2 > d.len() {
-        return None;
-    }
-    let v = u16::from_le_bytes(d[*p..*p + 2].try_into().unwrap());
-    *p += 2;
-    Some(v)
-}
-
-fn read_i32(d: &[u8], p: &mut usize) -> Option<i32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = i32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-
-fn read_u32(d: &[u8], p: &mut usize) -> Option<u32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = u32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-
-fn read_i64(d: &[u8], p: &mut usize) -> Option<i64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = i64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-
-fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = u64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-
-fn read_f32(d: &[u8], p: &mut usize) -> Option<f32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = f32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-
-fn read_f64(d: &[u8], p: &mut usize) -> Option<f64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = f64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-
-fn read_str8(d: &[u8], p: &mut usize) -> Option<String> {
-    let len = read_u8(d, p)? as usize;
-    if *p + len > d.len() {
-        return None;
-    }
-    let s = decode_utf8_delphi(&d[*p..*p + len]);
-    *p += len;
-    Some(s)
-}
-
-fn read_str16(d: &[u8], p: &mut usize) -> Option<String> {
-    let len = read_u16(d, p)? as usize;
-    if *p + len > d.len() {
-        return None;
-    }
-    let s = decode_utf8_delphi(&d[*p..*p + len]);
-    *p += len;
-    Some(s)
 }
 
 #[cfg(test)]

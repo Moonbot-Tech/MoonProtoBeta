@@ -4561,8 +4561,8 @@ Done:
   from writer-loop every 100 ms. That could send `emk_TradesResend` during
   channel silence, where Delphi would send nothing.
 - Rust now checks recovery from `EventDispatcher::dispatch_into_active_actions`
-  only after a valid `TradesStream` / `TradesResendResponse` produced
-  `TradesEvent::Apply`. Generated `emk_TradesResend` payloads are sent through
+  only after a valid `TradesStream` / `TradesResendResponse` produced an
+  applied trades signal. Generated `emk_TradesResend` payloads are sent through
   the same active action outbox as other protocol-owned sends.
 - `TradesState::tick` now mirrors the Delphi caller throttle: if
   `now_ms - last_check_missing_ms <= 100`, it exits; otherwise it updates
@@ -5536,10 +5536,10 @@ Done:
   For futures rows that tail sets `LastGotAllTrades` and calls
   `TMarket.SetLastTradePrices`; for spot rows it updates `LastGotSpotTrades`
   and exits before `SetLastTradePrices`.
-- Rust previously maintained only `TradesState` gap/retry state and emitted
-  `TradesEvent::Apply(pkt)`; it did not mutate any market live trade tail.
+- Rust previously maintained only `TradesState` gap/retry state and emitted an
+  owned packet event; it did not mutate any market live trade tail.
 - `MarketsState` now has `MarketTradeState` keyed by market name. The dispatcher
-  applies the bounded Delphi tail before emitting `TradesEvent::Apply`:
+  applies the bounded Delphi tail before emitting the public applied signal:
   `last_got_all_trades_ms`, `last_got_spot_trades_ms`, `last_trade_price`,
   `last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
   `last_trade_price_ema5`, and `last_trade_was_sell`.
@@ -5623,7 +5623,8 @@ Done:
 
 - Added `DecodedTradesPacket` and borrowed `TradeSectionIter`.
 - `parse_trades_packet` is now a compatibility collector over `SectionIter`,
-  so old public owned events keep their shape.
+  so raw protocol tools can still request an owned packet when they explicitly
+  parse bytes.
 - `EventDispatcher` no longer does collect-all then filter. It decodes the
   packet header/sections first and only collects rows for known markets, matching
   Delphi's `FindByServerIndex` + `Position += Count * row_size` shape more
@@ -5640,13 +5641,13 @@ Verification:
 Done:
 
 - Added `TradesPacketEffect`: packet-number/gap/duplicate/resend decisions now
-  can be produced from `packet_num` only, before owned public payload
-  construction.
-- Kept public compatibility: `TradesState::on_packet(TradesPacket, now_ms)` and
-  `on_packet_resend(TradesPacket)` still return the same `TradesEvent` shape.
+  can be produced from `packet_num` only, before row/state application.
+- Kept low-level parser compatibility: `TradesState::on_packet(TradesPacket,
+  now_ms)` and `on_packet_resend(TradesPacket)` still accept owned packets but
+  now return the signal/diagnostic `TradesEvent` shape.
 - Switched active dispatcher live/resend paths to call the packet-header
-  decision first, then collect known sections only when an `Apply` effect needs
-  the public owned `TradesPacket`.
+  decision first, then apply known sections directly when an `Apply` effect
+  means Delphi would process the payload.
 
 Verification:
 
@@ -5946,8 +5947,9 @@ Done:
 - `MarketsState` now exposes a row-level `apply_trade_tail_row_like_delphi`.
 - Active dispatcher applies futures/spot market tail while it collects known
   trade rows from borrowed `DecodedTradesPacket` sections.
-- `TradesEvent::Apply(TradesPacket)` is no longer the source of market-tail
-  mutation in the active dispatcher; it remains the public compatibility event.
+- `TradesEvent::Applied { packet_num, base_time }` is now a lightweight
+  signal/diagnostic event. It is no longer the source of market-tail mutation
+  and no longer carries an owned `TradesPacket`.
 
 Verification:
 
@@ -5959,13 +5961,13 @@ Verification:
 Follow-up after this step:
 
 - Retained-history worker batches now come from the same borrowed
-  `DecodedTradesPacket`/`TradeSectionIter` walk that builds the public
-  `TradesPacket`. Active retained storage no longer scans
-  `Event::Trade(TradesEvent::Apply(_))` and no longer depends on the public
-  owned event as its source.
-- Public `TradesEvent::Apply(TradesPacket)` is still emitted for API
-  compatibility. The optimization only removes a Rust-only internal dependency
-  between retained history and public event construction.
+  `DecodedTradesPacket`/`TradeSectionIter` walk. Active retained storage no
+  longer scans public `Event::Trade` payloads and no longer depends on public
+  owned event construction.
+- Public `TradesEvent` is signal/diagnostic only for active mode. Low-level
+  `parse_trades_packet` / `TradeSection` remain available for raw protocol
+  tools, but active callbacks read rows from market state and retained
+  `SeqRing` readers.
 - Verification after the retained-history change:
   `cargo test active_dispatch_queues_trades_into_history_worker_without_direct_store_write --lib`,
   `cargo test trades --lib`, and `cargo test dispatcher_ --lib` all pass.
@@ -6570,3 +6572,36 @@ Verification:
 - Added
   `request_candles_data_partial_parser_keeps_complete_prior_markets`.
 - `cargo test candles --lib --quiet` OK: 25 tests.
+
+### 2026-05-26 - TradesEvent signal/diagnostic shape
+
+Done:
+
+- Removed the active-library dependency on the old public owned packet event.
+- `TradesEvent::Applied { packet_num, base_time }` is now the public signal:
+  rows are already applied to market tail and queued to retained
+  `MarketHistoryWorker` / `SeqRing` storage before the signal is emitted.
+- Active `TradesStream` dispatch walks borrowed `DecodedTradesPacket` /
+  `TradeSectionIter` once and no longer allocates `Vec<TradeSection>` for the
+  callback hot path. Low-level raw tools can still call `parse_trades_packet`
+  when they explicitly need an owned packet.
+- Updated FireTest/examples/API docs to describe `TradesEvent` as
+  signal/diagnostic and retained rows as `SeqRing` reads.
+- Added shared strict binary readers for strategy schema/serializer fixed reads.
+- Added `StrategySchemaField::visible_kind_mask` for hot serializer visibility
+  checks while keeping `visible_kind_ordinals` as the API-readable field.
+- Collapsed `ClientSender` clone state from many independent `Arc` fields into
+  one `Arc<ClientSenderShared>`.
+
+Verification:
+
+- `cargo test trades --lib --quiet` OK: 66 tests.
+- `cargo test dispatcher_ --lib --quiet` OK: 46 tests.
+- `cargo test strategy --lib --quiet` OK: 33 passed, 1 ignored.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- `cargo test --test fire_test --no-run --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.31s`, `ParseFailed=0`,
+  err_emu actual drop `9.71%`, retained futures rows present, derived snapshot
+  present.

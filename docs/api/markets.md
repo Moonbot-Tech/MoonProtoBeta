@@ -80,7 +80,7 @@ Trades stream packets also update the bounded live trade tail kept by Delphi on
 `MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
 `last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
 `last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
-`TradesEvent::Apply`. Spot trade rows update only
+`TradesEvent::Applied` signal. Spot trade rows update only
 `last_got_spot_trades_ms`, matching Delphi's spot branch which exits before
 `SetLastTradePrices`.
 

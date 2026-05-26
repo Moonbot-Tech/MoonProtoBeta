@@ -59,7 +59,6 @@ use moonproto::commands::strategy_serializer::{
     parse_strategy_batch, FieldValue, StrategyFields, StrategyKind, StrategySnapshot,
 };
 use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
-use moonproto::commands::trades_stream::TradeSection;
 use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
 use moonproto::protocol::Command;
@@ -1265,23 +1264,15 @@ fn record_event(
         Event::Strat(other) => {
             log_server_event(&st, event_no, format!("Strat {other:?}"));
         }
-        Event::Trade(TradesEvent::Apply(pkt)) => {
+        Event::Trade(TradesEvent::Applied {
+            packet_num,
+            base_time,
+        }) => {
             st.trades_apply += 1;
-            let target_market_index = st.market_index;
-            let mut target_trade_price = None;
-            let mut target_trades = 0usize;
-            if let Some(market_index) = target_market_index {
-                for section in &pkt.sections {
-                    if let TradeSection::Trades(items) = section {
-                        for trade in items {
-                            if trade.market_index == market_index && trade.price > 0.0 {
-                                target_trade_price = Some(trade.price as f64);
-                                target_trades += 1;
-                            }
-                        }
-                    }
-                }
-            }
+            let target_trade_price = dispatcher
+                .markets()
+                .trade_state(&st.market)
+                .and_then(|state| (state.last_trade_price > 0.0).then_some(state.last_trade_price));
             if let Some(price) = target_trade_price {
                 st.target_trade_packets += 1;
                 st.last_trade_price = Some(price);
@@ -1290,38 +1281,21 @@ fn record_event(
                         &st,
                         event_no,
                         format!(
-                            "TradesStream target market={} idx={:?} packet_num={} trades={} last_price={:.8}",
-                            st.market, target_market_index, pkt.packet_num, target_trades, price
+                            "TradesStream target market={} idx={:?} packet_num={} source=market_tail/SeqRing last_price={:.8}",
+                            st.market, st.market_index, packet_num, price
                         ),
                     );
                 }
             }
             if should_log_stream_count(st.trades_apply) {
-                let mut trades = 0usize;
-                let mut mm_orders = 0usize;
-                let mut liq_orders = 0usize;
-                let mut watcher_fills = 0usize;
-                for section in &pkt.sections {
-                    match section {
-                        TradeSection::Trades(items) => trades += items.len(),
-                        TradeSection::MMOrders(items) => mm_orders += items.len(),
-                        TradeSection::LiqOrders(items) => liq_orders += items.len(),
-                        TradeSection::WatcherFills { .. } => watcher_fills += 1,
-                    }
-                }
                 log_server_event(
                     &st,
                     event_no,
                     format!(
-                        "TradesStream Apply #{} packet_num={} base_time={:.8} sections={} trades={} mm_orders={} liq={} watcher_fills={}",
+                        "TradesStream Applied #{} packet_num={} base_time={:.8}; rows are retained in SeqRing/storage",
                         st.trades_apply,
-                        pkt.packet_num,
-                        pkt.base_time,
-                        pkt.sections.len(),
-                        trades,
-                        mm_orders,
-                        liq_orders,
-                        watcher_fills
+                        packet_num,
+                        base_time,
                     ),
                 );
             }

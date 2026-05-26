@@ -777,6 +777,7 @@ mod tests {
                 layout: StrategyFieldLayout::None,
                 default_value: None,
                 visible_kind_ordinals: kinds.to_vec(),
+                visible_kind_mask: crate::commands::strategy_schema::visible_kind_mask(kinds),
                 static_picklist_raw: None,
                 static_picklist: Vec::new(),
                 dynamic_picklist: None,

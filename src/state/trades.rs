@@ -22,7 +22,7 @@
 //! let events = trades.on_packet(parsed_trades_packet, now_ms);
 //! for ev in events {
 //!     match ev {
-//!         TradesEvent::Apply(pkt) => /* apply trades to local model */,
+//!         TradesEvent::Applied { packet_num, .. } => /* read new rows from SeqRing */,
 //!         TradesEvent::GapDetected { start, end } => /* лог только */,
 //!     }
 //! }
@@ -95,11 +95,16 @@ fn is_packet_in_range(packet: u16, start: u16, end: u16) -> bool {
     offset <= span
 }
 
-/// Результат применения пакета.
+/// Результат применения TradesStream packet-number state.
 #[derive(Debug, Clone)]
 pub enum TradesEvent {
-    /// Пакет применён — потребитель должен раздать trades по маркетам.
-    Apply(TradesPacket),
+    /// Пакет применён.
+    ///
+    /// Active Lib уже раздаёт rows по market state и retained `SeqRing`
+    /// storage до эмита этого события. Событие является лёгким сигналом
+    /// "новые rows доступны"; оно намеренно не содержит owned `TradesPacket`,
+    /// чтобы hot path не собирал `Vec` ради public callback.
+    Applied { packet_num: u16, base_time: f64 },
     /// Обнаружен gap: пропущены packet_num в `[start..=end]`. Bucket создан, retry проверяется через `tick()`.
     GapDetected { start: u16, end: u16 },
     /// Пакет был фактически дубликат (packet_num == last).
@@ -127,12 +132,12 @@ pub enum TradesEvent {
     },
 }
 
-/// Packet-number effect produced before owned public payload construction.
+/// Packet-number effect produced before row/state application.
 ///
 /// Delphi decides gap/duplicate/resend bookkeeping from `PacketNum` first and
 /// then continues reading the stream rows. Keeping this separate lets the
-/// dispatcher iterate decoded sections in wire order before it needs to build
-/// the public owned `TradesPacket`.
+/// dispatcher iterate decoded sections in wire order and emit only a lightweight
+/// applied signal after Active Lib state/storage has been updated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TradesPacketEffect {
     Apply,
@@ -151,13 +156,12 @@ pub(crate) enum TradesPacketEffect {
 }
 
 impl TradesPacketEffect {
-    pub(crate) fn into_event(self, packet_for_apply: &mut Option<TradesPacket>) -> TradesEvent {
+    pub(crate) fn into_event(self, packet_num: u16, base_time: f64) -> TradesEvent {
         match self {
-            Self::Apply => TradesEvent::Apply(
-                packet_for_apply
-                    .take()
-                    .expect("TradesPacketEffect::Apply must appear at most once"),
-            ),
+            Self::Apply => TradesEvent::Applied {
+                packet_num,
+                base_time,
+            },
             Self::GapDetected { start, end } => TradesEvent::GapDetected { start, end },
             Self::Duplicate => TradesEvent::Duplicate,
             Self::OutOfOrder { packet_num } => TradesEvent::OutOfOrder { packet_num },
@@ -176,10 +180,11 @@ fn materialize_packet_effects(
     effects: Vec<TradesPacketEffect>,
     pkt: TradesPacket,
 ) -> Vec<TradesEvent> {
-    let mut packet_for_apply = Some(pkt);
+    let packet_num = pkt.packet_num;
+    let base_time = pkt.base_time;
     effects
         .into_iter()
-        .map(|effect| effect.into_event(&mut packet_for_apply))
+        .map(|effect| effect.into_event(packet_num, base_time))
         .collect()
 }
 
@@ -345,9 +350,13 @@ impl TradesState {
         None
     }
 
-    /// Обработать MPC_TradesStream пакет (track packets = true).
+    /// Обработать MPC_TradesStream packet-number state (track packets = true).
     /// Делает то же что Delphi `ProcessTradesStream(TrackPackets=True)` MoonProtoEngine.pas:1553+.
-    #[must_use = "TradesEvent's must be processed — пропуск Apply ведёт к потере trades для UI/strategy"]
+    ///
+    /// Low-level callers that still parse owned [`TradesPacket`] get only a
+    /// lightweight [`TradesEvent::Applied`] notification; row storage belongs
+    /// to the active dispatcher/SeqRing path.
+    #[must_use = "TradesEvents must be processed for diagnostics and gap recovery"]
     pub fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
         let effects = self.on_packet_header(pkt.packet_num, now_ms);
         materialize_packet_effects(effects, pkt)
@@ -357,8 +366,8 @@ impl TradesState {
     ///
     /// This deliberately takes only `packet_num`. Delphi performs this
     /// bookkeeping before the row-reading loop, so the Rust dispatcher can do
-    /// the same and only build an owned public `TradesPacket` when an `Apply`
-    /// effect is produced.
+    /// the same and apply decoded sections directly without building an owned
+    /// packet for public callbacks.
     pub(crate) fn on_packet_header(
         &mut self,
         packet_num: u16,
@@ -666,7 +675,7 @@ mod tests {
         let mut s = TradesState::new();
         let evs = s.on_packet(make_pkt(100), 1000);
         assert_eq!(evs.len(), 1);
-        assert!(matches!(evs[0], TradesEvent::Apply(_)));
+        assert!(matches!(evs[0], TradesEvent::Applied { .. }));
         assert_eq!(s.last_packet_num(), 100);
     }
 
@@ -675,7 +684,7 @@ mod tests {
         let mut s = TradesState::new();
         let _ = s.on_packet(make_pkt(100), 1000);
         let evs = s.on_packet(make_pkt(101), 1010);
-        assert!(matches!(evs[0], TradesEvent::Apply(_)));
+        assert!(matches!(evs[0], TradesEvent::Applied { .. }));
         assert_eq!(s.last_packet_num(), 101);
         assert_eq!(s.used_buckets(), 0);
     }
@@ -687,7 +696,7 @@ mod tests {
         let evs = s.on_packet(make_pkt(100), 1010);
         assert!(matches!(evs[0], TradesEvent::Duplicate));
         assert!(
-            matches!(evs[1], TradesEvent::Apply(_)),
+            matches!(evs[1], TradesEvent::Applied { .. }),
             "Delphi logs duplicate but still applies the packet payload"
         );
         assert_eq!(
@@ -723,7 +732,7 @@ mod tests {
                 }
             )
         });
-        let has_apply = evs.iter().any(|e| matches!(e, TradesEvent::Apply(_)));
+        let has_apply = evs.iter().any(|e| matches!(e, TradesEvent::Applied { .. }));
         assert!(has_gap && has_apply);
         assert_eq!(s.used_buckets(), 1);
     }
@@ -774,7 +783,7 @@ mod tests {
             TradesEvent::OutOfOrder { packet_num: 777 }
         ));
         assert!(
-            matches!(evs[1], TradesEvent::Apply(_)),
+            matches!(evs[1], TradesEvent::Applied { .. }),
             "Delphi TrackPackets=False applies resend payload even when no bucket matches"
         );
         assert_eq!(
@@ -797,7 +806,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(evs[1], TradesEvent::Apply(_)));
+        assert!(matches!(evs[1], TradesEvent::Applied { .. }));
         assert_eq!(evs.len(), 2);
         assert_eq!(
             s.last_packet_num(),
@@ -982,9 +991,13 @@ mod tests {
         // Теперь новый gap [2901..N] больше MAX_RECVD_SIZE → reset + Apply.
         let evs = s.on_packet(make_pkt(7000), 1020);
         assert_eq!(s.used_buckets(), 0);
-        assert!(evs
-            .iter()
-            .any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7000)));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            TradesEvent::Applied {
+                packet_num: 7000,
+                ..
+            }
+        )));
         assert!(!evs
             .iter()
             .any(|e| matches!(e, TradesEvent::GapDetected { .. })));
@@ -992,9 +1005,13 @@ mod tests {
         // Следующий пакет стартует tracking заново, потому что reset оставил
         // trades_started=false как в Delphi ResetGapBuckets.
         let evs = s.on_packet(make_pkt(7001), 1030);
-        assert!(evs
-            .iter()
-            .any(|e| matches!(e, TradesEvent::Apply(pkt) if pkt.packet_num == 7001)));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            TradesEvent::Applied {
+                packet_num: 7001,
+                ..
+            }
+        )));
         assert_eq!(s.last_packet_num(), 7001);
     }
 
@@ -1027,7 +1044,7 @@ mod tests {
         // Через 31 сек — пауза.
         let evs = s.on_packet(make_pkt(200), 1000 + 31_000);
         assert_eq!(s.used_buckets(), 0); // reset
-        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Apply(_))));
+        assert!(evs.iter().any(|e| matches!(e, TradesEvent::Applied { .. })));
         assert_eq!(s.last_packet_num(), 200);
     }
 }

@@ -584,6 +584,11 @@ impl std::error::Error for SubscribeError {}
 /// [`SubscribeError`] when the caller needs explicit feedback.
 #[derive(Clone)]
 pub struct ClientSender {
+    shared: Arc<ClientSenderShared>,
+    start: Instant,
+}
+
+struct ClientSenderShared {
     app_queue_alive: Arc<AtomicBool>,
     domain_ready: Arc<AtomicBool>,
     send_lock: Arc<Mutex<SendLockState>>,
@@ -592,13 +597,13 @@ pub struct ClientSender {
     last_trades_subscribe_request_ms: Arc<AtomicI64>,
     last_orderbook_subscribe_request_ms: Arc<AtomicI64>,
     last_orderbook_subscribe_request_uid: Arc<AtomicU64>,
-    start: Instant,
 }
 
 impl ClientSender {
     #[inline]
     fn domain_ready_for_typed_send(&self) -> bool {
-        self.app_queue_alive.load(Ordering::Relaxed) && self.domain_ready.load(Ordering::Relaxed)
+        self.shared.app_queue_alive.load(Ordering::Relaxed)
+            && self.shared.domain_ready.load(Ordering::Relaxed)
     }
 
     /// Subscribe to an orderbook stream and remember the intent for reconnect
@@ -692,11 +697,12 @@ impl ClientSender {
 
     /// Fallible orderbook subscription.
     pub fn try_subscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let market_name = market_name.to_string();
         let newly_added = self
+            .shared
             .subscription_registry
             .lock()
             .unwrap()
@@ -712,11 +718,12 @@ impl ClientSender {
 
     /// Fallible orderbook unsubscribe.
     pub fn try_unsubscribe_orderbook(&self, market_name: &str) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let market_name = market_name.to_string();
         let removed = self
+            .shared
             .subscription_registry
             .lock()
             .unwrap()
@@ -743,12 +750,12 @@ impl ClientSender {
         if market_names.is_empty() {
             return Ok(());
         }
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let mut new_names = Vec::new();
         {
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
             for market_name in market_names {
                 if registry.orderbook_subs.insert(market_name.clone()) {
                     new_names.push(market_name);
@@ -777,12 +784,12 @@ impl ClientSender {
         if market_names.is_empty() {
             return Ok(());
         }
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let mut removed_names = Vec::new();
         {
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
             for market_name in market_names {
                 if registry.orderbook_subs.remove(&market_name) {
                     removed_names.push(market_name);
@@ -800,11 +807,11 @@ impl ClientSender {
 
     /// Fallible all-orderbooks unsubscribe.
     pub fn try_unsubscribe_all_orderbooks(&self) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let removed_names = {
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
             registry.orderbook_subs.drain().collect::<Vec<_>>()
         };
         if removed_names.is_empty() || !self.domain_ready_for_typed_send() {
@@ -842,11 +849,11 @@ impl ClientSender {
         want_mm: bool,
         storage_scope: crate::state::TradeStorageScope,
     ) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let wire_changed = {
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
             let new_sub = Some(TradesSubscription { want_mm });
             let wire_changed =
                 registry.trades_sub != new_sub || registry.mm_orders_sub != Some(want_mm);
@@ -865,10 +872,11 @@ impl ClientSender {
 
     /// Fallible all-trades unsubscribe.
     pub fn try_unsubscribe_all_trades(&self) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         let had_subscription = self
+            .shared
             .subscription_registry
             .lock()
             .unwrap()
@@ -986,13 +994,15 @@ impl ClientSender {
             let now_ms = self.start.elapsed().as_millis() as i64;
             match method {
                 Some(EngineMethod::SubscribeAllTrades) => {
-                    self.last_trades_subscribe_request_ms
+                    self.shared
+                        .last_trades_subscribe_request_ms
                         .store(now_ms, Ordering::Relaxed);
                 }
                 Some(EngineMethod::SubscribeOrderBook) => {
-                    self.last_orderbook_subscribe_request_ms
+                    self.shared
+                        .last_orderbook_subscribe_request_ms
                         .store(now_ms, Ordering::Relaxed);
-                    self.last_orderbook_subscribe_request_uid.store(
+                    self.shared.last_orderbook_subscribe_request_uid.store(
                         request_uid.unwrap_or(NO_PENDING_ENGINE_REQUEST_UID),
                         Ordering::Relaxed,
                     );
@@ -1568,7 +1578,9 @@ impl ClientSender {
     /// Call this when sending raw UI update/switch payloads through
     /// [`Self::send_cmd`] rather than the typed wrappers below.
     pub fn mark_server_update_sent(&self) {
-        self.server_update_sent.store(true, Ordering::Relaxed);
+        self.shared
+            .server_update_sent
+            .store(true, Ordering::Relaxed);
     }
 
     /// Send `TClientSettingsCommand`.
@@ -1622,11 +1634,11 @@ impl ClientSender {
 
     /// Fallible `TMMOrdersSubscribeCommand`.
     pub fn try_ui_mm_subscribe(&self, subscribe: bool) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         {
-            let mut registry = self.subscription_registry.lock().unwrap();
+            let mut registry = self.shared.subscription_registry.lock().unwrap();
             registry.mm_orders_sub = Some(subscribe);
         }
         let uid = rand::random();
@@ -1859,15 +1871,19 @@ impl ClientSender {
     }
 
     fn try_enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
-        if !self.domain_ready.load(Ordering::Relaxed)
+        if !self.shared.domain_ready.load(Ordering::Relaxed)
             && !outgoing_allowed_before_domain_ready(item.cmd, &item.data)
         {
             return Err(SubscribeError::DomainNotReady);
         }
-        self.send_lock.lock().unwrap().push_send_cmd_int(item);
+        self.shared
+            .send_lock
+            .lock()
+            .unwrap()
+            .push_send_cmd_int(item);
         Ok(())
     }
 }
@@ -6076,18 +6092,22 @@ impl Client {
     /// ```
     pub fn sender(&self) -> ClientSender {
         ClientSender {
-            app_queue_alive: Arc::clone(&self.app_queue_alive),
-            domain_ready: Arc::clone(&self.domain_ready_flag),
-            send_lock: Arc::clone(&self.send_lock),
-            subscription_registry: Arc::clone(&self.subscription_registry),
-            server_update_sent: Arc::clone(&self.server_update_sent),
-            last_trades_subscribe_request_ms: Arc::clone(&self.last_trades_subscribe_request_ms),
-            last_orderbook_subscribe_request_ms: Arc::clone(
-                &self.last_orderbook_subscribe_request_ms,
-            ),
-            last_orderbook_subscribe_request_uid: Arc::clone(
-                &self.last_orderbook_subscribe_request_uid,
-            ),
+            shared: Arc::new(ClientSenderShared {
+                app_queue_alive: Arc::clone(&self.app_queue_alive),
+                domain_ready: Arc::clone(&self.domain_ready_flag),
+                send_lock: Arc::clone(&self.send_lock),
+                subscription_registry: Arc::clone(&self.subscription_registry),
+                server_update_sent: Arc::clone(&self.server_update_sent),
+                last_trades_subscribe_request_ms: Arc::clone(
+                    &self.last_trades_subscribe_request_ms,
+                ),
+                last_orderbook_subscribe_request_ms: Arc::clone(
+                    &self.last_orderbook_subscribe_request_ms,
+                ),
+                last_orderbook_subscribe_request_uid: Arc::clone(
+                    &self.last_orderbook_subscribe_request_uid,
+                ),
+            }),
             start: self._start,
         }
     }
@@ -10436,7 +10456,7 @@ mod api_pending_dispatch_tests {
                 .filter(|event| {
                     matches!(
                         event,
-                        crate::events::Event::Trade(crate::state::TradesEvent::Apply(_))
+                        crate::events::Event::Trade(crate::state::TradesEvent::Applied { .. })
                     )
                 })
                 .count();
@@ -10985,14 +11005,16 @@ mod client_sender_tests {
             Arc::new(AtomicU64::new(NO_PENDING_ENGINE_REQUEST_UID));
         (
             ClientSender {
-                app_queue_alive: Arc::clone(&app_queue_alive),
-                domain_ready: Arc::clone(&domain_ready),
-                send_lock: Arc::clone(&send_lock),
-                subscription_registry: Arc::clone(&subscription_registry),
-                server_update_sent: Arc::clone(&server_update_sent),
-                last_trades_subscribe_request_ms,
-                last_orderbook_subscribe_request_ms,
-                last_orderbook_subscribe_request_uid,
+                shared: Arc::new(ClientSenderShared {
+                    app_queue_alive: Arc::clone(&app_queue_alive),
+                    domain_ready: Arc::clone(&domain_ready),
+                    send_lock: Arc::clone(&send_lock),
+                    subscription_registry: Arc::clone(&subscription_registry),
+                    server_update_sent: Arc::clone(&server_update_sent),
+                    last_trades_subscribe_request_ms,
+                    last_orderbook_subscribe_request_ms,
+                    last_orderbook_subscribe_request_uid,
+                }),
                 start: Instant::now(),
             },
             subscription_registry,

@@ -1353,26 +1353,8 @@ fn handle_event(label: &str, event: &Event, stats: &SharedStats) {
     stats.events_total.fetch_add(1, Ordering::Relaxed);
     match event {
         Event::Trade(trades) => match trades {
-            TradesEvent::Apply(pkt) => {
+            TradesEvent::Applied { .. } => {
                 stats.trades_apply.fetch_add(1, Ordering::Relaxed);
-                for section in &pkt.sections {
-                    if let moonproto::commands::TradeSection::Trades(items) = section {
-                        for trade in items {
-                            if !trade.price.is_finite()
-                                || !trade.qty.is_finite()
-                                || trade.price <= 0.0
-                                || trade.qty == 0.0
-                            {
-                                stats.invalid_numbers.fetch_add(1, Ordering::Relaxed);
-                                println!(
-                                    "[{label}] invalid trade packet={} price={} qty={}",
-                                    pkt.packet_num, trade.price, trade.qty
-                                );
-                                return;
-                            }
-                        }
-                    }
-                }
             }
             TradesEvent::GapDetected { start, end } => {
                 let now_ms = event_elapsed_ms(stats);

@@ -455,8 +455,8 @@ fn _silence_unused_const() {
 mod tests {
     use super::*;
     use crate::commands::strategy_schema::{
-        StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaField,
-        StrategySchemaKind,
+        visible_kind_mask, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
+        StrategySchemaField, StrategySchemaKind,
     };
 
     fn schema_for_name_field() -> StrategySchema {
@@ -475,6 +475,7 @@ mod tests {
                 layout: StrategyFieldLayout::None,
                 default_value: None,
                 visible_kind_ordinals: vec![1],
+                visible_kind_mask: visible_kind_mask(&[1]),
                 static_picklist_raw: None,
                 static_picklist: Vec::new(),
                 dynamic_picklist: None,

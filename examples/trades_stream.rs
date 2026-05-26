@@ -10,7 +10,6 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use moonproto::commands::TradeSection;
 use moonproto::state::TradesEvent;
 use moonproto::{
     import_key, run_init_sequence, Client, ClientConfig, Event, EventDispatcher, InitConfig,
@@ -95,32 +94,31 @@ fn main() {
             Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
             &mut dispatcher,
             Box::new(move |event, state| match event {
-                Event::Trade(TradesEvent::Apply(packet)) => {
+                Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
                     packets_seen.fetch_add(1, Ordering::Relaxed);
-                    for section in &packet.sections {
-                        let TradeSection::Trades(items) = section else {
-                            continue;
+                    if let Some(name) = target.as_deref() {
+                        let Some(tail) = state.markets().trade_state(name) else {
+                            return;
                         };
-                        for trade in items {
-                            let name = state
-                                .markets()
-                                .market_name_by_index(trade.market_index)
-                                .unwrap_or("<unknown>");
-                            if target.as_deref().is_some_and(|wanted| wanted != name) {
-                                continue;
-                            }
-                            trades_seen.fetch_add(1, Ordering::Relaxed);
-                            if printed_seen.fetch_add(1, Ordering::Relaxed) < 25 {
-                                let stream = if trade.is_spot { "spot" } else { "futures" };
-                                let side = if trade.qty < 0.0 { "sell" } else { "buy" };
-                                println!(
-                                    "[trade] pkt={} {name} {stream} {} price={} qty={}",
-                                    packet.packet_num,
-                                    side,
-                                    trade.price,
-                                    trade.qty.abs()
-                                );
-                            }
+                        if tail.last_trade_price <= 0.0 {
+                            return;
+                        }
+                        trades_seen.fetch_add(1, Ordering::Relaxed);
+                        if printed_seen.fetch_add(1, Ordering::Relaxed) < 25 {
+                            let side = if tail.last_trade_was_sell {
+                                "sell"
+                            } else {
+                                "buy"
+                            };
+                            println!(
+                                "[trade-tail] pkt={} {name} {} price={}",
+                                packet_num, side, tail.last_trade_price
+                            );
+                        }
+                    } else {
+                        trades_seen.fetch_add(1, Ordering::Relaxed);
+                        if printed_seen.fetch_add(1, Ordering::Relaxed) < 25 {
+                            println!("[trade-signal] pkt={packet_num}");
                         }
                     }
                 }

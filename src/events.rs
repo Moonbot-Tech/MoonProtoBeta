@@ -15,7 +15,10 @@
 //!         match ev {
 //!             Event::Order(OrderEvent::Created(uid)) => { /* show new order */ }
 //!             Event::OrderBook(OrderBookEvent::Apply { market_index, .. }) => { /* redraw */ }
-//!             Event::Trade(TradesEvent::Apply(pkt)) => { /* process pkt */ }
+//!             Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
+//!                 /* read new rows from market state / SeqRing */
+//!                 let _ = packet_num;
+//!             }
 //!             _ => {}
 //!         }
 //!     }
@@ -41,10 +44,7 @@ use crate::commands::strat::StratCommand;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
-use crate::commands::trades_stream::{
-    decode_trades_packet, DecodedTradesPacket, LiqOrder, TradeSection, TradeSectionRef,
-    TradesPacket,
-};
+use crate::commands::trades_stream::{decode_trades_packet, DecodedTradesPacket, TradeSectionRef};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
 use crate::state::markets::MarketLastPriceHistoryInput;
@@ -1194,13 +1194,12 @@ impl EventDispatcher {
         }
     }
 
-    fn collect_known_trades_apply_like_delphi(
+    fn apply_known_trades_sections_like_delphi(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
         now_ms: Option<i64>,
         history_now_time_days: Option<f64>,
-    ) -> TradesPacket {
-        let mut sections = Vec::new();
+    ) {
         let collect_history =
             history_now_time_days.is_some() && self.market_history.is_some() && now_ms.is_some();
         let mut history_sections = Vec::new();
@@ -1236,7 +1235,6 @@ impl EventDispatcher {
                         } else {
                             0.0
                         };
-                        let mut collected = Vec::with_capacity(row_count);
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
                         } else {
@@ -1259,7 +1257,6 @@ impl EventDispatcher {
                                     qty: trade.qty,
                                 });
                             }
-                            collected.push(trade);
                         }
                         if let Some(market_name) = history_market_name {
                             if !history_rows.is_empty() {
@@ -1279,7 +1276,6 @@ impl EventDispatcher {
                                 }
                             }
                         }
-                        sections.push(TradeSection::Trades(collected));
                     }
                 }
                 TradeSectionRef::MMOrders(rows) => {
@@ -1301,7 +1297,6 @@ impl EventDispatcher {
                                 collect_history && self.active_trade_storage_allows_market(name)
                             })
                             .map(str::to_owned);
-                        let mut collected = Vec::with_capacity(row_count);
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
                         } else {
@@ -1316,7 +1311,6 @@ impl EventDispatcher {
                                     taker: row.taker,
                                 });
                             }
-                            collected.push(row);
                         }
                         if let Some(market_name) = history_market_name {
                             if !history_rows.is_empty() {
@@ -1326,7 +1320,6 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        sections.push(TradeSection::MMOrders(collected));
                     }
                 }
                 TradeSectionRef::LiqOrders(rows) => {
@@ -1348,7 +1341,6 @@ impl EventDispatcher {
                                 collect_history && self.active_trade_storage_allows_market(name)
                             })
                             .map(str::to_owned);
-                        let mut collected = Vec::with_capacity(row_count);
                         let mut history_rows = if history_market_name.is_some() {
                             Vec::with_capacity(row_count)
                         } else {
@@ -1362,12 +1354,6 @@ impl EventDispatcher {
                                     qty: trade.qty,
                                 });
                             }
-                            collected.push(LiqOrder {
-                                market_index: trade.market_index,
-                                time_delta_ms: trade.time_delta_ms,
-                                price: trade.price,
-                                qty: trade.qty,
-                            });
                         }
                         if let Some(market_name) = history_market_name {
                             if !history_rows.is_empty() {
@@ -1377,7 +1363,6 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        sections.push(TradeSection::LiqOrders(collected));
                     }
                 }
                 TradeSectionRef::WatcherFills {
@@ -1391,11 +1376,7 @@ impl EventDispatcher {
                                 continue;
                             }
                         }
-                        sections.push(TradeSection::WatcherFills {
-                            market_index,
-                            user,
-                            data: data.to_vec(),
-                        });
+                        let _ = (user, data);
                     }
                 }
             }
@@ -1409,11 +1390,6 @@ impl EventDispatcher {
                 });
             }
         }
-        TradesPacket {
-            base_time: decoded.base_time,
-            packet_num: decoded.packet_num,
-            sections,
-        }
     }
 
     fn collect_known_trades_events_like_delphi(
@@ -1423,17 +1399,18 @@ impl EventDispatcher {
         now_ms: i64,
         history_now_time_days: Option<f64>,
     ) -> Vec<TradesEvent> {
-        let mut packet_for_apply = None;
+        let mut applied_sections = false;
         let mut events = Vec::with_capacity(effects.len());
         for effect in effects {
-            if matches!(&effect, TradesPacketEffect::Apply) && packet_for_apply.is_none() {
-                packet_for_apply = Some(self.collect_known_trades_apply_like_delphi(
+            if matches!(&effect, TradesPacketEffect::Apply) && !applied_sections {
+                self.apply_known_trades_sections_like_delphi(
                     decoded,
                     Some(now_ms),
                     history_now_time_days,
-                ));
+                );
+                applied_sections = true;
             }
-            events.push(effect.into_event(&mut packet_for_apply));
+            events.push(effect.into_event(decoded.packet_num, decoded.base_time));
         }
         events
     }
@@ -1840,7 +1817,7 @@ impl EventDispatcher {
             matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
                 && out[start_len..]
                     .iter()
-                    .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_))));
+                    .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. })));
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
         // Dedup через HashSet — Grouped-payload может содержать несколько
         // RequestFullNeeded для одной и той же книги (corruption detection +
@@ -3324,15 +3301,18 @@ mod tests {
             1000,
         );
 
-        let pkt = first_trades_apply(&events);
-        assert_eq!(pkt.sections.len(), 1);
-        match &pkt.sections[0] {
-            TradeSection::Trades(trades) => {
-                assert_eq!(trades.len(), 1);
-                assert_eq!(trades[0].market_index, 0);
-            }
-            other => panic!("expected trades section, got {other:?}"),
-        }
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            Event::Trade(TradesEvent::Applied {
+                packet_num: 777,
+                ..
+            })
+        )));
+        let st = d
+            .markets
+            .trade_state("BTCUSDT")
+            .expect("known market trade state");
+        assert_eq!(st.last_trade_price, 100.0);
     }
 
     #[test]
@@ -3345,15 +3325,18 @@ mod tests {
         let payload = trades_resend_response_payload(&inner);
         let events = d.dispatch(Command::TradesResendResponse, &payload, 1000);
 
-        let pkt = first_trades_apply(&events);
-        assert_eq!(pkt.sections.len(), 1);
-        match &pkt.sections[0] {
-            TradeSection::Trades(trades) => {
-                assert_eq!(trades.len(), 1);
-                assert_eq!(trades[0].market_index, 0);
-            }
-            other => panic!("expected trades section, got {other:?}"),
-        }
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            Event::Trade(TradesEvent::Applied {
+                packet_num: 778,
+                ..
+            })
+        )));
+        let st = d
+            .markets
+            .trade_state("BTCUSDT")
+            .expect("known market trade state");
+        assert_eq!(st.last_trade_price, 100.0);
     }
 
     #[test]
@@ -3367,7 +3350,7 @@ mod tests {
 
         assert!(events
             .iter()
-            .any(|ev| matches!(ev, Event::Trade(TradesEvent::Apply(_)))));
+            .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. }))));
         let st = d
             .markets
             .trade_state("BTCUSDT")
@@ -4164,16 +4147,6 @@ mod tests {
         payload.extend_from_slice(&(inner.len() as u16).to_le_bytes());
         payload.extend_from_slice(inner);
         payload
-    }
-
-    fn first_trades_apply(events: &[Event]) -> &crate::commands::trades_stream::TradesPacket {
-        events
-            .iter()
-            .find_map(|ev| match ev {
-                Event::Trade(TradesEvent::Apply(pkt)) => Some(pkt),
-                _ => None,
-            })
-            .expect("TradesEvent::Apply")
     }
 
     #[test]

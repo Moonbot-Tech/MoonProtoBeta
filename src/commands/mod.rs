@@ -21,6 +21,7 @@ pub mod registry;
 pub mod strat;
 pub mod strategy_schema;
 pub mod strategy_serializer;
+pub(crate) mod strict_read;
 pub mod trade;
 pub mod trades_stream;
 pub mod ui;

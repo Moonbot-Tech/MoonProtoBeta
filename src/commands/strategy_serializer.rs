@@ -53,6 +53,9 @@ use std::sync::Arc;
 
 use super::registry::decode_utf8_delphi;
 use super::strategy_schema::{StrategySchema, StrategySchemaField};
+use super::strict_read::{
+    read_f32, read_f64, read_i32, read_i64, read_u16, read_u32, read_u64, read_u8,
+};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
@@ -685,72 +688,6 @@ fn skip_field_by_type_id(data: &[u8], pos: &mut usize, type_id: u8) -> Option<()
     Some(())
 }
 
-// --- Primitive readers ---
-fn read_u8(d: &[u8], p: &mut usize) -> Option<u8> {
-    if *p + 1 > d.len() {
-        return None;
-    }
-    let v = d[*p];
-    *p += 1;
-    Some(v)
-}
-fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
-    if *p + 2 > d.len() {
-        return None;
-    }
-    let v = u16::from_le_bytes(d[*p..*p + 2].try_into().unwrap());
-    *p += 2;
-    Some(v)
-}
-fn read_i32(d: &[u8], p: &mut usize) -> Option<i32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = i32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-fn read_u32(d: &[u8], p: &mut usize) -> Option<u32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = u32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-fn read_i64(d: &[u8], p: &mut usize) -> Option<i64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = i64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = u64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-fn read_f32(d: &[u8], p: &mut usize) -> Option<f32> {
-    if *p + 4 > d.len() {
-        return None;
-    }
-    let v = f32::from_le_bytes(d[*p..*p + 4].try_into().unwrap());
-    *p += 4;
-    Some(v)
-}
-fn read_f64(d: &[u8], p: &mut usize) -> Option<f64> {
-    if *p + 8 > d.len() {
-        return None;
-    }
-    let v = f64::from_le_bytes(d[*p..*p + 8].try_into().unwrap());
-    *p += 8;
-    Some(v)
-}
-
 // =============================================================================
 //  Writer (для тестов и опционального клиентского `WriteStrategy`)
 // =============================================================================
@@ -945,7 +882,8 @@ fn write_u16_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 mod tests {
     use super::*;
     use crate::commands::strategy_schema::{
-        StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind, StrategySchemaKind,
+        visible_kind_mask, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
+        StrategySchemaKind,
     };
 
     fn schema_field(
@@ -963,6 +901,7 @@ mod tests {
             layout: StrategyFieldLayout::None,
             default_value,
             visible_kind_ordinals: visible_kind_ordinals.to_vec(),
+            visible_kind_mask: visible_kind_mask(visible_kind_ordinals),
             static_picklist_raw: None,
             static_picklist: Vec::new(),
             dynamic_picklist: None,

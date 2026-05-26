@@ -56,9 +56,9 @@
 //!             // redraw orderbook
 //!             let _ = market_index;
 //!         }
-//!         Event::Trade(TradesEvent::Apply(pkt)) => {
-//!             // process trades packet (pkt.sections)
-//!             let _ = pkt;
+//!         Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
+//!             // Signal only: new rows are already in market state / SeqRing.
+//!             let _ = packet_num;
 //!         }
 //!         Event::EngineResponse(resp) if !resp.success => {
 //!             eprintln!("engine error: {}", resp.error_msg);
