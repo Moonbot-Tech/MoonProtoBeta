@@ -7946,3 +7946,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketHistoryStore` config split
+
+Done:
+
+- Moved retained-history scope/configuration into
+  `state/history_store/config.rs`: `TradeStorageScope`,
+  `MarketHistoryConfig`, slot-size budget constants, and system-memory probing.
+- Kept runtime registry/store/apply logic in `state/history_store.rs` for
+  focused work on trades/candles/derived analytics.
+- Kept system memory behavior unchanged on Windows, Unix, and fallback targets;
+  tests still use the same `GIB` helper through a test-only parent import.
+- This is a readability/publication split only. No history capacity defaults,
+  memory-budget math, scope semantics, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
