@@ -7729,3 +7729,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketsState` read-model type split
+
+Done:
+
+- Moved market read-model helper types into `state/markets/types.rs`:
+  `MarketHandle`, `MarketsListApplyTiming`, `MarketPrice`,
+  `MarketLastPriceHistoryInput`, `BaseCurrencyPrice`, `MarketTradeState`,
+  `MarketsEvent`.
+- Kept public paths unchanged through `state::markets` / `state` re-exports.
+- Left the Delphi-like COW list/dictionary merge and price/tag/index apply
+  algorithms in `state/markets.rs` for focused сверка.
+- This is a readability/publication split only. No COW handle behavior,
+  market lookup behavior, trade-tail update math, event shape, or public API
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
