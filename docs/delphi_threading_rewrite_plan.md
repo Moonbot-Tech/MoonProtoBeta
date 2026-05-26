@@ -8083,3 +8083,24 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=10.51%`, streams/API/market health OK,
   retained futures trades `1`, reader max `723us`, writer CPU max `141us`,
   GetMarketsList apply `2415us`.
+
+### 2026-05-26 - `MPC_Order` header split
+
+Done:
+
+- Moved Delphi-shaped `TBaseCommand`, `TBaseMarketCommand`, and
+  `TTradeEpochCommand` Rust equivalents into `commands/trade/headers.rs`.
+- Kept public paths unchanged through `commands::trade::*` re-exports:
+  `BaseCommandHeader`, `MarketCommandHeader`, and `TradeEpochHeader`.
+- Kept header behavior byte-identical: same 11-byte base header, same
+  currency/platform bytes, same Delphi UTF-8 string reader/writer, same
+  epoch/status tail, and same zero-tail status reads.
+- This is a readability/publication split only. No `MPC_Order` command IDs,
+  parser branch order, outbound builders, state apply behavior, or public API
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
