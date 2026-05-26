@@ -7925,3 +7925,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketsState` accessor split
+
+Done:
+
+- Moved `MarketsState` read-model accessors into
+  `state/markets/accessors.rs`.
+- Kept apply/update algorithms in `state/markets.rs` for focused Delphi сверка.
+- Kept exact lookup semantics from the current Rust code: stable handle lookup
+  by exact market name, `mIndex` lookup gated by `indexes_synchronized`, prices
+  through `by_name`, tags defaulting to `TokenTags::empty()`, and trade state
+  only for known `by_name` markets.
+- This is a readability/publication split only. No COW handle behavior,
+  market-index gating, price/tag/trade-state lookup behavior, or public API
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
