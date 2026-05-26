@@ -8,7 +8,7 @@
 //! - `emk_GetMarketsIndexes` → имена в порядке индексов (mIndex).
 //! - Периодически (~60 секунд + hourly burst) `emk_CheckBinanceTags` → теги монет.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,6 +21,8 @@ use crate::commands::market::{
 const EPS_MARKET: f64 = 1e-12;
 
 mod accessors;
+mod indexes;
+mod tags;
 mod types;
 
 pub(crate) use self::types::MarketLastPriceHistoryInput;
@@ -820,16 +822,6 @@ impl MarketsState {
         }
     }
 
-    /// Применить ответ `emk_GetMarketsIndexes`.
-    /// Помечает `indexes_synchronized = true` — после этого EventDispatcher разблокирует
-    /// обработку TradesStream / OrderBook пакетов.
-    pub fn apply_markets_indexes(&mut self, names: Vec<String>) -> MarketsEvent {
-        let count = names.len();
-        self.market_indexes = names;
-        self.indexes_synchronized = true;
-        MarketsEvent::IndexesUpdated { count }
-    }
-
     /// Apply the Delphi `ProcessTradesStream` live market tail side effects for
     /// one already-known trade row.
     ///
@@ -859,117 +851,8 @@ impl MarketsState {
         }
     }
 
-    /// Mark current market indexes as stale after server process restart.
-    ///
-    /// The old `market_indexes` vector is intentionally kept for diagnostics and for
-    /// consumers that need to show the last known mapping, but stream parsing must be
-    /// gated until a fresh `emk_GetMarketsIndexes` response arrives.
-    pub(crate) fn mark_indexes_stale(&mut self) {
-        self.indexes_synchronized = false;
-    }
-
-    /// Применить ответ `emk_CheckBinanceTags`.
-    ///
-    /// Delphi `TMoonProtoEngine.CheckBinanceTags` clears seen state for all
-    /// markets, applies tags for markets present in the response, then clears
-    /// tags for every market not seen in that response.
-    pub fn apply_token_tags(&mut self, items: Vec<MarketTokenTags>) -> MarketsEvent {
-        self.token_tags.clear();
-        let mut count = 0usize;
-        for it in items {
-            if self.by_name.contains_key(&it.market_name) {
-                self.token_tags.insert(it.market_name, it.tags);
-                count += 1;
-            }
-        }
-        MarketsEvent::TokenTagsUpdated { count }
-    }
-
-    /// Active-library direct counterpart of Delphi `CheckBinanceTags`.
-    ///
-    /// Delphi applies tags inside the read loop and clears unseen tags only
-    /// after the loop completes. A late string read error therefore leaves
-    /// already-read tag updates applied and does not clear old absent tags.
-    pub(crate) fn apply_token_tags_payload_like_delphi(
-        &mut self,
-        data: &[u8],
-    ) -> Option<MarketsEvent> {
-        let mut r = EngineStreamReader::new(data);
-        let count = r.read_count()?;
-        let mut seen = HashSet::with_capacity(r.bounded_count_capacity(count, 6));
-
-        for _ in 0..count {
-            let market_name = r.read_str()?;
-            let tags = TokenTags::from_bits(r.read_int()? as u32);
-            if self.by_name.contains_key(&market_name) {
-                self.token_tags.insert(market_name.clone(), tags);
-                seen.insert(market_name);
-            }
-        }
-
-        self.token_tags.retain(|name, _| seen.contains(name));
-        Some(MarketsEvent::TokenTagsUpdated { count: seen.len() })
-    }
-
-    pub(crate) fn has_server_market_index(&self, m_index: u16) -> bool {
-        if !self.indexes_synchronized {
-            return false;
-        }
-        self.market_indexes
-            .get(m_index as usize)
-            .is_some_and(|name| self.by_name.contains_key(name))
-    }
-
-    fn local_pos_for_server_index(&self, m_index: u16) -> Option<usize> {
-        let server_pos = m_index as usize;
-        if self.indexes_synchronized {
-            let market_name = self.market_indexes.get(server_pos)?;
-            return self.by_name.get(market_name).copied();
-        }
-
-        // Cold-start compatibility: before the first explicit indexes response,
-        // `GetMarketsList` arrives in server order. Once a mapping exists but is
-        // marked stale, direct fallback would silently apply prices to old names.
-        if self.market_indexes.is_empty() && server_pos < self.prices.len() {
-            Some(server_pos)
-        } else {
-            None
-        }
-    }
-
-    fn price_row_points_to_missing_market(&self, m_index: u16) -> bool {
-        let server_pos = m_index as usize;
-        if self.indexes_synchronized {
-            return self
-                .market_indexes
-                .get(server_pos)
-                .is_none_or(|name| !self.by_name.contains_key(name));
-        }
-        self.market_indexes.is_empty() && server_pos >= self.prices.len()
-    }
-
     pub fn markets_list_refresh_needed(&self) -> bool {
         self.markets_list_refresh_needed
-    }
-
-    /// Delphi `AddNewAksPrice` from `GlassUpdated`: keep `ChartPriceStep` fresh
-    /// when orderbook updates move the best ask before the next price refresh.
-    pub(crate) fn update_chart_price_step_from_server_index(
-        &mut self,
-        m_index: u16,
-        ask: f64,
-    ) -> bool {
-        if ask <= EPS_MARKET {
-            return false;
-        }
-        let Some(idx) = self.local_pos_for_server_index(m_index) else {
-            return false;
-        };
-        let Some(slot) = self.prices.get_mut(idx) else {
-            return false;
-        };
-        slot.chart_price_step = EPS_MARKET.max(ask / 5000.0);
-        true
     }
 
     pub(crate) fn take_new_markets_pending_price_refresh(&mut self) -> usize {

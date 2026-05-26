@@ -7483,6 +7483,7 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 26.14s`, `ParseFailed=0`, err_emu actual drop
   `11.59%`, retained futures rows present, derived snapshot present,
@@ -8191,6 +8192,26 @@ Done:
 - This is a readability/publication split only. No strategy snapshot payload,
   epoch, checked-delta, provider fallback, command sending, or public API
   behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketsState` tags/indexes split
+
+Done:
+
+- Moved Delphi `emk_CheckBinanceTags` apply logic into
+  `state/markets/tags.rs`.
+- Moved server `mIndex` mapping, stale-index gate, and orderbook
+  `ChartPriceStep` refresh helper into `state/markets/indexes.rs`.
+- Kept behavior unchanged: same tag clear/apply/retain sequence, same late-read
+  tag failure semantics, same `indexes_synchronized` gate, same cold-start
+  direct-index fallback, and same missing-market refresh detection.
+- This is a readability/publication split only. No market list apply, price
+  apply, tag apply, stream gate, or public API behavior changed.
 
 Verification:
 
