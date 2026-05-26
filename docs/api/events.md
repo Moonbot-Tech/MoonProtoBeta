@@ -141,19 +141,21 @@ constants such as `Command::Order`; unknown channel bytes are preserved in
 State fields are encapsulated. Read them through getters:
 
 ```rust
-if let Some(order) = dispatcher.orders().get(order_uid) {
+let Some(state) = client.snapshot() else { return; };
+
+if let Some(order) = state.orders().get(order_uid) {
     println!("{} {:?}", order.market_name, order.status);
 }
 
-if let Some(price) = dispatcher.markets().price("BTCUSDT") {
+if let Some(price) = state.markets().price("BTCUSDT") {
     println!("bid={} ask={}", price.bid, price.ask);
 }
 
-println!("orders={}", dispatcher.orders().len());
-println!("markets={}", dispatcher.markets().market_count());
+println!("orders={}", state.orders().len());
+println!("markets={}", state.markets().market_count());
 ```
 
-The dispatcher updates these states automatically when relevant packets arrive.
+The runtime updates these states automatically when relevant packets arrive.
 
 ## Queued One-Shot Events
 

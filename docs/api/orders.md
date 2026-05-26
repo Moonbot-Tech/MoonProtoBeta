@@ -81,12 +81,13 @@ and do not emit `OrderEvent`: they are not server state updates. If such a
 received command carries epoch/phase data and the order exists, `Orders::apply`
 still performs the hidden epoch/phase side effect before returning
 `NotApplicable`; this can make a later lower-epoch server update stale.
-Non-epoch commands remain a pure silent no-op. For outgoing UI clicks,
-`Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
-`immune_for_clicks` on found active orders, and then queues the click-immune
-command. The command UID is generated internally; the target order UIDs are the
-command items. Later order-status snapshots can refresh the same field from the
-server.
+Non-epoch commands remain a pure silent no-op. For outgoing UI clicks, normal
+applications call `client.orders().set_immune(items)`. The runtime owner
+immediately updates `immune_for_clicks` on found active orders and then queues
+the click-immune command. The command UID is generated internally; the target
+order UIDs are the command items. Later order-status snapshots can refresh the
+same field from the server. Low-level custom runtimes can still call the hidden
+`Client::set_immune` with live `Orders`.
 Skipped server-state packets also do not emit active dispatcher events: unknown
 UID updates, stale epoch packets, phase rollbacks, and empty bulk-replace
 effects match Delphi's log/free/exit receive path. The diagnostic

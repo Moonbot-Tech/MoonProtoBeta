@@ -3,7 +3,7 @@
 The strategy channel carries full strategy snapshots and compact updates:
 delete, sell-price update, checked-state sync, and snapshot requests.
 
-`EventDispatcher` maintains `StratsState` and emits `Event::Strat`. Snapshot
+The active runtime maintains `StratsState` and emits `Event::Strat`. Snapshot
 payloads are decoded automatically into both the lightweight `StrategyInfo`
 state and full `StrategySnapshot` values. `last_server_epoch` advances only
 after the snapshot serializer payload is decoded and applied successfully,
@@ -11,17 +11,15 @@ matching Delphi's `ApplyStratSnapshot` → `cfg.LocalStratEpoch := ServerEpoch`
 order. A malformed snapshot is logged and is not reported as `SnapshotFull` /
 `SnapshotPartial`.
 
-Before init, user code may give the library its current local strategies with
-`EventDispatcher::set_local_strategies`. The dispatcher owns that list after
-that point: `run_init_sequence` sends it as the Delphi post-init
-`TStratSnapshot.CreateFromStrats(...)`, the dispatcher answers server
-`TStratSnapshotRequest` automatically, and it applies strategy
-snapshots/deletes/checked updates received from the server. If user code does
-not provide local strategies, the list starts empty and is filled only by server
-snapshots; the current server snapshot is still available through the same read
-API.
+Before init, user code gives the library its current local strategies through
+`InitConfig::initial_strategies`. The runtime owns that list after that point:
+Init sends it as the Delphi post-init `TStratSnapshot.CreateFromStrats(...)`,
+the runtime answers server `TStratSnapshotRequest` automatically, and it
+applies strategy snapshots/deletes/checked updates received from the server. If
+user code provides an explicit empty list, the client has no local strategies;
+the current server snapshot is still available through the same read API.
 
-`run_init_sequence` also requests the live strategy schema with
+Init also requests the live strategy schema with
 `TStratSchemaRequest` and stores the decoded `TStratSchema` in
 `StratsState`. This is agreed active-library behavior: Rust consumers read
 strategy field metadata from the server instead of carrying a hardcoded copy of
@@ -109,10 +107,11 @@ little-endian binary schema.
 Public read API:
 
 ```rust
-let schema = dispatcher
+let Some(state) = client.snapshot() else { return; };
+let schema = state
     .strats()
     .strategy_schema()
-    .expect("connect_and_init completed, so schema is available");
+    .expect("MoonClient::connect completed, so schema is available");
 
 for kind in &schema.kinds {
     println!("kind {} {}", kind.ordinal, kind.name);
@@ -224,7 +223,7 @@ let has_listing = dispatcher
     .strats()
     .is_there_listing_strat_like_delphi(StrategyActiveMode::ActiveClient);
 
-let needs_assets = dispatcher
+let needs_assets = state
     .strats()
     .is_there_listing_sell_like_delphi(StrategyActiveMode::ActiveClient, is_futures);
 ```
@@ -235,14 +234,20 @@ automation requests by themselves.
 ```rust
 use moonproto::commands::strategy_serializer::StrategySnapshot;
 
-// Before connect_and_init:
 let strategies: Vec<StrategySnapshot> = load_current_strategies();
-dispatcher.set_local_strategy_epoch(load_local_strategy_epoch());
-dispatcher.set_local_strategies(&strategies);
+let init = InitConfig {
+    initial_strategies: Some(InitialStrategies::new(
+        load_local_strategy_epoch(),
+        strategies,
+    )),
+    ..Default::default()
+};
 
-// Later, read the current active-library view:
-let all: Vec<StrategySnapshot> = dispatcher.strategy_snapshot_vec();
-let one = dispatcher.strategy_snapshot(strategy_id);
+let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
+let all: Vec<StrategySnapshot> = client
+    .snapshot()
+    .map(|state| state.strategy_snapshot_vec())
+    .unwrap_or_default();
 ```
 
 `set_local_strategy_epoch` is Delphi `cfg.ServerStratEpoch` for this local
@@ -303,11 +308,11 @@ Single(f32)
 
 ## Sending Strategy Commands
 
-Prefer `Client` wrappers when the caller owns the client thread:
+Regular applications use `MoonClient`:
 
 ```rust
-client.strat_sell_price_update(strategy_id, sell_price);
-client.strat_delete(strategy_id, folder_path);
+client.strat_sell_price_update(strategy_id, sell_price)?;
+client.strat_delete(strategy_id, folder_path)?;
 ```
 
 Do not send `TStratSnapshotRequest` from client code. It is a server-to-client
@@ -349,10 +354,9 @@ matches Delphi `TStrategies.GetCheckedDelta`: local UI changes update
 items where `checked != prev_checked`.
 
 ```rust
-dispatcher.set_strategy_checked(strategy_id, true);
-let pending = dispatcher.strategy_checked_delta();
-let sent_count = dispatcher.send_strategy_checked_delta(&client);
-let start_delta_count = dispatcher.ui_strat_start_stop_v2(&client, true);
+client.set_strategy_checked(strategy_id, true)?;
+client.send_strategy_checked_delta()?;
+client.strategy_start_stop(true)?;
 ```
 
 `send_strategy_checked_delta` sends a checked-state delta only when the delta is
@@ -364,7 +368,7 @@ unchanged until the server confirms the checked-state change.
 The explicit `client.strat_checked_sync(&items, true)` and
 `client.ui_strat_start_stop_v2(is_start, &items)` methods remain available for
 compatibility tools that already have the exact checked-item array. Regular
-applications should prefer the dispatcher helpers so the library-owned strategy
+applications should prefer `MoonClient` helpers so the library-owned strategy
 state stays authoritative. Checked-state echo messages are inbound only; client
 code must not send them.
 

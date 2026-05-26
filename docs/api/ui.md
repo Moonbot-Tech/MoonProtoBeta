@@ -6,7 +6,7 @@ update control, leverage management, trigger management, DEX/spot switching, and
 arb activation notifications.
 
 Applications normally receive UI updates through `Event::Settings` and send UI
-commands through `Client::ui_*` wrappers.
+commands through `MoonClient::ui_*` wrappers.
 
 ## Receiving Settings
 
@@ -39,18 +39,15 @@ and arb validity time.
 ## Requesting Current Settings
 
 For a one-shot fetch, use `request_client_settings`. It sends
-a settings refresh request, keeps the UDP loop running, and returns the next
-`ClientSettingsCommand` snapshot applied by `EventDispatcher`. The returned
+a settings refresh request, keeps the runtime pumping, and returns the next
+`ClientSettingsCommand` snapshot applied by the active runtime. The returned
 snapshot may have the same internal command UID as the previous snapshot; the
 API guarantee is a newly received/applied settings packet, not UID monotonicity.
 Because the settings refresh is fire-and-forget, the helper may reissue it while
 the timeout is still open:
 
 ```rust
-let settings = client.request_client_settings(
-    &mut dispatcher,
-    std::time::Duration::from_secs(12),
-)?;
+let settings = client.request_client_settings(std::time::Duration::from_secs(12))?;
 println!("xSell={}", settings.x_sell);
 ```
 
@@ -59,43 +56,28 @@ to react to every later settings update.
 
 ## Sending UI Commands
 
-Prefer `Client` methods when the caller owns the client thread:
+Regular applications send UI commands through `MoonClient`:
 
 ```rust
-client.ui_settings_request();
-client.ui_send_settings(&settings);
-client.ui_strat_start_stop(true);
-client.ui_mm_subscribe(true);
-client.ui_update_version("", true);            // release update button
-client.ui_update_version("MoonBot-7", false);  // test/beta version name
-client.ui_lev_manage(&lev_manage);
-client.ui_trigger_manage(action, all_markets, &markets, &keys);
-client.ui_reset_profit(kind);
-client.ui_arb_activate_notify(arb_valid_until);
-client.ui_switch_dex("Main");
-client.ui_switch_spot(0);
-```
-
-`ui_lev_manage` sends the library-supported leverage-management format.
-`LevManage::cmd_ver` is kept for parsing received snapshots and does not change
-the outgoing command produced by the high-level wrapper.
-
-For strategy start/stop with an explicit checked-state delta, normal
-active-library code should send through `EventDispatcher`, not by hand-building
-the command items. The dispatcher owns strategy checked-state and sends only
-items whose checked value changed:
-
-```rust
-dispatcher.set_strategy_checked(strategy_id, true);
-dispatcher.ui_strat_start_stop_v2(&client, true);
-```
-
-Regular UI code sends commands through `MoonClient`:
-
-```rust
+client.refresh_settings()?;
+client.ui_send_settings(settings)?;
 client.ui_mm_subscribe(true)?;
-client.ui_update_version("", true)?;
+client.ui_update_version("", true)?;            // release update button
+client.ui_update_version("MoonBot-7", false)?;  // test/beta version name
 client.ui_switch_dex("Main")?;
+client.ui_switch_spot(0)?;
+```
+
+Low-level custom runtimes can still use `Client::ui_*` helpers for the UI
+commands that are not yet part of the regular `MoonClient` surface.
+
+For strategy start/stop with an explicit checked-state delta, normal UI code
+uses `MoonClient`. The runtime owns strategy checked-state and sends only items
+whose checked value changed:
+
+```rust
+client.set_strategy_checked(strategy_id, true)?;
+client.strategy_start_stop(true)?;
 ```
 
 `ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in
@@ -125,12 +107,9 @@ application; it sends/parses the command and exposes an inbound request as
 `SettingsEvent::VersionUpdate`.
 
 `ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` are typed UI domain
-commands and are gated by Init. After Init they also mark
-`ServerUpdateSent` inside `Client`. The next `run_init_sequence` consumes that
-marker and uses the update-aware BaseCheck retry path: `34 * 300ms` auth wait,
-then one BaseCheck plus up to 10 retries with `2000ms` pauses and the normal
-12s response timeout per attempt. If a diagnostic tool sends the same payload
-through lower-level APIs, call `client.mark_server_update_sent()` manually.
+commands and are gated by Init. Low-level diagnostic tools that send the same
+payload by hand are responsible for preserving the matching `ServerUpdateSent`
+side effect.
 
 Low-level builders in `commands::ui` remain available for diagnostics and
 compatibility tools, but normal applications should use the typed methods above.

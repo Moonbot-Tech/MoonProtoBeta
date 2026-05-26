@@ -86,7 +86,7 @@ pub struct MarketHistoryCandlesSnapshot {
     pub candles_5m: Vec<Candle5mRow>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MarketHistoryHandle {
     tx: mpsc::Sender<MarketHistoryCommand>,
 }

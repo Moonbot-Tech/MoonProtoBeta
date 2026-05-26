@@ -10,10 +10,10 @@ Markets state is maintained from Engine API responses:
 When using `MoonClient`, relevant responses are applied to the active markets
 read model automatically.
 
-The active dispatcher applies `GetMarketsList`, `UpdateMarketsList`, and
+The active runtime applies `GetMarketsList`, `UpdateMarketsList`, and
 `CheckBinanceTags` directly while reading the payload, matching Delphi's
 in-loop state updates. Applications should read the maintained state and events
-from `EventDispatcher`, not parse market payloads themselves.
+from `MoonClient` snapshots/events, not parse market payloads themselves.
 
 `CheckBinanceTags` follows the Delphi client: the latest successful response is
 authoritative for tags. Known markets present in the response receive the new
@@ -123,21 +123,24 @@ objects stay alive and are mutated in place. UI code may keep the handle after a
 search and read it later without re-searching by name.
 
 ```rust
-if let Some(market) = dispatcher.markets().get("BTCUSDT") {
+let Some(state) = client.snapshot() else { return; };
+let markets = state.markets();
+
+if let Some(market) = markets.get("BTCUSDT") {
     market.with(|market| {
         println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
     });
 }
 
-if let Some(price) = dispatcher.markets().price("BTCUSDT") {
+if let Some(price) = markets.price("BTCUSDT") {
     println!("bid={} ask={} mark={}", price.bid, price.ask, price.mark_price);
 }
 
-if let Some(name) = dispatcher.markets().market_name_by_index(0) {
+if let Some(name) = markets.market_name_by_index(0) {
     println!("mIndex 0 is {name}");
 }
 
-let tags = dispatcher.markets().tags("BTCUSDT");
+let tags = markets.tags("BTCUSDT");
 if tags.contains(TokenTags::ALPHA) {
     println!("BTCUSDT has ALPHA tag");
 }
@@ -148,12 +151,12 @@ if tags.contains(TokenTags::ALPHA) {
 Initial fetch:
 
 ```rust
-use moonproto::{connect_and_init, ConnectConfig, InitConfig};
+use moonproto::{ConnectConfig, InitConfig, MoonClient};
 
 let init = InitConfig {
     ..Default::default()
 };
-connect_and_init(&mut client, &mut dispatcher, ConnectConfig::new(init))?;
+let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 ```
 
 Long-running price refresh is controlled by `ClientConfig.refresh`. The default
@@ -162,7 +165,7 @@ does not start background Engine API. Set `update_markets_every` /
 `check_tags_every` to `None` if the application owns those requests manually.
 
 See `examples/market_refresh.rs` for a compact consumer-side loop that reads
-prices and tags from `EventDispatcher`.
+prices and tags from `MoonClient`.
 
 ## Events
 
@@ -179,9 +182,9 @@ pub enum MarketsEvent {
 
 `MarketsState.indexes_synchronized` is a critical invariant.
 The one-time Init always fetches the initial map. After server restart the
-dispatcher can mark it stale. If the one-time Init already completed, reconnect
+runtime can mark it stale. If the one-time Init already completed, reconnect
 restore sends `GetMarketsIndexes` again automatically and then refreshes prices
-with `UpdateMarketsList`. Until the fresh response arrives, `EventDispatcher`
+with `UpdateMarketsList`. Until the fresh response arrives, the active runtime
 drops orderbook/trades packets that depend on server indexes.
 Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
@@ -298,20 +301,23 @@ post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
 Convenience methods:
 
 ```rust
-let btc = dispatcher.markets().get("BTCUSDT"); // Option<MarketHandle>
-let btc_snapshot = dispatcher.markets().market_snapshot("BTCUSDT");
-dispatcher.markets().market_name_by_index(0);
-dispatcher.markets().market_by_index(0);
-dispatcher.markets().market_snapshot_by_index(0);
-dispatcher.markets().market_index_by_name("BTCUSDT");
-dispatcher.markets().price("BTCUSDT");
-dispatcher.markets().price_by_index(0);
-dispatcher.markets().ref_btc_corr_market("DOGEUSDT");
-dispatcher.markets().base_currency_price("BTC");
-dispatcher.markets().trade_state("BTCUSDT");
-dispatcher.markets().tags("BTCUSDT");
-dispatcher.markets().market_count();
-dispatcher.markets().corr_count();
+let Some(state) = client.snapshot() else { return; };
+let markets = state.markets();
+
+let btc = markets.get("BTCUSDT"); // Option<MarketHandle>
+let btc_snapshot = markets.market_snapshot("BTCUSDT");
+markets.market_name_by_index(0);
+markets.market_by_index(0);
+markets.market_snapshot_by_index(0);
+markets.market_index_by_name("BTCUSDT");
+markets.price("BTCUSDT");
+markets.price_by_index(0);
+markets.ref_btc_corr_market("DOGEUSDT");
+markets.base_currency_price("BTC");
+markets.trade_state("BTCUSDT");
+markets.tags("BTCUSDT");
+markets.market_count();
+markets.corr_count();
 ```
 
 The index helpers return `None` while the mapping is stale after a server

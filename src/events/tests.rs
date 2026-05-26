@@ -1485,6 +1485,17 @@ fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write(
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].price, 100.0);
     assert_eq!(rows[0].qty, 1.0);
+
+    let snapshot_futures = d
+        .snapshot()
+        .market_history_readers("BTCUSDT")
+        .expect("snapshot should expose retained history readers")
+        .futures_trades
+        .expect("snapshot should expose the futures ring reader");
+    rows.clear();
+    snapshot_futures.copy_last(8, &mut rows);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].price, 100.0);
 }
 
 #[test]

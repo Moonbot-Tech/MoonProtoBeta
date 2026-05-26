@@ -2,8 +2,8 @@
 
 The Active Lib keeps a live balance read model for the connected MoonBot
 session. Application code normally does not parse balance packets directly:
-run the client with an `EventDispatcher`, read `dispatcher.balances()`, and react
-to `Event::Balance` when the state changes.
+run `MoonClient`, read balances from `client.snapshot()`, and react to
+`Event::Balance` when the state changes.
 
 ## What The Library Maintains
 
@@ -31,7 +31,8 @@ totals. Stale incremental rows are skipped per market.
 ## Reading Current State
 
 ```rust
-let balances = dispatcher.balances();
+let Some(state) = client.snapshot() else { return; };
+let balances = state.balances();
 
 if let Some(btc) = balances.get("BTCUSDT") {
     println!(
@@ -52,8 +53,8 @@ println!(
 );
 ```
 
-`dispatcher.balances()` is always the latest state after all events already
-delivered by the dispatcher.
+The snapshot is immutable and safe for UI code to keep. Call `client.snapshot()`
+again after draining events when the UI wants the latest read model.
 
 ## Getting A Fresh Snapshot
 
@@ -66,8 +67,9 @@ let balances = client.request_balance_snapshot(std::time::Duration::from_secs(15
 println!("balance rows={}", balances.len());
 ```
 
-The helper sends the library-level balance refresh request, pumps the UDP loop,
-waits for the next full snapshot event, and returns a cloned `BalancesState`.
+The helper sends the library-level balance refresh request, keeps the runtime
+pumping MoonProto, waits for the next full snapshot event, and returns a cloned
+`BalancesState`.
 
 For fire-and-forget refresh in the normal runtime:
 
@@ -75,7 +77,7 @@ For fire-and-forget refresh in the normal runtime:
 client.refresh_balances()?;
 ```
 
-The next snapshot arrives through the normal dispatcher path.
+The next snapshot arrives through the normal `MoonClient` event/snapshot path.
 
 ## Events
 

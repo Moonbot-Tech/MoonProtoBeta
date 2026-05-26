@@ -19,6 +19,7 @@ pub struct EventDispatcherSnapshot {
     strats: StratsState,
     settings: SettingsState,
     markets: MarketsState,
+    market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
 }
 
@@ -82,6 +83,33 @@ impl EventDispatcherSnapshot {
     pub fn markets(&self) -> &MarketsState {
         &self.markets
     }
+
+    /// Retained history readers for one market, if trades storage is active.
+    pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+        self.market_history.as_ref()?.readers(market_name)
+    }
+
+    /// Current rolling volume snapshot for one market, if retained storage is active.
+    pub fn market_history_rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history
+            .as_ref()?
+            .rolling_volumes(market_name, now_time)
+    }
+
+    /// Current derived analytics snapshot for one market, if retained storage is active.
+    pub fn market_history_derived_snapshot(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history
+            .as_ref()?
+            .derived_snapshot(market_name, now_time)
+    }
 }
 
 impl EventDispatcher {
@@ -98,6 +126,7 @@ impl EventDispatcher {
             strats: self.strats.clone(),
             settings: self.settings.clone(),
             markets: self.markets.clone(),
+            market_history: self.market_history.clone(),
             local_strategy_epoch: self.local_strategy_epoch,
         }
     }

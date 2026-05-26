@@ -263,10 +263,19 @@ queueing, or drop decisions.
 
 ## Connection Setup
 
-For the common setup path, call `connect_and_init`. The Delphi init contract is
-mandatory: BaseCheck, AuthCheck, markets list, market indexes, price refresh,
-balance refresh, order snapshot, client strategy snapshot, and settings sync.
-`InitConfig` only adds optional stream subscriptions and timing:
+For regular applications, `MoonClient::connect` owns the setup path:
+
+```rust
+let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
+```
+
+The Delphi init contract is mandatory: BaseCheck, AuthCheck, markets list,
+market indexes, price refresh, balance refresh, order snapshot, client strategy
+snapshot, and settings sync. `InitConfig` only adds local strategies, optional
+stream subscriptions, and timing.
+
+For custom low-level runtimes that deliberately own `Client + EventDispatcher`,
+the same setup is available as `connect_and_init`:
 
 ```rust
 use std::time::Duration;
@@ -304,7 +313,7 @@ Init also sends `TStratSchemaRequest` and records
 `InitResult::strategy_schema_raw_bytes`,
 `InitResult::strategy_schema_kind_count`, and
 `InitResult::strategy_schema_field_count`. The decoded schema is stored in
-`dispatcher.strats().strategy_schema()` and contains strategy kinds, fields,
+the active strategy state and contains strategy kinds, fields,
 TypeIDs, UI kind, picklists, visibility, and chapter/layout markers. This is
 agreed active-library behavior: clients use the live server schema for strategy
 UI metadata and typed `TStrategySerializer` snapshot writes instead of a

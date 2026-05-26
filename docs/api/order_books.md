@@ -1,17 +1,17 @@
 # OrderBooks
 
 The orderbook channel delivers full snapshots and diffs for subscribed markets.
-Use the high-level subscription API and `EventDispatcher`; the library handles
-cache ordering, full-snapshot recovery, and the applied current-book read model.
+Use `MoonClient` subscription methods; the library handles cache ordering,
+full-snapshot recovery, and the applied current-book read model.
 
 ## Subscribe
 
 ```rust
-client.subscribe_orderbook("BTCUSDT");
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
-client.unsubscribe_orderbook("ETHUSDT");
-client.unsubscribe_orderbooks(["SOLUSDT"]);
-client.unsubscribe_all_orderbooks();
+client.subscribe_orderbook("BTCUSDT")?;
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.unsubscribe_orderbook("ETHUSDT")?;
+client.unsubscribe_orderbooks(["SOLUSDT"])?;
+client.unsubscribe_all_orderbooks()?;
 ```
 
 Subscriptions are stored in the client registry. Before Init, public subscribe
@@ -74,8 +74,8 @@ not surface a separate callback event for that request. The low-level
 `RequestFullNeeded` variant exists for manual `dispatch_into` / `OrderBooks`
 users that do not pass a `Client` to the dispatcher.
 
-The dispatcher applies each `Apply` event before the event is published. If the
-UI needs the current book, read it from the latest snapshot:
+The runtime applies each `Apply` event before the event is published. If the UI
+needs the current book, read it from the latest snapshot:
 
 ```rust
 use moonproto::Event;
