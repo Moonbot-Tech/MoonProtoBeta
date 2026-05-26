@@ -13,7 +13,8 @@
 //! - [`outer_light_crypt`] and [`calculate_mac32`] are standalone helpers for
 //!   code that needs to work with packets without full packing or unpacking.
 //! - [`ext_loader`] dynamically loads `moonext` for extended transport mode 1/2.
-//!   Without `moonext`, only mode 0 (base transport) is available.
+//!   Without `moonext`, requested extended modes are treated as mode 0 (base
+//!   transport), matching the public prototype rule: no closed binary, V0 only.
 //!
 //! ## What It Does Not Do
 //!
@@ -54,7 +55,8 @@
 ///
 /// Most client applications should not call this module directly. Use
 /// [`transport_pack`] / [`transport_unpack`] with `mask_ver = 1` or `2`; those
-/// functions delegate to `moonext` when the binary is available.
+/// functions delegate to `moonext` when the binary is available and fall back to
+/// base transport when it is not.
 pub mod ext_loader;
 mod header;
 mod mac;
@@ -72,7 +74,8 @@ pub use outer_crypt::outer_light_crypt;
 pub type MoonKey = [u8; 16];
 
 /// Pack a command into a wire-ready UDP datagram.
-/// mask_ver: 0 = base transport, 1/2 = extended (requires moonext).
+/// mask_ver: 0 = base transport, 1/2 = extended when moonext is available.
+/// Unsupported values or unavailable moonext are treated as mode 0.
 /// Returns: (main_packet, optional_extra_packet)
 /// If extended transport needs an additional packet sent, it's returned as the second element.
 ///
@@ -143,8 +146,9 @@ pub fn transport_pack_into_with_mac(
     // Obfuscation (always, all modes)
     outer_light_crypt(buf, mac_key);
 
-    // Extended transport (modes 1/2): delegate to moonext
-    if mask_ver != 0 {
+    // Extended transport (modes 1/2): delegate to moonext only when the closed
+    // binary is available. Without it, the open crate supports V0 only.
+    if extended_transport_enabled(mask_ver) {
         let (_ok, extra_pkt) = ext_loader::ext_wrap(buf, mask_ver, false);
         extra_pkt
     } else {
@@ -189,8 +193,10 @@ pub fn transport_unpack_with_mac(
     raw: &[u8],
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
-    // Extended transport (modes 1/2): let moonext handle it and return an owned Vec.
-    let mut buf: Vec<u8> = if mask_ver != 0 {
+    // Extended transport (modes 1/2): let moonext handle it only when present.
+    // Without moonext, requested extended modes are normalized to V0 so direct
+    // low-level callers do not create a send-but-never-receive half-mode.
+    let mut buf: Vec<u8> = if extended_transport_enabled(mask_ver) {
         ext_loader::ext_unwrap(raw, mask_ver)?
     } else {
         // mask_ver=0: the only allocation copies `raw` into an owned Vec for in-place crypt.
@@ -231,4 +237,57 @@ pub fn transport_unpack_with_mac(
     // B-V2-02: draining the header moves the remaining bytes to the front without a second allocation.
     buf.drain(..header::SERVER_HDR_SIZE);
     Some((hdr, buf))
+}
+
+#[inline]
+fn extended_transport_enabled(mask_ver: u8) -> bool {
+    matches!(mask_ver, 1 | 2) && ext_loader::is_available()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_server_packet(mac_key: &MoonKey, cmd: u8, payload: &[u8]) -> Vec<u8> {
+        let mac_ctx = MacContext::new(mac_key);
+        let hdr = ServerMsgHeader {
+            rnd: 0,
+            checksum: 0,
+            ver: TRANSPORT_VER,
+            cmd,
+        };
+        let mut packet = Vec::with_capacity(header::SERVER_HDR_SIZE + payload.len());
+        packet.extend_from_slice(&hdr.to_bytes());
+        packet.extend_from_slice(payload);
+        let mac = mac_ctx.mac(&packet);
+        packet[1..5].copy_from_slice(&mac.to_le_bytes());
+        outer_light_crypt(&mut packet, mac_key);
+        packet
+    }
+
+    #[test]
+    fn unavailable_extended_mode_unpacks_as_v0() {
+        if ext_loader::is_available() {
+            return;
+        }
+
+        let mac_key = [7u8; 16];
+        let payload = b"base-mode-payload";
+        let packet = build_server_packet(&mac_key, 42, payload);
+        let (hdr, decoded) = transport_unpack(&mac_key, &packet, 1).expect("V0 fallback");
+
+        assert_eq!(hdr.cmd, 42);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn unsupported_transport_mode_unpacks_as_v0() {
+        let mac_key = [9u8; 16];
+        let payload = b"unsupported-mode-payload";
+        let packet = build_server_packet(&mac_key, 43, payload);
+        let (hdr, decoded) = transport_unpack(&mac_key, &packet, 7).expect("V0 fallback");
+
+        assert_eq!(hdr.cmd, 43);
+        assert_eq!(decoded, payload);
+    }
 }

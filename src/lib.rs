@@ -94,7 +94,8 @@
 //! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V0 does not
 //! require the optional `moonext` binary. Extended transport modes V1/V2
 //! (`mask_ver = 1` or `2`) require `moonext`; UI code should call
-//! [`extended_transport_available`] before offering those modes.
+//! [`extended_transport_available`] before offering those modes. The public
+//! builder falls back to V0 when `moonext` is absent.
 //!
 //! Working examples: `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,

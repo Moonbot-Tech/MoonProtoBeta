@@ -10,7 +10,9 @@ transport is available as `moonproto::transport`.
 Current public prototype works without `moonext` in V0/base transport mode.
 Extended V1/V2 modes require the optional closed binary
 `moonext.dll` / `libmoonext.so` / `libmoonext.dylib`; until that binary is
-present, keep transport mode `0`.
+present, keep transport mode `0`. `ClientConfig::with_transport_mode(1 | 2)`
+falls back to V0 when `moonext` is absent; unsupported mode values also
+normalize to V0.
 
 ## Credentials
 

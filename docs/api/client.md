@@ -33,7 +33,10 @@ let mut client = moonproto::Client::new(cfg);
 modes `1` and `2` are extended modes and require the optional `moonext` binary to
 be available to the process. UI code should call
 `moonproto::extended_transport_available()` before offering V1/V2; if it returns
-`false`, only V0 should be selectable.
+`false`, only V0 should be selectable. The normal builder
+`ClientConfig::with_transport_mode(1 | 2)` also falls back to V0 when `moonext`
+is absent, so a public prototype without the closed binary still runs in base
+transport mode. Unsupported mode values also normalize to V0.
 
 The transport implementation is built into `moonproto` as `moonproto::transport`.
 Consumers do not need a separate `moonproto-transport` crate.

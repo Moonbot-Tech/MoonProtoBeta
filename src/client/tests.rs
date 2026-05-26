@@ -9,6 +9,8 @@ mod client_sender_tests;
 #[cfg(test)]
 mod client_subscribe_integration_tests;
 #[cfg(test)]
+mod config_tests;
+#[cfg(test)]
 mod pmtu_tests;
 
 #[cfg(test)]

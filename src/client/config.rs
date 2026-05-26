@@ -280,8 +280,11 @@ pub struct ClientConfig {
     /// Transport MAC/obfuscation key imported from MoonBot.
     pub mac_key: MoonKey,
     /// Transport mode: `0` for base transport, `1`/`2` for extended `moonext`.
-    /// Use [`crate::extended_transport_available`] before exposing modes `1`/`2`
-    /// in UI; mode `0` never requires `moonext`.
+    ///
+    /// [`Self::with_transport_mode`] normalizes unsupported extended modes back
+    /// to `0` when `moonext` is not available. Direct struct literals can still
+    /// set this field for low-level tests/tools, but normal application code
+    /// should go through the builder.
     pub mask_ver: u8,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
@@ -333,12 +336,20 @@ impl ClientConfig {
         }
     }
 
-    /// Override transport mode (`0` = base, `1/2` = extended and requires
-    /// `moonext` availability). This setter records the requested mode; callers
-    /// that expose mode switching should gate `1`/`2` with
-    /// [`crate::extended_transport_available`].
+    /// Override transport mode.
+    ///
+    /// `0` is always available. Modes `1` and `2` require optional `moonext`;
+    /// unsupported values and unavailable extended modes fall back to `0`.
+    /// This keeps the public prototype working in V0 instead of creating a
+    /// half-configured client that can send but cannot unwrap extended replies.
+    /// UI code should still call [`crate::extended_transport_available`] before
+    /// offering modes `1`/`2`.
     pub fn with_transport_mode(mut self, mask_ver: u8) -> Self {
-        self.mask_ver = mask_ver;
+        self.mask_ver = match mask_ver {
+            0 => 0,
+            1 | 2 if crate::extended_transport_available() => mask_ver,
+            _ => 0,
+        };
         self
     }
 
