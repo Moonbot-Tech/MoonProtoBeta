@@ -52,6 +52,7 @@ mod domain_balance;
 mod domain_commands;
 mod domain_send;
 mod domain_strat;
+mod domain_ui;
 mod engine_api;
 mod helpers;
 mod init;

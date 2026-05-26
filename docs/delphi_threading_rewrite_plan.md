@@ -8426,3 +8426,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` UI command split
+
+Done:
+
+- Moved UI-channel high-level wrappers into `client/domain_ui.rs`: settings
+  send/request, settings wait helper, strategy start/stop UI commands,
+  MM-orders subscribe, update/version, emu trades, lev/trigger manage,
+  profit reset, arb activate notify, DEX switch, and spot switch.
+- Kept the wrappers as inherent `Client` methods with the same names and
+  signatures. `ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` still
+  mark `ServerUpdateSent` only after a successful send helper call.
+- This is a readability/publication split only. No `Command::UI` payload,
+  retry/priority/encryption settings, UniqueKey behavior, settings retry loop,
+  or public method signature changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
