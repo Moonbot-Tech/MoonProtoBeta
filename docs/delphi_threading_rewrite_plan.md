@@ -8523,3 +8523,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Market` prices response split
+
+Done:
+
+- Moved `emk_UpdateMarketsList` price/corr-price wire types and parser/builder
+  from `commands/market.rs` into `commands/market/prices.rs`:
+  `MarketPriceUpdate`, `CorrMarketPriceUpdate`, `MarketsPricesResponse`,
+  `parse_markets_prices_response`, and `build_markets_prices_response`.
+- Kept the Delphi local funding-time shift helpers in `market.rs` and reused
+  them from the child module; test-only `*_with_local_shift` helpers remain
+  visible only under `cfg(test)`.
+- This is a readability/publication split only. No send_funding branch, field
+  order, funding-time shift math, corr-price parsing, allocation hint, or wire
+  bytes changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
