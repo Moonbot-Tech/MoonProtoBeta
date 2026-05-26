@@ -45,10 +45,12 @@ mod bps;
 mod candles;
 mod clock;
 mod config;
+mod constants;
 mod diagnostic_api;
 mod diagnostics;
 mod domain_commands;
 mod engine_api;
+mod helpers;
 mod init;
 mod metrics;
 mod protocol_core;
@@ -102,12 +104,14 @@ pub(crate) use clock::{
     set_server_time_delta_global,
 };
 use config::{CHECK_TAGS_BURST_COUNT, CHECK_TAGS_BURST_SPACING_MS};
+use constants::*;
 use diagnostics::{
     diagnostic_duplicate_sliced_acks, err_emu_drop_decision, trace_io_enabled,
     ErrEmuDiagnosticsState,
 };
 #[cfg(test)]
 use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
+use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
 use metrics::ProtocolMetrics;
@@ -122,136 +126,6 @@ pub(crate) use subscriptions::{
     SubscriptionRegistry, SubscriptionRegistrySummary,
 };
 pub(crate) use transport_state::{DataReadState, ReaderSlicedStats, SentSliced, SlicedAck};
-
-#[inline]
-fn is_domain_push_command(cmd: Command) -> bool {
-    matches!(
-        cmd,
-        Command::Order
-            | Command::Strat
-            | Command::Balance
-            | Command::TradesStream
-            | Command::TradesResendResponse
-            | Command::OrderBook
-            | Command::UI
-    )
-}
-
-#[inline]
-fn is_trades_stream_command(cmd: Command) -> bool {
-    matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
-}
-
-#[inline]
-fn is_datagram_too_large_error(e: &std::io::Error) -> bool {
-    match e.raw_os_error() {
-        Some(90) => true,    // Linux EMSGSIZE
-        Some(10040) => true, // Windows WSAEMSGSIZE
-        Some(40)
-            if cfg!(any(
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "freebsd",
-                target_os = "openbsd",
-                target_os = "netbsd",
-            )) =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
-#[inline]
-fn engine_request_uid(request_payload: &[u8]) -> Option<u64> {
-    request_payload
-        .get(3..11)
-        .and_then(|s| s.try_into().ok())
-        .map(u64::from_le_bytes)
-}
-
-#[inline]
-fn engine_request_method(request_payload: &[u8]) -> Option<EngineMethod> {
-    request_payload
-        .get(11)
-        .copied()
-        .map(EngineMethod::from_byte)
-}
-
-#[inline]
-fn engine_method_allowed_before_domain_ready(method: EngineMethod) -> bool {
-    matches!(
-        method,
-        EngineMethod::BaseCheck
-            | EngineMethod::AuthCheck
-            | EngineMethod::GetMarketsList
-            | EngineMethod::GetMarketsIndexes
-            | EngineMethod::UpdateMarketsList
-    )
-}
-
-#[inline]
-fn outgoing_allowed_before_domain_ready(cmd: u8, data: &[u8]) -> bool {
-    matches!(
-        Command::from_byte(cmd),
-        Command::API
-            if engine_request_method(data)
-                .is_some_and(engine_method_allowed_before_domain_ready)
-    )
-}
-
-#[inline]
-fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Duration> {
-    let elapsed = start.elapsed();
-    if elapsed >= timeout {
-        None
-    } else {
-        Some(timeout.saturating_sub(elapsed))
-    }
-}
-
-#[inline]
-fn queued_client_settings_updated_since(
-    dispatcher: &crate::events::EventDispatcher,
-    first_new_event: usize,
-) -> bool {
-    dispatcher
-        .queued_events()
-        .get(first_new_event..)
-        .unwrap_or(&[])
-        .iter()
-        .any(|event| {
-            matches!(
-                event,
-                crate::events::Event::Settings(crate::state::SettingsEvent::ClientSettingsUpdated)
-            )
-        })
-}
-
-// === Constants matching Delphi exactly ===
-const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
-const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
-const SETTINGS_HELPER_RETRY_PAUSE_MS: u64 = 5_000;
-const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
-const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
-const DELPHI_BASE_CHECK_UPDATE_RETRIES: usize = 10; // MoonProtoEngine.pas:586
-const DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS: u64 = 2_000; // MoonProtoEngine.pas:589
-const DELPHI_INIT_AUTH_RETRY_PAUSE_MS: u64 = 200; // Unit1.pas:5064-5068
-const RECONNECT_WAITING_MS: i64 = 7000; // MoonProtoUDPClient.pas:88
-const RECONNECT_THROTTLE_MS: i64 = 15000; // MoonProtoUDPClient.pas:89
-const OFFLINE_BASE_MS: i64 = 2300; // MoonProtoUDPClient.pas:772
-const DEAD_ZONE_MS: i64 = 5000; // MoonProtoUDPClient.pas:799
-const NEED_HELLO_AGAIN_THROTTLE_MS: i64 = 700; // MoonProtoUDPClient.pas:568
-const COMPRESSED_FLAG: u8 = 0x80; // MoonProtoDataStruct.pas:27
-const MIN_SIZE_TO_COMPRESS: usize = 64; // MoonProtoDataStruct.pas:31
-const NEVER_SENT_MS: i64 = i64::MIN / 2; // Эквивалент Delphi LastSentHello=0 при uptime-clock
-const NEVER_TIME_MS: i64 = i64::MIN / 2;
-const NO_PENDING_ENGINE_REQUEST_UID: u64 = u64::MAX;
-const BIND_FAILED_FIRST_EVENT_MS: i64 = 15_000;
-const BIND_FAILED_REPEAT_EVENT_MS: i64 = 50_000;
-const TRADES_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedReconnectAllTrades
-const TRADES_RECONNECT_RESUBSCRIBE_DELAY_MS: i64 = 100; // BWorks.pas Sleep(100)
-const ORDERBOOK_RECONNECT_THROTTLE_MS: i64 = 5_000; // MoonProtoEngine.NeedResubscribeOrderBooks
 
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {

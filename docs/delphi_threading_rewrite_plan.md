@@ -8290,3 +8290,23 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=9.73%`, init/markets/indexes/tags/update,
   trades/orderbook/order path health OK, retained futures trades `2`, reader
   max `729us`, writer CPU max `133us`, GetMarketsList apply `2319us`.
+
+### 2026-05-26 - `Client` constants/helpers split
+
+Done:
+
+- Moved Delphi timing/wire constants into `client/constants.rs`.
+- Moved pure client helper functions into `client/helpers.rs`: domain-push
+  gates, trades-stream gate, datagram-too-large OS mapping, Engine API request
+  UID/method extraction, pre-Init API allowlist, timeout remaining, and queued
+  settings-event check.
+- Kept `client.rs` private imports (`use constants::*`, `use helpers::*`) so
+  existing child modules/tests see the same names without changing call sites.
+- This is a readability/publication split only. No timing constant, Init gate,
+  send gate, reconnect, compression, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
