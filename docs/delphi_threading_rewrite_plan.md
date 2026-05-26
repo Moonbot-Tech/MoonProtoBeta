@@ -7200,3 +7200,19 @@ Verification:
   `FIRETEST_QUICK_PASS after 23.38s`, `ParseFailed=0`, err_emu actual drop
   `12.39%`, retained futures rows present, derived snapshot present,
   `reader max=767us`, `writer_cpu max=220us`.
+
+### 2026-05-26 - Full prod gate after protocol split / Sliced cleanup
+
+Done:
+
+- Ran the full release FireTest against the configured prod server after the
+  send-phase split, receive-phase split, retained-trades index-slot change, and
+  Sliced retry temp-copy removal.
+- This is the stronger checkpoint for the current working point: two live
+  clients, initial `err_emu=10%`, high-loss simple ops, retained trades/candles,
+  strategy schema/snapshot, order/settings scenarios, and protocol CPU summary.
+
+Verification:
+
+- `cargo test --release --test fire_test -- --ignored --nocapture` OK:
+  exit code 0 after 187.3s.
