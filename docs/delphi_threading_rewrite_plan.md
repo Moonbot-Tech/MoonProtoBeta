@@ -8602,3 +8602,26 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` protocol API split
+
+Done:
+
+- Moved Engine API response bookkeeping, pending-response dispatch, and chunked
+  candles aggregation helpers from `client/protocol_helpers.rs` into
+  `client/protocol_api.rs`.
+- Kept all methods as the same `Client::{...}` helpers used by
+  `protocol_recv.rs`, `protocol_core.rs`, and tests; this is only module
+  ownership cleanup.
+- This is a readability/publication split only. No API response header offsets,
+  pending UID lookup, candles chunk merge, active bookkeeping, callback delivery,
+  or dispatcher behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 27.08s`,
+  `ParseFailed=0`, err_emu actual drop `9.80%`, reader max `736us`,
+  writer CPU max `153us`, `GetMarketsList apply=2350us`.

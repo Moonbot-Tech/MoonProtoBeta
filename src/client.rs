@@ -58,6 +58,7 @@ mod helpers;
 mod init;
 mod lifecycle;
 mod metrics;
+mod protocol_api;
 mod protocol_core;
 mod protocol_helpers;
 mod protocol_io;
