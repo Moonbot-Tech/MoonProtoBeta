@@ -6800,6 +6800,9 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+- Quick prod FireTest release after the client split series OK:
+  `FIRETEST_QUICK_PASS after 25.41s`, `ParseFailed=0`,
+  `reader max=721us`, `writer_cpu max=127us`.
 
 ### 2026-05-26 - `client.rs` init/connect helper split
 
