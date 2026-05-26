@@ -254,46 +254,13 @@ impl ProtocolCore<'_> {
             raw_cmd,
             payload,
         );
-        let (cmd, payload) = decoded
-            .map(|(cmd, payload)| (cmd, Some(payload)))
-            .unwrap_or((raw_cmd, None));
-        let dispatch_api_pending_in_reader = !matches!(mode, RunMode::DispatcherWorker { .. });
-        let api_pending_consumed = payload.as_deref().is_some_and(|payload| {
-            dispatch_api_pending_in_reader
-                && Client::dispatch_api_pending_inline(
-                    self.client.api_pending.as_ref(),
-                    cmd,
-                    payload,
-                )
-        });
-        let candles_chunk_consumed = payload.as_deref().is_some_and(|payload| {
-            Client::dispatch_candles_chunk_inline(
-                &mut self.client.pending_candles,
-                cmd,
-                payload,
-                timestamp_ms,
-            )
-        });
-        if let (Some(stats), Some(payload)) = (sliced_stats.as_ref(), payload.as_deref()) {
-            self.client
-                .err_emu_diagnostics
-                .lock()
-                .unwrap()
-                .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, payload);
-        }
-        if let Some(stats) = sliced_stats {
-            self.apply_reader_sliced_stats(stats);
-        }
-        if let Some(payload) = payload {
-            self.client_new_data(
-                cmd,
-                payload,
-                api_pending_consumed,
-                candles_chunk_consumed,
-                timestamp_ms,
-                mode,
-            );
-        }
+        let Some((cmd, payload)) = decoded else {
+            if let Some(stats) = sliced_stats {
+                self.apply_reader_sliced_stats(stats);
+            }
+            return;
+        };
+        self.finish_data_read_int_decoded(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
     pub(crate) fn data_read_int_owned_inline(
@@ -316,6 +283,17 @@ impl ProtocolCore<'_> {
         ) else {
             return;
         };
+        self.finish_data_read_int_decoded(cmd, payload, timestamp_ms, sliced_stats, mode);
+    }
+
+    fn finish_data_read_int_decoded(
+        &mut self,
+        cmd: u8,
+        payload: Vec<u8>,
+        timestamp_ms: i64,
+        sliced_stats: Option<ReaderSlicedStats>,
+        mode: &mut RunMode<'_>,
+    ) {
         let api_pending_consumed = !matches!(mode, RunMode::DispatcherWorker { .. })
             && Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
         let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(

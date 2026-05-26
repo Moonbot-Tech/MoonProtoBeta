@@ -204,10 +204,10 @@ impl Client {
         raw_cmd: u8,
         data: &[u8],
     ) -> Option<(u8, Vec<u8>)> {
-        // B-V2-01 fix: используем Cow вместо безусловного data.to_vec(). Большинство
-        // пакетов не Crypted и не Compressed (Ping, handshake, Sliced-блоки) — для них
-        // payload остаётся borrowed (zero alloc). Crypted и Compressed создают Owned
-        // только когда реально нужны. На пике TradesStream это устраняет 50K alloc'ов/сек.
+        // Keep the borrowed/decompressed split explicit until the final owner
+        // handoff. The current dispatcher path still returns `Vec<u8>` because
+        // worker delivery owns payload bytes; removing that final copy belongs
+        // to the planned hot-path delivery optimization.
         use std::borrow::Cow;
         let mut cmd = raw_cmd;
         let mut payload: Cow<'_, [u8]> = Cow::Borrowed(data);

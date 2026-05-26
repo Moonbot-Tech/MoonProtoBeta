@@ -187,7 +187,7 @@ fn section_iter_decodes_all_section_types_without_collecting_first() {
 }
 
 #[test]
-fn section_iter_keeps_only_complete_rows_from_truncated_tail_like_old_parser() {
+fn section_iter_keeps_only_complete_rows_from_truncated_tail_like_delphi() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&45_000.0f64.to_le_bytes());
     payload.extend_from_slice(&78u16.to_le_bytes());

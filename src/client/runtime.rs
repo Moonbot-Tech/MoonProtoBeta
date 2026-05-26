@@ -44,15 +44,6 @@ impl Client {
         self.recv_poller = Some(poller);
     }
 
-    // ====================================================================
-    //  Init helper УБРАН: дизайн `run_init_sequence` конфликтовал с
-    //  `&mut Client` который держит `run()` — метод не мог быть вызван из
-    //  обычного flow. Init шаги выполняются напрямую: вызови `subscribe_*` /
-    //  `api_*` ДО `client.run_with_dispatcher` (методы требуют `&mut self` —
-    //  это безопасно пока main loop не запущен), либо после `Connected{fresh}`
-    //  через тот же `&mut Client` если используется single-thread runner.
-    // ====================================================================
-
     /// GetTimeMS equivalent — монотонные миллисекунды с момента старта `Client` (matches
     /// Delphi GetTickCount64 семантикой "since some fixed past point").
     ///
