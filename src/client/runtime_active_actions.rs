@@ -1,0 +1,62 @@
+use super::*;
+
+impl Client {
+    #[cfg(test)]
+    pub(crate) fn apply_active_actions<I>(&self, actions: I)
+    where
+        I: IntoIterator<Item = crate::events::ActiveAction>,
+    {
+        if !self.domain_ready_for_typed_send() {
+            return;
+        }
+        for action in actions {
+            match action {
+                crate::events::ActiveAction::RequestMarketsList => {
+                    self.send_api_request(&crate::commands::engine_request::get_markets_list());
+                }
+                crate::events::ActiveAction::RequestUpdateMarketsList => {
+                    self.send_api_request(&crate::commands::engine_request::update_markets_list());
+                }
+                crate::events::ActiveAction::RequestOrderSnapshot => {
+                    self.request_all_statuses(rand::random());
+                }
+                crate::events::ActiveAction::RequestStrategySchema => {
+                    self.strat_schema_request();
+                }
+                crate::events::ActiveAction::RequestOrderBookFull {
+                    market_index,
+                    book_kind,
+                } => {
+                    self.send_api_request(
+                        &crate::commands::engine_request::request_order_book_full(
+                            market_index,
+                            book_kind,
+                        ),
+                    );
+                }
+                crate::events::ActiveAction::SendStrategySnapshot {
+                    server_epoch,
+                    client_max_last_date,
+                    full,
+                    data,
+                } => {
+                    self.strat_send_snapshot_payload(
+                        server_epoch,
+                        client_max_last_date,
+                        full,
+                        &data,
+                    );
+                }
+                crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
+                    self.request_order_status(ctx, &market_name);
+                }
+                crate::events::ActiveAction::OrderCancel { request } => {
+                    self.send_order_cancel_request(request);
+                }
+                crate::events::ActiveAction::TradesResend { payload } => {
+                    self.send_api_request(&payload);
+                }
+            }
+        }
+    }
+}
