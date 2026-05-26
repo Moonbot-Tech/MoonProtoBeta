@@ -5848,6 +5848,14 @@ Done:
   `active_dispatch` and `app_enqueue` max samples. `API(31) payload=...` was
   too coarse for Phase Z; it now prints e.g.
   `API(31) method=GetMarketsList(3) payload=...`.
+- FireTest now saves every live `TStratSnapshot.Data` as a raw file under
+  `target/firetest_strategy_raw/` by default and prints the path in the
+  `SERVER->... Strat Snapshot...` log line. This gives Phase Z one exact payload
+  file for the Delphi console benchmark and the Rust benchmark.
+- Quick/full initial health now requires at least one live `TStratSnapshot`
+  event, not only `TStratSchema` plus trades/orderbook. This keeps the quick
+  gate aligned with the "full live parse of what the server sends" rule and
+  makes the raw strategy payload dump non-optional on normal live servers.
 - This is diagnostics only. It does not affect protocol send/retry/drop logic.
 
 Current quick prod FireTest:

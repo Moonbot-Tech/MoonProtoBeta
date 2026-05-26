@@ -34,6 +34,9 @@
 //! FireTest checks live full-parse health for all real server packets. Crafted
 //! malformed parser semantics (Delphi `Read` zero-tail vs `ReadBuffer`
 //! fail-fast) belong in deterministic unit/parser tests next to each parser.
+//! Strategy snapshots are also dumped as raw `TStratSnapshot.Data` files under
+//! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
+//! checks can run against the exact same live payload bytes.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -335,6 +338,7 @@ struct SessionStats {
     server_logs: u64,
     settings_events: u64,
     strategy_events: u64,
+    strategy_snapshot_events: u64,
     strategy_schema_events: u64,
     strategy_schema_fields: usize,
     strategy_schema_kinds: usize,
@@ -386,6 +390,7 @@ impl Clone for SessionStats {
             server_logs: self.server_logs,
             settings_events: self.settings_events,
             strategy_events: self.strategy_events,
+            strategy_snapshot_events: self.strategy_snapshot_events,
             strategy_schema_events: self.strategy_schema_events,
             strategy_schema_fields: self.strategy_schema_fields,
             strategy_schema_kinds: self.strategy_schema_kinds,
@@ -451,7 +456,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -463,6 +468,7 @@ impl SessionStats {
             self.server_logs,
             self.settings_events,
             self.strategy_events,
+            self.strategy_snapshot_events,
             self.strategy_schema_events,
             self.strategy_schema_kinds,
             self.strategy_schema_fields,
@@ -894,6 +900,49 @@ fn write_strategy_info_dump(
         .unwrap_or_else(|err| panic!("cannot write strategy dump {}: {err}", path.display()));
     println!("FIRETEST strategy info dump: {}", path.display());
     path
+}
+
+fn write_strategy_raw_dump(
+    label: &str,
+    event_no: u64,
+    kind: &str,
+    server_epoch: u64,
+    raw_data: &[u8],
+) -> Option<PathBuf> {
+    let dir = std::env::var_os("MOONPROTO_FIRETEST_STRATEGY_RAW_DUMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("firetest_strategy_raw")
+        });
+    if let Err(err) = fs::create_dir_all(&dir) {
+        eprintln!(
+            "WARN: cannot create strategy raw dump dir {}: {err}",
+            dir.display()
+        );
+        return None;
+    }
+
+    let file_name = format!(
+        "{}_strat_{}_event_{:06}_epoch_{}_raw_{}.bin",
+        sanitize_file_component(label),
+        sanitize_file_component(kind),
+        event_no,
+        server_epoch,
+        raw_data.len()
+    );
+    let path = dir.join(file_name);
+    match fs::write(&path, raw_data) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            eprintln!(
+                "WARN: failed to write strategy raw dump label={label} kind={kind} epoch={server_epoch} len={} err={err}",
+                raw_data.len()
+            );
+            None
+        }
+    }
 }
 
 fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session) {
@@ -1486,6 +1535,12 @@ fn record_strategy_snapshot(
     raw_data: &[u8],
 ) {
     st.strategy_events += 1;
+    st.strategy_snapshot_events += 1;
+    let raw_dump = write_strategy_raw_dump(&st.label, event_no, kind, server_epoch, raw_data);
+    let raw_dump_suffix = raw_dump
+        .as_ref()
+        .map(|path| format!(" dump={}", path.display()))
+        .unwrap_or_else(|| " dump=<write-failed>".to_string());
     if let Some(batch) = parse_strategy_batch(raw_data) {
         let ids_preview = batch
             .strategies
@@ -1502,11 +1557,12 @@ fn record_strategy_snapshot(
             st,
             event_no,
             format!(
-                "Strat {kind} epoch={} raw={} strategies={} ids=[{}]",
+                "Strat {kind} epoch={} raw={} strategies={} ids=[{}]{}",
                 server_epoch,
                 raw_data.len(),
                 count,
-                ids_preview
+                ids_preview,
+                raw_dump_suffix
             ),
         );
     } else {
@@ -1515,10 +1571,11 @@ fn record_strategy_snapshot(
             st,
             event_no,
             format!(
-                "Strat {kind} epoch={} raw={} parse_failed head={}",
+                "Strat {kind} epoch={} raw={} parse_failed head={}{}",
                 server_epoch,
                 raw_data.len(),
-                hex_preview(raw_data, 32)
+                hex_preview(raw_data, 32),
+                raw_dump_suffix
             ),
         );
     }
@@ -1856,6 +1913,7 @@ where
 
 fn has_initial_health(st: &SessionStats) -> bool {
     st.connected_now
+        && st.strategy_snapshot_events > 0
         && st.strategy_schema_events > 0
         && st.strategy_schema_kinds > 0
         && st.strategy_schema_fields > 0
@@ -1867,6 +1925,7 @@ fn has_initial_health(st: &SessionStats) -> bool {
 fn has_quick_health(st: &SessionStats) -> bool {
     st.connected_now
         && st.parse_failed == 0
+        && st.strategy_snapshot_events > 0
         && st.strategy_schema_events > 0
         && st.strategy_schema_kinds > 0
         && st.strategy_schema_fields > 0
