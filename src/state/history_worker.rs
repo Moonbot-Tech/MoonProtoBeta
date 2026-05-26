@@ -594,6 +594,66 @@ mod tests {
     }
 
     #[test]
+    fn worker_flush_compacts_evicted_futures_to_mini_candles() {
+        let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
+            futures_trades_capacity: 2,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 4,
+            candles_5m_capacity: 0,
+        });
+        assert!(worker.configure_markets(vec!["BTCUSDT".to_string()], Some(TradeStorageScope::All)));
+        let readers = worker.readers("BTCUSDT").unwrap();
+        let futures = readers.futures_trades.unwrap();
+        let mini = readers.mini_candles.unwrap();
+
+        let now_time = 45_000.0 + 1.0 / 24.0;
+        worker.handle().send_stream_batch(MarketHistoryStreamBatch {
+            base_time: 45_000.0,
+            now_time,
+            sections: vec![MarketHistoryStreamSection::FuturesTrades {
+                market_index: 0,
+                rows: vec![
+                    MarketHistoryTradeInput {
+                        time_delta_ms: 0,
+                        price: 100.0,
+                        qty: 2.0,
+                    },
+                    MarketHistoryTradeInput {
+                        time_delta_ms: 100,
+                        price: 101.0,
+                        qty: -3.0,
+                    },
+                    MarketHistoryTradeInput {
+                        time_delta_ms: 200,
+                        price: 102.0,
+                        qty: 4.0,
+                    },
+                ],
+            }],
+        });
+        assert!(worker.flush(now_time));
+
+        let mut retained = Vec::new();
+        futures.copy_last(8, &mut retained);
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].price, 101.0);
+        assert_eq!(retained[1].price, 102.0);
+
+        let mut compacted = Vec::new();
+        mini.copy_last(4, &mut compacted);
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].cnt, 1);
+        assert_eq!(compacted[0].min_price, 100.0);
+        assert_eq!(compacted[0].max_price, 100.0);
+        assert_eq!(compacted[0].buy_vol, 200.0);
+        assert_eq!(compacted[0].sell_vol, 0.0);
+    }
+
+    #[test]
     fn worker_applies_candles_snapshot_only_for_configured_scope() {
         let worker = MarketHistoryWorker::spawn(MarketHistoryConfig {
             futures_trades_capacity: 0,

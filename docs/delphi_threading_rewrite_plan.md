@@ -7216,3 +7216,27 @@ Verification:
 
 - `cargo test --release --test fire_test -- --ignored --nocapture` OK:
   exit code 0 after 187.3s.
+
+### 2026-05-26 - retained mini-candle compaction covered at worker boundary
+
+Done:
+
+- Added worker-level coverage for the agreed retained-history model: accepted
+  futures rows append directly into the retained `SeqRing`, overwritten rows
+  are buffered by the store, and `MarketHistoryWorker::flush` compacts them
+  into retained `MiniCandle` rows.
+- This proves the production worker boundary, not only the low-level
+  `compact_trades_to_mini_candles_like_delphi` helper.
+
+Verification:
+
+- `cargo test worker_flush_compacts_evicted_futures_to_mini_candles --lib --quiet` OK.
+- `cargo test history_worker --lib --quiet` OK: 10 passed.
+- `cargo test mini_candle --lib --quiet` OK: 4 passed.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 764 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.50s`, `ParseFailed=0`, err_emu actual drop
+  `9.19%`, retained futures rows present, derived snapshot present,
+  `reader max=682us`, `writer_cpu max=138us`.
