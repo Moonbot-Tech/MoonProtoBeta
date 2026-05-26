@@ -9004,3 +9004,27 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 22.66s`, `ParseFailed=0`,
   retained LastPrice/trades/derived present, orderbook full+diff applied,
   reader max 590us, writer CPU max 134us, `GetMarketsList` apply total 2525us.
+
+### 2026-05-26 - `StratsState` folders/schema/snapshot split
+
+Done:
+
+- Split `state/strats.rs` into a thin owner plus:
+  - `strats/folders.rs` for Delphi-like case-insensitive folder tree helpers;
+  - `strats/schema.rs` for `TStratSchema` apply and public schema accessors;
+  - `strats/snapshots.rs` for decoded `TStrategySerializer` snapshot apply,
+    local application-owned snapshots, checked-item upsert, and cached
+    `TStratSnapshot.CreateFromStrats` payload.
+- Kept public `StratsState`, `StratEvent`, `StrategyInfo`, strategy schema,
+  snapshot, checked delta, and folder APIs stable.
+- This is a readability/publication split only. No folder `SameText` keying,
+  folder-delete guard, schema parse/cache behavior, snapshot rollback guard,
+  full-snapshot no-clear rule, local snapshot replacement, checked sync/echo
+  mutation, or cached payload invalidation changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test strats --lib --quiet` OK: 24 passed, 1 ignored.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
