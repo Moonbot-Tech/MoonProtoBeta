@@ -7506,6 +7506,7 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
 - Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 27.51s`, `ParseFailed=0`, err_emu actual drop
   `10.70%`, retained futures rows present, derived snapshot present,
@@ -8057,3 +8058,28 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MPC_UI` soft-tail parser helper split
+
+Done:
+
+- Moved `TClientSettingsCommand` parse helpers, ShortString[15] reader,
+  zero-tail/preserve-tail scalar readers, and the inbound
+  `EmuTradePoint::read_from_delphi_stream` helper into `commands/ui/parser.rs`.
+- Kept payload structs, wire packed records, outbound builders, and the public
+  `UICommand` enum in `commands/ui.rs`.
+- Kept byte behavior unchanged: same mandatory settings block, same v2 branch,
+  same fallback values, same Delphi `<` guard for ASCfg sized blobs, same
+  compact ArbConfig parsing, and same zero-tail/preserve-tail semantics.
+- This is a readability/publication split only. No settings wire fields,
+  fallback behavior, builder behavior, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.56s`,
+  `ParseFailed=0`, `rx_actual_drop=10.51%`, streams/API/market health OK,
+  retained futures trades `1`, reader max `723us`, writer CPU max `141us`,
+  GetMarketsList apply `2415us`.
