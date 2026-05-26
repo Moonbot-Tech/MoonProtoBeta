@@ -7887,3 +7887,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `emk_AuthCheck` parser split
+
+Done:
+
+- Moved `AuthCheckResponse`, `DexInfo`, packed `THLDexInfo` wire layout, and
+  `parse_auth_check_response` into `commands/engine_api/auth_check.rs`.
+- Kept public paths unchanged through `commands::engine_api::*` re-exports.
+- Kept the same parent zero-tail/string helpers and Delphi soft-tail parsing:
+  mandatory fields first, optional Phase 2 fields only while not EOF, partial
+  18-byte DEX record reads into zero-filled slots.
+- This is a readability/publication split only. No `emk_AuthCheck` field
+  order, soft-tail behavior, packed DEX layout, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
