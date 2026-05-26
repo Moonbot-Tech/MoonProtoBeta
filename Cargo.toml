@@ -3,6 +3,7 @@ name = "moonproto"
 version = "0.1.0"
 edition = "2021"
 description = "Rust client library for the MoonProto UDP protocol used by MoonBot servers."
+repository = "https://github.com/Moonbot-Tech/MoonProtoBeta"
 publish = false
 
 [features]
