@@ -17,6 +17,7 @@ use crate::commands::trade::{
     OrderWorkerStatus, SetImmuneCommand, StopSettings, TradeCommand, TradeCtx, TradeEpochHeader,
 };
 use crate::commands::EngineMethod;
+use crate::state::orders::OrderCancelSend;
 use crate::state::DELPHI_MSECS_PER_DAY;
 
 static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

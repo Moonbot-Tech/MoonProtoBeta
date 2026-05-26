@@ -7629,3 +7629,27 @@ Verification:
   `FIRETEST_QUICK_PASS after 22.54s`, `ParseFailed=0`, err_emu actual drop
   `11.02%`, retained futures rows present, derived snapshot present,
   `reader max=628us`, `writer_cpu max=125us`, `GetMarketsList apply=2577us`.
+
+### 2026-05-26 - `EventDispatcher` active-action block split
+
+Done:
+
+- Moved `ActiveDispatchContext`, `ActiveAction`, and
+  `dispatch_into_active_actions` into `events/active.rs`.
+- Kept the active outbox order unchanged: client context link -> domain/init
+  gates -> token/index reset gates -> dispatch -> market-history sync ->
+  market-list refresh actions -> orderbook full request dedup -> strategy
+  snapshot/schema follow-up -> order snapshot cleanup -> trades resend tick.
+- This is a readability/publication split only. No auto-action, reconnect gate,
+  trades recovery, orderbook full refresh, strategy snapshot reply, or public
+  event behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.68s`, `ParseFailed=0`, err_emu actual drop
+  `10.24%`, retained futures rows present, derived snapshot present,
+  `reader max=713us`, `writer_cpu max=127us`, `GetMarketsList apply=2407us`.
