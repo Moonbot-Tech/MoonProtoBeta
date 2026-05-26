@@ -51,6 +51,7 @@ mod metrics;
 mod sender;
 mod socket;
 mod subscriptions;
+mod transport_state;
 
 pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;
@@ -99,6 +100,7 @@ pub(crate) use subscriptions::{
     refresh_subscription_summary, DomainRestoreIntent, PendingTradesUnsubscribe,
     SubscriptionRegistry, SubscriptionRegistrySummary,
 };
+pub(crate) use transport_state::{DataReadState, ReaderSlicedStats, SentSliced, SlicedAck};
 
 #[inline]
 fn is_domain_push_command(cmd: Command) -> bool {
@@ -564,13 +566,6 @@ impl SendLockState {
     fn is_empty(&self) -> bool {
         self.send_queues.is_empty()
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct ReaderSlicedStats {
-    datagram_num: u16,
-    dup_count: u8,
-    blocks_count: usize,
 }
 
 struct ProtocolCore<'client> {
@@ -2476,78 +2471,6 @@ impl ProtocolCore<'_> {
         } else {
             self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
         }
-    }
-}
-
-/// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
-struct SentSliced {
-    datagram_num: u16,
-    slices: Vec<Vec<u8>>,         // each slice payload (SliceHeader + data)
-    piece_last_checked: Vec<i64>, // per-piece LastChecked timestamp
-    ack_flags: [u8; 32],          // which blocks ACK'd
-    blocks_count: usize,
-    sent_count: usize,
-    last_checked: i64, // Min of all piece_last_checked
-    retry_count: i32,
-    last_retry_inc: i64,
-    max_retry_count: i32,
-    u_key: UniqueKey, // for UKey dedup (matches TMoonProtoSlicedData.UKey)
-}
-
-impl SentSliced {
-    #[inline]
-    fn is_block_acked(&self, block_num: usize) -> bool {
-        self.ack_flags[block_num / 8] & (1 << (block_num % 8)) != 0
-    }
-
-    fn refresh_last_checked_from_unacked(&mut self, fallback: i64) {
-        self.last_checked = (0..self.blocks_count)
-            .filter(|&block| !self.is_block_acked(block))
-            .map(|block| self.piece_last_checked[block])
-            .min()
-            .unwrap_or(fallback);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct SlicedAck {
-    flags: [u8; 32],
-    datagram_num: u16,
-}
-
-struct DataReadState {
-    decode_cipher: Option<crate::crypto::Aes128Gcm>,
-    slider: Slider,
-    data_size_ack_series_num: u16,
-}
-
-impl DataReadState {
-    fn new() -> Self {
-        Self {
-            decode_cipher: None,
-            slider: Slider::new(),
-            data_size_ack_series_num: 0,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.slider = Slider::new();
-        self.data_size_ack_series_num = 0;
-    }
-
-    fn set_decode_cipher(&mut self, cipher: crate::crypto::Aes128Gcm) {
-        self.decode_cipher = Some(cipher);
-    }
-
-    fn build_ack_half(&self) -> (u64, Vec<u64>) {
-        self.slider.build_ack_half()
-    }
-
-    fn update_data_size_ack_series_num(&mut self, series_num: u16) -> u16 {
-        if self.data_size_ack_series_num != series_num {
-            self.data_size_ack_series_num = series_num;
-        }
-        self.data_size_ack_series_num
     }
 }
 
