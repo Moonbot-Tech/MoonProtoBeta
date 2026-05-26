@@ -1,41 +1,47 @@
 # Orders
 
 The order channel mirrors server-side trading orders. Applications normally read
-orders through `EventDispatcher::orders()` and react to `Event::Order`.
+orders through immutable `MoonClient::snapshot()` values and react to
+`Event::Order`.
 
 ## Reading Orders
 
-For a one-shot active-order snapshot, use `Client::request_order_snapshot`:
+For a live UI, read from the latest `MoonClient` snapshot:
 
 ```rust
-let orders = client.request_order_snapshot(
-    &mut dispatcher,
-    Duration::from_secs(12),
-)?;
+if let Some(snapshot) = client.snapshot() {
+    for order in snapshot.orders().iter() {
+        redraw_order(order);
+    }
+}
 ```
 
-The helper sends `TAllStatusesReq`, keeps the UDP loop running, and waits for
-the dispatcher to finish missing-order cleanup requests. For continuous UI
-updates, read order events from the dispatcher:
+For continuous UI updates, drain order events and then read the latest snapshot:
 
 ```rust
 use moonproto::Event;
 use moonproto::state::OrderEvent;
 
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+for event in client.drain_events() {
     if let Event::Order(order_event) = event {
         match order_event {
             OrderEvent::Created(uid) | OrderEvent::Updated(uid) => {
-                if let Some(order) = state.orders().get(*uid) {
-                    redraw_order(order);
+                if let Some(state) = client.snapshot() {
+                    if let Some(order) = state.orders().get(uid) {
+                        redraw_order(order);
+                    }
                 }
             }
-            OrderEvent::Removed(uid) => remove_order_from_ui(*uid),
-            OrderEvent::Snapshot => redraw_all_orders(state.orders().iter()),
+            OrderEvent::Removed(uid) => remove_order_from_ui(uid),
+            OrderEvent::Snapshot => {
+                if let Some(state) = client.snapshot() {
+                    redraw_all_orders(state.orders().iter());
+                }
+            }
             _ => {}
         }
     }
-}));
+}
 ```
 
 `Orders::iter()` yields read-only `&Order` values. The dispatcher mutates the
@@ -49,8 +55,8 @@ terminal entries waiting for deferred removal can still produce a follow-up
 `TOrderStatusRequest` when they are absent from the fresh snapshot. This matches
 MoonProto virtual workers: Delphi `JobIsDone` becomes true only after
 `DoTheJobVirtual` returns, while `RemoveWorkerFromCache` happens before that.
-The active `Client::run_with_dispatcher*` path sends those follow-up requests
-automatically. Low-level raw `EventDispatcher::dispatch_into` users receive only
+The active `MoonClient` path sends those follow-up requests automatically.
+Low-level raw `EventDispatcher::dispatch_into` users receive only
 the typed state/events; after `OrderEvent::Snapshot` they can call
 `EventDispatcher::missing_order_status_requests_after_snapshot()` and pass each
 returned `(ctx, market_name)` to `Client::request_order_status`.
@@ -216,8 +222,8 @@ worker and does not apply the rest of `UpdateData` to `buy_order`.
 `pending_cancel` mirrors Delphi `vOrder.PendingCancel`. Calling
 `cancel_order` for a pending `OS_None` order sets this flag and follows
 Delphi's `CheckReplaceFlag` pending path. While the order stays pending,
-`run_with_dispatcher` keeps repeating the replace-then-cancel pair from its
-active order tick no more often than Delphi's 32 ms worker loop.
+`MoonClient` keeps repeating the replace-then-cancel pair from its active order
+tick no more often than Delphi's 32 ms worker loop.
 `TOrderNotFound` sets `cancel_request` and `server_forced_remove` immediately
 while the entry is still present. It does not rewrite the compact buy/sell
 orders at receive time: Delphi only changes those records later from
@@ -288,8 +294,8 @@ does not emit it as an active order event.
 ## Time Correction
 
 Order timestamps arrive as Delphi `TDateTime` values in server-local time. The
-client updates a per-client `ServerTimeDelta` from Ping packets; `EventDispatcher`
-links that value into `Orders` automatically when using `run_with_dispatcher`.
+client updates a per-client `ServerTimeDelta` from Ping packets; the active
+runtime links that value into `Orders` automatically.
 For `TOrderCompact` and `TOrderUpdateData`, only valid Delphi dates (`> 1`) are
 shifted, matching Delphi `AdjustTime`; zero/missing timestamps stay zero.
 

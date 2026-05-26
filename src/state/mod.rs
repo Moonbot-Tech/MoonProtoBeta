@@ -9,10 +9,9 @@
 //! - `Trades` for stream packets and automatic gap recovery.
 //! - `Settings` for settings snapshots and UI control events.
 //!
-//! Normal applications read these models through `EventDispatcher` getters
-//! after running `Client::run_with_dispatcher` or
-//! `Client::run_with_dispatcher_state`. The per-channel guides live in
-//! `moonproto/docs/api/<channel>.md`.
+//! Normal applications read these models through immutable `MoonClient`
+//! snapshots. Custom runtimes can read them through `EventDispatcher` getters.
+//! The per-channel guides live in `moonproto/docs/api/<channel>.md`.
 
 pub mod balances;
 pub mod epoch;

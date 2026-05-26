@@ -72,7 +72,7 @@ println!("balance rows={}", balances.len());
 The helper sends the library-level balance refresh request, pumps the UDP loop,
 waits for the next full snapshot event, and returns a cloned `BalancesState`.
 
-For fire-and-forget refresh from another UI or worker thread:
+For fire-and-forget refresh in a custom low-level runtime:
 
 ```rust
 let sender = client.sender();
@@ -86,7 +86,7 @@ The next snapshot arrives through the normal dispatcher path.
 ```rust
 use moonproto::{Event, state::BalanceEvent};
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+for event in client.drain_events() {
     match event {
         Event::Balance(BalanceEvent::SnapshotApplied { count, epoch }) => {
             println!("full balance snapshot: rows={count} epoch={epoch}");
@@ -104,7 +104,7 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
         }
         _ => {}
     }
-}));
+}
 ```
 
 `SnapshotApplied.count` and `IncrementalApplied.count` are counts of rows that
@@ -175,4 +175,3 @@ impl BalancesState {
     pub fn is_empty(&self) -> bool;
 }
 ```
-

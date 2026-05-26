@@ -97,8 +97,7 @@ Basic application shape:
 
 ```rust
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig,
-    EventDispatcher, InitConfig,
+    import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -113,12 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
         .with_transport_mode(0);
 
-    let mut client = Client::new(cfg);
-    let mut dispatcher = EventDispatcher::new();
-
-    connect_and_init(
-        &mut client,
-        &mut dispatcher,
+    let client = MoonClient::connect(
+        cfg,
         ConnectConfig::new(InitConfig {
             subscribe_trades: Some(false),
             subscribe_orderbooks: vec!["BTCUSDT".to_string()],
@@ -126,13 +121,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
+    client.subscribe_orderbook("ETHUSDT")?;
+    // After an order appears in events/snapshots:
+    // client.orders().move_order(order_uid, 50100.0)?;
+
+    if let Some(snapshot) = client.snapshot() {
+        println!("orders={}", snapshot.orders().len());
+    }
+
+    client.stop()?;
+
     Ok(())
 }
 ```
 
-Init is one-time per `Client` session. After Init, reconnect restore, market
-refresh, saved subscriptions, orderbook full resync, trades gap recovery, and
-pending Engine API dispatch are owned by the library.
+`MoonClient` owns the runtime thread. Init is one-time per session. After Init,
+reconnect restore, market refresh, saved subscriptions, orderbook full resync,
+trades gap recovery, and pending Engine API dispatch are owned by the library
+until `stop()` or drop.
 
 ## Tests
 

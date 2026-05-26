@@ -16,56 +16,27 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use std::time::Duration;
 //! use moonproto::{
-//!     connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event,
-//!     EventDispatcher, InitConfig, LifecycleEvent,
+//!     import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
 //! };
-//! use moonproto::state::{OrderEvent, OrderBookEvent, TradesEvent};
 //!
 //! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
 //! let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
-//! let mut client = Client::new(cfg);
-//! let mut dispatcher = EventDispatcher::new();
-//!
-//! client.on_lifecycle(Box::new(|ev| match ev {
-//!     LifecycleEvent::Connected { fresh } => println!("connected fresh={fresh}"),
-//!     LifecycleEvent::Reconnecting => println!("reconnecting"),
-//!     LifecycleEvent::BindFailed { consecutive_failures } => {
-//!         eprintln!("UDP bind failed {consecutive_failures} times");
-//!     }
-//!     _ => {}
-//! }));
 //!
 //! let init = InitConfig {
 //!     subscribe_trades: Some(false),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()
 //! };
-//! connect_and_init(
-//!     &mut client,
-//!     &mut dispatcher,
-//!     ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
-//! )?;
+//! let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 //!
-//! // Long-running stream: typed events are produced automatically.
-//! client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
-//!     match event {
-//!         Event::Order(OrderEvent::Created(uid)) => println!("new order {uid}"),
-//!         Event::OrderBook(OrderBookEvent::Apply { market_index, .. }) => {
-//!             // redraw orderbook
-//!             let _ = market_index;
-//!         }
-//!         Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
-//!             // Signal only: new rows are already in market state / SeqRing.
-//!             let _ = packet_num;
-//!         }
-//!         Event::EngineResponse(resp) if !resp.success => {
-//!             eprintln!("engine error: {}", resp.error_msg);
-//!         }
-//!         _ => {}
-//!     }
-//! }));
+//! client.subscribe_orderbook("ETHUSDT")?;
+//! // After an order appears in events/snapshots:
+//! // client.orders().move_order(order_uid, 50100.0)?;
+//! for event in client.drain_events() {
+//!     println!("event: {event:?}");
+//! }
+//! client.stop()?;
 //! ```
 //!
 //! For common one-shot Engine API operations, use typed helpers such as
@@ -79,10 +50,9 @@
 //! [`EventDispatcher::queued_events`] and can be drained with
 //! [`EventDispatcher::take_queued_events`].
 //!
-//! For market-level trade commands, build [`commands::trade::TradeCtx`] from the
-//! connected session with [`Client::trade_ctx`] or [`Client::random_trade_ctx`].
-//! Existing-order actions should usually use tracked-order helpers such as
-//! [`Client::cancel_tracked_order`] and [`Client::replace_tracked_order`].
+//! Regular applications should start with [`MoonClient`]. Lower-level
+//! [`Client`] and [`EventDispatcher`](crate::events::EventDispatcher) APIs remain
+//! available for tests, protocol tools, and custom runtimes.
 //!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.
 //! In a single-threaded caller, wait for those receivers through
@@ -141,8 +111,8 @@ pub mod transport;
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ClientSender, ConnectConfig,
     ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    LifecycleEvent, ProtocolMetricsSnapshot, RefreshConfig, SendPriority, SubscribeError,
-    TradeContextError, UniqueKey,
+    LifecycleEvent, MoonClient, MoonClientError, MoonOrders, ProtocolMetricsSnapshot,
+    RefreshConfig, SendPriority, SubscribeError, TradeContextError, UniqueKey,
 };
 pub use events::{
     Event, EventDispatcher, EventDispatcherSnapshot, MissingOrderStatusRequest,

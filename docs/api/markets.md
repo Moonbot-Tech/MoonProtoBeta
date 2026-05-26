@@ -7,8 +7,8 @@ Markets state is maintained from Engine API responses:
 - `GetMarketsIndexes` gives the canonical `mIndex -> market name` mapping.
 - `CheckBinanceTags` updates token tags.
 
-When using `Client::run_with_dispatcher`, relevant responses are applied to
-`EventDispatcher::markets()` automatically.
+When using `MoonClient`, relevant responses are applied to the active markets
+read model automatically.
 
 The active dispatcher applies `GetMarketsList`, `UpdateMarketsList`, and
 `CheckBinanceTags` directly while reading the payload, matching Delphi's
@@ -315,9 +315,9 @@ dispatcher.markets().corr_count();
 ```
 
 The index helpers return `None` while the mapping is stale after a server
-restart. In the normal `run_with_dispatcher` path, trades and orderbook events
-are gated until fresh indexes are received through init or an explicit
-`GetMarketsIndexes` request.
+restart. In the normal `MoonClient` path, trades and orderbook events are gated
+until fresh indexes are received through init or an explicit `GetMarketsIndexes`
+request.
 
 ## TokenTags
 

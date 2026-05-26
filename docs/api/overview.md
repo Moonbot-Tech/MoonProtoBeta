@@ -12,9 +12,10 @@ Application
         |
         v
 moonproto
-  Client              UDP, handshake, retry, reconnect, NTP, pending API
-  EventDispatcher     typed events + read-only state models
-  connect_and_init    ready connection + initial requests in one call
+  MoonClient          runtime thread + commands/events/snapshots
+  Client              low-level UDP, handshake, retry, reconnect, pending API
+  EventDispatcher     typed events + read-only state models owned by runtime
+  connect_and_init    low-level ready connection + init helper
   run_init_sequence   BaseCheck/AuthCheck/markets/indexes/balances/post-init sync
   commands::*         byte-level parsers/builders
   state::*            orders, orderbooks, trades, balances, strategies, markets
@@ -23,33 +24,24 @@ moonproto
 MoonBot server
 ```
 
-Use one `Client` plus one `EventDispatcher` per server connection.
+Use one `MoonClient` per server connection in regular applications.
 
 ## Recommended Lifecycle
 
 ```rust
-use std::time::Duration;
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig,
-    EventDispatcher, InitConfig,
+    import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
 };
 
 let keys = import_key(KEY_B64).expect("invalid key");
 let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
-
-let mut client = Client::new(cfg);
-let mut dispatcher = EventDispatcher::new();
 
 let init = InitConfig {
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
-connect_and_init(
-    &mut client,
-    &mut dispatcher,
-    ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
-)?;
+let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 
 // Domain state is opened only after init succeeds. Initial server pushes that
 // arrive earlier are dropped; the helper then requests fresh orders, settings,
@@ -58,9 +50,17 @@ connect_and_init(
 // application expects trades-stream events.
 // Init is one-time for this Client session; reconnect restore is automatic.
 
-client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
-    let _ = event;
-}));
+client.subscribe_orderbook("ETHUSDT")?;
+// After an order appears in events/snapshots:
+// client.orders().move_order(order_uid, 50100.0)?;
+
+if let Some(snapshot) = client.snapshot() {
+    println!("orders={}", snapshot.orders().len());
+}
+
+for event in client.drain_events() {
+    println!("{event:?}");
+}
 ```
 
 ## What the Library Does Automatically
@@ -80,8 +80,9 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
   hedge mode, API-key expiration, transferable assets, and candles.
 - Provides registry-aware single, batched, and all-clear helpers for orderbook
   subscriptions so reconnect restore follows the application's latest intent.
-- Queues events produced during one-shot waits in `EventDispatcher` so
-  notifications are not lost while the helper owns the run loop.
+- Runs the active session until explicit `stop()` or drop; applications do not
+  choose a protocol-loop duration.
+- Publishes typed events and immutable snapshots for UI read models.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the Delphi-style process-level NTP syncer by default with
   `ClientConfig::new` (`pool.ntp.org`). Use `with_ntp_host` to override the
@@ -123,7 +124,6 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 ## Low-Level Modules
 
-`commands::*` and `state::*` remain public for custom tooling, tests, and advanced
-consumers. Regular applications should prefer `Client::run_with_dispatcher`,
-`connect_and_init`, typed `Client::request_*` helpers,
-`Client::subscribe_*`, and the typed events.
+`commands::*`, `state::*`, `Client`, and `EventDispatcher` remain public for
+custom tooling, tests, and advanced runtimes. Regular applications should prefer
+`MoonClient`, typed command handles, immutable snapshots, and typed events.

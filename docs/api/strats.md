@@ -55,10 +55,11 @@ use moonproto::Event;
 use moonproto::state::StratEvent;
 use moonproto::commands::strategy_serializer::FieldValue;
 
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+for event in client.drain_events() {
     if let Event::Strat(strat_event) = event {
         match strat_event {
             StratEvent::SnapshotFull { .. } => {
+                let Some(state) = client.snapshot() else { continue; };
                 println!("strategies={}", state.strategy_snapshot_vec().len());
                 for strategy in state.strategy_snapshots() {
                     if let Some(FieldValue::String(name)) = strategy.fields.get("StrategyName") {
@@ -92,7 +93,7 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
             _ => {}
         }
     }
-}));
+}
 ```
 
 `raw_data` is still present in snapshot events for diagnostics and custom
@@ -319,8 +320,9 @@ list as `TStratSnapshot`, and later the server may send
 applies it to its local strategy if the strategy exists; the active client does
 not treat the same command as a server-to-client state update.
 
-Use `ClientSender` for the same fire-and-forget strategy commands from UI or
-worker threads while `run_with_dispatcher` is active:
+Use `MoonClient`/runtime command handles for regular UI integration. In a
+custom low-level runtime, `ClientSender` is the fire-and-forget strategy command
+handle:
 
 ```rust
 let sender = client.sender();

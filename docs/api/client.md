@@ -1,10 +1,15 @@
 # Client
 
-`Client` is the main handle for one MoonProto connection. It owns the UDP socket,
-handshake state, retry queues, pending Engine API registry, subscriptions, a
-process-level NTP guard, per-client server-time delta, and server identity.
+`MoonClient` is the recommended application handle for one MoonProto connection.
+It owns a runtime thread and keeps the active session alive until `stop()` or
+drop.
 
-Create one `Client` per server.
+`Client` is the lower-level session object used by `MoonClient`, tests, protocol
+tools, and custom runtimes. It owns the UDP socket, handshake state, retry
+queues, pending Engine API registry, subscriptions, a process-level NTP guard,
+per-client server-time delta, and server identity.
+
+Create one `MoonClient` per server in regular applications.
 
 ## Configuration
 
@@ -19,7 +24,10 @@ let cfg = moonproto::ClientConfig::new(
     keys.mac_key,
 )
 .with_transport_mode(mask_ver);
-let mut client = moonproto::Client::new(cfg);
+let client = moonproto::MoonClient::connect(
+    cfg,
+    moonproto::ConnectConfig::new(moonproto::InitConfig::default()),
+)?;
 ```
 
 For UI/config screens, call `moonproto::parse_key_info(KEY_B64)`. It returns the
@@ -84,22 +92,26 @@ the existing worker is reused.
 
 ## Running
 
-The recommended run path is `run_with_dispatcher`:
+The recommended run path is `MoonClient::connect`:
 
 ```rust
-use std::time::Duration;
-use moonproto::{Event, EventDispatcher};
+use moonproto::{ConnectConfig, InitConfig, MoonClient};
 
-let mut dispatcher = EventDispatcher::new();
+let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
+    subscribe_trades: Some(false),
+    subscribe_orderbooks: vec!["BTCUSDT".to_string()],
+    ..Default::default()
+}))?;
 
-client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|event| {
-    match event {
-        Event::Order(order_event) => println!("order: {order_event:?}"),
-        Event::OrderBook(book_event) => println!("book: {book_event:?}"),
-        Event::Trade(trade_event) => println!("trade event: {trade_event:?}"),
-        _ => {}
-    }
-}));
+client.subscribe_orderbook("ETHUSDT")?;
+// After an order appears in events/snapshots:
+// client.orders().move_order(order_uid, 50100.0)?;
+
+for event in client.drain_events() {
+    println!("event: {event:?}");
+}
+
+client.stop()?;
 ```
 
 This path performs active-library work: state dispatch, per-client
@@ -108,21 +120,31 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
-`run`, `run_with_dispatcher`, and `run_with_dispatcher_state` block the caller
-for the requested duration and run the MoonProto writer/orchestrator loop on
-that caller thread. UDP receive is owned by the same `ProtocolCore` loop: it
-waits with a nonblocking UDP poller and drains readable packets until
-`WouldBlock`.
-`run` raw callbacks and ordinary
-`run_with_dispatcher` event callbacks are delivered through the application
-callback queue after protocol/domain state is updated, so slow UI work does not
-block ACK/retry/send progress. The call returns after the queued callbacks from
-that run are drained. `Client::on_lifecycle` notifications use the same queued
-delivery during run calls. `run_with_dispatcher_state` also uses the application
-callback queue; it receives an `EventDispatcherSnapshot`, not the live
-dispatcher, so slow UI work cannot stall protocol ACK/retry/send progress. The
-snapshot copy itself is dispatcher-worker work; for high-rate hot paths prefer
-`run_with_dispatcher` unless the callback needs the read model.
+`MoonClient` owns the runtime thread. Applications do not choose a finite
+protocol-loop duration; the session runs until explicit `stop()` or drop. UI
+code reads typed events and immutable snapshots:
+
+```rust
+if let Some(snapshot) = client.snapshot() {
+    for order in snapshot.orders().iter() {
+        println!("{order:?}");
+    }
+}
+```
+
+Stateful order actions are user intents. They are marshalled into the runtime
+owner, applied to the live `Orders` state, and only then converted to protocol
+commands:
+
+```rust
+client.orders().move_order(order_uid, new_price)?;
+client.orders().cancel(order_uid)?;
+```
+
+The lower-level `Client::run`, `Client::run_with_dispatcher`, and
+`Client::run_with_dispatcher_state` APIs still exist for tests, protocol tools,
+and custom runtimes. They block the caller for the requested duration and should
+not be the regular desktop/UI application shape.
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
@@ -133,22 +155,14 @@ typed helpers append their Engine API/UI/domain commands to the send queues. The
 public guarantee is no local capacity cap: dense incoming streams do not drop
 queued user commands or Engine API requests.
 
-If the callback needs to read the just-updated dispatcher state, use
-`run_with_dispatcher_state`. The `state` argument is a read-only snapshot copied
-after the dispatcher applied the event:
-
-```rust
-client.run_with_dispatcher_state(Duration::from_secs(3600), &mut dispatcher, Box::new(|event, state| {
-    if let Event::Order(order_event) = event {
-        println!("orders now={}", state.orders().len());
-        let _ = order_event;
-    }
-}));
-```
+If a custom low-level runtime callback needs to read the just-updated dispatcher
+state, `Client::run_with_dispatcher_state` is still available as an advanced
+pump helper. It is deliberately not the recommended application API because it
+requires the caller to choose a finite run duration.
 
 `Client::run(duration, on_data)` is the low-level raw callback path. Use it only
 for protocol tools that intentionally bypass `EventDispatcher`; otherwise you are
-responsible for the recovery actions that `run_with_dispatcher` normally performs.
+responsible for the recovery actions that the active runtime normally performs.
 
 ## Packet Loss Test Hook
 
@@ -231,8 +245,8 @@ The snapshot also separates CPU-ish protocol work from wall-clock waits:
 `writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `reader_protocol_*`
 is the protocol recv path, and `active_dispatch_*` / `app_enqueue_*` measure the
 typed active-library worker path before user callbacks. In
-`run_with_dispatcher*`, `connect_and_init`, `run_init_sequence`, and the
-one-shot wait helpers, heavy domain parsing/state apply is worker-side work. It
+`MoonClient`, `connect_and_init`, `run_init_sequence`, and the one-shot wait
+helpers keep heavy domain parsing/state apply on the worker side. It
 is still measured because millisecond samples are performance red flags, but it
 does not block ACK/retry/send progress in the protocol recv loop. The
 `*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are coarse red flags for
@@ -358,9 +372,9 @@ Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
 MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
 serialized balance snapshot.
 
-Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
-needs custom progress UI between connection readiness and the one-time init
-requests.
+Use lower-level `Client` plus `run_init_sequence` directly only when an
+application deliberately implements its own custom runtime/progress UI between
+connection readiness and the one-time init requests.
 
 ## Trade Context
 
@@ -583,8 +597,8 @@ match client.sender().try_subscribe_orderbook("BTCUSDT") {
 
 `ClientSender` mirrors the fire-and-forget typed command wrappers for
 subscriptions, trade actions, UI commands, strategy commands, and balance
-refresh. Use it when another UI or worker thread needs to send commands while
-the owning thread is inside `run_with_dispatcher`:
+refresh. Use it in custom low-level runtimes when another UI or worker thread
+needs to send commands while the owning thread pumps the low-level client:
 
 ```rust
 let sender = client.sender();

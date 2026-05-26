@@ -1,16 +1,13 @@
-﻿//! High-level MoonProto client session API.
+//! High-level MoonProto client session API.
 //!
 //! [`Client`] owns one UDP session: transport handshake, reconnect, retry
 //! queues, slicing, pending Engine API responses, lifecycle events, and the
 //! active read-model work performed by [`crate::events::EventDispatcher`].
-//! Regular applications should create one `Client` plus one dispatcher per
-//! server and use [`connect_and_init`] followed by
-//! [`Client::run_with_dispatcher`].
+//! Regular applications should use [`MoonClient`], which owns the runtime thread
+//! and keeps the session alive until `stop()` or drop.
 //!
 //! This module also exposes low-level command queue primitives for protocol
-//! tools. Application code should prefer the typed helpers on `Client` and
-//! [`ClientSender`] because those helpers encode Delphi priority, retry, UKey,
-//! encryption, and reconnect-registry behavior.
+//! tools and custom runtimes.
 
 use crate::api_pending::ApiPending;
 use crate::commands::candles::{
@@ -40,6 +37,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod active_runtime;
 mod app_dispatch;
 mod bps;
 mod candles;
@@ -85,6 +83,7 @@ mod subscription_api;
 mod subscriptions;
 mod transport_state;
 
+pub use active_runtime::{MoonClient, MoonClientError, MoonOrders};
 pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;
 pub use candles::MergedCandles;
@@ -382,8 +381,8 @@ pub struct Client {
     /// не переотправляет: новая отправка разрешена только init/API слою.
     indexes_fetch_started_ms: i64,
 
-    /// Когда последний раз вызвали `trades_state.tick()` из main loop (в режиме
-    /// `run_with_dispatcher`). Throttle ~100ms — соответствует Delphi
+    /// Когда последний раз вызвали `trades_state.tick()` из active main loop.
+    /// Throttle ~100ms — соответствует Delphi
     /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets` периодичности.
     last_trades_tick_ms: i64,
 
@@ -447,7 +446,7 @@ pub struct Client {
     ///
     /// **Multi-Client** (DEVIATION #23): `EventDispatcher` должен быть привязан к
     /// этому handle через `EventDispatcher::set_server_time_delta_source(handle)`
-    /// или автоматически через `run_with_dispatcher`. Без
+    /// или автоматически через active runtime. Без
     /// привязки EventDispatcher падает обратно на global, что при multi-Client даёт
     /// off-by-50-1000ms timestamps в ордерах (последний Client перезаписывает
     /// delta всех остальных).
@@ -486,7 +485,8 @@ impl Client {
     ///
     /// Construction does not contact the server. The socket, handshake, and
     /// reconnect machinery start when the client loop runs through [`Self::run`],
-    /// [`Self::run_with_dispatcher`], or [`connect_and_init`].
+    /// [`Self::run_with_dispatcher`], [`connect_and_init`], or the high-level
+    /// [`MoonClient`] runtime.
     ///
     /// The returned client owns unbounded Delphi-style protocol queues. Clone
     /// [`Self::sender`] before entering a long-running loop when other UI or

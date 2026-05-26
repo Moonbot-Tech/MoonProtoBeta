@@ -45,10 +45,10 @@ recovery requests.
 ## Events
 
 ```rust
-use moonproto::{Event, EventDispatcher};
+use moonproto::Event;
 use moonproto::state::OrderBookEvent;
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+for event in client.drain_events() {
     if let Event::OrderBook(book_event) = event {
         match book_event {
             OrderBookEvent::Apply {
@@ -65,30 +65,30 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
             OrderBookEvent::RequestFullNeeded { .. } => {}
         }
     }
-}));
+}
 ```
 
-When using `run_with_dispatcher` or `run_with_dispatcher_state`, corrupted-cache
+When using `MoonClient`, corrupted-cache
 recovery is fully internal: the library requests a fresh full orderbook and does
 not surface a separate callback event for that request. The low-level
 `RequestFullNeeded` variant exists for manual `dispatch_into` / `OrderBooks`
 users that do not pass a `Client` to the dispatcher.
 
-The dispatcher applies each `Apply` event before invoking the callback. If the
-UI needs the current book, prefer `run_with_dispatcher_state` and read it from
-`state.order_books()`:
+The dispatcher applies each `Apply` event before the event is published. If the
+UI needs the current book, read it from the latest snapshot:
 
 ```rust
-use moonproto::{Event, EventDispatcher};
+use moonproto::Event;
 use moonproto::state::{OrderBookEvent, OrderBookKind};
 
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+for event in client.drain_events() {
     if let Event::OrderBook(OrderBookEvent::Apply { market_index, book_kind, .. }) = event {
-        let Some(kind) = OrderBookKind::from_u8(*book_kind) else { return; };
-        let Some(top) = state.order_books().top_of_book(*market_index, kind) else { return; };
+        let Some(state) = client.snapshot() else { continue; };
+        let Some(kind) = OrderBookKind::from_u8(book_kind) else { continue; };
+        let Some(top) = state.order_books().top_of_book(market_index, kind) else { continue; };
         println!("bid={:?} ask={:?}", top.bid, top.ask);
     }
-}));
+}
 ```
 
 ## Public Types
@@ -191,4 +191,4 @@ let packet = parse_order_book_packet(payload).expect("bad orderbook packet");
 let events = books.on_packet(packet, now_ms);
 ```
 
-Regular applications should prefer `Client::run_with_dispatcher`.
+Regular applications should prefer `MoonClient`.

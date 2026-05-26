@@ -2,8 +2,7 @@
 
 The trades stream carries exchange trades, market-maker orders, liquidation
 orders, and watcher fills. Packets are numbered with wrapping `u16` packet
-numbers. The library detects gaps and requests resend batches automatically when
-you run through `Client::run_with_dispatcher`.
+numbers. `MoonClient` detects gaps and requests resend batches automatically.
 
 ## Subscribe
 
@@ -56,10 +55,11 @@ use moonproto::state::{SeqRingCursor, TradesEvent};
 
 let mut cursor: Option<SeqRingCursor> = None;
 let mut rows = Vec::new();
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+for event in client.drain_events() {
     if let Event::Trade(trade_event) = event {
         match trade_event {
             TradesEvent::Applied { packet_num, .. } => {
+                let Some(state) = client.snapshot() else { continue; };
                 if let Some(readers) = state.market_history_readers("BTCUSDT") {
                     if let Some(reader) = readers.futures_trades {
                         let cursor = cursor.get_or_insert_with(|| reader.cursor_from_now());
@@ -77,7 +77,7 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
             TradesEvent::BucketClosed { .. } => {}
         }
     }
-}));
+}
 ```
 
 `TradesEvent::Applied` is a signal, not the trade payload carrier. Active Lib
@@ -89,14 +89,14 @@ their own `SeqRingCursor` when they need "only new rows".
 `GapDetected`, `ResendRequested`, `GapFilled`, `BucketClosed`, `Duplicate`, and
 resend-side `OutOfOrder` are diagnostic events. They are useful for
 logging/telemetry, but applications must not drive recovery from them:
-`Client::run_with_dispatcher` sends resend requests and maintains buckets
-automatically. `ResendRequested` means the library queued a resend request for
-the listed packet numbers. The dispatcher can still emit `Applied { .. }` for
+`MoonClient` sends resend requests and maintains buckets automatically.
+`ResendRequested` means the library queued a resend request for the listed
+packet numbers. The dispatcher can still emit `Applied { .. }` for
 duplicate/resend payloads when they carry usable stream data.
 
-Before an `Applied { .. }` event is emitted, `Client::run_with_dispatcher` also
-updates `MarketsState::trade_state(market)` for every known futures/spot trade
-row. This mirrors the bounded Delphi `ProcessTradesStream` tail: futures trades
+Before an `Applied { .. }` event is emitted, `MoonClient` also updates
+`MarketsState::trade_state(market)` for every known futures/spot trade row. This
+mirrors the bounded Delphi `ProcessTradesStream` tail: futures trades
 update `LastGotAllTrades` and the `SetLastTradePrices` fields, while spot trades
 only update `LastGotSpotTrades`.
 
@@ -593,25 +593,19 @@ markets, and keeps the worker as the single writer. This matches the Active Lib
 contract: `subscribe_all_trades` creates retained storage for all known markets;
 `subscribe_trades_for` creates it only for the requested subset.
 
-Read the default worker through the dispatcher:
+Read the default worker through the latest `MoonClient` snapshot:
 
 ```rust
-use moonproto::{Client, EventDispatcher};
-
-let mut dispatcher = EventDispatcher::new();
 client.subscribe_all_trades(false);
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
-    handle_event(event);
-}));
-
-let btc = dispatcher
-    .market_history_readers("BTCUSDT")
+let btc = client
+    .snapshot()
+    .and_then(|state| state.market_history_readers("BTCUSDT"))
     .expect("market storage was created by the trades subscription");
 ```
 
-For custom capacities, attach your own worker before the subscription becomes
-active:
+For custom capacities in a low-level custom runtime, attach your own worker
+before the subscription becomes active:
 
 ```rust
 use moonproto::{Client, EventDispatcher};
@@ -623,9 +617,8 @@ let mut dispatcher = EventDispatcher::new();
 dispatcher.set_market_history_handle(worker.handle());
 client.subscribe_all_trades(false);
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
-    handle_event(event);
-}));
+// Run your custom low-level runtime here. Regular applications should use
+// MoonClient instead of owning Client + EventDispatcher directly.
 
 let btc = worker.readers("BTCUSDT").expect("market storage was created by the trades subscription");
 ```
@@ -739,9 +732,9 @@ numbers up to three times with the source-matched delay formula:
 PathDelay = min(1800, max(300, RTT * (1.2 + retry * 0.7))) ms
 ```
 
-`Client::run_with_dispatcher` calls the trades recovery check after successfully
-parsed live/resend trades packets, under a 100 ms throttle, and sends the
-generated resend requests automatically.
+`MoonClient` calls the trades recovery check after successfully parsed
+live/resend trades packets, under a 100 ms throttle, and sends the generated
+resend requests automatically.
 
 Recovery is best-effort. Missing packet numbers are requested for up to three
 bucket retry cycles. If the bucket is still incomplete after the retry budget,

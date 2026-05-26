@@ -71,9 +71,9 @@ message derived from the event into your application queue.
 
 ## ServerTimeDelta Isolation
 
-`Client::run_with_dispatcher` and `run_with_dispatcher_state` automatically link
-the dispatcher to the matching client's `server_time_delta_handle`. That keeps
-order timestamps correct when two servers have different clock drift.
+`MoonClient` automatically links each runtime dispatcher to the matching
+client's `server_time_delta_handle`. That keeps order timestamps correct when
+two servers have different clock drift.
 
 For custom loops:
 

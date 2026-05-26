@@ -14,10 +14,11 @@ commands through `Client::ui_*` wrappers.
 use moonproto::Event;
 use moonproto::state::SettingsEvent;
 
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
+for event in client.drain_events() {
     if let Event::Settings(settings_event) = event {
         match settings_event {
             SettingsEvent::ClientSettingsUpdated => {
+                let Some(state) = client.snapshot() else { continue; };
                 if let Some(settings) = &state.settings().client_settings {
                     redraw_settings(settings);
                 }
@@ -28,7 +29,7 @@ client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, sta
             _ => {}
         }
     }
-}));
+}
 ```
 
 `SettingsState` stores the latest settings snapshot and small derived fields:

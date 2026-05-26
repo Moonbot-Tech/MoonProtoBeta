@@ -29,9 +29,9 @@ let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duratio
 let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
 ```
 
-The one-shot helpers keep pumping the UDP loop through short
-`run_with_dispatcher` ticks, validate `EngineResponse::success`, and parse the
-method-specific payload. They return `EngineRequestError`.
+The one-shot low-level helpers keep the UDP loop alive internally, validate
+`EngineResponse::success`, and parse the method-specific payload. They return
+`EngineRequestError`.
 Any other events produced during that wait are queued in
 `EventDispatcher::queued_events()`; call `take_queued_events()` after the helper
 when the application has live subscriptions and needs the notifications.
@@ -199,8 +199,8 @@ for the same asset row.
 
 ## Auto-Apply Through EventDispatcher
 
-When an `EngineResponse` arrives through `run_with_dispatcher`, these methods are
-applied to `dispatcher.markets()` automatically:
+When an `EngineResponse` arrives through the active runtime, these methods are
+applied to the markets read model automatically:
 
 - `GetMarketsList`;
 - `UpdateMarketsList`;

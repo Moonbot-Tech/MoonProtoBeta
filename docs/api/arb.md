@@ -18,7 +18,7 @@ Delphi client.
 use moonproto::commands::arb::ArbPayload;
 use moonproto::Event;
 
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+for event in client.drain_events() {
     if let Event::Arb { uid, payload } = event {
         match payload {
             ArbPayload::Price { blocks, .. } => {
@@ -29,7 +29,7 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
             }
         }
     }
-}));
+}
 ```
 
 ## Public Types
@@ -56,4 +56,3 @@ pub struct ArbIsolationEntry {
     pub flags: u8,
 }
 ```
-

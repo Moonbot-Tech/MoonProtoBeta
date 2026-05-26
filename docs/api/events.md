@@ -3,17 +3,16 @@
 `EventDispatcher` turns decoded MoonProto channel payloads into typed `Event`
 values and maintains read-only state models.
 
-Use it through `Client::run_with_dispatcher` unless you are writing a custom
-low-level loop.
+Regular applications receive these events from `MoonClient::drain_events`,
+`try_recv_event`, or `recv_event_timeout`. `EventDispatcher` remains public for
+custom low-level runtimes and tests.
 
 ## Recommended Use
 
 ```rust
-use moonproto::{Event, EventDispatcher};
+use moonproto::Event;
 
-let mut dispatcher = EventDispatcher::new();
-
-client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
+for event in client.drain_events() {
     match event {
         Event::Order(order_event) => println!("order: {order_event:?}"),
         Event::OrderBook(book_event) => println!("book: {book_event:?}"),
@@ -27,32 +26,25 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
         }
         _ => {}
     }
-}));
+}
 ```
 
-Use `Client::run_with_dispatcher_state` when the callback needs a read-only
-state snapshot after the event has been applied:
+Use `MoonClient::snapshot` when UI code needs the latest read-only state:
 
 ```rust
-client.run_with_dispatcher_state(duration, &mut dispatcher, Box::new(|event, state| {
-    if let Event::Order(order_event) = event {
-        println!("orders={}", state.orders().len());
-        let _ = order_event;
-    }
-}));
+if let Some(state) = client.snapshot() {
+    println!("orders={}", state.orders().len());
+}
 ```
 
-`run_with_dispatcher` and `run_with_dispatcher_state` block the caller for the
-requested duration while the MoonProto protocol loop runs on that caller thread.
-Decoded domain payloads are handed to an internal dispatcher worker, which owns
-active-library parsing/state apply and then queues public events. Slow callbacks
-delay return from the run call because the callback queue is drained before
-return, but callbacks and dispatcher-heavy work do not block ACK/retry/send
-progress inside the protocol loop. For `run_with_dispatcher_state`, building
-the state snapshot is worker-side work and can still be expensive on hot paths;
-use the plain event callback when the event already carries enough data.
+`MoonClient` owns the protocol loop and runs until explicit `stop()` or drop.
+Applications do not choose a protocol-loop duration. Decoded domain payloads are
+handed to an internal dispatcher worker, which owns active-library parsing/state
+apply and queues public events. UI code should update its own read model from
+events and render from that local copy; `snapshot()` is a convenient immutable
+read model, not a mutable state owner.
 
-`run_with_dispatcher_state` receives `EventDispatcherSnapshot`. It has the same
+`MoonClient::snapshot` returns `EventDispatcherSnapshot`. It has the same
 read-only getters used by UI code (`orders()`, `order_books()`, `trades()`,
 `balances()`, `strats()`, `settings()`, `markets()`,
 `strategy_snapshot_vec()`), but it is not the live dispatcher and cannot mutate
@@ -67,7 +59,7 @@ explicit all-trades subscription intent from `InitConfig::subscribe_trades` or
 `Client::subscribe_all_trades`; otherwise they are treated as unexpected and
 dropped.
 
-`run_with_dispatcher` uses the active action path, which also:
+`MoonClient` uses the active action path, which also:
 
 - links the dispatcher to this client's `ServerTimeDelta`;
 - resets per-session trades/orderbook state after server-token change;
@@ -186,8 +178,8 @@ Use `queued_events()` for a borrowed view, `queued_event_count()` and
 `queued_event_max_count()` for diagnostics, `take_queued_events()` to drain, and
 `clear_queued_events()` to discard. The queue has no fixed capacity and no drop
 policy; if it grows, diagnostics report that fact instead of losing events.
-`Client::run_with_dispatcher` does not use this queue because it delivers events
-directly to its callback.
+`MoonClient` publishes runtime events through its event receiver. Low-level
+custom runtimes may also deliver events directly instead of using this queue.
 
 ## Channel Behavior
 
@@ -217,7 +209,7 @@ dispatcher.dispatch_into(cmd, payload, now_ms, &mut out);
 If you call these directly, you do not get `Client`-backed auto-actions. In
 particular, direct `EventDispatcher::dispatch` / `dispatch_into` calls do not
 know `Client::domain_ready` or the subscription registry. In normal
-applications, prefer `Client::run_with_dispatcher`.
+applications, prefer `MoonClient`.
 
 For historical or truncated settings payloads, seed the dispatcher's local
 settings fallback before dispatching:
@@ -234,7 +226,7 @@ fallback automatically.
 
 `tick_trades` and `tick_trades_with_events` are low-level hooks for custom loops.
 Call them after a valid `TradesStream` / `TradesResendResponse` packet, using
-the packet timestamp and current RTT. `Client::run_with_dispatcher` does this
-tail-check automatically. Gap lifecycle events are diagnostics for
+the packet timestamp and current RTT. `MoonClient` and the low-level active
+runtime path do this tail-check automatically. Gap lifecycle events are diagnostics for
 logging/telemetry; the library performs recovery without requiring the
 application to react to them.

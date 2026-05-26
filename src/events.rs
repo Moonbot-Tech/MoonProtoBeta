@@ -77,7 +77,7 @@ fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
 /// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
 /// Applications should not mutate protocol state directly; state is maintained
 /// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
-/// outbox path used by `Client::run_with_dispatcher`.
+/// outbox path used by `MoonClient` and low-level active runtimes.
 pub struct EventDispatcher {
     pub(crate) orders: Orders,
     pub(crate) order_books: OrderBooks,
@@ -119,8 +119,8 @@ pub struct EventDispatcher {
     /// потребителей без линковки. См. `DEVIATION.md #23`.
     ///
     /// Привязка: либо явный вызов [`Self::set_server_time_delta_source`] с
-    /// `client.server_time_delta_handle()`, либо автоматически через
-    /// `Client::run_with_dispatcher`.
+    /// `client.server_time_delta_handle()`, либо автоматически через active
+    /// runtime path.
     server_time_delta_source: Option<Arc<AtomicU64>>,
     /// Optional override for fresh application-owned strategies. Without an
     /// override the dispatcher answers from `strats.snapshot_vec()`.
@@ -132,10 +132,9 @@ pub struct EventDispatcher {
     pending_strategy_snapshot_request_uid: Option<u64>,
     /// Events produced while a one-shot helper is pumping the client loop.
     ///
-    /// Long-running `Client::run_with_dispatcher` delivers events directly to its
-    /// callback. One-shot helpers (`run_until_response`, `request_*`) have no
-    /// callback argument, so they store produced events here for the application
-    /// to drain after the helper returns.
+    /// One-shot helpers (`run_until_response`, `request_*`) have no callback
+    /// argument, so they store produced events here for the application to drain
+    /// after the helper returns.
     queued_events: AppQueue<Event>,
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
@@ -312,10 +311,11 @@ impl EventDispatcher {
     /// Events produced by one-shot helpers and not yet drained by the
     /// application.
     ///
-    /// `Client::run_with_dispatcher` delivers events to its callback immediately
-    /// and does not use this queue. The queue is only for helper-driven waits
-    /// such as `Client::run_until_response`, `request_client_settings`,
-    /// `request_order_snapshot`, and typed `request_*` Engine API helpers.
+    /// Low-level custom runtimes may deliver events to their callback
+    /// immediately and skip this queue. The queue is only for helper-driven
+    /// waits such as `Client::run_until_response`,
+    /// `request_client_settings`, `request_order_snapshot`, and typed
+    /// `request_*` Engine API helpers.
     pub fn queued_events(&self) -> &[Event] {
         self.queued_events.as_slice()
     }
@@ -354,13 +354,13 @@ impl EventDispatcher {
     ///
     /// It returns serialized `TradesResend` Engine API requests for missing
     /// packet numbers and closes expired gap buckets. Applications do not need
-    /// to call this when using [`crate::client::Client::run_with_dispatcher`],
-    /// which calls the check after successfully parsed trades packets.
+    /// to call this when using [`crate::client::MoonClient`] or the low-level
+    /// active runtime path; they call the check after successfully parsed trades
+    /// packets.
     ///
-    /// Custom loops that bypass `run_with_dispatcher` should call it after a
-    /// valid `TradesStream`/`TradesResendResponse` packet, with the current RTT
-    /// and monotonic timestamp, then send each returned request through the
-    /// client.
+    /// Custom loops that bypass the active runtime should call it after a valid
+    /// `TradesStream`/`TradesResendResponse` packet, with the current RTT and
+    /// monotonic timestamp, then send each returned request through the client.
     pub fn tick_trades(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
         self.trades.tick(rtt_ms, now_ms)
     }
@@ -378,9 +378,9 @@ impl EventDispatcher {
     /// Attach this dispatcher to one client's `ServerTimeDelta` handle.
     ///
     /// After this, order-channel dispatch uses that client's time delta instead
-    /// of the process-global raw-dispatch fallback. Multi-server applications
-    /// should attach one dispatcher to the matching client. The usual
-    /// `Client::run_with_dispatcher` path links this automatically on first use.
+    /// of the process-global raw-dispatch fallback. Custom multi-server
+    /// runtimes should attach one dispatcher to the matching client. The
+    /// high-level [`crate::client::MoonClient`] path handles this internally.
     ///
     /// ```ignore
     /// let client = Client::new(cfg);
@@ -421,10 +421,10 @@ impl EventDispatcher {
     ///
     /// This method is the low-level parser path. It does not have a `Client`
     /// reference, so it cannot perform client-backed recovery actions.
-    /// Normal applications should use `Client::run_with_dispatcher`, whose
-    /// active dispatch path gates stale indexed streams, sends orderbook full
-    /// requests when recovery needs them, and requests missing order statuses
-    /// after a fresh order snapshot.
+    /// Normal applications should use [`crate::client::MoonClient`]. Custom
+    /// low-level active runtimes must provide the same active actions: gate
+    /// stale indexed streams, send orderbook full requests when recovery needs
+    /// them, and request missing order statuses after a fresh order snapshot.
     /// If a raw consumer intentionally uses this method, it should call
     /// [`Self::missing_order_status_requests_after_snapshot`] after
     /// `OrderEvent::Snapshot` and send those requests itself.

@@ -1,9 +1,20 @@
 # Trade Actions
 
-`Client` provides high-level wrappers for outgoing order commands. Use these
-instead of manually building `commands::trade::*` payloads: the wrappers set the
-right server route, send priority, retry policy, and pending-command
-deduplication.
+`MoonClient` provides the recommended order-intent API for applications. Use it
+instead of manually building `commands::trade::*` payloads: the runtime owner
+applies the intent to live `Orders`, then sets the right server route, send
+priority, retry policy, and pending-command deduplication.
+
+```rust
+client.orders().move_order(order_uid, new_price)?;
+client.orders().cancel(order_uid)?;
+client.orders().update_stops(order_uid, stops)?;
+client.orders().set_immune(items)?;
+```
+
+The lower-level `Client` wrappers remain available for custom runtimes and
+tests. They expose `&mut Orders` because the caller is then acting as the
+runtime owner.
 
 Trade wrappers are typed domain API and are gated by Init. Before
 `run_init_sequence` / `connect_and_init` opens `domain_ready`, market-level
@@ -210,39 +221,30 @@ client.update_order_stops(dispatcher.orders_mut(), order_uid, &stops);
 client.update_vstop(dispatcher.orders_mut(), order_uid, true, false, 50000.0, 12.0);
 ```
 
-## Sending While The Client Is Running
+## Sending From UI Code
 
-`Client` trade wrappers take `&self`, but the long-running pump methods take
-`&mut self` for the duration of the run tick. If a terminal sends commands from
-another UI thread while `run_with_dispatcher` is active, clone
-`client.sender()` before entering the run loop.
-
-`ClientSender` mirrors the fire-and-forget high-level trade wrappers, so UI code
-does not need to know send priorities, retry counts, encryption flags, or
-deduplication details:
+UI code should keep immutable order snapshots for rendering and send order
+intents back to `MoonClient`:
 
 ```rust
-let sender = client.sender();
+if let Some(snapshot) = client.snapshot() {
+    let order = snapshot.orders().get(order_uid);
+    let _ = order; // display data only
+}
 
-std::thread::spawn(move || {
-    sender.ui_mm_subscribe(true);
-    sender.balance_request_refresh();
-});
+client.orders().move_order(order_uid, new_price)?;
 ```
 
-`ClientSender::move_all_sells` and `ClientSender::move_all_buys` take the same
-`&Orders` argument as `Client`; replace/cancel/panic/stop/VStop/immune helpers
-take the same `&mut Orders` argument as `Client`. Boolean helpers return
-`false` and queue nothing when the Delphi active-client gate does not find a
-matching local order or when a send-if-changed/replace-in-flight check
-suppresses the packet. They also return `false` before Init, without mutating
-`Orders`. Market-level `turn_panic_sell` returns the number of queued per-order
-commands, or `0` before Init; `switch_panic_sell_by_market` returns the
-resulting button state after Init and `false` before Init.
-Because `Orders` is the local Delphi-equivalent order-state owner, call these
-state-aware helpers on the code path that owns mutable dispatcher state. If UI
-code runs on another thread, marshal the intent to that owner instead of
-sending raw order-action packets.
+Do not mutate a snapshot/copy of `Orders` to send a command. `Orders` is the
+Delphi-equivalent live order-worker state and belongs to the Active Lib
+runtime. The runtime checks the current live order, applies local flags such as
+replace-in-flight, pending cancel, previous Stops/VStop, panic, and immune, then
+queues a protocol command only when the live state allows it.
+
+`ClientSender` remains a lower-level thread-safe send handle for custom
+runtimes and stateless/fire-and-forget commands. Its stateful order helpers
+still require `&mut Orders`; regular UI integrations should prefer
+`MoonClient::orders()` instead.
 
 One-shot helpers that must wait for an applied state change, such as
 `request_order_snapshot`, still require mutable access to `Client` and an
