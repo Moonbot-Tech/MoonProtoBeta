@@ -269,7 +269,7 @@ impl MarketHistoryHandle {
     }
 
     /// Test/tool barrier: all previously sent batches are processed before this
-    /// call returns, then futures temp rows are drained and evicted rows compacted.
+    /// call returns, then evicted futures rows are compacted into mini-candles.
     pub fn flush(&self, now_time: f64) -> bool {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         if self
