@@ -8732,3 +8732,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `TradesState` event type split
+
+Done:
+
+- Moved TradesStream public/diagnostic event types from `state/trades.rs` into
+  `state/trades/types.rs`: `TradesEvent` and `TradesPacketEffect`.
+- Kept gap bucket creation, packet tracking, resend tick, and resend response
+  iterator in `state/trades.rs` for focused Delphi recovery сверка.
+- This is a readability/publication split only. No gap detection, retry timing,
+  bucket close behavior, resend payload, event content, or public API path
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
