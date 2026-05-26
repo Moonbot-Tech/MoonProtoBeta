@@ -7711,3 +7711,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `TEngineResponse` parser split
+
+Done:
+
+- Moved `EngineResponse` and `parse_engine_response` into
+  `commands/engine_api/response.rs`.
+- Kept public paths unchanged through `commands::engine_api::*` re-exports.
+- Kept the existing parent tests covering header skip, unknown method ordinals,
+  deflate payloads, and Delphi zero-tail scalar reads.
+- This is a readability/publication split only. No response parser behavior,
+  soft-tail behavior, decompression behavior, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
