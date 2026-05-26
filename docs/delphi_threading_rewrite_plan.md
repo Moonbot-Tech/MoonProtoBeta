@@ -7351,3 +7351,27 @@ Verification:
   `FIRETEST_QUICK_PASS after 23.23s`, `ParseFailed=0`, err_emu actual drop
   `9.73%`, retained futures rows present, derived snapshot present,
   `reader max=679us`, `writer_cpu max=155us`.
+
+### 2026-05-26 - remove client-side TStratSnapshotRequest API
+
+Done:
+
+- Closed `хуйня.md §X.187`: Delphi server drops `TStratSnapshotRequest` when it
+  receives it from a client (`клиент не должен слать это серверу`).
+- Removed public `Client::strat_snapshot_request` and
+  `ClientSender::strat_snapshot_request`.
+- Kept the request builder only as `cfg(test)` crate-internal helper for
+  server→client unit-test payloads. Normal Active Lib flow remains unchanged:
+  server sends the request, dispatcher answers with `TStratSnapshot`.
+- Updated strategy API docs to state this direction explicitly.
+
+Verification:
+
+- `cargo test parse_snapshot_request --lib --quiet` OK.
+- `cargo test snapshot_requested --lib --quiet` OK: 4 passed.
+- `cargo test --lib --quiet` OK: 767 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.18s`, `ParseFailed=0`, err_emu actual drop
+  `8.01%`, retained futures rows present, derived snapshot present,
+  `reader max=586us`, `writer_cpu max=144us`.

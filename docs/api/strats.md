@@ -309,10 +309,10 @@ client.strat_sell_price_update(strategy_id, sell_price);
 client.strat_delete(strategy_id, folder_path);
 ```
 
-`strat_snapshot_request()` exists only as an explicit protocol/testing tool.
-Delphi server ignores `TStratSnapshotRequest` received from a client; normal
-active-library code should not call it. The real flows are: post-init sends the
-current local strategy list as `TStratSnapshot`, and later the server may send
+Do not send `TStratSnapshotRequest` from client code. It is a server-to-client
+command in Delphi, and the Delphi server explicitly ignores it when received
+from a client. The real flows are: post-init sends the current local strategy
+list as `TStratSnapshot`, and later the server may send
 `TStratSnapshotRequest`, which the dispatcher answers automatically.
 
 `strat_sell_price_update` is the Delphi client-to-server command. The server

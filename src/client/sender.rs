@@ -1231,16 +1231,6 @@ impl ClientSender {
         }
     }
 
-    /// Send `TStratSnapshotRequest`.
-    ///
-    /// Protocol/testing tool only: Delphi server ignores this command when it
-    /// is received from a client. Normal active-library flow answers the server
-    /// request through `EventDispatcher`.
-    pub fn strat_snapshot_request(&self) {
-        let raw = crate::commands::strat::build_snapshot_request(rand::random());
-        self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
-    }
-
     /// Send `TStratSchemaRequest`.
     pub fn strat_schema_request(&self) {
         let raw = crate::commands::strat::build_schema_request(rand::random());

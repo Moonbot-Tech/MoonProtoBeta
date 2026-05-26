@@ -320,7 +320,7 @@ fn read_checked_items(payload: &[u8], mut pos: usize) -> Option<(Vec<StratChecke
 }
 
 // ============================================================================
-//  Builders (C→S)
+//  Builders
 // ============================================================================
 
 fn write_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
@@ -329,8 +329,12 @@ fn write_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.extend_from_slice(&uid.to_le_bytes());
 }
 
-/// `TStratSnapshotRequest` (CmdId=1).
-pub fn build_snapshot_request(uid: u64) -> Vec<u8> {
+/// `TStratSnapshotRequest` (CmdId=1, server → client).
+///
+/// This builder is crate-internal on purpose: Delphi server ignores the same
+/// command when it is received from a client.
+#[cfg(test)]
+pub(crate) fn build_snapshot_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_SNAPSHOT_REQUEST, uid);
     out
