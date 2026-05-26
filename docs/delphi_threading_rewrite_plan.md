@@ -7867,3 +7867,23 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.59s`,
   `ParseFailed=0`, `rx_actual_drop=10.75%`, streams/API/market health OK,
   reader max `717us`, writer CPU max `124us`, GetMarketsList apply `2314us`.
+
+### 2026-05-26 - `MPC_UI` builder split
+
+Done:
+
+- Moved outbound `MPC_UI` builders into `commands/ui/builders.rs`.
+- Kept public builder paths unchanged through `commands::ui::*` re-exports.
+- Kept UI types, parser, soft-tail client-settings fallback, and tests in the
+  parent UI module for focused parser сверка.
+- Kept `write_header` and `copy_blob_prefix` in the parent module because tests
+  and packed-record fallback already use them directly.
+- This is a readability/publication split only. No UI command ID, version byte,
+  field order, packed record layout, `ServerUpdateSent` caller behavior, or
+  public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
