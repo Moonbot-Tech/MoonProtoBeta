@@ -8265,3 +8265,28 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Orders` apply helper split
+
+Done:
+
+- Moved low-level order apply helpers into `state/orders/apply_helpers.rs`:
+  epoch/phase guard, full `TOrderStatus` field copy, `SelLDone` done flags,
+  and server trace-line application.
+- Kept the main `Orders::apply_at` match in `orders.rs` so the Delphi
+  `ProcessCommandOrder` skeleton remains readable in one place.
+- Kept behavior unchanged: same epoch stale window, same phase rollback check,
+  same `OS_None` pending visual-order handling, same local price preservation,
+  same done-flag mutation, and same trace-line initial/temp/finish handling.
+- This is a readability/publication split only. No order apply, trace,
+  terminal status, epoch, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.80s`,
+  `ParseFailed=0`, `rx_actual_drop=9.73%`, init/markets/indexes/tags/update,
+  trades/orderbook/order path health OK, retained futures trades `2`, reader
+  max `729us`, writer CPU max `133us`, GetMarketsList apply `2319us`.
