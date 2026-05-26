@@ -48,6 +48,7 @@ mod config;
 mod constants;
 mod diagnostic_api;
 mod diagnostics;
+mod domain_balance;
 mod domain_commands;
 mod domain_send;
 mod engine_api;

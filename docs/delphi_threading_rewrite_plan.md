@@ -8389,3 +8389,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` balance command split
+
+Done:
+
+- Moved Balance-channel high-level wrappers into `client/domain_balance.rs`:
+  `balance_request_refresh` and `request_balance_snapshot`.
+- Kept the helpers as inherent `Client` methods with the same names and
+  signatures, so callers and API docs remain unchanged.
+- This is a readability/publication split only. No `Command::Balance` payload,
+  retry/priority/encryption settings, dispatcher pump loop, timeout behavior,
+  or balance snapshot detection changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
