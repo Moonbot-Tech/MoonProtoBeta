@@ -7991,3 +7991,23 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=10.32%`, streams/API/market health OK,
   retained futures trades `42`, reader max `704us`, writer CPU max `874us`,
   GetMarketsList apply `2447us`.
+
+### 2026-05-26 - `EventDispatcher` public type split
+
+Done:
+
+- Moved public event/read-model types into `events/types.rs`:
+  `StrategySnapshotReply`, `MissingOrderStatusRequest`, watcher fill events,
+  and `Event`.
+- Kept dispatcher state, active dispatch, and channel dispatch logic in
+  `events.rs` for focused Delphi/protocol сверка.
+- Kept public paths unchanged through `events::*` re-exports.
+- This is a readability/publication split only. No event variant shape,
+  strategy snapshot normalization, watcher fill data, dispatch order, or public
+  API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
