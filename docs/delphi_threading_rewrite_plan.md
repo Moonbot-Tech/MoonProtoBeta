@@ -8128,3 +8128,22 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=10.78%`, streams/API/market health OK,
   retained futures trades `5`, reader max `756us`, writer CPU max `137us`,
   GetMarketsList apply `2450us`.
+
+### 2026-05-26 - `EventDispatcherSnapshot` split
+
+Done:
+
+- Moved `EventDispatcherSnapshot` and `EventDispatcher::snapshot()` into
+  `events/snapshot.rs`.
+- Kept public path unchanged through `events::EventDispatcherSnapshot` re-export.
+- Kept snapshot behavior unchanged: same cloned read models, same
+  `local_strategy_epoch`, same strategy snapshot helper methods, and same
+  exclusion of queued events/callback hooks from the read-only snapshot.
+- This is a readability/publication split only. No dispatch behavior, callback
+  queue behavior, read-model shape, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
