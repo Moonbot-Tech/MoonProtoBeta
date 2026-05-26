@@ -176,7 +176,3 @@ impl BalancesState {
 }
 ```
 
-Low-level balance packet parsers exist under `moonproto::commands` for custom
-diagnostics and protocol tooling. Ordinary applications should use the Active
-Lib state/events above.
-

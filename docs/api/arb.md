@@ -57,7 +57,3 @@ pub struct ArbIsolationEntry {
 }
 ```
 
-Low-level parsers are available under `moonproto::commands::arb` for protocol
-diagnostics and custom tooling. Normal applications should consume the typed
-`Event::Arb` values from the dispatcher.
-

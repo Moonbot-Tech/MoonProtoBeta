@@ -12,11 +12,8 @@ When using `Client::run_with_dispatcher`, relevant responses are applied to
 
 The active dispatcher applies `GetMarketsList`, `UpdateMarketsList`, and
 `CheckBinanceTags` directly while reading the payload, matching Delphi's
-in-loop state updates. The pure parse helpers remain available for raw callers
-and tests.
-
-Low-level market response builders use Delphi string serialization: `Word`
-UTF-8 byte length followed by exactly that declared number of bytes.
+in-loop state updates. Applications should read the maintained state and events
+from `EventDispatcher`, not parse market payloads themselves.
 
 `CheckBinanceTags` follows the Delphi client: the latest successful response is
 authoritative for tags. Known markets present in the response receive the new
@@ -341,31 +338,3 @@ TokenTags::TRAD_FI;
 ```
 
 Use `contains`, `is_empty`, `bits`, and `from_bits` for bitset work.
-
-## Low-Level Parsing
-
-```rust
-use moonproto::commands::market::{
-    parse_markets_indexes_response, parse_markets_list_response,
-    parse_markets_prices_response, parse_token_tags_response,
-};
-
-let list = parse_markets_list_response(&resp.data, 2).expect("bad markets list");
-```
-
-`EventDispatcher` currently uses protocol version `2` for `GetMarketsList`
-responses, matching the live server format with `futures_type`.
-
-Low-level market parsers read collection counts like Delphi `resp.ReadInt`:
-they do not reject a packet only because `count * estimated_item_size` is larger
-than the remaining bytes. Allocation is still bounded by the remaining payload;
-malformed string fields fail at the concrete `ReadBuffer` string read. Fixed
-Engine API scalar fields (`ReadInt`, `ReadWord`, `ReadDouble`, `ReadBool`,
-`ReadByte`, `ReadInt64`) follow Delphi `FStream.Read` semantics: available bytes
-are consumed and missing tail bytes are treated as zero in Rust's deterministic
-safe representation.
-
-`EngineStreamReader::read_count()` reads only the signed Delphi count and
-returns it as `usize` when non-negative. Code that needs preallocation should
-call `EngineStreamReader::bounded_count_capacity(count, estimated_item_size)`;
-that helper affects capacity only and must not be used as a parse gate.
