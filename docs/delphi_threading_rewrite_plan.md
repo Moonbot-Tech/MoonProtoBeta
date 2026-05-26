@@ -8370,3 +8370,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` domain send helper split
+
+Done:
+
+- Moved shared typed-send plumbing from `client/domain_commands.rs` into
+  `client/domain_send.rs`: generic domain send, keyed domain send, order-channel
+  send, keyed order-channel send, local cancel request send, and panic-sell send.
+- Kept the public domain command wrappers in `domain_commands.rs`; they still
+  build the same Delphi command payloads and call the same helper names.
+- This is a readability/publication split only. No `Command`, priority,
+  encryption flag, retry count, UniqueKey, local order mutation, or reconnect
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
