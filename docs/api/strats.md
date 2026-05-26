@@ -320,27 +320,27 @@ list as `TStratSnapshot`, and later the server may send
 applies it to its local strategy if the strategy exists; the active client does
 not treat the same command as a server-to-client state update.
 
-Use `MoonClient`/runtime command handles for regular UI integration. In a
-custom low-level runtime, `ClientSender` is the fire-and-forget strategy command
-handle:
+Use `MoonClient` for regular UI integration:
 
 ```rust
-let sender = client.sender();
-std::thread::spawn(move || {
-    sender.strat_sell_price_update(strategy_id, sell_price);
-});
+client.strat_sell_price_update(strategy_id, sell_price)?;
+client.set_strategy_checked(strategy_id, true)?;
+client.send_strategy_checked_delta()?;
 ```
 
-For normal active-library flow, set the local list before init and let the
-dispatcher answer server snapshot requests:
+For normal active-library flow, pass the local list before init and let the
+runtime answer server snapshot requests:
 
 ```rust
-use moonproto::commands::strategy_serializer::StrategySnapshot;
+use moonproto::{InitConfig, InitialStrategies};
 
-let strategies: Vec<StrategySnapshot> = load_current_strategies();
-dispatcher.set_local_strategy_epoch(load_local_strategy_epoch());
-dispatcher.set_local_strategies(&strategies);
-connect_and_init(&mut client, &mut dispatcher, connect_cfg)?;
+let init = InitConfig {
+    initial_strategies: Some(InitialStrategies::new(
+        load_local_strategy_epoch(),
+        load_current_strategies(),
+    )),
+    ..Default::default()
+};
 ```
 
 Checked-state sends should also go through the active-library state. This

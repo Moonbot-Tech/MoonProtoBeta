@@ -84,18 +84,15 @@ dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
 Without this link, low-level `dispatch_into` falls back to a process-global
 value used only by raw custom loops.
 
-## Thread-Safe UI Subscriptions
+## UI Subscriptions
 
-Clone a typed sender for UI threads:
+Keep one `MoonClient` per server connection and send intents to the matching
+handle:
 
 ```rust
-let sender = session.client.sender();
-
-ui_thread.spawn(move || {
-    sender.subscribe_orderbook("BTCUSDT");
-    sender.subscribe_all_trades(false);
-    sender.balance_request_refresh();
-});
+session.client.subscribe_orderbook("BTCUSDT")?;
+session.client.subscribe_all_trades(false)?;
+session.client.refresh_balances()?;
 ```
 
 These subscriptions are per-client. Before Init, subscribe calls update only

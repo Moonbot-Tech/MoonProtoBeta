@@ -76,7 +76,7 @@ impl StrategySnapshotReply {
 /// Follow-up `TOrderStatusRequest` target produced after a `TAllStatuses`
 /// snapshot did not mention a locally tracked Delphi `WCache` worker.
 ///
-/// Active `Client::run_with_dispatcher*` sends these automatically. Raw
+/// Active `MoonClient` / custom active runtimes send these automatically. Raw
 /// `EventDispatcher::dispatch_into` users can call
 /// [`EventDispatcher::missing_order_status_requests_after_snapshot`] after
 /// `OrderEvent::Snapshot` and send the returned requests through

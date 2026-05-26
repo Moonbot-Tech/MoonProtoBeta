@@ -90,17 +90,12 @@ dispatcher.set_strategy_checked(strategy_id, true);
 dispatcher.ui_strat_start_stop_v2(&client, true);
 ```
 
-When the UI sends commands from another thread while the client loop is running,
-clone `client.sender()` and call the same fire-and-forget UI wrappers on
-`ClientSender`:
+Regular UI code sends commands through `MoonClient`:
 
 ```rust
-let sender = client.sender();
-std::thread::spawn(move || {
-    sender.ui_mm_subscribe(true);
-    sender.ui_update_version("", true);
-    sender.ui_switch_dex("Main");
-});
+client.ui_mm_subscribe(true)?;
+client.ui_update_version("", true)?;
+client.ui_switch_dex("Main")?;
 ```
 
 `ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in

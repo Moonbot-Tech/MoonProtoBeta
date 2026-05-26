@@ -323,4 +323,4 @@ boxed payloads (`Box<OrderStatus>` / `Box<OrderReplaceResponse>`) because those
 records are much larger than the other variants. Deref access works normally in
 matches, and `Orders::apply` consumes the enum directly.
 
-Regular applications should use `EventDispatcher`.
+Regular applications should read orders through `MoonClient::snapshot()`.

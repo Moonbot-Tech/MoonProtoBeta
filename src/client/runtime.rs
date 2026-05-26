@@ -93,8 +93,11 @@ impl Client {
         }
     }
 
-    /// Run the client protocol loop for `duration`.
-    /// Matches TMoonProtoUDPClient.Execute.
+    /// Low-level finite protocol pump for tests and custom protocol tools.
+    ///
+    /// Regular applications should use [`MoonClient`](crate::MoonClient): it
+    /// owns the runtime thread and has no user-selected loop duration.
+    #[doc(hidden)]
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
         // Low-level raw API для потребителей которым НЕ нужны active-library
         // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).

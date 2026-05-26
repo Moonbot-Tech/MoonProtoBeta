@@ -86,7 +86,7 @@ impl Client {
     /// This is the one-shot counterpart to [`Self::send_api_request_async`].
     /// It is the preferred single-threaded API when the caller wants a direct
     /// request/response operation: it registers the pending UID, sends the
-    /// request, pumps [`Self::run_with_dispatcher`] in short ticks, and removes
+    /// request, pumps the low-level active worker in short ticks, and removes
     /// the pending slot if the caller's timeout expires.
     pub fn request_engine_response(
         &mut self,
@@ -524,8 +524,8 @@ impl Client {
     ///
     /// This is the one-shot counterpart to
     /// [`Self::api_request_candles_data_async`]. It registers the chunked
-    /// aggregator, sends `emk_RequestCandlesData`, pumps
-    /// [`Self::run_with_dispatcher`] in short ticks, and removes the pending
+    /// aggregator, sends `emk_RequestCandlesData`, pumps the low-level active
+    /// worker in short ticks, and removes the pending
     /// candles slot if the caller's timeout expires before the final chunk.
     pub fn request_candles_data(
         &mut self,

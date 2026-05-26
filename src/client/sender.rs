@@ -14,6 +14,7 @@ mod ui;
 /// no-local-cap behavior of `SendCmdInt`. Queueing can still be rejected if
 /// the owning `Client` is gone, or if the caller tries to bypass the Delphi
 /// `InitDone`/domain gate before the one-time init sequence completes.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
     /// The owning `Client` was dropped or the main loop exited, so this sender
@@ -38,8 +39,10 @@ impl std::error::Error for SubscribeError {}
 
 /// Thread-safe handle for UI and worker threads.
 ///
-/// Obtain it with [`Client::sender`], clone it freely, and send work while the
-/// owning `Client` is running on another thread. Subscription helpers update the
+/// `MoonClient` is the normal application handle. Obtain `ClientSender` with
+/// [`Client::sender`] only for custom low-level runtimes, clone it freely, and
+/// send work while the owning `Client` is running on another thread.
+/// Subscription helpers update the
 /// active-library registry. Raw command helpers append already-serialized
 /// command payloads directly into the Delphi-style send queues used by `Client`
 /// wrappers. The sender also mirrors fire-and-forget trade, UI, strategy, and
@@ -53,12 +56,12 @@ impl std::error::Error for SubscribeError {}
 /// thread::spawn(move || {
 ///     sender.subscribe_orderbook("DOGEUSDT");
 /// });
-/// // Main thread:
-/// client.run_with_dispatcher(...);
+/// // Main thread owns a custom low-level active pump.
 /// ```
 ///
 /// Fire-and-forget methods log if the client is gone. `try_*` methods return
 /// [`SubscribeError`] when the caller needs explicit feedback.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct ClientSender {
     pub(crate) shared: Arc<ClientSenderShared>,

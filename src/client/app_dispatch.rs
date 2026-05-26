@@ -9,9 +9,9 @@ use std::time::Instant;
 ///
 /// This callback receives decoded MoonProto command payloads after transport
 /// decrypt/decompress/group handling, but before `EventDispatcher` state
-/// application. Regular applications should use [`Client::run_with_dispatcher`]
-/// instead. The callback runs from the application callback queue, not inside
-/// the protocol writer tick.
+/// application. Regular applications should use [`crate::MoonClient`] instead.
+/// The callback runs from the application callback queue, not inside the
+/// protocol writer tick.
 pub type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
 pub(crate) type RawAppEvent = (Command, Vec<u8>);
 pub(crate) type StateAppEvent = (
@@ -38,7 +38,7 @@ pub(crate) enum DispatcherWorkItem {
     },
 }
 
-/// Callback that receives typed events from [`Client::run_with_dispatcher`].
+/// Callback that receives typed events from a low-level active-library pump.
 ///
 /// The callback runs from the application callback queue after dispatcher state
 /// has been updated. Blocking this callback does not block protocol ACK/retry
@@ -47,8 +47,8 @@ pub type EventFn = Box<dyn FnMut(&crate::events::Event) + Send>;
 
 /// Callback that receives an event plus the updated read-only dispatcher state.
 ///
-/// Use this with [`Client::run_with_dispatcher_state`] when the event only
-/// carries an id and the UI immediately needs the applied read model.
+/// Low-level callback variant for custom runtimes that need the applied read
+/// model together with every event.
 pub type EventWithStateFn =
     Box<dyn FnMut(&crate::events::Event, &crate::events::EventDispatcherSnapshot) + Send>;
 
@@ -57,7 +57,7 @@ pub type EventWithStateFn =
 ///
 /// * `Callback` — raw payload callback через `OnDataFn` (используется `Client::run`).
 /// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
-///   `EventDispatcher` (используется `Client::run_with_dispatcher`).
+///   `EventDispatcher` (используется low-level active pump).
 ///
 /// Этот enum позволяет одному delivery pipeline (`ProtocolCore` drain +
 /// `client_new_data_decoded`) обслуживать оба сценария без
@@ -98,7 +98,7 @@ impl<'a> DispatchSink<'a> {
 /// `dispatcher.dispatch_into(...)`). Production delivery goes through app
 /// queue.
 ///
-/// `Dispatcher` — active-library path для `Client::run_with_dispatcher`. Liба
+/// `Dispatcher` — active-library path для low-level finite pump. Liба
 /// сама пропускает data-пакеты через `EventDispatcher::dispatch_into_active_actions`,
 /// делает auto-actions (RequestOrderBookFull, trades resend tail-check, indexes
 /// sync gate), потребитель получает уже разобранные типизированные `Event`.
@@ -131,8 +131,8 @@ pub(crate) enum RunMode<'a> {
 }
 
 /// Два варианта event callback'а: только `&Event` или `(&Event, &EventDispatcherSnapshot)`.
-/// Изоляция позволяет иметь два публичных метода (`run_with_dispatcher` /
-/// `run_with_dispatcher_state`) без дубликации main loop кода.
+/// Изоляция позволяет иметь два low-level finite pump варианта без дубликации
+/// main loop кода.
 pub(crate) enum DispatcherEventFn {
     QueueToCallback(mpsc::Sender<crate::events::Event>),
     QueueToStateCallback(mpsc::Sender<StateAppEvent>),

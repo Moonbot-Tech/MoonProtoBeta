@@ -100,7 +100,7 @@ pub use diagnostics::{
 };
 pub use init::{
     connect_and_init, run_init_sequence, ConnectConfig, ConnectError, InitConfig, InitError,
-    InitResult,
+    InitResult, InitialStrategies,
 };
 pub use metrics::ProtocolMetricsSnapshot;
 pub use send_queue::{
@@ -109,6 +109,7 @@ pub use send_queue::{
     UK_ORDER_STATUS_SHORT, UK_SPOT_SWITCH, UK_STOP_MOVE, UK_STRAT_SELL_PRICE_UPDATE,
     UK_STRAT_SNAPSHOT, UK_TURN_MM_DETECTION,
 };
+#[doc(hidden)]
 pub use sender::{ClientSender, SubscribeError};
 pub use subscriptions::TradesSubscription;
 
@@ -484,9 +485,9 @@ impl Client {
     /// Create a client session from [`ClientConfig`].
     ///
     /// Construction does not contact the server. The socket, handshake, and
-    /// reconnect machinery start when the client loop runs through [`Self::run`],
-    /// [`Self::run_with_dispatcher`], [`connect_and_init`], or the high-level
-    /// [`MoonClient`] runtime.
+    /// reconnect machinery start when a runtime begins pumping the protocol.
+    /// Regular applications should prefer the high-level [`MoonClient`]
+    /// runtime, which owns that pump internally.
     ///
     /// The returned client owns unbounded Delphi-style protocol queues. Clone
     /// [`Self::sender`] before entering a long-running loop when other UI or

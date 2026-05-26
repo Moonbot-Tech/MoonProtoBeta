@@ -95,9 +95,13 @@ the existing worker is reused.
 The recommended run path is `MoonClient::connect`:
 
 ```rust
-use moonproto::{ConnectConfig, InitConfig, MoonClient};
+use moonproto::{ConnectConfig, InitConfig, InitialStrategies, MoonClient};
 
 let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
+    initial_strategies: Some(InitialStrategies::new(
+        0,
+        Vec::new(), // replace with your local strategy list if the app has one
+    )),
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
@@ -141,10 +145,10 @@ client.orders().move_order(order_uid, new_price)?;
 client.orders().cancel(order_uid)?;
 ```
 
-The lower-level `Client::run`, `Client::run_with_dispatcher`, and
-`Client::run_with_dispatcher_state` APIs still exist for tests, protocol tools,
-and custom runtimes. They block the caller for the requested duration and should
-not be the regular desktop/UI application shape.
+Advanced protocol tools can still own `Client + EventDispatcher` directly, but
+that is not the regular desktop/UI application shape. Such tools must keep the
+protocol pump alive themselves; normal applications should not model the session
+as "run for N seconds".
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
@@ -155,14 +159,9 @@ typed helpers append their Engine API/UI/domain commands to the send queues. The
 public guarantee is no local capacity cap: dense incoming streams do not drop
 queued user commands or Engine API requests.
 
-If a custom low-level runtime callback needs to read the just-updated dispatcher
-state, `Client::run_with_dispatcher_state` is still available as an advanced
-pump helper. It is deliberately not the recommended application API because it
-requires the caller to choose a finite run duration.
-
-`Client::run(duration, on_data)` is the low-level raw callback path. Use it only
-for protocol tools that intentionally bypass `EventDispatcher`; otherwise you are
-responsible for the recovery actions that the active runtime normally performs.
+Low-level raw callbacks are for diagnostics/protocol tools that intentionally
+bypass the Active Lib. If an application does that, it also owns the recovery
+work that `MoonClient` normally performs automatically.
 
 ## Packet Loss Test Hook
 
@@ -572,70 +571,27 @@ not update the reconnect registry. The high-level helper sends one batched
 unsubscribe for the names that were remembered locally; if none were
 remembered, it sends nothing.
 
-For UI threads, clone a `ClientSender`:
+Regular applications call the `MoonClient` handle from their UI/runtime layer:
 
 ```rust
-let sender = client.sender();
-std::thread::spawn(move || {
-    sender.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
-});
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.ui_mm_subscribe(true)?;
+client.refresh_balances()?;
+client.strat_sell_price_update(strategy_id, sell_price)?;
 ```
 
-Fire-and-forget typed command methods append into the same unbounded send queues
-as `Client::send_cmd` after Init. Before Init, typed domain methods are gated:
-subscription methods update the shared reconnect registry only, and trade/UI/
-strategy/balance wrappers queue nothing. Neither path has a local capacity cap.
-Use `try_*` methods
-when the UI needs explicit feedback that the client is still alive:
-
-```rust
-match client.sender().try_subscribe_orderbook("BTCUSDT") {
-    Ok(()) => {}
-    Err(err) => eprintln!("subscribe failed: {err:?}"),
-}
-```
-
-`ClientSender` mirrors the fire-and-forget typed command wrappers for
-subscriptions, trade actions, UI commands, strategy commands, and balance
-refresh. Use it in custom low-level runtimes when another UI or worker thread
-needs to send commands while the owning thread pumps the low-level client:
-
-```rust
-let sender = client.sender();
-std::thread::spawn(move || {
-    sender.ui_mm_subscribe(true);
-    sender.strat_sell_price_update(strategy_id, 49900.0);
-    sender.balance_request_refresh();
-});
-```
+Typed command methods append into the same unbounded Delphi-style send queues
+after Init. Before Init, subscriptions update only the reconnect registry and
+other domain commands queue nothing. Neither path has a local capacity cap.
 
 Order actions with Delphi-local side effects, such as replace/cancel/panic,
-stop/VStop, and immune clicks, require mutable access to `Orders`. Send those
-from the code path that owns the dispatcher/order state, or marshal the UI
-intent there before calling the matching `Client`/`ClientSender` helper.
+stop/VStop, and immune clicks, are intents on `client.orders()`. The runtime
+owner applies them to live `Orders` before queueing protocol commands.
 
-The sender also exposes raw `send_cmd`, `send_cmd_keyed`, and
-`send_api_request` methods for tools that already have a serialized payload
-from `commands::*` builders. These raw methods do not update typed library
-state, but they still obey `domain_ready`; before Init, fallible raw methods
-return `SubscribeError::DomainNotReady` for non-init commands. Normal
-applications should prefer the typed helpers. `send_api_request` is
-fire-and-forget: it does not register a pending receiver, so the response is
-delivered through the running dispatcher as `Event::EngineResponse`.
-`Client::send_api_request_async` is non-fallible; before Init it queues only
-mandatory Init Engine API requests, and for other methods returns a closed
-receiver without registering `api_pending`.
-
-```rust
-use moonproto::{Command, SendPriority};
-use moonproto::commands::engine_request;
-
-let sender = client.sender();
-sender.send_api_request(engine_request::check_binance_tags());
-
-let raw = build_custom_ui_payload();
-sender.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
-```
+`ClientSender` and raw `send_cmd` / `send_cmd_keyed` remain available only for
+custom low-level runtimes and protocol tools that already own
+`Client + EventDispatcher` directly. They are not the regular UI application
+model.
 
 `Command` is not a closed Rust enum; it preserves unknown raw channel
 identifiers. Use `Command::from_byte(raw)` and `cmd.to_byte()` when building

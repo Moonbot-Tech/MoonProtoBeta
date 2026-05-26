@@ -80,8 +80,7 @@ impl Client {
     /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
     /// ```
     ///
-    /// Если использовать `Client::run_with_dispatcher` — линковка делается
-    /// автоматически на первом active-dispatch шаге.
+    /// `MoonClient` and the low-level active pump link this automatically.
     ///
     /// См. `DEVIATION.md #23` (single-Client → multi-Client refactor).
     pub fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {

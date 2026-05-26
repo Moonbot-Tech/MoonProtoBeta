@@ -1,10 +1,12 @@
 use super::*;
 
 impl Client {
-    /// Active-library entry point: run the client with an integrated
-    /// `EventDispatcher`.
+    /// Low-level finite active-library pump for tests and custom runtimes.
     ///
-    /// Unlike [`Self::run`], this method routes incoming payloads through
+    /// Regular applications should use [`MoonClient`](crate::MoonClient): it
+    /// owns the runtime thread, publishes events/snapshots, and has no
+    /// user-selected protocol-loop duration. Unlike [`Self::run`], this method
+    /// routes incoming payloads through
     /// `dispatcher.dispatch_into_active` and performs active-library work:
     ///   - orderbook corrupted-cache recovery sends `RequestOrderBookFull`
     ///     without surfacing a separate callback event;
@@ -16,20 +18,9 @@ impl Client {
     /// The callback is informational: the dispatcher has already parsed the
     /// event and updated the read model.
     ///
-    /// Basic pattern:
-    /// ```ignore
-    /// let mut client = Client::new(cfg);
-    /// let mut dispatcher = EventDispatcher::new();
-    /// client.run_with_dispatcher(
-    ///     Duration::from_secs(3600),
-    ///     &mut dispatcher,
-    ///     Box::new(|ev| match ev {
-    ///         Event::Order(o) => /* update UI */,
-    ///         Event::EngineResponse(r) if !r.success => /* show error */,
-    ///         _ => {}
-    ///     })
-    /// );
-    /// ```
+    /// This is intentionally hidden from generated public docs so it does not
+    /// look like the normal desktop/UI application model.
+    #[doc(hidden)]
     pub fn run_with_dispatcher(
         &mut self,
         duration: Duration,
@@ -107,7 +98,7 @@ impl Client {
         }
     }
 
-    /// Same as [`Self::run_with_dispatcher`], but the callback also receives an
+    /// Low-level finite active-library pump whose callback also receives an
     /// updated read-only [`crate::events::EventDispatcherSnapshot`].
     ///
     /// This is useful for UI events that carry only an id, such as
@@ -115,6 +106,7 @@ impl Client {
     /// current order from the state snapshot. The callback runs from the
     /// application callback queue and does not block protocol ACK/retry/send
     /// progress.
+    #[doc(hidden)]
     pub fn run_with_dispatcher_state(
         &mut self,
         duration: Duration,

@@ -29,6 +29,7 @@ impl Client {
     /// Requires the local `Orders` read model. The wrapper derives market route
     /// and order type from the local order and repeats the Delphi
     /// `ReplaceSentTime = 0` gate.
+    #[doc(hidden)]
     pub fn replace_order(
         &self,
         orders: &mut crate::state::Orders,
@@ -49,6 +50,7 @@ impl Client {
     }
 
     /// Replace an order already tracked by `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn replace_tracked_order(
         &self,
         orders: &mut crate::state::Orders,
@@ -105,6 +107,7 @@ impl Client {
     ///
     /// Requires the local `Orders` read model. The wrapper derives current
     /// status from the local order and clears the local request after queueing.
+    #[doc(hidden)]
     pub fn cancel_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         if !self.domain_ready_for_typed_send() {
             return false;
@@ -117,6 +120,7 @@ impl Client {
     }
 
     /// Cancel an order already tracked by `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn cancel_tracked_order(&self, orders: &mut crate::state::Orders, uid: u64) -> bool {
         self.cancel_order(orders, uid)
     }
@@ -167,6 +171,7 @@ impl Client {
     ///
     /// The move mode, price, zone and side live in [`crate::commands::trade::MoveAllSellsParams`]
     /// to keep the public API resistant to swapped positional arguments.
+    #[doc(hidden)]
     pub fn move_all_sells(
         &self,
         orders: &crate::state::Orders,
@@ -247,6 +252,7 @@ impl Client {
     ///
     /// Requires the local `Orders` read model: if the UID is unknown or the
     /// stop record did not change, Delphi would not put a packet on the wire.
+    #[doc(hidden)]
     pub fn update_order_stops(
         &self,
         orders: &mut crate::state::Orders,
@@ -265,6 +271,7 @@ impl Client {
     }
 
     /// Update stops for an order already tracked by `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn update_tracked_order_stops(
         &self,
         orders: &mut crate::state::Orders,
@@ -276,6 +283,7 @@ impl Client {
 
     /// Delphi `TOrdersWorkers.TurnPanicSell`: set panic sell for every local
     /// active sell order in `market_name`.
+    #[doc(hidden)]
     pub fn turn_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
@@ -294,6 +302,7 @@ impl Client {
     }
 
     /// Delphi `TOrdersWorkers.SwitchPanicSellByMarket` button semantics.
+    #[doc(hidden)]
     pub fn switch_panic_sell_by_market(
         &self,
         orders: &mut crate::state::Orders,
@@ -312,6 +321,7 @@ impl Client {
 
     /// Delphi per-worker panic-sell flag + `TTurnPanicSellCommand` (CmdId=21,
     /// UK_OrderMove).
+    #[doc(hidden)]
     pub fn turn_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
@@ -330,6 +340,7 @@ impl Client {
 
     /// Toggle panic sell for an order already tracked by
     /// `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn turn_tracked_order_panic_sell(
         &self,
         orders: &mut crate::state::Orders,
@@ -344,6 +355,7 @@ impl Client {
     ///
     /// The dedup UID is `sum(items[].uid)`, matching Delphi
     /// `TSetImmuneCommand.SetUKey`.
+    #[doc(hidden)]
     pub fn set_immune(
         &self,
         orders: &mut crate::state::Orders,
@@ -365,6 +377,7 @@ impl Client {
     }
 
     /// `TMoveAllBuysCommand` (CmdId=27), gated like Delphi active-client UI.
+    #[doc(hidden)]
     pub fn move_all_buys(
         &self,
         orders: &crate::state::Orders,
@@ -393,6 +406,7 @@ impl Client {
     /// Requires the local `Orders` read model: the wrapper derives the current
     /// worker status, mutates local VStop state, and queues nothing if the value
     /// did not change.
+    #[doc(hidden)]
     pub fn update_vstop(
         &self,
         orders: &mut crate::state::Orders,
@@ -416,6 +430,7 @@ impl Client {
     }
 
     /// Update VStop for an order already tracked by `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn update_tracked_order_vstop(
         &self,
         orders: &mut crate::state::Orders,

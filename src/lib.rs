@@ -17,13 +17,18 @@
 //!
 //! ```ignore
 //! use moonproto::{
-//!     import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
+//!     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+//!     MoonClient,
 //! };
 //!
 //! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
 //! let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 //!
 //! let init = InitConfig {
+//!     initial_strategies: Some(InitialStrategies::new(
+//!         0,
+//!         Vec::new(), // replace with your local strategy list if the app has one
+//!     )),
 //!     subscribe_trades: Some(false),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()
@@ -109,11 +114,13 @@ pub mod state;
 pub mod transport;
 
 pub use client::{
-    connect_and_init, run_init_sequence, Client, ClientConfig, ClientSender, ConnectConfig,
-    ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    LifecycleEvent, MoonClient, MoonClientError, MoonOrders, ProtocolMetricsSnapshot,
-    RefreshConfig, SendPriority, SubscribeError, TradeContextError, UniqueKey,
+    connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
+    EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
+    InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders,
+    ProtocolMetricsSnapshot, RefreshConfig, SendPriority, TradeContextError, UniqueKey,
 };
+#[doc(hidden)]
+pub use client::{ClientSender, SubscribeError};
 pub use events::{
     Event, EventDispatcher, EventDispatcherSnapshot, MissingOrderStatusRequest,
     StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,

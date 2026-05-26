@@ -23,6 +23,23 @@ fn writer(client: &mut Client) -> ProtocolCore<'_> {
 }
 
 #[test]
+fn connect_and_init_installs_initial_strategies_before_waiting_for_auth() {
+    let mut client = Client::new(dummy_cfg());
+    let mut dispatcher = crate::events::EventDispatcher::new();
+    let cfg = ConnectConfig::new(InitConfig {
+        initial_strategies: Some(InitialStrategies::new(42, Vec::new())),
+        ..Default::default()
+    })
+    .with_connect_timeout(Duration::ZERO);
+
+    let result = connect_and_init(&mut client, &mut dispatcher, cfg);
+
+    assert!(matches!(result, Err(ConnectError::ConnectTimedOut { .. })));
+    assert_eq!(dispatcher.local_strategy_epoch(), 42);
+    assert_eq!(dispatcher.strategy_snapshot_vec().len(), 0);
+}
+
+#[test]
 fn bind_failed_event_waits_for_elapsed_threshold() {
     let mut client = Client::new(dummy_cfg());
     let events = Arc::new(Mutex::new(Vec::new()));

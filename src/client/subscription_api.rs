@@ -10,8 +10,8 @@ impl Client {
     //   1. Запоминают подписку в `subscription_registry`.
     //   2. После единственного Init восстанавливаются самой либой при reconnect.
     //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
-    //   4. Работают на `&self` — доступны во время `run_with_dispatcher`
-    //      через `client.sender()` clone из любого thread'а.
+    //   4. Работают на `&self` — доступны через `MoonClient` или через
+    //      `client.sender()` clone в custom low-level runtime.
     //
     //  Аналог Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` с
     //  `BookSubbed: TSet<TMarket>` и `NeedResubscribeOrderBooks`.
@@ -20,9 +20,9 @@ impl Client {
     /// Thread-safe sender handle for subscribing and sending commands from any
     /// thread.
     ///
-    /// The returned `ClientSender` is cloneable and can live in a UI thread,
-    /// worker thread, or any other owner. `Client::run_with_dispatcher` drains
-    /// those intents from the client main loop.
+    /// `MoonClient` is the normal subscription API. This lower-level sender is
+    /// cloneable and can live in a UI thread, worker thread, or any other owner
+    /// when the caller intentionally owns a custom `Client` runtime.
     ///
     /// ```ignore
     /// let mut client = Client::new(cfg);
@@ -30,8 +30,9 @@ impl Client {
     /// thread::spawn(move || {
     ///     sender.subscribe_orderbook("DOGEUSDT");
     /// });
-    /// client.run_with_dispatcher(...);
+    /// // Custom low-level active pump owns `client`.
     /// ```
+    #[doc(hidden)]
     pub fn sender(&self) -> ClientSender {
         ClientSender {
             shared: Arc::new(ClientSenderShared {

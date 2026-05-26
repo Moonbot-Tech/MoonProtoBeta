@@ -97,7 +97,8 @@ Basic application shape:
 
 ```rust
 use moonproto::{
-    import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
+    import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+    MoonClient,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -115,6 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MoonClient::connect(
         cfg,
         ConnectConfig::new(InitConfig {
+            initial_strategies: Some(InitialStrategies::new(
+                0,
+                Vec::new(), // replace with your local strategy list if the app has one
+            )),
             subscribe_trades: Some(false),
             subscribe_orderbooks: vec!["BTCUSDT".to_string()],
             ..Default::default()

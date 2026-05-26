@@ -30,13 +30,18 @@ Use one `MoonClient` per server connection in regular applications.
 
 ```rust
 use moonproto::{
-    import_key, ClientConfig, ConnectConfig, InitConfig, MoonClient,
+    import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+    MoonClient,
 };
 
 let keys = import_key(KEY_B64).expect("invalid key");
 let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 
 let init = InitConfig {
+    initial_strategies: Some(InitialStrategies::new(
+        0,
+        Vec::new(), // replace with your local strategy list if the app has one
+    )),
     subscribe_trades: Some(false),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()

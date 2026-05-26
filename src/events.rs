@@ -6,23 +6,22 @@
 //! automatically:
 //!
 //! ```ignore
-//! use moonproto::events::{EventDispatcher, Event};
-//! use moonproto::state::{OrderEvent, OrderBookEvent, TradesEvent};
+//! let client = moonproto::MoonClient::connect(cfg, connect)?;
 //!
-//! let mut dispatcher = EventDispatcher::new();
-//! client.on_data(move |cmd, payload| {
-//!     for ev in dispatcher.dispatch(cmd, payload, now_ms()) {
-//!         match ev {
-//!             Event::Order(OrderEvent::Created(uid)) => { /* show new order */ }
-//!             Event::OrderBook(OrderBookEvent::Apply { market_index, .. }) => { /* redraw */ }
-//!             Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
-//!                 /* read new rows from market state / SeqRing */
-//!                 let _ = packet_num;
-//!             }
-//!             _ => {}
-//!         }
+//! for event in client.drain_events() {
+//!     match event {
+//!         moonproto::Event::Order(order_event) => { /* update order UI */ }
+//!         moonproto::Event::OrderBook(book_event) => { /* redraw book */ }
+//!         moonproto::Event::Trade(trade_event) => { /* read retained history */ }
+//!         _ => {}
 //!     }
-//! });
+//! }
+//!
+//! if let Some(snapshot) = client.snapshot() {
+//!     for order in snapshot.orders().iter() {
+//!         /* render order row */
+//!     }
+//! }
 //! ```
 //!
 //! State models (`Orders`, `OrderBooks`, `TradesState`, and the other channel
@@ -209,6 +208,7 @@ impl EventDispatcher {
     /// Normal receive updates still go through `dispatch_into_active`; this is
     /// exposed for outgoing actions such as `Client::set_immune`, where Delphi
     /// mutates the local worker before sending a command to the server.
+    #[doc(hidden)]
     pub fn orders_mut(&mut self) -> &mut Orders {
         &mut self.orders
     }

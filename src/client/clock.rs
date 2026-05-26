@@ -32,7 +32,7 @@ fn get_ntp_offset_days() -> f64 {
 /// Process-global fallback для low-level `EventDispatcher::dispatch_into` callers
 /// которые не привязали per-client `ServerTimeDelta` source. Рекомендуемый
 /// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
-/// через `Client::run_with_dispatcher` и **не использует** это global значение.
+/// через `MoonClient` / low-level active pump и **не использует** это global значение.
 ///
 /// DEVIATION #23 закрыт: multi-Client больше не страдает от перезаписи —
 /// каждый Client имеет свой `Arc<AtomicU64>` handle.

@@ -183,6 +183,106 @@ impl MoonClient {
         })
     }
 
+    /// Request a fresh balance snapshot through the active runtime.
+    pub fn refresh_balances(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::BalanceRefresh)
+    }
+
+    /// Request a fresh UI/settings snapshot through the active runtime.
+    pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
+    }
+
+    /// Set the market-maker orders subscription flag.
+    pub fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
+    }
+
+    /// Send a full client-settings snapshot.
+    pub fn ui_send_settings(
+        &self,
+        settings: crate::commands::ui::ClientSettingsCommand,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SendSettings(settings)))
+    }
+
+    /// Request a MoonBot version update.
+    pub fn ui_update_version(
+        &self,
+        version_name: impl Into<String>,
+        is_release: bool,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::UpdateVersion {
+            version_name: version_name.into(),
+            is_release,
+        }))
+    }
+
+    /// Switch DEX mode.
+    pub fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchDex(
+            dex_name.into(),
+        )))
+    }
+
+    /// Switch spot mode.
+    pub fn ui_switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot_index)))
+    }
+
+    /// Send a strategy sell-price update.
+    pub fn strat_sell_price_update(
+        &self,
+        strategy_id: u64,
+        sell_price: f64,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Strat(
+            StratRuntimeCommand::SellPriceUpdate {
+                strategy_id,
+                sell_price,
+            },
+        ))
+    }
+
+    /// Delete one strategy or folder.
+    pub fn strat_delete(
+        &self,
+        strategy_id: u64,
+        folder_path: impl Into<String>,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Strat(StratRuntimeCommand::Delete {
+            strategy_id,
+            folder_path: folder_path.into(),
+        }))
+    }
+
+    /// Change a local strategy checked flag in the active runtime state.
+    pub fn set_strategy_checked(
+        &self,
+        strategy_id: u64,
+        checked: bool,
+    ) -> Result<bool, MoonClientError> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(RuntimeCommand::StrategySetChecked {
+                strategy_id,
+                checked,
+                reply: tx,
+            })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    /// Send Delphi checked-state delta if any local strategy changed.
+    pub fn send_strategy_checked_delta(&self) -> Result<usize, MoonClientError> {
+        self.send_usize(RuntimeCommand::StrategySendCheckedDelta)
+    }
+
+    /// Start or stop strategies with Delphi V2 checked-delta semantics.
+    pub fn strategy_start_stop(&self, is_start: bool) -> Result<usize, MoonClientError> {
+        self.send_usize(RuntimeCommand::StrategyStartStop { is_start })
+    }
+
     /// Stop the runtime thread and wait until it exits.
     pub fn stop(&self) -> Result<(), MoonClientError> {
         let _ = self.tx.send(RuntimeCommand::Stop);
@@ -196,6 +296,17 @@ impl MoonClient {
         self.tx
             .send(cmd)
             .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    fn send_usize(&self, cmd: RuntimeCommand) -> Result<usize, MoonClientError> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(RuntimeCommand::WithUsizeReply {
+                cmd: Box::new(cmd),
+                reply: tx,
+            })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
     }
 }
 
@@ -299,9 +410,48 @@ enum RuntimeCommand {
         want_mm: bool,
         markets: Vec<String>,
     },
+    BalanceRefresh,
+    Ui(UiRuntimeCommand),
+    Strat(StratRuntimeCommand),
+    StrategySetChecked {
+        strategy_id: u64,
+        checked: bool,
+        reply: mpsc::Sender<bool>,
+    },
+    StrategySendCheckedDelta,
+    StrategyStartStop {
+        is_start: bool,
+    },
+    WithUsizeReply {
+        cmd: Box<RuntimeCommand>,
+        reply: mpsc::Sender<usize>,
+    },
     OrderAction {
         kind: RuntimeCommandKind,
         reply: mpsc::Sender<bool>,
+    },
+}
+
+enum UiRuntimeCommand {
+    SettingsRequest,
+    MmSubscribe(bool),
+    SendSettings(crate::commands::ui::ClientSettingsCommand),
+    UpdateVersion {
+        version_name: String,
+        is_release: bool,
+    },
+    SwitchDex(String),
+    SwitchSpot(u8),
+}
+
+enum StratRuntimeCommand {
+    SellPriceUpdate {
+        strategy_id: u64,
+        sell_price: f64,
+    },
+    Delete {
+        strategy_id: u64,
+        folder_path: String,
     },
 }
 
@@ -411,11 +561,89 @@ fn handle_command(
             client.subscribe_trades_for(want_mm, markets);
             false
         }
+        RuntimeCommand::BalanceRefresh => {
+            client.balance_request_refresh();
+            false
+        }
+        RuntimeCommand::Ui(cmd) => {
+            handle_ui_command(client, cmd);
+            false
+        }
+        RuntimeCommand::Strat(cmd) => {
+            handle_strat_command(client, cmd);
+            false
+        }
+        RuntimeCommand::StrategySetChecked {
+            strategy_id,
+            checked,
+            reply,
+        } => {
+            let changed = dispatcher.set_strategy_checked(strategy_id, checked);
+            let _ = reply.send(changed);
+            changed
+        }
+        RuntimeCommand::StrategySendCheckedDelta => {
+            dispatcher.send_strategy_checked_delta(client);
+            false
+        }
+        RuntimeCommand::StrategyStartStop { is_start } => {
+            dispatcher.ui_strat_start_stop_v2(client, is_start);
+            false
+        }
+        RuntimeCommand::WithUsizeReply { cmd, reply } => {
+            let result = handle_usize_command(client, dispatcher, *cmd);
+            let _ = reply.send(result);
+            false
+        }
         RuntimeCommand::OrderAction { kind, reply } => {
             let result = handle_order_action(client, dispatcher, kind);
             let _ = reply.send(result);
             result
         }
+    }
+}
+
+fn handle_usize_command(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    cmd: RuntimeCommand,
+) -> usize {
+    match cmd {
+        RuntimeCommand::StrategySendCheckedDelta => dispatcher.send_strategy_checked_delta(client),
+        RuntimeCommand::StrategyStartStop { is_start } => {
+            dispatcher.ui_strat_start_stop_v2(client, is_start)
+        }
+        _ => {
+            handle_command(client, dispatcher, cmd);
+            0
+        }
+    }
+}
+
+fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {
+    match cmd {
+        UiRuntimeCommand::SettingsRequest => client.ui_settings_request(),
+        UiRuntimeCommand::MmSubscribe(subscribe) => client.ui_mm_subscribe(subscribe),
+        UiRuntimeCommand::SendSettings(settings) => client.ui_send_settings(&settings),
+        UiRuntimeCommand::UpdateVersion {
+            version_name,
+            is_release,
+        } => client.ui_update_version(&version_name, is_release),
+        UiRuntimeCommand::SwitchDex(dex_name) => client.ui_switch_dex(&dex_name),
+        UiRuntimeCommand::SwitchSpot(spot_index) => client.ui_switch_spot(spot_index),
+    }
+}
+
+fn handle_strat_command(client: &mut Client, cmd: StratRuntimeCommand) {
+    match cmd {
+        StratRuntimeCommand::SellPriceUpdate {
+            strategy_id,
+            sell_price,
+        } => client.strat_sell_price_update(strategy_id, sell_price),
+        StratRuntimeCommand::Delete {
+            strategy_id,
+            folder_path,
+        } => client.strat_delete(strategy_id, &folder_path),
     }
 }
 

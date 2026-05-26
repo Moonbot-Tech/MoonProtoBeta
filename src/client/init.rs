@@ -11,7 +11,7 @@ use super::*;
 //  Аналог Delphi `TCryptoPumpTool.InitInt` (`Unit1.pas:4987-5150`).
 //
 //  Почему free function, а не `Client::run_init_sequence`:
-//   - `Client::run` / `Client::run_with_dispatcher` занимают `&mut Client` на всё
+//   - low-level finite pumps занимают `&mut Client` на всё
 //     время выполнения (main loop крутится). Метод-helper не мог бы быть вызван
 //     ВО ВРЕМЯ работы run().
 //   - Free function принимает `&mut Client` явно — компилятор уровнем доказывает
@@ -25,6 +25,30 @@ use super::*;
 //  См. audit_responsibility F1, audit_responsibility_hints Q13.
 // =============================================================================
 
+/// Application-owned strategy state that must be installed before Init.
+///
+/// The server can ask for a client strategy snapshot as part of the active-lib
+/// handshake. Regular applications pass their current local strategy list here
+/// so `MoonClient` can store it in the runtime-owned dispatcher before the
+/// one-time Init sequence starts.
+#[derive(Debug, Clone, Default)]
+pub struct InitialStrategies {
+    /// Delphi `cfg.ServerStratEpoch` analogue for local snapshots.
+    pub epoch: u64,
+    /// Full decoded local strategy list in Delphi list order.
+    pub strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
+}
+
+impl InitialStrategies {
+    /// Build an initial strategy state for [`InitConfig`].
+    pub fn new(
+        epoch: u64,
+        strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
+    ) -> Self {
+        Self { epoch, strategies }
+    }
+}
+
 /// Configuration for [`run_init_sequence`].
 ///
 /// Delphi-critical init steps are not configurable: BaseCheck, AuthCheck,
@@ -33,6 +57,15 @@ use super::*;
 /// itself. This config only carries optional stream subscriptions and timing.
 #[derive(Debug, Clone, Default)]
 pub struct InitConfig {
+    /// Local strategies to install into the active library before Init starts.
+    ///
+    /// `None` preserves any strategy state already configured on the
+    /// `EventDispatcher`, which is useful for custom low-level runtimes.
+    /// `MoonClient` creates the dispatcher internally, so applications that
+    /// have local strategies should pass `Some(InitialStrategies::new(...))`.
+    /// An explicit empty list is valid and means "client has no local
+    /// strategies".
+    pub initial_strategies: Option<InitialStrategies>,
     /// Value for the post-init `TMMOrdersSubscribeCommand`.
     ///
     /// Delphi always sends this UI command after `InitDone` with
@@ -126,7 +159,7 @@ impl std::fmt::Display for InitError {
             Self::CriticalStepFailed { step, message } => {
                 write!(f, "critical init step '{step}' failed: {message}")
             }
-            Self::NotAuthenticated => write!(f, "client not authenticated (call run_with_dispatcher until Connected{{fresh:true}} first)"),
+            Self::NotAuthenticated => write!(f, "client not authenticated (wait for authorization or use MoonClient/connect_and_init)"),
         }
     }
 }
@@ -212,16 +245,20 @@ impl From<InitError> for ConnectError {
 
 /// Connect the client and run the configured init sequence.
 ///
-/// This helper is the recommended one-shot setup path for regular consumers.
-/// It hides the transport-ready wait before [`run_init_sequence`], while still
-/// using the same `Client::run_with_dispatcher` pump internally. Applications
-/// that need a custom phased UI can keep using `run_with_dispatcher` and
-/// `run_init_sequence` directly.
+/// This helper is the low-level ready-session setup used by `MoonClient` and
+/// protocol tools. Regular applications should normally call
+/// [`MoonClient::connect`](crate::MoonClient::connect), which owns the runtime
+/// thread after this setup succeeds.
 pub fn connect_and_init(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     cfg: ConnectConfig,
 ) -> Result<InitResult, ConnectError> {
+    if let Some(initial) = cfg.init.initial_strategies.as_ref() {
+        dispatcher.set_local_strategy_epoch(initial.epoch);
+        dispatcher.set_local_strategies(&initial.strategies);
+    }
+
     if !client.is_authorized() {
         client.run_with_dispatcher_worker_queued(cfg.connect_timeout, dispatcher);
     }
@@ -270,17 +307,8 @@ pub fn connect_and_init(
 /// above are mandatory: a timeout/error means Init failed and `domain_ready`
 /// stays closed.
 ///
-/// Pattern:
-/// ```ignore
-/// let mut client = Client::new(cfg);
-/// let mut dispatcher = EventDispatcher::new();
-/// // Phase 1 — handshake.
-/// client.run_with_dispatcher(Duration::from_secs(3), &mut dispatcher, Box::new(|_| {}));
-/// // Phase 2 — init while the helper pumps the client loop.
-/// let r = run_init_sequence(&mut client, &mut dispatcher, InitConfig::default())?;
-/// // Phase 3 — long-running stream.
-/// client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(|ev| {...}));
-/// ```
+/// `MoonClient::connect` is the public happy path; call this function directly
+/// only when writing a custom runtime or protocol test.
 ///
 /// [`ServerInfo`]: crate::commands::engine_api::ServerInfo
 #[derive(Debug, Clone)]

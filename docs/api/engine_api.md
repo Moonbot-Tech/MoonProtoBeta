@@ -298,4 +298,5 @@ but no auth metadata is stored.
 `trades_resend_batches`. They return request payloads for diagnostics and
 compatibility tools.
 
-Regular applications should use `Client::api_*` wrappers.
+Regular applications should prefer `MoonClient` state/events. Direct low-level
+Engine API wrappers are for custom runtimes and diagnostics.

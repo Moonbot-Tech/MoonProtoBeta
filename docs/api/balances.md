@@ -72,11 +72,10 @@ println!("balance rows={}", balances.len());
 The helper sends the library-level balance refresh request, pumps the UDP loop,
 waits for the next full snapshot event, and returns a cloned `BalancesState`.
 
-For fire-and-forget refresh in a custom low-level runtime:
+For fire-and-forget refresh in the normal runtime:
 
 ```rust
-let sender = client.sender();
-sender.balance_request_refresh();
+client.refresh_balances()?;
 ```
 
 The next snapshot arrives through the normal dispatcher path.

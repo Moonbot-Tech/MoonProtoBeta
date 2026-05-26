@@ -77,7 +77,7 @@ pub(crate) enum ActiveAction {
 }
 
 impl EventDispatcher {
-    /// Active-library parser step used by `Client::run_with_dispatcher`.
+    /// Active-library parser step used by `MoonClient` and custom active runtimes.
     ///
     /// The reader/main-loop side snapshots the owning `Client` into
     /// [`ActiveDispatchContext`], dispatches the payload, receives protocol

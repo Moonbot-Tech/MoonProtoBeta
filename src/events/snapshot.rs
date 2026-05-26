@@ -3,7 +3,8 @@
 use super::*;
 use crate::commands::strategy_serializer::StrategySnapshot;
 
-/// Immutable read-model copy delivered to `run_with_dispatcher_state` callbacks.
+/// Immutable read-model copy published by `MoonClient` and by custom
+/// low-level active runtimes.
 ///
 /// The live [`EventDispatcher`] stays owned by the protocol loop. This snapshot
 /// is cloned after dispatcher state is updated, then sent through the
