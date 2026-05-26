@@ -8104,3 +8104,27 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MPC_Order` command envelope split
+
+Done:
+
+- Moved public `TradeCommand` enum, `TradeCommand::parse`, and `uid()` matcher
+  into `commands/trade/command.rs`.
+- Kept public path unchanged through `commands::trade::*` re-export.
+- Kept dispatch behavior byte-identical: same future-version skip to
+  `Unknown`, same `CmdId` match order, same boxed variants, same header readers,
+  same UID extraction for every command variant, and same unknown UID fallback.
+- This is a readability/publication split only. No `MPC_Order` wire fields,
+  command variant shape, parser behavior, state apply behavior, or public API
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.76s`,
+  `ParseFailed=0`, `rx_actual_drop=10.78%`, streams/API/market health OK,
+  retained futures trades `5`, reader max `756us`, writer CPU max `137us`,
+  GetMarketsList apply `2450us`.
