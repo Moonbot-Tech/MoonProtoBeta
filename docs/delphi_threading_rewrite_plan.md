@@ -6827,6 +6827,29 @@ Verification:
   `reader max=694us`, `writer_cpu max=165us`, `active_dispatch max=3650us`
   on `Strat(30)` payload. The active-dispatch sample is the known Strategy
   parser/apply Phase Z CPU item, not a protocol-loop regression.
+
+### 2026-05-26 - `client.rs` ProtocolCore split
+
+Done:
+
+- Moved the whole `ProtocolCore` owner/tick implementation into
+  `src/client/protocol_core.rs` as one block, preserving method order and call
+  order inside the block.
+- `client.rs` now keeps the public `Client` API/body while the protocol
+  writer/reader tick lives in a dedicated file for Delphi parity review.
+- `ProtocolCore` methods are `pub(crate)` only because existing unit tests call
+  them as protocol oracles from the sibling `tests.rs` module. No public API was
+  added.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.90s`, `ParseFailed=0`,
+  `reader max=580us`, `writer_cpu max=146us`, `active_dispatch max=3219us`
+  on `Strat(30)`.
 - Quick prod FireTest release after the sender split OK:
   `FIRETEST_QUICK_PASS after 25.10s`, `ParseFailed=0`,
   `reader max=676us`, `writer_cpu max=153us`.
