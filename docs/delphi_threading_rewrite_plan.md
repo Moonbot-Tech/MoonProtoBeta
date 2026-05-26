@@ -6525,6 +6525,12 @@ Red flag:
   `ReadField` locals. Delphi uses `Stream.Read` for those too, but the effect
   may depend on uninitialized local variables or stale `NameBuf`, so it is not
   claimed as closed parity.
+- Follow-up re-check: the remaining strategy-serializer corrupt tails are not
+  `ReadBuffer` strings. They are `Stream.Read` into Delphi locals or shared
+  `NameBuf`; after EOF the next section can depend on stale/uninitialized bytes.
+  Rust keeps the current safe failure/open-red-flag stance until an explicit
+  deterministic policy is agreed. Valid live snapshots are still covered by
+  FireTest full-parse (`ParseFailed=0`) and raw dumps.
 
 Verification:
 
