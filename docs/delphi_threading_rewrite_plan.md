@@ -7155,3 +7155,25 @@ Verification:
   `FIRETEST_QUICK_PASS after 27.59s`, `ParseFailed=0`, err_emu actual drop
   `11.41%`, retained futures rows present, derived snapshot present,
   `reader max=748us`, `writer_cpu max=176us`.
+
+### 2026-05-26 - `ProtocolCore` receive-phase split
+
+Done:
+
+- Moved receive drain, transport unpack, ErrEmu decision, `DataRead` /
+  `DataReadInt`, handshake control receive handlers, Sliced receive/SlicedACK,
+  and Ping receive handling from `src/client/protocol_core.rs` into
+  `src/client/protocol_recv.rs` as one mechanical block.
+- The moved method order is unchanged. Calls from `ProtocolCore::run` and the
+  writer/send phase still hit the same inherent `ProtocolCore` methods.
+- `protocol_core.rs` now keeps the outer tick orchestration, app-command drain,
+  active dispatch, periodic refresh, and reconnect tail.
+
+Verification:
+
+- `cargo test --lib --quiet` OK: 763 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.32s`, `ParseFailed=0`, err_emu actual drop
+  `10.51%`, retained futures rows present, derived snapshot present,
+  `reader max=613us`, `writer_cpu max=150us`.
