@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://moonbot.pro">
+    <img src="assets/moonbot-logo-full.svg" alt="Moonbot" width="199">
+  </a>
+</p>
+
 # moonproto
 
 Rust client library for the MoonProto UDP protocol used by MoonBot servers.
@@ -226,6 +232,13 @@ examples/         runnable live/manual examples
 docs/api/         API documentation
 ```
 
+## License
+
+Licensed under the Apache License, Version 2.0. See `LICENSE`.
+
+Redistributions must preserve the attribution notice from `NOTICE` according to
+Apache-2.0 section 4(d).
+
 ## Development Notes
 
 - V0/base transport must work without `moonext`.
@@ -234,3 +247,11 @@ docs/api/         API documentation
 - Keep live credentials outside the public repo.
 - Run quick FireTest at important checkpoints; run full FireTest before calling
   a protocol build stable.
+
+---
+
+<p align="center">
+  <strong>Moonbot</strong><br>
+  Advanced terminal for cryptocurrency trading<br>
+  <a href="https://moonbot.pro">moonbot.pro</a>
+</p>
