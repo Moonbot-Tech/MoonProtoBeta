@@ -7693,3 +7693,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EngineMethod` ordinal split
+
+Done:
+
+- Moved the Delphi `TEngineMethodKind` ordinal wrapper into
+  `commands/engine_api/method.rs`.
+- Kept public paths unchanged through `commands::engine_api::EngineMethod`.
+- Kept the ordinal preservation tests with the type: unknown method bytes still
+  round-trip exactly like Delphi `ms.Read(Method, SizeOf(Method))`.
+- This is a readability/publication split only. No API response parsing,
+  request method ordinal, public constant, or Debug/name behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
