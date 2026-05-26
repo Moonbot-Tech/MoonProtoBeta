@@ -7820,3 +7820,25 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `ClientSender` UI helper split
+
+Done:
+
+- Moved `ClientSender` UI command helpers into `client/sender/ui.rs`.
+- Kept the public sender API unchanged for settings, strat start/stop UI
+  commands, MM-order subscribe, update-version, emu trades, leverage/trigger
+  manage, reset profit, arb notify, dex switch, and spot switch.
+- Kept the same command kind (`MPC_UI`), priority, encryption flag,
+  `MaxRetries`, and `UniqueKey` choices.
+- Kept Delphi `ServerUpdateSent` side effect attached only to update/switch
+  commands that successfully pass the domain gate and queue send work.
+- This is a readability/publication split only. No outbound UI bytes,
+  subscription registry mutation, domain gate behavior, server-update flag, or
+  public sender behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
