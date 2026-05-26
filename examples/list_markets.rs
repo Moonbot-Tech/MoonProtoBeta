@@ -79,16 +79,18 @@ fn main() {
     }
 
     for market in markets.markets.iter().take(limit) {
-        println!(
-            "[market] {} base={} status={} trading={} max_lev={} tick={} step={}",
-            market.bn_market_name,
-            market.base_currency,
-            market.bn_status,
-            market.status_trading,
-            market.max_leverage,
-            market.bn_tick_size,
-            market.bn_step_size
-        );
+        market.with(|market| {
+            println!(
+                "[market] {} base={} status={} trading={} max_lev={} tick={} step={}",
+                market.bn_market_name,
+                market.base_currency,
+                market.bn_status,
+                market.status_trading,
+                market.max_leverage,
+                market.bn_tick_size,
+                market.bn_step_size
+            );
+        });
     }
 
     client.disconnect();

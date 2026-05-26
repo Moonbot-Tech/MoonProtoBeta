@@ -9,6 +9,10 @@
 //! - Периодически (~60 секунд + hourly burst) `emk_CheckBinanceTags` → теги монет.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
+
+use parking_lot::RwLock;
 
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
@@ -17,6 +21,66 @@ use crate::commands::market::{
     MarketTokenTags, MarketsListResponse, MarketsPricesResponse, TokenTags,
 };
 const EPS_MARKET: f64 = 1e-12;
+
+/// Stable Delphi-like handle to one `TMarket` object.
+///
+/// Delphi `TMarkets` stores `TMarket` object references and replaces only the
+/// surrounding list/dictionaries on listing changes. Rust mirrors that with an
+/// `Arc` handle: callers may keep `MarketHandle` across a listing refresh and
+/// read the same live market object later.
+#[derive(Debug, Clone)]
+pub struct MarketHandle {
+    inner: Arc<RwLock<Market>>,
+}
+
+impl MarketHandle {
+    fn new(market: Market) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(market)),
+        }
+    }
+
+    /// Read the current market object under a short read lock.
+    pub fn with<R>(&self, f: impl FnOnce(&Market) -> R) -> R {
+        let market = self.inner.read();
+        f(&market)
+    }
+
+    /// Return an owned snapshot for code that does not want to hold a handle.
+    pub fn snapshot(&self) -> Market {
+        self.with(Clone::clone)
+    }
+
+    /// True when two handles point at the same live market object.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut Market) -> R) -> R {
+        let mut market = self.inner.write();
+        f(&mut market)
+    }
+}
+
+/// Last `GetMarketsList` apply phase timing.
+///
+/// Diagnostic only: it never gates protocol behavior. FireTest prints this when
+/// investigating CPU red flags around large market-list payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MarketsListApplyTiming {
+    pub payload_len: usize,
+    pub market_count: usize,
+    pub corr_count: usize,
+    pub total_ns: u64,
+    pub market_loop_ns: u64,
+    pub market_read_ns: u64,
+    pub market_apply_ns: u64,
+    pub index_rebuild_ns: u64,
+    pub corr_loop_ns: u64,
+    pub corr_read_ns: u64,
+    pub corr_apply_ns: u64,
+    pub ref_passes_ns: u64,
+}
 
 /// Per-market price snapshot (обновляется через `emk_UpdateMarketsList`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -139,9 +203,14 @@ impl MarketTradeState {
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
     /// Маркеты в порядке `mIndex` (как они приходят в `emk_GetMarketsList`).
-    pub markets: Vec<Market>,
-    /// `market_name` → индекс в `markets` (для быстрого lookup).
+    ///
+    /// Each item is a stable `MarketHandle`, matching Delphi `TMarket` object
+    /// references stored in `TMarkets = TSlowSafeList<TMarket>`.
+    pub markets: Arc<Vec<MarketHandle>>,
+    /// `market_name` → индекс в `markets` (internal fast lookup for parallel arrays).
     pub by_name: HashMap<String, usize>,
+    /// COW `market_name` → stable handle lookup exposed by [`Self::get`].
+    pub handles_by_name: Arc<HashMap<String, MarketHandle>>,
     /// Корреляционные маркеты (BTC-маркеты для расчётов), key = `bn_market_name`.
     pub corr_markets: HashMap<String, CorrMarket>,
     /// Цены маркетов по `mIndex` (параллельный массив, обновляется prices apply).
@@ -198,6 +267,7 @@ pub struct MarketsState {
     markets_version: u64,
     server_base_currency_name: Option<String>,
     server_base_currency_code: Option<u8>,
+    last_markets_list_timing: Option<MarketsListApplyTiming>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,23 +333,28 @@ impl MarketsState {
 
         let mut markets = Vec::with_capacity(old_markets.len().max(incoming_count));
         let mut prices = Vec::with_capacity(old_markets.len().max(incoming_count));
+        let mut lookup_entries = Vec::with_capacity(old_markets.len().max(incoming_count));
 
-        for (old_idx, mut market) in old_markets.into_iter().enumerate() {
+        for (old_idx, handle) in old_markets.iter().cloned().enumerate() {
+            let old_name = handle.with(|market| market.bn_market_name.clone());
             let mut price = old_prices
                 .get(old_idx)
                 .copied()
-                .unwrap_or_else(|| market_price_from_market(&market));
-            if let Some(&incoming_idx) = incoming_by_name.get(&market.bn_market_name) {
+                .unwrap_or_else(|| handle.with(market_price_from_market));
+            if let Some(&incoming_idx) = incoming_by_name.get(&old_name) {
                 let incoming = &resp.markets[incoming_idx];
-                merge_market_like_delphi_get_markets_list(
-                    &mut market,
-                    incoming,
-                    self.copy_max_leverage_from_markets_list,
-                );
-                price.funding_time = market.funding_time;
-                consumed.insert(market.bn_market_name.clone(), true);
+                handle.with_mut(|market| {
+                    merge_market_like_delphi_get_markets_list(
+                        market,
+                        incoming,
+                        self.copy_max_leverage_from_markets_list,
+                    );
+                    price.funding_time = market.funding_time;
+                    consumed.insert(market.bn_market_name.clone(), true);
+                });
             }
-            markets.push(market);
+            lookup_entries.push((old_name, handle.clone()));
+            markets.push(handle);
             prices.push(price);
         }
 
@@ -294,23 +369,19 @@ impl MarketsState {
                 self.new_markets_pending_price_refresh += 1;
                 self.new_markets_added.push(market.bn_market_name.clone());
             }
+            let name = market.bn_market_name.clone();
             prices.push(market_price_from_market(&market));
-            markets.push(market);
+            let handle = MarketHandle::new(market);
+            lookup_entries.push((name, handle.clone()));
+            markets.push(handle);
         }
 
-        self.by_name.clear();
-        self.by_name.reserve(markets.len());
-        for (i, m) in markets.iter().enumerate() {
-            self.by_name.insert(m.bn_market_name.clone(), i);
-            self.trade_states
-                .entry(m.bn_market_name.clone())
-                .or_default();
-        }
+        self.markets = Arc::new(markets);
+        self.replace_market_lookups_like_delphi_cow(lookup_entries);
 
         self.token_tags
             .retain(|name, _| self.by_name.contains_key(name));
 
-        self.markets = markets;
         self.prices = prices;
         self.bump_markets_version();
 
@@ -354,6 +425,7 @@ impl MarketsState {
         ver: u16,
         local_shift_minutes: f64,
     ) -> Option<MarketsEvent> {
+        let total_start = Instant::now();
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
@@ -366,9 +438,17 @@ impl MarketsState {
         } else {
             Vec::new()
         };
+        let mut pending_markets: Option<Vec<MarketHandle>> = None;
+        let mut pending_handles_by_name: Option<HashMap<String, MarketHandle>> = None;
+        let mut any_market_added = false;
 
+        let market_loop_start = Instant::now();
+        let mut market_read_ns = 0u64;
+        let mut market_apply_ns = 0u64;
         for _ in 0..count {
+            let read_start = Instant::now();
             let market = read_market_with_local_shift(&mut r, ver, local_shift_minutes)?;
+            market_read_ns = market_read_ns.saturating_add(elapsed_ns_u64(read_start));
             if allow_new_markets {
                 incoming_server_names.push(market.bn_market_name.clone());
             }
@@ -377,28 +457,75 @@ impl MarketsState {
             } else {
                 None
             };
-            if self.apply_one_market_from_list(market, allow_new_markets) && new_market_found {
+            let apply_start = Instant::now();
+            let added = self.apply_one_market_from_list_payload_batch(
+                market,
+                allow_new_markets,
+                &mut pending_markets,
+                &mut pending_handles_by_name,
+            );
+            market_apply_ns = market_apply_ns.saturating_add(elapsed_ns_u64(apply_start));
+            if added {
+                any_market_added = true;
+            }
+            if added && new_market_found {
                 self.new_markets_pending_price_refresh += 1;
                 if let Some(name) = market_name {
                     self.new_markets_added.push(name);
                 }
             }
         }
+        if let Some(markets) = pending_markets {
+            self.markets = Arc::new(markets);
+            if let Some(handles_by_name) = pending_handles_by_name {
+                self.handles_by_name = Arc::new(handles_by_name);
+            }
+            if any_market_added {
+                self.bump_markets_version();
+            }
+        }
+        let market_loop_ns = elapsed_ns_u64(market_loop_start);
 
+        let index_rebuild_start = Instant::now();
         if allow_new_markets {
             self.market_indexes = incoming_server_names;
             self.indexes_synchronized = true;
         }
+        let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);
 
+        let corr_loop_start = Instant::now();
         let corr_count = r.read_count()?;
+        let mut corr_read_ns = 0u64;
+        let mut corr_apply_ns = 0u64;
         for _ in 0..corr_count {
+            let read_start = Instant::now();
             let cm = read_corr_market(&mut r)?;
+            corr_read_ns = corr_read_ns.saturating_add(elapsed_ns_u64(read_start));
+            let apply_start = Instant::now();
             self.apply_one_corr_market_from_list(cm);
+            corr_apply_ns = corr_apply_ns.saturating_add(elapsed_ns_u64(apply_start));
         }
+        let corr_loop_ns = elapsed_ns_u64(corr_loop_start);
 
+        let ref_passes_start = Instant::now();
         self.check_corr_markets_like_delphi();
         self.check_currency_ref_markets_like_delphi();
+        let ref_passes_ns = elapsed_ns_u64(ref_passes_start);
         self.markets_list_refresh_needed = false;
+        self.last_markets_list_timing = Some(MarketsListApplyTiming {
+            payload_len: data.len(),
+            market_count: count,
+            corr_count,
+            total_ns: elapsed_ns_u64(total_start),
+            market_loop_ns,
+            market_read_ns,
+            market_apply_ns,
+            index_rebuild_ns,
+            corr_loop_ns,
+            corr_read_ns,
+            corr_apply_ns,
+            ref_passes_ns,
+        });
 
         Some(MarketsEvent::MarketsListReplaced {
             count: self.markets.len(),
@@ -406,13 +533,28 @@ impl MarketsState {
         })
     }
 
-    fn apply_one_market_from_list(&mut self, market: Market, allow_new_markets: bool) -> bool {
+    fn apply_one_market_from_list_payload_batch(
+        &mut self,
+        market: Market,
+        allow_new_markets: bool,
+        pending_markets: &mut Option<Vec<MarketHandle>>,
+        pending_handles_by_name: &mut Option<HashMap<String, MarketHandle>>,
+    ) -> bool {
         if let Some(&idx) = self.by_name.get(&market.bn_market_name) {
-            merge_market_like_delphi_get_markets_list(
-                &mut self.markets[idx],
-                &market,
-                self.copy_max_leverage_from_markets_list,
-            );
+            let handle = self.markets.get(idx).cloned().or_else(|| {
+                pending_markets
+                    .as_ref()
+                    .and_then(|markets| markets.get(idx).cloned())
+            });
+            if let Some(handle) = handle {
+                handle.with_mut(|existing| {
+                    merge_market_like_delphi_get_markets_list(
+                        existing,
+                        &market,
+                        self.copy_max_leverage_from_markets_list,
+                    );
+                });
+            }
             if let Some(price) = self.prices.get_mut(idx) {
                 price.funding_time = market.funding_time;
             }
@@ -423,15 +565,34 @@ impl MarketsState {
             return false;
         }
 
-        let idx = self.markets.len();
-        self.by_name.insert(market.bn_market_name.clone(), idx);
-        self.trade_states
-            .entry(market.bn_market_name.clone())
-            .or_default();
-        self.prices.push(market_price_from_market(&market));
-        self.markets.push(market);
-        self.bump_markets_version();
+        let name = market.bn_market_name.clone();
+        let handle = MarketHandle::new(market);
+        let markets = pending_markets.get_or_insert_with(|| self.markets.iter().cloned().collect());
+        let idx = markets.len();
+        markets.push(handle.clone());
+
+        let handles_by_name =
+            pending_handles_by_name.get_or_insert_with(|| (*self.handles_by_name).clone());
+        handles_by_name.insert(name.clone(), handle.clone());
+        self.by_name.insert(name.clone(), idx);
+        self.trade_states.entry(name).or_default();
+        self.prices.push(handle.with(market_price_from_market));
         true
+    }
+
+    fn replace_market_lookups_like_delphi_cow(
+        &mut self,
+        lookup_entries: Vec<(String, MarketHandle)>,
+    ) {
+        self.by_name.clear();
+        self.by_name.reserve(lookup_entries.len());
+        let mut handles_by_name = HashMap::with_capacity(lookup_entries.len());
+        for (i, (name, handle)) in lookup_entries.into_iter().enumerate() {
+            self.by_name.insert(name.clone(), i);
+            self.trade_states.entry(name.clone()).or_default();
+            handles_by_name.insert(name, handle);
+        }
+        self.handles_by_name = Arc::new(handles_by_name);
     }
 
     fn apply_one_corr_market_from_list(&mut self, cm: CorrMarket) {
@@ -479,17 +640,21 @@ impl MarketsState {
         if currency.is_empty() {
             return;
         }
-        for market in &self.markets {
-            if market.bn_market_name.is_empty() {
+        for handle in self.markets.iter() {
+            let (market_name, corr_name) = handle.with(|market| {
+                (
+                    market.bn_market_name.clone(),
+                    replace_text_ascii_case_insensitive(&market.bn_market_name, currency, "BTC"),
+                )
+            });
+            if market_name.is_empty() {
                 continue;
             }
-            let corr_name =
-                replace_text_ascii_case_insensitive(&market.bn_market_name, currency, "BTC");
             if self.corr_markets.contains_key(&corr_name) {
                 self.ref_btc_corr_markets
-                    .insert(market.bn_market_name.clone(), corr_name);
+                    .insert(market_name.clone(), corr_name);
             } else {
-                self.ref_btc_corr_markets.remove(&market.bn_market_name);
+                self.ref_btc_corr_markets.remove(&market_name);
             }
         }
     }
@@ -499,18 +664,20 @@ impl MarketsState {
         // the protocol tick does not scale as BaseCurDict * CorrDict in Rust.
         let mut usdt_market_by_key = HashMap::new();
         let mut usdt_rev_market_by_key = HashMap::new();
-        for market in &self.markets {
-            if same_text_ascii(&market.base_currency, "USDT") {
-                usdt_market_by_key.insert(
-                    norm_text_ascii(&market.bn_market_currency),
+        for handle in self.markets.iter() {
+            let (base_currency, bn_market_currency, bn_market_name) = handle.with(|market| {
+                (
+                    market.base_currency.clone(),
+                    market.bn_market_currency.clone(),
                     market.bn_market_name.clone(),
-                );
+                )
+            });
+            if same_text_ascii(&base_currency, "USDT") {
+                usdt_market_by_key
+                    .insert(norm_text_ascii(&bn_market_currency), bn_market_name.clone());
             }
-            if same_text_ascii(&market.bn_market_currency, "USDT") {
-                usdt_rev_market_by_key.insert(
-                    norm_text_ascii(&market.base_currency),
-                    market.bn_market_name.clone(),
-                );
+            if same_text_ascii(&bn_market_currency, "USDT") {
+                usdt_rev_market_by_key.insert(norm_text_ascii(&base_currency), bn_market_name);
             }
         }
 
@@ -731,17 +898,24 @@ impl MarketsState {
         &self,
     ) -> Vec<MarketLastPriceHistoryInput> {
         let mut rows = Vec::new();
-        for (idx, market) in self.markets.iter().enumerate() {
+        for (idx, handle) in self.markets.iter().enumerate() {
             let Some(slot) = self.prices.get(idx) else {
                 continue;
             };
+            let (market_name, is_btc_market, is_base_usdt_market) = handle.with(|market| {
+                (
+                    market.bn_market_name.clone(),
+                    market.is_btc_market,
+                    self.market_is_base_usdt_market_like_delphi(market),
+                )
+            });
             rows.push(MarketLastPriceHistoryInput {
-                market_name: market.bn_market_name.clone(),
+                market_name,
                 current: slot.p_last,
                 bid: slot.bid,
                 ask: slot.ask,
-                is_btc_market: market.is_btc_market,
-                is_base_usdt_market: self.market_is_base_usdt_market_like_delphi(market),
+                is_btc_market,
+                is_base_usdt_market,
             });
         }
         rows
@@ -753,12 +927,15 @@ impl MarketsState {
         send_funding: bool,
     ) -> Option<MarketLastPriceHistoryInput> {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
-            let market_name = self.markets[idx].bn_market_name.clone();
-            let is_btc_market = self.markets[idx].is_btc_market;
-            let is_base_usdt_market =
-                self.market_is_base_usdt_market_like_delphi(&self.markets[idx]);
-            let (bn_step_size, bn_min_qty, bn_min_notional) = {
-                let market = &mut self.markets[idx];
+            let handle = self.markets.get(idx).cloned()?;
+            let (market_name, is_btc_market, is_base_usdt_market) = handle.with(|market| {
+                (
+                    market.bn_market_name.clone(),
+                    market.is_btc_market,
+                    self.market_is_base_usdt_market_like_delphi(market),
+                )
+            });
+            let (bn_step_size, bn_min_qty, bn_min_notional) = handle.with_mut(|market| {
                 if send_funding {
                     market.funding_rate = p.funding_rate;
                     market.funding_time = p.funding_time;
@@ -768,7 +945,7 @@ impl MarketsState {
                     market.bn_min_qty,
                     market.bn_min_notional,
                 )
-            };
+            });
             let slot = &mut self.prices[idx];
             slot.bid = p.bid;
             slot.ask = p.ask;
@@ -928,9 +1105,18 @@ impl MarketsState {
         Some(MarketsEvent::TokenTagsUpdated { count: seen.len() })
     }
 
-    /// Получить маркет по имени.
-    pub fn get(&self, market_name: &str) -> Option<&Market> {
-        self.by_name.get(market_name).map(|&i| &self.markets[i])
+    /// Получить стабильный Delphi-like handle маркета по имени.
+    ///
+    /// The handle remains valid after listing refresh because the surrounding
+    /// list/dictionaries are COW-replaced while the market object itself stays
+    /// alive and is mutated in place.
+    pub fn get(&self, market_name: &str) -> Option<MarketHandle> {
+        self.handles_by_name.get(market_name).cloned()
+    }
+
+    /// Получить owned snapshot маркета по имени.
+    pub fn market_snapshot(&self, market_name: &str) -> Option<Market> {
+        self.get(market_name).map(|handle| handle.snapshot())
     }
 
     /// Resolve a server `mIndex` into the canonical market name from
@@ -948,10 +1134,16 @@ impl MarketsState {
             .map(String::as_str)
     }
 
-    /// Resolve a server `mIndex` into the full market snapshot.
-    pub fn market_by_index(&self, m_index: u16) -> Option<&Market> {
+    /// Resolve a server `mIndex` into a stable market handle.
+    pub fn market_by_index(&self, m_index: u16) -> Option<MarketHandle> {
         let name = self.market_name_by_index(m_index)?;
         self.get(name)
+    }
+
+    /// Resolve a server `mIndex` into an owned market snapshot.
+    pub fn market_snapshot_by_index(&self, m_index: u16) -> Option<Market> {
+        self.market_by_index(m_index)
+            .map(|handle| handle.snapshot())
     }
 
     /// Resolve a market name into the current server `mIndex`.
@@ -1098,6 +1290,10 @@ impl MarketsState {
         self.markets_version
     }
 
+    pub fn last_markets_list_apply_timing(&self) -> Option<MarketsListApplyTiming> {
+        self.last_markets_list_timing
+    }
+
     fn bump_markets_version(&mut self) {
         self.markets_version = self.markets_version.wrapping_add(1);
     }
@@ -1196,6 +1392,10 @@ fn market_price_from_market(m: &Market) -> MarketPrice {
         mark_price: 0.0,
         mark_price_found: false,
     }
+}
+
+fn elapsed_ns_u64(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 fn same_text_ascii(left: &str, right: &str) -> bool {
@@ -1332,8 +1532,8 @@ mod tests {
             }
         ));
         assert_eq!(st.market_count(), 2);
-        assert_eq!(st.get("BTC").unwrap().bn_market_name, "BTC");
-        assert_eq!(st.get("ETH").unwrap().bn_market_name, "ETH");
+        assert_eq!(st.get("BTC").unwrap().snapshot().bn_market_name, "BTC");
+        assert_eq!(st.get("ETH").unwrap().snapshot().bn_market_name, "ETH");
         assert!(st.get("DOGE").is_none());
         assert_eq!(st.market_name_by_index(1), Some("ETH"));
     }
@@ -1360,6 +1560,33 @@ mod tests {
             Some("BTCUSDT"),
             "Delphi rebuilds SrvMarkets after the market loop and before CorrMarkets"
         );
+    }
+
+    #[test]
+    fn apply_markets_list_payload_batches_new_market_cow_like_delphi_main_list_build() {
+        let mut st = MarketsState::new();
+        let mut data = Vec::new();
+        data.extend_from_slice(&3i32.to_le_bytes());
+        write_market(&mut data, &mk_market("BTCUSDT", 0), 2);
+        write_market(&mut data, &mk_market("ETHUSDT", 1), 2);
+        write_market(&mut data, &mk_market("DOGEUSDT", 2), 2);
+        data.extend_from_slice(&0i32.to_le_bytes());
+
+        let ev = st.apply_markets_list_payload_with_local_shift(&data, 2, 0.0);
+
+        assert!(matches!(
+            ev,
+            Some(MarketsEvent::MarketsListReplaced {
+                count: 3,
+                corr_count: 0
+            })
+        ));
+        assert_eq!(
+            st.markets_version(),
+            1,
+            "initial GetMarketsList must build the handle list once, not COW per row"
+        );
+        assert!(st.get("DOGEUSDT").is_some());
     }
 
     #[test]
@@ -1501,7 +1728,7 @@ mod tests {
             corr_markets: vec![],
         });
 
-        let market = st.get("BTCUSDT").unwrap();
+        let market = st.get("BTCUSDT").unwrap().snapshot();
         assert_eq!(market.bn_tick_size, 0.25);
         assert_eq!(
             market.bn_max_value, 123.0,
@@ -1522,6 +1749,35 @@ mod tests {
     }
 
     #[test]
+    fn market_handle_survives_listing_cow_and_sees_in_place_updates_like_delphi() {
+        let mut st = MarketsState::new();
+        let mut old = mk_market("BTCUSDT", 1);
+        old.bn_tick_size = 0.01;
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![old],
+            corr_markets: vec![],
+        });
+        let btc = st.get("BTCUSDT").expect("initial handle");
+
+        st.markets_list_refresh_needed = true;
+        let mut incoming_btc = mk_market("BTCUSDT", 1);
+        incoming_btc.bn_tick_size = 0.25;
+        let eth = mk_market("ETHUSDT", 2);
+        st.apply_markets_list(MarketsListResponse {
+            markets: vec![incoming_btc, eth],
+            corr_markets: vec![],
+        });
+
+        let fresh_btc = st.get("BTCUSDT").expect("fresh lookup");
+        assert!(
+            btc.ptr_eq(&fresh_btc),
+            "Delphi TMarkets COW replaces containers, not existing TMarket objects"
+        );
+        assert_eq!(btc.snapshot().bn_tick_size, 0.25);
+        assert!(st.get("ETHUSDT").is_some());
+    }
+
+    #[test]
     fn apply_markets_list_keeps_existing_max_leverage_without_delphi_engine_flag() {
         let mut st = MarketsState::new();
         let mut old = mk_market("BTCUSDT", 1);
@@ -1539,7 +1795,7 @@ mod tests {
         });
 
         assert_eq!(
-            st.get("BTCUSDT").unwrap().max_leverage,
+            st.get("BTCUSDT").unwrap().snapshot().max_leverage,
             25,
             "Delphi CopyFromMarket copies MaxLeverage only when ES_MaxLevInGetMarkets is set"
         );
@@ -1563,7 +1819,7 @@ mod tests {
             corr_markets: vec![],
         });
 
-        assert_eq!(st.get("BTCUSDT").unwrap().max_leverage, 125);
+        assert_eq!(st.get("BTCUSDT").unwrap().snapshot().max_leverage, 125);
     }
 
     #[test]
@@ -1809,7 +2065,7 @@ mod tests {
             corr_prices: vec![],
         });
 
-        let market = st.get("BTCUSDT").unwrap();
+        let market = st.get("BTCUSDT").unwrap().snapshot();
         assert_eq!(market.funding_rate, 0.0125);
         assert_eq!(market.funding_time, 46000.25);
 
@@ -2409,7 +2665,10 @@ mod tests {
         st.apply_markets_indexes(vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
 
         assert_eq!(st.market_name_by_index(0), Some("ETHUSDT"));
-        assert_eq!(st.market_by_index(1).unwrap().bn_market_name, "BTCUSDT");
+        assert_eq!(
+            st.market_by_index(1).unwrap().snapshot().bn_market_name,
+            "BTCUSDT"
+        );
         assert_eq!(st.market_index_by_name("BTCUSDT"), Some(1));
         assert_eq!(st.market_index_by_name("NOPE"), None);
     }
@@ -2425,7 +2684,7 @@ mod tests {
         st.mark_indexes_stale();
 
         assert_eq!(st.market_name_by_index(0), None);
-        assert_eq!(st.market_by_index(0), None);
+        assert!(st.market_by_index(0).is_none());
         assert_eq!(st.market_index_by_name("BTCUSDT"), None);
     }
 }

@@ -44,7 +44,9 @@ pub use history_worker::{
     MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
     MarketHistoryStreamSection, MarketHistoryTradeInput, MarketHistoryWorker,
 };
-pub use markets::{MarketPrice, MarketTradeState, MarketsEvent, MarketsState};
+pub use markets::{
+    MarketHandle, MarketPrice, MarketTradeState, MarketsEvent, MarketsListApplyTiming, MarketsState,
+};
 pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,
     OrderBookSnapshot, OrderBooks, TopOfBook,

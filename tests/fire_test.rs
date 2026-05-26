@@ -673,8 +673,30 @@ impl Session {
         let m = self
             .client
             .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
+        let market_apply = self
+            .dispatcher
+            .markets()
+            .last_markets_list_apply_timing()
+            .map(|t| {
+                format!(
+                    " get_markets_list_apply(total={}us markets={}us read={}us apply={}us index={}us corr={}us read={}us apply={}us ref={}us payload={} markets={} corr={})",
+                    t.total_ns / 1_000,
+                    t.market_loop_ns / 1_000,
+                    t.market_read_ns / 1_000,
+                    t.market_apply_ns / 1_000,
+                    t.index_rebuild_ns / 1_000,
+                    t.corr_loop_ns / 1_000,
+                    t.corr_read_ns / 1_000,
+                    t.corr_apply_ns / 1_000,
+                    t.ref_passes_ns / 1_000,
+                    t.payload_len,
+                    t.market_count,
+                    t.corr_count
+                )
+            })
+            .unwrap_or_default();
         format!(
-            "recv={} reader(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+            "recv={} reader(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
@@ -719,7 +741,8 @@ impl Session {
             avg_us(m.writer_tick_ns, m.writer_tick_count),
             m.writer_tick_max_ns / 1_000,
             m.send_phase_max_ns / 1_000,
-            m.public_event_queue_len
+            m.public_event_queue_len,
+            market_apply
         )
     }
 

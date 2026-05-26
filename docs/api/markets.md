@@ -113,9 +113,17 @@ Delphi `TDateTime` values. A zero funding time stays zero.
 
 ## Reading State
 
+`MarketsState::get(name)` returns a stable `MarketHandle`, not a temporary
+borrow. This mirrors Delphi `TMarkets = TSlowSafeList<TMarket>`: listing
+refresh may replace the surrounding list/dictionaries, but existing `TMarket`
+objects stay alive and are mutated in place. UI code may keep the handle after a
+search and read it later without re-searching by name.
+
 ```rust
 if let Some(market) = dispatcher.markets().get("BTCUSDT") {
-    println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
+    market.with(|market| {
+        println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
+    });
 }
 
 if let Some(price) = dispatcher.markets().price("BTCUSDT") {
@@ -290,9 +298,11 @@ wire payload.
 Convenience methods:
 
 ```rust
-dispatcher.markets().get("BTCUSDT");
+let btc = dispatcher.markets().get("BTCUSDT"); // Option<MarketHandle>
+let btc_snapshot = dispatcher.markets().market_snapshot("BTCUSDT");
 dispatcher.markets().market_name_by_index(0);
 dispatcher.markets().market_by_index(0);
+dispatcher.markets().market_snapshot_by_index(0);
 dispatcher.markets().market_index_by_name("BTCUSDT");
 dispatcher.markets().price("BTCUSDT");
 dispatcher.markets().price_by_index(0);

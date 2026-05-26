@@ -7339,8 +7339,9 @@ Done:
   reconfiguring known markets does not recreate existing per-market stores, and
   worker-owned registry keys / server-index slots use shared `Arc<str>` market
   names instead of owned `String` copies.
-- Public API remains string-based (`&str`/`String`); this is an internal
-  ownership optimization, not a protocol or wire-format change.
+- This step was only the internal history-storage optimization. A later
+  `TMarkets` COW step upgrades public market lookup to stable
+  `MarketHandle`s while keeping name-based lookup as the ergonomic entry point.
 
 Verification:
 
@@ -7397,3 +7398,58 @@ Verification:
 - `cargo test checked_word_count_builders_write_only_declared_wrapped_count_like_delphi --lib --quiet` OK.
 - `cargo test --lib --quiet` OK: 767 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - Delphi `TMarkets` COW as stable Rust handles
+
+Delphi evidence:
+
+- `TMarkets = class(TSlowSafeList<TMarket>)`; the list stores `TMarket` object
+  references, not value snapshots.
+- Normal `TMarkets.Add(MainList=false)` builds a new `TList<TMarket>` and new
+  dictionaries, copies existing object references into them, adds the new
+  object, then puts old list/dictionaries into delayed trash.
+- Existing `TMarket` objects stay alive and mutable. UI/code may keep a market
+  reference while listing refresh replaces the container around it.
+
+Done:
+
+- Replaced the public market object storage with Delphi-like stable
+  `MarketHandle`s. Rust analogue:
+  `TMarket*` -> `MarketHandle`; `TList<TMarket>` -> COW `Arc<Vec<MarketHandle>>`;
+  `TDictionary<string,TMarket>` -> COW `Arc<HashMap<..., MarketHandle>>`; delayed
+  trash -> normal `Arc` lifetime.
+- Existing markets must be mutated through the same handle on
+  `GetMarketsList`/`UpdateMarketsList`, not replaced by a new value.
+- The payload/streaming `GetMarketsList` path builds new handles in one pending
+  list/dict and replaces the containers once. This matches Delphi initial/main
+  list build and avoids the Rust-only O(N^2) bug where COW was performed per
+  market row.
+- Public API now lets user code do one lookup once, hold the handle, and read
+  current metadata later without re-searching by name/index:
+  `let btc = markets.get("BTCUSDT")?; btc.with(|m| ...)`.
+- Kept snapshot helpers for code that wants owned `Market` copies:
+  `market_snapshot` and `market_snapshot_by_index`.
+- Added tests proving handle identity survives listing refresh and sees later
+  in-place mutations.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test market_handle_survives_listing_cow_and_sees_in_place_updates_like_delphi --lib --quiet` OK.
+- `cargo test apply_markets_list_payload_batches_new_market_cow_like_delphi_main_list_build --lib --quiet` OK.
+- `cargo test --lib --quiet` OK: 768 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.10s`, `ParseFailed=0`, err_emu actual drop
+  `10.62%`, retained futures rows present, derived snapshot present,
+  `reader max=720us`, `writer_cpu max=142us`.
+
+Open CPU note:
+
+- The O(N^2) COW CPU bug is closed. Before the batch fix, phased FireTest showed
+  `GetMarketsList apply total=12218us`, `market_apply=10290us`. After the fix:
+  `total=2344us`, `markets=821us`, `market_read=325us`, `market_apply=436us`,
+  `corr=1212us`, `ref=305us`.
+- `active_dispatch max` for this large init payload is now about `3868us`.
+  Protocol reader/writer stayed below `1ms`; the remaining large init apply
+  budget is Phase Z optimization work, not socket receive/send work.

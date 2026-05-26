@@ -901,7 +901,9 @@ impl EventDispatcher {
         self.markets
             .markets
             .iter()
-            .map(|market| Some(Arc::<str>::from(market.bn_market_name.as_str())))
+            .map(|market| {
+                market.with(|market| Some(Arc::<str>::from(market.bn_market_name.as_str())))
+            })
             .collect()
     }
 
@@ -2529,6 +2531,7 @@ mod tests {
                 .markets
                 .get("OLDV1")
                 .expect("v1 market applied")
+                .snapshot()
                 .futures_type,
             BaseCurrency::EMPTY,
             "v1 payload has no FuturesType byte, so Delphi keeps CreateBase default BC_EMPTY"
