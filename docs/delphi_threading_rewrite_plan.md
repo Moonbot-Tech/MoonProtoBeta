@@ -8712,3 +8712,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `StratsState` public type split
+
+Done:
+
+- Moved strategy read-model/event/cache types from `state/strats.rs` into
+  `state/strats/types.rs`: `StrategyInfo`, `StratEvent`, and
+  `StrategySnapshotPayloadCache`.
+- Kept `StratsState` apply/delete/checked/schema/snapshot algorithms in
+  `state/strats.rs` so the Delphi `ProcessStratCommand` equivalent remains
+  concentrated for сверка.
+- This is a readability/publication split only. No strategy state mutation,
+  event shape, snapshot cache behavior, schema parse behavior, or public API
+  paths changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
