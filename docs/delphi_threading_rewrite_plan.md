@@ -7528,3 +7528,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `commands::trade` packed-record split
+
+Done:
+
+- Moved fixed Delphi packed records from `trade.rs` into
+  `commands/trade/records.rs`: `PriceZone`, `OrderCompact`, `StopSettings`,
+  `OrderUpdateData`, `ImmuneItem`, and the zero-tail readers used by soft-tail
+  command parsing.
+- Kept public paths unchanged through `commands::trade::*` re-exports.
+- Kept compile-time wire-size checks in the records module and kept tests
+  asserting the same public wire-size constants / byte-for-byte roundtrips.
+- `trade.rs` now focuses on command headers, command parsing, command structs,
+  and builders; fixed wire structs are isolated for easier Delphi packed-record
+  сверка.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

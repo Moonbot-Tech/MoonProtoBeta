@@ -1,3 +1,4 @@
+use super::records::{IMMUNE_ITEM_SIZE, PRICE_ZONE_SIZE};
 use super::*;
 
 #[test]
@@ -32,7 +33,6 @@ fn stop_settings_wire_layout_matches_delphi_record() {
     let mut encoded = Vec::new();
     stops.write_to(&mut encoded);
 
-    assert_eq!(std::mem::size_of::<WireStopSettings>(), 46);
     assert_eq!(STOP_SETTINGS_SIZE, 46);
     assert_eq!(encoded, expected);
 
@@ -63,7 +63,6 @@ fn order_compact_adjust_time_skips_zero_dates_like_delphi() {
 
 #[test]
 fn order_compact_uses_private_wire_struct() {
-    assert_eq!(std::mem::size_of::<WireOrderCompact>(), 117);
     assert_eq!(ORDER_COMPACT_SIZE, 117);
 
     let order = OrderCompact {
@@ -160,7 +159,6 @@ fn order_update_data_adjust_time_skips_zero_dates_like_delphi() {
 
 #[test]
 fn order_update_data_uses_private_wire_struct() {
-    assert_eq!(std::mem::size_of::<WireOrderUpdateData>(), 66);
     assert_eq!(ORDER_UPDATE_DATA_SIZE, 66);
 
     let data = OrderUpdateData {
@@ -505,7 +503,6 @@ fn move_all_commands_preserve_unknown_ordinals_like_delphi() {
 
 #[test]
 fn set_immune_wire_layout_matches_delphi_record() {
-    assert_eq!(std::mem::size_of::<WireImmuneItem>(), 9);
     assert_eq!(IMMUNE_ITEM_SIZE, 9);
 
     let payload = build_set_immune(
@@ -596,7 +593,6 @@ fn turn_panic_sell_builder_uses_delphi_client_epoch_header() {
 
 #[test]
 fn price_zone_uses_private_wire_struct_without_public_endian_wrappers() {
-    assert_eq!(std::mem::size_of::<WirePriceZone>(), 16);
     assert_eq!(PRICE_ZONE_SIZE, 16);
 
     let zone = PriceZone {
