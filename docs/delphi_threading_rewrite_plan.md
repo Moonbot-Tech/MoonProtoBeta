@@ -6875,6 +6875,23 @@ Verification:
   `FIRETEST_QUICK_PASS after 25.10s`, `ParseFailed=0`,
   `reader max=676us`, `writer_cpu max=153us`.
 
+### 2026-05-26 - `client.rs` Engine API/candles wrapper split
+
+Done:
+
+- Moved public Engine API request helpers, typed request/parse helpers, and
+  chunked candles async wrapper state methods into `src/client/engine_api.rs`.
+- Public methods remain inherent `Client` methods; API call sites and wire
+  behavior are unchanged.
+- Internal helpers needed by the existing subscription/refresh paths and tests
+  are crate-visible only.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
