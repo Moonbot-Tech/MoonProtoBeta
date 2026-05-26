@@ -10,7 +10,7 @@ use std::io::Read;
 use zerocopy::FromBytes;
 /// Parse merged `emk_RequestCandlesData` bytes.
 ///
-/// Input is the concatenated chunk payload returned by [`CandlesAggregator`].
+/// Input is the concatenated chunk payload returned by [`super::CandlesAggregator`].
 /// Delphi stores a zlib-compressed stream:
 ///
 /// ```text

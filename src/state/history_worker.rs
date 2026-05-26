@@ -3,7 +3,8 @@
 //! The protocol/event-dispatch path must not own hot history locks. It sends
 //! typed stream batches through this unbounded handle; the worker thread owns
 //! [`MarketHistoryRegistry`] and is the single writer for all per-market
-//! [`MarketHistoryStore`] instances.
+//! [`MarketHistoryStore`](crate::state::history_store::MarketHistoryStore)
+//! instances.
 
 use std::sync::{mpsc, Arc};
 use std::thread;

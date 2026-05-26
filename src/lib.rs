@@ -44,19 +44,18 @@
 //! client.stop()?;
 //! ```
 //!
-//! For common one-shot Engine API operations, use typed helpers such as
-//! [`Client::request_balance`], [`Client::request_hedge_mode`],
-//! [`Client::request_api_expiration_time`],
-//! [`Client::request_transfer_assets`],
-//! [`Client::request_coin_card_candles`], and
-//! [`Client::request_candles_data`]. They keep the client loop running, check
-//! the server status or channel completion, and parse or merge the response
-//! payload. Events observed during the wait are queued in
-//! [`EventDispatcher::queued_events`] and can be drained with
-//! [`EventDispatcher::take_queued_events`].
+//! For common one-shot Engine API operations, use [`MoonClient`] helpers such
+//! as [`MoonClient::request_balance`], [`MoonClient::request_hedge_mode`],
+//! [`MoonClient::request_api_expiration_time`],
+//! [`MoonClient::request_transfer_assets`],
+//! [`MoonClient::request_coin_card_candles`], and
+//! [`MoonClient::request_candles_data`]. The runtime keeps MoonProto pumping,
+//! checks the server status or channel completion, and parses or merges the
+//! response payload. Events observed during the wait remain available through
+//! [`MoonClient::drain_events`].
 //!
 //! Regular applications should start with [`MoonClient`]. Lower-level
-//! [`Client`] and [`EventDispatcher`](crate::events::EventDispatcher) APIs remain
+//! [`Client`] and [`EventDispatcher`] APIs remain
 //! available for tests, protocol tools, and custom runtimes.
 //!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.

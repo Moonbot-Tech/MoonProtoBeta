@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-/// A copyable row that can be stored in [`SeqRing`].
+/// A copyable row that can be stored in the retained dense ring.
 pub trait SeqRingRow: Copy + Default + Send + Sync + 'static {}
 
 impl<T> SeqRingRow for T where T: Copy + Default + Send + Sync + 'static {}

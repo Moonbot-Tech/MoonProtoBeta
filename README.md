@@ -200,15 +200,20 @@ Examples live in `examples/`.
 
 Important ones:
 
-- `trading_flow.rs`: phased connect, Init, subscriptions, stream.
-- `client_test.rs`: old low-level smoke/debug client.
-- `list_markets.rs`: fetch market list.
-- `market_refresh.rs`: observe background market refresh.
-- `trades_stream.rs`: subscribe to trades.
+- `trading_flow.rs`: compact `MoonClient` application flow.
+- `list_markets.rs`: market catalog from `MoonClient::snapshot`.
+- `market_refresh.rs`: background market refresh events/snapshots.
+- `trades_stream.rs`: trades subscription and retained market tail.
 - `order_book_stream.rs` / `order_book_top.rs`: orderbook stream/read model.
 - `request_candles_data.rs` / `history_bars.rs`: candle/history requests.
-- `order_snapshot.rs`: order snapshot helper.
-- `cancel_open_order.rs`: tracked cancel helper.
+- `order_snapshot.rs`: fresh order snapshot through `MoonClient`.
+- `cancel_open_order.rs`: tracked cancel intent through `client.orders()`.
+- `multi_client_test.rs`: two independent `MoonClient` runtimes.
+
+Diagnostic / protocol-tool examples intentionally use lower-level APIs:
+
+- `client_test.rs`: raw smoke/debug client.
+- `loss_logger.rs`: live loss/gap diagnostics.
 - `stress_client.rs`: two-client stress and protocol-loss diagnostics.
 
 ## API Docs

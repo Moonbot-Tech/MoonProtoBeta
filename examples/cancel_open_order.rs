@@ -1,29 +1,19 @@
-//! Request the current order snapshot and cancel one tracked order.
+//! Request current orders and optionally cancel one through `MoonClient`.
 //!
 //! By default this example is a dry run. Pass `--send` to actually queue the
-//! cancel command on the server.
+//! cancel intent.
 //!
 //! Run:
-//!   cargo run --example cancel_open_order --release -- "<key_base64>" "host:port" [order_uid] [--send]
+//!   cargo run --example cancel_open_order --release -- "<key_base64>" [host:port] [order_uid] [--send]
 
 use std::env;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use moonproto::state::OrderEvent;
-use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, Event, EventDispatcher,
-    InitConfig,
-};
+use moonproto::Event;
 
-fn parse_host(value: Option<&String>) -> (String, u16) {
-    let Some(value) = value else {
-        return ("127.0.0.1".to_string(), 3000);
-    };
-    let Some((host, port)) = value.split_once(':') else {
-        return (value.clone(), 3000);
-    };
-    (host.to_string(), port.parse().unwrap_or(3000))
-}
+mod common;
 
 fn parse_uid(value: &str) -> Option<u64> {
     value
@@ -50,33 +40,18 @@ fn main() {
         .filter(|arg| arg.as_str() != "--send")
         .find_map(|arg| parse_uid(arg));
 
-    let keys = import_key(&args[1]).expect("invalid key");
-    let (server_ip, server_port) = parse_host(host_arg);
-
-    let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key);
-    let mut client = Client::new(cfg);
-    let mut dispatcher = EventDispatcher::new();
-
-    let init = InitConfig {
-        step_timeout: None,
-        ..Default::default()
+    let client = match common::connect(&args[1], host_arg, common::init_config()) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("[connect/init] failed: {err}");
+            std::process::exit(2);
+        }
     };
 
-    println!("[connect] waiting for ready client...");
-    if let Err(err) = connect_and_init(
-        &mut client,
-        &mut dispatcher,
-        ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
-    ) {
-        eprintln!("[connect] failed: {err}");
-        std::process::exit(2);
-    }
-
-    println!("[orders] requesting snapshot...");
-    let mut orders = match client.request_order_snapshot(&mut dispatcher, Duration::from_secs(15)) {
+    let mut orders = match client.request_order_snapshot(Duration::from_secs(15)) {
         Ok(orders) => orders,
         Err(err) => {
-            eprintln!("[orders] snapshot failed: {err:?}");
+            eprintln!("[orders] snapshot failed: {err}");
             std::process::exit(3);
         }
     };
@@ -89,7 +64,6 @@ fn main() {
         .cloned()
     else {
         println!("[orders] no active orders to cancel");
-        client.disconnect();
         return;
     };
 
@@ -103,34 +77,33 @@ fn main() {
     );
 
     if !send {
-        println!("[dry-run] cancel was not sent; pass --send to queue TOrderCancelCommand");
-        client.disconnect();
+        println!("[dry-run] cancel was not sent; pass --send to queue cancel intent");
         return;
     }
 
-    if !client.cancel_tracked_order(dispatcher.orders_mut(), order.uid) {
-        println!("[send] cancel was not queued; local order state is no longer cancellable");
-        client.disconnect();
-        return;
+    match client.orders().cancel(order.uid) {
+        Ok(true) => println!("[send] cancel queued; listening briefly for order updates..."),
+        Ok(false) => {
+            println!("[send] cancel was not queued; live order state is no longer cancellable");
+            return;
+        }
+        Err(err) => {
+            eprintln!("[send] failed: {err}");
+            std::process::exit(4);
+        }
     }
-    println!("[send] cancel queued; listening briefly for order updates...");
 
-    client.run_with_dispatcher(
-        Duration::from_secs(5),
-        &mut dispatcher,
-        Box::new(|event| {
-            if let Event::Order(order_event) = event {
-                match order_event {
-                    OrderEvent::Updated(uid) => println!("[order] updated uid={uid}"),
-                    OrderEvent::Removed(uid) => println!("[order] removed uid={uid}"),
-                    OrderEvent::Ignored { uid, reason } => {
-                        println!("[order] ignored uid={uid} reason={reason:?}");
-                    }
-                    _ => {}
-                }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match client.recv_event_timeout(Duration::from_millis(500)) {
+            Ok(Event::Order(OrderEvent::Updated(uid))) => println!("[order] updated uid={uid}"),
+            Ok(Event::Order(OrderEvent::Removed(uid))) => println!("[order] removed uid={uid}"),
+            Ok(Event::Order(OrderEvent::Ignored { uid, reason })) => {
+                println!("[order] ignored uid={uid} reason={reason:?}");
             }
-        }),
-    );
-
-    client.disconnect();
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }

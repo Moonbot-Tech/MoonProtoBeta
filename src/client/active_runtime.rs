@@ -187,6 +187,30 @@ impl MoonClient {
         ))
     }
 
+    /// Unsubscribe from one orderbook by market name.
+    pub fn unsubscribe_orderbook(
+        &self,
+        market_name: impl Into<String>,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::UnsubscribeOrderBook(market_name.into()))
+    }
+
+    /// Unsubscribe from several orderbooks by market name.
+    pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.send_no_reply(RuntimeCommand::UnsubscribeOrderBooks(
+            market_names.into_iter().map(Into::into).collect(),
+        ))
+    }
+
+    /// Unsubscribe from all orderbooks remembered in the reconnect registry.
+    pub fn unsubscribe_all_orderbooks(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::UnsubscribeAllOrderBooks)
+    }
+
     /// Subscribe to all trades and retain Active Lib data for all markets.
     pub fn subscribe_all_trades(&self, want_mm: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::SubscribeAllTrades(want_mm))
@@ -207,6 +231,11 @@ impl MoonClient {
             want_mm,
             markets: market_names.into_iter().map(Into::into).collect(),
         })
+    }
+
+    /// Unsubscribe from all trades and clear the reconnect registry intent.
+    pub fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::UnsubscribeAllTrades)
     }
 
     /// Request a fresh balance snapshot through the active runtime.
@@ -301,6 +330,24 @@ impl MoonClient {
                 RuntimeReply::CandlesData(result) => result.map_err(MoonClientError::from),
                 _ => Err(MoonClientError::RuntimeStopped),
             })
+    }
+
+    /// Request one market's historical candles through Engine API.
+    pub fn request_coin_card_candles(
+        &self,
+        market: impl Into<String>,
+        ticks: crate::commands::candles::DeepHistoryKind,
+        timeout: Duration,
+    ) -> Result<Vec<crate::commands::candles::DeepPrice>, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::CoinCardCandles {
+            market: market.into(),
+            ticks,
+            timeout,
+        })
+        .and_then(|reply| match reply {
+            RuntimeReply::CoinCardCandles(result) => result.map_err(MoonClientError::from),
+            _ => Err(MoonClientError::RuntimeStopped),
+        })
     }
 
     /// Request a fresh UI/settings snapshot through the active runtime.
@@ -543,11 +590,15 @@ enum RuntimeCommand {
     Stop,
     SubscribeOrderBook(String),
     SubscribeOrderBooks(Vec<String>),
+    UnsubscribeOrderBook(String),
+    UnsubscribeOrderBooks(Vec<String>),
+    UnsubscribeAllOrderBooks,
     SubscribeAllTrades(bool),
     SubscribeTradesFor {
         want_mm: bool,
         markets: Vec<String>,
     },
+    UnsubscribeAllTrades,
     BalanceRefresh,
     Ui(UiRuntimeCommand),
     Strat(StratRuntimeCommand),
@@ -575,14 +626,37 @@ enum RuntimeCommand {
 }
 
 enum RuntimeCommandRequest {
-    OrderSnapshot { timeout: Duration },
-    BalanceSnapshot { timeout: Duration },
-    Balance { asset: String, timeout: Duration },
-    HedgeMode { timeout: Duration },
-    ApiExpirationTime { timeout: Duration },
-    TransferAssets { balance_type: u8, timeout: Duration },
-    CandlesData { timeout: Duration },
-    ClientSettings { timeout: Duration },
+    OrderSnapshot {
+        timeout: Duration,
+    },
+    BalanceSnapshot {
+        timeout: Duration,
+    },
+    Balance {
+        asset: String,
+        timeout: Duration,
+    },
+    HedgeMode {
+        timeout: Duration,
+    },
+    ApiExpirationTime {
+        timeout: Duration,
+    },
+    TransferAssets {
+        balance_type: u8,
+        timeout: Duration,
+    },
+    CandlesData {
+        timeout: Duration,
+    },
+    CoinCardCandles {
+        market: String,
+        ticks: crate::commands::candles::DeepHistoryKind,
+        timeout: Duration,
+    },
+    ClientSettings {
+        timeout: Duration,
+    },
 }
 
 enum RuntimeReply {
@@ -593,6 +667,7 @@ enum RuntimeReply {
     ApiExpirationTime(Result<crate::commands::engine_api::ApiExpirationTime, EngineRequestError>),
     TransferAssets(Result<Vec<crate::commands::engine_api::TransferAsset>, EngineRequestError>),
     CandlesData(Result<MergedCandles, mpsc::RecvTimeoutError>),
+    CoinCardCandles(Result<Vec<crate::commands::candles::DeepPrice>, EngineRequestError>),
     ClientSettings(Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError>),
 }
 
@@ -717,12 +792,28 @@ fn handle_command(
             client.subscribe_orderbooks(names);
             false
         }
+        RuntimeCommand::UnsubscribeOrderBook(name) => {
+            client.unsubscribe_orderbook(&name);
+            false
+        }
+        RuntimeCommand::UnsubscribeOrderBooks(names) => {
+            client.unsubscribe_orderbooks(names);
+            false
+        }
+        RuntimeCommand::UnsubscribeAllOrderBooks => {
+            client.unsubscribe_all_orderbooks();
+            false
+        }
         RuntimeCommand::SubscribeAllTrades(want_mm) => {
             client.subscribe_all_trades(want_mm);
             false
         }
         RuntimeCommand::SubscribeTradesFor { want_mm, markets } => {
             client.subscribe_trades_for(want_mm, markets);
+            false
+        }
+        RuntimeCommand::UnsubscribeAllTrades => {
+            client.unsubscribe_all_trades();
             false
         }
         RuntimeCommand::BalanceRefresh => {
@@ -814,6 +905,16 @@ fn handle_request_command(
         RuntimeCommandRequest::CandlesData { timeout } => (
             RuntimeReply::CandlesData(client.request_candles_data(dispatcher, timeout)),
             true,
+        ),
+        RuntimeCommandRequest::CoinCardCandles {
+            market,
+            ticks,
+            timeout,
+        } => (
+            RuntimeReply::CoinCardCandles(
+                client.request_coin_card_candles(dispatcher, &market, ticks, timeout),
+            ),
+            false,
         ),
         RuntimeCommandRequest::ClientSettings { timeout } => (
             RuntimeReply::ClientSettings(client.request_client_settings(dispatcher, timeout)),

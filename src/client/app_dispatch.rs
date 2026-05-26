@@ -5,7 +5,7 @@ use crate::protocol::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
-/// Raw callback used by [`Client::run`].
+/// Raw callback used by [`crate::client::Client::run`].
 ///
 /// This callback receives decoded MoonProto command payloads after transport
 /// decrypt/decompress/group handling, but before `EventDispatcher` state

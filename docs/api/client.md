@@ -377,6 +377,11 @@ connection readiness and the one-time init requests.
 
 ## Trade Context
 
+This is a low-level/custom-runtime topic. Regular UI actions for already
+tracked orders should use `client.orders()` intents, and new public market-level
+order helpers should be added to `MoonClient` before exposing that flow to
+application developers.
+
 Market-level trade commands need the active server route:
 `base_currency_code` and `exchange_code` from `server_info()`. After
 `connect_and_init`, build that route with:
@@ -387,10 +392,7 @@ client.new_order(ctx, "BTCUSDT", false, 50_000.0, 0, 0.001);
 ```
 
 If the application uses a custom init flow, call `request_base_check` first or
-set `server_info` manually from a parsed BaseCheck response. For actions on an
-order already present in `EventDispatcher::orders()`, prefer the
-`*_tracked_order` wrappers; they derive UID, market, route, and status from the
-tracked order state.
+set `server_info` manually from a parsed BaseCheck response.
 
 ## Engine API Requests
 
@@ -480,14 +482,14 @@ the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
 Use registry-aware methods:
 
 ```rust
-client.subscribe_all_trades(false);
-client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"]);
-client.subscribe_orderbook("BTCUSDT");
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
-client.unsubscribe_orderbook("BTCUSDT");
-client.unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
-client.unsubscribe_all_orderbooks();
-client.unsubscribe_all_trades();
+client.subscribe_all_trades(false)?;
+client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"])?;
+client.subscribe_orderbook("BTCUSDT")?;
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.unsubscribe_orderbook("BTCUSDT")?;
+client.unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.unsubscribe_all_orderbooks()?;
+client.unsubscribe_all_trades()?;
 ```
 
 The registry records the latest subscription intent. Before Init, public

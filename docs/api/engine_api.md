@@ -27,6 +27,11 @@ let qty = client.request_balance("USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
 let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
+let history = client.request_coin_card_candles(
+    "BTCUSDT",
+    moonproto::commands::candles::DeepHistoryKind::Hour1,
+    Duration::from_secs(12),
+)?;
 let candles = client.request_candles_data(Duration::from_secs(30))?;
 ```
 
@@ -63,7 +68,8 @@ UID is registered again.
 
 | Group | Methods |
 |---|---|
-| One-shot typed reads | `request_base_check`, `request_auth_check`, `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles` |
+| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_candles_data`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
+| Low-level init reads | `request_base_check`, `request_auth_check` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
@@ -77,10 +83,10 @@ UID is registered again.
 For subscriptions, prefer the registry-aware APIs:
 
 ```rust
-client.subscribe_all_trades(false);
-client.subscribe_orderbook("BTCUSDT");
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"]);
-client.unsubscribe_all_orderbooks();
+client.subscribe_all_trades(false)?;
+client.subscribe_orderbook("BTCUSDT")?;
+client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.unsubscribe_all_orderbooks()?;
 ```
 
 Those APIs update the subscription registry. Before Init, they do not send

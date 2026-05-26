@@ -2,11 +2,11 @@ use crate::commands::engine_api::{EngineMethod, ServerInfo};
 use crate::MoonKey;
 use std::sync::mpsc;
 use std::time::Duration;
-/// Transport authorization state for one [`Client`].
+/// Transport authorization state for one [`crate::client::Client`].
 ///
 /// This is a low-level diagnostic value. Most applications should watch
-/// [`LifecycleEvent`] and use [`Client::is_authorized`] /
-/// [`Client::is_domain_ready`] for coarse readiness.
+/// [`LifecycleEvent`] and use [`crate::client::Client::is_authorized`] /
+/// [`crate::client::Client::is_domain_ready`] for coarse readiness.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AuthStatus {
     /// Initial state before any successful transport exchange.
@@ -20,7 +20,8 @@ pub enum AuthStatus {
 }
 
 /// Error returned by one-shot Engine API helpers such as
-/// [`Client::request_balance`] and [`Client::request_coin_card_candles`].
+/// [`crate::MoonClient::request_balance`] and
+/// [`crate::MoonClient::request_coin_card_candles`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineRequestError {
     /// No response was delivered before the caller's timeout.
@@ -136,7 +137,7 @@ impl std::error::Error for TradeContextError {}
 
 /// Lifecycle event for the connection to the MoonProto server.
 ///
-/// Register a callback with [`Client::on_lifecycle`]. During client run calls,
+/// Register a callback with [`crate::client::Client::on_lifecycle`]. During client run calls,
 /// the callback is delivered through the application callback queue, not inside
 /// the protocol writer tick.
 ///
@@ -222,7 +223,7 @@ pub enum LifecycleEvent {
     ServerRestart,
 }
 
-/// Lifecycle callback type registered with [`Client::on_lifecycle`].
+/// Lifecycle callback type registered with [`crate::client::Client::on_lifecycle`].
 pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 
 /// Configuration for periodic refresh requests owned by the active library.

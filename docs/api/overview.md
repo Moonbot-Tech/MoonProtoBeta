@@ -113,8 +113,8 @@ Applications use lifecycle events for UI status and alerting, not for recovery.
 
 | API | Purpose |
 |---|---|
-| `client.md` | `Client`, config, run loop, init helper, subscriptions |
-| `events.md` | `EventDispatcher`, typed events, read-only state |
+| `client.md` | `MoonClient`, config, init, subscriptions, requests |
+| `events.md` | `MoonClient` events, immutable snapshots, low-level dispatcher |
 | `lifecycle.md` | Connection and critical status events |
 | `engine_api.md` | Engine RPC wrappers and response parsing |
 | `trade_actions.md` | High-level trading commands |

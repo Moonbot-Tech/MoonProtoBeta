@@ -43,7 +43,6 @@ use std::time::Duration;
 use moonproto::commands::candles::DeepHistoryKind;
 
 match client.request_coin_card_candles(
-    &mut dispatcher,
     "BTCUSDT",
     DeepHistoryKind::Hour1,
     Duration::from_secs(12),
@@ -58,9 +57,9 @@ match client.request_coin_card_candles(
 }
 ```
 
-The helper keeps the UDP loop running until the response arrives or the timeout
-expires. A successful response returns a `Vec<DeepPrice>` sorted exactly as the
-server sent it.
+The `MoonClient` helper keeps the runtime pumping until the response arrives or
+the timeout expires. A successful response returns a `Vec<DeepPrice>` sorted
+exactly as the server sent it.
 
 ## Full Candles Snapshot
 

@@ -1,26 +1,12 @@
-//! Request the current UI settings snapshot.
-//!
-//! Demonstrates `Client::request_client_settings`, the high-level helper for
-//! `TSettingsRequest` + `TClientSettingsCommand`. The consumer does not need to
-//! wait for `SettingsEvent::ClientSettingsUpdated` manually.
+//! Request the current UI/settings snapshot through `MoonClient`.
 //!
 //! Run:
-//!   cargo run --example request_client_settings --release -- "<key_base64>" "host:port"
+//!   cargo run --example request_client_settings --release -- "<key_base64>" [host:port]
 
 use std::env;
 use std::time::Duration;
 
-use moonproto::{import_key, run_init_sequence, Client, ClientConfig, EventDispatcher, InitConfig};
-
-fn parse_host(value: Option<&String>) -> (String, u16) {
-    let Some(value) = value else {
-        return ("127.0.0.1".to_string(), 3000);
-    };
-    let Some((host, port)) = value.split_once(':') else {
-        return (value.clone(), 3000);
-    };
-    (host.to_string(), port.parse().unwrap_or(3000))
-}
+mod common;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -29,43 +15,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    let keys = import_key(&args[1]).expect("invalid key");
-    let (server_ip, server_port) = parse_host(args.get(2));
-
-    let cfg = ClientConfig::new(server_ip, server_port, keys.master_key, keys.mac_key);
-    let mut client = Client::new(cfg);
-    let mut dispatcher = EventDispatcher::new();
-    client.on_lifecycle(Box::new(|event| println!("[lifecycle] {event:?}")));
-
-    println!("[connect] waiting for authorization...");
-    client.run_with_dispatcher(Duration::from_secs(15), &mut dispatcher, Box::new(|_| {}));
-    if !client.is_authorized() {
-        eprintln!(
-            "[connect] authorization timeout, status={:?}",
-            client.auth_status()
-        );
-        std::process::exit(2);
-    }
-
-    let init = InitConfig {
-        step_timeout: None,
-        ..Default::default()
+    let client = match common::connect(&args[1], args.get(2), common::init_config()) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("[connect/init] failed: {err}");
+            std::process::exit(2);
+        }
     };
-    if let Err(err) = run_init_sequence(&mut client, &mut dispatcher, init) {
-        eprintln!("[init] failed: {err}");
-        std::process::exit(3);
-    }
 
-    if let Some(name) = client.server_info().server_name.as_deref() {
-        println!("[server] {name}");
-    }
-
-    println!("[request] client settings");
-    let settings = match client.request_client_settings(&mut dispatcher, Duration::from_secs(15)) {
+    let settings = match client.request_client_settings(Duration::from_secs(15)) {
         Ok(settings) => settings,
         Err(err) => {
-            eprintln!("[request] timeout/disconnected: {err:?}");
-            std::process::exit(4);
+            eprintln!("[request] failed: {err}");
+            std::process::exit(3);
         }
     };
 
@@ -85,6 +47,4 @@ fn main() {
         settings.join_sell_kind,
         settings.temp_bl_symbols.len(),
     );
-
-    client.disconnect();
 }

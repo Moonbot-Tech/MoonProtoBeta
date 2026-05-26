@@ -76,19 +76,18 @@ dropped.
 Retained history is driven by the all-trades subscription:
 
 ```rust
-use moonproto::EventDispatcher;
-
-let mut dispatcher = EventDispatcher::new();
-client.subscribe_all_trades(false);
-
-let btc = dispatcher.market_history_readers("BTCUSDT");
+client.subscribe_all_trades(false)?;
+if let Some(snapshot) = client.snapshot() {
+    let btc_tail = snapshot.markets().trade_state("BTCUSDT");
+}
 ```
 
-The worker owns retained stores and the dispatcher only queues decoded stream
-batches to it. `subscribe_all_trades` creates stores for known markets;
-`subscribe_trades_for` creates stores only for the selected market names. Use
-`MarketHistoryWorker::spawn` + `set_market_history_handle` before subscription
-when you need custom capacities.
+The worker owns retained stores and the runtime queues decoded stream batches
+to it. `subscribe_all_trades` creates stores for known markets;
+`subscribe_trades_for` creates stores only for the selected market names.
+Custom low-level runtimes can still use `MarketHistoryWorker::spawn` and
+`EventDispatcher::set_market_history_handle` before subscription when they need
+custom capacities.
 
 ## Event Enum
 
