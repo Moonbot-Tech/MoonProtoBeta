@@ -8505,3 +8505,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Market` indexes response split
+
+Done:
+
+- Moved `emk_GetMarketsIndexes` parser/builder from `commands/market.rs` into
+  `commands/market/indexes.rs`.
+- Re-exported `parse_markets_indexes_response` and
+  `build_markets_indexes_response` from `market.rs`; callers keep the same API
+  path.
+- This is a readability/publication split only. No count read, UTF-8 string
+  read/write, allocation hint, parsed order, or wire bytes changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
