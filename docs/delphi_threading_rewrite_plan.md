@@ -6800,6 +6800,33 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `client.rs` semantic state/glue split series
+
+Done:
+
+- Moved public config/lifecycle/error types into `src/client/config.rs`.
+- Moved app callback / dispatcher worker glue into `src/client/app_dispatch.rs`.
+- Moved active-library subscription and restore intent state into
+  `src/client/subscriptions.rs`.
+- Moved candles async container state into `src/client/candles.rs`.
+- Moved `ReaderSlicedStats`, `SentSliced`, `SlicedAck`, and `DataReadState`
+  into `src/client/transport_state.rs`.
+- Public paths stay re-exported from `client.rs`; crate-only fields/methods were
+  widened only where the moved sibling modules/tests already needed the same
+  direct access. No send/recv protocol order, queue order, ACK/retry mechanics,
+  or wire format changed.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.38s`, `ParseFailed=0`,
+  `reader max=694us`, `writer_cpu max=165us`, `active_dispatch max=3650us`
+  on `Strat(30)` payload. The active-dispatch sample is the known Strategy
+  parser/apply Phase Z CPU item, not a protocol-loop regression.
 - Quick prod FireTest release after the sender split OK:
   `FIRETEST_QUICK_PASS after 25.10s`, `ParseFailed=0`,
   `reader max=676us`, `writer_cpu max=153us`.
