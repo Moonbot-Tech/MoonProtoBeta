@@ -1885,7 +1885,7 @@ fn write_trade_epoch_header(
 /// [`crate::state::Order::trade_ctx`]. Low-level protocol tools can use
 /// [`TradeCtx::with_route`] when they intentionally provide raw Delphi enum
 /// ordinals themselves.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradeCtx {
     pub uid: u64,
     pub currency: u8,

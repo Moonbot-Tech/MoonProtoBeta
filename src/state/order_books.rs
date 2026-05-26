@@ -261,6 +261,7 @@ pub enum OrderBookEvent {
 pub struct OrderBooks {
     caches: HashMap<BookKey, OrderBookCache>,
     books: HashMap<BookKey, OrderBookSnapshot>,
+    diff_scratch: Vec<OrderBookLevel>,
 }
 
 impl OrderBooks {
@@ -268,6 +269,7 @@ impl OrderBooks {
         Self {
             caches: HashMap::new(),
             books: HashMap::new(),
+            diff_scratch: Vec::new(),
         }
     }
 
@@ -312,7 +314,14 @@ impl OrderBooks {
         if cache.corrupted {
             let seq = pkt.seq;
             let cached_pkt = pkt.clone();
-            apply_diff_book(&mut self.books, key, seq, &pkt.buys, &pkt.sells);
+            apply_diff_book(
+                &mut self.books,
+                &mut self.diff_scratch,
+                key,
+                seq,
+                &pkt.buys,
+                &pkt.sells,
+            );
             cache.last_applied_seq = seq;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
@@ -342,7 +351,14 @@ impl OrderBooks {
         // (последний применённый seq = 0) — применяет первый Diff без ожидания
         // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
         if cmp == 0 || cache.last_applied_seq == 0 {
-            apply_diff_book(&mut self.books, key, pkt.seq, &pkt.buys, &pkt.sells);
+            apply_diff_book(
+                &mut self.books,
+                &mut self.diff_scratch,
+                key,
+                pkt.seq,
+                &pkt.buys,
+                &pkt.sells,
+            );
             cache.expected_seq = pkt.seq.wrapping_add(1);
             cache.last_applied_seq = pkt.seq;
             events.push(OrderBookEvent::Apply {
@@ -411,7 +427,7 @@ impl OrderBooks {
 
             // O(1) pop_front вместо O(N) remove(0).
             let entry = cache.packets.pop_front().unwrap();
-            apply_cached_packet(&mut self.books, key, &entry.pkt);
+            apply_cached_packet(&mut self.books, &mut self.diff_scratch, key, &entry.pkt);
             cache.expected_seq = entry.seq.wrapping_add(1);
             cache.last_applied_seq = entry.seq;
             events.push(OrderBookEvent::Apply {
@@ -436,6 +452,7 @@ impl OrderBooks {
         }
         self.caches.clear();
         self.books.clear();
+        self.diff_scratch.clear();
     }
 
     /// Delphi `TMoonProtoEngine.ResetOrderBookCaches`: clear out-of-order
@@ -486,13 +503,14 @@ impl OrderBooks {
 
 fn apply_cached_packet(
     books: &mut HashMap<BookKey, OrderBookSnapshot>,
+    scratch: &mut Vec<OrderBookLevel>,
     key: BookKey,
     pkt: &OrderBookUpdate,
 ) {
     if pkt.is_full {
         apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
     } else {
-        apply_diff_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
+        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells);
     }
 }
 
@@ -521,6 +539,7 @@ fn apply_full_book(
 
 fn apply_diff_book(
     books: &mut HashMap<BookKey, OrderBookSnapshot>,
+    scratch: &mut Vec<OrderBookLevel>,
     key: BookKey,
     seq: u16,
     buy_diff: &[OrderLevel],
@@ -533,13 +552,14 @@ fn apply_diff_book(
         buys: Vec::new(),
         sells: Vec::new(),
     });
-    apply_order_book_diff_keep_zero(&mut book.buys, buy_diff, sell_diff, true);
-    apply_order_book_diff_keep_zero(&mut book.sells, sell_diff, buy_diff, false);
+    apply_order_book_diff_keep_zero(&mut book.buys, scratch, buy_diff, sell_diff, true);
+    apply_order_book_diff_keep_zero(&mut book.sells, scratch, sell_diff, buy_diff, false);
     book.seq = seq;
 }
 
 fn apply_order_book_diff_keep_zero(
     book: &mut Vec<OrderBookLevel>,
+    scratch: &mut Vec<OrderBookLevel>,
     diff: &[OrderLevel],
     shrink: &[OrderLevel],
     is_buy_book: bool,
@@ -548,35 +568,38 @@ fn apply_order_book_diff_keep_zero(
         return;
     }
 
-    let mut new_book = Vec::with_capacity(book.len() + diff.len());
+    scratch.clear();
+    scratch.extend_from_slice(book);
+    book.clear();
+    book.reserve(scratch.len() + diff.len());
     let mut k = 0usize;
 
     for diff_level in diff {
         let diff_rate = diff_level.rate as f64;
 
         if is_buy_book {
-            while k < book.len() && book[k].rate > diff_rate + EPS_M {
-                new_book.push(book[k]);
+            while k < scratch.len() && scratch[k].rate > diff_rate + EPS_M {
+                book.push(scratch[k]);
                 k += 1;
             }
         } else {
-            while k < book.len() && book[k].rate < diff_rate - EPS_M {
-                new_book.push(book[k]);
+            while k < scratch.len() && scratch[k].rate < diff_rate - EPS_M {
+                book.push(scratch[k]);
                 k += 1;
             }
         }
 
         if (diff_level.quantity as f64) > EPS {
-            new_book.push((*diff_level).into());
+            book.push((*diff_level).into());
         }
 
-        if k < book.len() && (book[k].rate - diff_rate).abs() < EPS_M {
+        if k < scratch.len() && (scratch[k].rate - diff_rate).abs() < EPS_M {
             k += 1;
         }
     }
 
-    while k < book.len() {
-        new_book.push(book[k]);
+    while k < scratch.len() {
+        book.push(scratch[k]);
         k += 1;
     }
 
@@ -592,20 +615,18 @@ fn apply_order_book_diff_keep_zero(
     if cut_price > 0.0 {
         let mut cut = 0usize;
         if is_buy_book {
-            while cut < new_book.len() && new_book[cut].rate >= cut_price {
+            while cut < book.len() && book[cut].rate >= cut_price {
                 cut += 1;
             }
         } else {
-            while cut < new_book.len() && new_book[cut].rate <= cut_price {
+            while cut < book.len() && book[cut].rate <= cut_price {
                 cut += 1;
             }
         }
         if cut > 0 {
-            new_book.drain(0..cut);
+            book.drain(0..cut);
         }
     }
-
-    *book = new_book;
 }
 
 #[cfg(test)]
@@ -1110,8 +1131,9 @@ mod tests {
                 quantity: 1.0,
             })
             .collect();
+        let mut scratch = Vec::new();
 
-        apply_order_book_diff_keep_zero(&mut book, &[level(4_000.0, 2.0)], &[], true);
+        apply_order_book_diff_keep_zero(&mut book, &mut scratch, &[level(4_000.0, 2.0)], &[], true);
 
         assert_eq!(
             book.len(),

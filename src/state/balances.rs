@@ -18,7 +18,7 @@
 //! (`m.LastBalanceEpoch`), а full snapshot не проходит через общий epoch-gate.
 
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const BALANCE_EPS: f64 = 0.00000001;
 
@@ -159,20 +159,20 @@ impl BalancesState {
     pub(crate) fn apply_with_known_markets(
         &mut self,
         upd: BalanceUpdate,
-        known_market_names: &[String],
+        known_market_names: &HashMap<String, usize>,
     ) -> BalanceEvent {
-        let known = known_market_names
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        self.apply_internal(upd, |name| known.contains(name), Some(&known))
+        self.apply_internal(
+            upd,
+            |name| known_market_names.contains_key(name),
+            Some(known_market_names),
+        )
     }
 
     fn apply_internal<F>(
         &mut self,
         upd: BalanceUpdate,
         is_known_market: F,
-        full_known_markets: Option<&HashSet<&str>>,
+        full_known_markets: Option<&HashMap<String, usize>>,
     ) -> BalanceEvent
     where
         F: Fn(&str) -> bool,
@@ -196,7 +196,7 @@ impl BalancesState {
         &mut self,
         upd: BalanceUpdate,
         is_known_market: &F,
-        full_known_markets: Option<&HashSet<&str>>,
+        full_known_markets: Option<&HashMap<String, usize>>,
     ) -> BalanceEvent
     where
         F: Fn(&str) -> bool,
@@ -230,22 +230,22 @@ impl BalancesState {
         }
 
         if let Some(known) = full_known_markets {
-            for market_name in known {
-                if new_map.contains_key(*market_name) {
+            for market_name in known.keys() {
+                if new_map.contains_key(market_name) {
                     continue;
                 }
-                if let Some(previous) = previous_map.get(*market_name) {
+                if let Some(previous) = previous_map.get(market_name) {
                     new_map.insert(
-                        (*market_name).to_string(),
+                        market_name.clone(),
                         Self::reset_missing_snapshot_item(previous.clone()),
                     );
                 } else {
                     new_map.insert(
-                        (*market_name).to_string(),
+                        market_name.clone(),
                         Self::default_missing_snapshot_item(market_name),
                     );
                     self.last_epoch_by_market
-                        .entry((*market_name).to_string())
+                        .entry(market_name.clone())
                         .or_insert(0);
                 }
             }
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_delphi() {
         let mut s = BalancesState::new();
-        let known = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let known = HashMap::from([("BTCUSDT".to_string(), 0), ("ETHUSDT".to_string(), 1)]);
 
         let ev = s.apply_with_known_markets(upd(3, 10, vec![make_item("BTCUSDT", 100.0)]), &known);
 

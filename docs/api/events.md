@@ -193,7 +193,7 @@ directly to its callback.
 | `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Applied` after `OutOfOrder`. |
 | `Balance` | Applies subcommands `3/4`; subcommand `6` becomes typed `Event::Arb` after filtering arb records through the current server `mIndex` map. Base/request/unknown balance subcommands are skipped like Delphi base-class commands. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. Future-version, unknown, and client-inapplicable incoming strat commands are skipped like Delphi base-class commands. |
-| `UI` | Applies settings state and emits `Event::Settings`. Old append-only `TClientSettingsCommand` packets are parsed with the current settings snapshot as Delphi `cfg` fallback. |
+| `UI` | Applies settings state and emits `Event::Settings`. Old append-only `TClientSettingsCommand` packets are parsed with the current settings snapshot as Delphi `cfg` fallback. Inbound `TNewMarketNotifyCommand` is an internal listing-refresh wake-up; user code sees `MarketsEvent::NewMarketsAdded` only after a refreshed market list actually inserts new markets. |
 | `API` | Parses `EngineResponse`; applies markets responses when the method is markets-related. |
 | `LogMsg` | Emits `Event::ServerLog`. |
 

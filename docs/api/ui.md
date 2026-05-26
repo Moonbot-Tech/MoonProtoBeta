@@ -67,7 +67,6 @@ client.ui_strat_start_stop(true);
 client.ui_mm_subscribe(true);
 client.ui_update_version("", true);            // release update button
 client.ui_update_version("MoonBot-7", false);  // test/beta version name
-client.ui_new_market_notify();
 client.ui_lev_manage(&lev_manage);
 client.ui_trigger_manage(action, all_markets, &markets, &keys);
 client.ui_reset_profit(kind);
@@ -148,6 +147,12 @@ same raw UI payload through lower-level APIs, call
 
 Low-level builders in `commands::ui` remain available for tools that need raw
 payloads, but normal applications should not call `send_cmd` directly.
+
+Inbound Delphi `TNewMarketNotifyCommand` (UI CmdId=8, High) is internal to the
+active library. It forces an immediate listing refresh, but it is not emitted as
+a settings event. User code gets the listing signal from the market domain only
+after the refreshed `GetMarketsList` actually inserts new markets:
+`Event::Markets(MarketsEvent::NewMarketsAdded { names })`.
 
 Low-level `UICommand::ClientSettings` stores the settings snapshot as
 `Box<ClientSettingsCommand>`. This keeps the common `UICommand` envelope small

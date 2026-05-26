@@ -129,6 +129,20 @@ impl StrategySnapshotReply {
     }
 }
 
+/// Follow-up `TOrderStatusRequest` target produced after a `TAllStatuses`
+/// snapshot did not mention a locally tracked Delphi `WCache` worker.
+///
+/// Active `Client::run_with_dispatcher*` sends these automatically. Raw
+/// `EventDispatcher::dispatch_into` users can call
+/// [`EventDispatcher::missing_order_status_requests_after_snapshot`] after
+/// `OrderEvent::Snapshot` and send the returned requests through
+/// `Client::request_order_status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingOrderStatusRequest {
+    pub ctx: TradeCtx,
+    pub market_name: String,
+}
+
 /// All typed events emitted by [`EventDispatcher`].
 #[derive(Debug)]
 pub enum Event {
@@ -274,6 +288,10 @@ pub struct EventDispatcher {
     /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
     /// `NewMarketFound -> GetMarketsList` auto refresh.
     last_markets_list_refresh_ms: i64,
+    /// Delphi `Bworks.pas MustCheckLIstingFromServer`: set by inbound
+    /// `TNewMarketNotifyCommand` and bypasses the 30s listing-refresh throttle
+    /// for one `GetMarketsList` request.
+    force_markets_list_refresh: bool,
     /// Delphi `FTradesServerToken`: updated only when a `TradesStream` packet
     /// reaches the trades parser after the market-index gate. Reconnect restore
     /// uses this to decide whether `SubscribeAllTrades` actually produced a
@@ -319,7 +337,7 @@ pub struct EventDispatcher {
     /// derived state must stay disabled.
     trade_storage_scope: Option<TradeStorageScope>,
     last_market_history_scope: Option<TradeStorageScope>,
-    last_market_history_markets: Vec<String>,
+    last_market_history_markets_version: Option<u64>,
 }
 
 impl Default for EventDispatcher {
@@ -335,6 +353,7 @@ impl Default for EventDispatcher {
             local_strategy_epoch: 0,
             last_known_server_token: 0,
             last_markets_list_refresh_ms: 0,
+            force_markets_list_refresh: false,
             trades_server_token: 0,
             server_time_delta_source: None,
             strategy_snapshot_provider: None,
@@ -345,7 +364,7 @@ impl Default for EventDispatcher {
             market_history_auto_enabled: true,
             trade_storage_scope: None,
             last_market_history_scope: None,
-            last_market_history_markets: Vec::new(),
+            last_market_history_markets_version: None,
         }
     }
 }
@@ -474,6 +493,26 @@ impl EventDispatcher {
     /// mutates the local worker before sending a command to the server.
     pub fn orders_mut(&mut self) -> &mut Orders {
         &mut self.orders
+    }
+
+    /// Build Delphi `CleanupMissingWorkers` follow-up requests for raw
+    /// dispatcher users after `OrderEvent::Snapshot`.
+    ///
+    /// The active client path consumes the same helper internally and sends the
+    /// returned `TOrderStatusRequest`s automatically. Raw `dispatch_into` has no
+    /// `Client` handle by design, so the caller must decide whether to send
+    /// them through `Client::request_order_status`.
+    pub fn missing_order_status_requests_after_snapshot(&self) -> Vec<MissingOrderStatusRequest> {
+        self.orders
+            .missing_after_snapshot()
+            .into_iter()
+            .filter_map(|uid| {
+                self.orders.get(uid).map(|order| MissingOrderStatusRequest {
+                    ctx: order.trade_ctx(),
+                    market_name: order.market_name.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Drain deferred order removals after a reader-decoded batch.
@@ -689,7 +728,7 @@ impl EventDispatcher {
         self.market_history_auto_enabled = false;
         self.market_history = Some(handle);
         self.last_market_history_scope = None;
-        self.last_market_history_markets.clear();
+        self.last_market_history_markets_version = None;
         self.sync_market_history_storage();
     }
 
@@ -699,7 +738,7 @@ impl EventDispatcher {
         self.owned_market_history = None;
         self.market_history_auto_enabled = false;
         self.last_market_history_scope = None;
-        self.last_market_history_markets.clear();
+        self.last_market_history_markets_version = None;
     }
 
     /// Re-enable the default retained-history worker after
@@ -795,7 +834,7 @@ impl EventDispatcher {
                 self.market_history = None;
                 self.owned_market_history = None;
                 self.last_market_history_scope = None;
-                self.last_market_history_markets.clear();
+                self.last_market_history_markets_version = None;
             }
             return;
         }
@@ -806,7 +845,7 @@ impl EventDispatcher {
         self.market_history = Some(worker.handle());
         self.owned_market_history = Some(worker);
         self.last_market_history_scope = None;
-        self.last_market_history_markets.clear();
+        self.last_market_history_markets_version = None;
     }
 
     fn market_history_market_names(&self) -> Vec<String> {
@@ -822,15 +861,16 @@ impl EventDispatcher {
         let Some(handle) = &self.market_history else {
             return;
         };
-        let market_names = self.market_history_market_names();
+        let markets_version = self.markets.markets_version();
         if self.last_market_history_scope == self.trade_storage_scope
-            && self.last_market_history_markets == market_names
+            && self.last_market_history_markets_version == Some(markets_version)
         {
             return;
         }
-        handle.configure_markets(market_names.clone(), self.trade_storage_scope.clone());
+        let market_names = self.market_history_market_names();
+        handle.configure_markets(market_names, self.trade_storage_scope.clone());
         self.last_market_history_scope = self.trade_storage_scope.clone();
-        self.last_market_history_markets = market_names;
+        self.last_market_history_markets_version = Some(markets_version);
     }
 
     fn active_trade_storage_allows_market(&self, market_name: &str) -> bool {
@@ -966,6 +1006,9 @@ impl EventDispatcher {
     /// active dispatch path gates stale indexed streams, sends orderbook full
     /// requests when recovery needs them, and requests missing order statuses
     /// after a fresh order snapshot.
+    /// If a raw consumer intentionally uses this method, it should call
+    /// [`Self::missing_order_status_requests_after_snapshot`] after
+    /// `OrderEvent::Snapshot` and send those requests itself.
     ///
     /// ```ignore
     /// let mut buf = Vec::with_capacity(8);
@@ -1124,7 +1167,23 @@ impl EventDispatcher {
                 if !self.markets.has_server_market_index(pkt.market_index) {
                     return;
                 }
-                for ev in self.order_books.on_packet(pkt, now_ms) {
+                let market_index = pkt.market_index;
+                let book_kind = pkt.book_kind;
+                let events = self.order_books.on_packet(pkt, now_ms);
+                if events
+                    .iter()
+                    .any(|ev| matches!(ev, OrderBookEvent::Apply { .. }))
+                {
+                    if let Some(ask) = self
+                        .order_books
+                        .book_by_kind(market_index, book_kind)
+                        .and_then(|book| book.top().ask)
+                    {
+                        self.markets
+                            .update_chart_price_step_from_server_index(market_index, ask.rate);
+                    }
+                }
+                for ev in events {
                     out.push(Event::OrderBook(ev));
                 }
             }
@@ -1419,8 +1478,9 @@ impl EventDispatcher {
             0 | 1 | 2 | 5 => {}
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
-                    let known_markets = self.markets.by_name.keys().cloned().collect::<Vec<_>>();
-                    let ev = self.balances.apply_with_known_markets(upd, &known_markets);
+                    let ev = self
+                        .balances
+                        .apply_with_known_markets(upd, &self.markets.by_name);
                     out.push(Event::Balance(ev));
                 }
                 None => out.push(Self::parse_failed(Command::Balance, payload)),
@@ -1529,9 +1589,14 @@ impl EventDispatcher {
             Some(self.settings.client_settings_parse_fallback()),
         ) {
             Some(UICommand::Skipped { .. } | UICommand::Unknown { .. }) => {}
+            Some(UICommand::NewMarketNotify(_)) => {
+                self.markets.markets_list_refresh_needed = true;
+                self.force_markets_list_refresh = true;
+            }
             Some(cmd_v) => {
-                let ev = self.settings.apply(cmd_v);
-                out.push(Event::Settings(ev));
+                if let Some(ev) = self.settings.apply(cmd_v) {
+                    out.push(Event::Settings(ev));
+                }
             }
             None => out.push(Self::parse_failed(Command::UI, payload)),
         }
@@ -1556,7 +1621,8 @@ impl EventDispatcher {
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
-        let extra_event: Option<Event> = if resp.success {
+        let mut extra_events = Vec::new();
+        if resp.success {
             match resp.method {
                 EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
                     if resp.method == EngineMethod::GetMarketsList {
@@ -1564,9 +1630,13 @@ impl EventDispatcher {
                             .markets
                             .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
                         {
-                            Some(Event::Markets(ev))
-                        } else {
-                            None
+                            extra_events.push(Event::Markets(ev));
+                            let new_markets = self.markets.take_new_markets_added();
+                            if !new_markets.is_empty() {
+                                extra_events.push(Event::Markets(MarketsEvent::NewMarketsAdded {
+                                    names: new_markets,
+                                }));
+                            }
                         }
                     } else {
                         let wants_history = self.market_history.is_some()
@@ -1590,18 +1660,14 @@ impl EventDispatcher {
                                     last_price_rows,
                                 );
                             }
-                            Some(Event::Markets(ev))
-                        } else {
-                            None
+                            extra_events.push(Event::Markets(ev));
                         }
                     }
                 }
                 EngineMethod::GetMarketsIndexes => {
                     if let Some(names) = parse_markets_indexes_response(&resp.data) {
                         let ev = self.markets.apply_markets_indexes(names);
-                        Some(Event::Markets(ev))
-                    } else {
-                        None
+                        extra_events.push(Event::Markets(ev));
                     }
                 }
                 EngineMethod::CheckBinanceTags => {
@@ -1609,9 +1675,7 @@ impl EventDispatcher {
                         .markets
                         .apply_token_tags_payload_like_delphi(&resp.data)
                     {
-                        Some(Event::Markets(ev))
-                    } else {
-                        None
+                        extra_events.push(Event::Markets(ev));
                     }
                 }
                 EngineMethod::BaseCheck => {
@@ -1623,17 +1687,11 @@ impl EventDispatcher {
                         info.base_currency_name.as_deref(),
                         info.base_currency_code,
                     );
-                    None
                 }
-                _ => None,
+                _ => {}
             }
-        } else {
-            None
-        };
-
-        if let Some(ev) = extra_event {
-            out.push(ev);
         }
+        out.extend(extra_events);
         out.push(Event::EngineResponse(resp));
     }
 
@@ -1788,10 +1846,12 @@ impl EventDispatcher {
         let start_len = out.len();
         self.dispatch_into_with_history(cmd, payload, now_ms, Some(ctx.now_time_days), out);
         self.sync_market_history_storage();
-        if self.markets.markets_list_refresh_needed()
-            && (self.last_markets_list_refresh_ms == 0
-                || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000)
+        if self.force_markets_list_refresh
+            || (self.markets.markets_list_refresh_needed()
+                && (self.last_markets_list_refresh_ms == 0
+                    || (now_ms - self.last_markets_list_refresh_ms).abs() > 30_000))
         {
+            self.force_markets_list_refresh = false;
             self.last_markets_list_refresh_ms = now_ms;
             actions.push(ActiveAction::RequestMarketsList);
         }
@@ -1808,11 +1868,10 @@ impl EventDispatcher {
                     .iter()
                     .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. })));
         // Auto-action 1: OrderBookEvent::RequestFullNeeded → send_api_request (sync, no pending).
-        // Dedup через HashSet — Grouped-payload может содержать несколько
+        // Dedup через маленький Vec без heap при пустом наборе: Grouped-payload может содержать несколько
         // RequestFullNeeded для одной и той же книги (corruption detection +
         // последующий update в одном datagram'е). Шлём один запрос на пару.
-        use std::collections::HashSet;
-        let mut to_request_full: HashSet<(u16, u8)> = HashSet::new();
+        let mut to_request_full: Vec<(u16, u8)> = Vec::new();
         // Auto-action 2: StratEvent::SnapshotRequested → шлём fresh snapshot
         // из library-owned StratsState (или provider override). Delphi
         // `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ через
@@ -1831,7 +1890,10 @@ impl EventDispatcher {
                     market_index,
                     book_kind,
                 }) => {
-                    to_request_full.insert((*market_index, *book_kind));
+                    let key = (*market_index, *book_kind);
+                    if !to_request_full.contains(&key) {
+                        to_request_full.push(key);
+                    }
                     true
                 }
                 Event::Order(OrderEvent::Snapshot) => {
@@ -1906,15 +1968,11 @@ impl EventDispatcher {
 
     /// Delphi equivalent: `TMoonProtoNetClient.CleanupMissingWorkers`.
     fn cleanup_missing_workers(&self, actions: &mut Vec<ActiveAction>) {
-        let missing = self.orders.missing_after_snapshot();
-        for uid in missing {
-            if let Some(order) = self.orders.get(uid) {
-                let trade_ctx = order.trade_ctx();
-                actions.push(ActiveAction::RequestOrderStatus {
-                    ctx: trade_ctx,
-                    market_name: order.market_name.clone(),
-                });
-            }
+        for request in self.missing_order_status_requests_after_snapshot() {
+            actions.push(ActiveAction::RequestOrderStatus {
+                ctx: request.ctx,
+                market_name: request.market_name,
+            });
         }
     }
 }
@@ -2012,6 +2070,28 @@ mod tests {
         raw.extend_from_slice(&seq.to_le_bytes());
         raw.push(if is_full { 1 } else { 0 }); // Futures.
         raw.extend_from_slice(&0u16.to_le_bytes()); // buy_count=0, sell_count=0.
+        crate::compression::synlz_compress(&raw)
+    }
+
+    fn order_book_payload_full_with_levels(
+        market_index: u16,
+        seq: u16,
+        buys: &[(f32, f32)],
+        sells: &[(f32, f32)],
+    ) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&market_index.to_le_bytes());
+        raw.extend_from_slice(&seq.to_le_bytes());
+        raw.push(1); // full futures book.
+        raw.extend_from_slice(&(buys.len() as u16).to_le_bytes());
+        for (rate, qty) in buys {
+            raw.extend_from_slice(&rate.to_le_bytes());
+            raw.extend_from_slice(&qty.to_le_bytes());
+        }
+        for (rate, qty) in sells {
+            raw.extend_from_slice(&rate.to_le_bytes());
+            raw.extend_from_slice(&qty.to_le_bytes());
+        }
         crate::compression::synlz_compress(&raw)
     }
 
@@ -3810,6 +3890,32 @@ mod tests {
     }
 
     #[test]
+    fn raw_dispatch_exposes_missing_order_status_requests_after_snapshot() {
+        let mut d = EventDispatcher::new();
+        let stale_uid = 0xAABB_CCDD_0011_2233;
+        let status = order_status_for_test(stale_uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+        let (_result, _event) = d.orders.apply(TradeCommand::OrderStatus(Box::new(status)));
+
+        let mut out = Vec::new();
+        d.dispatch_into(
+            Command::Order,
+            &empty_all_statuses_payload(0x55),
+            1000,
+            &mut out,
+        );
+
+        assert!(out
+            .iter()
+            .any(|ev| matches!(ev, Event::Order(OrderEvent::Snapshot))));
+        let missing = d.missing_order_status_requests_after_snapshot();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].ctx.uid, stale_uid);
+        assert_eq!(missing[0].ctx.currency, 7);
+        assert_eq!(missing[0].ctx.platform, 9);
+        assert_eq!(missing[0].market_name, "BTCUSDT");
+    }
+
+    #[test]
     fn dispatch_into_active_consumes_orderbook_full_request_event() {
         let mut d = EventDispatcher::new();
         d.markets.indexes_synchronized = true;
@@ -3879,6 +3985,29 @@ mod tests {
             }
         }
         assert!(found, "RequestOrderBookFull must still be sent internally");
+    }
+
+    #[test]
+    fn orderbook_apply_updates_market_chart_price_step_like_delphi_glass_updated() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        let mut out = Vec::new();
+
+        d.dispatch_into(
+            Command::OrderBook,
+            &order_book_payload_full_with_levels(0, 1, &[(100.0, 1.0)], &[(125.0, 2.0)]),
+            10_000,
+            &mut out,
+        );
+
+        assert!(out
+            .iter()
+            .any(|ev| matches!(ev, Event::OrderBook(OrderBookEvent::Apply { .. }))));
+        assert_eq!(
+            d.markets().price("BTCUSDT").unwrap().chart_price_step,
+            125.0 / 5000.0,
+            "Delphi AddNewAksPrice is called from both price updates and GlassUpdated"
+        );
     }
 
     #[test]
@@ -4198,6 +4327,107 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, ActiveAction::RequestMarketsList)),
             "after 30s the pending NewMarketFound refresh is sent"
+        );
+    }
+
+    #[test]
+    fn active_new_market_notify_is_internal_and_bypasses_listing_refresh_throttle_like_delphi() {
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.last_markets_list_refresh_ms = 20_000;
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = crate::commands::ui::build_new_market_notify(77);
+
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::UI,
+            &payload,
+            21_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert!(out.is_empty(), "TNewMarketNotifyCommand is internal; user code sees NewMarketsAdded only after GetMarketsList actually inserts markets");
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, ActiveAction::RequestMarketsList)),
+            "Delphi ActivateMarketCheckEvent sets MustCheckLIstingFromServer and bypasses the 30s gate"
+        );
+        assert!(
+            dispatcher.markets.markets_list_refresh_needed(),
+            "GetMarketsList must run in NewMarketFound/listing mode so new symbols can be inserted"
+        );
+
+        actions.clear();
+        out.clear();
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::LogMsg,
+            &45_000.0f64.to_le_bytes(),
+            22_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(
+            actions.is_empty(),
+            "the force flag is one-shot; normal 30s throttle applies until the list response clears the pending flag"
+        );
+    }
+
+    #[test]
+    fn active_get_markets_list_emits_new_markets_added_after_actual_insert() {
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        let mut dispatcher = EventDispatcher::new();
+        seed_event_markets(&mut dispatcher, &["BTCUSDT"]);
+        dispatcher
+            .markets
+            .apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+        dispatcher.markets.markets_list_refresh_needed = true;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i32.to_le_bytes());
+        write_market(&mut data, &event_market("BTCUSDT"), 2);
+        write_market(&mut data, &event_market("DOGEUSDT"), 2);
+        data.extend_from_slice(&0i32.to_le_bytes());
+        let payload = api_response_payload_ver(2, EngineMethod::GetMarketsList, &data);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+
+        dispatch_active_packet_for_test(
+            &mut dispatcher,
+            Command::API,
+            &payload,
+            22_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+
+        assert!(dispatcher.markets().get("DOGEUSDT").is_some());
+        assert!(out
+            .iter()
+            .any(|ev| matches!(ev, Event::Markets(MarketsEvent::MarketsListReplaced { .. }))));
+        assert!(
+            out.iter().any(|ev| {
+                matches!(
+                    ev,
+                    Event::Markets(MarketsEvent::NewMarketsAdded { names })
+                        if names == &vec!["DOGEUSDT".to_string()]
+                )
+            }),
+            "user-facing listing event must be emitted only after the new market is present in state"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, ActiveAction::RequestUpdateMarketsList)),
+            "Delphi immediately updates prices after NewMarkets.Count > 0"
         );
     }
 

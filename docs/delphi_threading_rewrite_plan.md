@@ -6652,3 +6652,45 @@ Verification:
   `FIRETEST_QUICK_PASS after 22.78s`, `ParseFailed=0`, err_emu actual drop
   `9.07%`, retained futures rows present, derived snapshot present, reader max
   `590us`, writer CPU max `134us`.
+
+### 2026-05-26 - journal_review.md closure pass
+
+Done:
+
+- `TNewMarketNotifyCommand` is internal Active Lib control flow. It now forces
+  immediate `GetMarketsList` by bypassing the 30s listing throttle, but does not
+  emit a settings event. User-facing listing signal is
+  `MarketsEvent::NewMarketsAdded { names }`, emitted only after the refreshed
+  list actually inserts markets into `MarketsState`.
+- Removed normal public `ui_new_market_notify` wrappers from `Client` and
+  `ClientSender`; raw `commands::ui` parser/builder remains the wire layer.
+- Added raw `dispatch_into` helper
+  `missing_order_status_requests_after_snapshot()` for explicit
+  `CleanupMissingWorkers` follow-up requests when the caller is not using the
+  active client path.
+- `OrderBook` apply now refreshes `MarketPrice.chart_price_step` from the
+  applied book best ask, matching Delphi `AddNewAksPrice` from `GlassUpdated`.
+- `sync_market_history_storage` no longer clones all market names on every
+  packet; it uses `MarketsState::markets_version` and clones names only when
+  market scope/version changes.
+- Balance apply no longer clones `MarketsState.by_name` keys into a temporary
+  `Vec<String>` before filtering.
+- `dispatch_into_active_actions` uses a small `Vec` dedup for internal
+  `RequestOrderBookFull` actions instead of allocating an empty `HashSet` on
+  the common path.
+- `SeqRingWriter` has `push_batch_with_evicted` so batch writers can preserve
+  eviction side effects; futures trade retention already compacts evicted rows
+  to `MiniCandle`.
+- `OrderBooks` keeps a reusable `diff_scratch` buffer instead of allocating a
+  fresh diff `Vec` on every book apply.
+- Updated `journal_review.md` with closed/open decisions for every reviewer
+  point.
+
+Verification:
+
+- `cargo test --lib` OK: 759 passed, 1 ignored.
+- `cargo check --examples` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.17s`, `ParseFailed=0`, err_emu actual drop
+  `12.32%`, retained futures rows present, derived snapshot present, reader max
+  `773us`, writer CPU max `131us`.

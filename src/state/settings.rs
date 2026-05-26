@@ -13,8 +13,10 @@
 //! - `ArbActivateNotify` (CmdId=12): TDateTime когда истекает Arb лицензия.
 //!
 //! Action-команды (StratStartStop, ResetProfit, TriggerManage, EmuTrades,
-//! UpdateVersion, NewMarketNotify, SettingsRequest) — пробрасываются как `SettingsEvent`
-//! без фиксации в state.
+//! UpdateVersion, SettingsRequest) — пробрасываются как `SettingsEvent` без
+//! фиксации в state. `NewMarketNotify` является internal Active Lib trigger:
+//! dispatcher uses it to force listing refresh, and user code gets a market
+//! event only after a refreshed list actually inserts new markets.
 
 use crate::commands::ui::{
     ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, StratStartStop,
@@ -71,8 +73,6 @@ pub enum SettingsEvent {
     VersionUpdate(UpdateVersion),
     /// Серия эмулированных тиков (Sliced).
     EmuTrades(EmuTrades),
-    /// Появился новый маркет на бирже.
-    NewMarketAvailable { uid: u64 },
     /// Изменения hotkey-триггеров.
     TriggerManaged(TriggerManage),
     /// Запрос на сброс профита (kind: 0=Cur, 1=All).
@@ -105,58 +105,62 @@ impl SettingsState {
         &self.client_settings_fallback
     }
 
-    /// Применить входящую UI-команду к state. Возвращает event для прикладного слоя.
-    pub fn apply(&mut self, cmd: UICommand) -> SettingsEvent {
+    /// Применить входящую UI-команду к state.
+    ///
+    /// Returns `None` for internal commands that have no public settings event.
+    pub fn apply(&mut self, cmd: UICommand) -> Option<SettingsEvent> {
         match cmd {
             UICommand::ClientSettings(c) => {
                 let settings = *c;
                 self.client_settings_fallback = settings.clone();
                 self.client_settings = Some(settings);
-                SettingsEvent::ClientSettingsUpdated
+                Some(SettingsEvent::ClientSettingsUpdated)
             }
-            UICommand::SettingsRequest { uid } => SettingsEvent::SettingsRequested { uid },
+            UICommand::SettingsRequest { uid } => Some(SettingsEvent::SettingsRequested { uid }),
 
-            UICommand::StratStartStop(s) => SettingsEvent::StratStartStopRequested(s),
-            UICommand::StratStartStopV2(s) => SettingsEvent::StratStartStopV2Requested(s),
+            UICommand::StratStartStop(s) => Some(SettingsEvent::StratStartStopRequested(s)),
+            UICommand::StratStartStopV2(s) => Some(SettingsEvent::StratStartStopV2Requested(s)),
 
             UICommand::MMOrdersSubscribe(m) => {
                 self.mm_orders_subscribed = m.subscribe;
-                SettingsEvent::MMSubscribeChanged(m.subscribe)
+                Some(SettingsEvent::MMSubscribeChanged(m.subscribe))
             }
 
-            UICommand::UpdateVersion(u) => SettingsEvent::VersionUpdate(u),
+            UICommand::UpdateVersion(u) => Some(SettingsEvent::VersionUpdate(u)),
 
-            UICommand::EmuTrades(e) => SettingsEvent::EmuTrades(e),
+            UICommand::EmuTrades(e) => Some(SettingsEvent::EmuTrades(e)),
 
-            UICommand::NewMarketNotify(n) => SettingsEvent::NewMarketAvailable { uid: n.uid },
+            UICommand::NewMarketNotify(_) => None,
 
             UICommand::LevManage(l) => {
                 self.lev_manage = Some(l);
-                SettingsEvent::LevManageUpdated
+                Some(SettingsEvent::LevManageUpdated)
             }
 
-            UICommand::TriggerManage(t) => SettingsEvent::TriggerManaged(t),
+            UICommand::TriggerManage(t) => Some(SettingsEvent::TriggerManaged(t)),
 
-            UICommand::ResetProfit(r) => SettingsEvent::ResetProfitRequested(r),
+            UICommand::ResetProfit(r) => Some(SettingsEvent::ResetProfitRequested(r)),
 
             UICommand::ArbActivateNotify(a) => {
                 self.arb_valid_until = Some(a.arb_valid);
-                SettingsEvent::ArbActivated(a)
+                Some(SettingsEvent::ArbActivated(a))
             }
 
             UICommand::SwitchDex(s) => {
                 self.current_dex = Some(s.dex_name.clone());
-                SettingsEvent::DexSwitched(s)
+                Some(SettingsEvent::DexSwitched(s))
             }
 
             UICommand::SwitchSpot(s) => {
                 self.current_spot = Some(s.spot_index);
-                SettingsEvent::SpotSwitched(s)
+                Some(SettingsEvent::SpotSwitched(s))
             }
 
-            UICommand::Skipped { cmd_id, uid, ver } => SettingsEvent::Skipped { cmd_id, uid, ver },
+            UICommand::Skipped { cmd_id, uid, ver } => {
+                Some(SettingsEvent::Skipped { cmd_id, uid, ver })
+            }
 
-            UICommand::Unknown { cmd_id, uid } => SettingsEvent::Unknown { cmd_id, uid },
+            UICommand::Unknown { cmd_id, uid } => Some(SettingsEvent::Unknown { cmd_id, uid }),
         }
     }
 }
@@ -203,7 +207,7 @@ mod tests {
             arb_config: ArbConfigCompact::default(),
         };
         let ev = st.apply(UICommand::ClientSettings(Box::new(cmd)));
-        assert!(matches!(ev, SettingsEvent::ClientSettingsUpdated));
+        assert!(matches!(ev, Some(SettingsEvent::ClientSettingsUpdated)));
         assert_eq!(st.client_settings.as_ref().unwrap().x_sell, 50);
     }
 
@@ -215,7 +219,7 @@ mod tests {
             uid: 1,
             subscribe: true,
         }));
-        assert!(matches!(ev, SettingsEvent::MMSubscribeChanged(true)));
+        assert!(matches!(ev, Some(SettingsEvent::MMSubscribeChanged(true))));
         assert!(st.mm_orders_subscribed);
 
         let _ = st.apply(UICommand::MMOrdersSubscribe(MMOrdersSubscribe {
@@ -234,7 +238,7 @@ mod tests {
             dex_name: "Uni".to_string(),
         }));
         match ev {
-            SettingsEvent::DexSwitched(s) => assert_eq!(s.dex_name, "Uni"),
+            Some(SettingsEvent::DexSwitched(s)) => assert_eq!(s.dex_name, "Uni"),
             _ => panic!("wrong event"),
         }
         assert_eq!(st.current_dex.as_deref(), Some("Uni"));
@@ -287,7 +291,10 @@ mod tests {
             uid: 1,
             is_start: true,
         }));
-        assert!(matches!(ev, SettingsEvent::StratStartStopRequested(_)));
+        assert!(matches!(
+            ev,
+            Some(SettingsEvent::StratStartStopRequested(_))
+        ));
         // state не меняется
         assert!(st.client_settings.is_none());
     }

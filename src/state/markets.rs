@@ -185,6 +185,17 @@ pub struct MarketsState {
     /// list refresh. Active dispatcher consumes this to request immediate
     /// `UpdateMarketsList`, like Delphi `Engine.NewMarkets.Count > 0`.
     new_markets_pending_price_refresh: usize,
+    /// Names of markets inserted by the last successful listing refresh.
+    ///
+    /// This is emitted by the active dispatcher as a user-facing
+    /// `MarketsEvent::NewMarketsAdded` after the market list state is already
+    /// updated.
+    new_markets_added: Vec<String>,
+    /// Monotonic marker for changes to the retained market-name universe.
+    ///
+    /// Active history storage uses this to avoid cloning all market names on
+    /// every packet. Price/tag updates do not change it.
+    markets_version: u64,
     server_base_currency_name: Option<String>,
     server_base_currency_code: Option<u8>,
 }
@@ -194,6 +205,12 @@ pub enum MarketsEvent {
     /// Применён список маркетов (после `emk_GetMarketsList`).
     /// Variant name is historical; repeated calls merge like Delphi.
     MarketsListReplaced { count: usize, corr_count: usize },
+    /// A listing refresh inserted new markets into the local market universe.
+    ///
+    /// Emitted only after the refreshed `GetMarketsList` has actually added
+    /// markets. `TNewMarketNotifyCommand` itself is internal and only forces
+    /// that refresh.
+    NewMarketsAdded { names: Vec<String> },
     /// Обновлены цены (через `emk_UpdateMarketsList`).
     PricesUpdated {
         count: usize,
@@ -222,6 +239,7 @@ impl MarketsState {
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
         self.new_markets_pending_price_refresh = 0;
+        self.new_markets_added.clear();
         let incoming_count = resp.markets.len();
         let corr_count = resp.corr_markets.len();
         let incoming_server_names = if allow_new_markets {
@@ -274,6 +292,7 @@ impl MarketsState {
             }
             if new_market_found {
                 self.new_markets_pending_price_refresh += 1;
+                self.new_markets_added.push(market.bn_market_name.clone());
             }
             prices.push(market_price_from_market(&market));
             markets.push(market);
@@ -293,6 +312,7 @@ impl MarketsState {
 
         self.markets = markets;
         self.prices = prices;
+        self.bump_markets_version();
 
         for cm in resp.corr_markets {
             self.apply_one_corr_market_from_list(cm);
@@ -338,6 +358,7 @@ impl MarketsState {
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
         self.new_markets_pending_price_refresh = 0;
+        self.new_markets_added.clear();
         let mut r = EngineStreamReader::new(data);
         let count = r.read_count()?;
         let mut incoming_server_names = if allow_new_markets {
@@ -351,8 +372,16 @@ impl MarketsState {
             if allow_new_markets {
                 incoming_server_names.push(market.bn_market_name.clone());
             }
+            let market_name = if new_market_found {
+                Some(market.bn_market_name.clone())
+            } else {
+                None
+            };
             if self.apply_one_market_from_list(market, allow_new_markets) && new_market_found {
                 self.new_markets_pending_price_refresh += 1;
+                if let Some(name) = market_name {
+                    self.new_markets_added.push(name);
+                }
             }
         }
 
@@ -401,6 +430,7 @@ impl MarketsState {
             .or_default();
         self.prices.push(market_price_from_market(&market));
         self.markets.push(market);
+        self.bump_markets_version();
         true
     }
 
@@ -1034,10 +1064,42 @@ impl MarketsState {
         self.markets_list_refresh_needed
     }
 
+    /// Delphi `AddNewAksPrice` from `GlassUpdated`: keep `ChartPriceStep` fresh
+    /// when orderbook updates move the best ask before the next price refresh.
+    pub(crate) fn update_chart_price_step_from_server_index(
+        &mut self,
+        m_index: u16,
+        ask: f64,
+    ) -> bool {
+        if ask <= EPS_MARKET {
+            return false;
+        }
+        let Some(idx) = self.local_pos_for_server_index(m_index) else {
+            return false;
+        };
+        let Some(slot) = self.prices.get_mut(idx) else {
+            return false;
+        };
+        slot.chart_price_step = EPS_MARKET.max(ask / 5000.0);
+        true
+    }
+
     pub(crate) fn take_new_markets_pending_price_refresh(&mut self) -> usize {
         let count = self.new_markets_pending_price_refresh;
         self.new_markets_pending_price_refresh = 0;
         count
+    }
+
+    pub(crate) fn take_new_markets_added(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.new_markets_added)
+    }
+
+    pub(crate) fn markets_version(&self) -> u64 {
+        self.markets_version
+    }
+
+    fn bump_markets_version(&mut self) {
+        self.markets_version = self.markets_version.wrapping_add(1);
     }
 
     pub(crate) fn set_copy_max_leverage_from_markets_list(&mut self, enabled: bool) {
@@ -1375,6 +1437,7 @@ mod tests {
         });
 
         assert!(st.get("DOGEUSDT").is_some());
+        assert_eq!(st.take_new_markets_added(), vec!["DOGEUSDT".to_string()]);
         assert!(
             !st.markets_list_refresh_needed(),
             "Delphi clears NewMarketFound only after successful GetMarketsList apply"

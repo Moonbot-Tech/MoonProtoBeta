@@ -49,6 +49,11 @@ terminal entries waiting for deferred removal can still produce a follow-up
 `TOrderStatusRequest` when they are absent from the fresh snapshot. This matches
 MoonProto virtual workers: Delphi `JobIsDone` becomes true only after
 `DoTheJobVirtual` returns, while `RemoveWorkerFromCache` happens before that.
+The active `Client::run_with_dispatcher*` path sends those follow-up requests
+automatically. Low-level raw `EventDispatcher::dispatch_into` users receive only
+the typed state/events; after `OrderEvent::Snapshot` they can call
+`EventDispatcher::missing_order_status_requests_after_snapshot()` and pass each
+returned `(ctx, market_name)` to `Client::request_order_status`.
 Any incoming `TBaseMarketCommand` descendant that reaches Delphi
 `ProcessCommandOrder` and finds an existing local worker refreshes that
 worker's snapshot mark before epoch/phase checks. `TAllStatusesReq` and

@@ -68,9 +68,10 @@ post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
 `last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
 `min_lot_size = max(max(bn_step_size, bn_min_qty) * p_last, bn_min_notional)`.
 `chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
-`AddNewAksPrice(Ask)`: when `Ask > 0`, it becomes `max(eps, Ask / 5000)`;
-when `Ask` is zero/missing, the previous value is kept. Retained futures trade
-join uses this value for same-price aggregation.
+`AddNewAksPrice(Ask)`: both `UpdateMarketsList` and applied orderbook updates
+can refresh it from the current ask; when `Ask > 0`, it becomes
+`max(eps, Ask / 5000)`, and when `Ask` is zero/missing, the previous value is
+kept.
 When funding is included, the same row also updates
 `Market::funding_rate` and `Market::funding_time`, matching Delphi's `TMarket`
 mutation in the `HasFunding` branch.
@@ -89,8 +90,15 @@ If `UpdateMarketsList` refers to a server market index whose name is present in
 dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
 `GetMarketsList` request automatically, throttled to roughly one request per
 30 seconds while the unknown market condition persists. If that listing refresh
-adds new markets, the active dispatcher immediately requests `UpdateMarketsList`
-again so the new markets receive prices like Delphi `NewMarkets.Count > 0`.
+adds new markets, the active dispatcher emits
+`MarketsEvent::NewMarketsAdded { names }` and immediately requests
+`UpdateMarketsList` again so the new markets receive prices like Delphi
+`NewMarkets.Count > 0`.
+
+Inbound Delphi `TNewMarketNotifyCommand` also forces this listing refresh, but
+that UI command is internal to the active library. User code should react to
+`MarketsEvent::NewMarketsAdded { names }`, which is emitted only after
+`GetMarketsList` actually inserted the named markets into `MarketsState`.
 
 `UpdateMarketsList` carries server `mIndex` values. Price updates and
 `price_by_index` resolve those indexes through the current `GetMarketsIndexes`
@@ -149,6 +157,7 @@ prices and tags from `EventDispatcher`.
 pub enum MarketsEvent {
     // Historical name: emitted when a GetMarketsList response was applied.
     MarketsListReplaced { count: usize, corr_count: usize },
+    NewMarketsAdded { names: Vec<String> },
     PricesUpdated { count: usize, included_funding: bool, included_corr: bool },
     IndexesUpdated { count: usize },
     TokenTagsUpdated { count: usize },

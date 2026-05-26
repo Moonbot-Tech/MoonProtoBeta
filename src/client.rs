@@ -1673,12 +1673,6 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
-    /// Send `TNewMarketNotifyCommand`.
-    pub fn ui_new_market_notify(&self) {
-        let raw = crate::commands::ui::build_new_market_notify(rand::random());
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
-    }
-
     /// Send `TLevManageCommand`.
     pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
@@ -7239,13 +7233,6 @@ impl Client {
     ) {
         let raw = crate::commands::ui::build_emu_trades(rand::random(), m_index, base_time, points);
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
-    }
-
-    /// Send `TNewMarketNotifyCommand` (UI CmdId=8, High) to notify about a new
-    /// market.
-    pub fn ui_new_market_notify(&self) {
-        let raw = crate::commands::ui::build_new_market_notify(rand::random());
-        self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
     /// Send `TLevManageCommand` (UI CmdId=9, Sliced,

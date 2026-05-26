@@ -190,12 +190,24 @@ impl<T: SeqRingRow> SeqRingWriter<T> {
     }
 
     pub fn push_batch(&mut self, rows: &[T]) {
+        let mut ignored_evicted = Vec::new();
+        self.push_batch_with_evicted(rows, &mut ignored_evicted);
+    }
+
+    /// Append a batch and collect overwritten rows when the ring was full.
+    ///
+    /// This is the batch counterpart of [`Self::push_with_evicted`]. History
+    /// writers that compact old detailed rows into coarse rows must use this
+    /// instead of `push_batch` so eviction side effects are not silently lost.
+    pub fn push_batch_with_evicted(&mut self, rows: &[T], evicted: &mut Vec<T>) {
         let mut state = self.inner.state.write();
         for &row in rows {
             let seq = state.next_seq;
             let idx = state.slot_index(seq);
             if state.len < state.capacity {
                 state.len += 1;
+            } else {
+                evicted.push(state.rows[idx]);
             }
             state.rows[idx] = row;
             state.next_seq = state.next_seq.wrapping_add(1);
@@ -590,6 +602,20 @@ mod tests {
         let mut out = Vec::new();
         reader.copy_last(2, &mut out);
         assert_eq!(out, vec![12, 13]);
+    }
+
+    #[test]
+    fn push_batch_with_evicted_returns_all_overwritten_rows() {
+        let (mut writer, reader) = SeqRingWriter::<u64>::new(3).unwrap();
+        writer.push_batch(&[10, 11, 12]);
+
+        let mut evicted = Vec::new();
+        writer.push_batch_with_evicted(&[13, 14, 15, 16], &mut evicted);
+
+        assert_eq!(evicted, vec![10, 11, 12, 13]);
+        let mut out = Vec::new();
+        reader.copy_last(3, &mut out);
+        assert_eq!(out, vec![14, 15, 16]);
     }
 
     #[test]
