@@ -6992,6 +6992,29 @@ Verification:
   `reader max=679us`, `writer_cpu max=150us`, `active_dispatch max=3759us`
   on `Strat(30)`.
 
+### 2026-05-26 - `client.rs` protocol helper split
+
+Done:
+
+- Moved SlicedACK parsing/application, handshake helper decode/builders, Ping
+  response application, DataRead decode, Engine API/candles inline dispatch,
+  compression/wire send helpers, reset, bind, and bind-failure lifecycle
+  tracking into `src/client/protocol_helpers.rs`.
+- This is a block move of protocol helper methods used by `ProtocolCore` and
+  oracle tests; all widened methods are crate-visible only.
+- No protocol call order changed: `ProtocolCore` still calls the same
+  `Client::*` helpers at the same points in its tick.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.43s`, `ParseFailed=0`,
+  `reader max=667us`, `writer_cpu max=154us`, `active_dispatch max=3277us`
+  on `Strat(30)`.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
