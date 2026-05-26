@@ -7842,3 +7842,28 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `ClientSender` strategy/balance helper split
+
+Done:
+
+- Moved `ClientSender` strategy command helpers into `client/sender/strat.rs`.
+- Moved `ClientSender` balance refresh helper into `client/sender/balance.rs`.
+- Kept the public sender API unchanged for schema request, strategy snapshot
+  send, strategy delete, sell-price update, checked sync, and balance refresh.
+- Kept the same command kind (`MPC_Strat` / `MPC_Balance`), priority,
+  encryption flag, `MaxRetries`, and `UniqueKey` choices.
+- Kept `TStratSnapshot` as sliced/keyed by `UniqueKey::strat_snapshot()` and
+  kept balance refresh as high-priority non-sliced `MPC_Balance`.
+- This is a readability/publication split only. No outbound strategy/balance
+  bytes, strategy snapshot serialization, domain gate behavior, or public
+  sender behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.59s`,
+  `ParseFailed=0`, `rx_actual_drop=10.75%`, streams/API/market health OK,
+  reader max `717us`, writer CPU max `124us`, GetMarketsList apply `2314us`.
