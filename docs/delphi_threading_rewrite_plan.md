@@ -7102,3 +7102,32 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - retained trades dispatch uses server index slots
+
+Done:
+
+- Closed the hot-path part of the `Arc<str>` market-name review finding without
+  changing public API ownership: retained trades stream batches no longer carry
+  cloned `market_name: String` per section.
+- `MarketHistoryStreamSection` now carries `market_index: u16`; the
+  `MarketHistoryWorker` resolves it through registry slots configured from
+  `GetMarketsIndexes`.
+- The registry stores `Vec<Option<String>>` slots, not a compressed filtered
+  list. Unknown/missing index names keep their position as `None`, so a hole at
+  `mIndex=0` cannot shift `mIndex=1` into the wrong market.
+- `EventDispatcher` still uses `MarketsState::market_name_by_index` for the
+  Delphi visibility/storage-scope gate before enqueueing a retained batch; the
+  worker side avoids the extra hot clone/hash lookup.
+
+Verification:
+
+- `cargo test active_dispatch_history_worker_uses_server_index_mapping_not_market_vector_order --lib --quiet` OK.
+- `cargo test registry_resolves_stream_sections_by_configured_server_index --lib --quiet` OK.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 763 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.11s`, `ParseFailed=0`, err_emu actual drop
+  `10.51%`, retained futures rows present, derived snapshot present,
+  `reader max=742us`, `writer_cpu max=151us`.

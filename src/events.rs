@@ -848,11 +848,24 @@ impl EventDispatcher {
         self.last_market_history_markets_version = None;
     }
 
-    fn market_history_market_names(&self) -> Vec<String> {
+    fn market_history_market_slots(&self) -> Vec<Option<String>> {
+        if self.markets.indexes_synchronized && !self.markets.market_indexes.is_empty() {
+            return self
+                .markets
+                .market_indexes
+                .iter()
+                .map(|name| {
+                    self.markets
+                        .by_name
+                        .contains_key(name.as_str())
+                        .then(|| name.clone())
+                })
+                .collect();
+        }
         self.markets
             .markets
             .iter()
-            .map(|market| market.bn_market_name.clone())
+            .map(|market| Some(market.bn_market_name.clone()))
             .collect()
     }
 
@@ -867,8 +880,8 @@ impl EventDispatcher {
         {
             return;
         }
-        let market_names = self.market_history_market_names();
-        handle.configure_markets(market_names, self.trade_storage_scope.clone());
+        let market_slots = self.market_history_market_slots();
+        handle.configure_market_index_slots(market_slots, self.trade_storage_scope.clone());
         self.last_market_history_scope = self.trade_storage_scope.clone();
         self.last_market_history_markets_version = Some(markets_version);
     }
@@ -1279,12 +1292,10 @@ impl EventDispatcher {
                                 continue;
                             }
                         }
-                        let history_market_name = market_name
-                            .filter(|name| {
-                                collect_history && self.active_trade_storage_allows_market(name)
-                            })
-                            .map(str::to_owned);
-                        let mut history_rows = if history_market_name.is_some() {
+                        let collect_market_history = market_name.is_some_and(|name| {
+                            collect_history && self.active_trade_storage_allows_market(name)
+                        });
+                        let mut history_rows = if collect_market_history {
                             Vec::with_capacity(row_count)
                         } else {
                             Vec::new()
@@ -1299,7 +1310,7 @@ impl EventDispatcher {
                                     now_ms,
                                 );
                             }
-                            if history_market_name.is_some() {
+                            if collect_market_history {
                                 history_rows.push(MarketHistoryTradeInput {
                                     time_delta_ms: trade.time_delta_ms,
                                     price: trade.price,
@@ -1307,21 +1318,17 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        if let Some(market_name) = history_market_name {
-                            if !history_rows.is_empty() {
-                                if is_spot {
-                                    history_sections.push(MarketHistoryStreamSection::SpotTrades {
-                                        market_name,
-                                        rows: history_rows,
-                                    });
-                                } else {
-                                    history_sections.push(
-                                        MarketHistoryStreamSection::FuturesTrades {
-                                            market_name,
-                                            rows: history_rows,
-                                        },
-                                    );
-                                }
+                        if collect_market_history && !history_rows.is_empty() {
+                            if is_spot {
+                                history_sections.push(MarketHistoryStreamSection::SpotTrades {
+                                    market_index,
+                                    rows: history_rows,
+                                });
+                            } else {
+                                history_sections.push(MarketHistoryStreamSection::FuturesTrades {
+                                    market_index,
+                                    rows: history_rows,
+                                });
                             }
                         }
                     }
@@ -1340,18 +1347,16 @@ impl EventDispatcher {
                                 continue;
                             }
                         }
-                        let history_market_name = market_name
-                            .filter(|name| {
-                                collect_history && self.active_trade_storage_allows_market(name)
-                            })
-                            .map(str::to_owned);
-                        let mut history_rows = if history_market_name.is_some() {
+                        let collect_market_history = market_name.is_some_and(|name| {
+                            collect_history && self.active_trade_storage_allows_market(name)
+                        });
+                        let mut history_rows = if collect_market_history {
                             Vec::with_capacity(row_count)
                         } else {
                             Vec::new()
                         };
                         for row in rows {
-                            if history_market_name.is_some() {
+                            if collect_market_history {
                                 history_rows.push(MarketHistoryMMOrderInput {
                                     time_delta_ms: row.time_delta_ms,
                                     vol: row.vol,
@@ -1360,13 +1365,11 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        if let Some(market_name) = history_market_name {
-                            if !history_rows.is_empty() {
-                                history_sections.push(MarketHistoryStreamSection::MMOrders {
-                                    market_name,
-                                    rows: history_rows,
-                                });
-                            }
+                        if collect_market_history && !history_rows.is_empty() {
+                            history_sections.push(MarketHistoryStreamSection::MMOrders {
+                                market_index,
+                                rows: history_rows,
+                            });
                         }
                     }
                 }
@@ -1384,18 +1387,16 @@ impl EventDispatcher {
                                 continue;
                             }
                         }
-                        let history_market_name = market_name
-                            .filter(|name| {
-                                collect_history && self.active_trade_storage_allows_market(name)
-                            })
-                            .map(str::to_owned);
-                        let mut history_rows = if history_market_name.is_some() {
+                        let collect_market_history = market_name.is_some_and(|name| {
+                            collect_history && self.active_trade_storage_allows_market(name)
+                        });
+                        let mut history_rows = if collect_market_history {
                             Vec::with_capacity(row_count)
                         } else {
                             Vec::new()
                         };
                         for trade in rows {
-                            if history_market_name.is_some() {
+                            if collect_market_history {
                                 history_rows.push(MarketHistoryTradeInput {
                                     time_delta_ms: trade.time_delta_ms,
                                     price: trade.price,
@@ -1403,13 +1404,11 @@ impl EventDispatcher {
                                 });
                             }
                         }
-                        if let Some(market_name) = history_market_name {
-                            if !history_rows.is_empty() {
-                                history_sections.push(MarketHistoryStreamSection::Liquidations {
-                                    market_name,
-                                    rows: history_rows,
-                                });
-                            }
+                        if collect_market_history && !history_rows.is_empty() {
+                            history_sections.push(MarketHistoryStreamSection::Liquidations {
+                                market_index,
+                                rows: history_rows,
+                            });
                         }
                     }
                 }
@@ -3481,6 +3480,61 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].price, 100.0);
         assert_eq!(rows[0].qty, 1.0);
+    }
+
+    #[test]
+    fn active_dispatch_history_worker_uses_server_index_mapping_not_market_vector_order() {
+        let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+            futures_trades_capacity: 8,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+        });
+
+        let mut d = EventDispatcher::new();
+        d.set_market_history_handle(worker.handle());
+        seed_event_markets(&mut d, &["ETHUSDT", "BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec![
+            "UNKNOWNUSDT".to_string(),
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+        ]);
+
+        let mut client = crate::client::Client::new(dummy_client_cfg());
+        client.testing_set_domain_ready(true);
+        client.subscribe_all_trades(false);
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        let payload = trades_payload_with_rows(813, 0, 1, &[(0, 100.0, 1.0)]);
+
+        dispatch_active_packet_for_test(
+            &mut d,
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &client,
+            &mut actions,
+        );
+        assert!(worker.flush(45_000.0));
+
+        let btc = worker.readers("BTCUSDT").unwrap().futures_trades.unwrap();
+        let mut btc_rows = Vec::new();
+        btc.copy_last(8, &mut btc_rows);
+        assert_eq!(btc_rows.len(), 1);
+        assert_eq!(btc_rows[0].price, 100.0);
+
+        let eth = worker.readers("ETHUSDT").unwrap().futures_trades.unwrap();
+        let mut eth_rows = Vec::new();
+        eth.copy_last(8, &mut eth_rows);
+        assert!(
+            eth_rows.is_empty(),
+            "stream mIndex=1 must preserve GetMarketsIndexes slots, not local market vector order"
+        );
     }
 
     #[test]

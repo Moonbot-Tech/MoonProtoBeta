@@ -1,4 +1,4 @@
-﻿//! Active-library retained history store.
+//! Active-library retained history store.
 //!
 //! `MarketHistoryStore` is the per-market single-writer side owned by
 //! `MarketHistoryWorker`. Public code receives cloneable [`SeqRingReader`]
@@ -256,6 +256,7 @@ pub struct MarketHistoryReaders {
 pub struct MarketHistoryRegistry {
     default_config: MarketHistoryConfig,
     stores: HashMap<String, MarketHistoryStore>,
+    stores_by_index: Vec<Option<String>>,
 }
 
 impl MarketHistoryRegistry {
@@ -263,6 +264,7 @@ impl MarketHistoryRegistry {
         Self {
             default_config,
             stores: HashMap::new(),
+            stores_by_index: Vec::new(),
         }
     }
 
@@ -286,6 +288,17 @@ impl MarketHistoryRegistry {
         self.stores.get_mut(market_name)
     }
 
+    pub fn get_mut_by_server_index(
+        &mut self,
+        market_index: u16,
+    ) -> Option<&mut MarketHistoryStore> {
+        let market_name = self
+            .stores_by_index
+            .get(market_index as usize)?
+            .as_deref()?;
+        self.stores.get_mut(market_name)
+    }
+
     fn insert_configured_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
         self.stores
             .entry(market_name.to_string())
@@ -297,16 +310,39 @@ impl MarketHistoryRegistry {
         market_names: &[String],
         scope: Option<&TradeStorageScope>,
     ) -> usize {
+        let market_slots = market_names
+            .iter()
+            .map(|name| Some(name.clone()))
+            .collect::<Vec<_>>();
+        self.configure_market_index_slots(&market_slots, scope)
+    }
+
+    pub fn configure_market_index_slots(
+        &mut self,
+        market_slots: &[Option<String>],
+        scope: Option<&TradeStorageScope>,
+    ) -> usize {
         let Some(scope) = scope else {
             self.stores.clear();
+            self.stores_by_index.clear();
             return 0;
         };
 
-        let desired = market_names
-            .iter()
-            .filter(|name| scope.contains(name))
-            .cloned()
-            .collect::<HashSet<_>>();
+        self.stores_by_index.clear();
+        self.stores_by_index.reserve(market_slots.len());
+        let mut desired = HashSet::with_capacity(market_slots.len());
+        for slot in market_slots {
+            let Some(name) = slot.as_ref() else {
+                self.stores_by_index.push(None);
+                continue;
+            };
+            if !scope.contains(name) {
+                self.stores_by_index.push(None);
+                continue;
+            }
+            self.stores_by_index.push(Some(name.clone()));
+            desired.insert(name.clone());
+        }
         self.stores.retain(|name, _| desired.contains(name));
         for name in desired {
             self.insert_configured_market(&name);
@@ -1071,6 +1107,48 @@ mod tests {
 
         assert_eq!(registry.configure_markets(&markets, None), 0);
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_resolves_stream_sections_by_configured_server_index() {
+        let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
+            futures_trades_capacity: 1,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+        });
+        let markets = vec![
+            "ETHUSDT".to_string(),
+            "BTCUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ];
+
+        registry.configure_markets(&markets, Some(&TradeStorageScope::All));
+        assert!(registry.get_mut_by_server_index(0).is_some());
+        assert!(registry.get_mut_by_server_index(1).is_some());
+        assert!(registry.get_mut_by_server_index(3).is_none());
+
+        let scope = TradeStorageScope::from_markets(["BTCUSDT"]);
+        registry.configure_markets(&markets, Some(&scope));
+        assert!(registry.get_mut_by_server_index(0).is_none());
+        assert!(registry.get_mut_by_server_index(1).is_some());
+        assert!(registry.get_mut_by_server_index(2).is_none());
+
+        registry.configure_market_index_slots(
+            &[
+                None,
+                Some("BTCUSDT".to_string()),
+                Some("SOLUSDT".to_string()),
+            ],
+            Some(&TradeStorageScope::All),
+        );
+        assert!(registry.get_mut_by_server_index(0).is_none());
+        assert!(registry.get_mut_by_server_index(1).is_some());
+        assert!(registry.get_mut_by_server_index(2).is_some());
     }
 
     #[test]

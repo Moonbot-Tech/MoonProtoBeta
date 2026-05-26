@@ -54,19 +54,19 @@ pub struct MarketHistoryLastPriceBatch {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarketHistoryStreamSection {
     FuturesTrades {
-        market_name: String,
+        market_index: u16,
         rows: Vec<MarketHistoryTradeInput>,
     },
     SpotTrades {
-        market_name: String,
+        market_index: u16,
         rows: Vec<MarketHistoryTradeInput>,
     },
     Liquidations {
-        market_name: String,
+        market_index: u16,
         rows: Vec<MarketHistoryTradeInput>,
     },
     MMOrders {
-        market_name: String,
+        market_index: u16,
         rows: Vec<MarketHistoryMMOrderInput>,
     },
 }
@@ -97,7 +97,7 @@ pub struct MarketHistoryWorker {
 
 enum MarketHistoryCommand {
     ConfigureMarkets {
-        market_names: Vec<String>,
+        market_slots: Vec<Option<String>>,
         scope: Option<TradeStorageScope>,
     },
     Readers {
@@ -190,9 +190,18 @@ impl MarketHistoryHandle {
         market_names: Vec<String>,
         scope: Option<TradeStorageScope>,
     ) -> bool {
+        let market_slots = market_names.into_iter().map(Some).collect();
+        self.configure_market_index_slots(market_slots, scope)
+    }
+
+    pub(crate) fn configure_market_index_slots(
+        &self,
+        market_slots: Vec<Option<String>>,
+        scope: Option<TradeStorageScope>,
+    ) -> bool {
         self.tx
             .send(MarketHistoryCommand::ConfigureMarkets {
-                market_names,
+                market_slots,
                 scope,
             })
             .is_ok()
@@ -294,10 +303,10 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
     loop {
         match rx.recv_timeout(STORE_WORKER_RECV_TIMEOUT) {
             Ok(MarketHistoryCommand::ConfigureMarkets {
-                market_names,
+                market_slots,
                 scope,
             }) => {
-                registry.configure_markets(&market_names, scope.as_ref());
+                registry.configure_market_index_slots(&market_slots, scope.as_ref());
             }
             Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
                 let _ = reply.send(registry.readers(&market_name));
@@ -379,8 +388,8 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
 
     for section in batch.sections {
         match section {
-            MarketHistoryStreamSection::FuturesTrades { market_name, rows } => {
-                let Some(store) = registry.get_mut(&market_name) else {
+            MarketHistoryStreamSection::FuturesTrades { market_index, rows } => {
+                let Some(store) = registry.get_mut_by_server_index(market_index) else {
                     continue;
                 };
                 for row in rows {
@@ -394,8 +403,8 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::SpotTrades { market_name, rows } => {
-                let Some(store) = registry.get_mut(&market_name) else {
+            MarketHistoryStreamSection::SpotTrades { market_index, rows } => {
+                let Some(store) = registry.get_mut_by_server_index(market_index) else {
                     continue;
                 };
                 for row in rows {
@@ -409,8 +418,8 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::Liquidations { market_name, rows } => {
-                let Some(store) = registry.get_mut(&market_name) else {
+            MarketHistoryStreamSection::Liquidations { market_index, rows } => {
+                let Some(store) = registry.get_mut_by_server_index(market_index) else {
                     continue;
                 };
                 for row in rows {
@@ -424,8 +433,8 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::MMOrders { market_name, rows } => {
-                let Some(store) = registry.get_mut(&market_name) else {
+            MarketHistoryStreamSection::MMOrders { market_index, rows } => {
+                let Some(store) = registry.get_mut_by_server_index(market_index) else {
                     continue;
                 };
                 for row in rows {
@@ -490,7 +499,7 @@ mod tests {
             base_time: 45_000.0,
             now_time,
             sections: vec![MarketHistoryStreamSection::FuturesTrades {
-                market_name: "BTCUSDT".to_string(),
+                market_index: 0,
                 rows: vec![MarketHistoryTradeInput {
                     time_delta_ms: 250,
                     price: 100.0,
@@ -530,7 +539,7 @@ mod tests {
             base_time: 45_000.0,
             now_time: 45_000.0,
             sections: vec![MarketHistoryStreamSection::SpotTrades {
-                market_name: "ETHUSDT".to_string(),
+                market_index: 0,
                 rows: vec![MarketHistoryTradeInput {
                     time_delta_ms: 0,
                     price: 10.0,
