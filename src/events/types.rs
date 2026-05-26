@@ -131,12 +131,11 @@ pub enum Event {
     /// exposes the same domain data instead of dropping the section as opaque
     /// bytes.
     WatcherFills(WatcherFillsEvent),
-    /// Balance channel: one event for full/incremental updates (cmd_id_sub 3/4).
-    /// The exact base `TBalanceCommand` (cmd_id_sub 2) is parsed but ignored,
-    /// matching Delphi `ProcessBalanceCommand`.
+    /// Balance read-model event: full snapshots and incremental updates.
+    /// Internal/base/request balance packets are consumed without a public event.
     Balance(BalanceEvent),
-    /// Arb channel (`MPC_Balance` subcommand 6): compact kernel-to-client
-    /// payload.
+    /// Compact arbitrage relay payload after active-library market-index
+    /// filtering.
     Arb { uid: u64, payload: ArbPayload },
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),

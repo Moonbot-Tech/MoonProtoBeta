@@ -1,13 +1,13 @@
 //! Read models maintained by `EventDispatcher`.
 //!
 //! Each MoonProto channel has a matching state module:
-//! - `Orders` for `MPC_Order` trade-command state.
-//! - `Strats` for `MPC_Strat` strategy snapshots and updates.
-//! - `Balances` for `MPC_Balance` account and market balances.
+//! - `Orders` for trade-command state.
+//! - `Strats` for strategy snapshots and updates.
+//! - `Balances` for account and per-market balances.
 //! - `Markets` for Engine API market list, indexes, prices, and tags.
-//! - `OrderBooks` for `MPC_OrderBook` snapshots, diffs, and reordering caches.
-//! - `Trades` for `MPC_TradesStream` packets and automatic gap recovery.
-//! - `Settings` for `MPC_UI` settings snapshots and UI control events.
+//! - `OrderBooks` for snapshots, diffs, and reordering caches.
+//! - `Trades` for stream packets and automatic gap recovery.
+//! - `Settings` for settings snapshots and UI control events.
 //!
 //! Normal applications read these models through `EventDispatcher` getters
 //! after running `Client::run_with_dispatcher` or

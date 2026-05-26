@@ -7,8 +7,9 @@
 //!
 //! The builders and parsers preserve the Delphi wire formats: base command
 //! header, command id, version, UID, per-command priority/retry semantics, and
-//! exact field order. See `moonproto/docs/commands/` and `moonproto/docs/api/`
-//! for consumer-facing guides.
+//! exact field order. See `moonproto/docs/api/` for public Active Lib/API
+//! guides; raw protocol reference lives in the private MoonKernel
+//! `spec_pipeline/docs` workspace.
 
 pub mod arb;
 pub mod balance;

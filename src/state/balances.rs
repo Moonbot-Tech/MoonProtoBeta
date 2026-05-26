@@ -1,21 +1,16 @@
-//! Balance sync state — apply snapshot/incremental updates.
+//! Balance read model maintained by `EventDispatcher`.
 //!
-//! Источник Delphi: `MoonProtoEngine.pas:1210-1340 ProcessBalanceCommand + OnBalanceSnapshot
-//! + OnBalanceIncrement + ApplyBalanceItem`.
+//! Source parity: `MoonProtoEngine.pas:1210-1340 ProcessBalanceCommand +
+//! OnBalanceSnapshot + OnBalanceIncrement + ApplyBalanceItem`.
 //!
-//! ## Wire-format
-//! Парсер `commands::balance::parse_balance(cmd_id, payload)` уже распаковывает данные.
-//! Этот модуль применяет полученные `BalanceUpdate` к локальной модели.
+//! Public applications normally read this state through
+//! `EventDispatcher::balances()` or use `Client::request_balance_snapshot`.
+//! Low-level packet parsing happens in `commands::balance`; this module applies
+//! already-decoded full snapshots and incremental updates to the local model.
 //!
-//! `cmd_id`:
-//! - **2** = exact `TBalanceCommand` — parsed by the registry, but ignored by
-//!   Delphi `ProcessBalanceCommand`.
-//! - **3** = `TBalanceSnapshotFull` — globals + items; маркеты не в Items
-//!   сбрасываются в default.
-//! - **4** = `TBalanceIncrUpdate` — incremental: GlobalChanged-gated globals + merge items.
-//!
-//! В Delphi epoch для incremental проверяется на уровне отдельного рынка
-//! (`m.LastBalanceEpoch`), а full snapshot не проходит через общий epoch-gate.
+//! Incremental epoch protection is per market, matching Delphi
+//! `m.LastBalanceEpoch`. Full snapshots are authoritative for known markets and
+//! reset missing rows to default values without a global epoch gate.
 
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
 use std::collections::HashMap;
@@ -36,7 +31,8 @@ pub struct GlobalBalance {
 }
 
 /// Sync state балансов клиента. Обновляется через `apply(BalanceUpdate)` при
-/// получении `MPC_Balance` пакетов от сервера. Используется в [`crate::events::EventDispatcher`].
+/// получении full/incremental balance updates от сервера. Используется в
+/// [`crate::events::EventDispatcher`].
 ///
 /// **Семантика snapshot vs incremental**:
 /// - `cmd_id=2` (exact `TBalanceCommand`): не применяется к state, как в Delphi.
@@ -59,7 +55,7 @@ pub struct BalancesState {
 
 #[derive(Debug, Clone)]
 pub enum BalanceEvent {
-    /// Применён full snapshot (cmd_id=3): N маркетов получили данные, остальные сброшены в default.
+    /// Применён full snapshot: N маркетов получили данные, остальные сброшены в default.
     SnapshotApplied { count: usize, epoch: u16 },
     /// Применён incremental update: N маркетов изменилось, globals обновлены если global_changed=true.
     IncrementalApplied {
@@ -191,7 +187,7 @@ impl BalancesState {
         }
     }
 
-    /// Full snapshot (cmd_id=3): маркеты не в Items получают default (Delphi:1253-1275).
+    /// Full snapshot: маркеты не в Items получают default (Delphi:1253-1275).
     fn apply_full_snapshot<F>(
         &mut self,
         upd: BalanceUpdate,

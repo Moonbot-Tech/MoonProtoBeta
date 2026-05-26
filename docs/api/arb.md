@@ -1,25 +1,22 @@
-# Arb Payloads
+# Arbitrage Relay Events
 
-Arbitrage price updates arrive as `MPC_Balance` subcommand `6`. The public
-library parses the MoonProto envelope and decodes the compact kernel-to-client
-payload into price or isolation entries.
+The Active Lib can expose compact arbitrage price and isolation relay messages
+as `Event::Arb`. This is not part of the normal balance read model, even though
+the Delphi protocol transports it on the same internal channel as balances.
 
-The server sends this channel only to clients that are balance-subscribed. In
-the normal active-library flow this is handled by init: `connect_and_init` /
-`run_init_sequence` sends `UpdateMarketsList`, which enables balance-channel
-delivery on the Delphi server. A raw transport-only client that has not run init
-should not expect `Event::Arb` yet.
+In the normal active-library flow, init enables this delivery together with the
+balance/market refresh path. A raw transport-only client that has not completed
+init should not expect arbitrage relay events.
 
 ## EventDispatcher Path
 
-`EventDispatcher` is the active-library path. It matches the Delphi client:
-price blocks and isolation entries whose `market_index` is not present in the
-current server-index map are consumed but not exposed in `Event::Arb`.
-Use `parse_arb_payload_compact` directly when you need raw wire inspection.
+`EventDispatcher` filters relay records through the current server market-index
+map. Records for unknown indexes are consumed but not exposed, matching the
+Delphi client.
 
 ```rust
-use moonproto::Event;
 use moonproto::commands::arb::ArbPayload;
+use moonproto::Event;
 
 client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
     if let Event::Arb { uid, payload } = event {
@@ -35,26 +32,9 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 }));
 ```
 
-## Low-Level Parser
+## Public Types
 
 ```rust
-use moonproto::commands::arb::{ArbPayload, parse_arb_payload_compact, parse_arb_prices};
-
-let arb = parse_arb_prices(payload).expect("bad arb payload");
-let compact = parse_arb_payload_compact(&arb.payload).expect("bad compact payload");
-if let ArbPayload::Price { blocks, .. } = compact {
-    println!("uid={} markets={}", arb.uid, blocks.len());
-}
-```
-
-## Public Struct
-
-```rust
-pub struct ArbPricesCommand {
-    pub uid: u64,
-    pub payload: Vec<u8>,
-}
-
 pub enum ArbPayload {
     Price { version: u8, blocks: Vec<ArbPriceBlock> },
     Isolation { version: u8, entries: Vec<ArbIsolationEntry> },
@@ -77,5 +57,7 @@ pub struct ArbIsolationEntry {
 }
 ```
 
-`version <= 2` has an implicit price command. `version >= 3` carries an explicit
-command byte: `1` for prices and `2` for isolation flags.
+Low-level parsers are available under `moonproto::commands::arb` for protocol
+diagnostics and custom tooling. Normal applications should consume the typed
+`Event::Arb` values from the dispatcher.
+

@@ -565,6 +565,7 @@ impl Session {
         let history_worker = MarketHistoryWorker::spawn(firetest_history_config());
         let (candles_snapshot_tx, candles_snapshot_rx) = mpsc::channel();
         let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_markets_list_detailed_timing_enabled(true);
         dispatcher.set_market_history_handle(history_worker.handle());
         if let Some(strategy) = provided_strategy.as_ref() {
             dispatcher.set_local_strategies(std::slice::from_ref(strategy));

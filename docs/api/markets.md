@@ -106,6 +106,13 @@ that UI command is internal to the active library. User code should react to
 `price_by_index` resolve those indexes through the current `GetMarketsIndexes`
 mapping, so stale mappings after a server restart are not used.
 
+`MarketsState::last_markets_list_apply_timing()` is diagnostics only. It always
+records coarse total/loop timing for the latest active `GetMarketsList` apply.
+Per-row read/apply attribution is disabled by default because thousands of timer
+calls are measurable CPU work; enable it with
+`EventDispatcher::set_markets_list_detailed_timing_enabled(true)` only in
+FireTest or focused profiling.
+
 Funding timestamps match Delphi client state. The server serializes
 `FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
 so `Market::funding_time` and `MarketPrice::funding_time` are client-local

@@ -214,8 +214,6 @@ Start here:
 - `docs/api/strats.md`
 - `docs/api/multi_server.md`
 
-Command wire notes live in `docs/commands/`.
-
 ## Repository Layout
 
 ```text
@@ -227,7 +225,6 @@ src/transport/    built-in low-level transport and optional moonext loader
 tests/            integration, polling, and FireTest
 examples/         runnable live/manual examples
 docs/api/         API documentation
-docs/commands/    command/wire documentation
 ```
 
 ## Development Notes

@@ -98,6 +98,7 @@ pub struct MarketsState {
     server_base_currency_name: Option<String>,
     server_base_currency_code: Option<u8>,
     last_markets_list_timing: Option<MarketsListApplyTiming>,
+    markets_list_detailed_timing_enabled: bool,
 }
 
 impl MarketsState {
@@ -154,6 +155,16 @@ impl MarketsState {
 
     pub fn last_markets_list_apply_timing(&self) -> Option<MarketsListApplyTiming> {
         self.last_markets_list_timing
+    }
+
+    /// Enable per-row `GetMarketsList` read/apply timing.
+    ///
+    /// Disabled by default because thousands of `Instant::now()` calls are
+    /// themselves measurable CPU work. FireTest and focused diagnostics can
+    /// enable this when they need phase attribution; normal active-library
+    /// behavior keeps only coarse loop timing.
+    pub fn set_markets_list_detailed_timing_enabled(&mut self, enabled: bool) {
+        self.markets_list_detailed_timing_enabled = enabled;
     }
 
     pub(crate) fn set_copy_max_leverage_from_markets_list(&mut self, enabled: bool) {
