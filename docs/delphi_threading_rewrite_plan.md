@@ -7773,3 +7773,26 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `ClientSender` subscription split
+
+Done:
+
+- Moved `ClientSender` orderbook/trades subscription helpers into
+  `client/sender/subscriptions.rs`.
+- Kept the public sender API unchanged: same method names, arguments, fallible
+  variants, and fire-and-forget logging.
+- Kept subscription registry machine effect unchanged: update the reconnect
+  registry first, refresh the shared summary/scope, then send the Delphi
+  `TEngineRequest` only when the domain gate is ready.
+- Kept trades storage scope as an active-library-only decision; the wire command
+  is still `emk_SubscribeAllTrades`.
+- This is a readability/publication split only. No subscription registry,
+  reconnect restore, orderbook batch send, trades storage scope, request UID
+  timestamping, or public sender behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
