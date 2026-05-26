@@ -607,14 +607,17 @@ impl Session {
     fn pump(&mut self, duration: Duration) {
         let stats = Arc::clone(&self.stats);
         let candles_snapshot_tx = self.candles_snapshot_tx.clone();
-        self.client.run_with_dispatcher_state(
+        // FireTest is the hot health gate, so it uses the production event path
+        // and reads dispatcher state once per pump slice. Per-event
+        // `run_with_dispatcher_state` snapshots are a convenience API, not the
+        // path we want to benchmark for protocol/active-lib CPU.
+        self.client.run_with_dispatcher(
             duration,
             &mut self.dispatcher,
-            Box::new(move |event, dispatcher| {
-                record_event(&stats, event, dispatcher, Some(&candles_snapshot_tx))
-            }),
+            Box::new(move |event| record_event(&stats, event, None, Some(&candles_snapshot_tx))),
         );
         self.drain_queued();
+        self.refresh_stats_from_dispatcher(false);
         self.apply_completed_candles_snapshots();
     }
 
@@ -625,11 +628,41 @@ impl Session {
             record_event(
                 &self.stats,
                 &event,
-                &snapshot,
+                Some(&snapshot),
                 Some(&self.candles_snapshot_tx),
             );
         }
         self.apply_completed_candles_snapshots();
+    }
+
+    fn refresh_stats_from_dispatcher(&self, log_changes: bool) {
+        let snapshot = self.dispatcher.snapshot();
+        let mut st = self.stats.lock().unwrap();
+        let event_no = st.server_events;
+        sync_market_probe_from_dispatcher(&mut st, event_no, &snapshot, log_changes);
+        record_order_state_snapshot(&mut st, &snapshot);
+
+        if let Some(settings) = snapshot.settings().client_settings.clone() {
+            st.last_settings = Some(settings);
+        }
+        if let Some(state) = snapshot.markets().trade_state(&st.market) {
+            if state.last_trade_price > 0.0 {
+                st.last_trade_price = Some(state.last_trade_price);
+                st.target_trade_packets = st.target_trade_packets.max(st.trades_apply);
+            }
+        }
+        if let (Some(market_index), Some(book_kind)) = (st.market_index, st.last_book_kind) {
+            if let Some(kind) = OrderBookKind::from_u8(book_kind) {
+                if let Some(top) = snapshot.order_books().top_of_book(market_index, kind) {
+                    if let Some(bid) = top.bid {
+                        st.last_book_bid = Some(bid.rate);
+                    }
+                    if let Some(ask) = top.ask {
+                        st.last_book_ask = Some(ask.rate);
+                    }
+                }
+            }
+        }
     }
 
     fn snapshot(&self) -> SessionStats {
@@ -1169,22 +1202,28 @@ fn delphi_now_raw_for_test() -> f64 {
 fn record_event(
     stats: &Arc<Mutex<SessionStats>>,
     event: &Event,
-    dispatcher: &EventDispatcherSnapshot,
+    dispatcher: Option<&EventDispatcherSnapshot>,
     candles_snapshot_tx: Option<&mpsc::Sender<Vec<RequestCandlesMarket>>>,
 ) {
     let mut st = stats.lock().unwrap();
     st.server_events += 1;
     let event_no = st.server_events;
-    sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, false);
+    if let Some(dispatcher) = dispatcher {
+        sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, false);
+    }
     match event {
         Event::Order(ev) => {
             st.order_events += 1;
-            record_order_state_snapshot(&mut st, dispatcher);
+            if let Some(dispatcher) = dispatcher {
+                record_order_state_snapshot(&mut st, dispatcher);
+            }
             log_server_event(&st, event_no, format!("Order {ev:?}"));
         }
         Event::Markets(ev) => {
             st.market_events += 1;
-            sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, true);
+            if let Some(dispatcher) = dispatcher {
+                sync_market_probe_from_dispatcher(&mut st, event_no, dispatcher, true);
+            }
             log_server_event(
                 &st,
                 event_no,
@@ -1193,7 +1232,9 @@ fn record_event(
         }
         Event::Settings(SettingsEvent::ClientSettingsUpdated) => {
             st.settings_events += 1;
-            st.last_settings = dispatcher.settings().client_settings.clone();
+            if let Some(dispatcher) = dispatcher {
+                st.last_settings = dispatcher.settings().client_settings.clone();
+            }
             if let Some(settings) = &st.last_settings {
                 log_server_event(
                     &st,
@@ -1209,7 +1250,11 @@ fn record_event(
                     ),
                 );
             } else {
-                log_server_event(&st, event_no, "UI ClientSettings but state is empty");
+                log_server_event(
+                    &st,
+                    event_no,
+                    "UI ClientSettingsUpdated; state snapshot is refreshed after pump",
+                );
             }
         }
         Event::Settings(other) => {
@@ -1269,10 +1314,14 @@ fn record_event(
             base_time,
         }) => {
             st.trades_apply += 1;
-            let target_trade_price = dispatcher
-                .markets()
-                .trade_state(&st.market)
-                .and_then(|state| (state.last_trade_price > 0.0).then_some(state.last_trade_price));
+            let target_trade_price = dispatcher.and_then(|dispatcher| {
+                dispatcher
+                    .markets()
+                    .trade_state(&st.market)
+                    .and_then(|state| {
+                        (state.last_trade_price > 0.0).then_some(state.last_trade_price)
+                    })
+            });
             if let Some(price) = target_trade_price {
                 st.target_trade_packets += 1;
                 st.last_trade_price = Some(price);
@@ -1319,9 +1368,11 @@ fn record_event(
                     st.target_orderbook_update += 1;
                 }
                 st.last_book_kind = Some(*book_kind);
-                match OrderBookKind::from_u8(*book_kind)
-                    .and_then(|kind| dispatcher.order_books().top_of_book(*market_index, kind))
-                {
+                let top_of_book = dispatcher.and_then(|dispatcher| {
+                    OrderBookKind::from_u8(*book_kind)
+                        .and_then(|kind| dispatcher.order_books().top_of_book(*market_index, kind))
+                });
+                match top_of_book {
                     Some(top) => {
                         if let Some(bid) = top.bid {
                             st.last_book_bid = Some(bid.rate);
@@ -1338,12 +1389,13 @@ fn record_event(
                             }
                         }
                     }
-                    None => {
+                    None if dispatcher.is_some() => {
                         st.market_invariant_error = Some(format!(
                             "orderbook top unavailable for market={} idx={} kind={}",
                             st.market, market_index, book_kind
                         ));
                     }
+                    None => {}
                 }
                 if st.target_orderbook_full + st.target_orderbook_update <= 8
                     || (st.target_orderbook_full + st.target_orderbook_update).is_power_of_two()

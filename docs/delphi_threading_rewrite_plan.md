@@ -6724,3 +6724,34 @@ Follow-up done:
   block numbers `0..=255` keeps the Delphi sorted-list machine effect, including
   malformed `BlockNum > MaxBlockNum` behavior, while removing one heap `Vec` per
   received block.
+
+### 2026-05-26 - FireTest uses event hot path, not per-event state snapshots
+
+Done:
+
+- FireTest `Session::pump` now uses production `Client::run_with_dispatcher`
+  instead of `run_with_dispatcher_state`.
+- The test reads dispatcher state once after each short pump slice. This keeps
+  the health gate focused on protocol/active-lib CPU and avoids adding a full
+  `EventDispatcherSnapshot` clone to every live trade/orderbook/log event.
+- `run_with_dispatcher_state` remains available as a convenience UI API, but it
+  is no longer the path used for hot FireTest CPU measurements.
+- Updated `Audit/pipeline/FireTest.md` with the same rule.
+
+Verification:
+
+- `cargo check --test fire_test` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 25.43s`, `ParseFailed=0`,
+  err_emu actual drop `10.85%`, retained futures rows present, derived snapshot
+  present.
+- Full prod FireTest release OK after the same pump change: exit code 0,
+  `183.7s` wall-clock.
+- CPU: `reader max=716us`, `writer_cpu max=153us`,
+  `app_enqueue max=15us mode=callback`. The previous `app_enqueue mode=state`
+  millisecond samples were FireTest harness self-noise, not protocol hot-path
+  work.
+- Remaining Phase Z CPU work: worker-side `TStrategySerializer` / large init API
+  parse/apply (`active_dispatch max=3347us` in this run) and, separately, a
+  decision whether `run_with_dispatcher_state` itself should be optimized or
+  documented as non-hot convenience API.
