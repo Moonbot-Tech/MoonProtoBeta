@@ -8693,3 +8693,22 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 27.58s`,
   `ParseFailed=0`, err_emu actual drop `12.92%`, reader max `779us`,
   writer CPU max `161us`, `GetMarketsList apply=2287us`.
+
+### 2026-05-26 - `Engine API` inline tests split
+
+Done:
+
+- Moved inline `commands/engine_api.rs` unit tests into
+  `commands/engine_api/tests.rs`.
+- Kept production `engine_api.rs` as a compact facade and small parser owner for
+  simple Engine API responses; existing submodules still own BaseCheck,
+  AuthCheck, EngineMethod, and TEngineResponse.
+- This is a readability/publication split only. No parser code, test payload,
+  zero-tail behavior, response header offset, public type, or public function
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
