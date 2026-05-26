@@ -7750,3 +7750,26 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MPC_Order` builder split
+
+Done:
+
+- Moved client-originated `MPC_Order` builders into
+  `commands/trade/builders.rs`: `TradeCtx`, header write helpers, and every
+  public `build_*` function.
+- Kept public paths unchanged through `commands::trade::*` re-exports.
+- Kept parser/command structs in `commands/trade.rs`, fixed packed records in
+  `commands/trade/records.rs`, and Delphi ordinal wrappers in
+  `commands/trade/enums.rs`.
+- Private header write helpers remain visible only for the existing byte-level
+  tests; they are not promoted to public API.
+- This is a readability/publication split only. No outbound wire bytes,
+  command IDs, header layout, `TradeCtx` shape, or public builder behavior
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
