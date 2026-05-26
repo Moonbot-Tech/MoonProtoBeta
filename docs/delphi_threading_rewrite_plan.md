@@ -7453,3 +7453,12 @@ Open CPU note:
 - `active_dispatch max` for this large init payload is now about `3868us`.
   Protocol reader/writer stayed below `1ms`; the remaining large init apply
   budget is Phase Z optimization work, not socket receive/send work.
+
+Final Phase Z item:
+
+- Re-check `GetMarketsList apply total ~= 2344us` after the strict-parity work
+  settles. This is not a current blocker because the O(N^2) Rust-only bug is
+  removed and protocol reader/writer are below `1ms`, but `2.34ms` can still hide
+  avoidable init-state overhead. Re-measure against the same FireTest phase
+  counters and optimize remaining `corr/ref` or allocation costs if Delphi-style
+  machine effect proves they should be cheaper.
