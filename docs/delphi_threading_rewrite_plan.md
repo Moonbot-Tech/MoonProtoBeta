@@ -6968,6 +6968,30 @@ Verification:
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 
+### 2026-05-26 - `client.rs` runtime API split
+
+Done:
+
+- Moved poller registration helpers, `now_ms`, cached server address resolve,
+  `run`, `disconnect`, `run_with_dispatcher*`, `run_until_response`,
+  worker-queued runtime helper, and the test-only active-action oracle into
+  `src/client/runtime.rs`.
+- Public runtime API remains inherent `Client` methods. Crate-visible widening
+  is limited to helpers already called from `ProtocolCore`, `init.rs`, sibling
+  modules, or oracle tests.
+- The protocol loop still enters `ProtocolCore { client: self }.run(...)` at
+  the same call sites with the same `RunMode` construction.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.00s`, `ParseFailed=0`,
+  `reader max=679us`, `writer_cpu max=150us`, `active_dispatch max=3759us`
+  on `Strat(30)`.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
