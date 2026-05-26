@@ -7177,3 +7177,26 @@ Verification:
   `FIRETEST_QUICK_PASS after 26.32s`, `ParseFailed=0`, err_emu actual drop
   `10.51%`, retained futures rows present, derived snapshot present,
   `reader max=613us`, `writer_cpu max=150us`.
+
+### 2026-05-26 - Sliced retry resend removes temporary slice copy
+
+Done:
+
+- Removed the leftover `retry_sliced` TODO that copied every retransmitted
+  slice into a temporary `Vec<u8>` only to satisfy borrowing.
+- The retry loop now packs the selected `self.sending[idx].slices[block]`
+  directly into the reusable transport `send_buf`, then calls the same
+  `dispatch_send` path.
+- Protocol behavior is unchanged: same `MPC_Sliced` packet bytes, same
+  `ClientLimit`, same `UsedSlicedLimit`, same removal order. The change only
+  removes one heap grow/copy per retransmitted slice.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 763 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.38s`, `ParseFailed=0`, err_emu actual drop
+  `12.39%`, retained futures rows present, derived snapshot present,
+  `reader max=767us`, `writer_cpu max=220us`.

@@ -647,19 +647,26 @@ impl ProtocolCore<'_> {
             client.used_sliced_limit = true;
         }
 
-        // Аудит #2: отправляем по индексу из self.sending — никаких clone.
-        // ВАЖНО: send_raw_packet берёт `&[u8]`, поэтому borrow на self.sending живёт только
-        // на время одного send. send_raw_packet требует `&mut self` (внутри пишет в
-        // bps/total_sent/socket), а sending borrow read-only — нужен split. Делаем мини-
-        // dance: snapshot нужного slice во временный буфер (1 alloc per packet вместо 1
-        // alloc на каждый element в общем Vec<Vec<u8>>). Чуть лучше но не zero-alloc.
-        // **TODO** для следующей версии: разнести send_raw_packet чтобы slice мог быть
-        // передан без holding &mut self на сокет.
-        let mut tmp_slice: Vec<u8> = Vec::new();
         for (idx, block_num) in to_send_indices {
-            tmp_slice.clear();
-            tmp_slice.extend_from_slice(&client.sending[idx].slices[block_num]);
-            Self::send_command_on_client(client, Command::Sliced, &tmp_slice);
+            let Some(addr) = client.server_socket_addr() else {
+                continue;
+            };
+            let extra = {
+                let slice = &client.sending[idx].slices[block_num];
+                moonproto_transport::transport_pack_into_with_mac(
+                    &mut client.send_buf,
+                    &client.mac_ctx,
+                    &client.cfg.mac_key,
+                    Command::Sliced.to_byte(),
+                    client.cfg.client_id,
+                    slice,
+                    client.cfg.mask_ver,
+                )
+            };
+            let packet = std::mem::take(&mut client.send_buf);
+            client.dispatch_send(Command::Sliced.to_byte(), &packet, extra.as_deref(), addr);
+            client.send_buf = packet;
+            client.send_buf.clear();
         }
 
         for idx in to_remove.into_iter().rev() {
