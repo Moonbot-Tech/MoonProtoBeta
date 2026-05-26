@@ -8244,3 +8244,24 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=12.04%`, init/markets/indexes/tags/update,
   trades and orderbook health OK, retained futures trades `11`, reader max
   `698us`, writer CPU max `152us`, GetMarketsList apply `2547us`.
+
+### 2026-05-26 - `Orders` maintenance split
+
+Done:
+
+- Moved deferred removal, bulk-replace timeout tick, missing-after-snapshot,
+  `ServerTimeDelta` setter, `remove`, and `clear` into
+  `state/orders/maintenance.rs`.
+- Kept `ProcessCommandOrder`/`Orders::apply_at` in `orders.rs`; the split only
+  separates post-apply worker-loop maintenance and read-model cleanup.
+- Kept behavior unchanged: same deferred-removal due time merge, same
+  `SelLDone` 400 ms grace use by caller, same 5000 ms bulk-replace timeout,
+  same snapshot-flag cleanup candidate rule, and same state cleared on reset.
+- This is a readability/publication split only. No order apply, deferred
+  cleanup, bulk-replace, snapshot cleanup, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
