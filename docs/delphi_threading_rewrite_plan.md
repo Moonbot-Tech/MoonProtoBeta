@@ -7585,3 +7585,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EventDispatcher` OrderBook/Balance block split
+
+Done:
+
+- Moved `MPC_OrderBook` active dispatch into `events/order_book.rs`.
+- Moved `MPC_Balance` balance/arb active dispatch into `events/balance.rs`.
+- Kept machine-effect order unchanged:
+  market-index gate -> parse -> state apply -> chart-price side effect ->
+  typed event for order books; subcommand/version gate -> parse -> known-market
+  filter -> typed event for balances/arb.
+- This is a readability/publication split only. No protocol timing, parsing,
+  retained state, or public event behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

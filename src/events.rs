@@ -32,10 +32,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::app_queue::AppQueue;
-use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
-use crate::commands::balance::parse_balance;
+use crate::commands::arb::ArbPayload;
 use crate::commands::engine_api::{EngineResponse, ServerInfo};
-use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_schema::StrategySchema;
@@ -53,6 +51,8 @@ use crate::state::{
 };
 
 mod api;
+mod balance;
+mod order_book;
 mod orders;
 mod trades;
 
@@ -1101,101 +1101,6 @@ impl EventDispatcher {
                 cmd,
                 payload: payload.to_vec(),
             }),
-        }
-    }
-
-    fn client_new_data_order_book(&mut self, payload: &[u8], now_ms: i64, out: &mut Vec<Event>) {
-        // Active library: блокируем обработку OrderBook если markets indexes не sync.
-        // Соответствует Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
-        // PeerAppToken then exit`. Без этого: потеряем пакеты от первых апдейтов
-        // после server restart до получения свежих индексов (market_idx по новой
-        // нумерации применился бы к старому by_index → silent data corruption).
-        if !self.markets.indexes_synchronized {
-            return;
-        }
-        match parse_order_book_packet(payload) {
-            Some(pkt) => {
-                if !self.markets.has_server_market_index(pkt.market_index) {
-                    return;
-                }
-                let market_index = pkt.market_index;
-                let book_kind = pkt.book_kind;
-                let events = self.order_books.on_packet(pkt, now_ms);
-                if events
-                    .iter()
-                    .any(|ev| matches!(ev, OrderBookEvent::Apply { .. }))
-                {
-                    if let Some(ask) = self
-                        .order_books
-                        .book_by_kind(market_index, book_kind)
-                        .and_then(|book| book.top().ask)
-                    {
-                        self.markets
-                            .update_chart_price_step_from_server_index(market_index, ask.rate);
-                    }
-                }
-                for ev in events {
-                    out.push(Event::OrderBook(ev));
-                }
-            }
-            None => out.push(Self::parse_failed(Command::OrderBook, payload)),
-        }
-    }
-
-    fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
-        if payload.len() < 11 {
-            out.push(Self::parse_failed(Command::Balance, payload));
-            return;
-        }
-        let sub_cmd_id = payload[0];
-        let ver = u16::from_le_bytes([payload[1], payload[2]]);
-        if ver > crate::commands::registry::CURRENT_PROTO_CMD_VER {
-            return;
-        }
-        let body = &payload[11..];
-        match sub_cmd_id {
-            0 | 1 | 2 | 5 => {}
-            3 | 4 => match parse_balance(sub_cmd_id, body) {
-                Some(upd) => {
-                    let ev = self
-                        .balances
-                        .apply_with_known_markets(upd, &self.markets.by_name);
-                    out.push(Event::Balance(ev));
-                }
-                None => out.push(Self::parse_failed(Command::Balance, payload)),
-            },
-            6 => match parse_arb_prices(payload) {
-                Some(arb) => {
-                    if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
-                        let parsed = self.filter_arb_payload_to_known_markets(parsed);
-                        out.push(Event::Arb {
-                            uid: arb.uid,
-                            payload: parsed,
-                        });
-                    }
-                }
-                None => out.push(Self::parse_failed(Command::Balance, payload)),
-            },
-            _ => {}
-        }
-    }
-
-    fn filter_arb_payload_to_known_markets(&self, payload: ArbPayload) -> ArbPayload {
-        match payload {
-            ArbPayload::Price {
-                version,
-                mut blocks,
-            } => {
-                blocks.retain(|block| self.markets.has_server_market_index(block.market_index));
-                ArbPayload::Price { version, blocks }
-            }
-            ArbPayload::Isolation {
-                version,
-                mut entries,
-            } => {
-                entries.retain(|entry| self.markets.has_server_market_index(entry.market_index));
-                ArbPayload::Isolation { version, entries }
-            }
         }
     }
 
