@@ -4,10 +4,6 @@ pub(super) fn same_text_ascii(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-pub(super) fn norm_text_ascii(value: &str) -> String {
-    value.to_ascii_uppercase()
-}
-
 pub(super) fn replace_text_ascii_case_insensitive(input: &str, from: &str, to: &str) -> String {
     if from.is_empty() {
         return input.to_string();

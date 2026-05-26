@@ -1,11 +1,9 @@
 //! Base-currency and CorrMarket reference maintenance.
 
-use std::collections::HashMap;
-
 use crate::commands::market::BaseCurrency;
 
 use super::{
-    text::{norm_text_ascii, replace_text_ascii_case_insensitive, same_text_ascii},
+    text::{replace_text_ascii_case_insensitive, same_text_ascii},
     BaseCurrencyPrice, CorrMarket, MarketsState, EPS_MARKET,
 };
 
@@ -75,55 +73,46 @@ impl MarketsState {
     }
 
     pub(super) fn check_currency_ref_markets_like_delphi(&mut self) {
-        // Same final assignments as Delphi nested scans, but indexed first so
-        // the protocol tick does not scale as BaseCurDict * CorrDict in Rust.
-        let mut usdt_market_by_key = HashMap::new();
-        let mut usdt_rev_market_by_key = HashMap::new();
-        for handle in self.markets.iter() {
-            let (base_currency, bn_market_currency, bn_market_name) = handle.with(|market| {
-                (
-                    market.base_currency.clone(),
-                    market.bn_market_currency.clone(),
-                    market.bn_market_name.clone(),
-                )
-            });
-            if same_text_ascii(&base_currency, "USDT") {
-                usdt_market_by_key
-                    .insert(norm_text_ascii(&bn_market_currency), bn_market_name.clone());
-            }
-            if same_text_ascii(&bn_market_currency, "USDT") {
-                usdt_rev_market_by_key.insert(norm_text_ascii(&base_currency), bn_market_name);
-            }
-        }
-
-        let mut usdt_corr_market_by_key = HashMap::new();
-        let mut usdt_rev_corr_market_by_key = HashMap::new();
-        for cm in self.corr_markets.values() {
-            if same_text_ascii(&cm.base_currency_name, "USDT") {
-                usdt_corr_market_by_key.insert(
-                    norm_text_ascii(&cm.bn_market_currency),
-                    cm.bn_market_name.clone(),
-                );
-            }
-            if same_text_ascii(&cm.bn_market_currency, "USDT") {
-                usdt_rev_corr_market_by_key.insert(
-                    norm_text_ascii(&cm.base_currency_name),
-                    cm.bn_market_name.clone(),
-                );
-            }
-        }
-
         let keys = self
             .base_currency_prices
             .keys()
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
-            let norm_key = norm_text_ascii(&key);
-            let usdt_market = usdt_market_by_key.get(&norm_key).cloned();
-            let usdt_rev_market = usdt_rev_market_by_key.get(&norm_key).cloned();
-            let usdt_corr_market = usdt_corr_market_by_key.get(&norm_key).cloned();
-            let usdt_rev_corr_market = usdt_rev_corr_market_by_key.get(&norm_key).cloned();
+            let mut usdt_market = None;
+            let mut usdt_rev_market = None;
+            for handle in self.markets.iter() {
+                let matches = handle.with(|market| {
+                    let direct = same_text_ascii(&market.base_currency, "USDT")
+                        && same_text_ascii(&market.bn_market_currency, &key);
+                    let reverse = same_text_ascii(&market.bn_market_currency, "USDT")
+                        && same_text_ascii(&market.base_currency, &key);
+                    (direct || reverse).then(|| (direct, reverse, market.bn_market_name.clone()))
+                });
+                if let Some((direct, reverse, name)) = matches {
+                    if direct {
+                        usdt_market = Some(name.clone());
+                    }
+                    if reverse {
+                        usdt_rev_market = Some(name);
+                    }
+                }
+            }
+
+            let mut usdt_corr_market = None;
+            let mut usdt_rev_corr_market = None;
+            for cm in self.corr_markets.values() {
+                if same_text_ascii(&cm.base_currency_name, "USDT")
+                    && same_text_ascii(&cm.bn_market_currency, &key)
+                {
+                    usdt_corr_market = Some(cm.bn_market_name.clone());
+                }
+                if same_text_ascii(&cm.bn_market_currency, "USDT")
+                    && same_text_ascii(&cm.base_currency_name, &key)
+                {
+                    usdt_rev_corr_market = Some(cm.bn_market_name.clone());
+                }
+            }
 
             let Some(bc) = self.base_currency_prices.get_mut(&key) else {
                 continue;
