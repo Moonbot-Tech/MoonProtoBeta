@@ -38,12 +38,12 @@ and arb validity time.
 ## Requesting Current Settings
 
 For a one-shot fetch, use `request_client_settings`. It sends
-`TSettingsRequest`, keeps the UDP loop running, and returns the next
+a settings refresh request, keeps the UDP loop running, and returns the next
 `ClientSettingsCommand` snapshot applied by `EventDispatcher`. The returned
-snapshot may have the same command UID as the previous snapshot; the protocol
-guarantee is a newly received/applied settings packet, not UID monotonicity.
-Because `TSettingsRequest` is a fire-and-forget UI command, the helper may
-reissue it while the timeout is still open:
+snapshot may have the same internal command UID as the previous snapshot; the
+API guarantee is a newly received/applied settings packet, not UID monotonicity.
+Because the settings refresh is fire-and-forget, the helper may reissue it while
+the timeout is still open:
 
 ```rust
 let settings = client.request_client_settings(
@@ -75,19 +75,14 @@ client.ui_switch_dex("Main");
 client.ui_switch_spot(0);
 ```
 
-`ui_lev_manage` follows Delphi `TLevManageCommand.StoreToStream`: the outgoing
-wire version byte is always `LevCmdVer = 1`. `LevManage::cmd_ver` is kept for
-low-level parsing of received payloads and does not change the outgoing packet.
+`ui_lev_manage` sends the library-supported leverage-management format.
+`LevManage::cmd_ver` is kept for parsing received snapshots and does not change
+the outgoing command produced by the high-level wrapper.
 
-The low-level builders for `TStratStartStopCommandV2`, `TEmuTradesCommand`, and
-`TTriggerManageCommand` mirror Delphi `Word Count` serialization: the count is
-written as the low 16 bits, and only that declared number of elements is written
-to the packet body.
-
-For Delphi `TStratStartStopCommandV2`, normal active-library code should send
-through `EventDispatcher`, not by hand-building `checked_items`. The dispatcher
-owns strategy checked-state and builds `Items` as Delphi does:
-`CheckedDirect != PrevChecked`.
+For strategy start/stop with an explicit checked-state delta, normal
+active-library code should send through `EventDispatcher`, not by hand-building
+the command items. The dispatcher owns strategy checked-state and sends only
+items whose checked value changed:
 
 ```rust
 dispatcher.set_strategy_checked(strategy_id, true);
@@ -108,50 +103,46 @@ std::thread::spawn(move || {
 ```
 
 `ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in
-the reconnect registry immediately. Before Init it sends no wire command; the
-one-time Init uses the latest registry value for the post-init
-`TMMOrdersSubscribeCommand`. After Init, `ui_mm_subscribe` appends the wire
-command to the High send queue, and reconnect restores the latest MM-orders
-intent automatically. It does not rewrite the stored
-`subscribe_all_trades(want_mm)` value; Delphi has two separate callers that can
-write the same server MM-orders flag.
+the reconnect registry immediately. Before Init it sends nothing; the one-time
+Init uses the latest registry value for the post-init MM-orders subscription
+step. After Init, `ui_mm_subscribe` queues the command for sending, and
+reconnect restores the latest MM-orders intent automatically. It does not
+rewrite the stored `subscribe_all_trades(want_mm)` value; all-trades
+subscription and MM-order display are two separate user intents.
 
 ### Version Update
 
-`ui_update_version(version_name, is_release)` is the Rust wrapper for Delphi
-`TUpdateVersionCommand` (UI CmdId=6, High). It sends two fields:
-`VersionName: string` and `IsRelease: bool`.
+`ui_update_version(version_name, is_release)` asks the server to start the
+MoonBot update flow. It sends the version name and whether the release channel
+should be used.
 
 This is a remote-update command, not a passive "current client version"
-notification. Delphi uses it in two places:
+notification. The two normal UI uses are:
 
 - update button: sends `VersionName=""`, `IsRelease=true`;
 - beta/test install command: sends a version name such as `MoonBot-7` with
-  `IsRelease=false` after Delphi-side validation/normalization.
+  `IsRelease=false` after application-side validation/normalization.
 
-On the Delphi server, receiving this command calls `HandleRemoteUpdateCommand`
-and broadcasts the same `TUpdateVersionCommand` back to clients. On a Delphi
-client, receiving it queues `HandleRemoteUpdateCommand`, which starts the local
-updater flow. The Rust library does not download or restart the application; it
-only sends/parses the wire command and exposes the inbound command as a
+When the server accepts this command, it also broadcasts the update request back
+to connected clients. The Rust library does not download or restart the
+application; it sends/parses the command and exposes an inbound request as
 `SettingsEvent::VersionUpdate`.
 
 `ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` are typed UI domain
-commands and are gated by Init. After Init they also mark the Delphi
-`ServerUpdateSent` state inside `Client`. The next `run_init_sequence` will
-consume that marker and use the Delphi BaseCheck update retry path:
-`34 * 300ms` auth wait, then one BaseCheck plus up to 10 retries with `2000ms`
-pauses and the normal 12s `SendAndWait` timeout per attempt. If a tool sends the
-same raw UI payload through lower-level APIs, call
-`client.mark_server_update_sent()` manually.
+commands and are gated by Init. After Init they also mark
+`ServerUpdateSent` inside `Client`. The next `run_init_sequence` consumes that
+marker and uses the update-aware BaseCheck retry path: `34 * 300ms` auth wait,
+then one BaseCheck plus up to 10 retries with `2000ms` pauses and the normal
+12s response timeout per attempt. If a diagnostic tool sends the same payload
+through lower-level APIs, call `client.mark_server_update_sent()` manually.
 
-Low-level builders in `commands::ui` remain available for tools that need raw
-payloads, but normal applications should not call `send_cmd` directly.
+Low-level builders in `commands::ui` remain available for diagnostics and
+compatibility tools, but normal applications should use the typed methods above.
 
-Inbound Delphi `TNewMarketNotifyCommand` (UI CmdId=8, High) is internal to the
-active library. It forces an immediate listing refresh, but it is not emitted as
-a settings event. User code gets the listing signal from the market domain only
-after the refreshed `GetMarketsList` actually inserts new markets:
+Inbound listing notifications are internal to the active library. They force an
+immediate listing refresh, but they are not emitted as settings events. User
+code gets the listing signal from the market domain only after the refreshed
+market list actually inserts new markets:
 `Event::Markets(MarketsEvent::NewMarketsAdded { names })`.
 
 Low-level `UICommand::ClientSettings` stores the settings snapshot as
@@ -178,22 +169,22 @@ AutoStart blobs are opaque byte arrays with fixed public sizes:
 use moonproto::commands::ui::{AS_CFG_SIZE, AS_CFG2_SIZE};
 ```
 
-## Unique Keys
+## Pending Deduplication
 
-The high-level wrappers set the same UKey behavior as the Delphi command
-objects:
+Some UI commands intentionally collapse older pending commands before they are
+sent, while others always keep the latest user action as a distinct command:
 
-| Command | UKey behavior |
+| Command | Pending behavior |
 |---|---|
-| `ui_send_settings` | `UK_BaseUISettings` with fixed `UKey.UID = 1`; only the latest pending settings snapshot is kept. |
-| `ui_lev_manage` | `UK_LevManageSettings` with fixed `UKey.UID = 1`; only the latest pending leverage-management snapshot is kept. |
-| `ui_mm_subscribe` | `UK_TurnMMDetection` with the command's fresh wire UID; live rapid subscribe/unsubscribe commands do not collapse into one local slot. The client registry still remembers the latest desired value for reconnect restore. |
-| `ui_switch_dex` | `UK_DexSwitch` with the command's fresh wire UID; switch commands do not collapse into one local slot. |
-| `ui_switch_spot` | `UK_SpotSwitch` with the command's fresh wire UID; switch commands do not collapse into one local slot. |
+| `ui_send_settings` | Only the latest pending settings snapshot is kept. |
+| `ui_lev_manage` | Only the latest pending leverage-management snapshot is kept. |
+| `ui_mm_subscribe` | Rapid live subscribe/unsubscribe commands are queued as distinct commands. The reconnect registry still remembers the latest desired value. |
+| `ui_switch_dex` | Switch commands are queued as distinct commands. |
+| `ui_switch_spot` | Switch commands are queued as distinct commands. |
 
-This distinction matters because Delphi only overrides `SetUKey` for settings
-and leverage-management snapshots here. `MMOrders`, DEX, and Spot commands carry
-a unique command UID even though they have a non-`None` UKey kind.
+This matters for UI code that can emit rapid changes: settings and leverage are
+"latest wins"; MM-orders, DEX, and Spot commands preserve the user's command
+sequence.
 
 ## Low-Level Parsing
 
@@ -206,27 +197,10 @@ let command = UICommand::parse(payload).expect("bad UI payload");
 `EventDispatcher` performs this parsing and applies `SettingsState`
 automatically for known, supported UI commands.
 
-`UICommand::Skipped { cmd_id, uid, ver }` means the command header is valid but
-`ver` is newer than the current protocol command version. This mirrors Delphi
-registry `FSkipped`. `UICommand::Unknown { cmd_id, uid }` means the version is
-supported but no UI command class is registered for that `cmd_id`. The active
-dispatcher ignores both variants: they do not mutate `SettingsState` and do not
-emit `Event::Settings`, matching Delphi client behavior.
+`UICommand::Skipped { .. }` and `UICommand::Unknown { .. }` are diagnostic
+variants for forward compatibility. The active dispatcher ignores them: they do
+not mutate `SettingsState` and do not emit `Event::Settings`.
 
-Counted low-level UI arrays mirror Delphi `TMemoryStream.Read` behavior. For
-`StratStartStopV2.items`, `EmuTrades.points`, and `TriggerManage.markets/keys`,
-the parser keeps the declared `Count`; if the payload tail is truncated, missing
-bytes are zero/`false` and partial little-endian scalar bytes are preserved.
-
-The same zero-tail rule applies to fixed scalar UI command bodies such as
-`StratStartStop`, `MMOrdersSubscribe`, `ResetProfit`, `ArbActivateNotify`,
-`SwitchDex`, and `SwitchSpot`. Malformed UTF-8 string lengths/content remain a
-parse-failure path because Delphi uses `ReadBuffer` in the UTF-8 string helper.
-
-`ClientSettingsCommand` follows the same Delphi split. UTF-8 strings must be
-complete. Fixed fields after a valid string are soft-read with
-`TMemoryStream.Read`: missing `UseCoinsBlackList`/`TempBLCount` bytes decode as
-false/zero, `TempBLTimes` can zero-tail after a complete symbol string, and
-append-only fields keep the current settings fallback unless at least one byte of
-that field is present. For `VolDropLevel`, a partial read overwrites the low
-little-endian bytes and preserves the high bytes from the fallback value.
+`ClientSettingsCommand` is tolerant to old append-only settings snapshots:
+missing optional tail fields keep the current settings fallback when possible.
+Malformed UTF-8 strings remain a parse-failure path.

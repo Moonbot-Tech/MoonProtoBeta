@@ -2,15 +2,16 @@
 
 `Client` provides high-level wrappers for outgoing order commands. Use these
 instead of manually building `commands::trade::*` payloads: the wrappers set the
-correct command class, encryption, priority, retry count, and UKey dedup.
+right server route, send priority, retry policy, and pending-command
+deduplication.
 
 Trade wrappers are typed domain API and are gated by Init. Before
 `run_init_sequence` / `connect_and_init` opens `domain_ready`, market-level
-wrappers queue no wire command, boolean wrappers return `false`, and
+wrappers queue no server command, boolean wrappers return `false`, and
 market-level multi-order wrappers return `0` where applicable. Stateful helpers
 that require `&mut Orders` also do not mutate the local order cache before Init.
 Raw `send_cmd` / `send_cmd_keyed` obey the same gate; before Init they reject
-non-init commands instead of queueing wire.
+non-init commands instead of queueing them.
 
 ## Trade Context
 
@@ -22,17 +23,17 @@ let ctx = client.random_trade_ctx()
 Trade command headers include the server's base-currency and exchange ordinals.
 For market-level commands, derive them from the active session with
 `Client::trade_ctx(uid)` or `Client::random_trade_ctx()`. These methods return
-`TradeContextError` until `emk_BaseCheck` has filled `client.server_info()`;
+`TradeContextError` until BaseCheck has filled `client.server_info()`;
 `connect_and_init` does that automatically during mandatory init.
 
 For order-keyed commands, `ctx.uid` must be the server task id from `Order.uid`;
-that id is what UKey dedup uses for replace/cancel/stops/panic/vstop commands.
+that id is what replace/cancel/stops/panic/vstop deduplication uses.
 If the command targets an order already present in `EventDispatcher::orders()`,
 prefer `order.trade_ctx()` or the `*_tracked_order` wrappers below. They also
 preserve the currency/platform bytes carried by the server-side order state.
 
 `TradeCtx::with_route(uid, currency, platform)` is available for low-level tools
-that intentionally provide raw Delphi enum ordinals. There is no default
+that intentionally provide raw server route bytes. There is no default
 Binance/USDT shortcut: route bytes must come from `BaseCheck`, tracked order
 state, or explicit protocol-tool input.
 
@@ -65,7 +66,7 @@ state, or explicit protocol-tool input.
 | `switch_panic_sell_by_market(&mut orders, market, turn_on)` | Delphi `TOrdersWorkers.SwitchPanicSellByMarket`: button toggle semantics. Returns whether panic sell is now on. |
 | `turn_order_panic_sell(&mut orders, uid, turn_on)` | Apply Delphi per-worker `FPanicSell`/`PrevPanicSell` gate for one local sell order. Returns `true` when a command was queued. |
 | `turn_tracked_order_panic_sell(&mut orders, uid, turn_on)` | Same per-order panic-sell helper for tracked-order call sites. |
-| `set_immune(&mut orders, items)` | Apply Delphi `SetImmuneClicks` locally and send `TSetImmuneCommand` for found active orders. Returns `true` when a command was queued. |
+| `set_immune(&mut orders, items)` | Mark found active orders as click-immune locally and send the matching server command. Returns `true` when a command was queued. |
 | `penalty(ctx, market)` | Mark market penalty/cooldown. |
 | `move_all_buys(&orders, ctx, market, cmd_type, move_kind, price, side)` | Move buy orders in bulk if the local order state passes the Delphi active-client send gate. Returns `true` when a command was queued. |
 | `update_vstop(&mut orders, uid, on, fixed, level, vol)` | Apply Delphi `SendVStopIfChanged` and update volume stop if changed. Returns `true` when a command was queued. |
@@ -73,47 +74,42 @@ state, or explicit protocol-tool input.
 | `do_market_split_position(ctx, market, is_short)` | Market-split a position. |
 
 Epoch is intentionally not part of the public outgoing wrappers. Replace and
-panic-sell commands also do not take caller-supplied status: Delphi writes
-`epoch = 0` and `status = OS_None` for those wire commands, while Rust derives
-market route/order type from `Orders`.
+panic-sell commands also do not take caller-supplied status: the library derives
+the necessary market route/order type from `Orders`.
 
 Replace, cancel, panic-sell, stop/VStop, and `set_immune` are outgoing UI/order
-actions with local side effects. Delphi does not expose these as raw public
-wire sends: UI code mutates local worker fields, then the worker sends from
-`CheckReplaceFlag`.
+actions with local side effects. They are not raw public sends: UI code should
+mutate local order state through these helpers, and the library sends only when
+the local state allows it.
 
 `replace_order` requires `&mut Orders` and a local order UID. It derives the
-wire order type from the current local order: pending `OS_None` sends `O_BUY`,
+server order type from the current local order: pending `OS_None` sends `O_BUY`,
 `OS_BuySet` uses the local buy order type, and `OS_SellSet` uses the local sell
 order type. If a replace is already in flight (`ReplaceSentTime > 0`), Rust
 updates the local desired price but queues no second packet, matching Delphi.
 
 `cancel_order` derives the current status from the local order. For a pending
-`OS_None` order it sets the local `vOrder.PendingCancel` analogue and performs
-the same two Delphi sends from `CheckReplaceFlag`: `TOrderReplaceCommand(O_BUY,
-BuyCondPrice)` followed by `TOrderCancelCommand(OS_None)`. Both commands use
-`UK_OrderMove(uid)`, so if the writer has not copied the first command yet,
-Delphi-style send-queue dedup leaves the final cancel in the queue. In active
-dispatcher mode the library then repeats this pending replace-then-cancel pair
-from the order tick every 32 ms or later until the order leaves `OS_None`,
-matching Delphi's worker loop.
+`OS_None` order it marks pending cancel locally and performs the same
+replace-then-cancel sequence used by the active order worker. If the writer has
+not copied the first command yet, send-queue dedup leaves the final cancel in
+the queue. In active dispatcher mode the library repeats this pending
+replace-then-cancel pair from the order tick every 32 ms or later until the
+order leaves `OS_None`.
 
 `turn_panic_sell` is market-level like Delphi `TOrdersWorkers.TurnPanicSell`:
 it sets `FPanicSell` for all local active `OS_SellSet` orders in the market, and
-queues `TTurnPanicSellCommand` only for orders whose `PrevPanicSell` differs.
+queues a panic-sell command only for orders whose `PrevPanicSell` differs.
 `switch_panic_sell_by_market` repeats the chart button logic: if any active sell
 order in the market already has panic sell on, it turns all of them off;
 otherwise, when `turn_on` is true, it turns all of them on. Use
 `turn_order_panic_sell` only when the caller intentionally targets one tracked
 order worker.
 
-`set_immune` is an outgoing UI/order action with a local side effect. Delphi
-`TOrdersWorkers.SetImmuneClicks` sets `Worker.ImmuneForClicks` before sending the
-wire command, and sends nothing if no local active worker is found. Rust repeats
-that: pass `&mut Orders`, and the wrapper mutates found active orders before
-queueing `TSetImmuneCommand`. The command header UID is generated internally,
-matching Delphi `TBaseCommand.Create`; target order UIDs live in
-`TSetImmuneCommand.Items`.
+`set_immune` is an outgoing UI/order action with a local side effect. It sets
+`immune_for_clicks` before sending and sends nothing if no local active order is
+found. Pass `&mut Orders`; the wrapper mutates found active orders before
+queueing the command. The command's internal UID is generated by the library and
+is not the target order UID.
 
 `update_order_stops` and `update_vstop` are also state-aware outgoing actions.
 They require `&mut Orders` and a local order UID, because Delphi does not expose
@@ -125,12 +121,12 @@ pending orders set it automatically, and callers with their own local
 visual-order equivalent can set it through `Orders::mark_local_visual_order(uid)`
 after the server UID is known. Rust returns `false` and queues nothing when the
 local order is absent, has no local visual-order marker, or the values did not
-change. The wire `status`, market name, currency/platform route, and UKey are
+change. The outgoing status, market name, route, and deduplication key are
 derived from the local order.
 
 `move_all_sells` and `move_all_buys` require the current `Orders` read model.
-This mirrors Delphi active-client UI code: bulk move commands are not put on the
-wire until the client has a matching local order worker. `MoveKind` modes reject
+This mirrors Delphi active-client UI code: bulk move commands are not queued
+until the client has a matching local order worker. `MoveKind` modes reject
 `ReplaceMultiKind::None` and skip immune orders; sell `PriceZone` mode checks for
 any non-immune active sell on the market; percent (`Pers`) modes check only that
 an active buy/sell exists on the market.
@@ -143,7 +139,7 @@ The low-level trade action option types preserve Delphi raw enum ordinals:
 `FixedPosition(pub u8)`, `MoveAllCmdType(pub u8)`,
 `MoveAllBuysCmdType(pub u8)`, and `ReplaceMultiKind(pub u8)`. Use their named
 constants for regular API calls; unknown ordinals can still be parsed and
-round-tripped from wire payloads instead of becoming `ParseFailed`.
+round-tripped by low-level tools instead of becoming `ParseFailed`.
 
 `move_all_sells` intentionally takes a parameter struct instead of a long
 positional argument list. This is part of the public API:
@@ -222,8 +218,8 @@ another UI thread while `run_with_dispatcher` is active, clone
 `client.sender()` before entering the run loop.
 
 `ClientSender` mirrors the fire-and-forget high-level trade wrappers, so UI code
-does not need to know wire priorities, retry counts, encryption flags, or UKey
-details:
+does not need to know send priorities, retry counts, encryption flags, or
+deduplication details:
 
 ```rust
 let sender = client.sender();
@@ -258,15 +254,16 @@ append directly into the client's Delphi-style send queues; they do not wait
 behind accepted UDP packets or subscription-control events and do not enforce
 the typed-domain Init gate.
 
-## UKey Dedup
+## Pending Dedup
 
-Commands with the same UKey replace older pending commands in the client queues,
-and the server also deduplicates by UKey. For per-order replace, Delphi also has
-the stricter `ReplaceSentTime` gate: once a replace was queued for an order,
-another `replace_order` call updates the local desired price but does not queue
-a second packet until the replace response or timeout clears the local flag.
+Some order commands replace older pending commands for the same order before
+they leave the local send queue, and the server applies the same idea on its
+side. For per-order replace, there is also a stricter in-flight gate: once a
+replace was queued for an order, another `replace_order` call updates the local
+desired price but does not queue a second packet until the replace response or
+timeout clears the local flag.
 
-Wrappers that use `UK_OrderMove(ctx.uid)`:
+Wrappers that deduplicate by order UID:
 
 - `replace_order`;
 - `cancel_order`;
@@ -280,9 +277,9 @@ Replace/cancel/panic/stop/VStop wrappers derive `TradeCtx`, market name,
 current status, and order type from `Orders` before queueing, matching Delphi
 active-client order workers.
 
-`set_immune` uses `UK_ImmuneClicks(sum(found_items[].uid))`; items whose local
-active order is not found are not sent. Its header UID is random like Delphi
-`TSetImmuneCommand.Create`; it is not the target order UID.
+`set_immune` deduplicates by the set of found target order UIDs. Items whose
+local active order is not found are not sent. Its internal command UID is not
+the target order UID.
 
 ## Retry Counts
 

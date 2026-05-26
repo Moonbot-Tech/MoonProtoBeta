@@ -1,12 +1,12 @@
 # Candles
 
 Historical candles are requested through Engine API. Two methods are exposed:
-`emk_GetCoinCardCandles` (single response) and `emk_RequestCandlesData`
-(chunked, wrapped by a one-shot helper).
+`request_coin_card_candles` for one market/history kind and
+`request_candles_data` for the full multi-market candles snapshot.
 
 ## DeepPrice
 
-Packed record, **28 bytes**:
+`DeepPrice` is the public candle row:
 
 ```rust
 pub struct DeepPrice {
@@ -15,11 +15,9 @@ pub struct DeepPrice {
     pub max_p:   f32,    // 4 bytes
     pub min_p:   f32,    // 4 bytes
     pub vol:     f32,    // 4 bytes
-    pub time:    f64,    // 8 bytes — TDateTime (Delphi double, days since 1899-12-30)
+    pub time:    f64,    // date/time as server-compatible day number
 }
 ```
-
-Mirrors Delphi `MarketsU.pas:701-705 TDeepPrice = packed record`.
 
 ## DeepHistoryKind
 
@@ -36,10 +34,9 @@ pub enum DeepHistoryKind {
 
 Mirrors `EngineBase.pas:60 TMarketDeepHistoryKind`.
 
-**Note:** `Hour4` was added to Delphi later — the enum order is **wire-critical**,
-ordinal is sent as a single byte.
+Use these constants through the enum names; do not rely on Rust enum casts.
 
-## emk_GetCoinCardCandles — single response
+## Coin Card Candles
 
 ```rust
 use std::time::Duration;
@@ -61,26 +58,15 @@ match client.request_coin_card_candles(
 }
 ```
 
-Wire response (after DEFLATE decompression):
-```
-count: i32 LE
-candles: N × TDeepPrice (28 bytes each)
-```
+The helper keeps the UDP loop running until the response arrives or the timeout
+expires. A successful response returns a `Vec<DeepPrice>` sorted exactly as the
+server sent it.
 
-This parser follows the Delphi `TMemoryStream.Read` behavior used by
-`GetCoinCardCandles`: `count` is a scalar `Read`, so missing count bytes become
-zero and `count <= 0` returns an empty list. Candle records are read as one
-packed `TDeepPrice` array; if the server payload ends in the middle of the array,
-the available bytes are kept and the missing record tail is zero-filled. This is
-different from strict string fields elsewhere in Engine API, which use
-`ReadBuffer` and reject truncated declared strings.
+## Full Candles Snapshot
 
-## emk_RequestCandlesData — chunked response (one-shot helper recommended)
-
-The server replies with multiple `EngineResponse` packets carrying the same
-`request_uid`. Each packet is a chunk of the form `ChunkIndex:u16 +
-ChunkTotal:u16 + payload`. The library aggregates them through
-`CandlesAggregator` and returns the merged Delphi candles stream.
+The full snapshot can be larger than one UDP response, so the server sends it in
+chunks. The library aggregates chunks, parses the merged stream, and returns one
+`MergedCandles` value.
 
 ### One-Shot API (recommended)
 
@@ -89,8 +75,8 @@ use std::time::Duration;
 
 match client.request_candles_data(&mut dispatcher, Duration::from_secs(30)) {
     Ok(merged) => {
-        // merged.uid         — request_uid
-        // merged.zipped_data — raw zlib stream from Delphi StoreCandlesToZip
+        // merged.uid         — internal request id
+        // merged.zipped_data — original compressed stream kept for diagnostics
         // merged.markets     — parsed per-market 5m candles and wall data
         for market in &merged.markets {
             println!("{}: {} candles", market.market_name, market.candles_5m.len());
@@ -105,18 +91,16 @@ short dispatcher ticks, and removes the pending candles slot if the caller's
 timeout expires before the final chunk.
 
 When the client loop is already active, registered `RequestCandlesData` chunks
-are aggregated from the receive-side DataReadInt path. Completed streams signal
-the `MergedCandles` receiver before the consumed chunks are considered for raw
+are aggregated from the receive-side path. Completed streams signal the
+`MergedCandles` receiver before the consumed chunks are considered for raw
 callbacks or `EventDispatcher` delivery.
 
 For live registered requests the client first tries the strict
 `parse_request_candles_data_response` parser. If a merged zlib stream is
 malformed after one or more complete market entries, the internal active path
-falls back to the Delphi-shaped partial parser and keeps those complete prior
-markets. This mirrors the deterministic part of Delphi
-`TMarkets.ApplyRecvdStream`, which mutates each market while reading the stream.
-Packed-record/wall tails inside the currently malformed market are still treated
-safely by Rust and are not exposed as initialized market data.
+falls back to a compatibility partial parser and keeps those complete prior
+markets. Malformed data inside the currently broken market is not exposed as
+initialized market data.
 
 `MergedCandles`:
 ```rust
@@ -137,9 +121,7 @@ pub struct RequestCandlesMarket {
 Pending candles slots are not auto-cancelled by an internal timer. A slot is
 freed when all chunks arrive, when the server returns an error, when a one-shot
 `request_candles_data` caller timeout removes it, when the session is reset, or
-when another request with the same UID replaces it. This matches Delphi's
-protocol collector: the UI wait loop may stop after `Markets.LastChunkTime`,
-but `CandlesRequestUID` and stored chunks are not cleared by that wait timeout.
+when another request with the same UID replaces it.
 
 ### Async Receiver API
 
@@ -181,24 +163,6 @@ returns `None` if the merged stream is malformed. The partial fallback described
 above is an internal active-library compatibility path for registered
 `RequestCandlesData` requests.
 
-### Chunk wire format
-
-Each `EngineResponse.data` for `RequestCandlesData`:
-```
-ChunkIndex: u16 LE
-ChunkTotal: u16 LE
-chunk_payload: bytes (rest)
-```
-
-After all `ChunkTotal` chunks have arrived (in any order, by `ChunkIndex`
-`0..ChunkTotal-1`), the `chunk_payload`s are concatenated into the zlib stream
-written by Delphi `TMarkets.StoreCandlesToZip`. This is not the same layout as
-`GetCoinCardCandles`.
-
-The merged stream carries the server timezone shift in minutes. The parser applies
-the same correction as Delphi `TMarkets.ApplyRecvdStream`: each parsed 5m candle
-time is adjusted by `(local_timezone_minutes - server_timezone_minutes) / 1440`.
-
 ### CandlesAggregator API
 
 ```rust
@@ -214,16 +178,14 @@ impl CandlesAggregator {
 - **Out-of-order delivery**: chunks are accepted in any order, stored at `chunks[idx]`.
 - **Duplicates**: a repeated chunk for the same `idx` is ignored.
 - **Resize**: on the first chunk the internal `chunks: Vec<Option<Vec<u8>>>` is
-  sized to `ChunkTotal`.
-- **Chunk count**: Delphi uses a `u16` `ChunkTotal` and has no extra 1024-chunk
-  cap; the aggregator accepts the full wire range.
+  sized to the server-declared chunk count.
 - **Auto-reset**: when `on_chunk` returns `Some(merged)` the internal state is
   cleared and ready for the next request.
 
 ### Requirements for manual `CandlesAggregator` callers
 
-1. **DEFLATE decompression already done.** `response_data` is the
-   `EngineResponse.data` _after_ decompression.
+1. **DEFLATE decompression already done.** `response_data` is
+   `EngineResponse.data` after decompression.
 2. **`request_uid` filtering.** If you run multiple parallel `RequestCandlesData`
    through the manual aggregator, keep a separate `CandlesAggregator` per
    `request_uid` or call `reset()` between requests. The async API
@@ -232,12 +194,12 @@ impl CandlesAggregator {
 
 ## Candle time
 
-`DeepPrice.time` is a `TDateTime` (Delphi double, days since 1899-12-30). For
-`RequestCandlesData`, the parsed 5m candle times are already shifted to the
-client's local timezone, matching Delphi `ApplyRecvdStream`. `GetCoinCardCandles`
-returns the raw `TDeepPrice` values from the response.
+`DeepPrice.time` uses the server-compatible day-number timestamp. For
+`request_candles_data`, parsed 5m candle times are already shifted to the
+client's local timezone. `request_coin_card_candles` returns the timestamp values
+from the response.
 
-If the `TDateTime` value you are handling represents UTC, convert to unix
+If the timestamp value you are handling represents UTC, convert to unix
 timestamp with:
 
 ```rust
@@ -248,8 +210,6 @@ fn delphi_to_unix_secs(td: f64) -> f64 {
 
 ## Related API Surface
 
-`engine_api.md` documents the RPC channel and `EngineResponse` format.
-`events.md` documents `Event::EngineResponse` for raw response tracking.
 High-level candle helpers are `client.request_coin_card_candles()` and
 `client.request_candles_data()`. Lower-level entry points are
 `api_get_coin_card_candles()`, `api_request_candles_data()`, and

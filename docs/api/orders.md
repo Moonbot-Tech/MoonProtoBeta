@@ -54,38 +54,35 @@ automatically. Low-level raw `EventDispatcher::dispatch_into` users receive only
 the typed state/events; after `OrderEvent::Snapshot` they can call
 `EventDispatcher::missing_order_status_requests_after_snapshot()` and pass each
 returned `(ctx, market_name)` to `Client::request_order_status`.
-Any incoming `TBaseMarketCommand` descendant that reaches Delphi
-`ProcessCommandOrder` and finds an existing local worker refreshes that
-worker's snapshot mark before epoch/phase checks. `TAllStatusesReq` and
-`TSetImmuneCommand` do not do this, and the special `TBulkReplaceNotify` branch
-only touches the UIDs listed in the notify without refreshing snapshot
-presence.
-`TOrderStatus` responses marked `FromCache=true` update only an already tracked
+Any incoming market-scoped server update that finds an existing local order
+refreshes that order's snapshot mark before epoch/phase checks. Request packets
+and local click-immune commands do not do this, and bulk-replace notifications
+only touch the UIDs listed in the notify without refreshing snapshot presence.
+Order-status responses marked `FromCache=true` update only an already tracked
 order; they do not create a new active order entry when the UID is unknown.
-For a new non-cache `TOrderStatus`, the dispatcher also requires the market
-name to be present in `MarketsState`; otherwise the packet is dropped without
-creating an order, matching Delphi's `Cmd.m <> nil` worker-create guard.
-Worker identity fields from full `TOrderStatus` (`market_name`,
+For a new non-cache order status, the dispatcher also requires the market name
+to be present in `MarketsState`; otherwise the packet is dropped without
+creating an order, matching the active-client worker-create guard.
+Worker identity fields from full order status (`market_name`,
 `currency`, `platform`, `strat_id`, `is_short`, `db_id`, `from_cache`,
 `emulator_mode`) are set when the local worker is created. Later full statuses
 for the same UID update compact buy/sell orders, stops, immune flag, status,
 and price side effects, but do not rewrite those worker-level fields, matching
 Delphi `BOrderWorker.HandleServerCommand`.
-Incoming client-originated order commands such as `TSetImmuneCommand`,
-`TTurnPanicSellCommand`, join/split/close/sell/move commands, and raw request
-commands are not applied and do not emit `OrderEvent`: in the Delphi receive
-flow they are not server state updates. If such a received command is a
-`TTradeEpochCommand` descendant and the order exists, `Orders::apply` still
-performs Delphi's hidden `AcceptServerCommand` epoch/phase side effect before
-returning `NotApplicable`; this can make a later lower-epoch server update
-stale. Non-epoch commands remain a pure silent no-op. For outgoing UI clicks,
+Incoming client-originated order commands such as click-immune, panic-sell,
+join/split/close/sell/move commands, and raw request commands are not applied
+and do not emit `OrderEvent`: they are not server state updates. If such a
+received command carries epoch/phase data and the order exists, `Orders::apply`
+still performs the hidden epoch/phase side effect before returning
+`NotApplicable`; this can make a later lower-epoch server update stale.
+Non-epoch commands remain a pure silent no-op. For outgoing UI clicks,
 `Client::set_immune` takes `EventDispatcher::orders_mut()`, immediately updates
-`immune_for_clicks` on found active orders, and then queues `TSetImmuneCommand`.
-The command header UID is generated internally like Delphi `TBaseCommand.Create`;
-the target order UIDs are the command items. Later `TOrderStatus` snapshots can
-refresh the same field from the server.
+`immune_for_clicks` on found active orders, and then queues the click-immune
+command. The command UID is generated internally; the target order UIDs are the
+command items. Later order-status snapshots can refresh the same field from the
+server.
 Skipped server-state packets also do not emit active dispatcher events: unknown
-UID updates, stale epoch packets, phase rollbacks, and empty `TBulkReplaceNotify`
+UID updates, stale epoch packets, phase rollbacks, and empty bulk-replace
 effects match Delphi's log/free/exit receive path. The diagnostic
 `OrderEvent::Ignored` value is returned only by direct low-level
 `Orders::apply` calls.
@@ -95,16 +92,16 @@ Delphi `DoTheJobVirtual`, which runs two `Sleep(200); ProcessCommands` passes
 before removing the worker from `WCache`. The worker remains addressable long
 enough for immediately following visual packets such as `TOrderTracePoint`,
 then `OrderEvent::Removed` is emitted.
-`TBulkReplaceNotify` sets `bulk_replace_buy` / `bulk_replace_sell` for found
+Bulk-replace notification sets `bulk_replace_buy` / `bulk_replace_sell` for found
 orders only; its `BulkReplaced.uids` event lists only those actually found
 locally. The in-flight timer is Delphi's single worker-level `ReplaceSentTime`,
 not a separate timer per side. `TOrderReplaceResponse` clears only the matching
 flag; the active dispatcher clears `ReplaceSentTime` or the current-side flag
 from the worker tick, matching Delphi `CheckReplaceFlag`.
-`TBulkReplaceNotify` and incoming `TSetImmuneCommand` counted arrays follow
-Delphi `TMemoryStream.Read`: after a valid command prefix, the declared count is
-kept, complete elements are decoded, and short tail elements are zero-filled.
-The active dispatcher still exposes only found/relevant order side effects.
+Bulk-replace and incoming click-immune counted arrays keep compatibility with
+short tails: after a valid command prefix, the declared count is kept, complete
+elements are decoded, and short tail elements are zero-filled. The active
+dispatcher still exposes only found/relevant order side effects.
 Low-level trade command parsers keep the same Delphi split for malformed tails:
 market/order strings are strict `ReadBuffer` fields and reject the whole command
 when the declared bytes are missing; fixed scalar/record fields after a valid
@@ -182,13 +179,13 @@ Use `order.sell_reason()` to convert `sell_reason_code` into `SellReason`.
 `SellReason::description()` returns the same strings as Delphi
 `SellReasonCodeToStr`, including compact names such as `PanicSell`,
 `StopLoss`, and `TakeProfit`.
-Incoming `TOrderStatusUpdate` changes this code only when the wire
-`SellReasonCode` is non-zero, matching Delphi's `FPrevSellReasonCode` guard.
+Incoming order-status updates change this code only when `SellReasonCode` is
+non-zero, matching Delphi's `FPrevSellReasonCode` guard.
 A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `buy_price` and `sell_price` mirror Delphi `pBuyOrder.Price` /
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
-`buy_order.actual_price` / `sell_order.actual_price` and not present in
-`TOrderCompact` wire data.
+`buy_order.actual_price` / `sell_order.actual_price` and not present in the
+compact order snapshot.
 `has_local_visual_order` mirrors Delphi `BOrderWorker.vOrder <> nil`. It is set
 automatically for a new server-created pending `TOrderStatus(Status=None)`.
 Applications that create their own local visual-order equivalent before sending

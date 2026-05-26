@@ -14,44 +14,39 @@ client.unsubscribe_all_trades();
 ```
 
 The subscription is registry-aware. Before Init, subscribe and unsubscribe calls
-update only the registry and send no Engine API wire packet. The one-time Init
-flushes the current registry once using the exact stored `want_mm` value; the
-post-init `TMMOrdersSubscribeCommand` does not rewrite this all-trades value.
-After Init, reconnect replays it automatically using the Delphi reconnect
-sequence: if the current `ServerToken` has not yet been observed on
-`MPC_TradesStream`, the maintenance tick sends `emk_UnsubscribeAllTrades`, waits
-100 ms, then sends `emk_SubscribeAllTrades`. The sequence is retried no more
-often than once per 5000 ms until a trades packet for the current `ServerToken`
-reaches the parser.
-Queuing `emk_SubscribeAllTrades` arms that gate, and a successful response
-refreshes it again. This preserves the Delphi `SendAndWait` effect: the library
-does not immediately unsubscribe from a stream it has just subscribed to while
-waiting for the first trades packet.
-Unsubscribe removes the registry intent and sends `emk_UnsubscribeAllTrades`
-only after `domain_ready`.
+update only the registry and send nothing. The one-time Init flushes the current
+registry once using the exact stored `want_mm` value; the post-init MM-orders
+subscription step does not rewrite this all-trades value.
 
-Unlike Delphi MoonBot, the Rust library does not subscribe to all-trades unless
-the application asks for it. This is an accepted author decision for the public
+After Init, reconnect restores the trade stream automatically. If the current
+server token has not yet been observed in a trades packet, the maintenance tick
+performs the reconnect subscription sequence and then waits for the stream to
+prove that it belongs to the current token. The sequence is retried no more
+often than once per 5000 ms until a trades packet for the current token reaches
+the parser. This prevents the library from immediately unsubscribing from a
+stream it has just subscribed to while waiting for the first trades packet.
+Unsubscribe removes the registry intent and sends the unsubscribe request only
+after `domain_ready`.
+
+Unlike MoonBot UI, the Rust library does not subscribe to all-trades unless the
+application asks for it. This is an accepted author decision for the public
 library API. If no all-trades intent is present in the registry, incoming
-`MPC_TradesStream` and `MPC_TradesResendResponse` packets are considered
-unexpected and are dropped instead of being emitted as public events.
+trade-stream and resend packets are considered unexpected and are dropped
+instead of being emitted as public events.
 
-`subscribe_all_trades(want_mm)` is the Delphi-shaped default: once the market
+`subscribe_all_trades(want_mm)` is the full Active Lib default: once the market
 list is known, Active Lib creates retained storage for every known market and
 maintains trades, MM/liquidation rows, LastPrice, 5m candles, and derived
 analytics for them. `subscribe_trades_for(want_mm, markets)` is the accepted
 Rust API deviation for UI clients that want less local memory. It sends the
-same wire `emk_SubscribeAllTrades` command, but Active Lib emits/stores/calculates
-only the listed markets. Passing an empty market list means all markets. Raw
-diagnostic callbacks remain raw protocol callbacks and are not filtered by this
-retained-storage scope.
+same server subscription request, but Active Lib emits/stores/calculates only
+the listed markets. Passing an empty market list means all markets. Diagnostic
+callbacks remain unfiltered and should not be used as retained-history API.
 
 The public call always updates the reconnect registry immediately. Once Init is
-open, changed subscription intent also appends the wire Engine API request to
-the Delphi-style send queues. On the wire, `emk_SubscribeAllTrades` /
-`emk_UnsubscribeAllTrades` are Engine API requests and their success or failure
-is reported as a later `Event::EngineResponse`. Trades packets then arrive
-asynchronously on the `MPC_TradesStream` channel.
+open, changed subscription intent also queues the server request. Its success or
+failure is reported as a later `Event::EngineResponse`. Trades packets then
+arrive asynchronously through `Event::Trade` and retained history readers.
 
 ## Events
 
@@ -95,10 +90,9 @@ their own `SeqRingCursor` when they need "only new rows".
 resend-side `OutOfOrder` are diagnostic events. They are useful for
 logging/telemetry, but applications must not drive recovery from them:
 `Client::run_with_dispatcher` sends resend requests and maintains buckets
-automatically. `ResendRequested` means the Delphi-style tail check after a
-valid trades packet queued `emk_TradesResend` for the listed packet numbers.
-The dispatcher still emits `Applied { .. }` for duplicate/resend payloads when
-Delphi would parse the payload and update local state.
+automatically. `ResendRequested` means the library queued a resend request for
+the listed packet numbers. The dispatcher can still emit `Applied { .. }` for
+duplicate/resend payloads when they carry usable stream data.
 
 Before an `Applied { .. }` event is emitted, `Client::run_with_dispatcher` also
 updates `MarketsState::trade_state(market)` for every known futures/spot trade
@@ -739,30 +733,28 @@ larger retained tail.
 ## Recovery Behavior
 
 `TradesState` maintains up to 50 gap buckets. Each bucket retries missing packet
-numbers up to three times with the Delphi delay formula:
+numbers up to three times with the source-matched delay formula:
 
 ```text
 PathDelay = min(1800, max(300, RTT * (1.2 + retry * 0.7))) ms
 ```
 
 `Client::run_with_dispatcher` calls the trades recovery check after successfully
-parsed live/resend trades packets, under the same 100 ms `LastCheckMissingTime`
-throttle as Delphi, and sends the generated `emk_TradesResend` requests
-automatically.
+parsed live/resend trades packets, under a 100 ms throttle, and sends the
+generated resend requests automatically.
 
-Recovery is best-effort, matching Delphi. Missing packet numbers are requested
-for up to three bucket retry cycles. If the bucket is still incomplete after the
-retry budget, it is closed and the live stream continues; the library does not
-keep flooding the channel for old trades. A late resend packet can still be
-parsed and emitted as an `Applied` signal, but it no longer reopens the closed
-bucket.
+Recovery is best-effort. Missing packet numbers are requested for up to three
+bucket retry cycles. If the bucket is still incomplete after the retry budget,
+it is closed and the live stream continues; the library does not keep flooding
+the channel for old trades. A late resend packet can still be parsed and emitted
+as an `Applied` signal, but it no longer reopens the closed bucket.
 
 `EventDispatcher` also drops trades packets while market indexes are not
 synchronized after a server restart.
 
 ## Low-Level Use
 
-Custom tools can use the parser and state directly:
+Custom tools can use the parser and recovery state directly:
 
 ```rust
 use moonproto::commands::trades_stream::parse_trades_packet;
@@ -772,8 +764,8 @@ let mut trades = TradesState::new();
 let packet = parse_trades_packet(payload).expect("bad trades packet");
 let events = trades.on_packet(packet, now_ms);
 
-// Delphi-equivalent: call after a successfully parsed trades packet, not from
-// an independent timer while no trades packets are arriving.
+// Call after a successfully parsed trades packet, not from an independent timer
+// while no trades packets are arriving.
 for resend_request in trades.tick(rtt_ms, now_ms) {
     client.send_api_request(&resend_request);
 }

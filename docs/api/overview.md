@@ -89,15 +89,15 @@ client.run_with_dispatcher(Duration::from_secs(3600), &mut dispatcher, Box::new(
   themselves.
 - Aggregates chunked candle responses through `request_candles_data`.
 
-## Wire Compatibility Notes
+## String Compatibility Notes
 
 String fields sent by public helpers use the Delphi `WriteStringToStreamUtf8`
 shape: UTF-8 bytes, `Word` length prefix, and exactly that declared number of
 bytes in the packet body. If an input string is longer than `65535` bytes, the
-wire length wraps to the low 16 bits and only that many leading bytes are sent,
+serialized length wraps to the low 16 bits and only that many leading bytes are sent,
 matching Delphi.
 
-String fields received from the wire use Delphi `TEncoding.UTF8.GetString`
+String fields received from the server use Delphi `TEncoding.UTF8.GetString`
 replacement semantics: invalid UTF-8 bytes become ASCII `?`, not Unicode
 replacement character `U+FFFD`.
 

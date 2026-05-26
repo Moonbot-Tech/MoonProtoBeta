@@ -97,8 +97,8 @@ Delphi `AddNewMarket`: order pushes for an unknown market may have been dropped
 before the local market object existed, so the full order snapshot is requested
 again before the immediate price refresh.
 
-Inbound Delphi `TNewMarketNotifyCommand` also forces this listing refresh, but
-that UI command is internal to the active library. User code should react to
+Inbound listing notifications also force this listing refresh, but that command
+is internal to the active library. User code should react to
 `MarketsEvent::NewMarketsAdded { names }`, which is emitted only after
 `GetMarketsList` actually inserted the named markets into `MarketsState`.
 
@@ -273,8 +273,8 @@ the all-trades subscription scope; `set_market_history_handle` is only needed
 for custom capacities or externally owned storage. The UDP/protocol loop does
 not write the retained ring directly.
 
-`Market::futures_type` uses `BaseCurrency`, a raw Delphi `TBaseCurrency`
-ordinal wrapper:
+`Market::futures_type` uses `BaseCurrency`, a small public wrapper that
+preserves unknown future server values:
 
 ```rust
 pub struct BaseCurrency(pub u8);
@@ -285,22 +285,19 @@ BaseCurrency::USDC;
 BaseCurrency::EMPTY;
 BaseCurrency::UNKNOWN;
 
-let wire_byte = market.futures_type.to_byte();
-let value = BaseCurrency::from_byte(wire_byte);
+let raw = market.futures_type.to_byte();
+let value = BaseCurrency::from_byte(raw);
 ```
 
-Known constants match `Vars.pas:TBaseCurrency`. Unknown future ordinals are
-preserved as their original byte instead of being collapsed to
-`BaseCurrency::UNKNOWN`, matching Delphi `TBaseCurrency(resp.ReadByte)`.
-For protocol version `< 2`, the wire payload has no `FuturesType` byte, so
-`Market::futures_type` is `BaseCurrency::EMPTY`, matching the Delphi
-constructor default before `ReadMarketFromStream`.
+Known constants cover the currently named server values. Unknown future values
+are preserved as their original byte instead of being collapsed to
+`BaseCurrency::UNKNOWN`. For older servers that do not provide this field,
+`Market::futures_type` is `BaseCurrency::EMPTY`.
 
 `Market::listed_type_like_delphi()` returns the Delphi `TListedOnExchange`
 post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
 `ListedType::SPOT`; any other `futures_type` means `ListedType::BOTH`.
-`ListedType` is a raw ordinal wrapper and is not transmitted in the market
-wire payload.
+`ListedType` is a public ordinal wrapper for the derived listing kind.
 
 Convenience methods:
 

@@ -110,10 +110,10 @@ User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
 packets and receive-decoded delivery. Typed domain helpers are gated by Init:
 before `domain_ready`, subscriptions update only the reconnect registry and
-order/UI/strategy/balance wrappers queue no wire command. After Init, the same
-typed helpers append their Engine API/UI/domain wire commands to the send
-queues. The public guarantee is no local capacity cap: dense incoming streams
-do not drop queued user commands or Engine API requests.
+order/UI/strategy/balance wrappers queue no server command. After Init, the same
+typed helpers append their Engine API/UI/domain commands to the send queues. The
+public guarantee is no local capacity cap: dense incoming streams do not drop
+queued user commands or Engine API requests.
 
 If the callback needs to read the just-updated dispatcher state, use
 `run_with_dispatcher_state`. The `state` argument is a read-only snapshot copied
@@ -177,14 +177,14 @@ changing the loss rate.
 
 The snapshot includes total valid/delivered/dropped incoming packets,
 per-command counters, outgoing packets skipped by the hidden FireTest blackhole
-hook, and per-`MPC_Sliced` datagram counters. For sliced datagrams the API
+hook, and per-sliced-datagram counters. For sliced datagrams the API
 reports:
 
 - `datagram_num`, `blocks_count`, delivered/dropped packet attempts, and
   per-block delivered/dropped counters;
-- `block0_wire_cmd` and `block0_ui_cmd_id` when block 0 was observed;
-- `completed_cmd`, `completed_payload_len`, and for completed UI settings the
-  `completed_ui_cmd_id`;
+- optional raw diagnostic identifiers when the first block or completed payload
+  was observed;
+- `completed_cmd` and `completed_payload_len`;
 - for completed Engine API responses:
   `completed_api_method`, `completed_api_uid`, and `completed_api_success`.
 
@@ -322,15 +322,14 @@ valid non-empty serializer payload.
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
 subscription value. If it is `None`, a previously queued `ui_mm_subscribe`
 intent is used; otherwise the post-init UI command sends `false`. It never
-falls back to `subscribe_trades`, because Delphi uses `cfg.ShowHeatMap` for
-`TMMOrdersSubscribeCommand` and uses a separate
-`Strats.HasActivityStrat or cfg.ShowHeatMap` value for `SubscribeAllTrades`.
+falls back to `subscribe_trades`: the MM-orders UI flag and the all-trades
+subscription `want_mm` flag are separate intents.
 If all-trades was queued before Init, the later registry flush still sends its
 own stored `want_mm`; the post-init UI command does not rewrite that value.
 
 Typed outgoing domain helpers use the same Init gate. Before Init:
 `subscribe_*` / `unsubscribe_*` record the latest registry intent but do not put
-subscription packets on the wire; trade wrappers, UI wrappers, strategy
+subscription packets into the send queue; trade wrappers, UI wrappers, strategy
 wrappers, and `balance_request_refresh` queue nothing. Stateful order helpers
 such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
 cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers do
@@ -339,7 +338,7 @@ accepted by the raw path are the mandatory init primitives `BaseCheck`,
 `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`, and `UpdateMarketsList`.
 Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
 MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
-wire request.
+serialized balance snapshot.
 
 Use `run_with_dispatcher` plus `run_init_sequence` directly when an application
 needs custom progress UI between connection readiness and the one-time init
@@ -347,7 +346,7 @@ requests.
 
 ## Trade Context
 
-Market-level trade commands need the active server route in their wire header:
+Market-level trade commands need the active server route:
 `base_currency_code` and `exchange_code` from `server_info()`. After
 `connect_and_init`, build that route with:
 
@@ -445,18 +444,18 @@ let settings = client.request_client_settings(
 println!("xSell={}", settings.x_sell);
 ```
 
-`request_client_settings` completes on the next applied
-`TClientSettingsCommand`. It does not require the command UID to change because
-the server may answer with the current settings object unchanged. The low-level
-UI request is fire-and-forget, so this helper may reissue `TSettingsRequest`
-inside the same timeout window.
+`request_client_settings` completes on the next applied settings snapshot. It
+does not require the command UID to change because the server may answer with
+the current settings object unchanged. The low-level UI request is
+fire-and-forget, so this helper may reissue the refresh request inside the same
+timeout window.
 
 If an application already has local UI settings before connecting, pass them to
 the dispatcher with `set_client_settings_fallback`. This preserves Delphi
-soft-read behavior for old `TClientSettingsCommand` packets: missing tail fields
-keep the current `cfg` values (`FreePositionCheck`, `VolDropLevel`,
-`UseStopMarket`, auto-start blobs, hotkey prices, `JoinSellKind`, and
-`SignOrders` for `ver<2`) instead of being reset to Rust defaults.
+soft-read behavior for old settings snapshots: missing tail fields keep the
+current local values (`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`,
+auto-start blobs, hotkey prices, `JoinSellKind`, and `SignOrders` for old
+versions) instead of being reset to Rust defaults.
 
 ## Order Snapshot Request
 
@@ -534,8 +533,8 @@ are treated as unexpected and are dropped instead of becoming public events.
 Orderbook subscriptions are per market name; incoming events carry `book_kind`
 so the application can render futures and spot books separately.
 The batched orderbook helpers update the same registry and send one
-`emk_SubscribeOrderBook` / `emk_UnsubscribeOrderBook` request for the changed
-market names. Use `unsubscribe_all_orderbooks` instead of raw
+subscribe/unsubscribe request for the changed market names. Use
+`unsubscribe_all_orderbooks` instead of raw
 Engine API calls when clearing the UI selection: the raw Engine API call does
 not update the reconnect registry. The high-level helper sends one batched
 unsubscribe for the names that were remembered locally; if none were
@@ -606,8 +605,9 @@ let raw = build_custom_ui_payload();
 sender.send_cmd(raw, Command::UI, SendPriority::High, true, 3);
 ```
 
-`Command` is not a closed Rust enum; it preserves Delphi wire ordinals. Use
-`Command::from_byte(raw)` and `cmd.to_byte()` when building low-level tools.
+`Command` is not a closed Rust enum; it preserves unknown raw channel
+identifiers. Use `Command::from_byte(raw)` and `cmd.to_byte()` when building
+low-level tools.
 
 ## Periodic Refresh
 

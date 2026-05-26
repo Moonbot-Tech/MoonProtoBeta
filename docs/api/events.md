@@ -74,9 +74,8 @@ dropped.
 - sends `RequestOrderBookFull` when an orderbook gap requires a full snapshot;
 - emits strategy snapshot requests and, when a strategy snapshot provider is
   registered, sends a fresh application-owned snapshot reply;
-- checks trades-gap recovery after successfully parsed `TradesStream` /
-  `TradesResendResponse` packets and sends generated `emk_TradesResend`
-  requests;
+- checks trades-gap recovery after successfully parsed live/resend trades
+  packets and sends generated resend requests;
 - queues decoded trades/MM/liquidation stream batches into retained history
   when an all-trades subscription is active. By default the dispatcher lazily
   owns a `MarketHistoryWorker`; `set_market_history_handle` is only for custom
@@ -139,13 +138,12 @@ guessing from `cmd/len`.
 For `Command::UI`, future-version UI commands and unknown UI subcommand ids are
 recognized by the low-level parser as `UICommand::Skipped` or
 `UICommand::Unknown`, but the active dispatcher ignores them. They do not emit
-`Event::Settings`, matching Delphi `TCommandRegistry.FSkipped` and
-`TBaseUICommand` fallback behavior.
+`Event::Settings`.
 
-`Command` is a raw one-byte Delphi `TMoonProtoCommand` ordinal wrapper. Known
-channels are constants such as `Command::Order`; unknown channel bytes are
-preserved in `Event::Raw`/`Event::ParseFailed`. Use `Command::from_byte(raw)`
-and `cmd.to_byte()` for raw access.
+`Command` identifies the decoded top-level channel. Known channels are
+constants such as `Command::Order`; unknown channel bytes are preserved in
+`Event::Raw`/`Event::ParseFailed` for diagnostics. Use
+`Command::from_byte(raw)` and `cmd.to_byte()` for low-level access.
 
 ## Reading State
 
@@ -201,7 +199,7 @@ directly to its callback.
 | `TradesResendResponse` | Parses the batch and applies each historical trades packet without advancing the live packet counter; late packets outside active buckets still emit `Applied` after `OutOfOrder`. |
 | `Balance` | Applies full/incremental balance updates to `BalancesState`. Arbitrage relay payloads are exposed separately as typed `Event::Arb` after filtering records through the current server market-index map. Internal/base/request balance packets are consumed without user-facing events. |
 | `Strat` | Applies strategy snapshot/update/delete state and emits `Event::Strat`. Future-version, unknown, and client-inapplicable incoming strat commands are skipped like Delphi base-class commands. |
-| `UI` | Applies settings state and emits `Event::Settings`. Old append-only `TClientSettingsCommand` packets are parsed with the current settings snapshot as Delphi `cfg` fallback. Inbound `TNewMarketNotifyCommand` is an internal listing-refresh wake-up; user code sees `MarketsEvent::NewMarketsAdded` only after a refreshed market list actually inserts new markets. |
+| `UI` | Applies settings state and emits `Event::Settings`. Old append-only settings snapshots are parsed with the current settings snapshot as fallback. Inbound listing notifications are an internal refresh wake-up; user code sees `MarketsEvent::NewMarketsAdded` only after a refreshed market list actually inserts new markets. |
 | `API` | Parses `EngineResponse`; applies markets responses when the method is markets-related. |
 | `LogMsg` | Emits `Event::ServerLog`. |
 
@@ -221,16 +219,16 @@ particular, direct `EventDispatcher::dispatch` / `dispatch_into` calls do not
 know `Client::domain_ready` or the subscription registry. In normal
 applications, prefer `Client::run_with_dispatcher`.
 
-For historical or truncated `TClientSettingsCommand` payloads, seed the
-dispatcher's local settings fallback before dispatching:
+For historical or truncated settings payloads, seed the dispatcher's local
+settings fallback before dispatching:
 
 ```rust
 dispatcher.set_client_settings_fallback(local_settings.clone());
 ```
 
-The fallback mirrors Delphi `cfg`: missing soft-tail fields keep the current
-local values instead of being reset to Rust defaults. Each received full settings
-snapshot becomes the next fallback automatically.
+Missing compatible tail fields keep the current local values instead of being
+reset to Rust defaults. Each received full settings snapshot becomes the next
+fallback automatically.
 
 ## Trades Tick
 

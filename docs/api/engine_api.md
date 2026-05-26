@@ -1,23 +1,21 @@
 # Engine API
 
-`MPC_API` is the request/response RPC channel between the client and the server
-engine. Requests and responses are correlated by `request_uid`.
+Engine API is the request/response surface for one-shot server operations:
+health checks, account reads, market list refreshes, candles, orderbook
+snapshots, transfer assets, and account settings.
 
 Use typed `Client::request_*` helpers for common one-shot reads. Use
-`Client::api_*` wrappers when you need the raw `EngineResponse` receiver for a
-custom asynchronous flow.
+`Client::api_*` wrappers when a custom asynchronous flow needs the raw
+`EngineResponse` receiver.
 
-`EngineMethod` is the public method identifier type. It is a raw byte wrapper
-around Delphi `TEngineMethodKind`: known values are constants
+`EngineMethod` is the public method identifier type. Known values are constants
 (`EngineMethod::BaseCheck`, `EngineMethod::RequestCandlesData`, ...), and
-unknown method ordinals from the wire are preserved. Use
-`EngineMethod::from_byte(raw)`, `method.to_byte()`, `method.is_known()`, and
-`method.name()`; do not rely on Rust enum casts.
+unknown future server values are preserved. Use `EngineMethod::from_byte(raw)`,
+`method.to_byte()`, `method.is_known()`, and `method.name()`; do not rely on
+Rust enum casts.
 
-The source-matched default wait is 12 seconds per Engine API response:
-Delphi `TMoonProtoEngine.FTimeout = 12000` and `SendAndWait` sleeps in 10 ms
-ticks until that timeout expires. `run_init_sequence` uses this default when
-`InitConfig::step_timeout` is `None`.
+The default wait is 12 seconds per Engine API response. `run_init_sequence` uses
+this default when `InitConfig::step_timeout` is `None`.
 
 ## Waiting for a Response
 
@@ -48,12 +46,11 @@ let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(1
 Calling `rx.recv_timeout(...)` directly on the same thread usually times out
 because no UDP packets are processed during that wait.
 
-When the client loop is already active and decodes a registered
-`TEngineResponse`, the receiver is signalled immediately from the receive-side
-DataReadInt path, before the same payload is later applied to `EventDispatcher`.
-This avoids waiting for a second dispatcher drain, but single-threaded callers
-still need `run_until_response` because the current writer/send loop is pumped
-there.
+When the client loop is already active and decodes a registered response, the
+receiver is signalled immediately from the receive-side path, before the same
+payload is later applied to `EventDispatcher`. This avoids waiting for a second
+dispatcher drain, but single-threaded callers still need `run_until_response`
+because the current writer/send loop is pumped there.
 
 Chunked `RequestCandlesData` uses its own pending registry: registered chunks
 are also consumed and merged from receive-side DataReadInt, and the final
@@ -89,7 +86,7 @@ client.unsubscribe_all_orderbooks();
 ```
 
 Those APIs update the subscription registry. Before Init, they do not send
-subscription wire packets; the one-time Init flushes the current registry once.
+subscription packets; the one-time Init flushes the current registry once.
 After Init, reconnect restores registry-aware subscriptions automatically. Raw
 `api_subscribe_*` calls and raw `api_unsubscribe_order_book(...)` are useful for
 custom tools but do not update the subscription registry and do not enforce the
@@ -113,9 +110,8 @@ let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(
 println!("hedge_mode={hedge_mode}");
 ```
 
-`request_api_expiration_time()` returns an `ApiExpirationTime` wrapper around
-the server's Delphi `TDateTime` value and exposes `system_time()`,
-`unix_seconds()`, and `days_until(...)` helpers:
+`request_api_expiration_time()` returns an `ApiExpirationTime` wrapper and
+exposes `system_time()`, `unix_seconds()`, and `days_until(...)` helpers:
 
 ```rust
 let expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
@@ -128,20 +124,19 @@ For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
 `api_check_expiration_time` remain available and return
 `Receiver<EngineResponse>`.
 
-`request_candles_data` is the high-level API for
-`emk_RequestCandlesData`. It registers the chunk aggregator, keeps the client
-loop running, and returns one `MergedCandles` value after all chunks are merged.
+`request_candles_data` is the high-level API for the full candles snapshot
+request. It registers the chunk aggregator, keeps the client loop running, and
+returns one `MergedCandles` value after all chunks are merged.
 Use `api_request_candles_data_async` only for custom async flows that already
 own a running client loop.
 
-`api_get_markets_balance_full` is intentionally low-level. The current Delphi
-server calls `Engine.GetMarketsBalanceFull`, but does not serialize the balance
-snapshot yet, so a successful response has an empty `data` payload.
+`api_get_markets_balance_full` is intentionally low-level. The current reference
+server accepts the request, but does not serialize the balance snapshot yet, so
+a successful response has an empty `data` payload.
 
 `api_get_order`, `api_get_open_orders`, and `api_get_active_orders` are retained
-as raw wrappers because their enum values exist in `TEngineMethodKind`. The
-current Delphi reference server has no request-handler branches for them and
-returns `Unknown method` (error 400).
+as low-level wrappers for compatibility. The current reference server has no
+request-handler branches for them and returns `Unknown method` (error 400).
 
 `api_update_transfer_assets` is a normal request/response Engine API call, not a
 fire-and-forget notification. Regular applications should use
@@ -155,22 +150,20 @@ for asset in assets {
 ```
 
 The typed parser is also available as
-`parse_update_transfer_assets_response`. The response payload is
-`count:i32 + count * (currency:string, amount:f64, total:f64)`, matching Delphi
-`Markets.FAssets[EKind]`.
+`parse_update_transfer_assets_response`.
 
-Typed scalar response parsers follow Delphi stream semantics exactly:
+Typed scalar response parsers keep compatibility with server short-tail
+behavior:
 
-- `parse_get_balance_response`: reads one `Double` with Delphi `Read`; a short
-  fixed tail keeps available low bytes and zero-fills the missing bytes.
-- `parse_query_hedge_mode_response`: reads one `Boolean` byte with Delphi
-  `Read`; an empty payload is `false`.
-- `parse_api_expiration_time_response`: reads one Delphi `TDateTime` `Double`
-  with Delphi `Read`; an empty payload is `0.0` and therefore unknown.
-- `parse_update_transfer_assets_response`: reads `count` with Delphi `Read`;
-  `count <= 0` means no rows. Each row's `currency` is a strict `ReadBuffer`
-  string and rejects a truncated declared string. `amount` and `total` are
-  scalar `Double` fields and short fixed tails zero-fill like Delphi `Read`.
+- `parse_get_balance_response`: reads one floating-point balance; an empty or
+  short fixed tail becomes zero-filled compatibility data.
+- `parse_query_hedge_mode_response`: reads one boolean; an empty payload is
+  `false`.
+- `parse_api_expiration_time_response`: reads one date/time value; an empty
+  payload is `0.0` and therefore unknown.
+- `parse_update_transfer_assets_response`: reads the returned asset rows.
+  Truncated declared strings reject the response; short fixed numeric tails are
+  zero-filled for compatibility.
 
 ## EngineResponse
 
@@ -186,15 +179,10 @@ pub struct EngineResponse {
 }
 ```
 
-`ver` is the Delphi `TBaseCommand.ver` from the response header. `method`
-preserves the exact one-byte ordinal that the server sent. `data` is already
-DEFLATE-decompressed when the response was compressed on the wire.
-`TEngineResponse` follows Delphi tail semantics: `error_msg` is a strict
-`ReadBuffer` string and rejects the response when its declared bytes are
-missing; `IsCompressed`, `DataSize`, and uncompressed `Data` use Delphi
-`TMemoryStream.Read`/`CopyFrom` behavior after a valid string, so missing scalar
-tail bytes become zero and an overdeclared uncompressed `DataSize` keeps the
-available bytes.
+`ver` is the response format version from the server header. `method` preserves
+the exact method identifier that the server sent. `data` is already
+DEFLATE-decompressed when the response was compressed. If the response metadata
+is malformed, parsing fails before an `EngineResponse` is emitted.
 
 Transfer asset rows returned by `request_transfer_assets`:
 
@@ -293,25 +281,21 @@ println!("account={}", auth.account_id);
 assert_eq!(client.auth_info().map(|a| a.account_id.as_str()), Some(auth.account_id.as_str()));
 ```
 
-Mandatory fields are required. The optional Hyperliquid DEX tail is parsed like
-the Delphi client: `RecvdMaxPayload` is a scalar `ReadInt`, so a short tail
-keeps available low bytes and zero-fills the missing bytes. The declared DEX
-count then creates that many zero-filled `THLDexInfo` records, each record is
-partially overwritten by the remaining payload bytes, and a truncated tail does
-not reject the whole AuthCheck response.
+Mandatory fields are required. Optional Hyperliquid DEX metadata is parsed in a
+backward-compatible way: a truncated optional tail does not reject the whole
+AuthCheck response, but only fully available metadata is useful to callers.
 
 `request_auth_check` stores the parsed response in `client.auth_info()`.
 `run_init_sequence` does the same for its mandatory AuthCheck step and also
 copies it to `InitResult::auth_info`. A successful AuthCheck response with a
 malformed mandatory payload is still treated as AuthCheck success during init,
-but no auth metadata is stored; this mirrors Delphi, where
-`TMoonProtoEngine.AuthCheck` sets `Result := resp.Success` before the parse block
-and only logs `AuthCheck parse` exceptions.
+but no auth metadata is stored.
 
 ## Low-Level Builders
 
-`commands::engine_request` exposes byte-level builders such as
+`commands::engine_request` exposes low-level builders such as
 `base_check`, `auth_check`, `get_markets_list`, `request_order_book_full`, and
-`trades_resend_batches`. They return raw request payloads for advanced tools.
+`trades_resend_batches`. They return request payloads for diagnostics and
+compatibility tools.
 
 Regular applications should use `Client::api_*` wrappers.

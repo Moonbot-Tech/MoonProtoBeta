@@ -267,9 +267,9 @@ for strategy in &batch.strategies {
 ```
 
 `StrategySnapshot.fields` is a `StrategyFields` container, not a standard
-`HashMap`. It stores the decoded fields densely in wire/read order, which avoids
+`HashMap`. It stores the decoded fields densely in received order, which avoids
 hash work while parsing large snapshots. The reader path appends fields in the
-Delphi serializer order; `insert` keeps replacement semantics for user-built
+schema serializer order; `insert` keeps replacement semantics for user-built
 snapshots. The public operations are intentionally small and familiar:
 
 ```rust
@@ -353,28 +353,22 @@ let sent_count = dispatcher.send_strategy_checked_delta(&client);
 let start_delta_count = dispatcher.ui_strat_start_stop_v2(&client, true);
 ```
 
-`send_strategy_checked_delta` sends `TStratCheckedSync` only when the delta is
+`send_strategy_checked_delta` sends a checked-state delta only when the delta is
 non-empty. `ui_strat_start_stop_v2` always sends the UI start/stop command after
 the client's Init gate is open; the checked delta may be empty because the same
-wire packet also carries the start/stop action. Both helpers keep
-`prev_checked` unchanged until the server confirms with `TStratCheckedEcho` or
-`TStratCheckedSync`.
+command also carries the start/stop action. Both helpers keep `prev_checked`
+unchanged until the server confirms the checked-state change.
 
 The explicit `client.strat_checked_sync(&items, true)` and
 `client.ui_strat_start_stop_v2(is_start, &items)` methods remain available for
-protocol tools that already have the exact Delphi `Items` array. Regular
+compatibility tools that already have the exact checked-item array. Regular
 applications should prefer the dispatcher helpers so the library-owned strategy
-state stays authoritative. `TStratCheckedEcho` is inbound only: the Delphi
-server sends it as an ACK after applying a client `TStratCheckedSync` delta,
-and client code must not send it.
-
-Checked-item arrays are serialized with Delphi `Word Count` semantics: the
-outgoing count is the low 16 bits, and only that declared number of items is
-written to the packet body.
+state stays authoritative. Checked-state echo messages are inbound only; client
+code must not send them.
 
 The lower-level typed batch API remains available for explicit strategy sends.
 It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
-sends the full CmdId=2 `TStratSnapshot` wire body. Pass the live schema that
+sends the full strategy snapshot body. Pass the live schema that
 `run_init_sequence` stored in `dispatcher.strats().strategy_schema()`:
 
 ```rust
@@ -403,16 +397,16 @@ schema default. Defaults come from Delphi `TStrategy.Create` through
 exact compressed Delphi serializer bytes, prefer `strat_send_snapshot_payload(...)`.
 
 When decoding a snapshot after schema is available, known Delphi strategy fields
-also keep Delphi `ReadField` type checks through the same schema: if the wire
-TypeID does not match the schema/RTTI field type, the value is skipped instead
-of being exposed as a wrongly typed field. Generic `parse_strategy_batch(...)`
-remains available for diagnostics when no schema is available.
+also keep type checks through the same schema: if the incoming TypeID does not
+match the schema/RTTI field type, the value is skipped instead of being exposed
+as a wrongly typed field. Generic `parse_strategy_batch(...)` remains available
+for diagnostics when no schema is available.
 
 If the application already has a compressed `TStrategySerializer` payload, use
 `strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
 Passing an empty `data` slice means an empty strategy list; the library encodes
 it as a valid non-empty `TStrategySerializer` payload instead of sending
-wire `Size=0`.
+an empty snapshot body.
 
 For advanced override replies, register a fresh snapshot provider on the
 dispatcher:

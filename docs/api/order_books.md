@@ -15,32 +15,28 @@ client.unsubscribe_all_orderbooks();
 ```
 
 Subscriptions are stored in the client registry. Before Init, public subscribe
-and unsubscribe calls update only that registry and send no Engine API wire
-packet. The one-time Init flushes the current registry once. After Init,
+and unsubscribe calls update only that registry and send nothing. The one-time
+Init flushes the current registry once. After Init,
 reconnect replays the registry automatically and refetches indexes when needed.
 Orderbook replay waits until fresh `GetMarketsIndexes` has completed for the
 current `PeerAppToken`, matching Delphi `CheckBookTopics`: packets using new
 server indexes are not allowed to race old local index mappings.
-After a reconnect, the library repeats the full registry
-`emk_SubscribeOrderBook` batch every 5 seconds until a successful response
-confirms the current `ServerToken`, matching Delphi
-`FSubscribedBookServerToken` / `LastBookReconnectCheck`. A normal one-market
-subscribe response does not stop this reconnect replay unless it is the first
-successful orderbook subscribe in the session.
-Unsubscribe removes that market from the registry and sends
-`emk_UnsubscribeOrderBook` only after `domain_ready`.
+After a reconnect, the library repeats the full registry subscribe batch every
+5 seconds until a successful response confirms the current `ServerToken`. A
+normal one-market subscribe response does not stop this reconnect replay unless
+it is the first successful orderbook subscribe in the session.
+Unsubscribe removes that market from the registry and sends the unsubscribe
+request only after `domain_ready`.
 Use the batched helpers when a UI toggles several markets at once; they preserve
 one registry update and one batched Engine API request. Use
 `unsubscribe_all_orderbooks` to clear the registry and send one batched
 unsubscribe request for the market names that were remembered locally. If the
-registry is already empty, it sends no wire packet.
+registry is already empty, it sends nothing.
 
 The public call always updates the reconnect registry immediately. Once Init is
-open, changed subscriptions also append the wire Engine API request to the
-Delphi-style send queues. On the wire, `emk_SubscribeOrderBook` /
-`emk_UnsubscribeOrderBook` are Engine API requests and their success or failure
-is reported as a later `Event::EngineResponse`. Orderbook snapshots and diffs
-then arrive asynchronously on the `MPC_OrderBook` stream.
+open, changed subscriptions also queue the server request. Its success or
+failure is reported as a later `Event::EngineResponse`. Orderbook snapshots and
+diffs then arrive asynchronously as `Event::OrderBook`.
 
 The server subscription is per market name. `OrderBookKind` is not part of the
 subscribe request; it is carried by incoming orderbook packets and by full-book
@@ -73,7 +69,7 @@ client.run_with_dispatcher(duration, &mut dispatcher, Box::new(|event| {
 ```
 
 When using `run_with_dispatcher` or `run_with_dispatcher_state`, corrupted-cache
-recovery is fully internal: the library sends `emk_RequestOrderBookFull` and does
+recovery is fully internal: the library requests a fresh full orderbook and does
 not surface a separate callback event for that request. The low-level
 `RequestFullNeeded` variant exists for manual `dispatch_into` / `OrderBooks`
 users that do not pass a `Client` to the dispatcher.
@@ -159,9 +155,9 @@ pub enum OrderBookEvent {
 `RequestFullNeeded` is a low-level control event. The active dispatcher consumes
 it internally before invoking the application callback.
 
-Wire updates use `OrderLevel` (`f32`) because the protocol writes Delphi
-`Single` values. `OrderBookSnapshot` stores applied levels as `f64`, matching
-Delphi `TOrderGlass` state.
+Incoming updates use `OrderLevel` (`f32`) because the server sends compact
+single-precision values. `OrderBookSnapshot` stores applied levels as `f64` for
+the current-book read model.
 
 ## Recovery Behavior
 
