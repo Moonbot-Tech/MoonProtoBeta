@@ -8218,3 +8218,29 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketsState` currency/ref split
+
+Done:
+
+- Moved CorrMarket list apply, base-currency dictionary maintenance,
+  `refBTCMarket` resolution, and base-currency price recalculation into
+  `state/markets/currency.rs`.
+- Moved Delphi `SameText`-style ASCII market/currency helpers into
+  `state/markets/text.rs`.
+- Kept behavior unchanged: empty-base CorrMarkets still skip, existing
+  CorrMarkets still update tick size/base currency only, server base currency
+  changes still run `check_corr -> check_currency_ref -> update_prices`, and
+  USDT/direct/reverse price fallback order is unchanged.
+- This is a readability/publication split only. No market list apply, price
+  apply, base-currency, CorrMarket, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 25.60s`,
+  `ParseFailed=0`, `rx_actual_drop=12.04%`, init/markets/indexes/tags/update,
+  trades and orderbook health OK, retained futures trades `11`, reader max
+  `698us`, writer CPU max `152us`, GetMarketsList apply `2547us`.
