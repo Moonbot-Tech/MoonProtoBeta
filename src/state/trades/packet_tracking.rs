@@ -1,0 +1,278 @@
+//! `ProcessTradesStream` packet-number state machine.
+
+use super::*;
+use crate::commands::trades_stream::TradesPacket;
+
+impl TradesState {
+    /// Создать новый gap bucket (Delphi `CreateGapBucket` MoonProtoEngine.pas:1380-1430).
+    fn create_bucket(&mut self, start_num: u16, end_num: u16, now_ms: i64) {
+        let gap_size = end_num.wrapping_sub(start_num) as usize + 1;
+        let gap_size = gap_size.min(MAX_RECVD_SIZE);
+
+        // Сначала ищем пустой слот.
+        for b in self.buckets.iter_mut() {
+            if !b.active {
+                b.active = true;
+                b.start_num = start_num;
+                b.end_num = end_num;
+                b.created_ms = now_ms;
+                b.last_retry_ms = now_ms;
+                b.retry_count = 0;
+                b.refund_used = false;
+                if b.recvd.len() < gap_size {
+                    b.recvd.resize(gap_size, false);
+                } else {
+                    for r in b.recvd[..gap_size].iter_mut() {
+                        *r = false;
+                    }
+                }
+                self.used_buckets += 1;
+                return;
+            }
+        }
+
+        // Все заняты — вытесняем самый старый.
+        let oldest_idx = self
+            .buckets
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, b)| b.created_ms)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let b = &mut self.buckets[oldest_idx];
+        b.start_num = start_num;
+        b.end_num = end_num;
+        b.created_ms = now_ms;
+        b.last_retry_ms = now_ms;
+        b.retry_count = 0;
+        b.refund_used = false;
+        if b.recvd.len() < gap_size {
+            b.recvd.resize(gap_size, false);
+        } else {
+            for r in b.recvd[..gap_size].iter_mut() {
+                *r = false;
+            }
+        }
+        // used_buckets не меняется (slot был занят, остался занят).
+    }
+
+    /// Найти bucket для packet_num (Delphi `FindBucketForPacket`).
+    ///
+    /// With `want_extend=true`, this also performs Delphi's adjacent-bucket
+    /// extension and updates `last_packet_num` inside the method, matching the
+    /// Delphi side effect.
+    fn find_bucket_for_packet(
+        &mut self,
+        packet_num: u16,
+        want_extend: bool,
+        new_gap_start: u16,
+        new_gap_end: u16,
+    ) -> Option<usize> {
+        if self.used_buckets == 0 {
+            return None;
+        }
+        for (i, b) in self.buckets.iter().enumerate() {
+            if b.active && is_packet_in_range(packet_num, b.start_num, b.end_num) {
+                return Some(i);
+            }
+        }
+        if !want_extend {
+            return None;
+        }
+        for (i, b) in self.buckets.iter_mut().enumerate() {
+            if !b.active {
+                continue;
+            }
+            if b.retry_count >= 2 || b.end_num != new_gap_start.wrapping_sub(2) {
+                continue;
+            }
+            let old_size = b.end_num.wrapping_sub(b.start_num) as usize + 1;
+            let new_size = new_gap_end.wrapping_sub(b.start_num) as usize + 1;
+            if new_size > MAX_RECVD_SIZE {
+                continue;
+            }
+            if b.recvd.len() < new_size {
+                b.recvd.resize(new_size, false);
+            }
+            if old_size < b.recvd.len() {
+                b.recvd[old_size] = true;
+            }
+            if old_size + 1 < new_size {
+                for recvd in b.recvd[(old_size + 1)..new_size].iter_mut() {
+                    *recvd = false;
+                }
+            }
+            b.end_num = new_gap_end;
+            if b.retry_count >= 1 && !b.refund_used {
+                b.retry_count = b.retry_count.saturating_sub(1);
+                b.refund_used = true;
+            }
+            self.last_packet_num = packet_num;
+            return Some(i);
+        }
+        None
+    }
+
+    /// Обработать MPC_TradesStream packet-number state (track packets = true).
+    /// Делает то же что Delphi `ProcessTradesStream(TrackPackets=True)` MoonProtoEngine.pas:1553+.
+    ///
+    /// Low-level callers that still parse owned [`TradesPacket`] get only a
+    /// lightweight [`TradesEvent::Applied`] notification; row storage belongs
+    /// to the active dispatcher/SeqRing path.
+    #[must_use = "TradesEvents must be processed for diagnostics and gap recovery"]
+    pub fn on_packet(&mut self, pkt: TradesPacket, now_ms: i64) -> Vec<TradesEvent> {
+        let effects = self.on_packet_header(pkt.packet_num, now_ms);
+        materialize_packet_effects(effects, pkt)
+    }
+
+    /// Packet-number branch of `ProcessTradesStream(TrackPackets=True)`.
+    ///
+    /// This deliberately takes only `packet_num`. Delphi performs this
+    /// bookkeeping before the row-reading loop, so the Rust dispatcher can do
+    /// the same and apply decoded sections directly without building an owned
+    /// packet for public callbacks.
+    pub(crate) fn on_packet_header(
+        &mut self,
+        packet_num: u16,
+        now_ms: i64,
+    ) -> Vec<TradesPacketEffect> {
+        let mut events = Vec::new();
+
+        // === Первый пакет ИЛИ долгая пауза → reset ===
+        let pause_detected = self.trades_started
+            && self.last_packet_time_ms != 0
+            && (now_ms - self.last_packet_time_ms).abs() > TRADES_PAUSE_TIMEOUT_MS;
+
+        if !self.trades_started || pause_detected {
+            self.reset_gap_buckets(now_ms);
+            self.trades_started = true;
+            self.last_packet_num = packet_num;
+            self.last_packet_time_ms = now_ms;
+            events.push(TradesPacketEffect::Apply);
+            return events;
+        }
+
+        // === Дубликат ===
+        // Delphi `ProcessTradesStream`: ветка `PacketNum = LastTradesPacketNum`
+        // только логирует duplicate; после tracking-блока процедура всё равно
+        // читает секции и применяет trades. Сохраняем это: сначала diagnostic
+        // event, затем Apply того же payload.
+        if packet_num == self.last_packet_num {
+            self.last_packet_time_ms = now_ms;
+            events.push(TradesPacketEffect::Duplicate);
+            events.push(TradesPacketEffect::Apply);
+            return events;
+        }
+
+        // === Sequential: packet_num == last + 1 ===
+        if packet_num == self.last_packet_num.wrapping_add(1) {
+            self.last_packet_num = packet_num;
+            self.last_packet_time_ms = now_ms;
+            events.push(TradesPacketEffect::Apply);
+            return events;
+        }
+
+        // === Out-of-order или Gap ===
+        let last = self.last_packet_num;
+        // packet_num > last+1 → новый gap. Missing range is [last+1 .. packet_num-1].
+        let gap_size = packet_num.wrapping_sub(last.wrapping_add(1)) as usize;
+
+        // Если packet_num фактически "впереди" last (forward gap), создаём bucket.
+        // Wrap-safe forward detection: packet_num != last && packet_num != last+1.
+        // Различаем forward gap (gap_size небольшой) от backward (resend matching).
+
+        let new_gap_start = last.wrapping_add(1);
+        let new_gap_end = packet_num.wrapping_sub(1);
+
+        // Сначала проверяем — это packet из существующего bucket или соседний
+        // gap, который Delphi `FindBucketForPacket(... WantExtend=True ...)`
+        // расширит внутри того же метода.
+        if let Some(idx) = self.find_bucket_for_packet(packet_num, true, new_gap_start, new_gap_end)
+        {
+            let b = &mut self.buckets[idx];
+            if is_packet_in_range(packet_num, b.start_num, b.end_num) {
+                let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
+                if recvd_idx < b.recvd.len() {
+                    b.recvd[recvd_idx] = true;
+                }
+                let bucket_range = (b.start_num, b.end_num);
+                self.last_packet_time_ms = now_ms;
+                events.push(TradesPacketEffect::GapFilled {
+                    packet_num,
+                    bucket_seq_range: bucket_range,
+                });
+                events.push(TradesPacketEffect::Apply);
+                return events;
+            }
+            events.push(TradesPacketEffect::GapDetected {
+                start: new_gap_start,
+                end: new_gap_end,
+            });
+        }
+        if !events
+            .iter()
+            .any(|ev| matches!(ev, TradesPacketEffect::GapDetected { .. }))
+        {
+            // Проверяем размер. Слишком большой gap или buckets переполнены.
+            if gap_size > MAX_RECVD_SIZE || self.used_buckets >= MAX_GAP_BUCKETS {
+                // Delphi MoonProtoEngine.pas:1649-1658: при overflow сбрасывает buckets,
+                // НЕ обновляет LastTradesPacketNum, но текущий пакет всё равно дальше
+                // применяется к рынкам. Следующий обычный пакет заново стартует tracking.
+                //
+                // Старый "anti-DoS H8" drop+warn был самодеятельностью: ServerToken
+                // change уже handled через `EventDispatcher.last_known_server_token`
+                // ДО применения пакета, поэтому здесь нет adversarial vector — есть
+                // легитимный backpressure от сервера (например после restart).
+                log::warn!(target: "moonproto::trades",
+                    "packet_num jump {} -> {} (gap_size={} > MAX_RECVD_SIZE={} or buckets full); resetting gap buckets like Delphi",
+                    last, packet_num, gap_size, MAX_RECVD_SIZE);
+                self.reset_gap_buckets(now_ms);
+                events.push(TradesPacketEffect::Apply);
+                return events;
+            }
+
+            self.create_bucket(new_gap_start, new_gap_end, now_ms);
+            events.push(TradesPacketEffect::GapDetected {
+                start: new_gap_start,
+                end: new_gap_end,
+            });
+        }
+
+        self.last_packet_num = packet_num;
+        self.last_packet_time_ms = now_ms;
+        events.push(TradesPacketEffect::Apply);
+        events
+    }
+
+    /// Обработать пакет из MPC_TradesResendResponse (track packets = false).
+    /// Не двигает last_packet_num, только помечает recvd в buckets.
+    /// Delphi `ProcessTradesStream(TrackPackets=False)` ветка (MoonProtoEngine.pas:1667-1675).
+    pub fn on_packet_resend(&mut self, pkt: TradesPacket) -> Vec<TradesEvent> {
+        let effects = self.on_packet_resend_header(pkt.packet_num);
+        materialize_packet_effects(effects, pkt)
+    }
+
+    /// Packet-number branch of `ProcessTradesStream(TrackPackets=False)`.
+    pub(crate) fn on_packet_resend_header(&mut self, packet_num: u16) -> Vec<TradesPacketEffect> {
+        let mut events = Vec::new();
+        if let Some(idx) = self.find_bucket_for_packet(packet_num, false, 0, 0) {
+            let b = &mut self.buckets[idx];
+            let recvd_idx = packet_num.wrapping_sub(b.start_num) as usize;
+            if recvd_idx < b.recvd.len() {
+                b.recvd[recvd_idx] = true;
+            }
+            let bucket_range = (b.start_num, b.end_num);
+            events.push(TradesPacketEffect::GapFilled {
+                packet_num,
+                bucket_seq_range: bucket_range,
+            });
+        } else {
+            // Resend пришёл для давно закрытого bucket'а. Delphi TrackPackets=False
+            // не помечает bucket, но всё равно ниже разбирает секции и применяет
+            // trades; поэтому отдаём diagnostic OutOfOrder + Apply.
+            events.push(TradesPacketEffect::OutOfOrder { packet_num });
+        }
+        events.push(TradesPacketEffect::Apply);
+        events
+    }
+}

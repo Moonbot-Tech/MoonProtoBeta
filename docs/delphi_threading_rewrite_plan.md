@@ -8955,3 +8955,27 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.50s`, `ParseFailed=0`,
   retained LastPrice/trades/derived present, reader max 719us, writer CPU max
   155us, `GetMarketsList` apply total 2442us.
+
+### 2026-05-26 - `TradesState` gap/recovery split
+
+Done:
+
+- Split `state/trades.rs` into a thin owner plus:
+  - `trades/gap_bucket.rs` for `TGapBucket`-like bucket storage and wrap-range
+    checks;
+  - `trades/packet_tracking.rs` for `ProcessTradesStream(TrackPackets=True/False)`
+    packet-number machine effects;
+  - `trades/recovery.rs` for `CheckMissingTradesPackets` resend tick.
+- Kept public `TradesState`, `TradesEvent`, resend-response iterator, packet
+  tracking API, and tick API paths stable.
+- This is a readability/publication split only. No max bucket count, bucket
+  eviction, adjacent-bucket extend/refund rule, reset-on-overflow behavior,
+  duplicate/out-of-order events, resend packet numbering, retry delay formula,
+  retry count, or resend batch building changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test trades --lib --quiet` OK: 67 passed.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
