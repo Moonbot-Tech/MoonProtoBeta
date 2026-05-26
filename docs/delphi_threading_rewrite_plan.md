@@ -6800,6 +6800,9 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+- Quick prod FireTest release after the sender split OK:
+  `FIRETEST_QUICK_PASS after 25.10s`, `ParseFailed=0`,
+  `reader max=676us`, `writer_cpu max=153us`.
 
 ### 2026-05-26 - `client.rs` ClientSender split
 
