@@ -7484,10 +7484,6 @@ Verification:
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 - Quick prod FireTest release OK:
-  `FIRETEST_QUICK_PASS after 27.51s`, `ParseFailed=0`, err_emu actual drop
-  `10.70%`, retained futures rows present, derived snapshot present,
-  `reader max=717us`, `writer_cpu max=196us`, `GetMarketsList apply=2566us`.
-- Quick prod FireTest release OK:
   `FIRETEST_QUICK_PASS after 26.14s`, `ParseFailed=0`, err_emu actual drop
   `11.59%`, retained futures rows present, derived snapshot present,
   `reader max=715us`, `writer_cpu max=157us`, `GetMarketsList apply=2429us`.
@@ -7504,6 +7500,28 @@ Done:
   enqueue retained-history batch, then emit signal/diagnostic `TradesEvent`s.
 - This is a readability/publication split only. It does not change wire parsing,
   retained-history ownership, gap recovery, or public event shape.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 27.51s`, `ParseFailed=0`, err_emu actual drop
+  `10.70%`, retained futures rows present, derived snapshot present,
+  `reader max=717us`, `writer_cpu max=196us`, `GetMarketsList apply=2566us`.
+
+### 2026-05-26 - `commands::trade` Delphi ordinal split
+
+Done:
+
+- Moved the `MPC_Order` Delphi ordinal wrappers into
+  `commands/trade/enums.rs`: `OrderType`, `OrderWorkerStatus`,
+  `FixedPosition`, `MoveAllCmdType`, `MoveAllBuysCmdType`,
+  `ReplaceMultiKind`.
+- Kept public paths unchanged through `commands::trade::*` re-exports.
+- No wire parsing/building moved in this step; packed records and command
+  builders still sit in `trade.rs` for the next, separately verified split.
 
 Verification:
 
