@@ -8910,3 +8910,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Orders` read-model split
+
+Done:
+
+- Moved the public `Order` read-model and its local helpers from
+  `state/orders.rs` into `state/orders/model.rs`.
+- Kept the public path stable through `state::orders::Order`.
+- Internal sync fields are visible only inside the `orders` module tree, so
+  apply/actions/maintenance still mutate the same data, but the public model is
+  no longer mixed into the command dispatcher body.
+- This is a readability/publication split only. No `TOrderStatus` creation
+  defaults, `TradeCtx` route extraction, `SellReason` getter, trace storage,
+  epoch slots, local visual marker, pending cancel/replace fields, or public
+  order API changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
