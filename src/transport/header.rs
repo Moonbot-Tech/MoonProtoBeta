@@ -1,0 +1,211 @@
+use zerocopy::byteorder::little_endian::{U32 as LeU32, U64 as LeU64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
+/// Current MoonProto transport header version.
+pub const TRANSPORT_VER: u8 = 3;
+/// Size in bytes of the server-to-client UDP transport header.
+pub const SERVER_HDR_SIZE: usize = 7;
+/// Size in bytes of the client-to-server UDP transport header.
+pub const CLIENT_HDR_SIZE: usize = 15;
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct WireServerMsgHeader {
+    rnd: u8,
+    checksum: LeU32,
+    ver: u8,
+    cmd: u8,
+}
+
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct WireClientMsgHeader {
+    rnd: u8,
+    checksum: LeU32,
+    ver: u8,
+    cmd: u8,
+    client_id: LeU64,
+}
+
+const _: () = assert!(core::mem::size_of::<WireServerMsgHeader>() == SERVER_HDR_SIZE);
+const _: () = assert!(core::mem::size_of::<WireClientMsgHeader>() == CLIENT_HDR_SIZE);
+
+/// Server -> Client header (7 bytes)
+#[derive(Debug, Clone, Copy)]
+pub struct ServerMsgHeader {
+    /// Random byte used as the seed for outer obfuscation.
+    pub rnd: u8,
+    /// HMAC-CRC32C checksum stored in little-endian order on the wire.
+    pub checksum: u32,
+    /// Transport version. Valid packets use [`TRANSPORT_VER`].
+    pub ver: u8,
+    /// MoonProto command byte.
+    pub cmd: u8,
+}
+
+/// Client -> Server header (15 bytes)
+#[derive(Debug, Clone, Copy)]
+pub struct ClientMsgHeader {
+    /// Random byte used as the seed for outer obfuscation.
+    pub rnd: u8,
+    /// HMAC-CRC32C checksum stored in little-endian order on the wire.
+    pub checksum: u32,
+    /// Transport version. Valid packets use [`TRANSPORT_VER`].
+    pub ver: u8,
+    /// MoonProto command byte.
+    pub cmd: u8,
+    /// Client identifier carried in client-to-server packets.
+    pub client_id: u64,
+}
+
+// Маленькие parser/serializer'ы заголовков вызываются per-packet через cross-crate
+// границу. `#[inline]` обязателен — без него LLVM не инлайнит cross-crate (нужен
+// lto=fat который ломает быстрые dev-сборки). Тело ≤ 7-15 байт копий, code-bloat
+// при инлайне в caller'ы минимальный. Аудит B-V2-04. НЕ убирать.
+
+impl ServerMsgHeader {
+    /// Parse a server-to-client header from the beginning of `data`.
+    ///
+    /// Returns `None` when `data` is shorter than `SERVER_HDR_SIZE`.
+    #[inline]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < SERVER_HDR_SIZE {
+            return None;
+        }
+        let wire = WireServerMsgHeader::read_from_bytes(&data[..SERVER_HDR_SIZE]).ok()?;
+        Some(Self {
+            rnd: wire.rnd,
+            checksum: wire.checksum.get(),
+            ver: wire.ver,
+            cmd: wire.cmd,
+        })
+    }
+
+    /// Serialize this header to the exact 7-byte wire layout.
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; SERVER_HDR_SIZE] {
+        let wire = WireServerMsgHeader {
+            rnd: self.rnd,
+            checksum: LeU32::new(self.checksum),
+            ver: self.ver,
+            cmd: self.cmd,
+        };
+        let mut buf = [0u8; SERVER_HDR_SIZE];
+        buf.copy_from_slice(wire.as_bytes());
+        buf
+    }
+}
+
+impl ClientMsgHeader {
+    /// Create a client-to-server header for `cmd` and `client_id`.
+    ///
+    /// The checksum is initialized to zero; packing code fills it after the
+    /// payload has been appended.
+    #[inline]
+    pub fn new(cmd: u8, client_id: u64) -> Self {
+        Self {
+            rnd: rand_byte(),
+            checksum: 0,
+            ver: TRANSPORT_VER,
+            cmd,
+            client_id,
+        }
+    }
+
+    /// Serialize this header to the exact 15-byte wire layout.
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; CLIENT_HDR_SIZE] {
+        let wire = WireClientMsgHeader {
+            rnd: self.rnd,
+            checksum: LeU32::new(self.checksum),
+            ver: self.ver,
+            cmd: self.cmd,
+            client_id: LeU64::new(self.client_id),
+        };
+        let mut buf = [0u8; CLIENT_HDR_SIZE];
+        buf.copy_from_slice(wire.as_bytes());
+        buf
+    }
+
+    /// Parse a client-to-server header from the beginning of `data`.
+    ///
+    /// Returns `None` when `data` is shorter than `CLIENT_HDR_SIZE`.
+    #[inline]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < CLIENT_HDR_SIZE {
+            return None;
+        }
+        let wire = WireClientMsgHeader::read_from_bytes(&data[..CLIENT_HDR_SIZE]).ok()?;
+        Some(Self {
+            rnd: wire.rnd,
+            checksum: wire.checksum.get(),
+            ver: wire.ver,
+            cmd: wire.cmd,
+            client_id: wire.client_id.get(),
+        })
+    }
+}
+
+/// B-V2-12 fix: используем `rand::random::<u8>()` — thread-local Xoshiro RNG,
+/// ~5 нс/вызов с криптографически слабой но достаточной для obfuscation энтропией.
+/// Раньше делали `SystemTime::now()` (OS syscall ~50-300 нс) что:
+/// (а) hot path накладные расходы — 2 мс/сек wasted CPU при 10K pps,
+/// (б) low entropy — nanosecs могут повторяться при batch-send'ах подряд,
+///     снижая obfuscation strength `seed` поля в header'е.
+#[inline]
+fn rand_byte() -> u8 {
+    rand::random()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_header_wire_layout_is_fixed() {
+        let hdr = ServerMsgHeader {
+            rnd: 0x11,
+            checksum: 0x5544_3322,
+            ver: 0x66,
+            cmd: 0x77,
+        };
+
+        let bytes = hdr.to_bytes();
+        assert_eq!(bytes, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+
+        let parsed = ServerMsgHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.rnd, hdr.rnd);
+        assert_eq!(parsed.checksum, hdr.checksum);
+        assert_eq!(parsed.ver, hdr.ver);
+        assert_eq!(parsed.cmd, hdr.cmd);
+        assert!(ServerMsgHeader::from_bytes(&bytes[..SERVER_HDR_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn client_header_wire_layout_is_fixed() {
+        let hdr = ClientMsgHeader {
+            rnd: 0x11,
+            checksum: 0x5544_3322,
+            ver: 0x66,
+            cmd: 0x77,
+            client_id: 0xffee_ddcc_bbaa_9988,
+        };
+
+        let bytes = hdr.to_bytes();
+        assert_eq!(
+            bytes,
+            [
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff,
+            ]
+        );
+
+        let parsed = ClientMsgHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.rnd, hdr.rnd);
+        assert_eq!(parsed.checksum, hdr.checksum);
+        assert_eq!(parsed.ver, hdr.ver);
+        assert_eq!(parsed.cmd, hdr.cmd);
+        assert_eq!(parsed.client_id, hdr.client_id);
+        assert!(ClientMsgHeader::from_bytes(&bytes[..CLIENT_HDR_SIZE - 1]).is_none());
+    }
+}

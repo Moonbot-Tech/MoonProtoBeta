@@ -174,25 +174,94 @@ fn decode_buffer(buf: &mut [u8], code: &[u8]) {
 mod tests {
     use super::*;
 
+    fn encode_buffer(buf: &mut [u8], code: &[u8]) {
+        let code_len = code.len();
+        for (counter, byte) in buf.iter_mut().enumerate() {
+            let al = (counter & 0xFF) as u8;
+            let ah = ((counter >> 8) & 0xFF) as u8;
+            let nibble = counter & 0xF;
+            let c2 = if code_len > 2 { code[2] } else { 0 };
+            let c2_mod = c2 & 7;
+            let c1 = if code_len > 1 { code[1] } else { 0 };
+            let c0 = if code_len > 0 { code[0] } else { 0 };
+            let c3 = if code_len > 3 { code[3] } else { 0 };
+            let cn2 = if code_len > nibble + 2 {
+                code[nibble + 2]
+            } else {
+                0
+            };
+            let cn1 = if code_len > nibble + 1 {
+                code[nibble + 1]
+            } else {
+                0
+            };
+            let cn0 = if code_len > nibble { code[nibble] } else { 0 };
+            let cl_val = cn2.wrapping_add(nibble as u8);
+            let cn1_mod = cn1 & 7;
+            let cl_val2 = cn0.wrapping_add(cn1).wrapping_add(1);
+
+            let mut b = *byte;
+            b = b.wrapping_add(al);
+            b = b.wrapping_add(ah);
+            b ^= cl_val2;
+            b = b.wrapping_add(nibble as u8);
+            b = b.rotate_left(cn1_mod as u32);
+            b ^= cl_val;
+            b = b.wrapping_add(c3);
+            b ^= c0;
+            b = b.wrapping_add(c1 ^ ah);
+            b = b.rotate_right(c2_mod as u32);
+            b = b.wrapping_add(al);
+            b = b.rotate_left(c2_mod as u32);
+            b ^= al;
+            b = b.wrapping_add(al);
+            b = b.wrapping_add(ah);
+            *byte = b;
+        }
+    }
+
+    fn build_test_export(master_key: MoonKey, mac_key: MoonKey) -> String {
+        use base64::Engine;
+
+        let ts = 12_345_678_i64;
+        let password_str = format!("F$xC{}aR#d", ts);
+        let password: Vec<u8> = password_str.bytes().take(25).collect();
+
+        let mut clear = vec![0u8; 80];
+        clear[0..8].copy_from_slice(&ts.to_le_bytes());
+        let container = 8;
+        let rnd = b"TESTKEY";
+        clear[container] = rnd.len() as u8;
+        clear[container + 1..container + 1 + rnd.len()].copy_from_slice(rnd);
+        clear[container + 17] = 1; // filled
+        clear[container + 30] = 1; // version
+        clear[container + 32..container + 48].copy_from_slice(&master_key);
+        clear[container + 48..container + 64].copy_from_slice(&mac_key);
+
+        encode_buffer(&mut clear, &password);
+
+        let mut raw = Vec::with_capacity(16 + clear.len());
+        raw.extend_from_slice(&ts.to_le_bytes());
+        raw.extend_from_slice(&0_i64.to_le_bytes());
+        raw.extend_from_slice(&clear);
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    }
+
     #[test]
     fn import_test_key() {
-        let key_b64 = "v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC+/91HC9M+/rtivjR9IA9uN+pdyLbFSeAkYiWWIC/7oefi1dHu9zUy8Jf+Rom/4Md";
-        let keys = import_key(key_b64).expect("Failed to import key");
+        let master_key = [
+            0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5, 0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25,
+            0xcb, 0xd6,
+        ];
+        let mac_key = [
+            0x29, 0x05, 0xa9, 0xc4, 0x13, 0x10, 0xe4, 0x3f, 0x07, 0x04, 0x93, 0x63, 0x40, 0xfa,
+            0x45, 0xa5,
+        ];
+        let key_b64 = build_test_export(master_key, mac_key);
+        let keys = import_key(&key_b64).expect("Failed to import key");
         assert!(keys.filled);
         assert_eq!(keys.ver, 1);
-        assert_eq!(
-            keys.master_key,
-            [
-                0x30, 0x1b, 0x92, 0x12, 0x09, 0xae, 0x79, 0xa5, 0x10, 0x86, 0xb1, 0x80, 0xd3, 0x25,
-                0xcb, 0xd6
-            ]
-        );
-        assert_eq!(
-            keys.mac_key,
-            [
-                0x29, 0x05, 0xa9, 0xc4, 0x13, 0x10, 0xe4, 0x3f, 0x07, 0x04, 0x93, 0x63, 0x40, 0xfa,
-                0x45, 0xa5
-            ]
-        );
+        assert_eq!(keys.master_key, master_key);
+        assert_eq!(keys.mac_key, mac_key);
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! **Запуск:**
 //! ```powershell
-//! $env:MOONPROTO_LIVE_SERVER = "207.148.91.186:3000"
-//! $env:MOONPROTO_KEY = "v3oshQy/OLZSjsCkpZIOuy4y7aWoD7U12kIXJSx7h8cBKiRjEVPSrBB8WVO7yCjC..."
+//! $env:MOONPROTO_LIVE_SERVER = "HOST:PORT"
+//! $env:MOONPROTO_KEY = "<exported MoonBot key>"
 //! cargo test --test integration_smoke -- --ignored --nocapture
 //! ```
 //!

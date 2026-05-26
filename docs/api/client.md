@@ -13,7 +13,7 @@ Use `ClientConfig::new` for the common base-transport setup:
 ```rust
 let keys = moonproto::import_key(KEY_B64).expect("invalid key");
 let cfg = moonproto::ClientConfig::new(
-    "207.148.91.186",
+    host,
     3000,
     keys.master_key,
     keys.mac_key,
@@ -34,6 +34,9 @@ modes `1` and `2` are extended modes and require the optional `moonext` binary t
 be available to the process. UI code should call
 `moonproto::extended_transport_available()` before offering V1/V2; if it returns
 `false`, only V0 should be selectable.
+
+The transport implementation is built into `moonproto` as `moonproto::transport`.
+Consumers do not need a separate `moonproto-transport` crate.
 
 Override only what you need:
 

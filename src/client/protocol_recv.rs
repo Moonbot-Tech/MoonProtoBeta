@@ -1,4 +1,4 @@
-use super::protocol_core::ProtocolCore;
+﻿use super::protocol_core::ProtocolCore;
 use super::*;
 
 impl ProtocolCore<'_> {
@@ -67,7 +67,7 @@ impl ProtocolCore<'_> {
         let mut metric_payload_len = datagram.len();
 
         let continue_recv = if let Some((hdr, payload)) =
-            moonproto_transport::transport_unpack_with_mac(
+            crate::transport::transport_unpack_with_mac(
                 &self.client.mac_ctx,
                 &self.client.cfg.mac_key,
                 datagram,

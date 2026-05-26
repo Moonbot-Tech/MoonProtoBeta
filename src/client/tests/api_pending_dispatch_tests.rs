@@ -1,10 +1,10 @@
-use super::*;
+﻿use super::*;
 use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::build_markets_indexes_response;
 use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
 use crate::commands::ui::{build_client_settings, ClientSettingsCommand};
 use crate::events::EventDispatcher;
-use moonproto_transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
+use crate::transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
 use std::net::UdpSocket;
 
 fn write_str8(out: &mut Vec<u8>, value: &str) {

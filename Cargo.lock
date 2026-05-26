@@ -280,26 +280,16 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64",
+ "crc32c",
  "flate2",
  "libc",
+ "libloading",
  "log",
- "moonproto-transport",
  "parking_lot",
  "polling",
  "rand",
  "sha3",
  "socket2",
- "zerocopy",
-]
-
-[[package]]
-name = "moonproto-transport"
-version = "0.1.0"
-dependencies = [
- "crc32c",
- "libloading",
- "log",
- "rand",
  "zerocopy",
 ]
 

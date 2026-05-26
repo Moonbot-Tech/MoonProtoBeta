@@ -12,7 +12,7 @@
 //! Запуск:
 //!   cargo run --example multi_client_test --release -- <KEY_BASE64> <IP:PORT>
 //!
-//! Default IP:PORT = 207.148.91.186:3000 (тестовый MoonBot сервер).
+//! Default IP:PORT = 127.0.0.1:3000.
 
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -128,7 +128,7 @@ fn main() {
             parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3000u16),
         )
     } else {
-        ("207.148.91.186".to_string(), 3000u16)
+        ("127.0.0.1".to_string(), 3000u16)
     };
 
     let keys = key_import::import_key(key_b64).expect("invalid key");

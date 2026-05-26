@@ -121,10 +121,8 @@
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
 //! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
 //! - [`compression`] — SynLZ/DEFLATE helpers for wire-format payloads.
-//!
-//! Depends on [`moonproto_transport`] for the low-level wire layer: MAC,
-//! obfuscation, headers, and optional `moonext` loading for extended transport
-//! modes 1/2.
+//! - [`transport`] — low-level wire layer: MAC, obfuscation, headers, and
+//!   optional `moonext` loading for extended transport modes 1/2.
 
 mod api_pending;
 mod app_queue;
@@ -137,6 +135,7 @@ pub mod key_import;
 pub mod ntp;
 pub mod protocol;
 pub mod state;
+pub mod transport;
 
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ClientSender, ConnectConfig,
@@ -149,7 +148,5 @@ pub use events::{
     StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{import_key, ImportedKeys};
-pub use moonproto_transport::{
-    ext_available as extended_transport_available, MoonKey, ServerMsgHeader,
-};
 pub use protocol::Command;
+pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};

@@ -88,7 +88,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: loss_logger <key_b64> [ip:port] [logfile] [err_emu_pct]");
-        eprintln!("  Default: 207.148.91.186:3000, log → loss_logger.log, err_emu = 0");
+        eprintln!("  Default: 127.0.0.1:3000, log -> loss_logger.log, err_emu = 0");
         std::process::exit(1);
     }
 
@@ -100,7 +100,7 @@ fn main() {
             parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3000u16),
         )
     } else {
-        ("207.148.91.186".to_string(), 3000u16)
+        ("127.0.0.1".to_string(), 3000u16)
     };
     let logfile = args
         .get(3)

@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl Client {
     /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
@@ -31,7 +31,7 @@ impl Client {
             return;
         };
         // Zero-alloc fast path: reuse self.send_buf + cached MacContext.
-        let extra = moonproto_transport::transport_pack_into_with_mac(
+        let extra = crate::transport::transport_pack_into_with_mac(
             &mut self.send_buf,
             &self.mac_ctx,
             &self.cfg.mac_key,
@@ -56,7 +56,7 @@ impl Client {
         let Some(addr) = self.server_socket_addr() else {
             return;
         };
-        let extra = moonproto_transport::transport_pack_into_with_mac(
+        let extra = crate::transport::transport_pack_into_with_mac(
             &mut self.send_buf,
             &self.mac_ctx,
             &self.cfg.mac_key,

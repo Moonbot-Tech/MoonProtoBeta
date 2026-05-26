@@ -1,5 +1,5 @@
-use super::*;
-use moonproto_transport::{
+﻿use super::*;
+use crate::transport::{
     outer_light_crypt, ClientMsgHeader, MacContext, ServerMsgHeader, TRANSPORT_VER,
 };
 

@@ -6,14 +6,13 @@ The crate implements the encrypted transport, handshake, keepalive, reconnect,
 PMTU discovery, reliable sliced messages, typed command parsers/builders, state
 models, and the high-level active session API.
 
+The low-level transport layer is part of this crate (`moonproto::transport`);
+there is no separate public transport crate required for consumers.
+
 ## Install
 
-```toml
-[dependencies]
-moonproto = "0.1"
-```
-
-For local development inside this workspace:
+This prototype is intended to be consumed from the public repository or from a
+local checkout. Cargo registry publication is not configured yet.
 
 ```toml
 [dependencies]

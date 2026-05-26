@@ -8,11 +8,11 @@
 //! It checks request success, latency, throughput, TradesStream gap recovery,
 //! Sliced/backlog pressure, and payload sanity.
 //!
-//!   cargo run --example stress_client --release -- "<key_base64>" "207.148.91.186:3000" BTCUSDT 180 0 post_init
+//!   cargo run --example stress_client --release -- "<key_base64>" "127.0.0.1:3000" BTCUSDT 180 0 post_init
 //!
 //! Arguments:
 //! - key_base64: exported MoonBot key.
-//! - host:port: server address, default 207.148.91.186:3000.
+//! - host:port: server address, default 127.0.0.1:3000.
 //! - market: market used for orderbook/candles, default BTCUSDT.
 //! - duration_secs: load phase duration after init, default 180.
 //! - err_emu_pct: optional client-side incoming packet drop percent, default 0.
@@ -42,7 +42,7 @@ use moonproto::key_import;
 use moonproto::state::{OrderBookEvent, StratEvent, TradesEvent};
 use moonproto::{run_init_sequence, InitConfig};
 
-const DEFAULT_HOST: &str = "207.148.91.186:3000";
+const DEFAULT_HOST: &str = "127.0.0.1:3000";
 const DEFAULT_MARKET: &str = "BTCUSDT";
 const DEFAULT_DURATION_SECS: u64 = 180;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);

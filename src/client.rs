@@ -1,4 +1,4 @@
-//! High-level MoonProto client session API.
+﻿//! High-level MoonProto client session API.
 //!
 //! [`Client`] owns one UDP session: transport handshake, reconnect, retry
 //! queues, slicing, pending Engine API responses, lifecycle events, and the
@@ -448,12 +448,12 @@ pub struct Client {
 
     /// Cached MAC context — один раз вычисленные ipad CRC + opad block для `cfg.mac_key`.
     /// Используется в transport_pack/unpack hot-path вместо пересчёта HMAC ipad/opad
-    /// (128 XOR + crc32c) на каждом пакете. См. `moonproto_transport::MacContext`.
+    /// (128 XOR + crc32c) на каждом пакете. См. `crate::transport::MacContext`.
     ///
     /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в
     /// ClientConfig и не меняется) — этот context тоже фиксирован и
     /// переиспользуется receive/send фазами.
-    mac_ctx: moonproto_transport::MacContext,
+    mac_ctx: crate::transport::MacContext,
 
     /// Reusable buffer для `transport_pack_into_with_mac` — экономит alloc/dealloc на каждый
     /// исходящий пакет. Capacity растёт до peak packet size и переиспользуется.
@@ -514,7 +514,7 @@ impl Client {
         // Кэшированный MacContext для cfg.mac_key — фиксирован на всю life Client'а.
         // Создание делает 128 XOR + crc32c(ipad_block) единожды; затем `mac()` вызовы
         // только crc32c_append(cached, data) + crc32c_append(prev, opad_block).
-        let mac_ctx = moonproto_transport::MacContext::new(&cfg.mac_key);
+        let mac_ctx = crate::transport::MacContext::new(&cfg.mac_key);
 
         Self {
             cfg,

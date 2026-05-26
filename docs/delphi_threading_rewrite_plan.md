@@ -8859,3 +8859,34 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.34s`; retained LastPrice and
   futures trades present, derived snapshot present, `ParseFailed=0`, reader max
   607us, writer CPU max 130us, `GetMarketsList` apply total 2752us.
+
+### 2026-05-26 - GitHub prototype packaging: built-in transport
+
+Decision:
+
+- Public GitHub prototype is one repository/crate: `moonproto`.
+- The former `moonproto-transport` crate is no longer a separate public crate;
+  its low-level wire layer lives inside `moonproto::transport`.
+- `moonext` remains closed/optional. Without a compiled `moonext` binary the
+  library must not fail to start; it supports only V0/base transport and
+  `extended_transport_available()` returns `false`.
+
+Done:
+
+- Copied the transport code into `src/transport`: packed headers, MAC context,
+  outer obfuscation, pack/unpack, and optional `moonext` loader.
+- Removed the Cargo path dependency on `../moonproto-transport`; `crc32c` and
+  `libloading` are now direct dependencies of `moonproto`.
+- Updated internal protocol send/receive paths and transport tests to use
+  `crate::transport`.
+- Updated README/API docs to state that transport is built into `moonproto`.
+
+Later, after the public prototype:
+
+- Build `moonext` binaries for Windows, Linux, and macOS and place them as
+  optional runtime artifacts for extended V1/V2 transport.
+- Prefer doing Linux/macOS build and Linux smoke testing on the VPS documented
+  in project notes; local build is acceptable only when the matching toolchain is
+  installed.
+- Add an explicit Linux test pass for the public crate after the repository
+  layout is finalized.

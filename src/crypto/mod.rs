@@ -1,6 +1,6 @@
 //! AES-GCM payload crypto and MoonProto session-key derivation helpers.
 //!
-//! The transport MAC/obfuscation layer lives in `moonproto-transport`; this
+//! The transport MAC/obfuscation layer lives in [`crate::transport`]; this
 //! module is the inner payload encryption used after the MoonProto handshake has
 //! derived per-session encode/decode keys.
 

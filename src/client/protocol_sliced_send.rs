@@ -1,4 +1,4 @@
-use super::protocol_core::ProtocolCore;
+﻿use super::protocol_core::ProtocolCore;
 use super::*;
 
 impl ProtocolCore<'_> {
@@ -292,7 +292,7 @@ impl ProtocolCore<'_> {
             };
             let extra = {
                 let slice = &client.sending[idx].slices[block_num];
-                moonproto_transport::transport_pack_into_with_mac(
+                crate::transport::transport_pack_into_with_mac(
                     &mut client.send_buf,
                     &client.mac_ctx,
                     &client.cfg.mac_key,
