@@ -8750,3 +8750,21 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `TradesState` resend response split
+
+Done:
+
+- Moved zero-copy `MPC_TradesResendResponse` iterator from `state/trades.rs` into
+  `state/trades/resend_response.rs`: `TradesResendResponsePackets` and
+  `iter_trades_resend_response`.
+- Kept packet-number gap tracking and resend request scheduling in
+  `state/trades.rs`; only the response payload iterator moved.
+- This is a readability/publication split only. No response wire format,
+  truncation behavior, iterator item bytes, or public API path changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
