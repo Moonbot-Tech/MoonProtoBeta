@@ -7131,3 +7131,27 @@ Verification:
   `FIRETEST_QUICK_PASS after 24.11s`, `ParseFailed=0`, err_emu actual drop
   `10.51%`, retained futures rows present, derived snapshot present,
   `reader max=742us`, `writer_cpu max=151us`.
+
+### 2026-05-26 - `ProtocolCore` send-phase split
+
+Done:
+
+- Moved the Delphi writer/send phase methods from `src/client/protocol_core.rs`
+  into `src/client/protocol_send.rs` as one mechanical block.
+- The moved block starts at `send_command` and keeps the internal method order:
+  handshake sends, reconnect checks, `copy_send_ack_and_check_sening_data`,
+  ACK application, `CreateSlicedObject`, H retry, Sliced retry, Low phases,
+  grouped flush, and `DoSendMPData` wire batching.
+- `ProtocolCore::run`, receive drain, domain dispatch, periodic refresh, and
+  reconnect tail remain in `protocol_core.rs`. No call site or protocol order
+  changed; this is only a file boundary for review.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 763 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 27.59s`, `ParseFailed=0`, err_emu actual drop
+  `11.41%`, retained futures rows present, derived snapshot present,
+  `reader max=748us`, `writer_cpu max=176us`.
