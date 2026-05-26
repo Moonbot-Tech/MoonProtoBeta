@@ -23,10 +23,16 @@ use super::candles::current_local_time_shift_minutes;
 const MINS_IN_DAY: f64 = 1440.0;
 
 mod indexes;
+mod list;
 mod prices;
 mod reader;
 mod token_tags;
 pub use self::indexes::{build_markets_indexes_response, parse_markets_indexes_response};
+#[cfg(test)]
+use self::list::build_markets_list_response_with_local_shift;
+pub use self::list::{
+    build_markets_list_response, parse_markets_list_response, MarketsListResponse,
+};
 pub use self::prices::{
     build_markets_prices_response, parse_markets_prices_response, CorrMarketPriceUpdate,
     MarketPriceUpdate, MarketsPricesResponse,
@@ -341,7 +347,7 @@ pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
 }
 
-fn write_market_with_local_shift(
+pub(super) fn write_market_with_local_shift(
     out: &mut Vec<u8>,
     m: &Market,
     _ver: u16,
@@ -451,75 +457,6 @@ pub fn write_corr_market(out: &mut Vec<u8>, c: &CorrMarket) {
     write_str(out, &c.bn_market_currency);
     out.extend_from_slice(&c.bn_tick_size.to_le_bytes());
     write_str(out, &c.base_currency_name);
-}
-
-// =============================================================================
-//  MarketsListResponse — emk_GetMarketsList
-// =============================================================================
-
-/// Ответ на `emk_GetMarketsList`: полный список маркетов + CorrMarkets.
-/// Wire-form (MoonProtoEngineServer.pas:60-82 `WriteMarketsToStream`):
-///   `count:i32 + markets[count] + corr_count:i32 + corr_markets[corr_count]`.
-#[derive(Debug, Clone)]
-pub struct MarketsListResponse {
-    pub markets: Vec<Market>,
-    pub corr_markets: Vec<CorrMarket>,
-}
-
-/// Parse `EngineResponse.data` для `emk_GetMarketsList`.
-pub fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
-    parse_markets_list_response_with_local_shift(data, ver, current_local_time_shift_minutes())
-}
-
-fn parse_markets_list_response_with_local_shift(
-    data: &[u8],
-    ver: u16,
-    local_shift_minutes: f64,
-) -> Option<MarketsListResponse> {
-    let mut r = EngineStreamReader::new(data);
-    // Market минимум заведомо больше 16 байт; число используется только для
-    // prealloc, не для Delphi-incompatible early reject.
-    let count = r.read_count()?;
-    let mut markets = Vec::with_capacity(r.bounded_count_capacity(count, 16));
-    for _ in 0..count {
-        markets.push(read_market_with_local_shift(
-            &mut r,
-            ver,
-            local_shift_minutes,
-        )?);
-    }
-    // CorrMarket минимум больше 8 байт; только bounded prealloc.
-    let corr_count = r.read_count()?;
-    let mut corr_markets = Vec::with_capacity(r.bounded_count_capacity(corr_count, 8));
-    for _ in 0..corr_count {
-        corr_markets.push(read_corr_market(&mut r)?);
-    }
-    Some(MarketsListResponse {
-        markets,
-        corr_markets,
-    })
-}
-
-/// Опциональный билдер для тестов.
-pub fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
-    build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())
-}
-
-fn build_markets_list_response_with_local_shift(
-    resp: &MarketsListResponse,
-    ver: u16,
-    local_shift_minutes: f64,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1024);
-    out.extend_from_slice(&(resp.markets.len() as i32).to_le_bytes());
-    for m in &resp.markets {
-        write_market_with_local_shift(&mut out, m, ver, local_shift_minutes);
-    }
-    out.extend_from_slice(&(resp.corr_markets.len() as i32).to_le_bytes());
-    for c in &resp.corr_markets {
-        write_corr_market(&mut out, c);
-    }
-    out
 }
 
 // =============================================================================

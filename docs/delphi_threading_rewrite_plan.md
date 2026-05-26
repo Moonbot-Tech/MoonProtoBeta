@@ -8544,3 +8544,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Market` list response split
+
+Done:
+
+- Moved the `emk_GetMarketsList` response envelope from `commands/market.rs`
+  into `commands/market/list.rs`: `MarketsListResponse`,
+  `parse_markets_list_response`, and `build_markets_list_response`.
+- Kept `Market`, `CorrMarket`, `read_market`, `write_market`,
+  `read_corr_market`, and `write_corr_market` in `market.rs` so the core
+  Delphi field-order block remains together.
+- This is a readability/publication split only. No market/corr count handling,
+  bounded prealloc, local funding-time shift, read/write field order, or wire
+  bytes changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
