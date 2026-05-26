@@ -146,7 +146,7 @@ pub use client::{
 };
 pub use events::{
     Event, EventDispatcher, EventDispatcherSnapshot, MissingOrderStatusRequest,
-    StrategySnapshotReply,
+    StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{import_key, ImportedKeys};
 pub use moonproto_transport::{

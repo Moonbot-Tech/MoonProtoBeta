@@ -43,8 +43,10 @@ use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
-use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
-use crate::commands::trades_stream::{decode_trades_packet, DecodedTradesPacket, TradeSectionRef};
+use crate::commands::trade::{AllStatuses, OrderType, TradeCommand, TradeCtx};
+use crate::commands::trades_stream::{
+    decode_trades_packet, parse_watcher_fills, DecodedTradesPacket, TradeSectionRef,
+};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
 use crate::state::iter_trades_resend_response;
@@ -58,6 +60,7 @@ use crate::state::{
     MarketHistoryTradeInput, MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookEvent,
     OrderBooks, OrderEvent, Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState,
     StratEvent, StratsState, TradeStorageScope, TradesEvent, TradesPacketEffect, TradesState,
+    DELPHI_MSECS_PER_DAY,
 };
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -143,6 +146,33 @@ pub struct MissingOrderStatusRequest {
     pub market_name: String,
 }
 
+/// One watcher fill after Delphi `ProcessTradesStream` time-shift application.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatcherFillEvent {
+    /// Delphi `Round(TDateTime * MSecsPerDay)` timestamp used by `TWSFill.Time`.
+    pub time_ms: i64,
+    /// Shifted Delphi `TDateTime` value for consumers that work in days.
+    pub time: f64,
+    pub price: f32,
+    pub qty: f32,
+    pub z_btc: f32,
+    pub position: f32,
+    /// Raw `TOrderType` ordinal. Unknown values are preserved like Delphi enum bytes.
+    pub order_type: OrderType,
+    pub is_short: bool,
+    pub is_open: bool,
+    pub is_taker: bool,
+}
+
+/// Typed watcher fills from one `TradesStream` WatcherFills section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatcherFillsEvent {
+    pub market_index: u16,
+    pub market_name: String,
+    pub user: [u8; 20],
+    pub fills: Vec<WatcherFillEvent>,
+}
+
 /// All typed events emitted by [`EventDispatcher`].
 #[derive(Debug)]
 pub enum Event {
@@ -155,6 +185,11 @@ pub enum Event {
     /// [`TradesEvent`] values, so each sub-event is delivered as a separate
     /// `Event::Trade` instead of a nested vector.
     Trade(TradesEvent),
+    /// Typed HyperDex watcher fills. Delphi decodes these inside
+    /// `ProcessTradesStream` and calls `ProcessWatcherFillsDetect`; Active Lib
+    /// exposes the same domain data instead of dropping the section as opaque
+    /// bytes.
+    WatcherFills(WatcherFillsEvent),
     /// Balance channel: one event for full/incremental updates (cmd_id_sub 3/4).
     /// The exact base `TBalanceCommand` (cmd_id_sub 2) is parsed but ignored,
     /// matching Delphi `ProcessBalanceCommand`.
@@ -1259,15 +1294,46 @@ impl EventDispatcher {
         }
     }
 
+    fn ensure_trades_packet_time_shift_like_delphi(
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time_days: Option<f64>,
+        packet_time_shift: &mut Option<f64>,
+    ) {
+        if packet_time_shift.is_none() {
+            if let Some(now_time) = now_time_days {
+                let event_time = base_time + f64::from(time_delta_ms) / DELPHI_MSECS_PER_DAY;
+                *packet_time_shift = Some(((now_time - event_time) * 24.0).round() / 24.0);
+            }
+        }
+    }
+
+    fn trades_packet_shifted_time_like_delphi(
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time_days: Option<f64>,
+        packet_time_shift: &mut Option<f64>,
+    ) -> f64 {
+        let event_time = base_time + f64::from(time_delta_ms) / DELPHI_MSECS_PER_DAY;
+        if packet_time_shift.is_none() {
+            if let Some(now_time) = now_time_days {
+                *packet_time_shift = Some(((now_time - event_time) * 24.0).round() / 24.0);
+            }
+        }
+        event_time + packet_time_shift.unwrap_or(0.0)
+    }
+
     fn apply_known_trades_sections_like_delphi(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
         now_ms: Option<i64>,
         history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
     ) {
         let collect_history =
             history_now_time_days.is_some() && self.market_history.is_some() && now_ms.is_some();
         let mut history_sections = Vec::new();
+        let mut packet_time_shift: Option<f64> = None;
         for section in decoded.sections() {
             match section {
                 TradeSectionRef::Trades(rows) => {
@@ -1294,6 +1360,12 @@ impl EventDispatcher {
                             Vec::new()
                         };
                         for trade in rows {
+                            Self::ensure_trades_packet_time_shift_like_delphi(
+                                decoded.base_time,
+                                trade.time_delta_ms,
+                                history_now_time_days,
+                                &mut packet_time_shift,
+                            );
                             if let Some(now_ms) = now_ms {
                                 self.markets.apply_trade_tail_row_like_delphi(
                                     trade.market_index,
@@ -1349,6 +1421,12 @@ impl EventDispatcher {
                             Vec::new()
                         };
                         for row in rows {
+                            Self::ensure_trades_packet_time_shift_like_delphi(
+                                decoded.base_time,
+                                row.time_delta_ms,
+                                history_now_time_days,
+                                &mut packet_time_shift,
+                            );
                             if collect_market_history {
                                 history_rows.push(MarketHistoryMMOrderInput {
                                     time_delta_ms: row.time_delta_ms,
@@ -1389,6 +1467,12 @@ impl EventDispatcher {
                             Vec::new()
                         };
                         for trade in rows {
+                            Self::ensure_trades_packet_time_shift_like_delphi(
+                                decoded.base_time,
+                                trade.time_delta_ms,
+                                history_now_time_days,
+                                &mut packet_time_shift,
+                            );
                             if collect_market_history {
                                 history_rows.push(MarketHistoryTradeInput {
                                     time_delta_ms: trade.time_delta_ms,
@@ -1411,12 +1495,45 @@ impl EventDispatcher {
                     data,
                 } => {
                     if self.markets.has_server_market_index(market_index) {
-                        if let Some(market_name) = self.markets.market_name_by_index(market_index) {
-                            if !self.trade_section_visible_to_active_lib(market_name) {
-                                continue;
-                            }
+                        let Some(market_name) = self.markets.market_name_by_index(market_index)
+                        else {
+                            continue;
+                        };
+                        if !self.trade_section_visible_to_active_lib(market_name) {
+                            continue;
                         }
-                        let _ = (user, data);
+                        let Some(records) = parse_watcher_fills(data) else {
+                            continue;
+                        };
+                        let mut fills = Vec::with_capacity(records.len());
+                        for fill in records {
+                            let time = Self::trades_packet_shifted_time_like_delphi(
+                                decoded.base_time,
+                                fill.time_delta_ms,
+                                history_now_time_days,
+                                &mut packet_time_shift,
+                            );
+                            fills.push(WatcherFillEvent {
+                                time_ms: (time * DELPHI_MSECS_PER_DAY).round() as i64,
+                                time,
+                                price: fill.price,
+                                qty: fill.qty,
+                                z_btc: fill.z_btc,
+                                position: fill.position,
+                                order_type: OrderType::from_byte(fill.order_type),
+                                is_short: fill.is_short(),
+                                is_open: fill.is_open(),
+                                is_taker: fill.is_taker(),
+                            });
+                        }
+                        if !fills.is_empty() {
+                            out.push(Event::WatcherFills(WatcherFillsEvent {
+                                market_index,
+                                market_name: market_name.to_string(),
+                                user,
+                                fills,
+                            }));
+                        }
                     }
                 }
             }
@@ -1447,6 +1564,7 @@ impl EventDispatcher {
                     decoded,
                     Some(now_ms),
                     history_now_time_days,
+                    out,
                 );
                 applied_sections = true;
             }
@@ -3692,6 +3810,93 @@ mod tests {
     }
 
     #[test]
+    fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_detect() {
+        let mut d = EventDispatcher::new();
+        seed_event_markets(&mut d, &["BTCUSDT"]);
+        d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+        let user = [0xAB; 20];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&45_000.0f64.to_le_bytes());
+        payload.extend_from_slice(&803u16.to_le_bytes());
+        push_trades_section(&mut payload, 0, 0, &[(0, 100.0, 1.0)]);
+        push_watcher_fills_section(
+            &mut payload,
+            0,
+            user,
+            &[(
+                500,
+                101.5,
+                -0.25,
+                0.03125,
+                12.5,
+                OrderType::Buy.to_byte(),
+                0x07,
+            )],
+        );
+        payload.push(0); // packet flags: uncompressed, no taker flag.
+
+        let ctx = ActiveDispatchContext {
+            peer_app_token: 0,
+            market_indexes_current_for_peer: true,
+            server_token: 0,
+            subscribed_book_server_token: 0,
+            round_trip_delay_ms: 50,
+            server_time_delta_source: Arc::new(AtomicU64::new(0)),
+            now_time_days: 45_000.5,
+            domain_ready: true,
+            trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
+            copy_max_leverage_from_markets_list: false,
+            server_base_currency_name: Some("BTC".to_string()),
+            server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
+        };
+        let mut out = Vec::new();
+        let mut actions = Vec::new();
+        d.dispatch_into_active_actions(
+            Command::TradesStream,
+            &payload,
+            7_000,
+            &mut out,
+            &ctx,
+            &mut actions,
+        );
+
+        let watcher = out
+            .iter()
+            .find_map(|ev| match ev {
+                Event::WatcherFills(ev) => Some(ev),
+                _ => None,
+            })
+            .expect("WatcherFills section must reach user code as typed domain event");
+        assert_eq!(watcher.market_index, 0);
+        assert_eq!(watcher.market_name, "BTCUSDT");
+        assert_eq!(watcher.user, user);
+        assert_eq!(watcher.fills.len(), 1);
+        let fill = &watcher.fills[0];
+        let expected_time = 45_000.5 + 500.0 / DELPHI_MSECS_PER_DAY;
+        assert_eq!(fill.time, expected_time);
+        assert_eq!(
+            fill.time_ms,
+            (expected_time * DELPHI_MSECS_PER_DAY).round() as i64
+        );
+        assert_eq!(fill.price, 101.5);
+        assert_eq!(fill.qty, -0.25);
+        assert_eq!(fill.z_btc, 0.03125);
+        assert_eq!(fill.position, 12.5);
+        assert_eq!(fill.order_type, OrderType::Buy);
+        assert!(fill.is_short);
+        assert!(fill.is_open);
+        assert!(fill.is_taker);
+        assert!(out.iter().any(|ev| matches!(
+            ev,
+            Event::Trade(TradesEvent::Applied {
+                packet_num: 803,
+                ..
+            })
+        )));
+    }
+
+    #[test]
     fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_delphi_addfrom() {
         let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
             futures_trades_capacity: 0,
@@ -4299,6 +4504,28 @@ mod tests {
             payload.extend_from_slice(&time_delta.to_le_bytes());
             payload.extend_from_slice(&price.to_le_bytes());
             payload.extend_from_slice(&qty.to_le_bytes());
+        }
+    }
+
+    fn push_watcher_fills_section(
+        payload: &mut Vec<u8>,
+        market_index: u16,
+        user: [u8; 20],
+        rows: &[(i16, f32, f32, f32, f32, u8, u8)],
+    ) {
+        let market_index_and_flags = market_index | (3 << 14);
+        payload.extend_from_slice(&market_index_and_flags.to_le_bytes());
+        payload.push(1); // ext type: WatcherFills.
+        payload.extend_from_slice(&user);
+        payload.push(rows.len() as u8);
+        for (time_delta, price, qty, z_btc, position, order_type, flags) in rows {
+            payload.extend_from_slice(&time_delta.to_le_bytes());
+            payload.extend_from_slice(&price.to_le_bytes());
+            payload.extend_from_slice(&qty.to_le_bytes());
+            payload.extend_from_slice(&z_btc.to_le_bytes());
+            payload.extend_from_slice(&position.to_le_bytes());
+            payload.push(*order_type);
+            payload.push(*flags);
         }
     }
 

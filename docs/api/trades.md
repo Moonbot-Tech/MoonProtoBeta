@@ -109,6 +109,10 @@ only update `LastGotSpotTrades`.
 Low-level tools can still parse raw payloads with
 `parse_trades_packet` / `TradeSection`, including watcher fills, but active
 `Event::Trade` does not allocate an owned `TradesPacket` on the hot path.
+Watcher fills are the exception because Delphi treats them as domain events:
+Active Lib emits `Event::WatcherFills(WatcherFillsEvent)` with the shifted
+time, market, user address, raw `OrderType`, and decoded direction/open/taker
+flags.
 
 ## Public Types
 
@@ -147,6 +151,28 @@ pub struct WatcherFill {
 
 `WatcherFill::is_short()`, `is_open()`, and `is_taker()` decode the Delphi flags
 byte. `time_delta_ms` is relative to `TradesPacket::base_time`.
+
+```rust
+pub struct WatcherFillsEvent {
+    pub market_index: u16,
+    pub market_name: String,
+    pub user: [u8; 20],
+    pub fills: Vec<WatcherFillEvent>,
+}
+
+pub struct WatcherFillEvent {
+    pub time_ms: i64,      // Delphi Round(TDateTime * MSecsPerDay)
+    pub time: f64,         // shifted Delphi TDateTime
+    pub price: f32,
+    pub qty: f32,
+    pub z_btc: f32,
+    pub position: f32,
+    pub order_type: OrderType,
+    pub is_short: bool,
+    pub is_open: bool,
+    pub is_taker: bool,
+}
+```
 
 ## Retained History Building Blocks
 

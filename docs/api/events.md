@@ -110,6 +110,9 @@ pub enum Event {
     /// If a packet yields multiple `TradesEvent`s (e.g. `Applied` +
     /// `GapFilled`), each is pushed as its own `Event::Trade(...)`.
     Trade(TradesEvent),
+    /// Typed HyperDex watcher fills from a TradesStream WatcherFills section.
+    /// Time is already shifted the same way Delphi fills `TWSFill.Time`.
+    WatcherFills(WatcherFillsEvent),
     Balance(BalanceEvent), // full/incremental balance updates (cmd_id 3/4)
     Arb { uid: u64, payload: ArbPayload },
     Strat(StratEvent),
@@ -121,6 +124,11 @@ pub enum Event {
     ParseFailed { cmd: Command, len: usize, payload: Vec<u8> },
 }
 ```
+
+`WatcherFillsEvent` contains `market_index`, `market_name`, the 20-byte
+HyperDex `user` address, and `fills: Vec<WatcherFillEvent>`. Each fill carries
+`time_ms`, `time`, `price`, `qty`, `z_btc`, `position`, raw `OrderType`, and
+the decoded `is_short` / `is_open` / `is_taker` flags.
 
 `Command::API` may produce two events: `Event::Markets(...)` when a
 markets-related response was applied, followed by `Event::EngineResponse(...)`.

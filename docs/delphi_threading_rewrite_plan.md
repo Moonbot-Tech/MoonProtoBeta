@@ -7265,3 +7265,33 @@ Verification:
   `FIRETEST_QUICK_PASS after 22.68s`, `ParseFailed=0`, err_emu actual drop
   `8.96%`, retained futures rows present, derived snapshot present,
   `reader max=768us`, `writer_cpu max=132us`.
+
+### 2026-05-26 - WatcherFills active event restored
+
+Done:
+
+- Found and fixed `хуйня.md §X.185`: active `TradesStream` previously parsed
+  WatcherFills at the low-level parser but dropped them in
+  `EventDispatcher::apply_known_trades_sections_like_delphi`.
+- Delphi `ProcessTradesStream` branch `ExtType=1` reads `THLAddress`, `Count`,
+  `TWSFill` rows, applies the packet-level `TimeShift`, decodes `TOrderType`
+  and flags, then calls `ProcessWatcherFillsDetect`.
+- Rust now emits `Event::WatcherFills(WatcherFillsEvent)` with market index/name,
+  user, shifted `time_ms`/`time`, price, qty, zBTC, position, raw `OrderType`,
+  and `is_short` / `is_open` / `is_taker`.
+- The packet-level TimeShift is filled by the first processed
+  Trades/MM/Liq/Watcher row in the same packet, matching Delphi's shared
+  `TimeShiftFilled` variable. Unknown/stale market indexes still skip the
+  whole WatcherFills section.
+
+Verification:
+
+- `cargo test active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_detect --lib --quiet` OK.
+- `cargo test watcher --lib --quiet` OK: 5 passed.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 766 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 24.48s`, `ParseFailed=0`, err_emu actual drop
+  `10.88%`, retained futures rows present, derived snapshot present,
+  `reader max=720us`, `writer_cpu max=141us`.
