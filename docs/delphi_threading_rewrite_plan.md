@@ -8032,3 +8032,7 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.82s`,
+  `ParseFailed=0`, `rx_actual_drop=9.16%`, streams/API/market health OK,
+  retained futures trades `6`, reader max `669us`, writer CPU max `186us`,
+  GetMarketsList apply `2558us`.
