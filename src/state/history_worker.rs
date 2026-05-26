@@ -5,7 +5,7 @@
 //! [`MarketHistoryRegistry`] and is the single writer for all per-market
 //! [`MarketHistoryStore`] instances.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,7 @@ pub struct MarketHistoryWorker {
 
 enum MarketHistoryCommand {
     ConfigureMarkets {
-        market_slots: Vec<Option<String>>,
+        market_slots: Vec<Option<Arc<str>>>,
         scope: Option<TradeStorageScope>,
     },
     Readers {
@@ -190,13 +190,16 @@ impl MarketHistoryHandle {
         market_names: Vec<String>,
         scope: Option<TradeStorageScope>,
     ) -> bool {
-        let market_slots = market_names.into_iter().map(Some).collect();
+        let market_slots = market_names
+            .into_iter()
+            .map(|name| Some(Arc::<str>::from(name)))
+            .collect();
         self.configure_market_index_slots(market_slots, scope)
     }
 
     pub(crate) fn configure_market_index_slots(
         &self,
-        market_slots: Vec<Option<String>>,
+        market_slots: Vec<Option<Arc<str>>>,
         scope: Option<TradeStorageScope>,
     ) -> bool {
         self.tx

@@ -717,7 +717,10 @@ logging loops.
 Lib configures it from the current trades subscription and the known
 `GetMarketsList` universe: all markets for `subscribe_all_trades`, or only the
 requested subset for `subscribe_trades_for`. The active dispatcher queues rows
-only for stores allowed by that scope.
+only for stores allowed by that scope. Internally the registry keeps configured
+server-index slots and store keys as shared market-name handles, so adding a
+new listing does not require rebuilding existing per-market stores. Public
+lookup and configuration APIs remain string-based (`&str` / `String`).
 
 `MarketHistoryConfig::from_system_memory(market_count)` is the recommended
 RAM-budget helper for init/config code. It probes total physical RAM, falls

@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::Arc;
 
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
@@ -26,6 +27,8 @@ const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
 const LAST_PRICE_SLOT_BYTES: usize = size_of::<LastPricePoint>();
 const MINI_CANDLE_SLOT_BYTES: usize = size_of::<MiniCandle>();
 const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
+
+type SharedMarketName = Arc<str>;
 
 /// Active-library retained-history scope for the all-trades stream.
 ///
@@ -255,8 +258,8 @@ pub struct MarketHistoryReaders {
 #[derive(Default)]
 pub struct MarketHistoryRegistry {
     default_config: MarketHistoryConfig,
-    stores: HashMap<String, MarketHistoryStore>,
-    stores_by_index: Vec<Option<String>>,
+    stores: HashMap<SharedMarketName, MarketHistoryStore>,
+    stores_by_index: Vec<Option<SharedMarketName>>,
 }
 
 impl MarketHistoryRegistry {
@@ -299,9 +302,12 @@ impl MarketHistoryRegistry {
         self.stores.get_mut(market_name)
     }
 
-    fn insert_configured_market(&mut self, market_name: &str) -> &mut MarketHistoryStore {
+    fn insert_configured_market(
+        &mut self,
+        market_name: SharedMarketName,
+    ) -> &mut MarketHistoryStore {
         self.stores
-            .entry(market_name.to_string())
+            .entry(market_name)
             .or_insert_with(|| MarketHistoryStore::new(self.default_config))
     }
 
@@ -310,29 +316,49 @@ impl MarketHistoryRegistry {
         market_names: &[String],
         scope: Option<&TradeStorageScope>,
     ) -> usize {
-        let market_slots = market_names
-            .iter()
-            .map(|name| Some(name.clone()))
-            .collect::<Vec<_>>();
-        self.configure_market_index_slots(&market_slots, scope)
+        self.configure_market_index_slot_names(
+            market_names.iter().map(|name| Some(name.as_str())),
+            scope,
+        )
     }
 
-    pub fn configure_market_index_slots(
+    pub fn configure_market_index_slots<S>(
         &mut self,
-        market_slots: &[Option<String>],
+        market_slots: &[Option<S>],
         scope: Option<&TradeStorageScope>,
-    ) -> usize {
+    ) -> usize
+    where
+        S: AsRef<str>,
+    {
+        self.configure_market_index_slot_names(
+            market_slots
+                .iter()
+                .map(|slot| slot.as_ref().map(AsRef::as_ref)),
+            scope,
+        )
+    }
+
+    fn configure_market_index_slot_names<'a, I>(
+        &mut self,
+        market_slots: I,
+        scope: Option<&TradeStorageScope>,
+    ) -> usize
+    where
+        I: IntoIterator<Item = Option<&'a str>>,
+    {
         let Some(scope) = scope else {
             self.stores.clear();
             self.stores_by_index.clear();
             return 0;
         };
 
+        let market_slots = market_slots.into_iter();
+        let (slot_count, _) = market_slots.size_hint();
         self.stores_by_index.clear();
-        self.stores_by_index.reserve(market_slots.len());
-        let mut desired = HashSet::with_capacity(market_slots.len());
+        self.stores_by_index.reserve(slot_count);
+        let mut desired = HashSet::with_capacity(slot_count);
         for slot in market_slots {
-            let Some(name) = slot.as_ref() else {
+            let Some(name) = slot else {
                 self.stores_by_index.push(None);
                 continue;
             };
@@ -340,12 +366,13 @@ impl MarketHistoryRegistry {
                 self.stores_by_index.push(None);
                 continue;
             }
-            self.stores_by_index.push(Some(name.clone()));
-            desired.insert(name.clone());
+            let name = SharedMarketName::from(name);
+            self.stores_by_index.push(Some(Arc::clone(&name)));
+            desired.insert(name);
         }
         self.stores.retain(|name, _| desired.contains(name));
         for name in desired {
-            self.insert_configured_market(&name);
+            self.insert_configured_market(name);
         }
         self.stores.len()
     }
@@ -1149,6 +1176,43 @@ mod tests {
         assert!(registry.get_mut_by_server_index(0).is_none());
         assert!(registry.get_mut_by_server_index(1).is_some());
         assert!(registry.get_mut_by_server_index(2).is_some());
+    }
+
+    #[test]
+    fn registry_reconfigure_preserves_existing_store_like_delphi_market_cow() {
+        let mut registry = MarketHistoryRegistry::new(MarketHistoryConfig {
+            futures_trades_capacity: 2,
+            spot_trades_capacity: 0,
+            liquidation_capacity: 0,
+            mm_orders_capacity: 0,
+            mm_order_companion_capacity: 0,
+            last_price_capacity: 0,
+            mini_candles_capacity: 0,
+            candles_5m_capacity: 0,
+        });
+        let first = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        registry.configure_markets(&first, Some(&TradeStorageScope::All));
+        registry
+            .get_mut("BTCUSDT")
+            .unwrap()
+            .append_futures_trade_like_delphi(trade(45_000.0, 100.0, 1.0));
+
+        let after_listing = vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ];
+        registry.configure_markets(&after_listing, Some(&TradeStorageScope::All));
+
+        assert!(registry.contains_market("SOLUSDT"));
+        let mut out = Vec::new();
+        registry
+            .readers("BTCUSDT")
+            .unwrap()
+            .futures_trades
+            .unwrap()
+            .copy_last(10, &mut out);
+        assert_eq!(out, vec![trade(45_000.0, 100.0, 1.0)]);
     }
 
     #[test]

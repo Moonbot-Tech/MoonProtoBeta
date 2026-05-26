@@ -884,7 +884,7 @@ impl EventDispatcher {
         self.last_market_history_markets_version = None;
     }
 
-    fn market_history_market_slots(&self) -> Vec<Option<String>> {
+    fn market_history_market_slots(&self) -> Vec<Option<Arc<str>>> {
         if self.markets.indexes_synchronized && !self.markets.market_indexes.is_empty() {
             return self
                 .markets
@@ -894,14 +894,14 @@ impl EventDispatcher {
                     self.markets
                         .by_name
                         .contains_key(name.as_str())
-                        .then(|| name.clone())
+                        .then(|| Arc::<str>::from(name.as_str()))
                 })
                 .collect();
         }
         self.markets
             .markets
             .iter()
-            .map(|market| Some(market.bn_market_name.clone()))
+            .map(|market| Some(Arc::<str>::from(market.bn_market_name.as_str())))
             .collect()
     }
 

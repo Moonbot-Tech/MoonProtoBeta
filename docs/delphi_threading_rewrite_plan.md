@@ -7113,9 +7113,14 @@ Done:
 - `MarketHistoryStreamSection` now carries `market_index: u16`; the
   `MarketHistoryWorker` resolves it through registry slots configured from
   `GetMarketsIndexes`.
-- The registry stores `Vec<Option<String>>` slots, not a compressed filtered
+- The registry stores sparse server-index slots, not a compressed filtered
   list. Unknown/missing index names keep their position as `None`, so a hole at
   `mIndex=0` cannot shift `mIndex=1` into the wrong market.
+- Follow-up re-check of Delphi `TMarkets.Add`: list/dictionary updates use COW
+  while `TMarket` objects stay alive. Rust mirrors the useful part in retained
+  history by keeping worker-owned store keys and configured index slots as
+  shared `Arc<str>` names. Public lookup/config APIs remain `&str`/`String`;
+  this is an internal ownership optimization, not a protocol change.
 - `EventDispatcher` still uses `MarketsState::market_name_by_index` for the
   Delphi visibility/storage-scope gate before enqueueing a retained batch; the
   worker side avoids the extra hot clone/hash lookup.
@@ -7124,6 +7129,7 @@ Verification:
 
 - `cargo test active_dispatch_history_worker_uses_server_index_mapping_not_market_vector_order --lib --quiet` OK.
 - `cargo test registry_resolves_stream_sections_by_configured_server_index --lib --quiet` OK.
+- `cargo test registry_reconfigure_preserves_existing_store_like_delphi_market_cow --lib --quiet` OK.
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 763 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
@@ -7319,3 +7325,29 @@ Verification:
   `FIRETEST_QUICK_PASS after 23.73s`, `ParseFailed=0`, err_emu actual drop
   `10.17%`, retained futures rows present, derived snapshot present,
   `reader max=728us`, `writer_cpu max=158us`.
+
+### 2026-05-26 - retained history registry shared market names
+
+Done:
+
+- Re-checked Delphi `MarketsU.pas:TMarkets.Add`: normal listing-add builds a
+  new `TList<TMarket>` and new dictionaries, puts old containers into delayed
+  trash, and keeps existing `TMarket` objects alive.
+- Rust Active Lib now mirrors the useful machine effect for retained history:
+  reconfiguring known markets does not recreate existing per-market stores, and
+  worker-owned registry keys / server-index slots use shared `Arc<str>` market
+  names instead of owned `String` copies.
+- Public API remains string-based (`&str`/`String`); this is an internal
+  ownership optimization, not a protocol or wire-format change.
+
+Verification:
+
+- `cargo test registry_reconfigure_preserves_existing_store_like_delphi_market_cow --lib --quiet` OK.
+- `cargo test history_store:: --lib --quiet` OK: 18 passed.
+- `cargo test history_worker:: --lib --quiet` OK: 5 passed.
+- `cargo test --lib --quiet` OK: 767 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.23s`, `ParseFailed=0`, err_emu actual drop
+  `9.73%`, retained futures rows present, derived snapshot present,
+  `reader max=679us`, `writer_cpu max=155us`.
