@@ -60,6 +60,7 @@ mod lifecycle;
 mod metrics;
 mod protocol_core;
 mod protocol_helpers;
+mod protocol_io;
 mod protocol_recv;
 mod protocol_send;
 mod runtime;

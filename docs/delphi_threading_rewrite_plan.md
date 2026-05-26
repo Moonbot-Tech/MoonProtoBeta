@@ -8583,3 +8583,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` protocol IO split
+
+Done:
+
+- Moved raw send/transport IO helpers from `client/protocol_helpers.rs` into
+  `client/protocol_io.rs`: `maybe_compress`, `crypted_wire_cmd`,
+  `send_raw_packet_cmd`, `send_raw_packet`, and `dispatch_send`.
+- Kept writer queue logic in `protocol_send.rs`; this split only separates the
+  final packet packing/socket send layer.
+- This is a readability/publication split only. No compression threshold,
+  crypted wire command mapping, MAC transport packing, err_emu outgoing
+  accounting, send error handling, or retry behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
