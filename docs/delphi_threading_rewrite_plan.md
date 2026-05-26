@@ -8036,3 +8036,24 @@ Verification:
   `ParseFailed=0`, `rx_actual_drop=9.16%`, streams/API/market health OK,
   retained futures trades `6`, reader max `669us`, writer CPU max `186us`,
   GetMarketsList apply `2558us`.
+
+### 2026-05-26 - `MPC_UI` parser dispatch split
+
+Done:
+
+- Moved the inbound `UICommand::parse` / `parse_with_client_settings_fallback`
+  dispatch match into `commands/ui/parser.rs`.
+- Kept UI payload structs, fixed packed records, builders, and the existing
+  soft-tail `TClientSettingsCommand` helper block in `commands/ui.rs`.
+- Kept every `CmdId` branch byte-identical: same version gate, same UID/header
+  read, same zero-tail/preserve-tail readers, same fallback settings argument,
+  and same public `UICommand` variants.
+- This is a readability/publication split only. No `MPC_UI` command IDs,
+  parser branch order, wire fields, fallback behavior, or public API behavior
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
