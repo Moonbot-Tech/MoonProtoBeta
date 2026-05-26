@@ -28,44 +28,25 @@
 //! }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
-use crate::commands::order_book::{compare_seq, OrderBookUpdate, OrderLevel};
+use crate::commands::order_book::{compare_seq, OrderBookUpdate};
+
+mod apply;
+mod cache;
+mod types;
+
+#[cfg(test)]
+pub(crate) use self::apply::apply_order_book_diff_keep_zero;
+use self::apply::{apply_cached_packet, apply_diff_book, apply_full_book};
+use self::cache::OrderBookCache;
+pub use self::types::{
+    ApplyResult, BookKey, OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot,
+    TopOfBook,
+};
 
 const EPS: f64 = 0.00000001;
 const EPS_M: f64 = 0.000000009;
-
-/// Тип orderbook'а: фьючерсы или spot. Wire-формат — 1 байт.
-///
-/// Соответствует Delphi `TBookKind` (MoonProtoOrderBook.pas:5) с ord-кодами
-/// 0=`bk_Futures`, 1=`bk_Spot`. Используется в incoming orderbook packets,
-/// full-book recovery requests and internal state keys.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OrderBookKind {
-    /// Фьючерсный orderbook (`bk_Futures = 0`).
-    Futures = 0,
-    /// Spot orderbook (`bk_Spot = 1`).
-    Spot = 1,
-}
-
-impl OrderBookKind {
-    /// Конвертация в wire-байт (для engine_request / state cache key).
-    #[inline]
-    pub fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Распарсить из wire-байт. Неизвестное значение → None (вызывающая логика
-    /// должна решить — дропать пакет или fallback'нуть).
-    pub fn from_u8(b: u8) -> Option<Self> {
-        match b {
-            0 => Some(Self::Futures),
-            1 => Some(Self::Spot),
-            _ => None,
-        }
-    }
-}
 
 /// Кэш считается corrupted, если непустой дольше этого порога (мс).
 /// Соответствует `MoonProtoOrderBook.pas:9` `BOOK_EXPIRED_TIMEOUT = 800`.
@@ -77,184 +58,6 @@ const BOOK_FULL_REQUEST_THROTTLE: i64 = 5000;
 
 /// Лимит размера кэша. Соответствует `MoonProtoOrderBook.pas:11` `BOOK_CACHE_MAX_PACKETS = 64`.
 const BOOK_CACHE_MAX_PACKETS: usize = 64;
-
-/// Ключ кэша: `(market_index, book_kind)`. `book_kind`: 0=Futures, 1=Spot.
-pub type BookKey = (u16, u8);
-
-/// One applied orderbook level stored in the client read model.
-///
-/// Wire packets carry `Single` (`f32`) values for compactness, while Delphi
-/// applies them into `TOrderGlass` (`double`). The public snapshot follows the
-/// applied-state side and stores `f64`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OrderBookLevel {
-    pub rate: f64,
-    pub quantity: f64,
-}
-
-impl From<OrderLevel> for OrderBookLevel {
-    fn from(level: OrderLevel) -> Self {
-        Self {
-            rate: level.rate as f64,
-            quantity: level.quantity as f64,
-        }
-    }
-}
-
-/// Best visible bid/ask from an applied orderbook snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct TopOfBook {
-    pub bid: Option<OrderBookLevel>,
-    pub ask: Option<OrderBookLevel>,
-}
-
-/// Applied current book for one `(market_index, book_kind)` pair.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct OrderBookSnapshot {
-    pub market_index: u16,
-    pub book_kind: u8,
-    pub seq: u16,
-    pub buys: Vec<OrderBookLevel>,
-    pub sells: Vec<OrderBookLevel>,
-}
-
-impl OrderBookSnapshot {
-    pub fn top(&self) -> TopOfBook {
-        TopOfBook {
-            bid: self.buys.first().copied(),
-            ask: self.sells.first().copied(),
-        }
-    }
-}
-
-/// Один кэшированный пакет (out-of-order).
-#[derive(Debug, Clone)]
-struct CachedPacket {
-    seq: u16,
-    pkt: OrderBookUpdate,
-}
-
-/// Per-(market_index, book_kind) кэш. Соответствует Delphi `TOrderBookCache`.
-#[derive(Debug, Clone, Default)]
-struct OrderBookCache {
-    /// Следующий ожидаемый seq.
-    expected_seq: u16,
-    /// Последний применённый seq. Аналог Delphi `m.MoonProtoBookSeq[bookKind]`.
-    /// Начальное значение 0 важно: normal-mode применяет первый Diff без Full
-    /// (Delphi `MoonProtoEngine.pas:2066-2071`). Раньше использовалось `has_full: bool`,
-    /// что заставляло клиента отправлять лишний `RequestOrderBookFull` и
-    /// terminale не показывали degraded diff-view.
-    last_applied_seq: u16,
-    /// Сортированный по seq список накопленных out-of-order пакетов.
-    /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` чтобы `pop_front()` в `drain_cache`
-    /// был O(1) вместо O(N) на `Vec::remove(0)`. На burst recovery 64 пакета это снимает
-    /// ~2080 memmove ops (64+63+62+…+1).
-    packets: VecDeque<CachedPacket>,
-    /// Помечен ли кэш как corrupted (нужен Full).
-    corrupted: bool,
-    /// Время последнего отправленного `RequestOrderBookFull` (throttle).
-    last_full_request_ms: i64,
-    /// Время, когда кэш стал непустым (0 если пуст). Используется в `is_expired`.
-    cache_not_empty_since_ms: i64,
-}
-
-impl OrderBookCache {
-    /// A-17 fix: используем стандартный `partition_point` вместо самописного binary search.
-    /// Wrapping-safe сравнение через `compare_seq` — оставляем (стандартный `binary_search`
-    /// не годится из-за u16 wrap-around).
-    fn binary_search_insert(&mut self, seq: u16) -> usize {
-        // VecDeque не имеет `partition_point` на ring-форме; make_contiguous() выравнивает
-        // в один slice (O(1) если ring не wrapped, O(N) только при reset wrapped state).
-        // Для нашего N≤64 — пренебрежимо.
-        self.packets.make_contiguous();
-        self.packets
-            .as_slices()
-            .0
-            .partition_point(|p| compare_seq(p.seq, seq) < 0)
-    }
-
-    fn add(&mut self, seq: u16, pkt: OrderBookUpdate, now_ms: i64) {
-        if self.packets.is_empty() {
-            self.cache_not_empty_since_ms = now_ms;
-        }
-        let pos = self.binary_search_insert(seq);
-        self.packets.insert(pos, CachedPacket { seq, pkt });
-    }
-
-    fn drop_oldest(&mut self) {
-        self.packets.pop_front();
-        if self.packets.is_empty() {
-            self.cache_not_empty_since_ms = 0;
-        }
-    }
-
-    fn check_cache_empty(&mut self) {
-        if self.packets.is_empty() {
-            self.cache_not_empty_since_ms = 0;
-        }
-    }
-
-    /// `MoonProtoOrderBook.pas:526-530 IsExpired`.
-    fn is_expired(&self, now_ms: i64) -> bool {
-        self.cache_not_empty_since_ms > 0
-            && (now_ms - self.cache_not_empty_since_ms).abs() > BOOK_EXPIRED_TIMEOUT
-    }
-
-    /// `MoonProtoOrderBook.pas:532-539 TryRequestFull` — true если надо отправить запрос.
-    fn try_request_full(&mut self, now_ms: i64) -> bool {
-        if !self.corrupted {
-            return false;
-        }
-        if (now_ms - self.last_full_request_ms).abs() <= BOOK_FULL_REQUEST_THROTTLE {
-            return false;
-        }
-        self.last_full_request_ms = now_ms;
-        true
-    }
-
-    fn clear(&mut self) {
-        self.packets.clear();
-        self.cache_not_empty_since_ms = 0;
-    }
-}
-
-/// Результат применения пакета.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ApplyResult {
-    /// Пакет применён немедленно (seq == expected).
-    Applied,
-    /// Пакет применён из кэша (после применения младших seq).
-    AppliedFromCache,
-    /// Пакет положен в кэш (seq > expected, ждём промежуточных).
-    Cached,
-    /// Пакет stale (seq < expected) — отброшен.
-    Stale,
-}
-
-/// Событие для потребителя.
-#[derive(Debug, Clone)]
-pub enum OrderBookEvent {
-    /// Пакет применён; `OrderBooks` уже обновил applied read model.
-    Apply {
-        market_index: u16,
-        book_kind: u8,
-        is_full: bool,
-        seq: u16,
-        buys: Vec<crate::commands::order_book::OrderLevel>,
-        sells: Vec<crate::commands::order_book::OrderLevel>,
-    },
-    /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
-    /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
-    /// before invoking application callbacks.
-    RequestFullNeeded { market_index: u16, book_kind: u8 },
-    /// Пакет проигнорирован (stale / no full yet / cache).
-    Ignored {
-        market_index: u16,
-        book_kind: u8,
-        seq: u16,
-        reason: ApplyResult,
-    },
-}
 
 /// Главный sync state — кэш на каждый (market_index, book_kind).
 #[derive(Debug, Clone, Default)]
@@ -498,134 +301,6 @@ impl OrderBooks {
     /// Iterate over applied current books.
     pub fn iter_books(&self) -> impl Iterator<Item = &OrderBookSnapshot> {
         self.books.values()
-    }
-}
-
-fn apply_cached_packet(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
-    scratch: &mut Vec<OrderBookLevel>,
-    key: BookKey,
-    pkt: &OrderBookUpdate,
-) {
-    if pkt.is_full {
-        apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
-    } else {
-        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells);
-    }
-}
-
-fn apply_full_book(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
-    key: BookKey,
-    seq: u16,
-    buys: &[OrderLevel],
-    sells: &[OrderLevel],
-) {
-    let book = books.entry(key).or_insert_with(|| OrderBookSnapshot {
-        market_index: key.0,
-        book_kind: key.1,
-        seq: 0,
-        buys: Vec::new(),
-        sells: Vec::new(),
-    });
-    book.seq = seq;
-    book.buys.clear();
-    book.buys
-        .extend(buys.iter().copied().map(OrderBookLevel::from));
-    book.sells.clear();
-    book.sells
-        .extend(sells.iter().copied().map(OrderBookLevel::from));
-}
-
-fn apply_diff_book(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
-    scratch: &mut Vec<OrderBookLevel>,
-    key: BookKey,
-    seq: u16,
-    buy_diff: &[OrderLevel],
-    sell_diff: &[OrderLevel],
-) {
-    let book = books.entry(key).or_insert_with(|| OrderBookSnapshot {
-        market_index: key.0,
-        book_kind: key.1,
-        seq: 0,
-        buys: Vec::new(),
-        sells: Vec::new(),
-    });
-    apply_order_book_diff_keep_zero(&mut book.buys, scratch, buy_diff, sell_diff, true);
-    apply_order_book_diff_keep_zero(&mut book.sells, scratch, sell_diff, buy_diff, false);
-    book.seq = seq;
-}
-
-fn apply_order_book_diff_keep_zero(
-    book: &mut Vec<OrderBookLevel>,
-    scratch: &mut Vec<OrderBookLevel>,
-    diff: &[OrderLevel],
-    shrink: &[OrderLevel],
-    is_buy_book: bool,
-) {
-    if diff.is_empty() {
-        return;
-    }
-
-    scratch.clear();
-    scratch.extend_from_slice(book);
-    book.clear();
-    book.reserve(scratch.len() + diff.len());
-    let mut k = 0usize;
-
-    for diff_level in diff {
-        let diff_rate = diff_level.rate as f64;
-
-        if is_buy_book {
-            while k < scratch.len() && scratch[k].rate > diff_rate + EPS_M {
-                book.push(scratch[k]);
-                k += 1;
-            }
-        } else {
-            while k < scratch.len() && scratch[k].rate < diff_rate - EPS_M {
-                book.push(scratch[k]);
-                k += 1;
-            }
-        }
-
-        if (diff_level.quantity as f64) > EPS {
-            book.push((*diff_level).into());
-        }
-
-        if k < scratch.len() && (scratch[k].rate - diff_rate).abs() < EPS_M {
-            k += 1;
-        }
-    }
-
-    while k < scratch.len() {
-        book.push(scratch[k]);
-        k += 1;
-    }
-
-    let mut cut_price = -1.0;
-    for level in shrink {
-        let rate = level.rate as f64;
-        if rate > EPS_M {
-            cut_price = rate;
-            break;
-        }
-    }
-
-    if cut_price > 0.0 {
-        let mut cut = 0usize;
-        if is_buy_book {
-            while cut < book.len() && book[cut].rate >= cut_price {
-                cut += 1;
-            }
-        } else {
-            while cut < book.len() && book[cut].rate <= cut_price {
-                cut += 1;
-            }
-        }
-        if cut > 0 {
-            book.drain(0..cut);
-        }
     }
 }
 

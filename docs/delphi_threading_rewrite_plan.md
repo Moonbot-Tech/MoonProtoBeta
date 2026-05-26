@@ -8979,3 +8979,28 @@ Verification:
 - `cargo test trades --lib --quiet` OK: 67 passed.
 - `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `OrderBooks` types/cache/apply split
+
+Done:
+
+- Split `state/order_books.rs` into a thin owner plus:
+  - `order_books/types.rs` for public/read-model types and events;
+  - `order_books/cache.rs` for `TOrderBookCache`-like out-of-order storage,
+    expiration, and full-request throttle;
+  - `order_books/apply.rs` for full/diff apply into the visible book model.
+- Kept public type paths stable through re-exports from `state::order_books`.
+- This is a readability/publication split only. No `TBookKind` ordinals,
+  cache sort order, cache expiration, full-request throttle, first-diff rule,
+  corrupted-mode degraded apply, diff merge/zero-quantity delete, shrink cut,
+  top-of-book API, or clear/reset behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test order_book --lib --quiet` OK: 20 passed.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 22.66s`, `ParseFailed=0`,
+  retained LastPrice/trades/derived present, orderbook full+diff applied,
+  reader max 590us, writer CPU max 134us, `GetMarketsList` apply total 2525us.
