@@ -8,7 +8,7 @@ Create one `Client` per server.
 
 ## Configuration
 
-Use `ClientConfig::new` for the common base-transport setup:
+Use the imported MoonBot key plus the endpoint/settings selected by the user:
 
 ```rust
 let keys = moonproto::import_key(KEY_B64).expect("invalid key");
@@ -17,8 +17,26 @@ let cfg = moonproto::ClientConfig::new(
     3000,
     keys.master_key,
     keys.mac_key,
-);
+)
+.with_transport_mode(mask_ver);
 let mut client = moonproto::Client::new(cfg);
+```
+
+For UI/config screens, call `moonproto::parse_key_info(KEY_B64)`. It returns the
+same cryptographic keys plus `display_name` equivalent to MoonBot's
+`rnd + "  " + FormatDateTime("dd.mm.yyyy hh:nn", Date)` and optional suggested
+endpoint/transport settings from current key exports. Those suggestions are not
+mandatory: applications can pre-fill controls from them and then connect with
+whatever host, port, and mode the user selected.
+
+```rust
+let info = moonproto::parse_key_info(KEY_B64).expect("invalid key");
+ui.key_label = info.display_name;
+if let Some(network) = info.network {
+    ui.host = network.address.map(|ip| ip.to_string()).unwrap_or_default();
+    ui.port = network.port;
+    ui.mask_ver = network.mask_ver;
+}
 ```
 
 `ClientConfig::new` sets:

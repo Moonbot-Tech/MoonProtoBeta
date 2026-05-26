@@ -15,6 +15,7 @@
 //! ```text
 //! server = 127.0.0.1:3000
 //! key = <exported MoonBot key>
+//! # mask_ver = 0
 //! allow_mutation = true
 //! market = BTCUSDT
 //! strategy_field = Comment
@@ -67,7 +68,7 @@ use moonproto::state::{
     OrderBookKind, SettingsEvent, StratEvent, TradesEvent,
 };
 use moonproto::{
-    connect_and_init, import_key, Client, ClientConfig, ConnectConfig, EventDispatcher,
+    connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
     EventDispatcherSnapshot, ImportedKeys, InitConfig, LifecycleEvent,
 };
 
@@ -120,6 +121,7 @@ struct FireConfig {
     path: PathBuf,
     host: String,
     port: u16,
+    mask_ver: u8,
     key_b64: String,
     allow_mutation: bool,
     market: String,
@@ -168,13 +170,35 @@ impl FireConfig {
             );
         }
 
-        let server = take_required(&values, "server");
-        let (host, port) = parse_server(&server);
         let key_b64 = values
             .get("key")
             .or_else(|| values.get("moonproto_key"))
             .unwrap_or_else(|| panic!("FireTest config missing `key`"))
             .to_string();
+        let key_info = parse_key_info(&key_b64)
+            .unwrap_or_else(|| panic!("invalid MoonProto key in FireTest config"));
+        let (host, port) = match values.get("server").filter(|s| !s.trim().is_empty()) {
+            Some(server) => parse_server(server),
+            None => {
+                let network = key_info.network.unwrap_or_else(|| {
+                    panic!("FireTest config missing `server`, and this MoonBot key does not carry endpoint metadata")
+                });
+                let address = network.address.unwrap_or_else(|| {
+                    panic!("FireTest config missing `server`, and this MoonBot key has no active IP address")
+                });
+                (address.to_string(), network.port)
+            }
+        };
+        let mask_ver = values
+            .get("mask_ver")
+            .or_else(|| values.get("transport_mode"))
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                s.parse::<u8>()
+                    .unwrap_or_else(|_| panic!("bad mask_ver: {s}"))
+            })
+            .or_else(|| key_info.network.map(|network| network.mask_ver))
+            .unwrap_or(0);
         let allow_mutation = parse_bool(
             values
                 .get("allow_mutation")
@@ -225,6 +249,7 @@ impl FireConfig {
             path,
             host,
             port,
+            mask_ver,
             key_b64,
             allow_mutation,
             market,
@@ -238,13 +263,6 @@ impl FireConfig {
             reconnect_timeout,
         }
     }
-}
-
-fn take_required(values: &HashMap<String, String>, key: &str) -> String {
-    values
-        .get(key)
-        .unwrap_or_else(|| panic!("FireTest config missing `{key}`"))
-        .to_string()
 }
 
 fn strip_quotes(value: &str) -> &str {
@@ -532,6 +550,7 @@ impl Session {
         }));
         let mut client = Client::new(
             ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
+                .with_transport_mode(cfg.mask_ver)
                 .with_client_id(rand::random()),
         );
         client.reset_err_emu_diagnostics();
@@ -3015,14 +3034,17 @@ fn is_usd_like_base(base_currency_name: Option<&str>) -> bool {
 fn fire_test_active_library_health() {
     let cfg = FireConfig::load_required();
     let profile = FireProfile::from_env();
-    let keys = import_key(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+    let key_info = parse_key_info(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
+    let keys = key_info.keys;
 
     println!(
-        "FIRETEST config: profile={} path={} server={}:{} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
+        "FIRETEST config: profile={} path={} key={} server={}:{} mask_ver={} market={} strategy_field={} strategy_id={:?} err_emu={} high_loss_err_emu={} connect_timeout={:?} candles_timeout={:?} high_loss_timeout={:?}",
         profile.as_str(),
         cfg.path.display(),
+        key_info.display_name,
         cfg.host,
         cfg.port,
+        cfg.mask_ver,
         cfg.market,
         cfg.strategy_field,
         cfg.strategy_id,

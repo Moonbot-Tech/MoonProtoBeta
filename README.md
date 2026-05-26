@@ -25,8 +25,10 @@ cargo run --release --example trading_flow -- "<exported MoonBot key>" "HOST:POR
 ```
 
 `<exported MoonBot key>` is the base64 key string exported by MoonBot and parsed
-by `moonproto::import_key`. `HOST:PORT` is the MoonBot UDP endpoint, for example
-`127.0.0.1:3000`.
+by `moonproto::import_key`. Current MoonBot exports can also include suggested
+UDP endpoint and transport mode; UI code can read those suggestions with
+`moonproto::parse_key_info`, then still let the user edit host, port, and mode
+before connecting.
 
 For live tests, put the config outside this crate repo. By default FireTest reads
 `../moonproto.firetest.conf` relative to the `moonproto/` directory. You can
@@ -37,6 +39,7 @@ root next to the `moonproto/` directory, not inside the public crate.
 ```text
 server = HOST:PORT
 key = <exported MoonBot key>
+# mask_ver = 0
 ```
 
 This config is only for live tests. A normal application can read the same

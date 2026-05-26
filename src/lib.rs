@@ -148,6 +148,9 @@ pub use events::{
     Event, EventDispatcher, EventDispatcherSnapshot, MissingOrderStatusRequest,
     StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
-pub use key_import::{import_key, ImportedKeys};
+pub use key_import::{
+    import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,
+    ImportedKeys, ImportedNetworkConfig,
+};
 pub use protocol::Command;
 pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};
