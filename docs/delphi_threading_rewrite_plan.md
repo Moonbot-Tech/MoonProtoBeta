@@ -6933,6 +6933,23 @@ Verification:
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 
+### 2026-05-26 - `client.rs` diagnostic/status API split
+
+Done:
+
+- Moved transport/domain status getters, protocol counters, diagnostic UI
+  getters, BpsCounter accessors, and log throttle into
+  `src/client/diagnostic_api.rs`.
+- Public getter paths remain inherent `Client` methods.
+- `track_sent` / `track_recv` are crate-visible only because runtime and
+  `ProtocolCore` still update the same counters.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
