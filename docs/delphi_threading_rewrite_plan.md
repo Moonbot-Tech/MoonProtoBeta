@@ -6556,6 +6556,13 @@ Verification:
   malformed market, especially `TDeepPricePack` and `TWallData` partial
   `AStream.Read` effects, because Delphi may depend on local packed-record
   bytes that Rust must not invent as initialized data.
+- Follow-up re-check: `ReadStringFromStream` used by candle market names is also
+  `Read`, not `ReadBuffer`; a complete length with a short UTF-16 body depends on
+  Delphi `String` storage after `SetLength`. Partial candle records read into
+  local packed records, and partial wall data writes directly over existing
+  `TMarket` wall fields. Those corrupt tails are state/stale-memory dependent,
+  so the current Rust partial parser intentionally keeps only fully read market
+  entries and leaves current-market corrupt tails as an open safe-policy issue.
 - Recorded `spec_pipeline/work/хуйня.md §X.184`.
 
 Verification:
