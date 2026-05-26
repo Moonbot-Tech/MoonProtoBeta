@@ -18,6 +18,11 @@
 //! - err_emu_pct: optional client-side incoming packet drop percent, default 0.
 //! - err_emu_phase: `post_init` (default) enables loss after both clients finish init;
 //!   `pre_connect` enables loss before handshake to stress authorization/reconnect.
+//!
+//! Diagnostic-only: this tool intentionally owns low-level
+//! `Client + EventDispatcher + ClientSender` so it can measure protocol
+//! recovery, pending slots, raw candles aggregation, and reconnect phases.
+//! Regular application code should use `MoonClient`.
 
 use std::collections::{HashMap, VecDeque};
 use std::env;

@@ -38,6 +38,12 @@
 //! Strategy snapshots are also dumped as raw `TStratSnapshot.Data` files under
 //! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
 //! checks can run against the exact same live payload bytes.
+//!
+//! This is a diagnostic/protocol health test, not application example code. It
+//! intentionally owns `Client + EventDispatcher` directly so it can inspect
+//! protocol metrics, err_emu counters, raw strategy payloads, reconnect phases,
+//! and destructive order/settings scenarios. Regular applications should use
+//! `MoonClient`.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

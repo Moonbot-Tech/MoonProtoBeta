@@ -5,6 +5,10 @@
 ///   cargo run --example loss_logger --release -- <key_b64> [ip:port] [logfile.txt]
 ///
 /// Лог: каждое событие с timestamp в `logfile.txt` (по умолчанию `loss_logger.log`).
+///
+/// Diagnostic-only: this tool intentionally owns low-level
+/// `Client + EventDispatcher` to inspect gap/loss/recovery internals. Regular
+/// application code should use `MoonClient`.
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
