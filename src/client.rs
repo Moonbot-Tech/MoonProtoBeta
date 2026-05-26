@@ -16,7 +16,7 @@ use crate::api_pending::ApiPending;
 use crate::commands::candles::{
     parse_coin_card_candles_response, parse_request_candles_data_response,
     parse_request_candles_data_response_partial_like_delphi, CandlesAggregator, CandlesChunkResult,
-    DeepPrice, RequestCandlesMarket,
+    DeepPrice,
 };
 use crate::commands::engine_api::{
     parse_api_expiration_time_response, parse_auth_check_response, parse_base_check_response,
@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 mod app_dispatch;
 mod bps;
+mod candles;
 mod clock;
 mod config;
 mod diagnostics;
@@ -53,6 +54,7 @@ mod subscriptions;
 
 pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;
+pub use candles::MergedCandles;
 pub use clock::set_ntp_offset;
 pub use config::{
     AuthStatus, ClientConfig, EngineRequestError, LifecycleEvent, LifecycleFn, RefreshConfig,
@@ -76,6 +78,7 @@ use app_dispatch::{
     metric_api_method, run_dispatcher_worker, wait_dispatcher_worker_barrier, DispatchSink,
     DispatcherEventFn, DispatcherWorkItem, RawAppEvent, RunMode, StateAppEvent,
 };
+pub(crate) use candles::{EngineResponseMeta, PartialCandles};
 pub(crate) use clock::{
     current_utc_hour_slot, delphi_now, delphi_now_raw, get_server_time_delta_global,
     set_server_time_delta_global,
@@ -2474,40 +2477,6 @@ impl ProtocolCore<'_> {
             self.push_tmp_send_item(wire_cmd, wire_data, accounted_size);
         }
     }
-}
-
-// =============================================================================
-//  CandlesAggregator async API
-// =============================================================================
-
-/// Merged result returned by `api_request_candles_data_async`.
-///
-/// The server answers `RequestCandlesData` with several `EngineResponse` chunks
-/// sharing one `request_uid`. The library aggregates those chunks through
-/// [`CandlesAggregator`] and returns both the merged zlib stream and parsed
-/// market entries.
-#[derive(Debug, Clone)]
-pub struct MergedCandles {
-    /// Request UID used to correlate the chunked response.
-    pub uid: u64,
-    /// Merged zlib stream from Delphi `TMarkets.StoreCandlesToZip`.
-    pub zipped_data: Vec<u8>,
-    /// Parsed market entries from the zipped stream.
-    pub markets: Vec<RequestCandlesMarket>,
-}
-
-/// Внутреннее состояние частично собранного набора свечей.
-struct PartialCandles {
-    aggregator: CandlesAggregator,
-    /// Sender который будет уведомлён когда aggregator вернёт merged.
-    sender: mpsc::Sender<MergedCandles>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EngineResponseMeta {
-    request_uid: u64,
-    method: EngineMethod,
-    success: bool,
 }
 
 /// Sent Sliced datagram awaiting ACK (matches TMoonProtoSlicedData in Sending list)
