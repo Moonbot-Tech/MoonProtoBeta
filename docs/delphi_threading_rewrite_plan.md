@@ -9028,3 +9028,27 @@ Verification:
 - `cargo test strats --lib --quiet` OK: 24 passed, 1 ignored.
 - `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `RequestCandlesData` parser split
+
+Done:
+
+- Moved chunked `emk_RequestCandlesData` zlib stream parsing from
+  `commands/candles.rs` into `commands/candles/request_parser.rs`.
+- Kept `DeepPrice`, packed wire structs, `GetCoinCardCandles` parser, local
+  timezone helpers, and public parser paths stable through re-exports.
+- This is a readability/publication split only. No version gate, legacy count
+  handling, local-time shift rounding, strict market-size precheck, full candle
+  count validation, partial parser stop/zero-tail wall behavior, UTF-16 string
+  read, packed record layout, or malformed-tail tests changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test candles --lib --quiet` OK: 27 passed.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK on current HEAD: `FIRETEST_QUICK_PASS after 25.61s`,
+  `ParseFailed=0`, retained LastPrice/trades/derived present, orderbook
+  full+diff applied, reader max 746us, writer CPU max 145us,
+  `GetMarketsList` apply total 2469us.
