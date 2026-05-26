@@ -8625,3 +8625,25 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 27.08s`,
   `ParseFailed=0`, err_emu actual drop `9.80%`, reader max `736us`,
   writer CPU max `153us`, `GetMarketsList apply=2350us`.
+
+### 2026-05-26 - `ProtocolCore` connect/reconnect split
+
+Done:
+
+- Moved handshake/reconnect helpers from `client/protocol_send.rs` into
+  `client/protocol_connect.rs`: Hello, HelloAgain, reconnect/offline/dead-zone
+  checks, and force-disconnect handling.
+- Kept raw send helpers in `protocol_send.rs`; connect helpers still call the
+  same `send_command`/`send_command_raw` methods in the same protocol positions.
+- This is a readability/publication split only. No token increment, HelloAgain
+  encryption fallback, reconnect timing, offline flag, dead-zone gate,
+  LogOff/full-reset branch, or socket clearing behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.73s`,
+  `ParseFailed=0`, err_emu actual drop `10.91%`, reader max `739us`,
+  writer CPU max `160us`, `GetMarketsList apply=2516us`.
