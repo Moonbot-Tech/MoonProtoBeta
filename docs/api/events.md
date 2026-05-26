@@ -158,28 +158,21 @@ The dispatcher updates these states automatically when relevant packets arrive.
 
 ## Queued One-Shot Events
 
-One-shot helpers such as `Client::request_balance`,
-`Client::request_client_settings`, `Client::request_order_snapshot`,
-`Client::request_balance_snapshot`, and `Client::run_until_response` keep the
-UDP loop running while they wait. Their active-library parsing/state apply runs
-through the dispatcher worker, and the helper returns only after queued work up
-to the observed response/event has passed a FIFO barrier. If unrelated packets
-arrive during that wait, their state changes are applied immediately and the
-produced `Event` values are stored in the dispatcher:
+`MoonClient::request_*` helpers keep the runtime pumping while they wait and
+return after the observed response/event has been applied to Active Lib state.
+Unrelated packets received during that wait are still applied and later appear
+through the normal event receiver:
 
 ```rust
-let settings = client.request_client_settings(&mut dispatcher, timeout)?;
-for event in dispatcher.take_queued_events() {
+let settings = client.request_client_settings(timeout)?;
+for event in client.drain_events() {
     handle_event(event);
 }
 ```
 
-Use `queued_events()` for a borrowed view, `queued_event_count()` and
-`queued_event_max_count()` for diagnostics, `take_queued_events()` to drain, and
-`clear_queued_events()` to discard. The queue has no fixed capacity and no drop
-policy; if it grows, diagnostics report that fact instead of losing events.
-`MoonClient` publishes runtime events through its event receiver. Low-level
-custom runtimes may also deliver events directly instead of using this queue.
+Low-level custom runtimes that own `Client + EventDispatcher` directly can use
+the dispatcher's queued-event helpers instead of the `MoonClient` event
+receiver.
 
 ## Channel Behavior
 

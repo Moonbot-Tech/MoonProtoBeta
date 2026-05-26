@@ -57,14 +57,11 @@ delivered by the dispatcher.
 
 ## Getting A Fresh Snapshot
 
-Use `Client::request_balance_snapshot` when the application needs a fresh full
-snapshot before continuing:
+Use `MoonClient::request_balance_snapshot` when the application needs a fresh
+full snapshot before continuing:
 
 ```rust
-let balances = client.request_balance_snapshot(
-    &mut dispatcher,
-    std::time::Duration::from_secs(15),
-)?;
+let balances = client.request_balance_snapshot(std::time::Duration::from_secs(15))?;
 
 println!("balance rows={}", balances.len());
 ```

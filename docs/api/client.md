@@ -394,58 +394,23 @@ tracked order state.
 
 ## Engine API Requests
 
-For common one-shot reads, prefer typed request helpers:
+For common one-shot reads, use `MoonClient` request helpers. The runtime keeps
+the UDP loop alive while the caller waits for the request timeout:
 
 ```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
-let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
-let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
-let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
+let qty = client.request_balance("USDT", Duration::from_secs(12))?;
+let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
+let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
+let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
+let candles = client.request_candles_data(Duration::from_secs(30))?;
 ```
 
-These helpers send the request, keep the UDP loop running through
-`EventDispatcher`, validate the server response, and parse the payload. They
-return `EngineRequestError` for timeout, disconnect, server error, or malformed
-payload.
+These helpers validate the server response and parse the payload. Engine API
+failures are returned as `MoonClientError::EngineRequest`.
 
-If packets from active subscriptions arrive while a one-shot helper is waiting,
-the helper still applies them to `EventDispatcher` and stores the produced
-notifications in `dispatcher.queued_events()`. Drain them after the helper when
-the UI needs every event:
-
-```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
-for event in dispatcher.take_queued_events() {
-    handle_event(event);
-}
-```
-
-Lower-level `Client::api_*` methods still return
-`std::sync::mpsc::Receiver<EngineResponse>` for custom async flows:
-
-```rust
-let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-```
-
-Do not call `rx.recv_timeout(...)` on the same thread that owns the `Client`.
-The response is delivered only while the client loop is running. Direct
-`recv_timeout` is correct only when another thread is already running the
-client.
-While the client loop is active, registered Engine API responses are delivered
-to their receiver by the active dispatcher worker after the same payload has
-updated `EventDispatcher` state. The low-level raw `run` path still dispatches
-pending receivers from receive-side DataReadInt because it intentionally has no
-active dispatcher worker.
-`run_until_response` uses the same dispatcher-worker queued-event behavior as
-typed one-shot helpers and returns only after the worker has processed all
-earlier queued domain work.
-
-Use `request_engine_response` when a custom Engine API payload needs
-caller-scoped timeout cleanup. Raw `api_*` receivers keep their pending slot
-until the response arrives, a reconnect clears the session, or the same UID is
-registered again.
+Low-level `Client::api_*` receivers remain only for custom runtimes and
+diagnostic tools. A normal application should not wait on raw receivers from the
+UI thread.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Use `request_candles_data` for the common one-shot flow:
@@ -455,10 +420,7 @@ while the client loop is active; consumed chunks do not produce raw callback or
 dispatcher events.
 
 ```rust
-let merged = client.request_candles_data(
-    &mut dispatcher,
-    Duration::from_secs(30),
-)?;
+let merged = client.request_candles_data(Duration::from_secs(30))?;
 println!("markets={}", merged.markets.len());
 ```
 
@@ -468,10 +430,7 @@ The UI settings channel is not an Engine API request, so it has no pending
 `Receiver`. Use `request_client_settings` for the common one-shot flow:
 
 ```rust
-let settings = client.request_client_settings(
-    &mut dispatcher,
-    Duration::from_secs(12),
-)?;
+let settings = client.request_client_settings(Duration::from_secs(12))?;
 println!("xSell={}", settings.x_sell);
 ```
 
@@ -490,32 +449,25 @@ versions) instead of being reset to Rust defaults.
 
 ## Order Snapshot Request
 
-Use `request_order_snapshot` when the application needs the current active
+Use `MoonClient::request_order_snapshot` when the application needs the current active
 orders as a one-shot operation:
 
 ```rust
-let orders = client.request_order_snapshot(
-    &mut dispatcher,
-    Duration::from_secs(12),
-)?;
+let orders = client.request_order_snapshot(Duration::from_secs(12))?;
 println!("active orders={}", orders.len());
 ```
 
-The helper sends `TAllStatusesReq`, keeps the UDP loop running, applies the
-snapshot into `EventDispatcher::orders()`, and waits until the dispatcher has
-finished Delphi `CleanupMissingWorkers` follow-up requests for orders absent
-from the fresh snapshot.
+The helper requests the fresh snapshot, applies it to runtime `Orders`, and
+waits until the dispatcher has finished Delphi missing-worker follow-up requests
+for orders absent from the fresh snapshot.
 
 ## Balance Snapshot Request
 
-Use `request_balance_snapshot` when the application needs a fresh full balance
+Use `MoonClient::request_balance_snapshot` when the application needs a fresh full balance
 read model from the Balance channel:
 
 ```rust
-let balances = client.request_balance_snapshot(
-    &mut dispatcher,
-    Duration::from_secs(15),
-)?;
+let balances = client.request_balance_snapshot(Duration::from_secs(15))?;
 println!("balance markets={}", balances.len());
 println!("btc total={}", balances.global.btc_balance_total);
 ```

@@ -4,9 +4,10 @@ Engine API is the request/response surface for one-shot server operations:
 health checks, account reads, market list refreshes, candles, orderbook
 snapshots, transfer assets, and account settings.
 
-Use typed `Client::request_*` helpers for common one-shot reads. Use
-`Client::api_*` wrappers when a custom asynchronous flow needs the raw
-`EngineResponse` receiver.
+Use typed `MoonClient::request_*` helpers for common one-shot reads. The runtime
+keeps pumping MoonProto while the caller waits for the response timeout. Use
+low-level `Client::api_*` wrappers only when a custom asynchronous flow needs
+the raw `EngineResponse` receiver.
 
 `EngineMethod` is the public method identifier type. Known values are constants
 (`EngineMethod::BaseCheck`, `EngineMethod::RequestCandlesData`, ...), and
@@ -22,19 +23,16 @@ this default when `InitConfig::step_timeout` is `None`.
 ```rust
 use std::time::Duration;
 
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
-let api_expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
-let transfer_assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
-let candles = client.request_candles_data(&mut dispatcher, Duration::from_secs(30))?;
+let qty = client.request_balance("USDT", Duration::from_secs(12))?;
+let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
+let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
+let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
+let candles = client.request_candles_data(Duration::from_secs(30))?;
 ```
 
-The one-shot low-level helpers keep the UDP loop alive internally, validate
-`EngineResponse::success`, and parse the method-specific payload. They return
-`EngineRequestError`.
-Any other events produced during that wait are queued in
-`EventDispatcher::queued_events()`; call `take_queued_events()` after the helper
-when the application has live subscriptions and needs the notifications.
+The one-shot helpers validate `EngineResponse::success` and parse the
+method-specific payload. They return `MoonClientError`; Engine API failures are
+wrapped as `MoonClientError::EngineRequest`.
 
 For custom flows, use the lower-level receiver path:
 
@@ -97,7 +95,7 @@ typed subscription gate.
 `request_balance(currency)` returns the current quantity for one currency:
 
 ```rust
-let qty = client.request_balance(&mut dispatcher, "USDT", Duration::from_secs(12))?;
+let qty = client.request_balance("USDT", Duration::from_secs(12))?;
 println!("USDT balance={qty}");
 ```
 
@@ -106,7 +104,7 @@ println!("USDT balance={qty}");
 `request_hedge_mode()` returns the current hedge-mode flag:
 
 ```rust
-let hedge_mode = client.request_hedge_mode(&mut dispatcher, Duration::from_secs(12))?;
+let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 println!("hedge_mode={hedge_mode}");
 ```
 
@@ -114,7 +112,7 @@ println!("hedge_mode={hedge_mode}");
 exposes `system_time()`, `unix_seconds()`, and `days_until(...)` helpers:
 
 ```rust
-let expiration = client.request_api_expiration_time(&mut dispatcher, Duration::from_secs(12))?;
+let expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
 if let Some(unix) = expiration.unix_seconds() {
     println!("API key expires at unix_seconds={unix}");
 }
@@ -125,7 +123,7 @@ For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
 `Receiver<EngineResponse>`.
 
 `request_candles_data` is the high-level API for the full candles snapshot
-request. It registers the chunk aggregator, keeps the client loop running, and
+request. It registers the chunk aggregator, keeps the runtime pumping, and
 returns one `MergedCandles` value after all chunks are merged.
 Use `api_request_candles_data_async` only for custom async flows that already
 own a running client loop.
@@ -143,7 +141,7 @@ fire-and-forget notification. Regular applications should use
 `request_transfer_assets`:
 
 ```rust
-let assets = client.request_transfer_assets(&mut dispatcher, 0, Duration::from_secs(12))?;
+let assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
 for asset in assets {
     println!("{} transferable={} total={}", asset.currency, asset.amount, asset.total);
 }

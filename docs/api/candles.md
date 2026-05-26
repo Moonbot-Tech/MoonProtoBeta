@@ -73,7 +73,7 @@ chunks. The library aggregates chunks, parses the merged stream, and returns one
 ```rust
 use std::time::Duration;
 
-match client.request_candles_data(&mut dispatcher, Duration::from_secs(30)) {
+match client.request_candles_data(Duration::from_secs(30)) {
     Ok(merged) => {
         // merged.uid         — internal request id
         // merged.zipped_data — original compressed stream kept for diagnostics
@@ -86,9 +86,9 @@ match client.request_candles_data(&mut dispatcher, Duration::from_secs(30)) {
 }
 ```
 
-The helper registers the chunk aggregator, keeps the UDP loop running through
-short dispatcher ticks, and removes the pending candles slot if the caller's
-timeout expires before the final chunk.
+The helper registers the chunk aggregator, keeps the runtime pumping MoonProto,
+and removes the pending candles slot if the caller's timeout expires before the
+final chunk.
 
 When the client loop is already active, registered `RequestCandlesData` chunks
 are aggregated from the receive-side path. Completed streams signal the

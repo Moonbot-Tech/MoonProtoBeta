@@ -14,6 +14,12 @@ const ACTIVE_RUNTIME_TICK: Duration = Duration::from_millis(20);
 pub enum MoonClientError {
     /// Connect/init failed before the runtime became usable.
     Connect(ConnectError),
+    /// A one-shot runtime request timed out.
+    RequestTimeout,
+    /// A one-shot runtime request channel was closed.
+    RequestDisconnected,
+    /// Engine API helper failed.
+    EngineRequest(EngineRequestError),
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
 }
@@ -22,6 +28,9 @@ impl std::fmt::Display for MoonClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect(err) => write!(f, "{err}"),
+            Self::RequestTimeout => write!(f, "MoonProto request timed out"),
+            Self::RequestDisconnected => write!(f, "MoonProto request channel disconnected"),
+            Self::EngineRequest(err) => write!(f, "{err}"),
             Self::RuntimeStopped => write!(f, "MoonProto runtime is stopped"),
         }
     }
@@ -31,6 +40,8 @@ impl std::error::Error for MoonClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Connect(err) => Some(err),
+            Self::EngineRequest(err) => Some(err),
+            Self::RequestTimeout | Self::RequestDisconnected => None,
             Self::RuntimeStopped => None,
         }
     }
@@ -39,6 +50,21 @@ impl std::error::Error for MoonClientError {
 impl From<ConnectError> for MoonClientError {
     fn from(err: ConnectError) -> Self {
         Self::Connect(err)
+    }
+}
+
+impl From<mpsc::RecvTimeoutError> for MoonClientError {
+    fn from(err: mpsc::RecvTimeoutError) -> Self {
+        match err {
+            mpsc::RecvTimeoutError::Timeout => Self::RequestTimeout,
+            mpsc::RecvTimeoutError::Disconnected => Self::RequestDisconnected,
+        }
+    }
+}
+
+impl From<EngineRequestError> for MoonClientError {
+    fn from(err: EngineRequestError) -> Self {
+        Self::EngineRequest(err)
     }
 }
 
@@ -188,9 +214,110 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
     }
 
+    /// Request a fresh full balance snapshot and return the applied read model.
+    pub fn request_balance_snapshot(
+        &self,
+        timeout: Duration,
+    ) -> Result<crate::state::BalancesState, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::BalanceSnapshot { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::BalanceSnapshot(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
+    }
+
+    /// Request a fresh order snapshot and return the applied order list.
+    pub fn request_order_snapshot(
+        &self,
+        timeout: Duration,
+    ) -> Result<Vec<crate::state::Order>, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::OrderSnapshot { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::OrderSnapshot(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
+    }
+
+    /// Request one asset balance through Engine API.
+    pub fn request_balance(
+        &self,
+        asset: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<f64, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::Balance {
+            asset: asset.into(),
+            timeout,
+        })
+        .and_then(|reply| match reply {
+            RuntimeReply::Balance(result) => result.map_err(MoonClientError::from),
+            _ => Err(MoonClientError::RuntimeStopped),
+        })
+    }
+
+    /// Request hedge-mode state through Engine API.
+    pub fn request_hedge_mode(&self, timeout: Duration) -> Result<bool, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::HedgeMode { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::HedgeMode(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
+    }
+
+    /// Request API-key expiration metadata through Engine API.
+    pub fn request_api_expiration_time(
+        &self,
+        timeout: Duration,
+    ) -> Result<crate::commands::engine_api::ApiExpirationTime, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::ApiExpirationTime { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::ApiExpirationTime(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
+    }
+
+    /// Request transferable assets through Engine API.
+    pub fn request_transfer_assets(
+        &self,
+        balance_type: u8,
+        timeout: Duration,
+    ) -> Result<Vec<crate::commands::engine_api::TransferAsset>, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::TransferAssets {
+            balance_type,
+            timeout,
+        })
+        .and_then(|reply| match reply {
+            RuntimeReply::TransferAssets(result) => result.map_err(MoonClientError::from),
+            _ => Err(MoonClientError::RuntimeStopped),
+        })
+    }
+
+    /// Request chunked candles and return the merged response.
+    pub fn request_candles_data(
+        &self,
+        timeout: Duration,
+    ) -> Result<MergedCandles, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::CandlesData { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::CandlesData(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
+    }
+
     /// Request a fresh UI/settings snapshot through the active runtime.
     pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
+    }
+
+    /// Request the current UI/settings snapshot and return the applied value.
+    pub fn request_client_settings(
+        &self,
+        timeout: Duration,
+    ) -> Result<crate::commands::ui::ClientSettingsCommand, MoonClientError> {
+        self.send_request(RuntimeCommandRequest::ClientSettings { timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::ClientSettings(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
     }
 
     /// Set the market-maker orders subscription flag.
@@ -305,6 +432,17 @@ impl MoonClient {
                 cmd: Box::new(cmd),
                 reply: tx,
             })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
+    fn send_request(
+        &self,
+        request: RuntimeCommandRequest,
+    ) -> Result<RuntimeReply, MoonClientError> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(RuntimeCommand::Request { request, reply: tx })
             .map_err(|_| MoonClientError::RuntimeStopped)?;
         rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
     }
@@ -426,10 +564,36 @@ enum RuntimeCommand {
         cmd: Box<RuntimeCommand>,
         reply: mpsc::Sender<usize>,
     },
+    Request {
+        request: RuntimeCommandRequest,
+        reply: mpsc::Sender<RuntimeReply>,
+    },
     OrderAction {
         kind: RuntimeCommandKind,
         reply: mpsc::Sender<bool>,
     },
+}
+
+enum RuntimeCommandRequest {
+    OrderSnapshot { timeout: Duration },
+    BalanceSnapshot { timeout: Duration },
+    Balance { asset: String, timeout: Duration },
+    HedgeMode { timeout: Duration },
+    ApiExpirationTime { timeout: Duration },
+    TransferAssets { balance_type: u8, timeout: Duration },
+    CandlesData { timeout: Duration },
+    ClientSettings { timeout: Duration },
+}
+
+enum RuntimeReply {
+    OrderSnapshot(Result<Vec<crate::state::Order>, mpsc::RecvTimeoutError>),
+    BalanceSnapshot(Result<crate::state::BalancesState, mpsc::RecvTimeoutError>),
+    Balance(Result<f64, EngineRequestError>),
+    HedgeMode(Result<bool, EngineRequestError>),
+    ApiExpirationTime(Result<crate::commands::engine_api::ApiExpirationTime, EngineRequestError>),
+    TransferAssets(Result<Vec<crate::commands::engine_api::TransferAsset>, EngineRequestError>),
+    CandlesData(Result<MergedCandles, mpsc::RecvTimeoutError>),
+    ClientSettings(Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError>),
 }
 
 enum UiRuntimeCommand {
@@ -595,11 +759,66 @@ fn handle_command(
             let _ = reply.send(result);
             false
         }
+        RuntimeCommand::Request { request, reply } => {
+            let (response, changed) = handle_request_command(client, dispatcher, request);
+            let _ = reply.send(response);
+            changed
+        }
         RuntimeCommand::OrderAction { kind, reply } => {
             let result = handle_order_action(client, dispatcher, kind);
             let _ = reply.send(result);
             result
         }
+    }
+}
+
+fn handle_request_command(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    request: RuntimeCommandRequest,
+) -> (RuntimeReply, bool) {
+    match request {
+        RuntimeCommandRequest::OrderSnapshot { timeout } => (
+            RuntimeReply::OrderSnapshot(client.request_order_snapshot(dispatcher, timeout)),
+            true,
+        ),
+        RuntimeCommandRequest::BalanceSnapshot { timeout } => (
+            RuntimeReply::BalanceSnapshot(client.request_balance_snapshot(dispatcher, timeout)),
+            true,
+        ),
+        RuntimeCommandRequest::Balance { asset, timeout } => (
+            RuntimeReply::Balance(client.request_balance(dispatcher, &asset, timeout)),
+            false,
+        ),
+        RuntimeCommandRequest::HedgeMode { timeout } => (
+            RuntimeReply::HedgeMode(client.request_hedge_mode(dispatcher, timeout)),
+            false,
+        ),
+        RuntimeCommandRequest::ApiExpirationTime { timeout } => (
+            RuntimeReply::ApiExpirationTime(
+                client.request_api_expiration_time(dispatcher, timeout),
+            ),
+            false,
+        ),
+        RuntimeCommandRequest::TransferAssets {
+            balance_type,
+            timeout,
+        } => (
+            RuntimeReply::TransferAssets(client.request_transfer_assets(
+                dispatcher,
+                balance_type,
+                timeout,
+            )),
+            false,
+        ),
+        RuntimeCommandRequest::CandlesData { timeout } => (
+            RuntimeReply::CandlesData(client.request_candles_data(dispatcher, timeout)),
+            true,
+        ),
+        RuntimeCommandRequest::ClientSettings { timeout } => (
+            RuntimeReply::ClientSettings(client.request_client_settings(dispatcher, timeout)),
+            true,
+        ),
     }
 }
 
