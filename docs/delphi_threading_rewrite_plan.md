@@ -8835,3 +8835,27 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.77s`; `GetMarketsList=1`,
   `UpdateMarketsList=2`, `ParseFailed=0`, retained LastPrice/trades present,
   reader max 627us, writer CPU max 135us, `GetMarketsList` apply total 2822us.
+
+### 2026-05-26 - `MarketHistoryStore` derived split
+
+Done:
+
+- Moved retained-history derived analytics from `state/history_store.rs` into
+  `state/history_store/derived.rs`: current 5m candle maintenance,
+  derived refresh tick, candle/last-price one-pass delta accumulators, rolling
+  trade delta merge, and combined delta selection.
+- Kept append/storage/compaction ownership in `state/history_store.rs`, so
+  storage writes and derived calculations are now separate active-lib сверка
+  blocks.
+- This is a readability/publication split only. No SeqRing writes, current
+  candle publish/replace rule, candle sealing threshold, rolling volume update,
+  mini-candle compaction, derived values, or user reader API changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.34s`; retained LastPrice and
+  futures trades present, derived snapshot present, `ParseFailed=0`, reader max
+  607us, writer CPU max 130us, `GetMarketsList` apply total 2752us.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::history::DerivedDeltaSnapshot;
 
 fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {
     TradeHistoryRow { time, price, qty }
