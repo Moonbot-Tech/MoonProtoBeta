@@ -8147,3 +8147,31 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EventDispatcher` retained-history split
+
+Done:
+
+- Moved retained-history worker wiring into `events/history.rs`: handle attach/
+  clear/default-enable, reader/derived/volume getters, candle snapshot apply,
+  trade-storage scope sync, default worker creation, market-index slots, and
+  active-lib storage visibility gates.
+- Kept exact current behavior: `Candle5mRow::from_deep_price`, singular
+  `apply_candles_snapshot`, `MarketHistoryWorker::spawn(Default)`, LastPrice
+  backfill on enabling storage, server-index-first slot configuration, and
+  scoped `contains()` filtering.
+- Kept sibling module visibility through `pub(super)` only for the helpers that
+  active/API/trades dispatch already called before the split.
+- This is a readability/publication split only. No retained-history state,
+  scope behavior, worker lifecycle, stream filtering, or public API behavior
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.75s`,
+  `ParseFailed=0`, `rx_actual_drop=10.91%`, streams/API/market health OK,
+  retained futures trades `3`, reader max `724us`, writer CPU max `146us`,
+  GetMarketsList apply `2264us`.
