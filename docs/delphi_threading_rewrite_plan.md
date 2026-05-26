@@ -8768,3 +8768,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `CandlesAggregator` split
+
+Done:
+
+- Moved chunked `emk_RequestCandlesData` aggregator from `commands/candles.rs`
+  into `commands/candles/aggregator.rs`: `CandlesAggregator` and
+  `CandlesChunkResult`.
+- Kept `TDeepPrice`, `TDeepPricePack`, `StoreCandlesToZip` parsing, local
+  timezone shift, and strict/partial candle decoders in `commands/candles.rs`.
+- This is a readability/publication split only. No chunk header parse,
+  duplicate handling, merge order, reset behavior, parser bytes, or public API
+  path changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
