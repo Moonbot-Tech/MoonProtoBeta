@@ -8931,3 +8931,27 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `StrategySerializer` reader/writer split
+
+Done:
+
+- Split `commands/strategy_serializer.rs` into a thin facade plus
+  `strategy_serializer/reader.rs` and `strategy_serializer/writer.rs`.
+- Kept public parser functions, `StrategyBatchBuilder`, TypeID constants, and
+  `StrategyBatch` paths stable through re-exports.
+- Kept test-only low-level helper visibility only for the existing unit tests.
+- This is a readability/publication split only. No raw-deflate behavior,
+  dictionary order, schema TypeID gate, zero-tail scalar/string reads,
+  unknown-field skip rule, writer field order, zero-flag encoding, or empty
+  snapshot payload changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test strategy_serializer --lib --quiet` OK: 21 passed.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.50s`, `ParseFailed=0`,
+  retained LastPrice/trades/derived present, reader max 719us, writer CPU max
+  155us, `GetMarketsList` apply total 2442us.
