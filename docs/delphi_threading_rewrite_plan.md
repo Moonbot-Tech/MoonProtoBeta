@@ -6755,3 +6755,31 @@ Verification:
   parse/apply (`active_dispatch max=3347us` in this run) and, separately, a
   decision whether `run_with_dispatcher_state` itself should be optimized or
   documented as non-hot convenience API.
+
+### 2026-05-26 - Strategy snapshot CPU rerun after FireTest pump fix
+
+Measured:
+
+- Reran the ignored Rust Phase Z benchmark on the newest full FireTest raw dump:
+  `A_strat_SnapshotPartial_event_003458_epoch_585_raw_44284.bin`.
+- Payload: `44284` bytes, `761` strategies, `200` release iterations.
+- Result:
+  `parse_avg/max=3157us/4680us`,
+  `apply_cold_avg/max=2659us/3672us`,
+  `apply_warm_avg/max=1920us/2274us`.
+
+Interpretation:
+
+- The live `active_dispatch ~3ms` Strat samples are still real worker-side
+  parser/apply work, not FireTest state-callback snapshot noise.
+- Prior Delphi benchmark on a comparable `~44KB/762 strategy` payload measured
+  warm `LoadStrategiesFromStream` around `3.5ms` average, so current Rust is not
+  proven slower than Delphi here.
+- Keep this in Phase Z, not protocol recv parity: protocol `reader` and
+  `writer_cpu` are below `1ms`; the remaining decision is whether to optimize
+  worker/app-side large payload parsing further for UX margin.
+
+Verification:
+
+- `cargo test --release bench_firetest_strategy_snapshot_payload --lib -- --ignored --nocapture`
+  OK.
