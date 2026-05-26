@@ -8890,3 +8890,23 @@ Later, after the public prototype:
   installed.
 - Add an explicit Linux test pass for the public crate after the repository
   layout is finalized.
+
+### 2026-05-26 - `Orders` read-access split
+
+Done:
+
+- Moved pure read-only `Orders` API from `state/orders.rs` into
+  `state/orders/accessors.rs`: `get`, `iter`, `len`, `is_empty`, and
+  `current_snapshot_flag`.
+- Kept `Order` storage ownership, snapshot begin, incoming command apply,
+  deferred removals, outgoing local worker actions, and helper state exactly in
+  their existing blocks.
+- This is a readability/publication split only. No order wire parsing, epoch
+  gate, phase rollback gate, FromCache behavior, deferred cleanup, snapshot
+  missing-worker logic, or outgoing order-worker send gate changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 777 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

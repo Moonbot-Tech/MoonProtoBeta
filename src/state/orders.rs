@@ -23,6 +23,7 @@
 use crate::commands::trade::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+mod accessors;
 mod actions;
 mod apply_helpers;
 mod maintenance;
@@ -315,30 +316,6 @@ impl Orders {
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
         }
-    }
-
-    /// Получить ордер по UID.
-    pub fn get(&self, uid: u64) -> Option<&Order> {
-        self.map.get(&uid)
-    }
-
-    /// Итератор по всем ордерам.
-    pub fn iter(&self) -> impl Iterator<Item = &Order> {
-        self.map.values()
-    }
-
-    /// Количество ордеров.
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
-
-    /// Текущее значение snapshot flag.
-    pub fn current_snapshot_flag(&self) -> u8 {
-        self.current_snapshot_flag
     }
 
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
