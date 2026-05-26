@@ -640,7 +640,11 @@ impl Session {
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
-            metric_cmd_label(m.reader_protocol_max_cmd, m.reader_protocol_max_payload_len),
+            metric_cmd_label(
+                m.reader_protocol_max_cmd,
+                u8::MAX,
+                m.reader_protocol_max_payload_len
+            ),
             m.reader_protocol_over_100us,
             m.reader_protocol_over_1ms,
             m.reader_protocol_over_5ms,
@@ -651,7 +655,11 @@ impl Session {
             m.writer_cpu_over_5ms,
             avg_us(m.active_dispatch_ns, m.active_dispatch_count),
             m.active_dispatch_max_ns / 1_000,
-            metric_cmd_label(m.active_dispatch_max_cmd, m.active_dispatch_max_payload_len),
+            metric_cmd_label(
+                m.active_dispatch_max_cmd,
+                m.active_dispatch_max_api_method,
+                m.active_dispatch_max_payload_len
+            ),
             m.active_dispatch_max_events,
             m.active_dispatch_max_actions,
             m.active_dispatch_over_100us,
@@ -659,7 +667,11 @@ impl Session {
             m.active_dispatch_over_5ms,
             avg_us(m.app_enqueue_ns, m.app_enqueue_count),
             m.app_enqueue_max_ns / 1_000,
-            metric_cmd_label(m.app_enqueue_max_cmd, m.app_enqueue_max_payload_len),
+            metric_cmd_label(
+                m.app_enqueue_max_cmd,
+                m.app_enqueue_max_api_method,
+                m.app_enqueue_max_payload_len
+            ),
             m.app_enqueue_max_events,
             metric_app_mode_label(m.app_enqueue_max_mode),
             m.app_enqueue_over_100us,
@@ -1068,12 +1080,23 @@ fn avg_us(total_ns: u64, count: u64) -> u64 {
     }
 }
 
-fn metric_cmd_label(cmd: u8, payload_len: u64) -> String {
+fn metric_cmd_label(cmd: u8, api_method: u8, payload_len: u64) -> String {
     if cmd == u8::MAX {
         format!("pre-cmd payload={payload_len}")
     } else {
         let c = Command::from_byte(cmd);
-        format!("{}({}) payload={payload_len}", c.name(), c.to_byte())
+        if c == Command::API && api_method != u8::MAX {
+            let method = EngineMethod::from_byte(api_method);
+            format!(
+                "{}({}) method={}({}) payload={payload_len}",
+                c.name(),
+                c.to_byte(),
+                method.name(),
+                method.to_byte()
+            )
+        } else {
+            format!("{}({}) payload={payload_len}", c.name(), c.to_byte())
+        }
     }
 }
 

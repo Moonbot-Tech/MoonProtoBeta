@@ -5840,6 +5840,37 @@ Finished small Strat optimization step:
   against Rust `parse_strategy_batch*`/`StratsState` apply. Only after that
   decide whether parser changes are required.
 
+### 2026-05-26 - CPU attribution detail for Phase Z
+
+Done:
+
+- FireTest CPU labels now record the Engine API method for worker-side
+  `active_dispatch` and `app_enqueue` max samples. `API(31) payload=...` was
+  too coarse for Phase Z; it now prints e.g.
+  `API(31) method=GetMarketsList(3) payload=...`.
+- This is diagnostics only. It does not affect protocol send/retry/drop logic.
+
+Current quick prod FireTest:
+
+- `FIRETEST_QUICK_PASS after 26.15s`, `ParseFailed=0`.
+- Protocol-owned hot path is below 1ms in this run:
+  `reader max=780us`, `writer_cpu max=146us`, `send_max=109us`.
+- Remaining >1ms samples are worker/app-side:
+  `active_dispatch max=4160us max_src=Strat(30) payload=44463`,
+  `app_enqueue max=2236us max_src=Strat(30) payload=44463 mode=state`.
+- Interpretation: current red flag is no longer UDP protocol ACK/retry
+  starvation in quick profile. It is still Phase Z work for worker-side
+  `TStrategySerializer` parse/apply and `run_with_dispatcher_state` snapshot
+  clone cost.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 tests.
+- `cargo check --examples --quiet` OK.
+- `cargo test --test fire_test --no-run --quiet` OK.
+- Quick prod FireTest OK as above.
+
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
 Done:

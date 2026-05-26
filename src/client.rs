@@ -2388,6 +2388,7 @@ impl DispatcherEventFn {
         dispatcher: &mut crate::events::EventDispatcher,
         protocol_metrics: &ProtocolMetrics,
         source_cmd: Option<Command>,
+        source_api_method: u8,
         source_payload_len: usize,
     ) {
         if events.is_empty() {
@@ -2419,10 +2420,20 @@ impl DispatcherEventFn {
         protocol_metrics.record_app_enqueue_labeled(
             enqueue_start.elapsed(),
             source_cmd.map_or(u8::MAX, Command::to_byte),
+            source_api_method,
             source_payload_len,
             event_count,
             mode,
         );
+    }
+}
+
+#[inline]
+fn metric_api_method(cmd: Command, payload: &[u8]) -> u8 {
+    if cmd == Command::API && payload.len() > 19 {
+        payload[19]
+    } else {
+        u8::MAX
     }
 }
 
@@ -2465,6 +2476,7 @@ fn run_dispatcher_worker(
                 protocol_metrics.record_active_dispatch_labeled(
                     active_dispatch_start.elapsed(),
                     cmd.to_byte(),
+                    metric_api_method(cmd, &payload),
                     payload.len(),
                     event_count,
                     action_count,
@@ -2474,13 +2486,21 @@ fn run_dispatcher_worker(
                     dispatcher,
                     &protocol_metrics,
                     Some(cmd),
+                    metric_api_method(cmd, &payload),
                     payload.len(),
                 );
             }
             DispatcherWorkItem::DrainDeferredOrderRemovals { now_ms } => {
                 event_buf.clear();
                 dispatcher.drain_deferred_order_removals_due(now_ms, &mut event_buf);
-                on_event.drain_events(&mut event_buf, dispatcher, &protocol_metrics, None, 0);
+                on_event.drain_events(
+                    &mut event_buf,
+                    dispatcher,
+                    &protocol_metrics,
+                    None,
+                    u8::MAX,
+                    0,
+                );
             }
             DispatcherWorkItem::TickOrders { now_ms } => {
                 event_buf.clear();
@@ -2491,7 +2511,14 @@ fn run_dispatcher_worker(
                     &mut active_actions_buf,
                 );
                 sender.apply_active_actions(active_actions_buf.drain(..));
-                on_event.drain_events(&mut event_buf, dispatcher, &protocol_metrics, None, 0);
+                on_event.drain_events(
+                    &mut event_buf,
+                    dispatcher,
+                    &protocol_metrics,
+                    None,
+                    u8::MAX,
+                    0,
+                );
             }
             DispatcherWorkItem::ResetOrderbookCachesKeepBooks => {
                 dispatcher.reset_orderbook_caches_keep_books();
@@ -3213,6 +3240,7 @@ impl ProtocolCore<'_> {
                     dispatcher,
                     &self.client.protocol_metrics,
                     None,
+                    u8::MAX,
                     0,
                 );
             }
@@ -3391,6 +3419,7 @@ impl ProtocolCore<'_> {
                     self.client.protocol_metrics.record_active_dispatch_labeled(
                         active_dispatch_start.elapsed(),
                         c.to_byte(),
+                        metric_api_method(c, &p),
                         p.len(),
                         event_count,
                         action_count,
@@ -3400,6 +3429,7 @@ impl ProtocolCore<'_> {
                         dispatcher,
                         &self.client.protocol_metrics,
                         Some(c),
+                        metric_api_method(c, &p),
                         p.len(),
                     );
                 }
@@ -3429,6 +3459,7 @@ impl ProtocolCore<'_> {
                 for (c, p) in payload_buf.drain(..) {
                     let enqueue_start = Instant::now();
                     let payload_len = p.len();
+                    let api_method = metric_api_method(c, &p);
                     let work = DispatcherWorkItem::Data {
                         cmd: c,
                         payload: p,
@@ -3439,6 +3470,7 @@ impl ProtocolCore<'_> {
                     self.client.protocol_metrics.record_app_enqueue_labeled(
                         enqueue_start.elapsed(),
                         c.to_byte(),
+                        api_method,
                         payload_len,
                         1,
                         4,
@@ -3619,6 +3651,7 @@ impl ProtocolCore<'_> {
                     dispatcher,
                     &self.client.protocol_metrics,
                     None,
+                    u8::MAX,
                     0,
                 );
             }

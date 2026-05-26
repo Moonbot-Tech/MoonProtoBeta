@@ -54,6 +54,8 @@ pub struct ProtocolMetricsSnapshot {
     /// `cmd == u8::MAX` means the enqueue came from a timer/deferred task
     /// rather than a specific incoming packet.
     pub app_enqueue_max_cmd: u8,
+    /// Engine API method for API sources, or `u8::MAX` when not applicable.
+    pub app_enqueue_max_api_method: u8,
     pub app_enqueue_max_payload_len: u64,
     pub app_enqueue_max_events: u64,
     pub app_enqueue_max_mode: u8,
@@ -67,6 +69,8 @@ pub struct ProtocolMetricsSnapshot {
     pub active_dispatch_max_ns: u64,
     /// Source command/payload/events/actions for `active_dispatch_max_ns`.
     pub active_dispatch_max_cmd: u8,
+    /// Engine API method for API sources, or `u8::MAX` when not applicable.
+    pub active_dispatch_max_api_method: u8,
     pub active_dispatch_max_payload_len: u64,
     pub active_dispatch_max_events: u64,
     pub active_dispatch_max_actions: u64,
@@ -107,6 +111,7 @@ pub(crate) struct ProtocolMetrics {
     app_enqueue_ns: AtomicU64,
     app_enqueue_max_ns: AtomicU64,
     app_enqueue_max_cmd: AtomicU64,
+    app_enqueue_max_api_method: AtomicU64,
     app_enqueue_max_payload_len: AtomicU64,
     app_enqueue_max_events: AtomicU64,
     app_enqueue_max_mode: AtomicU64,
@@ -117,6 +122,7 @@ pub(crate) struct ProtocolMetrics {
     active_dispatch_ns: AtomicU64,
     active_dispatch_max_ns: AtomicU64,
     active_dispatch_max_cmd: AtomicU64,
+    active_dispatch_max_api_method: AtomicU64,
     active_dispatch_max_payload_len: AtomicU64,
     active_dispatch_max_events: AtomicU64,
     active_dispatch_max_actions: AtomicU64,
@@ -162,6 +168,7 @@ impl ProtocolMetrics {
         &self,
         duration: Duration,
         source_cmd: u8,
+        source_api_method: u8,
         payload_len: usize,
         event_count: usize,
         mode: u8,
@@ -177,6 +184,8 @@ impl ProtocolMetrics {
         ) {
             self.app_enqueue_max_cmd
                 .store(u64::from(source_cmd), Ordering::Relaxed);
+            self.app_enqueue_max_api_method
+                .store(u64::from(source_api_method), Ordering::Relaxed);
             self.app_enqueue_max_payload_len
                 .store(payload_len as u64, Ordering::Relaxed);
             self.app_enqueue_max_events
@@ -190,6 +199,7 @@ impl ProtocolMetrics {
         &self,
         duration: Duration,
         source_cmd: u8,
+        source_api_method: u8,
         payload_len: usize,
         event_count: usize,
         action_count: usize,
@@ -205,6 +215,8 @@ impl ProtocolMetrics {
         ) {
             self.active_dispatch_max_cmd
                 .store(u64::from(source_cmd), Ordering::Relaxed);
+            self.active_dispatch_max_api_method
+                .store(u64::from(source_api_method), Ordering::Relaxed);
             self.active_dispatch_max_payload_len
                 .store(payload_len as u64, Ordering::Relaxed);
             self.active_dispatch_max_events
@@ -240,6 +252,8 @@ impl ProtocolMetrics {
             app_enqueue_ns: self.app_enqueue_ns.load(Ordering::Relaxed),
             app_enqueue_max_ns: self.app_enqueue_max_ns.load(Ordering::Relaxed),
             app_enqueue_max_cmd: self.app_enqueue_max_cmd.load(Ordering::Relaxed) as u8,
+            app_enqueue_max_api_method: self.app_enqueue_max_api_method.load(Ordering::Relaxed)
+                as u8,
             app_enqueue_max_payload_len: self.app_enqueue_max_payload_len.load(Ordering::Relaxed),
             app_enqueue_max_events: self.app_enqueue_max_events.load(Ordering::Relaxed),
             app_enqueue_max_mode: self.app_enqueue_max_mode.load(Ordering::Relaxed) as u8,
@@ -250,6 +264,9 @@ impl ProtocolMetrics {
             active_dispatch_ns: self.active_dispatch_ns.load(Ordering::Relaxed),
             active_dispatch_max_ns: self.active_dispatch_max_ns.load(Ordering::Relaxed),
             active_dispatch_max_cmd: self.active_dispatch_max_cmd.load(Ordering::Relaxed) as u8,
+            active_dispatch_max_api_method: self
+                .active_dispatch_max_api_method
+                .load(Ordering::Relaxed) as u8,
             active_dispatch_max_payload_len: self
                 .active_dispatch_max_payload_len
                 .load(Ordering::Relaxed),
