@@ -5880,9 +5880,8 @@ Current quick prod FireTest:
   payload `44431` bytes, `762` strategies, `500` release iterations:
   parse-only avg/max `2651us/4153us`, active cold apply avg/max
   `2569us/3914us`, active warm apply avg/max `2034us/3283us`.
-  This confirms the remaining `Strat` CPU red flag is real parser/apply work,
-  not UDP/Sliced/logging noise. Next required evidence is the Delphi console
-  benchmark on the same `.bin` before choosing a Rust optimization.
+  This confirmed the remaining `Strat` CPU red flag is real parser/apply work,
+  not UDP/Sliced/logging noise.
 
 Verification:
 
@@ -5891,6 +5890,54 @@ Verification:
 - `cargo check --examples --quiet` OK.
 - `cargo test --test fire_test --no-run --quiet` OK.
 - Quick prod FireTest OK as above.
+
+### 2026-05-26 - Delphi StrategySerializer benchmark
+
+Done:
+
+- Added `tools/delphi/StratSerializerBench.dpr`, a local Delphi console
+  benchmark that reads the exact same raw `TStratSnapshot.Data` dump written by
+  FireTest.
+- The benchmark compiles the current Delphi `StrategySerializer.pas` and
+  `Strategies.pas`, with the rest resolved from the existing MoonBot DCUs. This
+  is diagnostics only; it does not change the Delphi server/client source.
+- Important standalone-init finding: `TStrategy.Create -> rebuildProps` reads
+  global `Strategies.Strats`. A standalone bench with that global left `nil`
+  crashes before payload parsing. The bench now points the global at the same
+  `TStrategies` container being loaded, matching live MoonBot machine effect.
+
+Measured on the same `44431` byte / `762` strategy FireTest payload:
+
+- Delphi `LoadStrategiesFromStream` cold new list, 500 optimized iterations:
+  avg/max `45208us/56096us`.
+- Delphi warm same list, 500 optimized iterations: avg/max `3536us/4491us`.
+- Rust release benchmark rerun on the same payload, 500 iterations:
+  parse-only avg/max `2643us/4604us`, cold apply avg/max `2593us/4686us`,
+  warm apply avg/max `1981us/3599us`.
+
+Interpretation:
+
+- Rust is not slower than Delphi on pure warm snapshot apply; the live
+  `active_dispatch` `~3-4ms` samples are consistent with real worker-side
+  serializer/apply work plus normal scheduler/log/test noise.
+- The protocol recv CPU red flag remains closed for the measured quick/full
+  runs (`reader` below `1ms`). The open Phase Z work is broader CPU cleanup,
+  especially worker/app-side API market parsing/apply and state snapshot enqueue
+  cost.
+
+Verification:
+
+- Delphi bench compile OK with DCC64 12.2, optimized build.
+- Delphi bench run OK on FireTest raw snapshot.
+- Rust benchmark command OK:
+  `cargo test --release bench_firetest_strategy_snapshot_payload --lib -- --ignored --nocapture`.
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- `cargo test --test fire_test --no-run --quiet` OK.
+- Quick prod FireTest release OK: `FIRETEST_QUICK_PASS after 26.64s`,
+  `ParseFailed=0`; CPU `reader max=660us`, `writer_cpu max=136us`,
+  `active_dispatch max=3508us max_src=Strat(30)`, `app_enqueue max=2604us`.
 
 ### 2026-05-25 - Trades market tail moved before owned event dependency
 
