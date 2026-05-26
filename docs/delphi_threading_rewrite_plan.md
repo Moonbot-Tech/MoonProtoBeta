@@ -6527,22 +6527,26 @@ Red flag:
 
 - Recorded `spec_pipeline/work/хуйня.md §X.183`.
 - Still open there: dictionary name/path reads, incomplete `Len` prefixes,
-  incomplete strategy headers, incomplete `FieldIdx`/`TypeID`, and scalar
-  `ReadField` locals. Delphi uses `Stream.Read` for those too, but the effect
-  may depend on uninitialized local variables or stale `NameBuf`, so it is not
-  claimed as closed parity.
+  incomplete strategy headers, and incomplete `FieldIdx`/`TypeID`. Delphi uses
+  `Stream.Read` for those too, but the effect may depend on uninitialized local
+  variables or stale `NameBuf`, so it is not claimed as closed parity.
 - Follow-up re-check: the remaining strategy-serializer corrupt tails are not
   `ReadBuffer` strings. They are `Stream.Read` into Delphi locals or shared
   `NameBuf`; after EOF the next section can depend on stale/uninitialized bytes.
   Rust keeps the current safe failure/open-red-flag stance until an explicit
   deterministic policy is agreed. Valid live snapshots are still covered by
   FireTest full-parse (`ParseFailed=0`) and raw dumps.
+- Follow-up fix: known-field fixed-size scalar values now use deterministic
+  Delphi-shaped soft read: consume all available bytes, zero-fill the missing
+  tail, and return the value. This closes the scalar `ReadField` no-consume
+  mismatch without changing the valid wire path.
 
 Verification:
 
 - Added parser tests for short serializer string field bodies, short skipped
-  fixed-size mismatches, and short skipped string mismatches.
-- `cargo test strategy_serializer --lib --quiet` OK: 20 tests.
+  fixed-size mismatches, short skipped string mismatches, and short scalar field
+  values.
+- `cargo test strategy_serializer --lib --quiet` OK: 21 tests.
 
 ### 2026-05-26 - RequestCandlesData malformed partial-apply red flag
 
@@ -6559,23 +6563,30 @@ Verification:
   truncated later market no longer cancels the complete prior market in the
   active `MergedCandles.markets` result.
 - Still open in `хуйня.md §X.184`: exact corrupt tails inside the currently
-  malformed market, especially `TDeepPricePack` and `TWallData` partial
-  `AStream.Read` effects, because Delphi may depend on local packed-record
-  bytes that Rust must not invent as initialized data.
+  malformed market, especially `TDeepPricePack` partial `AStream.Read` effects
+  and stale wall bytes, because Delphi may depend on local packed-record bytes
+  or previous `TMarket` wall state that Rust must not invent as initialized
+  data.
 - Follow-up re-check: `ReadStringFromStream` used by candle market names is also
   `Read`, not `ReadBuffer`; a complete length with a short UTF-16 body depends on
   Delphi `String` storage after `SetLength`. Partial candle records read into
   local packed records, and partial wall data writes directly over existing
-  `TMarket` wall fields. Those corrupt tails are state/stale-memory dependent,
-  so the current Rust partial parser intentionally keeps only fully read market
-  entries and leaves current-market corrupt tails as an open safe-policy issue.
+  `TMarket` wall fields. Those corrupt tails are state/stale-memory dependent;
+  Rust only claims parity for deterministic sub-cases and leaves unsafe/stale
+  current-market tails as an open safe-policy issue.
+- Follow-up fix: if the current market has fully read candles and the corrupt
+  tail begins at `TWallData`, the partial parser now keeps the market's candles
+  and reads the wall tail with deterministic zero-fill. This matches the
+  deterministic part of Delphi `ApplyRecvdStream`: `m.Deep5m` was already
+  mutated before the wall reads.
 - Recorded `spec_pipeline/work/хуйня.md §X.184`.
 
 Verification:
 
 - Added
-  `request_candles_data_partial_parser_keeps_complete_prior_markets`.
-- `cargo test candles --lib --quiet` OK: 25 tests.
+  `request_candles_data_partial_parser_keeps_complete_prior_markets` and
+  `request_candles_data_partial_parser_keeps_current_market_when_wall_tail_is_short`.
+- `cargo test candles --lib --quiet` OK: 26 tests.
 
 ### 2026-05-26 - TradesEvent signal/diagnostic shape
 

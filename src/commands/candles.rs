@@ -417,12 +417,8 @@ fn parse_request_candles_data_response_partial_with_local_shift(
             break;
         }
 
-        let Some(buy_wall) = read_wall_data(&data, &mut pos) else {
-            break;
-        };
-        let Some(sell_wall) = read_wall_data(&data, &mut pos) else {
-            break;
-        };
+        let buy_wall = read_wall_data_zero_tail(&data, &mut pos);
+        let sell_wall = read_wall_data_zero_tail(&data, &mut pos);
         markets.push(RequestCandlesMarket {
             market_name,
             candles_5m,
@@ -621,6 +617,15 @@ fn read_wall_data(data: &[u8], pos: &mut usize) -> Option<[WallItem; 4]> {
         item.count = read_i32(data, pos)?;
     }
     Some(out)
+}
+
+fn read_wall_data_zero_tail(data: &[u8], pos: &mut usize) -> [WallItem; 4] {
+    let mut out = [WallItem::default(); 4];
+    for item in &mut out {
+        item.vol = f32::from_le_bytes(read_zero_tail::<4>(data, pos));
+        item.count = i32::from_le_bytes(read_zero_tail::<4>(data, pos));
+    }
+    out
 }
 
 // =============================================================================
@@ -1084,6 +1089,34 @@ mod tests {
         assert_eq!(markets[0].candles_5m[0].time, 45_000.0);
         assert_eq!(markets[0].buy_wall[0].vol, 10.0);
         assert_eq!(markets[0].sell_wall[3].count, 13);
+    }
+
+    #[test]
+    fn request_candles_data_partial_parser_keeps_current_market_when_wall_tail_is_short() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&0i32.to_le_bytes());
+        plain.push(2);
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0f64.to_le_bytes());
+        write_delphi_utf16_string(&mut plain, "BTCUSDT");
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        write_deep_price_pack(&mut plain, 101.0, 99.0, 12.5, 45_000.0);
+        // Delphi has already applied Deep5m at this point. A short wall tail
+        // must not cancel the current market's deterministic candle state.
+        plain.extend_from_slice(&10.0f32.to_le_bytes()[..2]);
+
+        let zipped = zip_plain(&plain);
+
+        assert!(parse_request_candles_data_response(&zipped).is_none());
+        let markets =
+            parse_request_candles_data_response_partial_with_local_shift(&zipped, 0.0).unwrap();
+        assert_eq!(markets.len(), 1);
+        assert_eq!(markets[0].market_name, "BTCUSDT");
+        assert_eq!(markets[0].candles_5m.len(), 1);
+        assert_eq!(markets[0].candles_5m[0].time, 45_000.0);
+        assert_eq!(markets[0].candles_5m[0].vol, 12.5);
+        assert_eq!(markets[0].buy_wall[0].count, 0);
+        assert_eq!(markets[0].sell_wall[3], WallItem::default());
     }
 
     #[test]

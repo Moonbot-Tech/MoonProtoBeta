@@ -53,9 +53,7 @@ use std::sync::Arc;
 
 use super::registry::decode_utf8_delphi;
 use super::strategy_schema::{StrategySchema, StrategySchemaField};
-use super::strict_read::{
-    read_f32, read_f64, read_i32, read_i64, read_u16, read_u32, read_u64, read_u8,
-};
+use super::strict_read::{read_i32, read_u16, read_u64, read_u8};
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
@@ -638,15 +636,29 @@ fn read_strategy(
 /// (как `SkipFieldByTypeID` pas:373: `Stream.Position := Stream.Position + 8`).
 fn try_read_field_value(data: &[u8], pos: &mut usize, type_id: u8) -> Option<FieldValue> {
     match type_id {
-        TID_BOOL => Some(FieldValue::Bool(read_u8(data, pos)? != 0)),
-        TID_BYTE => Some(FieldValue::Byte(read_u8(data, pos)?)),
-        TID_WORD => Some(FieldValue::Word(read_u16(data, pos)?)),
-        TID_INT32 => Some(FieldValue::Int32(read_i32(data, pos)?)),
-        TID_UINT32 => Some(FieldValue::UInt32(read_u32(data, pos)?)),
-        TID_INT64 => Some(FieldValue::Int64(read_i64(data, pos)?)),
-        TID_UINT64 => Some(FieldValue::UInt64(read_u64(data, pos)?)),
-        TID_SINGLE => Some(FieldValue::Single(read_f32(data, pos)?)),
-        TID_DOUBLE => Some(FieldValue::Double(read_f64(data, pos)?)),
+        TID_BOOL => Some(FieldValue::Bool(read_zero_tail::<1>(data, pos)[0] != 0)),
+        TID_BYTE => Some(FieldValue::Byte(read_zero_tail::<1>(data, pos)[0])),
+        TID_WORD => Some(FieldValue::Word(u16::from_le_bytes(read_zero_tail::<2>(
+            data, pos,
+        )))),
+        TID_INT32 => Some(FieldValue::Int32(i32::from_le_bytes(read_zero_tail::<4>(
+            data, pos,
+        )))),
+        TID_UINT32 => Some(FieldValue::UInt32(u32::from_le_bytes(read_zero_tail::<4>(
+            data, pos,
+        )))),
+        TID_INT64 => Some(FieldValue::Int64(i64::from_le_bytes(read_zero_tail::<8>(
+            data, pos,
+        )))),
+        TID_UINT64 => Some(FieldValue::UInt64(u64::from_le_bytes(read_zero_tail::<8>(
+            data, pos,
+        )))),
+        TID_SINGLE => Some(FieldValue::Single(f32::from_le_bytes(read_zero_tail::<4>(
+            data, pos,
+        )))),
+        TID_DOUBLE => Some(FieldValue::Double(f64::from_le_bytes(read_zero_tail::<8>(
+            data, pos,
+        )))),
         TID_STRING => {
             let len = read_u16(data, pos)? as usize;
             let mut bytes = vec![0u8; len];
@@ -664,6 +676,16 @@ fn try_read_field_value(data: &[u8], pos: &mut usize, type_id: u8) -> Option<Fie
             None
         }
     }
+}
+
+fn read_zero_tail<const N: usize>(data: &[u8], pos: &mut usize) -> [u8; N] {
+    let mut out = [0u8; N];
+    let available = data.len().saturating_sub(*pos).min(N);
+    if available > 0 {
+        out[..available].copy_from_slice(&data[*pos..*pos + available]);
+        *pos += available;
+    }
+    out
 }
 
 fn skip_field_by_type_id(data: &[u8], pos: &mut usize, type_id: u8) -> Option<()> {
@@ -1413,6 +1435,36 @@ mod tests {
             ps.fields.get("Comment"),
             Some(&FieldValue::String("a\0\0".to_string()))
         );
+    }
+
+    #[test]
+    fn scalar_field_value_zero_fills_short_body_like_delphi_stream_read() {
+        let mut plain = Vec::new();
+        // NameDict: one Int32 field.
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        plain.push(9);
+        plain.extend_from_slice(b"KeepAlert");
+        // PathDict
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // StratCount
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Strategy header
+        plain.extend_from_slice(&1u64.to_le_bytes());
+        plain.extend_from_slice(&1i32.to_le_bytes());
+        plain.extend_from_slice(&0u64.to_le_bytes());
+        plain.push(0);
+        plain.push(0);
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        // FieldCount=1
+        plain.extend_from_slice(&1u16.to_le_bytes());
+        // Field 0: declared Int32, but only low two bytes are present.
+        plain.extend_from_slice(&0u16.to_le_bytes());
+        plain.push(TID_INT32);
+        plain.extend_from_slice(&0x1234u16.to_le_bytes());
+
+        let parsed = parse_strategy_batch_plain(&plain).unwrap();
+        let ps = &parsed.strategies[0];
+        assert_eq!(ps.fields.get("KeepAlert"), Some(&FieldValue::Int32(0x1234)));
     }
 
     #[test]
