@@ -6915,6 +6915,24 @@ Verification:
   `reader max=798us`, `writer_cpu max=152us`, `active_dispatch max=3942us`
   on `Strat(30)`.
 
+### 2026-05-26 - `client.rs` domain command wrapper split
+
+Done:
+
+- Moved high-level Order/UI/Strat/Balance `Client` wrappers into
+  `src/client/domain_commands.rs`.
+- The moved code still calls the same command builders, priorities, retry
+  counts, UKeys, and domain-ready gate. Public methods remain inherent
+  `Client` methods.
+- `send_order_cancel_request` is crate-visible only because the active
+  dispatcher action path in the runtime body calls the same helper.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
