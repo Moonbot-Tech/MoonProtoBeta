@@ -7796,3 +7796,27 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `ClientSender` order helper split
+
+Done:
+
+- Moved `ClientSender` order/trade command helpers into
+  `client/sender/orders.rs`.
+- Kept the public sender API unchanged for new/replace/cancel/join/split/move
+  orders, panic sell, immune clicks, VStop/stops, close/sell/split-position,
+  status requests, and penalty commands.
+- Kept the same builders, command kind (`MPC_Order`), priority (`High`),
+  encryption flag, `MaxRetries`, and `UniqueKey` choices.
+- Kept Delphi active-client local-state gates in the same order: check domain
+  gate, mutate/query `Orders`, then queue the wire command only when the local
+  helper returns a send request.
+- This is a readability/publication split only. No outbound order bytes,
+  order-cache mutation, keyed dedup behavior, retry count, or public sender
+  behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
