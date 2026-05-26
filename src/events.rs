@@ -309,16 +309,6 @@ impl EventDispatcher {
         &self.markets
     }
 
-    /// Enable detailed per-row `GetMarketsList` timing diagnostics.
-    ///
-    /// Normal production code should leave this disabled. The coarse total and
-    /// loop timings are still recorded; this switch only controls read/apply
-    /// attribution inside the market and CorrMarket loops.
-    pub fn set_markets_list_detailed_timing_enabled(&mut self, enabled: bool) {
-        self.markets
-            .set_markets_list_detailed_timing_enabled(enabled);
-    }
-
     /// Events produced by one-shot helpers and not yet drained by the
     /// application.
     ///

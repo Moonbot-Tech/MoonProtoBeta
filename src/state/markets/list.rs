@@ -157,17 +157,9 @@ impl MarketsState {
         let mut pending_markets: Option<Vec<MarketHandle>> = None;
         let mut pending_handles_by_name: Option<HashMap<String, MarketHandle>> = None;
         let mut any_market_added = false;
-        let detailed_timing = self.markets_list_detailed_timing_enabled;
-
         let market_loop_start = Instant::now();
-        let mut market_read_ns = 0u64;
-        let mut market_apply_ns = 0u64;
         for _ in 0..count {
-            let read_start = detailed_timing.then(Instant::now);
             let market = read_market_with_local_shift(&mut r, ver, local_shift_minutes)?;
-            if let Some(read_start) = read_start {
-                market_read_ns = market_read_ns.saturating_add(elapsed_ns_u64(read_start));
-            }
             if allow_new_markets {
                 incoming_server_names.push(market.bn_market_name.clone());
             }
@@ -176,16 +168,12 @@ impl MarketsState {
             } else {
                 None
             };
-            let apply_start = detailed_timing.then(Instant::now);
             let added = self.apply_one_market_from_list_payload_batch(
                 market,
                 allow_new_markets,
                 &mut pending_markets,
                 &mut pending_handles_by_name,
             );
-            if let Some(apply_start) = apply_start {
-                market_apply_ns = market_apply_ns.saturating_add(elapsed_ns_u64(apply_start));
-            }
             if added {
                 any_market_added = true;
             }
@@ -216,19 +204,9 @@ impl MarketsState {
 
         let corr_loop_start = Instant::now();
         let corr_count = r.read_count()?;
-        let mut corr_read_ns = 0u64;
-        let mut corr_apply_ns = 0u64;
         for _ in 0..corr_count {
-            let read_start = detailed_timing.then(Instant::now);
             let cm = read_corr_market(&mut r)?;
-            if let Some(read_start) = read_start {
-                corr_read_ns = corr_read_ns.saturating_add(elapsed_ns_u64(read_start));
-            }
-            let apply_start = detailed_timing.then(Instant::now);
             self.apply_one_corr_market_from_list(cm);
-            if let Some(apply_start) = apply_start {
-                corr_apply_ns = corr_apply_ns.saturating_add(elapsed_ns_u64(apply_start));
-            }
         }
         let corr_loop_ns = elapsed_ns_u64(corr_loop_start);
 
@@ -243,12 +221,8 @@ impl MarketsState {
             corr_count,
             total_ns: elapsed_ns_u64(total_start),
             market_loop_ns,
-            market_read_ns,
-            market_apply_ns,
             index_rebuild_ns,
             corr_loop_ns,
-            corr_read_ns,
-            corr_apply_ns,
             ref_passes_ns,
         });
 

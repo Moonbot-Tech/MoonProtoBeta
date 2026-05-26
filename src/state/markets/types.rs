@@ -57,12 +57,8 @@ pub struct MarketsListApplyTiming {
     pub corr_count: usize,
     pub total_ns: u64,
     pub market_loop_ns: u64,
-    pub market_read_ns: u64,
-    pub market_apply_ns: u64,
     pub index_rebuild_ns: u64,
     pub corr_loop_ns: u64,
-    pub corr_read_ns: u64,
-    pub corr_apply_ns: u64,
     pub ref_passes_ns: u64,
 }
 

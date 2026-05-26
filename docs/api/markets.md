@@ -108,10 +108,9 @@ mapping, so stale mappings after a server restart are not used.
 
 `MarketsState::last_markets_list_apply_timing()` is diagnostics only. It always
 records coarse total/loop timing for the latest active `GetMarketsList` apply.
-Per-row read/apply attribution is disabled by default because thousands of timer
-calls are measurable CPU work; enable it with
-`EventDispatcher::set_markets_list_detailed_timing_enabled(true)` only in
-FireTest or focused profiling.
+Per-row read/apply attribution is intentionally absent from production code:
+thousands of timer calls inside the market/CorrMarket loops distort the CPU
+path they are supposed to measure.
 
 Funding timestamps match Delphi client state. The server serializes
 `FundingTime - TZShift`; Rust parsers add the local client timezone shift back,

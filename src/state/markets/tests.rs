@@ -154,7 +154,7 @@ fn apply_markets_list_payload_batches_new_market_cow_like_delphi_main_list_build
 }
 
 #[test]
-fn markets_list_payload_timing_keeps_per_row_probes_off_by_default() {
+fn markets_list_payload_timing_records_only_coarse_production_phases() {
     let mut st = MarketsState::new();
     let mut data = Vec::new();
     data.extend_from_slice(&2i32.to_le_bytes());
@@ -166,31 +166,9 @@ fn markets_list_payload_timing_keeps_per_row_probes_off_by_default() {
 
     assert!(ev.is_some());
     let timing = st.last_markets_list_apply_timing().unwrap();
-    assert_eq!(timing.market_read_ns, 0);
-    assert_eq!(timing.market_apply_ns, 0);
-    assert_eq!(timing.corr_read_ns, 0);
-    assert_eq!(timing.corr_apply_ns, 0);
-}
-
-#[test]
-fn markets_list_payload_timing_can_enable_detailed_firetest_probes() {
-    let mut st = MarketsState::new();
-    st.set_markets_list_detailed_timing_enabled(true);
-    let mut data = Vec::new();
-    data.extend_from_slice(&64i32.to_le_bytes());
-    for i in 0..64 {
-        write_market(&mut data, &mk_market(&format!("M{i}USDT"), i as u16), 2);
-    }
-    data.extend_from_slice(&0i32.to_le_bytes());
-
-    let ev = st.apply_markets_list_payload_with_local_shift(&data, 2, 0.0);
-
-    assert!(ev.is_some());
-    let timing = st.last_markets_list_apply_timing().unwrap();
-    assert!(
-        timing.market_read_ns > 0 || timing.market_apply_ns > 0,
-        "detailed mode must run per-row probes for FireTest attribution"
-    );
+    assert_eq!(timing.market_count, 2);
+    assert_eq!(timing.corr_count, 0);
+    assert_eq!(timing.payload_len, data.len());
 }
 
 #[test]

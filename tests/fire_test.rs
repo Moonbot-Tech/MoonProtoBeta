@@ -584,7 +584,6 @@ impl Session {
         let history_worker = MarketHistoryWorker::spawn(firetest_history_config());
         let (candles_snapshot_tx, candles_snapshot_rx) = mpsc::channel();
         let mut dispatcher = EventDispatcher::new();
-        dispatcher.set_markets_list_detailed_timing_enabled(true);
         dispatcher.set_market_history_handle(history_worker.handle());
         if let Some(strategy) = provided_strategy.as_ref() {
             dispatcher.set_local_strategies(std::slice::from_ref(strategy));
@@ -699,15 +698,11 @@ impl Session {
             .last_markets_list_apply_timing()
             .map(|t| {
                 format!(
-                    " get_markets_list_apply(total={}us markets={}us read={}us apply={}us index={}us corr={}us read={}us apply={}us ref={}us payload={} markets={} corr={})",
+                    " get_markets_list_apply(total={}us markets={}us index={}us corr={}us ref={}us payload={} markets={} corr={})",
                     t.total_ns / 1_000,
                     t.market_loop_ns / 1_000,
-                    t.market_read_ns / 1_000,
-                    t.market_apply_ns / 1_000,
                     t.index_rebuild_ns / 1_000,
                     t.corr_loop_ns / 1_000,
-                    t.corr_read_ns / 1_000,
-                    t.corr_apply_ns / 1_000,
                     t.ref_passes_ns / 1_000,
                     t.payload_len,
                     t.market_count,
