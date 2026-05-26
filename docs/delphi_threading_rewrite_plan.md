@@ -6801,6 +6801,26 @@ Verification:
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 
+### 2026-05-26 - `client.rs` init/connect helper split
+
+Done:
+
+- Moved the MoonBot-compatible init/connect free-function layer into
+  `src/client/init.rs`.
+- Public API paths are preserved by re-export from `client.rs`:
+  `connect_and_init`, `run_init_sequence`, `ConnectConfig`, `ConnectError`,
+  `InitConfig`, `InitError`, `InitResult`.
+- Internal test oracles for BaseCheck retry and post-init resync remain
+  crate-visible only for unit tests; no public API was added.
+- No send/recv protocol order changed. This only separates the domain init
+  helper layer from the transport/runtime owner.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` clock/socket helper split
 
 Done:
