@@ -89,6 +89,13 @@
 //! [`Client::run_until_response`], not direct `rx.recv_timeout(...)`; otherwise
 //! the client loop is stopped while the caller waits.
 //!
+//! ## Transport Modes
+//!
+//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V0 does not
+//! require the optional `moonext` binary. Extended transport modes V1/V2
+//! (`mask_ver = 1` or `2`) require `moonext`; UI code should call
+//! [`extended_transport_available`] before offering those modes.
+//!
 //! Working examples: `examples/client_test.rs`, `examples/trading_flow.rs`,
 //! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,
 //! `examples/query_hedge_mode.rs`,
@@ -142,5 +149,7 @@ pub use events::{
     StrategySnapshotReply,
 };
 pub use key_import::{import_key, ImportedKeys};
-pub use moonproto_transport::{MoonKey, ServerMsgHeader};
+pub use moonproto_transport::{
+    ext_available as extended_transport_available, MoonKey, ServerMsgHeader,
+};
 pub use protocol::Command;

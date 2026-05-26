@@ -83,6 +83,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 5. Call `connect_and_init(&mut client, &mut dispatcher, ConnectConfig { ... })`.
 6. Continue with `client.run_with_dispatcher(...)` for the long-running stream.
 
+`ClientConfig::new` uses V0/base transport (`mask_ver = 0`). V0 does not require
+`moonext`. Extended V1/V2 transport modes (`mask_ver = 1` or `2`) require the
+optional `moonext` binary (`moonext.dll`, `libmoonext.so`, or
+`libmoonext.dylib`) to be available next to the application or under `ext/`.
+Use `moonproto::extended_transport_available()` to decide whether UI can offer
+V1/V2; if it returns `false`, keep only V0 selectable.
+
 Before init completes, all client run modes drop domain snapshots and streams
 that the server may push immediately after transport auth. After a successful
 init the helper sends the same refresh set as the Delphi client: order snapshot

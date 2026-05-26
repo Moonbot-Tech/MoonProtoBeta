@@ -2175,6 +2175,8 @@ pub struct ClientConfig {
     /// Transport MAC/obfuscation key imported from MoonBot.
     pub mac_key: MoonKey,
     /// Transport mode: `0` for base transport, `1`/`2` for extended `moonext`.
+    /// Use [`crate::extended_transport_available`] before exposing modes `1`/`2`
+    /// in UI; mode `0` never requires `moonext`.
     pub mask_ver: u8,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
@@ -2206,6 +2208,8 @@ impl ClientConfig {
     ///
     /// Tests and offline tools can call [`Self::without_ntp`].
     /// Applications with extended transport can use [`Self::with_transport_mode`].
+    /// Check [`crate::extended_transport_available`] before offering modes `1`
+    /// and `2` to users.
     pub fn new(
         server_ip: impl Into<String>,
         server_port: u16,
@@ -2225,7 +2229,9 @@ impl ClientConfig {
     }
 
     /// Override transport mode (`0` = base, `1/2` = extended and requires
-    /// `moonext` availability).
+    /// `moonext` availability). This setter records the requested mode; callers
+    /// that expose mode switching should gate `1`/`2` with
+    /// [`crate::extended_transport_available`].
     pub fn with_transport_mode(mut self, mask_ver: u8) -> Self {
         self.mask_ver = mask_ver;
         self

@@ -29,6 +29,12 @@ let mut client = moonproto::Client::new(cfg);
 - `refresh = RefreshConfig::default()` (`UpdateMarketsList` every 2 seconds and
   `CheckBinanceTags` every 60 seconds after Init).
 
+`mask_ver = 0` is the base transport and does not require `moonext`. Transport
+modes `1` and `2` are extended modes and require the optional `moonext` binary to
+be available to the process. UI code should call
+`moonproto::extended_transport_available()` before offering V1/V2; if it returns
+`false`, only V0 should be selectable.
+
 Override only what you need:
 
 ```rust
