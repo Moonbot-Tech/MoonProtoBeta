@@ -8787,3 +8787,27 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MarketsState` price-apply split
+
+Done:
+
+- Moved the Delphi `UpdateMarketsList` counterpart from `state/markets.rs` into
+  `state/markets/prices.rs`: parsed `MarketsPricesResponse` apply,
+  direct payload apply, LastPrice backfill rows, per-market price mutation,
+  CorrMarket price mutation, and strict price-row readers.
+- Kept `GetMarketsList` full-list apply and COW market-handle maintenance in
+  `state/markets.rs`, so listing refresh and price refresh are now separate
+  сверка blocks.
+- This is a readability/publication split only. No `mIndex` mapping gate,
+  funding shift, mark-price flag reset, missing-market refresh flag,
+  CorrMarket update, LastPrice backfill, or user API path changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.21s`; `UpdateMarketsList=2`,
+  `ParseFailed=0`, retained LastPrice/trades present, reader max 751us,
+  writer CPU max 148us, `GetMarketsList` apply total 2390us.
