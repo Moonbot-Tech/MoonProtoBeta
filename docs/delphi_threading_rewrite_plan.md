@@ -6800,6 +6800,26 @@ Verification:
 - `cargo fmt --all -- --check` OK.
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `client.rs` ClientSender split
+
+Done:
+
+- Moved `SubscribeError`, `ClientSender`, and `ClientSenderShared` into
+  `src/client/sender.rs`.
+- `client::ClientSender` and `client::SubscribeError` remain re-exported from
+  `client.rs`; public API paths are unchanged.
+- The test-only direct construction path remains crate-visible so existing unit
+  tests continue to prove Delphi queue/gate behavior without adding a public
+  constructor.
+- No send queue semantics changed: the moved code still appends the same
+  `SendItem`s into the same Delphi-style `SendLockState` queues.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
 - Quick prod FireTest release after the client split series OK:
   `FIRETEST_QUICK_PASS after 25.41s`, `ParseFailed=0`,
   `reader max=721us`, `writer_cpu max=127us`.
