@@ -8350,3 +8350,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `StrategySerializer` public type split
+
+Done:
+
+- Moved the public strategy snapshot data model into
+  `commands/strategy_serializer/types.rs`: `FieldValue`, `StrategySnapshot`,
+  `StrategyFields`, `StrategyKind`, and `StrategyActiveMode`.
+- Kept the parent module as the wire-format reader/writer owner:
+  dictionary reading, field TypeID checks, schema filtering, DEFLATE handling,
+  and writer field order remain in `strategy_serializer.rs`.
+- This is a readability/publication split only. No strategy snapshot wire
+  bytes, TypeID mapping, zero/default filtering, schema behavior, or public API
+  names changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
