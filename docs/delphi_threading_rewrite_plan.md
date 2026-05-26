@@ -8310,3 +8310,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` session/lifecycle API split
+
+Done:
+
+- Moved server identity, AuthCheck metadata, trade-route context builders, and
+  `ServerTimeDelta` handle getter into `client/session_api.rs`.
+- Moved lifecycle callback delivery and Delphi `ServerUpdateSent` marker into
+  `client/lifecycle.rs`.
+- Kept internal visibility unchanged for child modules: `fire_lifecycle`,
+  `check_lifecycle_transition`, and `take_server_update_sent` are
+  `pub(super)` because protocol/init modules call them.
+- This is a readability/publication split only. No server identity storage,
+  AuthCheck storage, trade route derivation, lifecycle event ordering,
+  `ServerUpdateSent`, or public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
