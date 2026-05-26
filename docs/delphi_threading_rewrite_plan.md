@@ -6950,6 +6950,24 @@ Verification:
 - `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
 
+### 2026-05-26 - `client.rs` raw send API split
+
+Done:
+
+- Moved raw `Client::send_cmd`, `Client::send_cmd_keyed`, internal
+  `enqueue_send_item`, and test-only subscription registry helpers into
+  `src/client/send_api.rs`.
+- Queue behavior is unchanged: calls still append `SendItem` into the same
+  unbounded Delphi-style `SendLockState` queues.
+- `refresh_subscription_summary` is crate-visible only because the
+  subscription API sibling module updates the same atomic mirrors.
+
+Verification:
+
+- `cargo fmt --all -- --check` OK.
+- `cargo test --lib --quiet` OK: 759 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+
 ### 2026-05-26 - `client.rs` ClientSender split
 
 Done:
