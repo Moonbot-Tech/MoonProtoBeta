@@ -5856,6 +5856,12 @@ Done:
   event, not only `TStratSchema` plus trades/orderbook. This keeps the quick
   gate aligned with the "full live parse of what the server sends" rule and
   makes the raw strategy payload dump non-optional on normal live servers.
+- Added an ignored Rust-side Phase Z benchmark:
+  `cargo test --release bench_firetest_strategy_snapshot_payload --lib -- --ignored --nocapture`.
+  It reads `MOONPROTO_STRAT_SNAPSHOT_BENCH` or the newest
+  `target/firetest_strategy_raw/*.bin` and measures parse-only,
+  active in-place cold apply, and active in-place warm apply on the exact live
+  snapshot payload.
 - This is diagnostics only. It does not affect protocol send/retry/drop logic.
 
 Current quick prod FireTest:
@@ -5870,6 +5876,13 @@ Current quick prod FireTest:
   starvation in quick profile. It is still Phase Z work for worker-side
   `TStrategySerializer` parse/apply and `run_with_dispatcher_state` snapshot
   clone cost.
+- Rust pure serializer/apply benchmark on live payload after the raw-dump gate:
+  payload `44431` bytes, `762` strategies, `500` release iterations:
+  parse-only avg/max `2651us/4153us`, active cold apply avg/max
+  `2569us/3914us`, active warm apply avg/max `2034us/3283us`.
+  This confirms the remaining `Strat` CPU red flag is real parser/apply work,
+  not UDP/Sliced/logging noise. Next required evidence is the Delphi console
+  benchmark on the same `.bin` before choosing a Rust optimization.
 
 Verification:
 

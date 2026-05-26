@@ -754,6 +754,9 @@ mod tests {
         StrategySchemaKind,
     };
     use crate::commands::strategy_serializer::{FieldValue, StrategyFields};
+    use std::hint::black_box;
+    use std::path::PathBuf;
+    use std::time::Instant;
 
     fn schema_for_strategy_name(kinds: &[u8]) -> StrategySchema {
         StrategySchema {
@@ -779,6 +782,117 @@ mod tests {
                 dynamic_picklist: None,
             }],
         }
+    }
+
+    fn latest_firetest_strategy_raw_dump() -> PathBuf {
+        if let Some(path) = std::env::var_os("MOONPROTO_STRAT_SNAPSHOT_BENCH") {
+            return PathBuf::from(path);
+        }
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("firetest_strategy_raw");
+        let mut files = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "cannot read {}; run FireTest quick/full first or set MOONPROTO_STRAT_SNAPSHOT_BENCH: {err}",
+                    dir.display()
+                )
+            })
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|ty| ty.is_file()).unwrap_or(false))
+            .filter_map(|entry| {
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, entry.path()))
+            })
+            .collect::<Vec<_>>();
+        files.sort_by_key(|(modified, _)| *modified);
+        files.pop().map(|(_, path)| path).unwrap_or_else(|| {
+            panic!(
+                "no FireTest strategy raw dumps in {}; run FireTest quick/full first or set MOONPROTO_STRAT_SNAPSHOT_BENCH",
+                dir.display()
+            )
+        })
+    }
+
+    fn bench_iters() -> usize {
+        std::env::var("MOONPROTO_STRAT_BENCH_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|iters| *iters > 0)
+            .unwrap_or(200)
+    }
+
+    fn measure_us<F>(iters: usize, mut f: F) -> (u128, u128, usize)
+    where
+        F: FnMut() -> usize,
+    {
+        let mut total_ns = 0u128;
+        let mut max_ns = 0u128;
+        let mut checksum = 0usize;
+        for _ in 0..iters {
+            let start = Instant::now();
+            checksum = checksum.wrapping_add(black_box(f()));
+            let ns = start.elapsed().as_nanos();
+            total_ns += ns;
+            max_ns = max_ns.max(ns);
+        }
+        (total_ns / iters as u128 / 1_000, max_ns / 1_000, checksum)
+    }
+
+    #[test]
+    #[ignore = "diagnostic CPU benchmark; run after FireTest writes target/firetest_strategy_raw/*.bin"]
+    fn bench_firetest_strategy_snapshot_payload() {
+        let path = latest_firetest_strategy_raw_dump();
+        let raw = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        let batch = crate::commands::strategy_serializer::parse_strategy_batch(&raw)
+            .unwrap_or_else(|| {
+                panic!(
+                    "strategy snapshot payload is not parseable: {}",
+                    path.display()
+                )
+            });
+        let strategy_count = batch.strategies.len();
+        let iters = bench_iters();
+
+        let (parse_avg_us, parse_max_us, parse_sum) = measure_us(iters, || {
+            crate::commands::strategy_serializer::parse_strategy_batch(black_box(&raw))
+                .map(|batch| batch.strategies.len())
+                .unwrap_or(0)
+        });
+
+        let (apply_cold_avg_us, apply_cold_max_us, apply_cold_sum) = measure_us(iters, || {
+            let mut state = StratsState::new();
+            state
+                .apply_snapshot_decoded_with_mode_in_place(black_box(&raw), false)
+                .unwrap_or(0)
+        });
+
+        let mut warm_state = StratsState::new();
+        let _ = warm_state
+            .apply_snapshot_decoded_with_mode_in_place(&raw, false)
+            .expect("warm-up strategy apply failed");
+        let (apply_warm_avg_us, apply_warm_max_us, apply_warm_sum) = measure_us(iters, || {
+            warm_state
+                .apply_snapshot_decoded_with_mode_in_place(black_box(&raw), false)
+                .unwrap_or(0)
+        });
+
+        println!(
+            "STRAT_BENCH payload={} bytes={} strategies={} iters={} parse_avg/max={}us/{}us apply_cold_avg/max={}us/{}us apply_warm_avg/max={}us/{}us checksum={}",
+            path.display(),
+            raw.len(),
+            strategy_count,
+            iters,
+            parse_avg_us,
+            parse_max_us,
+            apply_cold_avg_us,
+            apply_cold_max_us,
+            apply_warm_avg_us,
+            apply_warm_max_us,
+            parse_sum ^ apply_cold_sum ^ apply_warm_sum,
+        );
     }
 
     #[test]
