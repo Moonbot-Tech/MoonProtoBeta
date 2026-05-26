@@ -7569,3 +7569,19 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `EventDispatcher` API response block split
+
+Done:
+
+- Moved the Delphi-shaped `ProcessApiCommand` block into `events/api.rs`.
+- Kept side-effect order unchanged: method-specific state apply and extra
+  market events first, then original `Event::EngineResponse`.
+- Kept `UpdateMarketsList -> LastPrice` retained-history queue with the API
+  block, because it is part of the same Delphi `TMarket.AddFrom` side effect.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

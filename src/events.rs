@@ -34,10 +34,7 @@ use std::sync::Arc;
 use crate::app_queue::AppQueue;
 use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
 use crate::commands::balance::parse_balance;
-use crate::commands::engine_api::{
-    parse_base_check_response, parse_engine_response, EngineMethod, EngineResponse, ServerInfo,
-};
-use crate::commands::market::parse_markets_indexes_response;
+use crate::commands::engine_api::{EngineResponse, ServerInfo};
 use crate::commands::order_book::parse_order_book_packet;
 use crate::commands::registry::decode_utf8_delphi;
 use crate::commands::strat::StratCommand;
@@ -46,17 +43,16 @@ use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::trade::{OrderType, TradeCtx};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
-use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::orders::OrderCancelSend;
 use crate::state::{
     BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot,
-    MarketHistoryConfig, MarketHistoryHandle, MarketHistoryLastPriceBatch,
-    MarketHistoryLastPriceInput, MarketHistoryReaders, MarketHistoryWorker, MarketsEvent,
-    MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders, RollingTradeVolumeSnapshot,
-    SettingsEvent, SettingsState, StratEvent, StratsState, TradeStorageScope, TradesEvent,
-    TradesState,
+    MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders, MarketHistoryWorker,
+    MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders,
+    RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
+    TradeStorageScope, TradesEvent, TradesState,
 };
 
+mod api;
 mod orders;
 mod trades;
 
@@ -1283,133 +1279,6 @@ impl EventDispatcher {
             }
             None => out.push(Self::parse_failed(Command::UI, payload)),
         }
-    }
-
-    fn client_new_data_api(
-        &mut self,
-        payload: &[u8],
-        history_now_time_days: Option<f64>,
-        out: &mut Vec<Event>,
-    ) {
-        match parse_engine_response(payload) {
-            Some(resp) => self.process_api_command(resp, history_now_time_days, out),
-            None => out.push(Self::parse_failed(Command::API, payload)),
-        }
-    }
-
-    /// Active dispatcher counterpart of Delphi `TMoonProtoNetClient.ProcessApiCommand`.
-    fn process_api_command(
-        &mut self,
-        resp: EngineResponse,
-        history_now_time_days: Option<f64>,
-        out: &mut Vec<Event>,
-    ) {
-        let mut extra_events = Vec::new();
-        if resp.success {
-            match resp.method {
-                EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
-                    if resp.method == EngineMethod::GetMarketsList {
-                        if let Some(ev) = self
-                            .markets
-                            .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
-                        {
-                            extra_events.push(Event::Markets(ev));
-                            let new_markets = self.markets.take_new_markets_added();
-                            if !new_markets.is_empty() {
-                                extra_events.push(Event::Markets(MarketsEvent::NewMarketsAdded {
-                                    names: new_markets,
-                                }));
-                            }
-                        }
-                    } else {
-                        let wants_history = self.market_history.is_some()
-                            && history_now_time_days.is_some()
-                            && self.trade_storage_scope.is_some();
-                        let mut last_price_rows = Vec::new();
-                        let ev = if wants_history {
-                            self.markets
-                                .apply_markets_prices_payload_collecting_last_price_like_delphi(
-                                    &resp.data,
-                                    Some(&mut last_price_rows),
-                                )
-                        } else {
-                            self.markets
-                                .apply_markets_prices_payload_like_delphi(&resp.data)
-                        };
-                        if let Some(ev) = ev {
-                            if wants_history {
-                                self.queue_last_price_history_like_delphi(
-                                    history_now_time_days,
-                                    last_price_rows,
-                                );
-                            }
-                            extra_events.push(Event::Markets(ev));
-                        }
-                    }
-                }
-                EngineMethod::GetMarketsIndexes => {
-                    if let Some(names) = parse_markets_indexes_response(&resp.data) {
-                        let ev = self.markets.apply_markets_indexes(names);
-                        extra_events.push(Event::Markets(ev));
-                    }
-                }
-                EngineMethod::CheckBinanceTags => {
-                    if let Some(ev) = self
-                        .markets
-                        .apply_token_tags_payload_like_delphi(&resp.data)
-                    {
-                        extra_events.push(Event::Markets(ev));
-                    }
-                }
-                EngineMethod::BaseCheck => {
-                    let info = parse_base_check_response(&resp.data);
-                    self.markets.set_copy_max_leverage_from_markets_list(
-                        copy_max_leverage_from_markets_list(&info),
-                    );
-                    self.markets.set_server_base_currency(
-                        info.base_currency_name.as_deref(),
-                        info.base_currency_code,
-                    );
-                }
-                _ => {}
-            }
-        }
-        out.extend(extra_events);
-        out.push(Event::EngineResponse(resp));
-    }
-
-    fn queue_last_price_history_like_delphi(
-        &self,
-        history_now_time_days: Option<f64>,
-        rows: Vec<MarketLastPriceHistoryInput>,
-    ) {
-        let (Some(handle), Some(now_time)) = (&self.market_history, history_now_time_days) else {
-            return;
-        };
-        if rows.is_empty() {
-            return;
-        }
-        let rows: Vec<MarketHistoryLastPriceInput> = rows
-            .into_iter()
-            .filter(|row| self.active_trade_storage_allows_market(&row.market_name))
-            .map(|row| MarketHistoryLastPriceInput {
-                market_name: row.market_name,
-                current: row.current,
-                bid: row.bid,
-                ask: row.ask,
-                is_btc_market: row.is_btc_market,
-                is_base_usdt_market: row.is_base_usdt_market,
-            })
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        handle.send_last_price_batch(MarketHistoryLastPriceBatch { now_time, rows });
-    }
-
-    fn queue_current_last_price_history_like_delphi(&self, now_time_days: f64) {
-        let rows = self.markets.current_last_price_history_rows_like_delphi();
-        self.queue_last_price_history_like_delphi(Some(now_time_days), rows);
     }
 
     fn client_new_data_log_msg(&mut self, payload: &[u8], out: &mut Vec<Event>) {
