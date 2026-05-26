@@ -8670,3 +8670,26 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 22.75s`,
   `ParseFailed=0`, err_emu actual drop `9.12%`, reader max `692us`,
   writer CPU max `147us`, `GetMarketsList apply=2959us`.
+
+### 2026-05-26 - `ProtocolCore` direct send split
+
+Done:
+
+- Moved direct High/Low send helpers from `client/protocol_send.rs` into
+  `client/protocol_direct_send.rs`: regular H/L ACK apply, High UKey cleanup,
+  H send, PendingH retry, direct Low batching, grouped flush, and
+  `DoSendMPData` equivalent.
+- `client/protocol_send.rs` now owns the compact `CheckSeningData` skeleton:
+  copy send-lock snapshot, then call the Delphi-ordered Sliced/H/Low phases.
+- This is a readability/publication split only. No PendingH retry timing,
+  WantACK byte, compression flag, crypt header, grouped packet format, PMTU
+  accounting, UKey cleanup, Low-before/after-Sliced order, or wire bytes changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 27.58s`,
+  `ParseFailed=0`, err_emu actual drop `12.92%`, reader max `779us`,
+  writer CPU max `161us`, `GetMarketsList apply=2287us`.
