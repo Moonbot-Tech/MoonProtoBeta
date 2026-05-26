@@ -8811,3 +8811,27 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.21s`; `UpdateMarketsList=2`,
   `ParseFailed=0`, retained LastPrice/trades present, reader max 751us,
   writer CPU max 148us, `GetMarketsList` apply total 2390us.
+
+### 2026-05-26 - `MarketsState` list-apply split
+
+Done:
+
+- Moved the Delphi `GetMarketsList` counterpart from `state/markets.rs` into
+  `state/markets/list.rs`: parsed `MarketsListResponse` merge, direct payload
+  read/apply, COW handle lookup replacement, new-market bookkeeping,
+  market-index rebuild, CorrMarket pass, and apply timing diagnostics.
+- Made hidden module dependencies explicit: `tags.rs` now imports
+  `EngineStreamReader` directly, and market tests import list/price response
+  structs directly instead of relying on parent `use` leakage.
+- This is a readability/publication split only. No full-list merge rules,
+  COW stable-handle behavior, old-market retention, new-market listing event,
+  index synchronization, CorrMarket application, or active Init path changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 24.77s`; `GetMarketsList=1`,
+  `UpdateMarketsList=2`, `ParseFailed=0`, retained LastPrice/trades present,
+  reader max 627us, writer CPU max 135us, `GetMarketsList` apply total 2822us.

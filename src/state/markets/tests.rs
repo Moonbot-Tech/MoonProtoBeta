@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::market::{
-    write_market, BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate, MarketsPricesResponse,
+    write_market, BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate, MarketsListResponse,
+    MarketsPricesResponse,
 };
 
 fn mk_market(name: &str, idx: u16) -> Market {

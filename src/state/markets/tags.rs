@@ -2,7 +2,9 @@
 
 use std::collections::HashSet;
 
-use super::{EngineStreamReader, MarketTokenTags, MarketsEvent, MarketsState, TokenTags};
+use crate::commands::market::EngineStreamReader;
+
+use super::{MarketTokenTags, MarketsEvent, MarketsState, TokenTags};
 
 impl MarketsState {
     /// Применить ответ `emk_CheckBinanceTags`.
