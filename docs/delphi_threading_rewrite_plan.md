@@ -8466,3 +8466,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Market` EngineStreamReader split
+
+Done:
+
+- Moved the generic Engine API stream reader from `commands/market.rs` into
+  `commands/market/reader.rs` and re-exported it as `EngineStreamReader`.
+- Kept `read_market`, `write_market`, market-list parsing, price parsing,
+  indexes, and token-tags logic in `market.rs`; their Delphi field order and
+  wire behavior did not move or change.
+- This is a readability/publication split only. No zero-tail reads, string
+  reads, count handling, allocation hints, market payload bytes, or public API
+  names changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
