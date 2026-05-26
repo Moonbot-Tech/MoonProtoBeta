@@ -8485,3 +8485,23 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Market` token-tags split
+
+Done:
+
+- Moved `emk_CheckBinanceTags` wire types and parser/builder from
+  `commands/market.rs` into `commands/market/token_tags.rs`: `TokenTags`,
+  `MarketTokenTags`, `parse_token_tags_response`, and
+  `build_token_tags_response`.
+- Re-exported the same public names from `market.rs`; callers and tests keep
+  using the existing API path.
+- This is a readability/publication split only. No tag bitmask constants,
+  string encoding, count handling, allocation hint, parsed rows, or wire bytes
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
