@@ -8447,3 +8447,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` trade command module rename
+
+Done:
+
+- Renamed the remaining `client/domain_commands.rs` module to
+  `client/domain_trade.rs` after UI/Strat/Balance wrappers were split out.
+- The file now contains only high-level Order/Trade wrappers over
+  `commands::trade::build_*` plus the local order-state helper wrappers that
+  match Delphi UI order actions.
+- This is a readability/publication rename only. No `Command::Order` payload,
+  retry/priority/encryption settings, UniqueKey behavior, local order cache
+  mutation, or public method signature changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
