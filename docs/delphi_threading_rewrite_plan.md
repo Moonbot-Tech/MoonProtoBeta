@@ -7653,3 +7653,23 @@ Verification:
   `FIRETEST_QUICK_PASS after 22.68s`, `ParseFailed=0`, err_emu actual drop
   `10.24%`, retained futures rows present, derived snapshot present,
   `reader max=713us`, `writer_cpu max=127us`, `GetMarketsList apply=2407us`.
+
+### 2026-05-26 - `Orders` read-model type split
+
+Done:
+
+- Moved order read-model helper types into `state/orders/types.rs`:
+  `SellReason`, `OrderCancelSend`, `PanicSellSend`,
+  `OrderTraceChartPoint`, `OrderTraceLine`, `ApplyResult`, `OrderEvent`.
+- Kept public paths unchanged through `state::orders` / `state` re-exports.
+- Left `Orders::apply_at` and the Delphi worker state-machine in
+  `state/orders.rs` intact for one-piece protocol сверка.
+- This is a readability/publication split only. No order apply behavior,
+  event shape, pending-cancel action, panic-sell action, trace-line math, or
+  public API behavior changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
