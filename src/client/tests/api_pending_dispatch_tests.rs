@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::build_markets_indexes_response;

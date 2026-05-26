@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::events::EventDispatcher;
 use moonproto_transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
