@@ -103,11 +103,16 @@ impl Client {
         // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).
         // User callback выполняется через app queue, а не внутри protocol tick.
         let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
@@ -130,7 +135,9 @@ impl Client {
                 let mut mode = RunMode::CallbackQueue { app_tx };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             app_handle
                 .join()
                 .expect("moonproto app callback thread panicked");

@@ -77,6 +77,7 @@ impl From<EngineRequestError> for MoonClientError {
 pub struct MoonClient {
     tx: mpsc::Sender<RuntimeCommand>,
     events_rx: Mutex<mpsc::Receiver<crate::events::Event>>,
+    lifecycle_rx: Mutex<mpsc::Receiver<LifecycleEvent>>,
     snapshot: Arc<RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -87,12 +88,14 @@ impl MoonClient {
     pub fn connect(cfg: ClientConfig, connect: ConnectConfig) -> Result<Self, MoonClientError> {
         let (tx, rx) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::channel();
+        let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
         let (init_tx, init_rx) = mpsc::channel();
         let snapshot = Arc::new(RwLock::new(None));
         let runtime_snapshot = Arc::clone(&snapshot);
 
         let join = thread::spawn(move || {
             let mut client = Client::new(cfg);
+            client.set_lifecycle_event_sender(Some(lifecycle_tx));
             let mut dispatcher = crate::events::EventDispatcher::new();
 
             let init_result = connect_and_init(&mut client, &mut dispatcher, connect);
@@ -115,6 +118,7 @@ impl MoonClient {
             Ok(Ok(_)) => Ok(Self {
                 tx,
                 events_rx: Mutex::new(events_rx),
+                lifecycle_rx: Mutex::new(lifecycle_rx),
                 snapshot,
                 join: Mutex::new(Some(join)),
             }),
@@ -159,6 +163,32 @@ impl MoonClient {
         timeout: Duration,
     ) -> Result<crate::events::Event, mpsc::RecvTimeoutError> {
         self.events_rx.lock().unwrap().recv_timeout(timeout)
+    }
+
+    /// Drain lifecycle events observed by the runtime.
+    pub fn drain_lifecycle_events(&self) -> Vec<LifecycleEvent> {
+        let rx = self.lifecycle_rx.lock().unwrap();
+        let mut out = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => out.push(event),
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        out
+    }
+
+    /// Try to receive one lifecycle event without blocking.
+    pub fn try_recv_lifecycle_event(&self) -> Option<LifecycleEvent> {
+        self.lifecycle_rx.lock().unwrap().try_recv().ok()
+    }
+
+    /// Receive one lifecycle event with an application-selected timeout.
+    pub fn recv_lifecycle_event_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<LifecycleEvent, mpsc::RecvTimeoutError> {
+        self.lifecycle_rx.lock().unwrap().recv_timeout(timeout)
     }
 
     /// Order intent API. The live `Orders` state remains owned by the runtime.

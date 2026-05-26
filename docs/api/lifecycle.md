@@ -24,17 +24,19 @@ pub enum LifecycleEvent {
 ```rust
 use moonproto::LifecycleEvent;
 
-client.on_lifecycle(Box::new(|event| match event {
-    LifecycleEvent::Connecting => ui_status("connecting"),
-    LifecycleEvent::Connected { fresh: true } => ui_status("connected"),
-    LifecycleEvent::Connected { fresh: false } => ui_status("reconnected"),
-    LifecycleEvent::Reconnecting => ui_status("reconnecting"),
-    LifecycleEvent::ServerRestart => ui_status("server restarted"),
-    LifecycleEvent::Disconnected => ui_status("disconnected"),
-    LifecycleEvent::BindFailed { consecutive_failures } => {
-        show_network_alert(consecutive_failures);
+for event in client.drain_lifecycle_events() {
+    match event {
+        LifecycleEvent::Connecting => ui_status("connecting"),
+        LifecycleEvent::Connected { fresh: true } => ui_status("connected"),
+        LifecycleEvent::Connected { fresh: false } => ui_status("reconnected"),
+        LifecycleEvent::Reconnecting => ui_status("reconnecting"),
+        LifecycleEvent::ServerRestart => ui_status("server restarted"),
+        LifecycleEvent::Disconnected => ui_status("disconnected"),
+        LifecycleEvent::BindFailed { consecutive_failures } => {
+            show_network_alert(consecutive_failures);
+        }
     }
-}));
+}
 ```
 
 ## Semantics
@@ -67,5 +69,8 @@ reconnect restores required Engine API state automatically.
 
 ## Callback Cost
 
-Lifecycle callbacks run on the same thread as the client main loop. Keep them
-short and pass heavy work to another thread or queue.
+Regular applications receive lifecycle events from `MoonClient` through
+`drain_lifecycle_events`, `try_recv_lifecycle_event`, or
+`recv_lifecycle_event_timeout`. Low-level protocol tools that own `Client`
+directly can still register `Client::on_lifecycle`; that callback is not the
+normal desktop/UI integration path.

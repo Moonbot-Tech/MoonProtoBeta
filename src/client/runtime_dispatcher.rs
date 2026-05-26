@@ -37,11 +37,16 @@ impl Client {
         let api_pending = Arc::clone(&self.api_pending);
         let (app_tx, app_rx) = mpsc::channel::<crate::events::Event>();
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
@@ -78,7 +83,9 @@ impl Client {
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             dispatcher_handle
                 .join()
                 .expect("moonproto dispatcher worker thread panicked");
@@ -119,11 +126,16 @@ impl Client {
         let api_pending = Arc::clone(&self.api_pending);
         let (app_tx, app_rx) = mpsc::channel::<StateAppEvent>();
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
@@ -160,7 +172,9 @@ impl Client {
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             dispatcher_handle
                 .join()
                 .expect("moonproto dispatcher worker thread panicked");
@@ -206,11 +220,16 @@ impl Client {
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
         let api_pending = Arc::clone(&self.api_pending);
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
@@ -241,7 +260,9 @@ impl Client {
                 };
                 ProtocolCore { client: self }.run(duration, &mut mode);
             }
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             dispatcher_handle
                 .join()
                 .expect("moonproto dispatcher worker thread panicked");
@@ -263,11 +284,16 @@ impl Client {
     /// synchronous dispatcher without spawning worker/app queues.
     #[cfg(test)]
     fn run_inner(&mut self, duration: Duration, mut mode: RunMode<'_>) {
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
@@ -281,7 +307,9 @@ impl Client {
                 })
             });
             ProtocolCore { client: self }.run(duration, &mut mode);
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             if let Some(handle) = lifecycle_handle {
                 restored_lifecycle_cb = Some(
                     handle

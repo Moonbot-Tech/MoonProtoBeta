@@ -8,11 +8,11 @@ In the normal active-library flow, init enables this delivery together with the
 balance/market refresh path. A raw transport-only client that has not completed
 init should not expect arbitrage relay events.
 
-## EventDispatcher Path
+## Active Library Path
 
-`EventDispatcher` filters relay records through the current server market-index
-map. Records for unknown indexes are consumed but not exposed, matching the
-Delphi client.
+`MoonClient` filters relay records through the current server market-index map
+before exposing `Event::Arb`. Records for unknown indexes are consumed but not
+exposed, matching the Delphi client.
 
 ```rust
 use moonproto::commands::arb::ArbPayload;

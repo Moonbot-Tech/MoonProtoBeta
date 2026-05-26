@@ -38,6 +38,9 @@
 //! client.subscribe_orderbook("ETHUSDT")?;
 //! // After an order appears in events/snapshots:
 //! // client.orders().move_order(order_uid, 50100.0)?;
+//! for lifecycle in client.drain_lifecycle_events() {
+//!     println!("lifecycle: {lifecycle:?}");
+//! }
 //! for event in client.drain_events() {
 //!     println!("event: {event:?}");
 //! }
@@ -71,9 +74,8 @@
 //! [`extended_transport_available`] before offering those modes. The public
 //! builder falls back to V0 when `moonext` is absent.
 //!
-//! Working examples: `examples/client_test.rs`, `examples/trading_flow.rs`,
-//! `examples/history_bars.rs`, `examples/list_markets.rs`, `examples/get_balance.rs`,
-//! `examples/query_hedge_mode.rs`,
+//! Working examples: `examples/trading_flow.rs`, `examples/history_bars.rs`,
+//! `examples/list_markets.rs`, `examples/get_balance.rs`, `examples/query_hedge_mode.rs`,
 //! `examples/api_expiration_time.rs`,
 //! `examples/request_client_settings.rs`,
 //! `examples/order_snapshot.rs`,
@@ -82,8 +84,9 @@
 //! `examples/trades_stream.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
-//! `examples/multi_client_test.rs`,
-//! `examples/stress_client.rs`.
+//! and `examples/multi_client_test.rs`. `examples/loss_logger.rs` and
+//! `examples/stress_client.rs` are diagnostic protocol tools, not normal
+//! application templates.
 //!
 //! ## Main Public Modules
 //!

@@ -26,7 +26,3 @@ libloading = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[[example]]
-name = "client_test"
-path = "examples/client_test.rs"

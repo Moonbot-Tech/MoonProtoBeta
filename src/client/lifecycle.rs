@@ -11,6 +11,14 @@ impl Client {
         self.lifecycle_cb = Some(cb);
     }
 
+    pub(super) fn set_lifecycle_event_sender(&self, tx: Option<mpsc::Sender<LifecycleEvent>>) {
+        *self.lifecycle_app_tx.lock().unwrap() = tx;
+    }
+
+    pub(super) fn lifecycle_event_sender_installed(&self) -> bool {
+        self.lifecycle_app_tx.lock().unwrap().is_some()
+    }
+
     /// Mark Delphi `ServerUpdateSent`.
     ///
     /// UI wrappers that can trigger a server-side restart/routing update

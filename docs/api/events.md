@@ -7,6 +7,11 @@ Regular applications receive these events from `MoonClient::drain_events`,
 `try_recv_event`, or `recv_event_timeout`. `EventDispatcher` remains public for
 custom low-level runtimes and tests.
 
+Connection lifecycle is a separate stream because it is owned by the transport
+session rather than a decoded protocol channel. Use
+`MoonClient::drain_lifecycle_events`, `try_recv_lifecycle_event`, or
+`recv_lifecycle_event_timeout` for `LifecycleEvent`.
+
 ## Recommended Use
 
 ```rust

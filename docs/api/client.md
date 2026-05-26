@@ -114,6 +114,9 @@ client.subscribe_orderbook("ETHUSDT")?;
 for event in client.drain_events() {
     println!("event: {event:?}");
 }
+for lifecycle in client.drain_lifecycle_events() {
+    println!("lifecycle: {lifecycle:?}");
+}
 
 client.stop()?;
 ```
@@ -126,7 +129,7 @@ inside the same `Client` session maintains the user-requested active-lib state.
 
 `MoonClient` owns the runtime thread. Applications do not choose a finite
 protocol-loop duration; the session runs until explicit `stop()` or drop. UI
-code reads typed events and immutable snapshots:
+code reads typed events, lifecycle events, and immutable snapshots:
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
@@ -601,15 +604,17 @@ client.peer_app_token();
 client.server_info();
 ```
 
-`server_info()` is populated by `connect_and_init` or `run_init_sequence`.
-For multiple independent server connections, create one `Client` and one
-`EventDispatcher` per server.
+These raw observability methods are on low-level `Client` for diagnostic tools.
+Regular applications observe connection/domain state through `MoonClient`
+events, lifecycle events, immutable snapshots, and request results. For
+multiple independent server connections, create one `MoonClient` per server.
 
 ## Shutdown
 
 ```rust
-client.disconnect();
+client.stop()?;
 ```
 
-`disconnect` schedules `LogOff`, closes the socket path, and exits the current
-run loop. To reconnect after final shutdown, create a new `Client`.
+`stop` schedules `LogOff`, closes the socket path, and joins the runtime thread.
+Dropping `MoonClient` performs the same shutdown best-effort. To reconnect after
+final shutdown, create a new `MoonClient`.

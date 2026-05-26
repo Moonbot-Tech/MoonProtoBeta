@@ -130,6 +130,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After an order appears in events/snapshots:
     // client.orders().move_order(order_uid, 50100.0)?;
 
+    for lifecycle in client.drain_lifecycle_events() {
+        println!("lifecycle: {lifecycle:?}");
+    }
+
     if let Some(snapshot) = client.snapshot() {
         println!("orders={}", snapshot.orders().len());
     }
@@ -212,7 +216,6 @@ Important ones:
 
 Diagnostic / protocol-tool examples intentionally use lower-level APIs:
 
-- `client_test.rs`: raw smoke/debug client.
 - `loss_logger.rs`: live loss/gap diagnostics.
 - `stress_client.rs`: two-client stress and protocol-loss diagnostics.
 

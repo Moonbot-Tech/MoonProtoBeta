@@ -69,7 +69,7 @@ use moonproto::state::{
 };
 use moonproto::{
     connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
-    EventDispatcherSnapshot, ImportedKeys, InitConfig, LifecycleEvent,
+    EventDispatcherSnapshot, ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -585,8 +585,8 @@ impl Session {
         let (candles_snapshot_tx, candles_snapshot_rx) = mpsc::channel();
         let mut dispatcher = EventDispatcher::new();
         dispatcher.set_market_history_handle(history_worker.handle());
+        let initial_strategies: Vec<_> = provided_strategy.iter().cloned().collect();
         if let Some(strategy) = provided_strategy.as_ref() {
-            dispatcher.set_local_strategies(std::slice::from_ref(strategy));
             println!(
                 "FIRETEST {label}: local strategy snapshot seeded id={} ver={} last_date={}",
                 strategy.strategy_id, strategy.strategy_ver, strategy.last_date
@@ -598,6 +598,7 @@ impl Session {
             subscribe_trades: Some(false),
             subscribe_orderbooks: vec![cfg.market.clone()],
             step_timeout: None,
+            initial_strategies: Some(InitialStrategies::new(0, initial_strategies)),
         };
 
         println!(

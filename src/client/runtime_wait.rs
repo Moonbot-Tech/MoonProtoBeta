@@ -36,11 +36,16 @@ impl Client {
         let trades_server_token_mirror = Arc::clone(&self.dispatcher_trades_server_token);
         let api_pending = Arc::clone(&self.api_pending);
         let (work_tx, work_rx) = mpsc::channel::<DispatcherWorkItem>();
-        let lifecycle_pair = self.lifecycle_cb.take().map(|cb| {
-            let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-            *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
-            (rx, cb)
-        });
+        let lifecycle_pair = if self.lifecycle_event_sender_installed() {
+            None
+        } else {
+            self.lifecycle_cb.take().map(|cb| {
+                let (tx, rx) = mpsc::channel::<LifecycleEvent>();
+                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                (rx, cb)
+            })
+        };
+        let clear_lifecycle_app_tx = lifecycle_pair.is_some();
         let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         let mut result: Option<Result<T, mpsc::RecvTimeoutError>> = None;
@@ -93,7 +98,9 @@ impl Client {
                     ProtocolCore { client: self }.run(tick, &mut mode);
                 }
             }
-            *lifecycle_app_tx.lock().unwrap() = None;
+            if clear_lifecycle_app_tx {
+                *lifecycle_app_tx.lock().unwrap() = None;
+            }
             dispatcher_handle
                 .join()
                 .expect("moonproto dispatcher worker thread panicked");

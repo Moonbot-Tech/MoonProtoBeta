@@ -33,6 +33,10 @@ fn main() {
         }
     };
 
+    for lifecycle in client.drain_lifecycle_events() {
+        println!("[lifecycle] {lifecycle:?}");
+    }
+
     client
         .subscribe_trades_for(false, [market])
         .expect("runtime stopped");

@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use moonproto::state::OrderBookEvent;
 use moonproto::{
-    parse_key_info, ClientConfig, ConnectConfig, Event, InitConfig, InitialStrategies, MoonClient,
+    parse_key_info, ClientConfig, ConnectConfig, Event, InitConfig, InitialStrategies,
+    LifecycleEvent, MoonClient,
 };
 
 const STREAM_DURATION_SECS: u64 = 15;
@@ -58,6 +59,15 @@ fn runtime_smoke_full_happy_path() {
     )
     .expect("FAIL: MoonClient::connect/connect+init failed");
     println!("OK: moonclient_connect_init");
+
+    let lifecycle = client.drain_lifecycle_events();
+    assert!(
+        lifecycle
+            .iter()
+            .any(|event| matches!(event, LifecycleEvent::Connected { fresh: true })),
+        "FAIL: MoonClient did not expose initial Connected lifecycle event: {lifecycle:?}"
+    );
+    println!("OK: lifecycle_events {:?}", lifecycle);
 
     let snapshot = client
         .snapshot()
