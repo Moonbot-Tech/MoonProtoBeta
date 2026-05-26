@@ -8011,3 +8011,24 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `MPC_Order` trace payload split
+
+Done:
+
+- Moved trade visual/trace payloads into `commands/trade/trace.rs`:
+  `trace_flags`, `OrderTracePoint`, `CorridorUpdate`, and
+  `BulkReplaceNotify`.
+- Kept public paths unchanged through `commands::trade::*` re-exports.
+- Kept all readers byte-identical: same `MarketCommandHeader`, same zero-tail
+  scalar readers, same flag bits, same UID vector count handling, and same
+  `adjust_time` side effect.
+- This is a readability/publication split only. No `MPC_Order` command ID,
+  field order, trace flag semantics, parser behavior, or public API behavior
+  changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
