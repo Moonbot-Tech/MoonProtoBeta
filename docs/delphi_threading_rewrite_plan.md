@@ -7240,3 +7240,28 @@ Verification:
   `FIRETEST_QUICK_PASS after 24.50s`, `ParseFailed=0`, err_emu actual drop
   `9.19%`, retained futures rows present, derived snapshot present,
   `reader max=682us`, `writer_cpu max=138us`.
+
+### 2026-05-26 - trades dispatch removes resend/event wrapper allocations
+
+Done:
+
+- Added zero-copy `iter_trades_resend_response`: active dispatch now walks
+  `MPC_TradesResendResponse` inner `TradesStream` packets as borrowed slices
+  instead of cloning every inner payload into `Vec<u8>`.
+- Kept `parse_trades_resend_response` as the owned compatibility helper for
+  raw callers/tests; it is now a thin wrapper over the iterator.
+- Removed the intermediate `Vec<TradesEvent>` in active trades dispatch.
+  `TradesPacketEffect` values are converted straight into `Event::Trade`,
+  while the first `Apply` still performs retained-state update before the
+  `Applied` signal, preserving the previous Delphi machine-effect order.
+
+Verification:
+
+- `cargo test parse_resend_response --lib --quiet` OK.
+- `cargo test trades_resend --lib --quiet` OK: 3 passed.
+- `cargo test --lib --quiet` OK: 765 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 22.68s`, `ParseFailed=0`, err_emu actual drop
+  `8.96%`, retained futures rows present, derived snapshot present,
+  `reader max=768us`, `writer_cpu max=132us`.

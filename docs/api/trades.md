@@ -737,7 +737,7 @@ Custom tools can use the parser and state directly:
 
 ```rust
 use moonproto::commands::trades_stream::parse_trades_packet;
-use moonproto::state::{parse_trades_resend_response, TradesState};
+use moonproto::state::{iter_trades_resend_response, TradesState};
 
 let mut trades = TradesState::new();
 let packet = parse_trades_packet(payload).expect("bad trades packet");
@@ -749,8 +749,8 @@ for resend_request in trades.tick(rtt_ms, now_ms) {
     client.send_api_request(&resend_request);
 }
 
-for raw_packet in parse_trades_resend_response(resend_response_payload) {
-    if let Some(packet) = parse_trades_packet(&raw_packet) {
+for raw_packet in iter_trades_resend_response(resend_response_payload) {
+    if let Some(packet) = parse_trades_packet(raw_packet) {
         let historical_events = trades.on_packet_resend(packet);
         for resend_request in trades.tick(rtt_ms, now_ms) {
             client.send_api_request(&resend_request);

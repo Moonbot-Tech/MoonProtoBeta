@@ -47,9 +47,9 @@ use crate::commands::trade::{AllStatuses, TradeCommand, TradeCtx};
 use crate::commands::trades_stream::{decode_trades_packet, DecodedTradesPacket, TradeSectionRef};
 use crate::commands::ui::{ClientSettingsCommand, UICommand};
 use crate::protocol::Command;
+use crate::state::iter_trades_resend_response;
 use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::orders::OrderCancelSend;
-use crate::state::parse_trades_resend_response;
 use crate::state::{
     ApplyResult, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
     MarketHistoryCandlesSnapshot, MarketHistoryConfig, MarketHistoryHandle,
@@ -1218,13 +1218,13 @@ impl EventDispatcher {
         match decode_trades_packet(payload) {
             Some(decoded) => {
                 let effects = self.trades.on_packet_header(decoded.packet_num, now_ms);
-                let trade_events = self.collect_known_trades_events_like_delphi(
+                self.collect_known_trades_events_like_delphi(
                     &decoded,
                     effects,
                     now_ms,
                     history_now_time_days,
+                    out,
                 );
-                self.apply_trades_events_like_delphi(trade_events, out);
             }
             None => out.push(Self::parse_failed(Command::TradesStream, payload)),
         }
@@ -1242,27 +1242,20 @@ impl EventDispatcher {
         if !self.markets.indexes_synchronized {
             return;
         }
-        let inner_payloads = parse_trades_resend_response(payload);
-        for inner in inner_payloads {
-            match decode_trades_packet(&inner) {
+        for inner in iter_trades_resend_response(payload) {
+            match decode_trades_packet(inner) {
                 Some(decoded) => {
                     let effects = self.trades.on_packet_resend_header(decoded.packet_num);
-                    let trade_events = self.collect_known_trades_events_like_delphi(
+                    self.collect_known_trades_events_like_delphi(
                         &decoded,
                         effects,
                         now_ms,
                         history_now_time_days,
+                        out,
                     );
-                    self.apply_trades_events_like_delphi(trade_events, out);
                 }
-                None => out.push(Self::parse_failed(Command::TradesResendResponse, &inner)),
+                None => out.push(Self::parse_failed(Command::TradesResendResponse, inner)),
             }
-        }
-    }
-
-    fn apply_trades_events_like_delphi(&mut self, events: Vec<TradesEvent>, out: &mut Vec<Event>) {
-        for ev in events {
-            out.push(Event::Trade(ev));
         }
     }
 
@@ -1445,9 +1438,9 @@ impl EventDispatcher {
         effects: Vec<TradesPacketEffect>,
         now_ms: i64,
         history_now_time_days: Option<f64>,
-    ) -> Vec<TradesEvent> {
+        out: &mut Vec<Event>,
+    ) {
         let mut applied_sections = false;
-        let mut events = Vec::with_capacity(effects.len());
         for effect in effects {
             if matches!(&effect, TradesPacketEffect::Apply) && !applied_sections {
                 self.apply_known_trades_sections_like_delphi(
@@ -1457,9 +1450,10 @@ impl EventDispatcher {
                 );
                 applied_sections = true;
             }
-            events.push(effect.into_event(decoded.packet_num, decoded.base_time));
+            out.push(Event::Trade(
+                effect.into_event(decoded.packet_num, decoded.base_time),
+            ));
         }
-        events
     }
 
     fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
