@@ -8407,3 +8407,22 @@ Verification:
 - `cargo fmt --all` OK.
 - `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
 - `cargo check --examples --quiet` OK.
+
+### 2026-05-26 - `Client` strat command split
+
+Done:
+
+- Moved Strat-channel high-level wrappers into `client/domain_strat.rs`:
+  schema request, snapshot payload/batch send, delete, sell-price update, and
+  checked sync.
+- Kept the Strat snapshot sender helper with the Strat wrappers because it is
+  the `TStratSnapshot` `UK_StratSnapshot`/Sliced send path.
+- This is a readability/publication split only. No `Command::Strat` payload,
+  retry/priority/encryption settings, UniqueKey behavior, schema request,
+  snapshot format, or public method signature changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.

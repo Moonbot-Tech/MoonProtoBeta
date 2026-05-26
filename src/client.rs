@@ -51,6 +51,7 @@ mod diagnostics;
 mod domain_balance;
 mod domain_commands;
 mod domain_send;
+mod domain_strat;
 mod engine_api;
 mod helpers;
 mod init;
