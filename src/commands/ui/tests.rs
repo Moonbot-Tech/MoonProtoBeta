@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn header_bytes(cmd_id: u8, uid: u64) -> Vec<u8> {

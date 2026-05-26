@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::commands::market::{
     write_market, BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate,

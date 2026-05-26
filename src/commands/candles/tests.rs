@@ -1,4 +1,3 @@
-
 use super::*;
 use flate2::{write::ZlibEncoder, Compression};
 use std::io::Write;

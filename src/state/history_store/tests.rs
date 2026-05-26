@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn trade(time: f64, price: f32, qty: f32) -> TradeHistoryRow {

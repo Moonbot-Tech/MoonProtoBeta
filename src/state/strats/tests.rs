@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::commands::strat::{
     StratCheckedEcho, StratCheckedSync, StratDelete, StratSellPriceUpdate,

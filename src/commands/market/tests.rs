@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn sample_market(name: &str, with_v2: bool) -> Market {

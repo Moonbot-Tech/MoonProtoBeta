@@ -54,9 +54,9 @@ impl EngineMethod {
     /// `GetMarketsBalanceFull`: server-side full balance refresh.
     ///
     /// Current Delphi `MoonProtoEngineServer.pas → ProcessRequest` calls
-    /// `Engine.GetMarketsBalanceFull`, but the response writer is still a TODO
-    /// (`WriteBalancesToStream` is not implemented), so a successful response has
-    /// an empty `data` payload.
+    /// `Engine.GetMarketsBalanceFull`, but `WriteBalancesToStream` is not
+    /// implemented in the reference server, so a successful response has an
+    /// empty `data` payload.
     pub const GetMarketsBalanceFull: Self = Self(7);
     /// `GetOrder` — enum value exists in `TEngineMethodKind`.
     ///

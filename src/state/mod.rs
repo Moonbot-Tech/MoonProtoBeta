@@ -62,6 +62,5 @@ pub use settings::{SettingsEvent, SettingsState};
 pub use strats::{StratEvent, StrategyInfo, StratsState};
 pub(crate) use trades::TradesPacketEffect;
 pub use trades::{
-    iter_trades_resend_response, parse_trades_resend_response, TradesEvent,
-    TradesResendResponsePackets, TradesState,
+    iter_trades_resend_response, TradesEvent, TradesResendResponsePackets, TradesState,
 };

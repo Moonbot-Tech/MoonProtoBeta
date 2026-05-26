@@ -95,7 +95,7 @@ pub fn build_engine_request_full(
     buf
 }
 
-/// Backward-compatible wrapper for requests without `params`.
+/// Build a complete low-level `TEngineRequest` wire payload without `params`.
 pub fn build_engine_request(
     method: EngineMethod,
     market_name: &str,
@@ -163,8 +163,8 @@ pub fn update_markets_list() -> Vec<u8> {
 
 /// `emk_GetMarketsBalanceFull` — asks the server to refresh full market balances.
 ///
-/// Current Delphi server code calls `Engine.GetMarketsBalanceFull`, but does not
-/// serialize balances into the response yet (`WriteBalancesToStream` is TODO), so
+/// Current Delphi server code calls `Engine.GetMarketsBalanceFull`, but
+/// `WriteBalancesToStream` is not implemented in the reference server, so
 /// successful responses have an empty payload.
 pub fn get_markets_balance_full() -> Vec<u8> {
     build_engine_request(EngineMethod::GetMarketsBalanceFull, "", &[])

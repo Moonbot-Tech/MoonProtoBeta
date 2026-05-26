@@ -10,8 +10,8 @@
 //! последовательностью. При gap (потерянный пакет) — создаётся **GapBucket**, который
 //! запрашивает resend через `emk_TradesResend` (батч до 200 номеров) до 3 retry с
 //! exponential backoff. Сервер отвечает `MPC_TradesResendResponse` (batch формата:
-//! `Byte(count) + [Word(sz) + raw_packet] × count`), который мы распарсиваем обратно
-//! в `TradesPacket` через `parse_trades_resend_response`.
+//! `Byte(count) + [Word(sz) + raw_packet] × count`), который active dispatcher
+//! проходит без копирования через `iter_trades_resend_response`.
 //!
 //! ## Использование
 //!
@@ -685,16 +685,6 @@ pub fn iter_trades_resend_response(payload: &[u8]) -> TradesResendResponsePacket
             remaining: payload[0] as usize,
         }
     }
-}
-
-/// Распарсить `MPC_TradesResendResponse` payload в owned список сырых TradesStream packets.
-///
-/// Active Lib hot path uses [`iter_trades_resend_response`] to avoid copies. This owned
-/// helper is kept for compatibility with raw callers and tests.
-pub fn parse_trades_resend_response(payload: &[u8]) -> Vec<Vec<u8>> {
-    iter_trades_resend_response(payload)
-        .map(<[u8]>::to_vec)
-        .collect()
 }
 
 #[cfg(test)]

@@ -825,8 +825,8 @@ impl MarketsState {
     /// Active-library direct counterpart of Delphi `UpdateMarketsList`.
     ///
     /// Delphi mutates market prices inside the read loop. If a later corr-market
-    /// string read raises, already-applied prices remain. The pure parser is kept
-    /// for tests/raw callers; dispatcher uses this method for protocol state.
+    /// string read raises, already-applied prices remain. The pure parser remains
+    /// a low-level command helper; dispatcher uses this method for protocol state.
     pub(crate) fn apply_markets_prices_payload_like_delphi(
         &mut self,
         data: &[u8],

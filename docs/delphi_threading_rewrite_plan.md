@@ -5099,7 +5099,7 @@ Done:
   tags remain and old absent tags are not cleared.
 - Rust active dispatcher now uses direct payload apply for
   `UpdateMarketsList` and `CheckBinanceTags` instead of pure parse-then-apply.
-  The pure parse helpers remain for raw callers/tests.
+  The pure parse helpers remain low-level command helpers.
 - Recorded `spec_pipeline/work/хуйня.md §X.139`.
 
 Verification:
@@ -5607,7 +5607,7 @@ Target shape:
   - `MMOrders { market_index, has_taker, rows }`;
   - `LiqOrders { market_index, rows }`;
   - `WatcherFills { market_index, user, records_raw }`.
-- Keep current `parse_trades_packet -> TradesPacket` as a compatibility
+- Keep current `parse_trades_packet -> TradesPacket` as an owned low-level
   collector over `SectionIter`.
 - Then switch the active dispatcher hot path to `SectionIter`: gate unknown
   markets by skipping rows like Delphi, update `TradesState` by packet header,
@@ -5626,7 +5626,7 @@ Verification:
 Done:
 
 - Added `DecodedTradesPacket` and borrowed `TradeSectionIter`.
-- `parse_trades_packet` is now a compatibility collector over `SectionIter`,
+- `parse_trades_packet` is now an owned low-level collector over `SectionIter`,
   so raw protocol tools can still request an owned packet when they explicitly
   parse bytes.
 - `EventDispatcher` no longer does collect-all then filter. It decodes the
@@ -5646,7 +5646,7 @@ Done:
 
 - Added `TradesPacketEffect`: packet-number/gap/duplicate/resend decisions now
   can be produced from `packet_num` only, before row/state application.
-- Kept low-level parser compatibility: `TradesState::on_packet(TradesPacket,
+- Kept the low-level state parser shape: `TradesState::on_packet(TradesPacket,
   now_ms)` and `on_packet_resend(TradesPacket)` still accept owned packets but
   now return the signal/diagnostic `TradesEvent` shape.
 - Switched active dispatcher live/resend paths to call the packet-header
@@ -7253,11 +7253,11 @@ Verification:
 
 Done:
 
-- Added zero-copy `iter_trades_resend_response`: active dispatch now walks
-  `MPC_TradesResendResponse` inner `TradesStream` packets as borrowed slices
-  instead of cloning every inner payload into `Vec<u8>`.
-- Kept `parse_trades_resend_response` as the owned compatibility helper for
-  raw callers/tests; it is now a thin wrapper over the iterator.
+- Added zero-copy `iter_trades_resend_response`: active dispatch and low-level
+  callers now walk `MPC_TradesResendResponse` inner `TradesStream` packets as
+  borrowed slices instead of cloning every inner payload into `Vec<u8>`.
+- Removed the owned `parse_trades_resend_response` wrapper; callers that need
+  owned bytes can collect from the iterator explicitly.
 - Removed the intermediate `Vec<TradesEvent>` in active trades dispatch.
   `TradesPacketEffect` values are converted straight into `Event::Trade`,
   while the first `Apply` still performs retained-state update before the
@@ -7462,3 +7462,28 @@ Final Phase Z item:
   avoidable init-state overhead. Re-measure against the same FireTest phase
   counters and optimize remaining `corr/ref` or allocation costs if Delphi-style
   machine effect proves they should be cheaper.
+
+### 2026-05-26 - cleanup of stale compatibility helpers
+
+Done:
+
+- Removed unused public one-slot `UniqueKey` helpers for
+  `UK_TurnMMDetection`, `UK_DexSwitch`, and `UK_SpotSwitch`. The only helpers
+  left for these UI commands are the Delphi-equivalent `(kind, command UID)`
+  forms used by live code.
+- Removed owned `parse_trades_resend_response`; resend responses are now exposed
+  only through zero-copy `iter_trades_resend_response`. Low-level callers that
+  need owned bytes can collect from the iterator explicitly.
+- Reworded stale `compatibility/raw callers/tests` comments into final API
+  language: borrowed hot path first, owned low-level helper only where it is a
+  real public tool.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 26.14s`, `ParseFailed=0`, err_emu actual drop
+  `11.59%`, retained futures rows present, derived snapshot present,
+  `reader max=715us`, `writer_cpu max=157us`, `GetMarketsList apply=2429us`.

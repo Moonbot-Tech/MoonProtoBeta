@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::commands::strategy_schema::{
     visible_kind_mask, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,

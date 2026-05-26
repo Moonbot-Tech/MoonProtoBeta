@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::state::history::DELPHI_MSECS_PER_DAY;
 use crate::state::MarketHistoryConfig;

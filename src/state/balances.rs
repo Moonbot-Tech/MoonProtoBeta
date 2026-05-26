@@ -50,8 +50,8 @@ pub struct BalancesState {
     pub by_market: HashMap<String, BalanceItem>,
     /// Последний применённый epoch любого accepted balance-пакета.
     ///
-    /// Это поле оставлено для диагностики/back-compat. Для отбрасывания stale
-    /// incremental items используется `last_epoch_by_market`, как в Delphi.
+    /// Это поле оставлено для диагностики. Для отбрасывания stale incremental
+    /// items используется `last_epoch_by_market`, как в Delphi.
     pub last_epoch: u16,
     /// Последний применённый epoch по market_name (Delphi `m.LastBalanceEpoch`).
     last_epoch_by_market: HashMap<String, u16>,

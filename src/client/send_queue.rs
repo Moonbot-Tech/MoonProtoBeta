@@ -100,18 +100,6 @@ impl UniqueKey {
             uid: 1,
         }
     }
-    /// Legacy one-slot `UK_TurnMMDetection` helper.
-    ///
-    /// Delphi `TMMOrdersSubscribeCommand` does not override `SetUKey`, so the
-    /// high-level wrapper uses [`Self::turn_mm_detection_for`] with the command
-    /// UID. Keep this helper only for tools that intentionally want explicit
-    /// single-slot dedup.
-    pub fn turn_mm_detection() -> Self {
-        Self {
-            kind: UK_TURN_MM_DETECTION,
-            uid: 0,
-        }
-    }
     /// Delphi `TMMOrdersSubscribeCommand` UKey: `(UK_TurnMMDetection, UID)`.
     pub fn turn_mm_detection_for(uid: u64) -> Self {
         Self {
@@ -136,31 +124,11 @@ impl UniqueKey {
             uid: 1,
         }
     }
-    /// Legacy one-slot `UK_DexSwitch` helper.
-    ///
-    /// Delphi `TSwitchDexCommand` does not override `SetUKey`, so the
-    /// high-level wrapper uses [`Self::dex_switch_for`] with the command UID.
-    pub fn dex_switch() -> Self {
-        Self {
-            kind: UK_DEX_SWITCH,
-            uid: 0,
-        }
-    }
     /// Delphi `TSwitchDexCommand` UKey: `(UK_DexSwitch, UID)`.
     pub fn dex_switch_for(uid: u64) -> Self {
         Self {
             kind: UK_DEX_SWITCH,
             uid,
-        }
-    }
-    /// Legacy one-slot `UK_SpotSwitch` helper.
-    ///
-    /// Delphi `TSwitchSpotCommand` does not override `SetUKey`, so the
-    /// high-level wrapper uses [`Self::spot_switch_for`] with the command UID.
-    pub fn spot_switch() -> Self {
-        Self {
-            kind: UK_SPOT_SWITCH,
-            uid: 0,
         }
     }
     /// Delphi `TSwitchSpotCommand` UKey: `(UK_SpotSwitch, UID)`.

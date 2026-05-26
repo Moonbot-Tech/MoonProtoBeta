@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::commands::trades_stream::TradesPacket;
 
@@ -210,38 +209,31 @@ fn bucket_closes_after_max_retries() {
 }
 
 #[test]
-fn parse_resend_response_simple() {
+fn iter_resend_response_simple() {
     // count=2, 2 пакета по 3 байта.
     let payload: Vec<u8> = vec![
         2, // count
         3, 0, // sz=3
         0xAA, 0xBB, 0xCC, 3, 0, 0x11, 0x22, 0x33,
     ];
-    let packets = parse_trades_resend_response(&payload);
+    let packets: Vec<&[u8]> = iter_trades_resend_response(&payload).collect();
     assert_eq!(packets.len(), 2);
-    assert_eq!(packets[0], vec![0xAA, 0xBB, 0xCC]);
-    assert_eq!(packets[1], vec![0x11, 0x22, 0x33]);
+    assert_eq!(packets[0], &[0xAA, 0xBB, 0xCC][..]);
+    assert_eq!(packets[1], &[0x11, 0x22, 0x33][..]);
 }
 
 #[test]
-fn iter_resend_response_is_zero_copy_and_matches_owned_parser() {
+fn iter_resend_response_is_zero_copy() {
     let payload: Vec<u8> = vec![2, 3, 0, 0xAA, 0xBB, 0xCC, 3, 0, 0x11, 0x22, 0x33];
     let packets: Vec<&[u8]> = iter_trades_resend_response(&payload).collect();
     assert_eq!(packets, vec![&payload[3..6], &payload[8..11]]);
-    assert_eq!(
-        parse_trades_resend_response(&payload),
-        packets
-            .iter()
-            .map(|packet| packet.to_vec())
-            .collect::<Vec<_>>()
-    );
 }
 
 #[test]
-fn parse_resend_response_truncated() {
+fn iter_resend_response_truncated() {
     // count=2, но второй пакет не помещается.
     let payload: Vec<u8> = vec![2, 3, 0, 0xAA, 0xBB, 0xCC, 5, 0, 0x11];
-    let packets = parse_trades_resend_response(&payload);
+    let packets: Vec<&[u8]> = iter_trades_resend_response(&payload).collect();
     assert_eq!(packets.len(), 1);
 }
 

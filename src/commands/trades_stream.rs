@@ -155,8 +155,8 @@ pub enum TradeSection {
     LiqOrders(Vec<LiqOrder>),
     /// Watcher-fill batch.
     ///
-    /// `data` keeps the original `Count * 20` bytes for backward-compatible
-    /// low-level tools. Use [`parse_watcher_fills`] or
+    /// `data` keeps the original `Count * 20` bytes for low-level tools that
+    /// want the raw wire records. Use [`parse_watcher_fills`] or
     /// [`TradeSection::watcher_fill_records`] to decode it into typed records.
     WatcherFills {
         /// Server market index from the current `GetMarketsIndexes` mapping.
@@ -520,8 +520,8 @@ fn read_trade_row(data: &[u8], pos: &mut usize) -> Option<WireTradeRow> {
     Some(row)
 }
 
-/// Parse a raw MPC_TradesStream payload.
-/// Returns parsed packet or None on error.
+/// Decode a raw `MPC_TradesStream` payload into a borrowed packet view.
+/// Returns `None` on malformed payload.
 pub fn decode_trades_packet(raw: &[u8]) -> Option<DecodedTradesPacket<'_>> {
     if raw.is_empty() {
         return None;
@@ -553,8 +553,10 @@ pub fn decode_trades_packet(raw: &[u8]) -> Option<DecodedTradesPacket<'_>> {
     })
 }
 
-/// Parse a raw MPC_TradesStream payload.
-/// Returns parsed packet or None on error.
+/// Parse a raw `MPC_TradesStream` payload into an owned packet.
+///
+/// Active dispatch uses [`decode_trades_packet`] and borrowed section iteration;
+/// this helper is for low-level tools that explicitly need owned rows.
 pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
     let decoded = decode_trades_packet(raw)?;
     Some(TradesPacket {
