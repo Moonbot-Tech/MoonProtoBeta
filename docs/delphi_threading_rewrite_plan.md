@@ -8647,3 +8647,26 @@ Verification:
 - Quick FireTest OK: `FIRETEST_QUICK_PASS after 23.73s`,
   `ParseFailed=0`, err_emu actual drop `10.91%`, reader max `739us`,
   writer CPU max `160us`, `GetMarketsList apply=2516us`.
+
+### 2026-05-26 - `ProtocolCore` sliced send split
+
+Done:
+
+- Moved Sliced outgoing helpers from `client/protocol_send.rs` into
+  `client/protocol_sliced_send.rs`: Sliced UKey cleanup, copied SlicedACK
+  application, `CreateSlicedObject` equivalent, and Sliced retry loop.
+- Kept the `CheckSeningData` orchestration in `protocol_send.rs`; it still calls
+  Sliced send, SlicedACK apply, regular H/L ACK, High send/retry, Low flush,
+  Sliced retry, and remaining Low flush in the same order.
+- This is a readability/publication split only. No PMTU sizing, compression,
+  encryption header, datagram numbering, priority insert, retry budget,
+  ClientLimit, `UsedSlicedLimit`, ACK cleanup, or wire bytes changed.
+
+Verification:
+
+- `cargo fmt --all` OK.
+- `cargo test --lib --quiet` OK: 769 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick FireTest OK: `FIRETEST_QUICK_PASS after 22.75s`,
+  `ParseFailed=0`, err_emu actual drop `9.12%`, reader max `692us`,
+  writer CPU max `147us`, `GetMarketsList apply=2959us`.

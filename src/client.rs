@@ -65,6 +65,7 @@ mod protocol_helpers;
 mod protocol_io;
 mod protocol_recv;
 mod protocol_send;
+mod protocol_sliced_send;
 mod runtime;
 mod send_api;
 mod send_queue;
