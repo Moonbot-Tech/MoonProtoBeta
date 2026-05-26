@@ -244,9 +244,9 @@ pub fn connect_and_init(
 /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`), matching Delphi
 /// `ClientNewData` under `not InitDone`. After a successful bootstrap, the
 /// library sends `TAllStatusesReq`, `TSettingsRequest`,
-/// `TMMOrdersSubscribeCommand`, and `TRequestBalanceRefresh`. Strategy snapshots
-/// are not fabricated by init; the dispatcher answers a real server
-/// `TStratSnapshotRequest` from its library-owned strategy list.
+/// `TStratSnapshot.CreateFromStrats(...)`, `TMMOrdersSubscribeCommand`, and
+/// `TRequestBalanceRefresh`. The dispatcher also answers later server
+/// `TStratSnapshotRequest` commands from the same library-owned strategy list.
 ///
 /// The mutable `EventDispatcher` is required because the helper keeps pumping
 /// the client loop while it waits. Engine API responses are also applied to

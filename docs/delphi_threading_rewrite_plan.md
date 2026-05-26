@@ -7295,3 +7295,27 @@ Verification:
   `FIRETEST_QUICK_PASS after 24.48s`, `ParseFailed=0`, err_emu actual drop
   `10.88%`, retained futures rows present, derived snapshot present,
   `reader max=720us`, `writer_cpu max=141us`.
+
+### 2026-05-26 - listing refresh requests order snapshot
+
+Done:
+
+- Closed `INVARIANT.md §3.3` listing/order-snapshot parity: after refreshed
+  `GetMarketsList` actually inserts new markets, Active Lib now queues
+  `TAllStatusesReq` before the immediate `UpdateMarketsList` price refresh.
+- Delphi evidence: local `AddNewMarket` sends `TAllStatusesReq` during
+  `GetMarketsList`, and `Bworks` calls `UpdateMarketsList` afterward when
+  `Engine.NewMarkets.Count > 0`.
+- This protects orders for a market whose earlier order-push could be dropped
+  because the market did not exist locally yet.
+
+Verification:
+
+- `cargo test active_get_markets_list_emits_new_markets_added_after_actual_insert --lib --quiet` OK.
+- `cargo test new_market_list_refresh_requests_immediate_prices_like_delphi_new_markets --lib --quiet` OK.
+- `cargo test --lib --quiet` OK: 766 passed, 1 ignored.
+- `cargo check --examples --quiet` OK.
+- Quick prod FireTest release OK:
+  `FIRETEST_QUICK_PASS after 23.73s`, `ParseFailed=0`, err_emu actual drop
+  `10.17%`, retained futures rows present, derived snapshot present,
+  `reader max=728us`, `writer_cpu max=158us`.

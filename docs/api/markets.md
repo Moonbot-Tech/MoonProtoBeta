@@ -92,8 +92,10 @@ dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
 30 seconds while the unknown market condition persists. If that listing refresh
 adds new markets, the active dispatcher emits
 `MarketsEvent::NewMarketsAdded { names }` and immediately requests
-`UpdateMarketsList` again so the new markets receive prices like Delphi
-`NewMarkets.Count > 0`.
+`TAllStatusesReq` plus `UpdateMarketsList` again. The order snapshot mirrors
+Delphi `AddNewMarket`: order pushes for an unknown market may have been dropped
+before the local market object existed, so the full order snapshot is requested
+again before the immediate price refresh.
 
 Inbound Delphi `TNewMarketNotifyCommand` also forces this listing refresh, but
 that UI command is internal to the active library. User code should react to

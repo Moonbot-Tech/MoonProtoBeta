@@ -513,6 +513,9 @@ impl ClientSender {
                 crate::events::ActiveAction::RequestUpdateMarketsList => {
                     self.send_api_request(crate::commands::engine_request::update_markets_list());
                 }
+                crate::events::ActiveAction::RequestOrderSnapshot => {
+                    self.request_all_statuses(rand::random());
+                }
                 crate::events::ActiveAction::RequestStrategySchema => {
                     self.strat_schema_request();
                 }

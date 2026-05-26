@@ -7054,6 +7054,12 @@ mod reconnect_timing_tests {
         assert!(dispatcher.markets().get("DOGEUSDT").is_some());
         assert!(
             actions.iter().any(|action| {
+                matches!(action, crate::events::ActiveAction::RequestOrderSnapshot)
+            }),
+            "Delphi AddNewMarket queues TAllStatusesReq after local market creation"
+        );
+        assert!(
+            actions.iter().any(|action| {
                 matches!(
                     action,
                     crate::events::ActiveAction::RequestUpdateMarketsList
@@ -7064,6 +7070,12 @@ mod reconnect_timing_tests {
         client.apply_active_actions(actions.drain(..));
         let sent = drain_send_items(&client);
         let methods = api_methods(&sent);
+        assert!(
+            sent.iter().any(|item| {
+                Command::from_byte(item.cmd) == Command::Order && item.data.first() == Some(&9)
+            }),
+            "active action must enqueue TAllStatusesReq"
+        );
         assert!(
             methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),
             "active action must enqueue emk_UpdateMarketsList"

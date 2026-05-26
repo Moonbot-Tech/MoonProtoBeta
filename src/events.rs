@@ -266,6 +266,7 @@ fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
 pub(crate) enum ActiveAction {
     RequestMarketsList,
     RequestUpdateMarketsList,
+    RequestOrderSnapshot,
     RequestStrategySchema,
     RequestOrderBookFull {
         market_index: u16,
@@ -1966,9 +1967,8 @@ impl EventDispatcher {
             self.last_markets_list_refresh_ms = now_ms;
             actions.push(ActiveAction::RequestMarketsList);
         }
-        if self.markets.take_new_markets_pending_price_refresh() > 0 {
-            actions.push(ActiveAction::RequestUpdateMarketsList);
-        }
+        let new_markets_need_price_refresh =
+            self.markets.take_new_markets_pending_price_refresh() > 0;
         // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
         // Delphi `ProcessTradesStream` в конце вызывает `CheckMissingTradesPackets`;
         // значит recovery resend — последействие успешного trades-пакета, а не
@@ -1989,6 +1989,7 @@ impl EventDispatcher {
         // `TStratSnapshot.CreateFromStrats(Strats)`.
         let mut snapshot_requested_uid: Option<u64> = None;
         let mut strategy_schema_applied = false;
+        let mut new_markets_added = false;
         // Auto-action 3: OrderEvent::Snapshot → CleanupMissingWorkers.
         // Delphi after TAllStatuses increments CurrentSnapshotFlag, applies all
         // statuses, then requests exact status for workers absent from the fresh
@@ -2019,6 +2020,10 @@ impl EventDispatcher {
                     strategy_schema_applied = true;
                     false
                 }
+                Event::Markets(MarketsEvent::NewMarketsAdded { .. }) => {
+                    new_markets_added = true;
+                    false
+                }
                 _ => false,
             };
             if remove_event {
@@ -2026,6 +2031,12 @@ impl EventDispatcher {
             } else {
                 idx += 1;
             }
+        }
+        if new_markets_added {
+            actions.push(ActiveAction::RequestOrderSnapshot);
+        }
+        if new_markets_need_price_refresh {
+            actions.push(ActiveAction::RequestUpdateMarketsList);
         }
         for (mi, bk) in to_request_full {
             // Fire-and-forget — response придёт обычным OrderBook-пакетом (is_full=true)
@@ -4701,8 +4712,26 @@ mod tests {
         assert!(
             actions
                 .iter()
+                .any(|action| matches!(action, ActiveAction::RequestOrderSnapshot)),
+            "Delphi AddNewMarket sends TAllStatusesReq after local market creation"
+        );
+        assert!(
+            actions
+                .iter()
                 .any(|action| matches!(action, ActiveAction::RequestUpdateMarketsList)),
             "Delphi immediately updates prices after NewMarkets.Count > 0"
+        );
+        let order_snapshot_pos = actions
+            .iter()
+            .position(|action| matches!(action, ActiveAction::RequestOrderSnapshot))
+            .expect("order snapshot action");
+        let update_prices_pos = actions
+            .iter()
+            .position(|action| matches!(action, ActiveAction::RequestUpdateMarketsList))
+            .expect("update prices action");
+        assert!(
+            order_snapshot_pos < update_prices_pos,
+            "Delphi AddNewMarket queues TAllStatusesReq during GetMarketsList before Bworks calls UpdateMarketsList"
         );
     }
 
