@@ -28,8 +28,8 @@ mod types;
 use self::text::same_text_ascii;
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 pub use self::types::{
-    BaseCurrencyPrice, MarketHandle, MarketPrice, MarketTradeState, MarketsEvent,
-    MarketsListApplyTiming,
+    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState,
+    MarketsEvent, MarketsListApplyTiming,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +43,12 @@ pub struct MarketsState {
     pub(crate) by_name: Arc<HashMap<String, usize>>,
     /// COW `market_name` → stable handle lookup exposed by [`Self::get`].
     pub(crate) handles_by_name: Arc<HashMap<String, MarketHandle>>,
+    /// COW `market_name` -> current server mIndex.
+    ///
+    /// Delphi rebuilds `SrvMarkets` as an index array of `TMarket` references
+    /// after `GetMarketsIndexes`; this reverse map keeps the public
+    /// name-to-index helper O(1) instead of scanning the whole index vector.
+    pub(crate) market_index_by_name: Arc<HashMap<String, u16>>,
     /// Корреляционные маркеты (BTC-маркеты для расчётов), key = `bn_market_name`.
     pub(crate) corr_markets: HashMap<String, CorrMarket>,
     /// Цены маркетов по `mIndex` (параллельный массив, обновляется prices apply).

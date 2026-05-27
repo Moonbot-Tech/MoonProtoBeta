@@ -82,6 +82,7 @@ pub(crate) use self::reader::{
     parse_strategy_batch_for_each_with_schema_field_types,
     parse_strategy_batch_with_schema_field_types,
 };
+pub use self::types::field_names;
 pub use self::types::{
     FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };

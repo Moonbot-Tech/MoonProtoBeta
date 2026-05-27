@@ -256,6 +256,10 @@ impl StratsState {
         })
     }
 
+    pub fn has_listing_strategy(&self, mode: StrategyActiveMode) -> bool {
+        self.is_there_listing_strat_like_delphi(mode)
+    }
+
     /// Delphi `TStrategies.IsThereListingSell`.
     pub fn is_there_listing_sell_like_delphi(
         &self,
@@ -281,6 +285,10 @@ impl StratsState {
                     StrategyKind::MOON_SHOT | StrategyKind::MOON_HOOK
                 )
         })
+    }
+
+    pub fn has_listing_sell_strategy(&self, mode: StrategyActiveMode, is_futures: bool) -> bool {
+        self.is_there_listing_sell_like_delphi(mode, is_futures)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &StrategyInfo)> {

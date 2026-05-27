@@ -36,6 +36,15 @@ impl MarketHandle {
         self.with(Clone::clone)
     }
 
+    /// Copy only the live balance/position fields used by chart and order UI.
+    ///
+    /// This avoids cloning the whole `Market` object when the consumer only
+    /// needs the Delphi `TMarket` account fields such as liquidation price,
+    /// position size, leverage, and PnL.
+    pub fn balance_position(&self) -> MarketBalancePosition {
+        self.with(MarketBalancePosition::from_market)
+    }
+
     /// True when two handles point at the same live market object.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -44,6 +53,71 @@ impl MarketHandle {
     pub(super) fn with_mut<R>(&self, f: impl FnOnce(&mut Market) -> R) -> R {
         let mut market = self.inner.write();
         f(&mut market)
+    }
+}
+
+/// Small copy of live Delphi `TMarket` balance/position fields.
+///
+/// Balance packets still mutate the live `Market` object; this type is only a
+/// convenience snapshot for UI code that should not clone the whole market.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketBalancePosition {
+    pub initial_balance: f64,
+    pub locked_balance: f64,
+    pub pos_size: f64,
+    pub pos_price: f64,
+    pub liq_price: f64,
+    pub pos_dir: u8,
+    pub long_pos_size: f64,
+    pub long_pos_price: f64,
+    pub long_liq_price: f64,
+    pub long_position_type: u8,
+    pub short_pos_size: f64,
+    pub short_pos_price: f64,
+    pub short_liq_price: f64,
+    pub short_position_type: u8,
+    pub asset_balance: f64,
+    pub asset_balance_full: f64,
+    pub total_profit_b: f64,
+    pub total_profit_l: f64,
+    pub total_profit_s: f64,
+    pub leverage_x: i32,
+    pub position_type: u8,
+    pub balance_hash: u64,
+    pub last_balance_epoch: u16,
+}
+
+impl MarketBalancePosition {
+    pub fn total_profit(self) -> f64 {
+        self.total_profit_b + self.total_profit_l + self.total_profit_s
+    }
+
+    fn from_market(market: &Market) -> Self {
+        Self {
+            initial_balance: market.initial_balance,
+            locked_balance: market.locked_balance,
+            pos_size: market.pos_size,
+            pos_price: market.pos_price,
+            liq_price: market.liq_price,
+            pos_dir: market.pos_dir,
+            long_pos_size: market.long_pos_size,
+            long_pos_price: market.long_pos_price,
+            long_liq_price: market.long_liq_price,
+            long_position_type: market.long_position_type,
+            short_pos_size: market.short_pos_size,
+            short_pos_price: market.short_pos_price,
+            short_liq_price: market.short_liq_price,
+            short_position_type: market.short_position_type,
+            asset_balance: market.asset_balance,
+            asset_balance_full: market.asset_balance_full,
+            total_profit_b: market.total_profit_b,
+            total_profit_l: market.total_profit_l,
+            total_profit_s: market.total_profit_s,
+            leverage_x: market.leverage_x,
+            position_type: market.position_type,
+            balance_hash: market.balance_hash,
+            last_balance_epoch: market.last_balance_epoch,
+        }
     }
 }
 

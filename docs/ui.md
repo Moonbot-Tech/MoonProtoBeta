@@ -5,8 +5,8 @@ settings snapshots, strategy start/stop, market-maker subscription, version
 update control, leverage management, trigger management, DEX/spot switching, and
 arb activation notifications.
 
-Applications normally receive UI updates through `Event::Settings` and send UI
-commands through `MoonClient::ui_*` wrappers.
+Applications normally receive UI updates through `Event::Settings` and send
+user intents through `MoonClient` settings/update/switch helpers.
 
 ## Receiving Settings
 
@@ -60,16 +60,17 @@ Regular applications send UI commands through `MoonClient`:
 
 ```rust
 client.refresh_settings()?;
-client.ui_send_settings(settings)?;
-client.ui_mm_subscribe(true)?;
-client.ui_update_version("", true)?;            // release update button
-client.ui_update_version("MoonBot-7", false)?;  // test/beta version name
-client.ui_switch_dex("Main")?;
-client.ui_switch_spot(0)?;
+client.send_settings(settings)?;
+client.set_mm_orders_subscription(true)?;
+client.request_version_update("", true)?;            // release update button
+client.request_version_update("MoonBot-7", false)?;  // test/beta version name
+client.switch_dex("Main")?;
+client.switch_spot(0)?;
 ```
 
-Low-level custom runtimes can still use `Client::ui_*` helpers for the UI
-commands that are not yet part of the regular `MoonClient` surface.
+Low-level custom runtimes can still use `Client::ui_*` helpers. The `ui_`
+prefix belongs to the wire channel; normal application code should use the
+high-level method names above.
 
 For strategy start/stop with an explicit checked-state delta, normal UI code
 uses `MoonClient`. The runtime owns strategy checked-state and sends only items
@@ -80,18 +81,17 @@ client.set_strategy_checked(strategy_id, true)?;
 client.strategy_start_stop(true)?;
 ```
 
-`ui_mm_subscribe` is registry-aware: it records the latest MM-orders value in
-the reconnect registry immediately. Before Init it sends nothing; the one-time
-Init uses the latest registry value for the post-init MM-orders subscription
-step. After Init, `ui_mm_subscribe` queues the command for sending, and
-reconnect restores the latest MM-orders intent automatically. It does not
-rewrite the stored `subscribe_all_trades(TradesStreamMode::...)` value;
-all-trades subscription content and MM-order display are two separate user
-intents.
+`set_mm_orders_subscription` is registry-aware: it records the latest MM-orders
+value in the reconnect registry immediately. Before Init it sends nothing; the
+one-time Init uses the latest registry value for the post-init MM-orders
+subscription step. After Init, it queues the command for sending, and reconnect
+restores the latest MM-orders intent automatically. It does not rewrite the
+stored `subscribe_all_trades(TradesStreamMode::...)` value; all-trades
+subscription content and MM-order display are two separate user intents.
 
 ### Version Update
 
-`ui_update_version(version_name, is_release)` asks the server to start the
+`request_version_update(version_name, is_release)` asks the server to start the
 MoonBot update flow. It sends the version name and whether the release channel
 should be used.
 
@@ -107,7 +107,7 @@ to connected clients. The Rust library does not download or restart the
 application; it sends/parses the command and exposes an inbound request as
 `SettingsEvent::VersionUpdate`.
 
-`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot` are typed UI domain
+`request_version_update`, `switch_dex`, and `switch_spot` are typed UI domain
 commands and are gated by Init. Low-level diagnostic tools that send the same
 payload by hand are responsible for preserving the matching `ServerUpdateSent`
 side effect.
@@ -152,11 +152,11 @@ sent, while others always keep the latest user action as a distinct command:
 
 | Command | Pending behavior |
 |---|---|
-| `ui_send_settings` | Only the latest pending settings snapshot is kept. |
+| `send_settings` | Only the latest pending settings snapshot is kept. |
 | `ui_lev_manage` | Only the latest pending leverage-management snapshot is kept. |
-| `ui_mm_subscribe` | Rapid live subscribe/unsubscribe commands are queued as distinct commands. The reconnect registry still remembers the latest desired value. |
-| `ui_switch_dex` | Switch commands are queued as distinct commands. |
-| `ui_switch_spot` | Switch commands are queued as distinct commands. |
+| `set_mm_orders_subscription` | Rapid live subscribe/unsubscribe commands are queued as distinct commands. The reconnect registry still remembers the latest desired value. |
+| `switch_dex` | Switch commands are queued as distinct commands. |
+| `switch_spot` | Switch commands are queued as distinct commands. |
 
 This matters for UI code that can emit rapid changes: settings and leverage are
 "latest wins"; MM-orders, DEX, and Spot commands preserve the user's command

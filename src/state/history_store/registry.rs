@@ -53,7 +53,7 @@ impl MarketHistoryRegistry {
         self.stores.get_mut(market_name)
     }
 
-    pub fn get_mut_by_server_index(
+    pub(crate) fn get_mut_by_server_index(
         &mut self,
         market_index: u16,
     ) -> Option<&mut MarketHistoryStore> {
@@ -145,7 +145,7 @@ impl MarketHistoryRegistry {
             .map(MarketHistoryStore::readers)
     }
 
-    pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
+    pub(crate) fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
         self.stores
             .values_mut()
             .map(|store| store.compact_evicted_futures_like_delphi(now_time))

@@ -34,8 +34,11 @@ impl EventDispatcher {
                     .markets
                     .market_name_by_index(market_index)
                     .map(str::to_owned);
-                let events = self.order_books.on_packet(pkt, now_ms);
-                if events
+                self.order_book_events.clear();
+                self.order_books
+                    .on_packet_into(pkt, now_ms, &mut self.order_book_events);
+                if self
+                    .order_book_events
                     .iter()
                     .any(|ev| matches!(ev, OrderBookEvent::Apply { .. }))
                 {
@@ -48,7 +51,7 @@ impl EventDispatcher {
                             .update_chart_price_step_from_server_index(market_index, ask.rate);
                     }
                 }
-                for mut ev in events {
+                for mut ev in self.order_book_events.drain(..) {
                     if let OrderBookEvent::Apply {
                         market_name: name, ..
                     } = &mut ev

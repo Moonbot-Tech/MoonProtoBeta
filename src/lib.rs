@@ -54,7 +54,7 @@
 //! [`MoonClient::request_api_expiration_time`],
 //! [`MoonClient::request_transfer_assets`],
 //! [`MoonClient::request_coin_card_candles`], and
-//! [`MoonClient::request_candles_data`]. Mutation helpers such as
+//! [`MoonClient::refresh_candles`]. Mutation helpers such as
 //! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
 //! [`MoonClient::cancel_all_orders`] also run inside the owned runtime. The
 //! runtime keeps MoonProto pumping, checks the server status or channel
@@ -67,9 +67,9 @@
 //! available for tests, protocol tools, and custom runtimes.
 //!
 //! Lower-level `Client::api_*` calls return receivers for custom async flows.
-//! In a single-threaded caller, wait for those receivers through
-//! [`Client::run_until_response`], not direct `rx.recv_timeout(...)`; otherwise
-//! the client loop is stopped while the caller waits.
+//! Custom runtimes must keep the client loop pumping while they wait for those
+//! receivers; direct `rx.recv_timeout(...)` on the same thread stops protocol
+//! progress.
 //!
 //! ## Transport Modes
 //!

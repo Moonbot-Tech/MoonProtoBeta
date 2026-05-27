@@ -118,7 +118,7 @@ Active Lib emits `Event::WatcherFills(WatcherFillsEvent)` with the shifted
 time, market, user address, raw `OrderType`, and decoded direction/open/taker
 flags.
 
-## Public Types
+## Types
 
 ```rust
 pub struct TradesPacket {
@@ -152,6 +152,10 @@ pub struct WatcherFill {
     pub flags: u8,
 }
 ```
+
+`TradesPacket`, `TradeSection`, and raw `market_index` fields are the decoded
+packet form for diagnostics and custom protocol tools. Regular applications
+read retained per-market rows from `MarketHistoryReaders`.
 
 `WatcherFill::is_short()`, `is_open()`, and `is_taker()` decode the Delphi flags
 byte. `time_delta_ms` is relative to `TradesPacket::base_time`.
@@ -222,7 +226,7 @@ pub struct MMOrderCompanionData {
     pub color: u32,
 }
 
-pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32;
+pub fn hl_address_color(taker: [u8; 20]) -> u32;
 
 pub struct MiniCandle {
     pub time: f64, // Delphi TDateTime
@@ -292,23 +296,14 @@ matching Delphi `PCardinal(@Qty)^ and $80000000`.
 stored as doubles. HyperDex taker address/color companion data is a separate
 storage layer; it is not folded into the base row. `MMOrderCompanionData`
 matches Delphi `TMMOrderData`: `Taker: THLAddress` and `Color: TColor`.
-`hl_address_color_like_delphi` mirrors Delphi `HLAddressColor`: XOR address
+`hl_address_color` mirrors Delphi `HLAddressColor`: XOR address
 bytes into R/G/B accumulators by index modulo 3, scale each channel with
 `(x * 5 >> 3) + 80`, and set alpha to `0xFF`.
 
-```rust
-pub fn compact_trades_to_mini_candles_like_delphi(
-    rows: &[TradeHistoryRow],
-    last_mini_time: f64,
-    now_time: f64,
-    out: &mut Vec<MiniCandle>,
-);
-```
-
-The compaction helper mirrors Delphi `TMarket.ResizeOrdersHistory`: it groups
-detailed trades by a 5-second anchor window, calculates buy/sell volume as
-`Price * Abs(Qty)`, maintains min/max price, and applies the same `T1`/`Now`
-append gates used when old detailed trades are turned into `TMiniCandle`.
+Old detailed futures rows evicted from retained storage are compacted into
+`MiniCandle` rows by the Active Lib worker. That writer path mirrors Delphi
+`TMarket.ResizeOrdersHistory`, but it is internal: applications read
+`mini_candles` through `MarketHistoryReaders`.
 
 ```rust
 pub struct TradeVolumeTotals {
@@ -327,19 +322,17 @@ pub struct RollingTradeVolumeSnapshot {
     pub five_minutes: TradeVolumeTotals,
 }
 
-pub struct RollingTradeVolumes;
-
-impl RollingTradeVolumes {
-    pub fn add_trade(&mut self, row: TradeHistoryRow);
-    pub fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
-    pub fn window(&self, now_time: f64, window_seconds: i64) -> TradeVolumeTotals;
+pub struct RollingTradeVolumeSnapshot {
+    pub one_minute: TradeVolumeTotals,
+    pub three_minutes: TradeVolumeTotals,
+    pub five_minutes: TradeVolumeTotals,
 }
 ```
 
-`RollingTradeVolumes` uses 5-second buckets and updates from newly received
-trades. It is the active-library derived-state path for 1/3/5 minute buy/sell
-volumes and short trade-price deltas; the intended precision loss is bounded by
-one bucket width. Call
+The internal rolling-volume accumulator uses 5-second buckets and updates from
+newly received trades. It is the active-library derived-state path for 1/3/5
+minute buy/sell volumes and short trade-price deltas; the intended precision
+loss is bounded by one bucket width. Call
 `MarketHistoryWorker::rolling_volumes(market, now_time)` or the same method on
 `MarketHistoryHandle` to read the current derived totals for an active retained
 market. Unknown or out-of-scope markets return `None` and are not allocated by a
@@ -377,26 +370,14 @@ long-window source.
 ```rust
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64; // 0.2 / 86400.0
 pub const DELPHI_MSECS_PER_DAY: f64;         // 86400000.0
-
-pub struct TradesPacketTimeShift;
-
-impl TradesPacketTimeShift {
-    pub fn new() -> Self;
-    pub fn shift_days(&self) -> Option<f64>;
-    pub fn apply_like_delphi(
-        &mut self,
-        base_time: f64,
-        time_delta_ms: i16,
-        now_time: f64,
-    ) -> f64;
-}
 ```
 
-`TradesPacketTimeShift` mirrors Delphi `ProcessTradesStream`: the first
+The per-packet timestamp shift mirrors Delphi `ProcessTradesStream`: the first
 known/stored row in a packet fixes
 `round((NowTimeX - (BaseTime + TimeDelta / MSecsPerDay)) * 24) / 24`, and every
 later row in that packet reuses the same shift. Unknown-market sections that
-Delphi skips do not fill the shift.
+Delphi skips do not fill the shift. This is internal writer logic; applications
+receive already shifted retained rows.
 
 Delphi has a temporary `tmpList/tmpTradesRead/tmpTradesWrite` ring in
 `AddTmpHOrder`, but that is not a public Active Lib API concept. Delphi uses it
@@ -544,53 +525,6 @@ pub struct MarketHistoryRegistry;
 impl MarketHistoryStore {
     pub fn new(config: MarketHistoryConfig) -> Self;
     pub fn readers(&self) -> MarketHistoryReaders;
-    pub fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
-    pub fn append_futures_stream_trade_like_delphi(
-        &mut self,
-        base_time: f64,
-        time_delta_ms: i16,
-        now_time: f64,
-        price: f32,
-        qty: f32,
-        time_shift: &mut TradesPacketTimeShift,
-    ) -> f64;
-    pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
-    pub fn append_spot_stream_trade_like_delphi(
-        &mut self,
-        base_time: f64,
-        time_delta_ms: i16,
-        now_time: f64,
-        price: f32,
-        qty: f32,
-        time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>);
-    pub fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64>;
-    pub fn append_liquidation_stream_like_delphi(
-        &mut self,
-        base_time: f64,
-        time_delta_ms: i16,
-        now_time: f64,
-        price: f32,
-        qty: f32,
-        time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>);
-    pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64>;
-    pub fn append_mm_order_with_companion_like_delphi(
-        &mut self,
-        row: MMOrderHistoryRow,
-        companion: Option<MMOrderCompanionData>,
-    ) -> Option<u64>;
-    pub fn append_mm_stream_order_like_delphi(
-        &mut self,
-        base_time: f64,
-        time_delta_ms: i16,
-        now_time: f64,
-        vol: f32,
-        q: f32,
-        taker: Option<[u8; 20]>,
-        time_shift: &mut TradesPacketTimeShift,
-    ) -> (f64, Option<u64>);
-    pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize;
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot;
     pub fn derived_snapshot(&self) -> MarketDerivedSnapshot;
 }
@@ -605,6 +539,10 @@ impl MarketHistoryRegistry {
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders>;
 }
 ```
+
+The append/compaction methods are intentionally not public. Active Lib owns the
+single writer side and applies trades/candles through `MarketHistoryWorker`;
+application code reads snapshots and rings.
 
 `EventDispatcher::new()` starts without allocating retained stores. When an
 all-trades scope becomes active, the dispatcher lazily starts a default
@@ -652,12 +590,12 @@ trades append directly into retained `SeqRing` storage in StoreWorker receive
 order; there is no temporary join buffer in the Rust Active Lib storage path.
 Rows evicted from the futures retained ring are buffered for `TMiniCandle`
 compaction.
-The `*_stream_*_like_delphi` helpers convert `BaseTime + TimeDeltaMS` through a
-shared `TradesPacketTimeShift`, so all retained row types in one packet use the
-same Delphi packet time correction. MM-order companion rows are aligned with
-the base MM-order ring slot: when a taker address is present, the helper stores
-`TMMOrderData` with Delphi `HLAddressColor`; otherwise it stores default
-companion data for that slot.
+The worker converts `BaseTime + TimeDeltaMS` through one shared per-packet time
+shift, so all retained row types in one packet use the same Delphi packet time
+correction. MM-order companion rows are aligned with the base MM-order ring
+slot: when a taker address is present, the worker stores `TMMOrderData` with
+Delphi `HLAddressColor`; otherwise it stores default companion data for that
+slot.
 LastPrice rows are produced from active `UpdateMarketsList`, not from trades:
 the dispatcher computes `pLast = (Bid + Ask) / 2` in the same market-price
 apply block and queues a `MarketHistoryLastPriceBatch`; the worker then applies

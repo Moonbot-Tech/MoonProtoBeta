@@ -129,14 +129,11 @@ let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
 if let Some(market) = markets.get("BTCUSDT") {
+    let pos = market.balance_position();
     market.with(|market| {
-        println!(
-            "tick={} max_lev={} liq={}",
-            market.bn_tick_size,
-            market.max_leverage,
-            market.liq_price
-        );
+        println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
     });
+    println!("liq={}", pos.liq_price);
 }
 
 if let Some(price) = markets.price("BTCUSDT") {
@@ -164,6 +161,9 @@ UI this is the normal path: keep the selected `MarketHandle` and read fields
 such as `pos_size`, `pos_price`, `liq_price`, `leverage_x`, `asset_balance`,
 `total_profit_*`, and `bn_max_value` from it. `BalancesState` is the account
 totals / low-level row view, not the primary per-market UI object.
+
+For chart overlays that only need position fields, `MarketHandle::balance_position`
+returns a small copy without cloning the whole market object.
 
 Arbitrage relay packets also apply to the live market. Use
 `Market::arb_slots` from the selected handle; raw arb `market_index` blocks are
@@ -276,10 +276,9 @@ Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
 client computes `pLast = (Bid + Ask) / 2`, and the brown LastPrice chart line is
 drawn from `Market.HistoryPrice`.
 
-Retained storage uses `MarketHistoryStore::append_last_price_like_delphi`.
-It appends a `LastPricePoint` only when Delphi `TMarket.AddFrom` would add a
-`HistoryPrice` row: `pLast > 0`, bid or ask is present, and the market is a BTC
-market or a base-USDT market.
+The retained-history worker appends a `LastPricePoint` only when Delphi
+`TMarket.AddFrom` would add a `HistoryPrice` row: `pLast > 0`, bid or ask is
+present, and the market is a BTC market or a base-USDT market.
 When trades retained storage is active, `EventDispatcher` queues these rows into
 its `MarketHistoryWorker` immediately. The default worker is lazy-created from
 the all-trades subscription scope; `set_market_history_handle` is only needed

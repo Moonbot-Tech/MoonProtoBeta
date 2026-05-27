@@ -51,7 +51,6 @@ because the exact Delphi effect can depend on uninitialized locals or stale
 ```rust
 use moonproto::Event;
 use moonproto::state::StratEvent;
-use moonproto::commands::strategy_serializer::FieldValue;
 
 for event in client.drain_events() {
     if let Event::Strat(strat_event) = event {
@@ -60,7 +59,7 @@ for event in client.drain_events() {
                 let Some(state) = client.snapshot() else { continue; };
                 println!("strategies={}", state.strategy_snapshot_vec().len());
                 for strategy in state.strategy_snapshots() {
-                    if let Some(FieldValue::String(name)) = strategy.fields.get("StrategyName") {
+                    if let Some(name) = strategy.strategy_name() {
                         println!("{}: {}", strategy.strategy_id, name);
                     }
                 }
@@ -195,9 +194,9 @@ low-level parser/state APIs still expose `StratCommand::Skipped`,
 
 ## Active Predicates
 
-`StrategySnapshot` exposes exact Delphi helpers for code that needs to reason
-about active strategies without guessing that `checked == active`.
-`active_like_delphi(mode)` mirrors `TStratForm.CheckActive` /
+`StrategySnapshot` exposes exact Delphi-compatible helpers for code that needs
+to reason about active strategies without guessing that `checked == active`.
+`is_active(mode)` mirrors `TStratForm.CheckActive` /
 `bStartCheckedClick`: in `ActiveClient` mode a checked strategy is local-active
 only when it cannot auto-buy and does not run detection on the kernel; in
 `UsingMoonProto` mode the inverse side is active; in `Standalone` mode active is
@@ -208,24 +207,24 @@ use moonproto::commands::strategy_serializer::{
     StrategyActiveMode, StrategyKind, StrategySnapshot,
 };
 
-let is_local = strategy.active_like_delphi(StrategyActiveMode::ActiveClient);
-let kind = strategy.kind_like_delphi();
+let is_local = strategy.is_active(StrategyActiveMode::ActiveClient);
+let kind = strategy.kind();
 
-if kind == StrategyKind::NEW_LISTING && strategy.sell_from_asset_like_delphi() {
+if kind == StrategyKind::NEW_LISTING && strategy.sell_from_asset() {
     println!("listing sell-from-asset strategy");
 }
 ```
 
-`StratsState` also exposes Delphi listing predicates:
+`StratsState` also exposes listing predicates:
 
 ```rust
 let has_listing = dispatcher
     .strats()
-    .is_there_listing_strat_like_delphi(StrategyActiveMode::ActiveClient);
+    .has_listing_strategy(StrategyActiveMode::ActiveClient);
 
 let needs_assets = state
     .strats()
-    .is_there_listing_sell_like_delphi(StrategyActiveMode::ActiveClient, is_futures);
+    .has_listing_sell_strategy(StrategyActiveMode::ActiveClient, is_futures);
 ```
 
 These are read helpers only. They do not make the active library send listing
@@ -261,12 +260,12 @@ from incoming snapshots. When user code edits local strategies, call
 
 ```rust
 use moonproto::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategyFields,
+    field_names, parse_strategy_batch, FieldValue, StrategyFields,
 };
 
 let batch = parse_strategy_batch(raw_data).expect("bad strategy snapshot");
 for strategy in &batch.strategies {
-    if let Some(FieldValue::String(name)) = strategy.fields.get("StrategyName") {
+    if let Some(name) = strategy.fields.get_string(field_names::STRATEGY_NAME) {
         println!("{}: {}", strategy.strategy_id, name);
     }
 }
@@ -276,13 +275,15 @@ for strategy in &batch.strategies {
 `HashMap`. It stores the decoded fields densely in received order, which avoids
 hash work while parsing large snapshots. The reader path appends fields in the
 schema serializer order; `insert` keeps replacement semantics for user-built
-snapshots. The public operations are intentionally small and familiar:
+snapshots. Prefer typed getters and `field_names::*` constants for common fields
+so UI code does not depend on unreviewed string literals. The public operations
+are intentionally small and familiar:
 
 ```rust
 let mut fields = StrategyFields::new();
-fields.insert("StrategyName", FieldValue::String("Local".to_string()));
+fields.insert(field_names::STRATEGY_NAME, FieldValue::String("Local".to_string()));
 
-if let Some(FieldValue::String(name)) = fields.get("StrategyName") {
+if let Some(name) = fields.get_string(field_names::STRATEGY_NAME) {
     println!("{name}");
 }
 
@@ -360,14 +361,13 @@ client.strategy_start_stop(true)?;
 ```
 
 `send_strategy_checked_delta` sends a checked-state delta only when the delta is
-non-empty. `ui_strat_start_stop_v2` always sends the UI start/stop command after
-the client's Init gate is open; the checked delta may be empty because the same
+non-empty. `strategy_start_stop` always sends the start/stop command after the
+client's Init gate is open; the checked delta may be empty because the same
 command also carries the start/stop action. Both helpers keep `prev_checked`
 unchanged until the server confirms the checked-state change.
 
-The explicit `client.strat_checked_sync(&items, true)` and
-`client.ui_strat_start_stop_v2(is_start, &items)` methods remain available for
-compatibility tools that already have the exact checked-item array. Regular
+Low-level compatibility tools may still call the raw checked-sync/start-stop
+helpers when they already have the exact checked-item array. Regular
 applications should prefer `MoonClient` helpers so the library-owned strategy
 state stays authoritative. Checked-state echo messages are inbound only; client
 code must not send them.

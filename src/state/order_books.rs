@@ -85,8 +85,19 @@ impl OrderBooks {
     /// Возвращает список событий: Apply (может быть несколько при разгребании cache), RequestFullNeeded, Ignored.
     #[must_use = "OrderBookEvent's must be processed — low-level пропуск RequestFullNeeded ведёт к persistent corrupted orderbook"]
     pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
-        let key: BookKey = (pkt.market_index, pkt.book_kind);
         let mut events = Vec::new();
+        self.on_packet_into(pkt, now_ms, &mut events);
+        events
+    }
+
+    /// Обработать один packet в caller-owned event buffer.
+    pub fn on_packet_into(
+        &mut self,
+        pkt: OrderBookUpdate,
+        now_ms: i64,
+        events: &mut Vec<OrderBookEvent>,
+    ) {
+        let key: BookKey = (pkt.market_index, pkt.book_kind);
 
         let cache = self.caches.entry(key).or_default();
 
@@ -117,8 +128,8 @@ impl OrderBooks {
                 sells: pkt.sells,
             });
             // Попробовать применить накопленные diff из cache.
-            self.drain_cache(key, &mut events);
-            return events;
+            self.drain_cache(key, events);
+            return;
         }
 
         // === 2. Corrupted mode — Delphi MoonProtoEngine.pas:2021-2039 ===
@@ -163,7 +174,7 @@ impl OrderBooks {
                     book_kind: key.1,
                 });
             }
-            return events;
+            return;
         }
 
         let cmp = compare_seq(pkt.seq, cache.expected_seq);
@@ -200,8 +211,8 @@ impl OrderBooks {
                 sells: pkt.sells,
             });
             // Может быть в cache следующие seq — drain.
-            self.drain_cache(key, &mut events);
-            return events;
+            self.drain_cache(key, events);
+            return;
         }
 
         // === 4. Stale: seq < expected → отброс ===
@@ -212,7 +223,7 @@ impl OrderBooks {
                 seq: pkt.seq,
                 reason: ApplyResult::Stale,
             });
-            return events;
+            return;
         }
 
         // === 5. Gap: seq > expected → положить в cache, проверить expired/corrupted ===
@@ -233,7 +244,6 @@ impl OrderBooks {
             seq,
             reason: ApplyResult::Cached,
         });
-        events
     }
 
     /// Разгрести cache — применить все последовательные пакеты `expected_seq, +1, +2 ...`.

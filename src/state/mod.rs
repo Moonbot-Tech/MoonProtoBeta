@@ -29,11 +29,10 @@ pub mod trades;
 
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
-    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
-    CandleVolumeSnapshot, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
-    MMOrderHistoryRow, MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot,
-    RollingTradeVolumes, TradeHistoryRow, TradeVolumeTotals, TradesPacketTimeShift,
-    DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS,
+    hl_address_color, hl_address_color_like_delphi, Candle5mRow, CandleVolumeSnapshot,
+    DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow,
+    MarketDerivedSnapshot, MiniCandle, RollingTradeVolumeSnapshot, TradeHistoryRow,
+    TradeVolumeTotals, DELPHI_MSECS_PER_DAY, DELPHI_SAME_TRADES_TIME_DAYS,
 };
 pub use history_store::{
     MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, MarketHistoryStore,
@@ -45,7 +44,8 @@ pub use history_worker::{
     MarketHistoryStreamSection, MarketHistoryTradeInput, MarketHistoryWorker,
 };
 pub use markets::{
-    MarketHandle, MarketPrice, MarketTradeState, MarketsEvent, MarketsListApplyTiming, MarketsState,
+    MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState, MarketsEvent,
+    MarketsListApplyTiming, MarketsState,
 };
 pub use order_books::{
     ApplyResult as OrderBookApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel,

@@ -134,6 +134,8 @@ pub struct EventDispatcher {
     /// argument, so they store produced events here for the application to drain
     /// after the helper returns.
     queued_events: AppQueue<Event>,
+    /// Reused hot-path buffer for `OrderBooks::on_packet_into`.
+    order_book_events: Vec<OrderBookEvent>,
     /// Optional retained-history writer. The dispatcher only queues typed
     /// batches into this handle; the worker owns `MarketHistoryStore`.
     market_history: Option<MarketHistoryHandle>,
@@ -176,6 +178,7 @@ impl Default for EventDispatcher {
             strategy_snapshot_provider: None,
             pending_strategy_snapshot_request_uid: None,
             queued_events: AppQueue::default(),
+            order_book_events: Vec::new(),
             market_history: None,
             owned_market_history: None,
             market_history_auto_enabled: true,

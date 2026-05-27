@@ -95,7 +95,7 @@ for event in client.drain_events() {
 }
 ```
 
-## Public Types
+## Types
 
 ```rust
 pub enum OrderBookKind {
@@ -158,6 +158,11 @@ pub enum OrderBookEvent {
     Ignored { market_index: u16, book_kind: u8, seq: u16, reason: ApplyResult },
 }
 ```
+
+`OrderBookKind`, `TopOfBook`, and the current `OrderBookSnapshot` are the normal
+UI-facing pieces. `OrderBookUpdate` keeps the decoded packet form and still
+contains `market_index` / raw `book_kind`; it is useful for diagnostics and
+custom protocol tools, not for normal chart lookup.
 
 `market_index`, raw `book_kind`, `buys`, and `sells` are kept for diagnostics
 and low-level tools. For normal UI code, prefer `market_name`, `kind`, and

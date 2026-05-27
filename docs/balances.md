@@ -48,15 +48,14 @@ let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
 if let Some(eth) = markets.get("ETHUSDT") {
-    eth.with(|m| {
-        println!(
-            "pos={} entry={} liq={} lev={}x",
-            m.pos_size,
-            m.pos_price,
-            m.liq_price,
-            m.leverage_x
-        );
-    });
+    let pos = eth.balance_position();
+    println!(
+        "pos={} entry={} liq={} lev={}x",
+        pos.pos_size,
+        pos.pos_price,
+        pos.liq_price,
+        pos.leverage_x
+    );
 }
 
 let global = &state.balances().global;
@@ -70,7 +69,9 @@ println!(
 
 The snapshot is immutable and safe for UI code to keep. `MarketHandle` values
 are stable across listing refreshes, so a chart can keep the handle for the
-selected market and read fresh fields from it.
+selected market and read fresh fields from it. Use `MarketHandle::with` for
+zero-copy reads of many market fields, or `MarketHandle::balance_position` when
+the UI only needs the live balance/position subset.
 
 ## Getting A Fresh Snapshot
 
@@ -124,43 +125,15 @@ for event in client.drain_events() {
 `SnapshotApplied.count` and `IncrementalApplied.count` are counts of rows that
 actually changed the read model after market filtering and stale-epoch checks.
 
-## Low-Level BalanceItem Fields
+## Low-Level Rows
 
 `BalanceItem` is the decoded packet row and the secondary balance-table view.
-It is useful for diagnostics and account tables. Market UI should normally read
-the same position/liquidation fields from `Market`.
+It is useful for diagnostics and account tables. Market chart/order UI should
+normally read the same position/liquidation fields from `MarketHandle`, not from
+`BalanceItem`.
 
-```rust
-pub struct BalanceItem {
-    pub market_name:           String,
-    pub balance_hash:          u64,
-    pub initial_balance:       f64,
-    pub locked_balance:        f64,
-    pub pos_size:              f64,
-    pub pos_price:             f64,
-    pub liq_price:             f64,
-    pub pos_dir:               u8,
-    pub long_pos_size:         f64,
-    pub long_pos_price:        f64,
-    pub long_liq_price:        f64,
-    pub long_position_type:    u8,
-    pub short_pos_size:        f64,
-    pub short_pos_price:       f64,
-    pub short_liq_price:       f64,
-    pub short_position_type:   u8,
-    pub asset_balance:         f64,
-    pub asset_balance_full:    f64,
-    pub total_profit_b:        f64,
-    pub total_profit_l:        f64,
-    pub total_profit_s:        f64,
-    pub max_value:             f64,
-    pub leverage_x:            i32,
-    pub position_type:         u8,
-}
-```
-
-`max_value` follows Delphi behavior: a zero or near-zero incoming value does not
-erase a previously known non-zero value.
+`BalanceItem::max_value` follows Delphi behavior: a zero or near-zero incoming
+value does not erase a previously known non-zero value on the live market.
 
 ## GlobalBalance
 

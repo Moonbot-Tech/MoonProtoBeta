@@ -32,28 +32,23 @@ let history = client.request_coin_card_candles(
     moonproto::commands::candles::DeepHistoryKind::Hour1,
     Duration::from_secs(12),
 )?;
-let candles = client.request_candles_data(Duration::from_secs(30))?;
+let markets_received = client.refresh_candles(Duration::from_secs(30))?;
 ```
 
 The one-shot helpers validate `EngineResponse::success` and parse the
 method-specific payload. They return `MoonClientError`; Engine API failures are
 wrapped as `MoonClientError::EngineRequest`.
 
-For custom flows, use the lower-level receiver path:
-
-```rust
-let rx = client.api_get_markets_list();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-```
-
-Calling `rx.recv_timeout(...)` directly on the same thread usually times out
-because no UDP packets are processed during that wait.
+Advanced protocol tools can use the lower-level receiver path. Normal
+applications should not wait on raw receivers from the UI thread: a raw
+`Client::api_*` call only registers/sends a request, and a custom runtime must
+keep the client loop pumping until the matching `EngineResponse` is decoded.
 
 When the client loop is already active and decodes a registered response, the
 receiver is signalled immediately from the receive-side path, before the same
 payload is later applied to `EventDispatcher`. This avoids waiting for a second
-dispatcher drain, but single-threaded callers still need `run_until_response`
-because the current writer/send loop is pumped there.
+dispatcher drain. In the high-level `MoonClient` path the runtime thread keeps
+doing that work automatically.
 
 Chunked `RequestCandlesData` uses its own pending registry: registered chunks
 are also consumed and merged from receive-side DataReadInt, and the final
@@ -68,9 +63,9 @@ UID is registered again.
 
 | Group | Methods |
 |---|---|
-| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_candles_data`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
+| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
 | `MoonClient` mutation/refresh helpers | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
-| Low-level init reads | `request_base_check`, `request_auth_check` |
+| Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
 | Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
@@ -79,7 +74,7 @@ UID is registered again.
 | Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
 | Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
 | Position/transfer | `api_change_position_type`, `api_convert_dust_bnb`, `api_confirm_risk_limit`, `api_set_ma_mode`, `api_do_transfer_asset`, `api_update_transfer_assets` |
-| Candles | `request_coin_card_candles`, `request_candles_data`, `api_get_coin_card_candles`, `api_request_candles_data_async` |
+| Candles | `refresh_candles`, `request_coin_card_candles`, `request_candles_data`, `api_get_coin_card_candles`, `api_request_candles_data_async` |
 
 For subscriptions, prefer the registry-aware APIs:
 
@@ -131,11 +126,13 @@ For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
 `api_check_expiration_time` remain available and return
 `Receiver<EngineResponse>`.
 
-`request_candles_data` is an explicit full candles refresh/diagnostic helper.
-It registers the chunk aggregator, keeps the runtime pumping, returns one
-`MergedCandles` value after all chunks are merged, and applies parsed 5m candles
-to retained market history when trades storage is active. Normal chart UI reads
-candles from `snapshot.market_history_readers(market)`.
+`refresh_candles` is the normal explicit full candles refresh helper. It
+registers the chunk aggregator, keeps the runtime pumping, hides the
+chunked/zipped payload, and applies parsed 5m candles to retained market history
+when trades storage is active. Normal chart UI reads candles from
+`snapshot.market_history_readers(market)`.
+`request_candles_data` remains available for diagnostics that need
+`MergedCandles`.
 Use `api_request_candles_data_async` only for custom async flows that already
 own a running client loop.
 
@@ -231,21 +228,19 @@ if let Some(bot_id) = info.bot_id {
 }
 ```
 
-Manual parsing:
+Manual parsing for custom protocol tools:
 
 ```rust
 use moonproto::commands::engine_api::{exchange_type_flags, parse_base_check_response};
 
-let rx = client.api_base_check();
-let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-let info = parse_base_check_response(&resp.data);
+let info = parse_base_check_response(&engine_response.data);
 
 if info.supports(exchange_type_flags::FUTURES) {
     enable_futures_ui();
 }
 ```
 
-One-shot parsing and storage:
+One-shot parsing and storage for low-level custom runtimes:
 
 ```rust
 let info = client.request_base_check(&mut dispatcher, Duration::from_secs(12))?;

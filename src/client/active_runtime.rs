@@ -442,6 +442,17 @@ impl MoonClient {
             })
     }
 
+    /// Request a full 5m candles refresh and apply it to retained market history.
+    ///
+    /// This is the normal Active Lib API for chart state. It hides the
+    /// chunked/zipped protocol payload and returns the number of parsed market
+    /// candle entries in the received snapshot. Read retained candles through
+    /// `snapshot().market_history_readers(market_name)`.
+    pub fn refresh_candles(&self, timeout: Duration) -> Result<usize, MoonClientError> {
+        self.request_candles_data(timeout)
+            .map(|merged| merged.markets.len())
+    }
+
     /// Request one market's historical candles through Engine API.
     pub fn request_coin_card_candles(
         &self,
@@ -500,12 +511,12 @@ impl MoonClient {
     }
 
     /// Set the market-maker orders subscription flag.
-    pub fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
+    pub fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
     }
 
     /// Send a full client-settings snapshot.
-    pub fn ui_send_settings(
+    pub fn send_settings(
         &self,
         settings: crate::commands::ui::ClientSettingsCommand,
     ) -> Result<(), MoonClientError> {
@@ -513,7 +524,7 @@ impl MoonClient {
     }
 
     /// Request a MoonBot version update.
-    pub fn ui_update_version(
+    pub fn request_version_update(
         &self,
         version_name: impl Into<String>,
         is_release: bool,
@@ -525,15 +536,47 @@ impl MoonClient {
     }
 
     /// Switch DEX mode.
-    pub fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+    pub fn switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchDex(
             dex_name.into(),
         )))
     }
 
     /// Switch spot mode.
-    pub fn ui_switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
+    pub fn switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot_index)))
+    }
+
+    #[doc(hidden)]
+    pub fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
+        self.set_mm_orders_subscription(subscribe)
+    }
+
+    #[doc(hidden)]
+    pub fn ui_send_settings(
+        &self,
+        settings: crate::commands::ui::ClientSettingsCommand,
+    ) -> Result<(), MoonClientError> {
+        self.send_settings(settings)
+    }
+
+    #[doc(hidden)]
+    pub fn ui_update_version(
+        &self,
+        version_name: impl Into<String>,
+        is_release: bool,
+    ) -> Result<(), MoonClientError> {
+        self.request_version_update(version_name, is_release)
+    }
+
+    #[doc(hidden)]
+    pub fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+        self.switch_dex(dex_name)
+    }
+
+    #[doc(hidden)]
+    pub fn ui_switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
+        self.switch_spot(spot_index)
     }
 
     /// Send a strategy sell-price update.

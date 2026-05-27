@@ -370,7 +370,7 @@ request. If `client.mark_server_update_sent()` was called before init, the next
 `AuthDone`, sends BaseCheck once, and if it still fails retries it 10 times with
 `2000ms` pauses. The high-level UI wrappers that match Delphi
 `ServerUpdateSent` behavior call the marker automatically:
-`ui_update_version`, `ui_switch_dex`, and `ui_switch_spot`.
+`request_version_update`, `switch_dex`, and `switch_spot`.
 
 Domain pushes received before init completion are ignored in every client run
 mode, including the raw `Client::run` callback. This matches the Delphi
@@ -386,8 +386,9 @@ dispatcher replies from the same current local strategy list; an empty list is a
 valid non-empty serializer payload.
 `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
-subscription value. If it is `None`, a previously queued `ui_mm_subscribe`
-intent is used; otherwise the post-init UI command sends `false`. It never
+subscription value. If it is `None`, a previously queued
+`set_mm_orders_subscription` intent is used; otherwise the post-init UI command
+sends `false`. It never
 falls back to `subscribe_trades`: the MM-orders UI flag and the all-trades
 subscription `want_mm` flag are separate intents.
 If all-trades was queued before Init, the later registry flush still sends its
@@ -440,7 +441,7 @@ let qty = client.request_balance("USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
 let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
-let candles = client.request_candles_data(Duration::from_secs(30))?;
+let markets_received = client.refresh_candles(Duration::from_secs(30))?;
 client.set_leverage("BTCUSDT", 20, Duration::from_secs(12))?;
 client.set_hedge_mode(true, Duration::from_secs(12))?;
 client.confirm_risk_limit("BTCUSDT", Duration::from_secs(12))?;
@@ -456,16 +457,19 @@ diagnostic tools. A normal application should not wait on raw receivers from the
 UI thread.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
-pending slot. Use `request_candles_data` for the common one-shot flow:
+pending slot. Use `refresh_candles` for the common one-shot flow:
 
 Registered candle chunks are aggregated from the receive-side DataReadInt path
 while the client loop is active; consumed chunks do not produce raw callback or
 dispatcher events.
 
 ```rust
-let merged = client.request_candles_data(Duration::from_secs(30))?;
-println!("markets={}", merged.markets.len());
+let markets_received = client.refresh_candles(Duration::from_secs(30))?;
+println!("markets={markets_received}");
 ```
+
+`request_candles_data` is kept for diagnostics that need the merged raw protocol
+payload; chart UI should read retained candles from market history readers.
 
 ## UI Settings Request
 
@@ -575,7 +579,7 @@ Regular applications call the `MoonClient` handle from their UI/runtime layer:
 
 ```rust
 client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
-client.ui_mm_subscribe(true)?;
+client.set_mm_orders_subscription(true)?;
 client.refresh_balances()?;
 client.strat_sell_price_update(strategy_id, sell_price)?;
 ```

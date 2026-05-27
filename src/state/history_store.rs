@@ -160,7 +160,7 @@ impl MarketHistoryStore {
     /// The caller passes `p_last = (Bid + Ask) / 2` from `UpdateMarketsList`.
     /// Delphi appends only for BTC markets or base-USDT markets, only when a
     /// real bid/ask was present, and only after the caller checked `pLast`.
-    pub fn append_last_price_like_delphi(
+    pub(crate) fn append_last_price_like_delphi(
         &mut self,
         current: f64,
         real_time: f64,
@@ -182,14 +182,14 @@ impl MarketHistoryStore {
         })
     }
 
-    pub fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    pub(crate) fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
         let seq = self.push_retained_futures_trade(row)?;
         self.rolling_volumes.add_trade(row);
         self.update_current_candle_from_trade(row);
         Some(seq)
     }
 
-    pub fn append_futures_stream_trade_like_delphi(
+    pub(crate) fn append_futures_stream_trade_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -203,11 +203,11 @@ impl MarketHistoryStore {
         time
     }
 
-    pub fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    pub(crate) fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
         self.spot_trades.as_mut().map(|writer| writer.push(row))
     }
 
-    pub fn append_spot_stream_trade_like_delphi(
+    pub(crate) fn append_spot_stream_trade_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -221,11 +221,11 @@ impl MarketHistoryStore {
         (time, seq)
     }
 
-    pub fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    pub(crate) fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
         self.liquidations.as_mut().map(|writer| writer.push(row))
     }
 
-    pub fn append_liquidation_stream_like_delphi(
+    pub(crate) fn append_liquidation_stream_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -239,11 +239,7 @@ impl MarketHistoryStore {
         (time, seq)
     }
 
-    pub fn append_mm_order_like_delphi(&mut self, row: MMOrderHistoryRow) -> Option<u64> {
-        self.append_mm_order_with_companion_like_delphi(row, None)
-    }
-
-    pub fn append_mm_order_with_companion_like_delphi(
+    pub(crate) fn append_mm_order_with_companion_like_delphi(
         &mut self,
         row: MMOrderHistoryRow,
         companion: Option<MMOrderCompanionData>,
@@ -255,7 +251,7 @@ impl MarketHistoryStore {
         Some(seq)
     }
 
-    pub fn append_mm_stream_order_like_delphi(
+    pub(crate) fn append_mm_stream_order_like_delphi(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -284,7 +280,7 @@ impl MarketHistoryStore {
     /// Fold detailed futures rows evicted from `SeqRing` into retained
     /// `TMiniCandle` rows. StoreWorker should call this from its periodic
     /// derived-state tick.
-    pub fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
+    pub(crate) fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
         if self.evicted_futures_for_compaction.is_empty() {
             return 0;
         }

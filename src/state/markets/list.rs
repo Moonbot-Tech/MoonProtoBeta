@@ -106,7 +106,7 @@ impl MarketsState {
         self.check_corr_markets_like_delphi();
         self.check_currency_ref_markets_like_delphi();
         if allow_new_markets {
-            self.market_indexes = Arc::new(incoming_server_names);
+            self.replace_market_indexes_like_delphi_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
         self.markets_list_refresh_needed = false;
@@ -196,7 +196,7 @@ impl MarketsState {
 
         let index_rebuild_start = Instant::now();
         if allow_new_markets {
-            self.market_indexes = Arc::new(incoming_server_names);
+            self.replace_market_indexes_like_delphi_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
         let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);

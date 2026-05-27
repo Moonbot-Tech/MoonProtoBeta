@@ -21,20 +21,26 @@ pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
 /// packet uses the same shift. Unknown-market sections skipped by Delphi do not
 /// fill this value.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct TradesPacketTimeShift {
+pub(crate) struct TradesPacketTimeShift {
     shift_days: Option<f64>,
 }
 
 impl TradesPacketTimeShift {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn shift_days(&self) -> Option<f64> {
+    #[cfg(test)]
+    pub(crate) fn shift_days(&self) -> Option<f64> {
         self.shift_days
     }
 
-    pub fn apply_like_delphi(&mut self, base_time: f64, time_delta_ms: i16, now_time: f64) -> f64 {
+    pub(crate) fn apply_like_delphi(
+        &mut self,
+        base_time: f64,
+        time_delta_ms: i16,
+        now_time: f64,
+    ) -> f64 {
         let row_time = base_time + f64::from(time_delta_ms) / DELPHI_MSECS_PER_DAY;
         let shift = *self
             .shift_days
@@ -129,7 +135,7 @@ pub struct MMOrderCompanionData {
     pub color: u32,
 }
 
-pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
+pub fn hl_address_color(taker: [u8; 20]) -> u32 {
     let mut r = 0u8;
     let mut g = 0u8;
     let mut b = 0u8;
@@ -143,6 +149,11 @@ pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
 
     let scale = |x: u8| -> u32 { ((u32::from(x) * 5) >> 3) + 80 };
     0xFF00_0000 | (scale(r) << 16) | (scale(g) << 8) | scale(b)
+}
+
+#[doc(hidden)]
+pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
+    hl_address_color(taker)
 }
 
 /// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.
@@ -273,7 +284,7 @@ impl SeqRingTimedRow for MiniCandle {
 /// new candle starts when `abs(anchor - row.Time) > 5 / SecsPerDay`, split
 /// groups are appended only when newer than `last_mini_time` and older than the
 /// resize `now_time`, and the final group only checks `c.Time > last_mini_time`.
-pub fn compact_trades_to_mini_candles_like_delphi(
+pub(crate) fn compact_trades_to_mini_candles_like_delphi(
     rows: &[TradeHistoryRow],
     last_mini_time: f64,
     now_time: f64,
@@ -458,7 +469,7 @@ pub struct MarketDerivedSnapshot {
 /// public value being maintained: fast buy/sell trade volume over 1/3/5 minute
 /// windows. The accepted precision loss is bounded by one bucket width.
 #[derive(Debug, Clone)]
-pub struct RollingTradeVolumes {
+pub(crate) struct RollingTradeVolumes {
     buckets: [TradeVolumeBucket; ROLLING_VOLUME_BUCKETS],
 }
 
@@ -486,7 +497,7 @@ impl Default for RollingTradeVolumes {
 }
 
 impl RollingTradeVolumes {
-    pub fn add_trade(&mut self, row: TradeHistoryRow) {
+    pub(crate) fn add_trade(&mut self, row: TradeHistoryRow) {
         let bucket_id = volume_bucket_id(row.time);
         let idx = volume_bucket_index(bucket_id);
         let bucket = &mut self.buckets[idx];
@@ -499,7 +510,7 @@ impl RollingTradeVolumes {
         bucket.totals.add_trade(row);
     }
 
-    pub fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+    pub(crate) fn snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
         let now_bucket = volume_bucket_id(now_time);
         let one_minute_oldest = oldest_volume_bucket(now_bucket, 60);
         let three_minutes_oldest = oldest_volume_bucket(now_bucket, 3 * 60);
@@ -519,19 +530,6 @@ impl RollingTradeVolumes {
             }
         }
         snapshot
-    }
-
-    pub fn window(&self, now_time: f64, window_seconds: i64) -> TradeVolumeTotals {
-        let now_bucket = volume_bucket_id(now_time);
-        let oldest_bucket = oldest_volume_bucket(now_bucket, window_seconds);
-
-        let mut totals = TradeVolumeTotals::default();
-        for bucket in &self.buckets {
-            if bucket.bucket_id >= oldest_bucket && bucket.bucket_id <= now_bucket {
-                totals.add_totals(bucket.totals);
-            }
-        }
-        totals
     }
 }
 

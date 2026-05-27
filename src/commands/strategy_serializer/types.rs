@@ -5,6 +5,19 @@ use super::{
     TID_UINT64, TID_WORD,
 };
 
+/// Common Delphi `TStrategy` field names.
+///
+/// The snapshot remains schema-driven, so this list is intentionally small:
+/// it covers fields the Active Lib itself reads and fields most UI code needs.
+pub mod field_names {
+    pub const STRATEGY_NAME: &str = "StrategyName";
+    pub const SELL_PRICE: &str = "SellPrice";
+    pub const AUTO_BUY: &str = "AutoBuy";
+    pub const RUN_DETECT_ON_KERNEL: &str = "RunDetectOnKernel";
+    pub const SHORT: &str = "Short";
+    pub const SELL_FROM_ASSET: &str = "SellFromAsset";
+}
+
 /// Decoded поле стратегии. Соответствует Delphi `TValue` после RTTI-десериализации.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
@@ -169,6 +182,27 @@ impl StrategyFields {
             .map(|(_, value)| value)
     }
 
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        match self.get(key) {
+            Some(FieldValue::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn get_double(&self, key: &str) -> Option<f64> {
+        match self.get(key) {
+            Some(FieldValue::Double(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        match self.get(key) {
+            Some(FieldValue::String(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn contains_key(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
@@ -242,34 +276,70 @@ pub enum StrategyActiveMode {
 }
 
 impl StrategySnapshot {
+    pub fn kind(&self) -> StrategyKind {
+        self.kind_like_delphi()
+    }
+
     pub fn kind_like_delphi(&self) -> StrategyKind {
         StrategyKind(self.kind)
     }
 
     pub fn field_bool_or_false(&self, name: &str) -> bool {
-        matches!(self.fields.get(name), Some(FieldValue::Bool(true)))
+        self.fields.get_bool(name).unwrap_or(false)
+    }
+
+    pub fn strategy_name(&self) -> Option<&str> {
+        self.fields.get_string(field_names::STRATEGY_NAME)
+    }
+
+    pub fn sell_price_field(&self) -> Option<f64> {
+        self.fields.get_double(field_names::SELL_PRICE)
+    }
+
+    pub fn auto_buy(&self) -> bool {
+        self.auto_buy_like_delphi()
     }
 
     pub fn auto_buy_like_delphi(&self) -> bool {
-        self.field_bool_or_false("AutoBuy")
+        self.field_bool_or_false(field_names::AUTO_BUY)
+    }
+
+    pub fn run_detect_on_kernel(&self) -> bool {
+        self.run_detect_on_kernel_like_delphi()
     }
 
     pub fn run_detect_on_kernel_like_delphi(&self) -> bool {
-        self.field_bool_or_false("RunDetectOnKernel")
+        self.field_bool_or_false(field_names::RUN_DETECT_ON_KERNEL)
+    }
+
+    pub fn is_short(&self) -> bool {
+        self.short_like_delphi()
     }
 
     pub fn short_like_delphi(&self) -> bool {
-        self.field_bool_or_false("Short")
+        self.field_bool_or_false(field_names::SHORT)
+    }
+
+    pub fn sell_from_asset(&self) -> bool {
+        self.sell_from_asset_like_delphi()
     }
 
     pub fn sell_from_asset_like_delphi(&self) -> bool {
-        self.field_bool_or_false("SellFromAsset")
+        self.field_bool_or_false(field_names::SELL_FROM_ASSET)
+    }
+
+    pub fn can_auto_buy(&self) -> bool {
+        self.can_auto_buy_like_delphi()
     }
 
     /// Delphi `TStrategy.CanAutoBuy`.
     pub fn can_auto_buy_like_delphi(&self) -> bool {
         (self.auto_buy_like_delphi() || self.kind_like_delphi() == StrategyKind::MOON_SHOT)
             && self.kind_like_delphi() != StrategyKind::MANUAL
+    }
+
+    pub fn is_active(&self, mode: StrategyActiveMode) -> bool {
+        self.active_like_delphi(mode)
     }
 
     /// Delphi `TStratForm.CheckActive` / `bStartCheckedClick` active assignment.

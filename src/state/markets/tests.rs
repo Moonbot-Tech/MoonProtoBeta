@@ -124,6 +124,34 @@ fn apply_markets_list_initial_populates_state() {
     assert_eq!(st.get("ETH").unwrap().snapshot().bn_market_name, "ETH");
     assert!(st.get("DOGE").is_none());
     assert_eq!(st.market_name_by_index(1), Some("ETH"));
+    assert_eq!(st.market_index_by_name("ETH"), Some(1));
+}
+
+#[test]
+fn market_handle_balance_position_reads_live_market_fields() {
+    let mut st = MarketsState::new();
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![mk_market("BTCUSDT", 0)],
+        corr_markets: vec![],
+    });
+
+    let handle = st.get("BTCUSDT").unwrap();
+    handle.with_mut(|market| {
+        market.pos_size = 2.5;
+        market.pos_price = 65000.0;
+        market.liq_price = 42000.0;
+        market.leverage_x = 10;
+        market.total_profit_b = 1.0;
+        market.total_profit_l = 2.0;
+        market.total_profit_s = 3.0;
+    });
+
+    let pos = handle.balance_position();
+    assert_eq!(pos.pos_size, 2.5);
+    assert_eq!(pos.pos_price, 65000.0);
+    assert_eq!(pos.liq_price, 42000.0);
+    assert_eq!(pos.leverage_x, 10);
+    assert_eq!(pos.total_profit(), 6.0);
 }
 
 #[test]

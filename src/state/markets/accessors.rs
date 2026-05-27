@@ -75,10 +75,7 @@ impl MarketsState {
         if !self.indexes_synchronized {
             return None;
         }
-        self.market_indexes
-            .iter()
-            .position(|name| name == market_name)
-            .and_then(|idx| u16::try_from(idx).ok())
+        self.market_index_by_name.get(market_name).copied()
     }
 
     /// Получить цену маркета по `mIndex`.

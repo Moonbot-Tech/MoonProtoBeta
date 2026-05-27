@@ -122,6 +122,31 @@ fn strategy_with_fields(
 }
 
 #[test]
+fn strategy_fields_typed_getters_and_aliases_hide_string_bag_boilerplate() {
+    let strategy = strategy_with_fields(
+        StrategyKind::NEW_LISTING,
+        true,
+        &[
+            (
+                field_names::STRATEGY_NAME,
+                FieldValue::String("Listing".to_string()),
+            ),
+            (field_names::SELL_PRICE, FieldValue::Double(12.5)),
+            (field_names::AUTO_BUY, FieldValue::Bool(true)),
+            (field_names::SELL_FROM_ASSET, FieldValue::Bool(true)),
+        ],
+    );
+
+    assert_eq!(strategy.strategy_name(), Some("Listing"));
+    assert_eq!(strategy.sell_price_field(), Some(12.5));
+    assert_eq!(strategy.kind(), StrategyKind::NEW_LISTING);
+    assert!(strategy.auto_buy());
+    assert!(strategy.sell_from_asset());
+    assert!(strategy.is_active(StrategyActiveMode::UsingMoonProto));
+    assert!(!strategy.is_active(StrategyActiveMode::ActiveClient));
+}
+
+#[test]
 fn strategy_active_helpers_match_delphi_check_active_modes() {
     let listing = strategy_with_fields(StrategyKind::NEW_LISTING, true, &[]);
     assert!(listing.active_like_delphi(StrategyActiveMode::ActiveClient));

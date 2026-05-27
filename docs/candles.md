@@ -50,12 +50,20 @@ let high = candle.high();
 let unix_ms = candle.time_delphi().unix_millis();
 ```
 
-## Explicit Requests
+## Explicit Refresh
 
-`MoonClient::request_candles_data(timeout)` remains available as an explicit
-refresh/diagnostic helper. It returns `MergedCandles` because that helper exposes
-the protocol aggregation result, but it also applies parsed market candles to
-retained Active Lib history when storage is active.
+Use `MoonClient::refresh_candles(timeout)` when the UI wants to force a fresh
+full 5m snapshot. The helper returns the number of parsed market entries and
+applies candles to retained Active Lib history when storage is active:
+
+```rust
+let markets_received = client.refresh_candles(std::time::Duration::from_secs(30))?;
+println!("candles refreshed for {markets_received} markets");
+```
+
+`MoonClient::request_candles_data(timeout)` remains available as a
+refresh/diagnostic helper for protocol investigations. It returns
+`MergedCandles` because that helper exposes the aggregation result.
 
 `MergedCandles.uid` and `MergedCandles.zipped_data` are protocol diagnostics.
 Chart UI should read retained candles through `market_history_readers`, not
