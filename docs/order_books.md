@@ -52,14 +52,14 @@ for event in client.drain_events() {
     if let Event::OrderBook(book_event) = event {
         match book_event {
             OrderBookEvent::Apply {
-                market_index,
-                book_kind,
+                market_name,
+                kind,
                 is_full,
                 seq,
-                buys,
-                sells,
+                top,
+                ..
             } => {
-                redraw_book(*market_index, *book_kind, *is_full, *seq, buys, sells);
+                redraw_top(market_name.as_deref(), kind, top, is_full, seq);
             }
             OrderBookEvent::Ignored { .. } => {}
             OrderBookEvent::RequestFullNeeded { .. } => {}
@@ -74,19 +74,23 @@ not surface a separate callback event for that request. The low-level
 `RequestFullNeeded` variant exists for manual `dispatch_into` / `OrderBooks`
 users that do not pass a `Client` to the dispatcher.
 
-The runtime applies each `Apply` event before the event is published. If the UI
-needs the current book, read it from the latest snapshot:
+The runtime applies each `Apply` event before the event is published. The event
+already carries the resolved market name when it came through `MoonClient` /
+`EventDispatcher`, the typed `OrderBookKind`, and the current best bid/ask after
+the diff was applied:
 
 ```rust
 use moonproto::Event;
-use moonproto::state::{OrderBookEvent, OrderBookKind};
+use moonproto::state::OrderBookEvent;
 
 for event in client.drain_events() {
-    if let Event::OrderBook(OrderBookEvent::Apply { market_index, book_kind, .. }) = event {
-        let Some(state) = client.snapshot() else { continue; };
-        let Some(kind) = OrderBookKind::from_u8(book_kind) else { continue; };
-        let Some(top) = state.order_books().top_of_book(market_index, kind) else { continue; };
-        println!("bid={:?} ask={:?}", top.bid, top.ask);
+    if let Event::OrderBook(OrderBookEvent::Apply { market_name, kind, top, .. }) = event {
+        println!(
+            "{} {kind:?} bid={:?} ask={:?}",
+            market_name.as_deref().unwrap_or("<unknown>"),
+            top.bid,
+            top.ask,
+        );
     }
 }
 ```
@@ -141,9 +145,12 @@ pub enum ApplyResult {
 pub enum OrderBookEvent {
     Apply {
         market_index: u16,
+        market_name: Option<String>,
         book_kind: u8,
+        kind: OrderBookKind,
         is_full: bool,
         seq: u16,
+        top: TopOfBook,
         buys: Vec<OrderLevel>,
         sells: Vec<OrderLevel>,
     },
@@ -152,8 +159,11 @@ pub enum OrderBookEvent {
 }
 ```
 
-`RequestFullNeeded` is a low-level control event. The active dispatcher consumes
-it internally before invoking the application callback.
+`market_index`, raw `book_kind`, `buys`, and `sells` are kept for diagnostics
+and low-level tools. For normal UI code, prefer `market_name`, `kind`, and
+`top`; diff packet rows are not the full applied book. `RequestFullNeeded` is a
+low-level control event. The active dispatcher consumes it internally before
+invoking the application callback.
 
 Incoming updates use `OrderLevel` (`f32`) because the server sends compact
 single-precision values. `OrderBookSnapshot` stores applied levels as `f64` for

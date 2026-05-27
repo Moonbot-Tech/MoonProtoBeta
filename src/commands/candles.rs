@@ -32,6 +32,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use super::engine_api::EngineMethod;
 use super::engine_request::build_engine_request_full;
+use crate::time::DelphiTime;
 
 mod aggregator;
 mod request_parser;
@@ -75,6 +76,36 @@ const _: [(); 28] = [(); DEEP_PRICE_SIZE];
 const MINS_IN_DAY: f64 = 1440.0;
 
 impl DeepPrice {
+    #[inline]
+    pub fn open(self) -> f32 {
+        self.open_p
+    }
+
+    #[inline]
+    pub fn close(self) -> f32 {
+        self.close_p
+    }
+
+    #[inline]
+    pub fn high(self) -> f32 {
+        self.max_p
+    }
+
+    #[inline]
+    pub fn low(self) -> f32 {
+        self.min_p
+    }
+
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
+    }
+
     fn from_wire(wire: WireDeepPrice) -> Self {
         Self {
             open_p: wire.open_p.get(),

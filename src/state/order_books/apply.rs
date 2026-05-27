@@ -4,6 +4,7 @@ use super::{BookKey, OrderBookLevel, OrderBookSnapshot};
 use crate::commands::order_book::{OrderBookUpdate, OrderLevel};
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
+use std::mem;
 
 pub(super) fn apply_cached_packet(
     books: &mut HashMap<BookKey, OrderBookSnapshot>,
@@ -108,8 +109,7 @@ pub(crate) fn apply_order_book_diff_keep_zero_with_eps(
     }
 
     scratch.clear();
-    scratch.extend_from_slice(book);
-    book.clear();
+    mem::swap(book, scratch);
     book.reserve(scratch.len() + diff.len());
     let mut k = 0usize;
 

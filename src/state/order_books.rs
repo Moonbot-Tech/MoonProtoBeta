@@ -17,7 +17,7 @@
 //! let events = state.on_packet(packet);
 //! for ev in events {
 //!     match ev {
-//!         OrderBookEvent::Apply { .. } => /* read state.book_by_kind(...) */,
+//!         OrderBookEvent::Apply { top, .. } => /* redraw best bid/ask or read state.book(...) */,
 //!         OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
 //!             // Low-level mode only: send emk_RequestOrderBookFull yourself.
 //!             // EventDispatcher::dispatch_into_active consumes this internally.
@@ -103,9 +103,16 @@ impl OrderBooks {
             cache.check_cache_empty();
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
+                market_name: None,
                 book_kind: pkt.book_kind,
+                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: true,
                 seq: pkt.seq,
+                top: self
+                    .books
+                    .get(&key)
+                    .map(OrderBookSnapshot::top)
+                    .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -133,9 +140,16 @@ impl OrderBooks {
             cache.last_applied_seq = seq;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
+                market_name: None,
                 book_kind: pkt.book_kind,
+                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: false,
                 seq,
+                top: self
+                    .books
+                    .get(&key)
+                    .map(OrderBookSnapshot::top)
+                    .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -172,9 +186,16 @@ impl OrderBooks {
             cache.last_applied_seq = pkt.seq;
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
+                market_name: None,
                 book_kind: pkt.book_kind,
+                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: false,
                 seq: pkt.seq,
+                top: self
+                    .books
+                    .get(&key)
+                    .map(OrderBookSnapshot::top)
+                    .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -247,9 +268,16 @@ impl OrderBooks {
             cache.last_applied_seq = entry.seq;
             events.push(OrderBookEvent::Apply {
                 market_index: entry.pkt.market_index,
+                market_name: None,
                 book_kind: entry.pkt.book_kind,
+                kind: OrderBookKind::from_u8(entry.pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: entry.pkt.is_full,
                 seq: entry.seq,
+                top: self
+                    .books
+                    .get(&key)
+                    .map(OrderBookSnapshot::top)
+                    .unwrap_or_default(),
                 buys: entry.pkt.buys,
                 sells: entry.pkt.sells,
             });

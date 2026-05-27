@@ -22,6 +22,7 @@ use crate::commands::ui::{
     ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, StratStartStop,
     StratStartStopV2, SwitchDex, SwitchSpot, TriggerManage, UICommand, UpdateVersion,
 };
+use crate::time::DelphiTime;
 
 /// Sync state клиентских настроек — обновляется через `apply(UICommand)`.
 ///
@@ -93,6 +94,10 @@ pub enum SettingsEvent {
 impl SettingsState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn arb_valid_until_time(&self) -> Option<DelphiTime> {
+        self.arb_valid_until.map(DelphiTime::from_days)
     }
 
     /// Seed Delphi `cfg` fallback used while parsing old `TClientSettingsCommand`

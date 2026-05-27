@@ -31,7 +31,7 @@ Use one `MoonClient` per server connection in regular applications.
 ```rust
 use moonproto::{
     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-    MoonClient,
+    MoonClient, TradesStreamMode,
 };
 
 let keys = import_key(KEY_B64).expect("invalid key");
@@ -42,7 +42,7 @@ let init = InitConfig {
         0,
         Vec::new(), // replace with your local strategy list if the app has one
     )),
-    subscribe_trades: Some(false),
+    subscribe_trades: Some(TradesStreamMode::TradesOnly),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
@@ -114,10 +114,23 @@ replacement character `U+FFFD`.
 
 Applications use lifecycle events for UI status and alerting, not for recovery.
 
+## Time Values
+
+MoonProto inherits Delphi `TDateTime`: `f64` days since `1899-12-30`. That is
+not Unix time. Public dense rows keep raw day fields for compatibility and cheap
+history storage, but application code should convert through `DelphiTime` or
+the row helper methods:
+
+```rust
+let unix_ms = candle.time_delphi().unix_millis();
+let system_time = trade.time_delphi().system_time();
+```
+
 ## Public Entry Points
 
 | API | Purpose |
 |---|---|
+| `active_lib.md` | What `MoonClient` maintains automatically |
 | `client.md` | `MoonClient`, config, init, subscriptions, requests |
 | `events.md` | `MoonClient` events, immutable snapshots, low-level dispatcher |
 | `lifecycle.md` | Connection and critical status events |

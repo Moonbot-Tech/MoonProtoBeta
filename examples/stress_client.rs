@@ -45,7 +45,7 @@ use moonproto::commands::{parse_get_balance_response, parse_query_hedge_mode_res
 use moonproto::events::{Event, EventDispatcher};
 use moonproto::key_import;
 use moonproto::state::{OrderBookEvent, StratEvent, TradesEvent};
-use moonproto::{run_init_sequence, InitConfig};
+use moonproto::{run_init_sequence, InitConfig, TradesStreamMode};
 
 const DEFAULT_HOST: &str = "127.0.0.1:3000";
 const DEFAULT_MARKET: &str = "BTCUSDT";
@@ -1666,7 +1666,7 @@ fn run_one_client(
     let init = InitConfig {
         initial_strategies: None,
         mm_orders_subscribe: None,
-        subscribe_trades: Some(false),
+        subscribe_trades: Some(TradesStreamMode::TradesOnly),
         subscribe_orderbooks: vec![args.market.clone()],
         step_timeout: Some(INIT_TIMEOUT),
     };

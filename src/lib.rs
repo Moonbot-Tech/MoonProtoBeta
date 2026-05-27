@@ -18,7 +18,7 @@
 //! ```ignore
 //! use moonproto::{
 //!     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-//!     MoonClient, NewOrderParams, OrderSide,
+//!     MoonClient, NewOrderParams, OrderSide, TradesStreamMode,
 //! };
 //!
 //! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
@@ -29,7 +29,7 @@
 //!         0,
 //!         Vec::new(), // replace with your local strategy list if the app has one
 //!     )),
-//!     subscribe_trades: Some(false),
+//!     subscribe_trades: Some(TradesStreamMode::TradesOnly),
 //!     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
 //!     ..Default::default()
 //! };
@@ -118,6 +118,7 @@ pub mod key_import;
 pub mod ntp;
 pub mod protocol;
 pub mod state;
+pub mod time;
 pub mod transport;
 
 pub use client::{
@@ -125,7 +126,7 @@ pub use client::{
     ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
     InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade,
     NewOrderParams, OrderSide, ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams,
-    SendPriority, SplitOrderParams, TradeContextError, UniqueKey,
+    SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode, UniqueKey,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
@@ -138,4 +139,5 @@ pub use key_import::{
     ImportedKeys, ImportedNetworkConfig,
 };
 pub use protocol::Command;
+pub use time::DelphiTime;
 pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};

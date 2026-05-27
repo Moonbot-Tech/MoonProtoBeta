@@ -7,8 +7,13 @@ numbers. `MoonClient` detects gaps and requests resend batches automatically.
 ## Subscribe
 
 ```rust
-client.subscribe_all_trades(false); // false = trades only, true = include MM orders
-client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"]); // retain Active Lib data only for these markets
+use moonproto::TradesStreamMode;
+
+client.subscribe_all_trades(TradesStreamMode::TradesOnly);
+client.subscribe_trades_for(
+    TradesStreamMode::TradesOnly,
+    ["BTCUSDT", "ETHUSDT"],
+); // retain Active Lib data only for these markets
 client.unsubscribe_all_trades();
 ```
 
@@ -33,14 +38,16 @@ library API. If no all-trades intent is present in the registry, incoming
 trade-stream and resend packets are considered unexpected and are dropped
 instead of being emitted as public events.
 
-`subscribe_all_trades(want_mm)` is the full Active Lib default: once the market
+`subscribe_all_trades(mode)` is the full Active Lib default: once the market
 list is known, Active Lib creates retained storage for every known market and
 maintains trades, MM/liquidation rows, LastPrice, 5m candles, and derived
-analytics for them. `subscribe_trades_for(want_mm, markets)` is the accepted
-Rust API deviation for UI clients that want less local memory. It sends the
-same server subscription request, but Active Lib emits/stores/calculates only
-the listed markets. Passing an empty market list means all markets. Diagnostic
-callbacks remain unfiltered and should not be used as retained-history API.
+analytics for them. `TradesStreamMode::TradesAndMarketMakers` requests the
+server's market-maker sections too. `subscribe_trades_for(mode, markets)` is
+the accepted Rust API deviation for UI clients that want less local memory. It
+sends the same server subscription request, but Active Lib
+emits/stores/calculates only the listed markets. Passing an empty market list
+means all markets. Diagnostic callbacks remain unfiltered and should not be
+used as retained-history API.
 
 The public call always updates the reconnect registry immediately. Once Init is
 open, changed subscription intent also queues the server request. Its success or
@@ -85,6 +92,9 @@ has already applied known rows to `MarketsState::trade_state(market)` and queued
 retained history batches to `MarketHistoryWorker` before this event is emitted.
 Applications read rows through `MarketHistoryReaders` / `SeqRingReader`, using
 their own `SeqRingCursor` when they need "only new rows".
+History row `time` fields are Delphi day values, not Unix timestamps. Use
+`row.time_delphi().unix_millis()` or `row.time_delphi().system_time()` in UI
+code.
 
 `GapDetected`, `ResendRequested`, `GapFilled`, `BucketClosed`, `Duplicate`, and
 resend-side `OutOfOrder` are diagnostic events. They are useful for
@@ -193,6 +203,8 @@ pub struct TradeHistoryRow {
 }
 
 impl TradeHistoryRow {
+    pub fn time_delphi(self) -> DelphiTime;
+    pub fn unix_millis(self) -> Option<i64>;
     pub fn quantity(self) -> f32;        // Abs(qty)
     pub fn is_buy(self) -> bool;         // Delphi sign-bit check
     pub fn same_direction(self, other: Self) -> bool;
@@ -228,6 +240,14 @@ pub struct Candle5mRow {
     pub min_p: f32,
     pub vol: f32,
     pub time: f64,
+}
+
+impl Candle5mRow {
+    pub fn open(self) -> f32;
+    pub fn high(self) -> f32;
+    pub fn low(self) -> f32;
+    pub fn close(self) -> f32;
+    pub fn time_delphi(self) -> DelphiTime;
 }
 
 pub struct MarketDerivedSnapshot {
@@ -596,7 +616,7 @@ contract: `subscribe_all_trades` creates retained storage for all known markets;
 Read the default worker through the latest `MoonClient` snapshot:
 
 ```rust
-client.subscribe_all_trades(false);
+client.subscribe_all_trades(TradesStreamMode::TradesOnly);
 
 let btc = client
     .snapshot()
@@ -615,7 +635,7 @@ let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
 
 let mut dispatcher = EventDispatcher::new();
 dispatcher.set_market_history_handle(worker.handle());
-client.subscribe_all_trades(false);
+client.subscribe_all_trades(TradesStreamMode::TradesOnly);
 
 // Run your custom low-level runtime here. Regular applications should use
 // MoonClient instead of owning Client + EventDispatcher directly.

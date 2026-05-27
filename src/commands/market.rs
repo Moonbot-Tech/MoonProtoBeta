@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 
 use super::candles::current_local_time_shift_minutes;
+use crate::time::DelphiTime;
 const MINS_IN_DAY: f64 = 1440.0;
 
 mod indexes;
@@ -242,6 +243,10 @@ impl Market {
     pub fn total_profit(&self) -> f64 {
         self.total_profit_b + self.total_profit_l + self.total_profit_s
     }
+
+    pub fn funding_time_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.funding_time)
+    }
 }
 
 pub const ARB_PRICE_RING_LEN: usize = 10;
@@ -253,10 +258,22 @@ pub struct MarketArbPricePoint {
     pub my_price: f32,
 }
 
+impl MarketArbPricePoint {
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketArbNowEntry {
     pub price: f32,
     pub time: f64,
+}
+
+impl MarketArbNowEntry {
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use moonproto::state::OrderBookEvent;
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, Event, InitConfig, InitialStrategies,
-    LifecycleEvent, MoonClient,
+    LifecycleEvent, MoonClient, TradesStreamMode,
 };
 
 const STREAM_DURATION_SECS: u64 = 15;
@@ -48,7 +48,7 @@ fn runtime_smoke_full_happy_path() {
     let cfg = ClientConfig::new(&ip, port, info.keys.master_key, info.keys.mac_key);
     let init = InitConfig {
         initial_strategies: Some(InitialStrategies::new(0, Vec::new())),
-        subscribe_trades: Some(false),
+        subscribe_trades: Some(TradesStreamMode::TradesOnly),
         subscribe_orderbooks: vec!["BTCUSDT".to_string()],
         step_timeout: None,
         ..Default::default()

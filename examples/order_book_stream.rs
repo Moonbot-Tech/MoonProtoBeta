@@ -52,25 +52,38 @@ fn main() {
         match client.recv_event_timeout(Duration::from_millis(500)) {
             Ok(Event::OrderBook(event)) => match event {
                 OrderBookEvent::Apply {
-                    market_index,
-                    book_kind,
+                    market_name,
+                    kind,
                     is_full,
                     seq,
+                    top,
                     buys,
                     sells,
+                    ..
                 } => {
                     applies += 1;
                     if is_full {
                         fulls += 1;
                     }
+                    let name = market_name.as_deref().unwrap_or("<unknown>");
+                    let bid = top
+                        .bid
+                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                        .unwrap_or_else(|| "none".to_string());
+                    let ask = top
+                        .ask
+                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                        .unwrap_or_else(|| "none".to_string());
                     println!(
-                        "[book] idx={} kind={} full={} seq={} bids={} asks={}",
-                        market_index,
-                        book_kind_name(book_kind),
+                        "[book] market={} kind={} full={} seq={} bids={} asks={} top_bid={} top_ask={}",
+                        name,
+                        book_kind_name(kind.as_u8()),
                         is_full,
                         seq,
                         buys.len(),
-                        sells.len()
+                        sells.len(),
+                        bid,
+                        ask
                     );
                 }
                 OrderBookEvent::Ignored {

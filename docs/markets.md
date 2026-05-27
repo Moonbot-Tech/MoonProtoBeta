@@ -113,6 +113,8 @@ Funding timestamps match Delphi client state. The server serializes
 `FundingTime - TZShift`; Rust parsers add the local client timezone shift back,
 so `Market::funding_time` and `MarketPrice::funding_time` are client-local
 Delphi `TDateTime` values. A zero funding time stays zero.
+They are not Unix timestamps; use `funding_time_delphi().unix_millis()` when
+the UI needs wall-clock time.
 
 ## Reading State
 
@@ -138,7 +140,13 @@ if let Some(market) = markets.get("BTCUSDT") {
 }
 
 if let Some(price) = markets.price("BTCUSDT") {
-    println!("bid={} ask={} mark={}", price.bid, price.ask, price.mark_price);
+    println!(
+        "bid={} ask={} mark={} funding_ms={:?}",
+        price.bid,
+        price.ask,
+        price.mark_price,
+        price.funding_time_delphi().unix_millis()
+    );
 }
 
 if let Some(name) = markets.market_name_by_index(0) {
@@ -259,6 +267,9 @@ pub struct LastPricePoint {
     pub real_time: f64, // Delphi TDateTime
 }
 ```
+
+Use `LastPricePoint::time_delphi()` for conversion to Unix milliseconds or
+`SystemTime`.
 
 This row mirrors Delphi `THistoricalPrices`. It is not the last trade price.
 Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the

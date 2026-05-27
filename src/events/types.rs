@@ -3,6 +3,7 @@
 use super::*;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
+use crate::time::DelphiTime;
 
 /// Fresh strategy snapshot override returned by the application for a server
 /// `TStratSnapshotRequest`.
@@ -105,6 +106,18 @@ pub struct WatcherFillEvent {
     pub is_taker: bool,
 }
 
+impl WatcherFillEvent {
+    #[inline]
+    pub fn time_delphi(&self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(&self) -> Option<i64> {
+        self.time_delphi().unix_millis()
+    }
+}
+
 /// Typed watcher fills from one `TradesStream` WatcherFills section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillsEvent {
@@ -159,4 +172,13 @@ pub enum Event {
         len: usize,
         payload: Vec<u8>,
     },
+}
+
+impl Event {
+    pub fn server_log_time(&self) -> Option<DelphiTime> {
+        match self {
+            Self::ServerLog { time, .. } => Some(DelphiTime::from_days(*time)),
+            _ => None,
+        }
+    }
 }

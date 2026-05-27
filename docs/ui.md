@@ -85,8 +85,9 @@ the reconnect registry immediately. Before Init it sends nothing; the one-time
 Init uses the latest registry value for the post-init MM-orders subscription
 step. After Init, `ui_mm_subscribe` queues the command for sending, and
 reconnect restores the latest MM-orders intent automatically. It does not
-rewrite the stored `subscribe_all_trades(want_mm)` value; all-trades
-subscription and MM-order display are two separate user intents.
+rewrite the stored `subscribe_all_trades(TradesStreamMode::...)` value;
+all-trades subscription content and MM-order display are two separate user
+intents.
 
 ### Version Update
 

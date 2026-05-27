@@ -21,7 +21,7 @@ use moonproto::events::Event;
 use moonproto::key_import;
 use moonproto::state::order_books::ApplyResult as OBApplyResult;
 use moonproto::state::{BalanceEvent, MarketsEvent, OrderBookEvent, SettingsEvent, TradesEvent};
-use moonproto::{run_init_sequence, EventDispatcher, InitConfig};
+use moonproto::{run_init_sequence, EventDispatcher, InitConfig, TradesStreamMode};
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -215,7 +215,7 @@ fn main() {
         "[INIT] BaseCheck/AuthCheck/markets/indexes/balance + optional trades subscription",
     );
     let init = InitConfig {
-        subscribe_trades: Some(false),
+        subscribe_trades: Some(TradesStreamMode::TradesOnly),
         ..Default::default()
     };
     match run_init_sequence(&mut client, &mut dispatcher, init) {

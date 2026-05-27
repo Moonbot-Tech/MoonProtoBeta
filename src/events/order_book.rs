@@ -30,6 +30,10 @@ impl EventDispatcher {
                 }
                 let market_index = pkt.market_index;
                 let book_kind = pkt.book_kind;
+                let market_name = self
+                    .markets
+                    .market_name_by_index(market_index)
+                    .map(str::to_owned);
                 let events = self.order_books.on_packet(pkt, now_ms);
                 if events
                     .iter()
@@ -44,7 +48,13 @@ impl EventDispatcher {
                             .update_chart_price_step_from_server_index(market_index, ask.rate);
                     }
                 }
-                for ev in events {
+                for mut ev in events {
+                    if let OrderBookEvent::Apply {
+                        market_name: name, ..
+                    } = &mut ev
+                    {
+                        *name = market_name.clone();
+                    }
                     out.push(Event::OrderBook(ev));
                 }
             }

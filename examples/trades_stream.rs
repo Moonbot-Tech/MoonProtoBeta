@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::TradesEvent;
-use moonproto::Event;
+use moonproto::{Event, TradesStreamMode};
 
 mod common;
 
@@ -35,11 +35,13 @@ fn main() {
 
     if let Some(market) = market_filter.as_ref() {
         client
-            .subscribe_trades_for(false, [market.as_str()])
+            .subscribe_trades_for(TradesStreamMode::TradesOnly, [market.as_str()])
             .expect("runtime stopped");
         println!("[subscribe] all-trades, retained market={market}");
     } else {
-        client.subscribe_all_trades(false).expect("runtime stopped");
+        client
+            .subscribe_all_trades(TradesStreamMode::TradesOnly)
+            .expect("runtime stopped");
         println!("[subscribe] all-trades, retained all markets");
     }
 

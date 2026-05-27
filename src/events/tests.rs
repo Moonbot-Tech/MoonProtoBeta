@@ -18,7 +18,7 @@ use crate::commands::trade::{
 };
 use crate::commands::EngineMethod;
 use crate::state::orders::OrderCancelSend;
-use crate::state::DELPHI_MSECS_PER_DAY;
+use crate::state::{OrderBookKind, DELPHI_MSECS_PER_DAY};
 
 static SERVER_TIME_DELTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2383,6 +2383,22 @@ fn orderbook_apply_updates_market_chart_price_step_like_delphi_glass_updated() {
     assert!(out
         .iter()
         .any(|ev| matches!(ev, Event::OrderBook(OrderBookEvent::Apply { .. }))));
+    let apply = out
+        .iter()
+        .find_map(|ev| match ev {
+            Event::OrderBook(OrderBookEvent::Apply {
+                market_name,
+                kind,
+                top,
+                ..
+            }) => Some((market_name, kind, top)),
+            _ => None,
+        })
+        .expect("orderbook apply event");
+    assert_eq!(apply.0.as_deref(), Some("BTCUSDT"));
+    assert_eq!(*apply.1, OrderBookKind::Futures);
+    assert_eq!(apply.2.bid.unwrap().rate, 100.0);
+    assert_eq!(apply.2.ask.unwrap().rate, 125.0);
     assert_eq!(
         d.markets().price("BTCUSDT").unwrap().chart_price_step,
         125.0 / 5000.0,

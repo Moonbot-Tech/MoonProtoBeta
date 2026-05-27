@@ -3,6 +3,7 @@ use super::{
     EngineStreamReader,
 };
 use crate::commands::candles::current_local_time_shift_minutes;
+use crate::time::DelphiTime;
 
 /// Обновление цены одного маркета (byte-exact с `WriteMarketPricesToStream`
 /// MoonProtoSerialization.pas:195-209).
@@ -18,6 +19,12 @@ pub struct MarketPriceUpdate {
     pub funding_time: f64,
     pub mark_price: f64,
     pub mark_price_found: bool,
+}
+
+impl MarketPriceUpdate {
+    pub fn funding_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.funding_time)
+    }
 }
 
 /// Обновление цены `CorrMarket`.

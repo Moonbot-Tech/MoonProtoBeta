@@ -98,7 +98,7 @@ Basic application shape:
 ```rust
 use moonproto::{
     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-    MoonClient, NewOrderParams, OrderSide,
+    MoonClient, NewOrderParams, OrderSide, TradesStreamMode,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0,
                 Vec::new(), // replace with your local strategy list if the app has one
             )),
-            subscribe_trades: Some(false),
+            subscribe_trades: Some(TradesStreamMode::TradesOnly),
             subscribe_orderbooks: vec!["BTCUSDT".to_string()],
             ..Default::default()
         }),
@@ -150,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 reconnect restore, market refresh, saved subscriptions, orderbook full resync,
 trades gap recovery, and pending Engine API dispatch are owned by the library
 until `stop()` or drop.
+See `docs/active_lib.md` for the maintained-state contract.
 
 Engine API helpers that mutate server/exchange state also run through the owned
 runtime. Examples: `client.set_leverage(...)`, `client.set_hedge_mode(...)`,

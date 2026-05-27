@@ -1,7 +1,7 @@
 # Arbitrage State
 
-Arbitrage relay packets are transported through `MPC_Balance`, but the normal
-Active Lib state is per market.
+Arbitrage relay packets are low-level transport details. The normal Active Lib
+state is per market.
 
 When the current client settings enable an arbitrage platform, incoming compact
 arb prices are applied to the live `Market` object:

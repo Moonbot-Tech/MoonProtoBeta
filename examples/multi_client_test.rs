@@ -7,7 +7,7 @@ use std::env;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use moonproto::Event;
+use moonproto::{Event, TradesStreamMode};
 
 mod common;
 
@@ -30,7 +30,7 @@ fn run_client(label: &'static str, key: String, endpoint: Option<String>) -> Cli
     };
     let endpoint_ref = endpoint.as_ref();
     let mut init = common::init_config();
-    init.subscribe_trades = Some(false);
+    init.subscribe_trades = Some(TradesStreamMode::TradesOnly);
 
     let client = match common::connect(&key, endpoint_ref, init) {
         Ok(client) => client,

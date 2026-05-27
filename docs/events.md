@@ -81,7 +81,9 @@ dropped.
 Retained history is driven by the all-trades subscription:
 
 ```rust
-client.subscribe_all_trades(false)?;
+use moonproto::TradesStreamMode;
+
+client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
 if let Some(snapshot) = client.snapshot() {
     let btc_tail = snapshot.markets().trade_state("BTCUSDT");
 }
@@ -123,7 +125,11 @@ pub enum Event {
 `WatcherFillsEvent` contains `market_index`, `market_name`, the 20-byte
 HyperDex `user` address, and `fills: Vec<WatcherFillEvent>`. Each fill carries
 `time_ms`, `time`, `price`, `qty`, `z_btc`, `position`, raw `OrderType`, and
-the decoded `is_short` / `is_open` / `is_taker` flags.
+the decoded `is_short` / `is_open` / `is_taker` flags. Use
+`WatcherFillEvent::time_delphi()` for wall-clock conversion.
+
+`ServerLog.time` is also a Delphi day value. Use `event.server_log_time()` when
+the UI needs Unix milliseconds or `SystemTime`.
 
 `Command::API` may produce two events: `Event::Markets(...)` when a
 markets-related response was applied, followed by `Event::EngineResponse(...)`.

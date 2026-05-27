@@ -76,6 +76,7 @@ use moonproto::state::{
 use moonproto::{
     connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
     EventDispatcherSnapshot, ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent,
+    TradesStreamMode,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -601,7 +602,7 @@ impl Session {
 
         let init = InitConfig {
             mm_orders_subscribe: Some(true),
-            subscribe_trades: Some(false),
+            subscribe_trades: Some(TradesStreamMode::TradesOnly),
             subscribe_orderbooks: vec![cfg.market.clone()],
             step_timeout: None,
             initial_strategies: Some(InitialStrategies::new(0, initial_strategies)),
@@ -1400,8 +1401,11 @@ fn record_event(
         Event::OrderBook(OrderBookEvent::Apply {
             market_index,
             book_kind,
+            market_name,
+            kind,
             is_full,
             seq,
+            top,
             buys,
             sells,
         }) => {
@@ -1413,11 +1417,7 @@ fn record_event(
                     st.target_orderbook_update += 1;
                 }
                 st.last_book_kind = Some(*book_kind);
-                let top_of_book = dispatcher.and_then(|dispatcher| {
-                    OrderBookKind::from_u8(*book_kind)
-                        .and_then(|kind| dispatcher.order_books().top_of_book(*market_index, kind))
-                });
-                match top_of_book {
+                match Some(*top) {
                     Some(top) => {
                         if let Some(bid) = top.bid {
                             st.last_book_bid = Some(bid.rate);
@@ -1449,9 +1449,11 @@ fn record_event(
                         &st,
                         event_no,
                         format!(
-                            "OrderBook target market={} idx={} kind={} full={} seq={} top_bid={:?} top_ask={:?}",
+                            "OrderBook target market={} event_market={:?} idx={} kind={:?} raw_kind={} full={} seq={} top_bid={:?} top_ask={:?}",
                             st.market,
+                            market_name,
                             market_index,
+                            kind,
                             book_kind,
                             is_full,
                             seq,

@@ -84,7 +84,9 @@ UID is registered again.
 For subscriptions, prefer the registry-aware APIs:
 
 ```rust
-client.subscribe_all_trades(false)?;
+use moonproto::TradesStreamMode;
+
+client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
 client.subscribe_orderbook("BTCUSDT")?;
 client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
 client.unsubscribe_all_orderbooks()?;

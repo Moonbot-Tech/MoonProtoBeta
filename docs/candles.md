@@ -10,7 +10,9 @@ to retained per-market history. Incoming trades then maintain the current 5m
 candle and derived candle/volume state.
 
 ```rust
-client.subscribe_trades_for(false, ["BTCUSDT"])?;
+use moonproto::TradesStreamMode;
+
+client.subscribe_trades_for(TradesStreamMode::TradesOnly, ["BTCUSDT"])?;
 
 // Later, after events/snapshot refresh:
 let Some(state) = client.snapshot() else { return; };
@@ -40,7 +42,13 @@ pub struct Candle5mRow {
 }
 ```
 
-`time` is a Delphi-compatible `TDateTime` day value.
+`time` is a Delphi-compatible day value, not Unix time. Prefer the helper
+methods in application code:
+
+```rust
+let high = candle.high();
+let unix_ms = candle.time_delphi().unix_millis();
+```
 
 ## Explicit Requests
 
@@ -55,3 +63,5 @@ through raw zipped chunk state.
 
 For one market and one history kind, `request_coin_card_candles` returns the
 server response as `Vec<DeepPrice>` and does not replace retained 5m history.
+`DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
+`time_delphi()` helpers.

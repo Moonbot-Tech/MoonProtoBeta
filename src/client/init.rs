@@ -1,5 +1,6 @@
 //! MoonBot-compatible domain init sequence helpers.
 
+use super::active_runtime::TradesStreamMode;
 use super::*;
 
 // =============================================================================
@@ -72,9 +73,9 @@ pub struct InitConfig {
     /// `cfg.ShowHeatMap`. `None` falls back to a previously queued
     /// `ui_mm_subscribe` intent, then to `false`.
     pub mm_orders_subscribe: Option<bool>,
-    /// Subscribe to all-trades with this `want_mm` value. `None` skips the
-    /// all-trades subscription during init.
-    pub subscribe_trades: Option<bool>,
+    /// Subscribe to all-trades during init. `None` skips the all-trades
+    /// subscription during init.
+    pub subscribe_trades: Option<TradesStreamMode>,
     /// Subscribe to orderbooks by market name.
     ///
     /// The server resolves names, so callers can request these before
@@ -693,8 +694,8 @@ pub fn run_init_sequence(
     client.send_registry_subscriptions_after_init();
 
     // === 6. SubscribeAllTrades === optional; registry update + direct wire enqueue.
-    if let Some(want_mm) = cfg.subscribe_trades {
-        client.subscribe_all_trades(want_mm);
+    if let Some(mode) = cfg.subscribe_trades {
+        client.subscribe_all_trades(mode.want_market_makers());
         result.trades_subscribed = true;
     }
 

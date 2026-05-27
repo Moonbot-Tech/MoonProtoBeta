@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::commands::market::Market;
+use crate::time::DelphiTime;
 
 /// Stable Delphi-like handle to one `TMarket` object.
 ///
@@ -91,6 +92,12 @@ pub struct MarketPrice {
     pub mark_price: f64,
     /// Был ли получен mark_price в последнем апдейте (биржи могут не присылать на каждом тике).
     pub mark_price_found: bool,
+}
+
+impl MarketPrice {
+    pub fn funding_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.funding_time)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

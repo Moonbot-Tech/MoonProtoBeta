@@ -49,26 +49,18 @@ fn main() {
     while Instant::now() < deadline {
         match client.recv_event_timeout(Duration::from_millis(500)) {
             Ok(Event::OrderBook(OrderBookEvent::Apply {
-                market_index,
-                book_kind,
+                market_name,
+                kind,
                 seq,
+                top,
                 ..
             })) => {
-                let Some(snapshot) = client.snapshot() else {
-                    continue;
-                };
-                let Some(name) = snapshot.markets().market_name_by_index(market_index) else {
+                let Some(name) = market_name.as_deref() else {
                     continue;
                 };
                 if name != market {
                     continue;
                 }
-                let Some(kind) = OrderBookKind::from_u8(book_kind) else {
-                    continue;
-                };
-                let Some(top) = snapshot.order_books().top_of_book(market_index, kind) else {
-                    continue;
-                };
                 updates += 1;
                 let bid = top
                     .bid

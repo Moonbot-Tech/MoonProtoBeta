@@ -898,7 +898,7 @@ fn post_init_mm_orders_does_not_fallback_to_subscribe_trades() {
     client.set_domain_ready(true);
     let cfg = InitConfig {
         mm_orders_subscribe: None,
-        subscribe_trades: Some(true),
+        subscribe_trades: Some(crate::client::TradesStreamMode::TradesAndMarketMakers),
         ..Default::default()
     };
     let mut dispatcher = EventDispatcher::new();

@@ -24,28 +24,27 @@ use moonproto::state::OrderEvent;
 
 for event in client.drain_events() {
     if let Event::Order(order_event) = event {
-        match order_event {
-            OrderEvent::Created(uid) | OrderEvent::Updated(uid) => {
-                if let Some(state) = client.snapshot() {
-                    if let Some(order) = state.orders().get(uid) {
-                        redraw_order(order);
-                    }
+        if let Some(uid) = order_event.changed_uid() {
+            if let Some(state) = client.snapshot() {
+                if let Some(order) = state.orders().get(uid) {
+                    redraw_order(order);
                 }
             }
-            OrderEvent::Removed(uid) => remove_order_from_ui(uid),
-            OrderEvent::Snapshot => {
-                if let Some(state) = client.snapshot() {
-                    redraw_all_orders(state.orders().iter());
-                }
+        } else if let Some(uid) = order_event.removed_uid() {
+            remove_order_from_ui(uid);
+        } else if matches!(order_event, OrderEvent::Snapshot) {
+            if let Some(state) = client.snapshot() {
+                redraw_all_orders(state.orders().iter());
             }
-            _ => {}
         }
     }
 }
 ```
 
 `Orders::iter()` yields read-only `&Order` values. The dispatcher mutates the
-state internally as packets arrive.
+state internally as packets arrive. `OrderEvent` intentionally carries a UID
+instead of cloning `Order` into every hot event; `changed_uid()` and
+`removed_uid()` are the normal UI helpers.
 When a server `TAllStatuses` snapshot arrives, the dispatcher follows the Delphi
 order: it advances the snapshot flag, applies each contained `TOrderStatus`
 through the same order-command path as live updates, emits the per-order events,

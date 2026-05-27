@@ -5,6 +5,7 @@
 //! user-visible/history concept rather than only a wire packet.
 
 use crate::state::seq_ring::SeqRingTimedRow;
+use crate::time::DelphiTime;
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 pub const DELPHI_MSECS_PER_DAY: f64 = 86_400_000.0;
@@ -57,6 +58,16 @@ pub struct TradeHistoryRow {
 }
 
 impl TradeHistoryRow {
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
+    }
+
     pub fn quantity(self) -> f32 {
         self.qty.abs()
     }
@@ -92,6 +103,13 @@ pub struct MMOrderHistoryRow {
     pub time: f64,
     pub vol: f64,
     pub q: f64,
+}
+
+impl MMOrderHistoryRow {
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
 }
 
 impl SeqRingTimedRow for MMOrderHistoryRow {
@@ -140,6 +158,13 @@ pub struct LastPricePoint {
     pub real_time: f64,
 }
 
+impl LastPricePoint {
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.real_time)
+    }
+}
+
 impl SeqRingTimedRow for LastPricePoint {
     fn seq_ring_time(&self) -> f64 {
         self.real_time
@@ -175,6 +200,36 @@ impl Candle5mRow {
             time: row.time,
         }
     }
+
+    #[inline]
+    pub fn open(self) -> f32 {
+        self.open_p
+    }
+
+    #[inline]
+    pub fn close(self) -> f32 {
+        self.close_p
+    }
+
+    #[inline]
+    pub fn high(self) -> f32 {
+        self.max_p
+    }
+
+    #[inline]
+    pub fn low(self) -> f32 {
+        self.min_p
+    }
+
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
+    }
 }
 
 impl SeqRingTimedRow for Candle5mRow {
@@ -196,6 +251,13 @@ pub struct MiniCandle {
     pub max_price: f32,
     pub buy_vol: f32,
     pub sell_vol: f32,
+}
+
+impl MiniCandle {
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.time)
+    }
 }
 
 impl SeqRingTimedRow for MiniCandle {

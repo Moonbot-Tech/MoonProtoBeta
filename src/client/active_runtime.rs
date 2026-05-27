@@ -19,7 +19,7 @@ pub use handles::{MoonOrders, MoonTrade};
 use runtime_loop::{publish_queued_events, publish_snapshot, runtime_loop};
 pub use types::{
     ClosePositionParams, MoonClientError, NewOrderParams, OrderSide, SellOrderParams,
-    SplitOrderParams,
+    SplitOrderParams, TradesStreamMode,
 };
 
 /// High-level Active Lib client for regular applications.
@@ -204,15 +204,17 @@ impl MoonClient {
     }
 
     /// Subscribe to all trades and retain Active Lib data for all markets.
-    pub fn subscribe_all_trades(&self, want_mm: bool) -> Result<(), MoonClientError> {
-        self.send_no_reply(RuntimeCommand::SubscribeAllTrades(want_mm))
+    pub fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::SubscribeAllTrades(
+            mode.want_market_makers(),
+        ))
     }
 
     /// Subscribe to all trades on the wire while retaining Active Lib data for
     /// all markets when `market_names` is empty, or for the given markets.
     pub fn subscribe_trades_for<I, S>(
         &self,
-        want_mm: bool,
+        mode: TradesStreamMode,
         market_names: I,
     ) -> Result<(), MoonClientError>
     where
@@ -220,7 +222,7 @@ impl MoonClient {
         S: Into<String>,
     {
         self.send_no_reply(RuntimeCommand::SubscribeTradesFor {
-            want_mm,
+            want_mm: mode.want_market_makers(),
             markets: market_names.into_iter().map(Into::into).collect(),
         })
     }

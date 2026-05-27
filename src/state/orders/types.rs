@@ -234,3 +234,38 @@ pub enum OrderEvent {
     /// Команда проигнорирована (out-of-order / phase rollback / unknown).
     Ignored { uid: u64, reason: ApplyResult },
 }
+
+impl OrderEvent {
+    pub fn uid(&self) -> Option<u64> {
+        match self {
+            Self::Created(uid)
+            | Self::Updated(uid)
+            | Self::Removed(uid)
+            | Self::TracePoint { uid }
+            | Self::CorridorChanged(uid)
+            | Self::VStopChanged(uid)
+            | Self::StopsChanged(uid)
+            | Self::Ignored { uid, .. } => Some(*uid),
+            Self::BulkReplaced { .. } | Self::Snapshot => None,
+        }
+    }
+
+    pub fn changed_uid(&self) -> Option<u64> {
+        match self {
+            Self::Created(uid)
+            | Self::Updated(uid)
+            | Self::TracePoint { uid }
+            | Self::CorridorChanged(uid)
+            | Self::VStopChanged(uid)
+            | Self::StopsChanged(uid) => Some(*uid),
+            _ => None,
+        }
+    }
+
+    pub fn removed_uid(&self) -> Option<u64> {
+        match self {
+            Self::Removed(uid) => Some(*uid),
+            _ => None,
+        }
+    }
+}

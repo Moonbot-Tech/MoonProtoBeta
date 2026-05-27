@@ -328,30 +328,6 @@ impl<T: SeqRingRow> SeqRingReader<T> {
             meta,
         })
     }
-
-    /// Binary-search a retained monotonic range. `is_before(row)` must return
-    /// true for rows before the target and false for target/after rows.
-    pub fn lower_bound_seq_by<F>(&self, mut is_before: F) -> Option<u64>
-    where
-        F: FnMut(T) -> bool,
-    {
-        let state = self.inner.state.read();
-        let bounds = state.bounds();
-        let mut lo = bounds.oldest_seq;
-        let mut hi = bounds.next_seq;
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let row = state.row_at_seq(mid);
-            if is_before(row) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-
-        Some(lo)
-    }
 }
 
 impl<T: SeqRingTimedRow> SeqRingReader<T> {

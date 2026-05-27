@@ -10,7 +10,7 @@ use std::env;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use moonproto::Event;
+use moonproto::{Event, TradesStreamMode};
 
 mod common;
 
@@ -38,7 +38,7 @@ fn main() {
     }
 
     client
-        .subscribe_trades_for(false, [market])
+        .subscribe_trades_for(TradesStreamMode::TradesOnly, [market])
         .expect("runtime stopped");
 
     if let Some(snapshot) = client.snapshot() {

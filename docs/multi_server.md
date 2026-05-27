@@ -7,7 +7,7 @@ application's session id.
 ## Basic Pattern
 
 ```rust
-use moonproto::{ConnectConfig, InitConfig, MoonClient};
+use moonproto::{ConnectConfig, InitConfig, MoonClient, TradesStreamMode};
 
 struct Session {
     label: String,
@@ -62,7 +62,7 @@ Send intents to the matching session handle:
 
 ```rust
 session.client.subscribe_orderbook("BTCUSDT")?;
-session.client.subscribe_all_trades(false)?;
+session.client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
 session.client.refresh_balances()?;
 ```
 

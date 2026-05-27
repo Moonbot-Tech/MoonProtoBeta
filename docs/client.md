@@ -95,14 +95,14 @@ the existing worker is reused.
 The recommended run path is `MoonClient::connect`:
 
 ```rust
-use moonproto::{ConnectConfig, InitConfig, InitialStrategies, MoonClient};
+use moonproto::{ConnectConfig, InitConfig, InitialStrategies, MoonClient, TradesStreamMode};
 
 let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
     initial_strategies: Some(InitialStrategies::new(
         0,
         Vec::new(), // replace with your local strategy list if the app has one
     )),
-    subscribe_trades: Some(false),
+    subscribe_trades: Some(TradesStreamMode::TradesOnly),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 }))?;
@@ -305,10 +305,10 @@ the same setup is available as `connect_and_init`:
 
 ```rust
 use std::time::Duration;
-use moonproto::{connect_and_init, ConnectConfig, InitConfig};
+use moonproto::{connect_and_init, ConnectConfig, InitConfig, TradesStreamMode};
 
 let init = InitConfig {
-    subscribe_trades: Some(false),
+    subscribe_trades: Some(TradesStreamMode::TradesOnly),
     subscribe_orderbooks: vec!["BTCUSDT".to_string()],
     ..Default::default()
 };
@@ -523,8 +523,13 @@ the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
 Use registry-aware methods:
 
 ```rust
-client.subscribe_all_trades(false)?;
-client.subscribe_trades_for(false, ["BTCUSDT", "ETHUSDT"])?;
+use moonproto::TradesStreamMode;
+
+client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
+client.subscribe_trades_for(
+    TradesStreamMode::TradesOnly,
+    ["BTCUSDT", "ETHUSDT"],
+)?;
 client.subscribe_orderbook("BTCUSDT")?;
 client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
 client.unsubscribe_orderbook("BTCUSDT")?;

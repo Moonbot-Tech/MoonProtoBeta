@@ -71,6 +71,23 @@ impl From<TradeContextError> for MoonClientError {
     }
 }
 
+/// User-facing trades stream content selection.
+///
+/// Low-level wire helpers still use the historical boolean because that is the
+/// packet field. `MoonClient` uses this enum so application code does not have
+/// to remember what `true` means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradesStreamMode {
+    TradesOnly,
+    TradesAndMarketMakers,
+}
+
+impl TradesStreamMode {
+    pub const fn want_market_makers(self) -> bool {
+        matches!(self, Self::TradesAndMarketMakers)
+    }
+}
+
 /// Long/short side for user-facing market trade intents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSide {

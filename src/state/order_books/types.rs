@@ -99,12 +99,23 @@ pub enum ApplyResult {
 /// Событие для потребителя.
 #[derive(Debug, Clone)]
 pub enum OrderBookEvent {
-    /// Пакет применён; `OrderBooks` уже обновил applied read model.
+    /// Packet was applied; `OrderBooks` has already updated the read model.
+    ///
+    /// `market_index` and raw `book_kind` are kept for diagnostics and low-level
+    /// tools. Normal UI code should use `market_name`, `kind`, and `top`: they
+    /// describe the already-applied book without forcing the caller to resolve
+    /// server indexes or inspect diff rows.
     Apply {
         market_index: u16,
+        market_name: Option<String>,
         book_kind: u8,
+        kind: OrderBookKind,
         is_full: bool,
         seq: u16,
+        top: TopOfBook,
+        /// Raw packet rows. For diff packets these are the diff rows, not the
+        /// full applied book. Read `top` or `OrderBooks::book(...)` for the
+        /// current applied state.
         buys: Vec<OrderLevel>,
         sells: Vec<OrderLevel>,
     },
@@ -119,4 +130,43 @@ pub enum OrderBookEvent {
         seq: u16,
         reason: ApplyResult,
     },
+}
+
+impl OrderBookEvent {
+    pub fn market_index(&self) -> u16 {
+        match self {
+            Self::Apply { market_index, .. }
+            | Self::RequestFullNeeded { market_index, .. }
+            | Self::Ignored { market_index, .. } => *market_index,
+        }
+    }
+
+    pub fn book_kind_raw(&self) -> u8 {
+        match self {
+            Self::Apply { book_kind, .. }
+            | Self::RequestFullNeeded { book_kind, .. }
+            | Self::Ignored { book_kind, .. } => *book_kind,
+        }
+    }
+
+    pub fn kind(&self) -> Option<OrderBookKind> {
+        match self {
+            Self::Apply { kind, .. } => Some(*kind),
+            _ => OrderBookKind::from_u8(self.book_kind_raw()),
+        }
+    }
+
+    pub fn market_name(&self) -> Option<&str> {
+        match self {
+            Self::Apply { market_name, .. } => market_name.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn top(&self) -> Option<TopOfBook> {
+        match self {
+            Self::Apply { top, .. } => Some(*top),
+            _ => None,
+        }
+    }
 }

@@ -149,38 +149,6 @@ fn copy_new_since_uses_per_consumer_cursor() {
 }
 
 #[test]
-fn lower_bound_finds_time_position() {
-    let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
-    for i in 0..6 {
-        writer.push(TimedRow {
-            time_ms: 1_000 + i * 250,
-            value: i,
-        });
-    }
-
-    let seq = reader
-        .lower_bound_seq_by(|row| row.time_ms < 1_700)
-        .unwrap();
-    assert_eq!(seq, 3);
-
-    let mut out = Vec::new();
-    reader.copy_from_seq(seq, 2, &mut out);
-    assert_eq!(
-        out,
-        vec![
-            TimedRow {
-                time_ms: 1_750,
-                value: 3,
-            },
-            TimedRow {
-                time_ms: 2_000,
-                value: 4,
-            },
-        ]
-    );
-}
-
-#[test]
 fn copy_from_time_hides_sequence_coordinates() {
     let (mut writer, reader) = SeqRingWriter::<TimedRow>::new(8).unwrap();
     for i in 0..6 {
