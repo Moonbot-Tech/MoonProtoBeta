@@ -4,7 +4,7 @@
   </a>
 </p>
 
-# moonproto
+# MoonProto
 
 Rust client library for the MoonProto UDP protocol used by MoonBot servers.
 
