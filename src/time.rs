@@ -36,6 +36,19 @@ impl DelphiTime {
     }
 
     #[inline]
+    pub fn from_system_time(time: SystemTime) -> Self {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(delta) => Self::from_unix_seconds(delta.as_secs_f64()),
+            Err(err) => Self::from_unix_seconds(-err.duration().as_secs_f64()),
+        }
+    }
+
+    #[inline]
+    pub fn now() -> Self {
+        Self::from_system_time(SystemTime::now())
+    }
+
+    #[inline]
     pub const fn as_days(self) -> f64 {
         self.0
     }
@@ -87,6 +100,13 @@ mod tests {
         assert_eq!(dt.as_days(), UNIX_EPOCH_AS_DELPHI_DAYS);
         assert_eq!(dt.unix_seconds(), Some(0.0));
         assert_eq!(dt.unix_millis(), Some(0));
+    }
+
+    #[test]
+    fn system_time_roundtrip_handles_pre_epoch() {
+        let before = UNIX_EPOCH - Duration::from_secs(86_400);
+        let dt = DelphiTime::from_system_time(before);
+        assert_eq!(dt.as_days(), UNIX_EPOCH_AS_DELPHI_DAYS - 1.0);
     }
 
     #[test]

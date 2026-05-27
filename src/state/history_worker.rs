@@ -161,12 +161,36 @@ impl MarketHistoryWorker {
         self.handle.rolling_volumes(market_name, now_time)
     }
 
+    pub fn rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.handle.rolling_volumes_at(market_name, now_time)
+    }
+
+    pub fn rolling_volumes_now(&self, market_name: &str) -> Option<RollingTradeVolumeSnapshot> {
+        self.handle.rolling_volumes_now(market_name)
+    }
+
     pub fn derived_snapshot(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<MarketDerivedSnapshot> {
         self.handle.derived_snapshot(market_name, now_time)
+    }
+
+    pub fn derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.handle.derived_snapshot_at(market_name, now_time)
+    }
+
+    pub fn derived_snapshot_now(&self, market_name: &str) -> Option<MarketDerivedSnapshot> {
+        self.handle.derived_snapshot_now(market_name)
     }
 
     pub fn apply_candles_snapshot(&self, markets: Vec<MarketHistoryCandlesSnapshot>) -> bool {
@@ -246,6 +270,18 @@ impl MarketHistoryHandle {
         reply_rx.recv().ok().flatten()
     }
 
+    pub fn rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.rolling_volumes(market_name, now_time.as_days())
+    }
+
+    pub fn rolling_volumes_now(&self, market_name: &str) -> Option<RollingTradeVolumeSnapshot> {
+        self.rolling_volumes_at(market_name, crate::DelphiTime::now())
+    }
+
     pub fn derived_snapshot(
         &self,
         market_name: &str,
@@ -260,6 +296,18 @@ impl MarketHistoryHandle {
             })
             .ok()?;
         reply_rx.recv().ok().flatten()
+    }
+
+    pub fn derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.derived_snapshot(market_name, now_time.as_days())
+    }
+
+    pub fn derived_snapshot_now(&self, market_name: &str) -> Option<MarketDerivedSnapshot> {
+        self.derived_snapshot_at(market_name, crate::DelphiTime::now())
     }
 
     /// Queue one decoded trades packet for retained-history storage.

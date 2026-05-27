@@ -11,6 +11,7 @@ use std::sync::mpsc;
 /// sharing one `request_uid`. The library aggregates those chunks through
 /// [`CandlesAggregator`] and returns both the merged zlib stream and parsed
 /// market entries.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MergedCandles {
     /// Request UID used to correlate the chunked response.

@@ -475,6 +475,7 @@ impl Client {
     /// **Для нормальной работы используй [`Client::api_request_candles_data_async`]**
     /// — он автоматически агрегирует chunks через [`CandlesAggregator`] и возвращает
     /// `Receiver<MergedCandles>` для blocking-ожидания финального результата.
+    #[doc(hidden)]
     pub fn api_request_candles_data(&self) {
         self.send_api_request(&crate::commands::engine_request::request_candles_data());
     }
@@ -515,6 +516,7 @@ impl Client {
     /// with the same UID replaces it, or a one-shot caller timeout removes it.
     /// Delphi likewise does not cancel `CandlesRequestUID` when the UI wait
     /// loop stops after `Markets.LastChunkTime` timeout.
+    #[doc(hidden)]
     pub fn api_request_candles_data_async(&mut self) -> mpsc::Receiver<MergedCandles> {
         self.api_request_candles_data_async_registered().1
     }
@@ -527,6 +529,7 @@ impl Client {
     /// aggregator, sends `emk_RequestCandlesData`, pumps the low-level active
     /// worker in short ticks, and removes the pending
     /// candles slot if the caller's timeout expires before the final chunk.
+    #[doc(hidden)]
     pub fn request_candles_data(
         &mut self,
         dispatcher: &mut crate::events::EventDispatcher,

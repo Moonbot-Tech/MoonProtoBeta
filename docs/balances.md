@@ -58,7 +58,7 @@ if let Some(eth) = markets.get("ETHUSDT") {
     );
 }
 
-let global = &state.balances().global;
+let global = state.balances().global();
 println!(
     "btc_total={} locked={} full={}",
     global.btc_balance_total,
@@ -152,17 +152,14 @@ special coin balance, for example USDT on futures servers.
 ## API Surface
 
 ```rust
-pub struct BalancesState {
-    pub global:     GlobalBalance,
-    pub by_market:  HashMap<String, BalanceItem>,
-    pub last_epoch: u16, // diagnostic: last accepted balance packet epoch
-}
-
 impl BalancesState {
-    pub fn new() -> Self;
+    pub fn global(&self) -> &GlobalBalance;
     pub fn get(&self, market_name: &str) -> Option<&BalanceItem>;
     pub fn iter(&self) -> impl Iterator<Item = (&String, &BalanceItem)>;
     pub fn len(&self) -> usize;
     pub fn is_empty(&self) -> bool;
 }
 ```
+
+The public struct still keeps the decoded secondary table for compatibility and
+diagnostics, but chart UI should prefer `MarketHandle::balance_position()`.

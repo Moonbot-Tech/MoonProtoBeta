@@ -42,7 +42,9 @@ for event in client.drain_events() {
 ```
 
 `Orders::iter()` yields read-only `&Order` values. The dispatcher mutates the
-state internally as packets arrive. `OrderEvent` intentionally carries a UID
+state internally as packets arrive. High-level order actions accept either an
+`&Order` from the snapshot or its UID; the runtime resolves that selector
+against the live state before sending. `OrderEvent` intentionally carries a UID
 instead of cloning `Order` into every hot event; `changed_uid()` and
 `removed_uid()` are the normal UI helpers.
 When a server `TAllStatuses` snapshot arrives, the dispatcher follows the Delphi
@@ -192,6 +194,8 @@ A later update with `SellReasonCode = 0` leaves the previous reason visible.
 `pSellOrder.Price`: they are local desired/replace prices, distinct from
 `buy_order.actual_price` / `sell_order.actual_price` and not present in the
 compact order snapshot.
+`OrderCompact::open_time_delphi`, `close_time_delphi`, and
+`create_time_delphi` convert the raw Delphi day fields for UI time formatting.
 `has_local_visual_order` mirrors Delphi `BOrderWorker.vOrder <> nil`. It is set
 automatically for a new server-created pending `TOrderStatus(Status=None)`.
 Applications that create their own local visual-order equivalent before sending
@@ -210,6 +214,7 @@ diagnostic log. `buy_trace_line` and `sell_trace_line` mirror Delphi
 non-initial traces without an existing line do not create one, temporary points
 are stored as the line temp point, and finish traces mutate the last drawable
 point only when Delphi `CanFinish` would allow it.
+Use `OrderTraceChartPoint::time_delphi()` for chart timestamps.
 `pending_buy_cond_price` mirrors Delphi `vOrder.BuyCondPrice` for pending
 `OS_None` orders. A new server-created `TOrderStatus(Status=None)` creates this
 pending value from `BuyOrder.MeanPrice`, matching Delphi `OnMServerOrder`

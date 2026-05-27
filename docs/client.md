@@ -109,7 +109,7 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
 
 client.subscribe_orderbook("ETHUSDT")?;
 // After an order appears in events/snapshots:
-// client.orders().move_order(order_uid, 50100.0)?;
+// client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 
 for event in client.drain_events() {
     println!("event: {event:?}");
@@ -158,6 +158,17 @@ then converted to protocol commands:
 ```rust
 client.orders().move_order(order_uid, new_price)?;
 client.orders().cancel(order_uid)?;
+```
+
+Those calls also accept `&Order` from a snapshot, so UI code can act on the
+visible order object without treating the UID as a protocol detail:
+
+```rust
+if let Some(snapshot) = client.snapshot() {
+    if let Some(order) = snapshot.orders().get(order_uid) {
+        client.orders().move_order(order, new_price)?;
+    }
+}
 ```
 
 One-shot Engine API helpers also run inside the owned runtime. Read helpers
@@ -423,7 +434,7 @@ client.trade().new_order(NewOrderParams::new(
     50_000.0,
     0.001,
 ))?;
-client.orders().move_order(order_uid, new_price)?;
+client.orders().move_order(order_uid, new_price)?; // or pass &Order from a snapshot
 ```
 
 The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
@@ -516,7 +527,7 @@ read model from the Balance channel:
 ```rust
 let balances = client.request_balance_snapshot(Duration::from_secs(15))?;
 println!("balance markets={}", balances.len());
-println!("btc total={}", balances.global.btc_balance_total);
+println!("btc total={}", balances.global().btc_balance_total);
 ```
 
 The helper sends `TRequestBalanceRefresh`, keeps the UDP loop running, waits for

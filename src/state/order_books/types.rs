@@ -2,29 +2,28 @@
 
 use crate::commands::order_book::OrderLevel;
 
-/// Тип orderbook'а: фьючерсы или spot. Wire-формат — 1 байт.
+/// Orderbook kind: futures or spot. Wire format is one byte.
 ///
-/// Соответствует Delphi `TBookKind` (MoonProtoOrderBook.pas:5) с ord-кодами
-/// 0=`bk_Futures`, 1=`bk_Spot`. Используется в incoming orderbook packets,
-/// full-book recovery requests and internal state keys.
+/// Matches Delphi `TBookKind` (MoonProtoOrderBook.pas:5): 0=`bk_Futures`,
+/// 1=`bk_Spot`. Used in incoming orderbook packets, full-book recovery
+/// requests, and internal state keys.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrderBookKind {
-    /// Фьючерсный orderbook (`bk_Futures = 0`).
+    /// Futures orderbook (`bk_Futures = 0`).
     Futures = 0,
     /// Spot orderbook (`bk_Spot = 1`).
     Spot = 1,
 }
 
 impl OrderBookKind {
-    /// Конвертация в wire-байт (для engine_request / state cache key).
+    /// Convert to the wire byte used by Engine API requests and state keys.
     #[inline]
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Распарсить из wire-байт. Неизвестное значение → None (вызывающая логика
-    /// должна решить — дропать пакет или fallback'нуть).
+    /// Parse a wire byte. Unknown values return `None`.
     pub fn from_u8(b: u8) -> Option<Self> {
         match b {
             0 => Some(Self::Futures),
@@ -34,7 +33,7 @@ impl OrderBookKind {
     }
 }
 
-/// Ключ кэша: `(market_index, book_kind)`. `book_kind`: 0=Futures, 1=Spot.
+/// Cache key: `(market_index, book_kind)`. `book_kind`: 0=Futures, 1=Spot.
 pub type BookKey = (u16, u8);
 
 /// One applied orderbook level stored in the client read model.
@@ -83,20 +82,20 @@ impl OrderBookSnapshot {
     }
 }
 
-/// Результат применения пакета.
+/// Result of applying one packet to the orderbook cache.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplyResult {
-    /// Пакет применён немедленно (seq == expected).
+    /// Packet was applied immediately (`seq == expected`).
     Applied,
-    /// Пакет применён из кэша (после применения младших seq).
+    /// Packet was applied from cache after earlier sequence numbers arrived.
     AppliedFromCache,
-    /// Пакет положен в кэш (seq > expected, ждём промежуточных).
+    /// Packet was cached (`seq > expected`).
     Cached,
-    /// Пакет stale (seq < expected) — отброшен.
+    /// Packet was stale (`seq < expected`) and was dropped.
     Stale,
 }
 
-/// Событие для потребителя.
+/// Orderbook event emitted by the read model.
 #[derive(Debug, Clone)]
 pub enum OrderBookEvent {
     /// Packet was applied; `OrderBooks` has already updated the read model.
@@ -123,7 +122,7 @@ pub enum OrderBookEvent {
     /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
     /// before invoking application callbacks.
     RequestFullNeeded { market_index: u16, book_kind: u8 },
-    /// Пакет проигнорирован (stale / no full yet / cache).
+    /// Packet was ignored (stale / no full yet / cache).
     Ignored {
         market_index: u16,
         book_kind: u8,

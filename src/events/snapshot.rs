@@ -118,6 +118,23 @@ impl EventDispatcherSnapshot {
             .rolling_volumes(market_name, now_time)
     }
 
+    /// Current rolling volume snapshot at a typed Delphi time.
+    pub fn market_history_rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes(market_name, now_time.as_days())
+    }
+
+    /// Current rolling volume snapshot using the local system clock.
+    pub fn market_history_rolling_volumes_now(
+        &self,
+        market_name: &str,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes_at(market_name, crate::DelphiTime::now())
+    }
+
     /// Current derived analytics snapshot for one market, if retained storage is active.
     pub fn market_history_derived_snapshot(
         &self,
@@ -127,6 +144,23 @@ impl EventDispatcherSnapshot {
         self.market_history
             .as_ref()?
             .derived_snapshot(market_name, now_time)
+    }
+
+    /// Current derived analytics snapshot at a typed Delphi time.
+    pub fn market_history_derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot(market_name, now_time.as_days())
+    }
+
+    /// Current derived analytics snapshot using the local system clock.
+    pub fn market_history_derived_snapshot_now(
+        &self,
+        market_name: &str,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot_at(market_name, crate::DelphiTime::now())
     }
 }
 

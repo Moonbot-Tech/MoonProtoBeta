@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::market::{
-    write_market, BaseCurrency, CorrMarketPriceUpdate, MarketPriceUpdate, MarketsListResponse,
-    MarketsPricesResponse,
+    write_market, BaseCurrency, CorrMarketPriceUpdate, MarketArbNowEntry, MarketPriceUpdate,
+    MarketsListResponse, MarketsPricesResponse,
 };
 
 fn mk_market(name: &str, idx: u16) -> Market {
@@ -152,6 +152,31 @@ fn market_handle_balance_position_reads_live_market_fields() {
     assert_eq!(pos.liq_price, 42000.0);
     assert_eq!(pos.leverage_x, 10);
     assert_eq!(pos.total_profit(), 6.0);
+}
+
+#[test]
+fn market_handle_reads_arb_slot_without_raw_map_access() {
+    let mut st = MarketsState::new();
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![mk_market("BTCUSDT", 0)],
+        corr_markets: vec![],
+    });
+
+    let handle = st.get("BTCUSDT").unwrap();
+    handle.with_mut(|market| {
+        let slot = market.arb_slots.entry(7).or_default();
+        slot.isolated_flags = 3;
+        slot.now = MarketArbNowEntry {
+            price: 42.5,
+            time: 45_000.25,
+        };
+    });
+
+    let slot = handle.arb_slot(7).unwrap();
+    assert_eq!(slot.isolated_flags, 3);
+    assert_eq!(slot.now.price, 42.5);
+    assert_eq!(handle.arb_now(7).unwrap().time, 45_000.25);
+    assert!(handle.arb_slot(8).is_none());
 }
 
 #[test]

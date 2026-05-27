@@ -25,18 +25,14 @@ fn parse_kind(value: Option<&String>) -> DeepHistoryKind {
     }
 }
 
-fn delphi_to_unix_secs(value: f64) -> i64 {
-    ((value - 25_569.0) * 86_400.0).round() as i64
-}
-
 fn print_candle(label: &str, candle: &DeepPrice) {
     println!(
         "{label}: unix={} open={} high={} low={} close={} vol={}",
-        delphi_to_unix_secs(candle.time),
-        candle.open_p,
-        candle.max_p,
-        candle.min_p,
-        candle.close_p,
+        candle.time_delphi().unix_seconds().unwrap_or(0.0).round() as i64,
+        candle.open(),
+        candle.high(),
+        candle.low(),
+        candle.close(),
         candle.vol
     );
 }

@@ -57,7 +57,7 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 
 client.subscribe_orderbook("ETHUSDT")?;
 // After an order appears in events/snapshots:
-// client.orders().move_order(order_uid, 50100.0)?;
+// client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 
 if let Some(snapshot) = client.snapshot() {
     println!("orders={}", snapshot.orders().len());

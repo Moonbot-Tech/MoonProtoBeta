@@ -116,6 +116,13 @@ pub struct OrderTraceChartPoint {
     pub price: f32,
 }
 
+impl OrderTraceChartPoint {
+    /// Point time as Delphi `TDateTime`.
+    pub fn time_delphi(self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.time)
+    }
+}
+
 impl Default for OrderTraceChartPoint {
     fn default() -> Self {
         Self {

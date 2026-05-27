@@ -15,7 +15,7 @@ mod types;
 use commands::{
     RuntimeCommand, RuntimeCommandRequest, RuntimeReply, StratRuntimeCommand, UiRuntimeCommand,
 };
-pub use handles::{MoonOrders, MoonTrade};
+pub use handles::{MoonOrders, MoonTrade, OrderTarget};
 use runtime_loop::{publish_queued_events, publish_snapshot, runtime_loop};
 pub use types::{
     ClosePositionParams, MoonClientError, NewOrderParams, OrderSide, SellOrderParams,
@@ -431,6 +431,7 @@ impl MoonClient {
     }
 
     /// Request chunked candles and return the merged response.
+    #[doc(hidden)]
     pub fn request_candles_data(
         &self,
         timeout: Duration,

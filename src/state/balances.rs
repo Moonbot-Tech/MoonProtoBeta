@@ -324,6 +324,10 @@ impl BalancesState {
         self.by_market.get(market_name)
     }
 
+    pub fn global(&self) -> &GlobalBalance {
+        &self.global
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &BalanceItem)> {
         self.by_market.iter()
     }

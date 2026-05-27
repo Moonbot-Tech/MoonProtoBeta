@@ -1,16 +1,20 @@
 # Trade Actions
 
 `MoonClient` provides the normal order-intent API. UI code reads immutable
-order snapshots, keeps the order UID, and sends user actions back to the runtime:
+order snapshots and sends user actions back to the runtime by passing either the
+visible `&Order` or its UID:
 
 ```rust
-client.orders().move_order(order_uid, new_price)?;
-client.orders().cancel(order_uid)?;
-client.orders().update_stops(order_uid, stops)?;
-client.orders().update_vstop(order_uid, true, false, 50000.0, 12.0)?;
+let Some(snapshot) = client.snapshot() else { return; };
+let Some(order) = snapshot.orders().get(order_uid) else { return; };
+
+client.orders().move_order(order, new_price)?;
+client.orders().cancel(order.uid)?;
+client.orders().update_stops(order, stops)?;
+client.orders().update_vstop(order.uid, true, false, 50000.0, 12.0)?;
 client.orders().set_immune(items)?;
-client.orders().turn_panic_sell(order_uid, true)?;
-client.orders().request_status(order_uid)?;
+client.orders().turn_panic_sell(order, true)?;
+client.orders().request_status(order.uid)?;
 client.orders().switch_panic_sell_by_market("BTCUSDT", true)?;
 ```
 
@@ -31,10 +35,9 @@ if let Some(snapshot) = client.snapshot() {
             order.sell_order.actual_price,
             order.sell_order.quantity
         );
+        client.orders().move_order(order, new_price)?;
     }
 }
-
-client.orders().move_order(order_uid, new_price)?;
 ```
 
 Snapshots are display/read models. They are safe to keep in UI state, but they

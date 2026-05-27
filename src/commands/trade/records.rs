@@ -60,9 +60,10 @@ impl PriceZone {
     }
 }
 
-/// TOrderCompact (MarketsU.pas:180, 117 байт packed).
-/// Этот тип сериализуется через `ms.Read/Write(BuyOrder, SizeOf(BuyOrder))` —
-/// то есть **прямой memcpy** packed struct.
+/// `TOrderCompact` (MarketsU.pas:180), 117-byte packed record.
+///
+/// Delphi serializes this record with `ms.Read/Write(BuyOrder,
+/// SizeOf(BuyOrder))`, i.e. direct packed-struct bytes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderCompact {
     pub int_id: i64,
@@ -118,8 +119,7 @@ struct WireOrderCompact {
     is_short: u8,
 }
 
-/// Размер `TOrderCompact` в байтах wire-format'а.
-/// 13×8 + 4 + 9×1 = 117 байт.
+/// `TOrderCompact` wire size: 13×8 + 4 + 9×1 = 117 bytes.
 pub const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
 const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
 
@@ -200,8 +200,24 @@ impl OrderCompact {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
 
-    /// Применить временное смещение к временным полям. ServerTimeDelta = InitialTime - Now.
-    /// Delphi корректирует только валидные `TDateTime` values (`> 1`).
+    /// Open time as Delphi `TDateTime`.
+    pub fn open_time_delphi(self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.open_time)
+    }
+
+    /// Close time as Delphi `TDateTime`.
+    pub fn close_time_delphi(self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.close_time)
+    }
+
+    /// Create time as Delphi `TDateTime`.
+    pub fn create_time_delphi(self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.create_time)
+    }
+
+    /// Apply `ServerTimeDelta = InitialTime - Now` to time fields.
+    ///
+    /// Delphi adjusts only valid `TDateTime` values (`> 1`).
     pub fn adjust_time(&mut self, delta: f64) {
         if self.open_time > 1.0 {
             self.open_time -= delta;
@@ -215,7 +231,7 @@ impl OrderCompact {
     }
 }
 
-/// TStopSettings (MarketsU.pas:215, packed record, 46 байт).
+/// `TStopSettings` (MarketsU.pas:215), 46-byte packed record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
     pub stop_loss_on: u8,
@@ -320,7 +336,7 @@ impl StopSettings {
     }
 }
 
-/// TOrderUpdateData (MarketsU.pas:263, packed record, 66 байт).
+/// `TOrderUpdateData` (MarketsU.pas:263), 66-byte packed record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrderUpdateData {
     pub int_id: i64,
@@ -402,6 +418,11 @@ impl OrderUpdateData {
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
+    }
+
+    /// Open time as Delphi `TDateTime`.
+    pub fn open_time_delphi(self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.open_time)
     }
 
     pub fn adjust_time(&mut self, delta: f64) {

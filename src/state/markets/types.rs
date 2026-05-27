@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::commands::market::Market;
+use crate::commands::market::{Market, MarketArbNowEntry, MarketArbSlot};
 use crate::time::DelphiTime;
 
 /// Stable Delphi-like handle to one `TMarket` object.
@@ -43,6 +43,16 @@ impl MarketHandle {
     /// position size, leverage, and PnL.
     pub fn balance_position(&self) -> MarketBalancePosition {
         self.with(MarketBalancePosition::from_market)
+    }
+
+    /// Copy one arbitrage slot by platform code.
+    pub fn arb_slot(&self, platform_code: u8) -> Option<MarketArbSlot> {
+        self.with(|market| market.arb_slots.get(&platform_code).cloned())
+    }
+
+    /// Copy the latest arbitrage price entry by platform code.
+    pub fn arb_now(&self, platform_code: u8) -> Option<MarketArbNowEntry> {
+        self.with(|market| market.arb_slots.get(&platform_code).map(|slot| slot.now))
     }
 
     /// True when two handles point at the same live market object.
@@ -137,12 +147,12 @@ pub struct MarketsListApplyTiming {
     pub ref_passes_ns: u64,
 }
 
-/// Per-market price snapshot (обновляется через `emk_UpdateMarketsList`).
+/// Per-market price snapshot updated by `emk_UpdateMarketsList`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketPrice {
-    /// Лучшая цена покупки (top of bid side).
+    /// Best bid price.
     pub bid: f64,
-    /// Лучшая цена продажи (top of ask side).
+    /// Best ask price.
     pub ask: f64,
     /// Delphi `TMarket.LastBid`, updated from `Bid` by `UpdateMarketsList`.
     pub last_bid: f64,
@@ -158,13 +168,13 @@ pub struct MarketPrice {
     /// Delphi updates it only when `Ask > eps`; otherwise the previous value is
     /// kept.
     pub chart_price_step: f64,
-    /// Funding rate (для perpetual futures), дробь — например `0.0001` = 0.01%.
+    /// Funding rate for perpetual futures, for example `0.0001` = 0.01%.
     pub funding_rate: f64,
-    /// Client-local Delphi `TDateTime` момента следующего funding взимания.
+    /// Client-local Delphi `TDateTime` for the next funding charge.
     pub funding_time: f64,
-    /// Mark price (используется биржей для PnL/liquidation расчётов, может отличаться от last/bid/ask).
+    /// Exchange mark price used for PnL/liquidation calculations.
     pub mark_price: f64,
-    /// Был ли получен mark_price в последнем апдейте (биржи могут не присылать на каждом тике).
+    /// Whether the latest update carried a mark price.
     pub mark_price_found: bool,
 }
 
@@ -269,7 +279,7 @@ impl MarketTradeState {
 
 #[derive(Debug, Clone)]
 pub enum MarketsEvent {
-    /// Применён список маркетов (после `emk_GetMarketsList`).
+    /// A `GetMarketsList` response was applied.
     /// Variant name is historical; repeated calls merge like Delphi.
     MarketsListReplaced { count: usize, corr_count: usize },
     /// A listing refresh inserted new markets into the local market universe.
@@ -278,14 +288,14 @@ pub enum MarketsEvent {
     /// markets. `TNewMarketNotifyCommand` itself is internal and only forces
     /// that refresh.
     NewMarketsAdded { names: Vec<String> },
-    /// Обновлены цены (через `emk_UpdateMarketsList`).
+    /// Prices were updated by `emk_UpdateMarketsList`.
     PricesUpdated {
         count: usize,
         included_funding: bool,
         included_corr: bool,
     },
-    /// Получен список имён маркетов (`emk_GetMarketsIndexes`).
+    /// The server-index market-name map was updated by `emk_GetMarketsIndexes`.
     IndexesUpdated { count: usize },
-    /// Обновлены теги монет (`emk_CheckBinanceTags`).
+    /// Token tags were updated by `emk_CheckBinanceTags`.
     TokenTagsUpdated { count: usize },
 }

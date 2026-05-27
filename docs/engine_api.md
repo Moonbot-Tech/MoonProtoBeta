@@ -50,9 +50,10 @@ payload is later applied to `EventDispatcher`. This avoids waiting for a second
 dispatcher drain. In the high-level `MoonClient` path the runtime thread keeps
 doing that work automatically.
 
-Chunked `RequestCandlesData` uses its own pending registry: registered chunks
-are also consumed and merged from receive-side DataReadInt, and the final
-`MergedCandles` receiver is signalled when the last chunk arrives.
+Chunked `RequestCandlesData` uses its own pending registry internally:
+registered chunks are also consumed and merged from receive-side DataReadInt.
+The normal public helper is `refresh_candles`, which hides the merged zlib
+payload and applies parsed 5m rows to retained market history.
 
 For custom raw payloads with caller-owned timeout cleanup, call
 `Client::request_engine_response`. Raw `api_*` receivers keep their pending slot
@@ -74,7 +75,7 @@ UID is registered again.
 | Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
 | Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
 | Position/transfer | `api_change_position_type`, `api_convert_dust_bnb`, `api_confirm_risk_limit`, `api_set_ma_mode`, `api_do_transfer_asset`, `api_update_transfer_assets` |
-| Candles | `refresh_candles`, `request_coin_card_candles`, `request_candles_data`, `api_get_coin_card_candles`, `api_request_candles_data_async` |
+| Candles | `refresh_candles`, `request_coin_card_candles`, `api_get_coin_card_candles` |
 
 For subscriptions, prefer the registry-aware APIs:
 
@@ -131,10 +132,9 @@ registers the chunk aggregator, keeps the runtime pumping, hides the
 chunked/zipped payload, and applies parsed 5m candles to retained market history
 when trades storage is active. Normal chart UI reads candles from
 `snapshot.market_history_readers(market)`.
-`request_candles_data` remains available for diagnostics that need
-`MergedCandles`.
-Use `api_request_candles_data_async` only for custom async flows that already
-own a running client loop.
+Hidden low-level chunk helpers remain available for diagnostics that need
+`MergedCandles`, but regular applications should not build chart state from raw
+chunk/zlib payloads.
 
 `api_get_markets_balance_full` is intentionally low-level. The current reference
 server accepts the request, but does not serialize the balance snapshot yet, so

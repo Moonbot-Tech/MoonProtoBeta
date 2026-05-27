@@ -61,13 +61,10 @@ let markets_received = client.refresh_candles(std::time::Duration::from_secs(30)
 println!("candles refreshed for {markets_received} markets");
 ```
 
-`MoonClient::request_candles_data(timeout)` remains available as a
-refresh/diagnostic helper for protocol investigations. It returns
-`MergedCandles` because that helper exposes the aggregation result.
-
-`MergedCandles.uid` and `MergedCandles.zipped_data` are protocol diagnostics.
-Chart UI should read retained candles through `market_history_readers`, not
-through raw zipped chunk state.
+Low-level diagnostic tools can still call the hidden chunked request helpers and
+inspect the merged `MergedCandles` object. Chart UI should not use that raw
+chunk/zlib state; it should read retained candles through
+`market_history_readers`.
 
 For one market and one history kind, `request_coin_card_candles` returns the
 server response as `Vec<DeepPrice>` and does not replace retained 5m history.

@@ -166,8 +166,8 @@ For chart overlays that only need position fields, `MarketHandle::balance_positi
 returns a small copy without cloning the whole market object.
 
 Arbitrage relay packets also apply to the live market. Use
-`Market::arb_slots` from the selected handle; raw arb `market_index` blocks are
-diagnostic protocol details.
+`MarketHandle::arb_slot(platform_code)` or `arb_now(platform_code)` from the
+selected handle; raw arb `market_index` blocks are diagnostic protocol details.
 
 ## Init and Refresh
 

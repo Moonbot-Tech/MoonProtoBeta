@@ -51,6 +51,21 @@ impl EventDispatcher {
             .rolling_volumes(market_name, now_time)
     }
 
+    pub fn market_history_rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes(market_name, now_time.as_days())
+    }
+
+    pub fn market_history_rolling_volumes_now(
+        &self,
+        market_name: &str,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.market_history_rolling_volumes_at(market_name, crate::DelphiTime::now())
+    }
+
     pub fn market_history_derived_snapshot(
         &self,
         market_name: &str,
@@ -59,6 +74,21 @@ impl EventDispatcher {
         self.market_history
             .as_ref()?
             .derived_snapshot(market_name, now_time)
+    }
+
+    pub fn market_history_derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: crate::DelphiTime,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot(market_name, now_time.as_days())
+    }
+
+    pub fn market_history_derived_snapshot_now(
+        &self,
+        market_name: &str,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.market_history_derived_snapshot_at(market_name, crate::DelphiTime::now())
     }
 
     pub fn flush_market_history(&self, now_time: f64) -> bool {

@@ -326,11 +326,12 @@ pub struct RollingTradeVolumeSnapshot {
 The internal rolling-volume accumulator uses 5-second buckets and updates from
 newly received trades. It is the active-library derived-state path for 1/3/5
 minute buy/sell volumes and short trade-price deltas; the intended precision
-loss is bounded by one bucket width. Call
-`MarketHistoryWorker::rolling_volumes(market, now_time)` or the same method on
-`MarketHistoryHandle` to read the current derived totals for an active retained
-market. Unknown or out-of-scope markets return `None` and are not allocated by a
-read.
+loss is bounded by one bucket width. Normal applications call
+`EventDispatcherSnapshot::market_history_derived_snapshot_now(market)` or
+`market_history_rolling_volumes_now(market)`. Lower-level code that owns a
+typed clock can use the `*_at(market, DelphiTime)` helpers. The older
+`now_time: f64` methods remain for protocol tests and exact Delphi-day tools.
+Unknown or out-of-scope markets return `None` and are not allocated by a read.
 
 `MarketDerivedSnapshot::trade_deltas` is the futures-trade source. It is filled
 from the same 5-second buckets as volumes, currently for 1m and 5m windows.
@@ -428,11 +429,26 @@ impl MarketHistoryWorker {
         market_name: &str,
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn rolling_volumes_now(
+        &self,
+        market_name: &str,
+    ) -> Option<RollingTradeVolumeSnapshot>;
     pub fn derived_snapshot(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<MarketDerivedSnapshot>;
+    pub fn derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: DelphiTime,
+    ) -> Option<MarketDerivedSnapshot>;
+    pub fn derived_snapshot_now(&self, market_name: &str) -> Option<MarketDerivedSnapshot>;
     pub fn flush(&self, now_time: f64) -> bool;
 }
 
@@ -476,11 +492,26 @@ impl MarketHistoryHandle {
         market_name: &str,
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn rolling_volumes_at(
+        &self,
+        market_name: &str,
+        now_time: DelphiTime,
+    ) -> Option<RollingTradeVolumeSnapshot>;
+    pub fn rolling_volumes_now(
+        &self,
+        market_name: &str,
+    ) -> Option<RollingTradeVolumeSnapshot>;
     pub fn derived_snapshot(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<MarketDerivedSnapshot>;
+    pub fn derived_snapshot_at(
+        &self,
+        market_name: &str,
+        now_time: DelphiTime,
+    ) -> Option<MarketDerivedSnapshot>;
+    pub fn derived_snapshot_now(&self, market_name: &str) -> Option<MarketDerivedSnapshot>;
     pub fn send_stream_batch(&self, batch: MarketHistoryStreamBatch) -> bool;
     pub fn send_last_price_batch(&self, batch: MarketHistoryLastPriceBatch) -> bool;
     pub fn flush(&self, now_time: f64) -> bool;

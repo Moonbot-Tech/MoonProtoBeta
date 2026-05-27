@@ -39,7 +39,7 @@
 //! // After the user chooses a market/order side:
 //! // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
 //! // After an order appears in events/snapshots:
-//! // client.orders().move_order(order_uid, 50100.0)?;
+//! // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 //! for lifecycle in client.drain_lifecycle_events() {
 //!     println!("lifecycle: {lifecycle:?}");
 //! }
@@ -125,8 +125,9 @@ pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams, ConnectConfig,
     ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
     InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade,
-    NewOrderParams, OrderSide, ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams,
-    SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode, UniqueKey,
+    NewOrderParams, OrderSide, OrderTarget, ProtocolMetricsSnapshot, RefreshConfig,
+    SellOrderParams, SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode,
+    UniqueKey,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};

@@ -6,6 +6,36 @@ use super::{
 };
 use std::sync::mpsc;
 
+/// Existing order selected by UI code for a stateful action.
+///
+/// Application code can pass either an order UID or a borrowed
+/// [`crate::state::Order`] from a snapshot. The runtime still resolves and
+/// mutates the live order state before sending, so this is only a user-facing
+/// selector, not a copied worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderTarget {
+    uid: u64,
+}
+
+impl OrderTarget {
+    /// Server order UID.
+    pub fn uid(self) -> u64 {
+        self.uid
+    }
+}
+
+impl From<u64> for OrderTarget {
+    fn from(uid: u64) -> Self {
+        Self { uid }
+    }
+}
+
+impl From<&crate::state::Order> for OrderTarget {
+    fn from(order: &crate::state::Order) -> Self {
+        Self { uid: order.uid }
+    }
+}
+
 /// Order intent handle.
 ///
 /// UI code can keep immutable order snapshots for rendering, but all stateful
@@ -17,34 +47,42 @@ pub struct MoonOrders {
 }
 
 impl MoonOrders {
-    /// Move/replace one tracked order by UID.
-    pub fn move_order(&self, uid: u64, new_price: f64) -> Result<bool, MoonClientError> {
+    /// Move/replace one tracked order.
+    pub fn move_order(
+        &self,
+        order: impl Into<OrderTarget>,
+        new_price: f64,
+    ) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::MoveOrder { uid, new_price })
     }
 
-    /// Cancel one tracked order by UID.
-    pub fn cancel(&self, uid: u64) -> Result<bool, MoonClientError> {
+    /// Cancel one tracked order.
+    pub fn cancel(&self, order: impl Into<OrderTarget>) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::CancelOrder { uid })
     }
 
-    /// Update Stops for one tracked order by UID.
+    /// Update Stops for one tracked order.
     pub fn update_stops(
         &self,
-        uid: u64,
+        order: impl Into<OrderTarget>,
         stops: crate::commands::trade::StopSettings,
     ) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::UpdateStops { uid, stops })
     }
 
-    /// Update VStop for one tracked order by UID.
+    /// Update VStop for one tracked order.
     pub fn update_vstop(
         &self,
-        uid: u64,
+        order: impl Into<OrderTarget>,
         on: bool,
         fixed: bool,
         level: f64,
         vol: f64,
     ) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::UpdateVStop {
             uid,
             on,
@@ -62,13 +100,19 @@ impl MoonOrders {
         self.send_bool(RuntimeCommandKind::SetImmune { items })
     }
 
-    /// Toggle panic sell for one tracked order by UID.
-    pub fn turn_panic_sell(&self, uid: u64, turn_on: bool) -> Result<bool, MoonClientError> {
+    /// Toggle panic sell for one tracked order.
+    pub fn turn_panic_sell(
+        &self,
+        order: impl Into<OrderTarget>,
+        turn_on: bool,
+    ) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on })
     }
 
-    /// Request a fresh status for one tracked order by UID.
-    pub fn request_status(&self, uid: u64) -> Result<bool, MoonClientError> {
+    /// Request a fresh status for one tracked order.
+    pub fn request_status(&self, order: impl Into<OrderTarget>) -> Result<bool, MoonClientError> {
+        let uid = order.into().uid();
         self.send_bool(RuntimeCommandKind::RequestOrderStatus { uid })
     }
 

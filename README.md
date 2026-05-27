@@ -90,7 +90,7 @@ cargo run --release --example trading_flow -- "<key>" "HOST:PORT"
 cargo run --release --example list_markets -- "<key>" "HOST:PORT" 20
 cargo run --release --example order_book_top -- "<key>" "HOST:PORT" BTCUSDT 30
 cargo run --release --example trades_stream -- "<key>" "HOST:PORT" all 30
-cargo run --release --example request_candles_data -- "<key>" "HOST:PORT" 90 0
+cargo run --release --example history_bars -- "<key>" "HOST:PORT" BTCUSDT 1h
 ```
 
 Basic application shape:
@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After the user chooses a market/order side:
     // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
     // After an order appears in events/snapshots:
-    // client.orders().move_order(order_uid, 50100.0)?;
+    // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 
     for lifecycle in client.drain_lifecycle_events() {
         println!("lifecycle: {lifecycle:?}");
@@ -217,7 +217,8 @@ Important ones:
 - `market_refresh.rs`: background market refresh events/snapshots.
 - `trades_stream.rs`: trades subscription and retained market tail.
 - `order_book_stream.rs` / `order_book_top.rs`: orderbook stream/read model.
-- `request_candles_data.rs` / `history_bars.rs`: candle/history requests.
+- `history_bars.rs`: retained candle/history read path.
+- `request_candles_data.rs`: diagnostic chunked-candles protocol tool.
 - `order_snapshot.rs`: fresh order snapshot through `MoonClient`.
 - `cancel_open_order.rs`: tracked cancel intent through `client.orders()`.
 - `multi_client_test.rs`: two independent `MoonClient` runtimes.

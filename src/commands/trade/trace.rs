@@ -51,6 +51,11 @@ impl OrderTracePoint {
         (self.flags & trace_flags::IS_INITIAL) != 0
     }
 
+    /// Trace time as Delphi `TDateTime`.
+    pub fn trace_time_delphi(&self) -> crate::DelphiTime {
+        crate::DelphiTime::from_days(self.trace_time)
+    }
+
     pub fn adjust_time(&mut self, delta: f64) {
         self.trace_time -= delta;
     }
@@ -78,7 +83,9 @@ impl CorridorUpdate {
 }
 
 /// `TBulkReplaceNotify` (TradeStruct.pas:275-284).
-/// Уведомление: эти UID'ы массово replace'нуты (UI должна показать как "перемещаются").
+///
+/// Notification that these UIDs are being bulk-replaced; UI should show them
+/// as moving/in-flight.
 #[derive(Debug, Clone)]
 pub struct BulkReplaceNotify {
     pub market: MarketCommandHeader,
