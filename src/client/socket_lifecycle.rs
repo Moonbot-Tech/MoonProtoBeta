@@ -20,6 +20,7 @@ impl Client {
     }
 
     pub(crate) fn bind_socket(&mut self, cur_tm: i64) {
+        self.transport_mode_state.reset();
         self.force_disconnect = false;
         if self.next_port < 1024 || self.next_port > 65000 {
             self.next_port = 1024;

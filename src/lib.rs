@@ -78,11 +78,9 @@
 //!
 //! ## Transport Modes
 //!
-//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V0 is
-//! always available. V1/V2 (`mask_ver = 1` or `2`) are extended transport modes
-//! that must match the server-side connection setting; UI code should call
-//! [`extended_transport_available`] before offering them. The public builder
-//! falls back to V0 when extended transport support is unavailable.
+//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V1/V2
+//! (`mask_ver = 1` or `2`) are built-in transport modes that must match the
+//! server-side connection setting. Unsupported mode values fall back to V0.
 //!
 //! Working examples: `examples/trading_flow.rs`, `examples/history_bars.rs`,
 //! `examples/list_markets.rs`, `examples/get_balance.rs`, `examples/query_hedge_mode.rs`,
@@ -150,4 +148,4 @@ pub use state::{
     TransferAssetsState,
 };
 pub use time::DelphiTime;
-pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};
+pub use transport::{MoonKey, ServerMsgHeader};

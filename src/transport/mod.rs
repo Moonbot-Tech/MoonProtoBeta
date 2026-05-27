@@ -12,9 +12,7 @@
 //!   de-obfuscation, and header parsing.
 //! - [`outer_light_crypt`] and [`calculate_mac32`] are standalone helpers for
 //!   code that needs to work with packets without full packing or unpacking.
-//! - V0 is always available. V1/V2 are used only when
-//!   [`ext_available`] returns `true`; otherwise requested extended modes are
-//!   treated as V0.
+//! - V0, V1, and V2 are built in. Unsupported mode values are treated as V0.
 //!
 //! ## What It Does Not Do
 //!
@@ -51,14 +49,14 @@
 //! `calculate_mac32`/header serializers) remain marked `#[inline]`; keep that
 //! unless a measured full-LTO profile replaces the current fast dev workflow.
 
-mod ext_loader;
+mod extended;
 mod header;
 mod mac;
 mod outer_crypt;
 
 use log::warn;
 
-pub use ext_loader::is_available as ext_available;
+pub use extended::TransportModeState;
 pub use header::{ClientMsgHeader, ServerMsgHeader, TRANSPORT_VER};
 pub use mac::{calculate_mac32, MacContext};
 pub use outer_crypt::outer_light_crypt;
@@ -68,8 +66,8 @@ pub use outer_crypt::outer_light_crypt;
 pub type MoonKey = [u8; 16];
 
 /// Pack a command into a wire-ready UDP datagram.
-/// mask_ver: 0 = V0/base transport, 1/2 = V1/V2 when available.
-/// Unsupported values or unavailable extended modes are treated as mode 0.
+/// mask_ver: 0 = V0/base transport, 1/2 = V1/V2.
+/// Unsupported values are treated as mode 0.
 /// Returns: (main_packet, optional_extra_packet)
 /// If extended transport needs an additional packet sent, it's returned as the second element.
 ///
@@ -94,8 +92,16 @@ pub fn transport_pack(
 ) -> (Vec<u8>, Option<Vec<u8>>) {
     let mut buf = Vec::with_capacity(header::CLIENT_HDR_SIZE + payload.len());
     let mac_ctx = MacContext::new(mac_key);
-    let extra = transport_pack_into_with_mac(
-        &mut buf, &mac_ctx, mac_key, cmd, client_id, payload, mask_ver,
+    let mut mode_state = TransportModeState::new();
+    let extra = transport_pack_into_with_mac_and_state(
+        &mut buf,
+        &mac_ctx,
+        mac_key,
+        cmd,
+        client_id,
+        payload,
+        mask_ver,
+        &mut mode_state,
     );
     (buf, extra)
 }
@@ -114,7 +120,9 @@ pub fn transport_pack(
 /// from.
 ///
 /// Returns an optional extra packet for `mask_ver` 1/2 when the selected
-/// transport mode requires one.
+/// transport mode requires one. For long-lived V2 sessions prefer
+/// [`transport_pack_into_with_mac_and_state`] so the per-client warmup counter
+/// matches Delphi `SentCountDNS`.
 #[inline]
 pub fn transport_pack_into_with_mac(
     buf: &mut Vec<u8>,
@@ -124,6 +132,31 @@ pub fn transport_pack_into_with_mac(
     client_id: u64,
     payload: &[u8],
     mask_ver: u8,
+) -> Option<Vec<u8>> {
+    let mut mode_state = TransportModeState::new();
+    transport_pack_into_with_mac_and_state(
+        buf,
+        mac_ctx,
+        mac_key,
+        cmd,
+        client_id,
+        payload,
+        mask_ver,
+        &mut mode_state,
+    )
+}
+
+/// Stateful zero-alloc pack used by `Client`.
+#[inline]
+pub fn transport_pack_into_with_mac_and_state(
+    buf: &mut Vec<u8>,
+    mac_ctx: &MacContext,
+    mac_key: &MoonKey,
+    cmd: u8,
+    client_id: u64,
+    payload: &[u8],
+    mask_ver: u8,
+    mode_state: &mut TransportModeState,
 ) -> Option<Vec<u8>> {
     let hdr = ClientMsgHeader::new(cmd, client_id);
 
@@ -140,14 +173,7 @@ pub fn transport_pack_into_with_mac(
     // Obfuscation (always, all modes)
     outer_light_crypt(buf, mac_key);
 
-    // Extended transport (modes 1/2) is active only when available; otherwise
-    // the open crate supports V0.
-    if extended_transport_enabled(mask_ver) {
-        let (_ok, extra_pkt) = ext_loader::ext_wrap(buf, mask_ver, false);
-        extra_pkt
-    } else {
-        None
-    }
+    extended::wrap_outgoing_client(buf, normalized_transport_mode(mask_ver), mode_state)
 }
 
 /// Unpack a received UDP datagram. Verifies MAC and version.
@@ -187,17 +213,8 @@ pub fn transport_unpack_with_mac(
     raw: &[u8],
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
-    // Extended transport (modes 1/2) is active only when available. Otherwise
-    // requested extended modes are normalized to V0 so direct low-level callers
-    // do not create a send-but-never-receive half-mode.
-    let mut buf: Vec<u8> = if extended_transport_enabled(mask_ver) {
-        ext_loader::ext_unwrap(raw, mask_ver)?
-    } else {
-        // mask_ver=0: the only allocation copies `raw` into an owned Vec for in-place crypt.
-        let mut v = Vec::with_capacity(raw.len());
-        v.extend_from_slice(raw);
-        v
-    };
+    let mut buf: Vec<u8> =
+        extended::unwrap_incoming_client(raw, normalized_transport_mode(mask_ver))?;
 
     if buf.len() < header::SERVER_HDR_SIZE {
         return None;
@@ -234,8 +251,11 @@ pub fn transport_unpack_with_mac(
 }
 
 #[inline]
-fn extended_transport_enabled(mask_ver: u8) -> bool {
-    matches!(mask_ver, 1 | 2) && ext_loader::is_available()
+fn normalized_transport_mode(mask_ver: u8) -> u8 {
+    match mask_ver {
+        1 | 2 => mask_ver,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -260,21 +280,6 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_extended_mode_unpacks_as_v0() {
-        if ext_loader::is_available() {
-            return;
-        }
-
-        let mac_key = [7u8; 16];
-        let payload = b"base-mode-payload";
-        let packet = build_server_packet(&mac_key, 42, payload);
-        let (hdr, decoded) = transport_unpack(&mac_key, &packet, 1).expect("V0 fallback");
-
-        assert_eq!(hdr.cmd, 42);
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
     fn unsupported_transport_mode_unpacks_as_v0() {
         let mac_key = [9u8; 16];
         let payload = b"unsupported-mode-payload";
@@ -282,6 +287,39 @@ mod tests {
         let (hdr, decoded) = transport_unpack(&mac_key, &packet, 7).expect("V0 fallback");
 
         assert_eq!(hdr.cmd, 43);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn mode1_stun_roundtrip_unpacks_packet() {
+        let mac_key = [7u8; 16];
+        let payload = b"mode1-stun-payload";
+        let mut packet = build_server_packet(&mac_key, 42, payload);
+        extended::wrap_outgoing_client(&mut packet, 1, &mut TransportModeState::new());
+
+        let (hdr, decoded) = transport_unpack(&mac_key, &packet, 1).expect("mode1 unpack");
+
+        assert_eq!(hdr.cmd, 42);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn mode2_dns_warmup_is_ignored_and_normal_packet_unpacks() {
+        let mac_key = [7u8; 16];
+        let payload = b"mode2-payload";
+        let mut state = TransportModeState::new();
+        let extra = {
+            let mut buf = Vec::new();
+            let mac_ctx = MacContext::new(&mac_key);
+            transport_pack_into_with_mac_and_state(
+                &mut buf, &mac_ctx, &mac_key, 44, 123, payload, 2, &mut state,
+            )
+        };
+        let packet = build_server_packet(&mac_key, 44, payload);
+
+        assert!(transport_unpack(&mac_key, extra.as_deref().unwrap(), 2).is_none());
+        let (hdr, decoded) = transport_unpack(&mac_key, &packet, 2).expect("mode2 packet");
+        assert_eq!(hdr.cmd, 44);
         assert_eq!(decoded, payload);
     }
 }

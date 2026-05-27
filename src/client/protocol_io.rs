@@ -31,7 +31,7 @@ impl Client {
             return;
         };
         // Zero-alloc fast path: reuse self.send_buf + cached MacContext.
-        let extra = crate::transport::transport_pack_into_with_mac(
+        let extra = crate::transport::transport_pack_into_with_mac_and_state(
             &mut self.send_buf,
             &self.mac_ctx,
             &self.cfg.mac_key,
@@ -39,6 +39,7 @@ impl Client {
             self.cfg.client_id,
             payload,
             self.cfg.mask_ver,
+            &mut self.transport_mode_state,
         );
         // Извлекаем packet чтобы borrow checker не ругался на двойной &mut self
         // (dispatch_send берёт &mut self, ему не нужен send_buf после copy в socket).
@@ -56,7 +57,7 @@ impl Client {
         let Some(addr) = self.server_socket_addr() else {
             return;
         };
-        let extra = crate::transport::transport_pack_into_with_mac(
+        let extra = crate::transport::transport_pack_into_with_mac_and_state(
             &mut self.send_buf,
             &self.mac_ctx,
             &self.cfg.mac_key,
@@ -64,6 +65,7 @@ impl Client {
             self.cfg.client_id,
             payload,
             self.cfg.mask_ver,
+            &mut self.transport_mode_state,
         );
         let packet = std::mem::take(&mut self.send_buf);
         self.dispatch_send(cmd.to_byte(), &packet, extra.as_deref(), addr);

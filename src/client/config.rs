@@ -282,10 +282,9 @@ pub struct ClientConfig {
     pub mac_key: MoonKey,
     /// Transport mode: `0` for V0/base transport, `1`/`2` for V1/V2.
     ///
-    /// [`Self::with_transport_mode`] normalizes unsupported extended modes back
-    /// to `0` when extended transport support is unavailable. Direct struct
-    /// literals can still set this field for low-level tests/tools, but normal
-    /// application code should go through the builder.
+    /// [`Self::with_transport_mode`] normalizes unsupported mode values back to
+    /// `0`. Direct struct literals can still set this field for low-level
+    /// tests/tools, but normal application code should go through the builder.
     pub mask_ver: u8,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
@@ -316,9 +315,8 @@ impl ClientConfig {
     /// - `refresh = RefreshConfig::default()` (Delphi-worker refresh after Init).
     ///
     /// Tests and offline tools can call [`Self::without_ntp`].
-    /// Applications with extended transport can use [`Self::with_transport_mode`].
-    /// Check [`crate::extended_transport_available`] before offering modes `1`
-    /// and `2` to users.
+    /// Applications can select V1/V2 with [`Self::with_transport_mode`] when the
+    /// server-side connection setting uses the same mode.
     pub fn new(
         server_ip: impl Into<String>,
         server_port: u16,
@@ -339,16 +337,12 @@ impl ClientConfig {
 
     /// Override transport mode.
     ///
-    /// `0` is always available. Modes `1` and `2` select V1/V2; unsupported
-    /// values and unavailable extended modes fall back to `0`.
-    /// This keeps the public prototype working in V0 instead of creating a
-    /// half-configured client that can send but cannot unwrap extended replies.
-    /// UI code should still call [`crate::extended_transport_available`] before
-    /// offering modes `1`/`2`.
+    /// `0` selects V0/base transport. Modes `1` and `2` select V1/V2.
+    /// Unsupported values fall back to `0`.
     pub fn with_transport_mode(mut self, mask_ver: u8) -> Self {
         self.mask_ver = match mask_ver {
             0 => 0,
-            1 | 2 if crate::extended_transport_available() => mask_ver,
+            1 | 2 => mask_ver,
             _ => 0,
         };
         self

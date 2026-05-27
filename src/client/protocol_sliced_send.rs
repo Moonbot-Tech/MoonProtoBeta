@@ -292,7 +292,7 @@ impl ProtocolCore<'_> {
             };
             let extra = {
                 let slice = &client.sending[idx].slices[block_num];
-                crate::transport::transport_pack_into_with_mac(
+                crate::transport::transport_pack_into_with_mac_and_state(
                     &mut client.send_buf,
                     &client.mac_ctx,
                     &client.cfg.mac_key,
@@ -300,6 +300,7 @@ impl ProtocolCore<'_> {
                     client.cfg.client_id,
                     slice,
                     client.cfg.mask_ver,
+                    &mut client.transport_mode_state,
                 )
             };
             let packet = std::mem::take(&mut client.send_buf);

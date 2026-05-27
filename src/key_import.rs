@@ -610,6 +610,7 @@ mod tests {
         .with_transport_mode(network.mask_ver);
         assert_eq!(cfg.server_ip, "127.0.0.1");
         assert_eq!(cfg.server_port, 3000);
+        assert_eq!(cfg.mask_ver, 2);
     }
 
     #[test]

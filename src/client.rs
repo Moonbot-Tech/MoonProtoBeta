@@ -467,6 +467,10 @@ pub struct Client {
     /// переиспользуется receive/send фазами.
     mac_ctx: crate::transport::MacContext,
 
+    /// Delphi `SentCountDNS` equivalent for transport mode V2.
+    /// Lives on the client, not in a global/static transport helper.
+    transport_mode_state: crate::transport::TransportModeState,
+
     /// Reusable buffer для `transport_pack_into_with_mac` — экономит alloc/dealloc на каждый
     /// исходящий пакет. Capacity растёт до peak packet size и переиспользуется.
     /// audit_rust_quality #4: 50K pps × 1500б = 75 MB/s allocator pressure eximinated.
@@ -646,6 +650,7 @@ impl Client {
             check_tags_burst_sent: CHECK_TAGS_BURST_COUNT,
             last_check_tags_burst_ms: i64::MIN / 2,
             mac_ctx,
+            transport_mode_state: crate::transport::TransportModeState::new(),
             send_buf: Vec::with_capacity(2048), // типичный send packet ~500-1500 байт
         }
     }

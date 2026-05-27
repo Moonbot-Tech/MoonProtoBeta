@@ -12,11 +12,9 @@ The crate contains the transport layer, handshake, reconnect, reliable sliced
 datagrams, typed command parsers/builders, read-model state, and the active
 session API.
 
-MoonProto supports transport modes V0, V1, and V2. The selected mode must match
-the server-side connection setting. V0 is always available. UI code should offer
-V1/V2 only when `moonproto::extended_transport_available()` returns `true`;
-`ClientConfig::with_transport_mode(1 | 2)` falls back to V0 when extended
-transport support is unavailable. Unsupported mode values also normalize to V0.
+MoonProto supports built-in transport modes V0, V1, and V2. The selected mode
+must match the server-side connection setting. Unsupported mode values normalize
+to V0.
 
 ## Credentials
 
@@ -275,9 +273,7 @@ Apache-2.0 section 4(d).
 
 ## Development Notes
 
-- V0/base transport must work without extended transport support.
-- V1/V2 must only be offered when `moonproto::extended_transport_available()`
-  returns `true`.
+- V0/V1/V2 transport modes are built in; selected client and server modes must match.
 - Keep live credentials outside the public repo.
 - Run quick FireTest at important checkpoints; run full FireTest before calling
   a protocol build stable.

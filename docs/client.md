@@ -56,11 +56,8 @@ if let Some(network) = info.network {
   `CheckBinanceTags` every 60 seconds after Init).
 
 `mask_ver = 0` is V0/base transport. Transport modes `1` and `2` select V1/V2.
-The selected mode must match the server-side connection setting. UI code should
-call `moonproto::extended_transport_available()` before offering V1/V2; if it
-returns `false`, only V0 should be selectable. The normal builder
-`ClientConfig::with_transport_mode(1 | 2)` also falls back to V0 when extended
-transport support is unavailable. Unsupported mode values also normalize to V0.
+The selected mode must match the server-side connection setting. Unsupported
+mode values normalize to V0.
 
 Override only what you need:
 
