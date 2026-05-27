@@ -14,6 +14,30 @@ const ROLLING_VOLUME_BUCKET_SECONDS: i64 = 5;
 const ROLLING_VOLUME_BUCKETS: usize = 5 * 60 / ROLLING_VOLUME_BUCKET_SECONDS as usize;
 pub const DELPHI_SAME_TRADES_TIME_DAYS: f64 = 0.2 / SECONDS_PER_DAY;
 
+/// Counts from one full 5m candles snapshot after Active Lib applies the
+/// current trades-retention scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CandlesSnapshotApplySummary {
+    pub received_markets: usize,
+    pub received_candles: usize,
+    pub retained_markets: usize,
+    pub retained_candles: usize,
+}
+
+/// Event emitted when Active Lib's initial full 5m candles snapshot reaches the
+/// retained history worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandlesSnapshotEvent {
+    Ready {
+        request_uid: u64,
+        summary: CandlesSnapshotApplySummary,
+    },
+    Failed {
+        request_uid: Option<u64>,
+        error: String,
+    },
+}
+
 /// Delphi `ProcessTradesStream` per-packet time-shift state.
 ///
 /// The first known/stored row in a packet fixes

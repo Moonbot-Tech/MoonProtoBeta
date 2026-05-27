@@ -108,11 +108,13 @@ impl EventDispatcher {
     pub fn apply_candles_snapshot(
         &mut self,
         markets: &[crate::commands::candles::RequestCandlesMarket],
-    ) -> bool {
+    ) -> Option<crate::state::CandlesSnapshotApplySummary> {
         self.sync_market_history_storage();
         let Some(handle) = &self.market_history else {
-            return false;
+            return None;
         };
+        let received_markets = markets.len();
+        let received_candles = markets.iter().map(|market| market.candles_5m.len()).sum();
         let rows = markets
             .iter()
             .filter(|market| self.active_trade_storage_allows_market(&market.market_name))
@@ -126,10 +128,31 @@ impl EventDispatcher {
                     .collect(),
             })
             .collect::<Vec<_>>();
-        if rows.is_empty() {
-            return false;
+        let retained_markets = rows.len();
+        let retained_candles = rows.iter().map(|market| market.candles_5m.len()).sum();
+        let summary = crate::state::CandlesSnapshotApplySummary {
+            received_markets,
+            received_candles,
+            retained_markets,
+            retained_candles,
+        };
+        if rows.is_empty() || handle.apply_candles_snapshot(rows) {
+            Some(summary)
+        } else {
+            None
         }
-        handle.apply_candles_snapshot(rows)
+    }
+
+    pub(crate) fn market_history_barrier_async(&self) -> Option<std::sync::mpsc::Receiver<()>> {
+        self.market_history.as_ref()?.barrier_async()
+    }
+
+    pub(crate) fn queue_candles_snapshot_event(
+        &mut self,
+        event: crate::state::CandlesSnapshotEvent,
+    ) {
+        self.queued_events
+            .extend([crate::events::Event::CandlesSnapshot(event)]);
     }
 
     pub(crate) fn set_trade_storage_scope(

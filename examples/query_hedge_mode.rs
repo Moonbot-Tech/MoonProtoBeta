@@ -1,4 +1,4 @@
-//! Query account hedge mode through the high-level Active Lib runtime.
+﻿//! Query account hedge mode through the high-level Active Lib runtime.
 //!
 //! Run:
 //!   cargo run --example query_hedge_mode --release -- "<key_base64>" [host:port]
@@ -23,7 +23,7 @@ fn main() {
         }
     };
 
-    match client.request_hedge_mode(Duration::from_secs(15)) {
+    match client.blocking_request_hedge_mode(Duration::from_secs(15)) {
         Ok(value) => println!("[response] hedge_mode={value}"),
         Err(err) => {
             eprintln!("[request] failed: {err}");

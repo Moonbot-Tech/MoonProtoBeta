@@ -162,9 +162,11 @@ if let Some(snapshot) = client.snapshot() {
 ```
 
 `refresh_transfer_assets()` queues all three Engine API requests and returns
-immediately. Each completed response updates the library-owned state and emits
-`Event::TransferAssets`. Use `refresh_transfer_assets_kind(kind)` if the UI
-only needs one wallet.
+immediately. Each completed response updates the library-owned state and emits a
+per-wallet `Event::TransferAssets::Updated` or `UpdateFailed`. After all three
+requests have answered, Active Lib emits `TransferAssetsEvent::RefreshCompleted`;
+that is the UI-safe point equivalent to Delphi `WaitUpdCount = 0`. Use
+`refresh_transfer_assets_kind(kind)` if the UI only needs one wallet.
 
 ## Low-Level Rows
 

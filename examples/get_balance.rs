@@ -1,4 +1,4 @@
-//! Fetch one asset balance through the high-level Active Lib runtime.
+﻿//! Fetch one asset balance through the high-level Active Lib runtime.
 //!
 //! Run:
 //!   cargo run --example get_balance --release -- "<key_base64>" [host:port] [asset]
@@ -25,7 +25,7 @@ fn main() {
     };
 
     println!("[request] balance asset={asset}");
-    match client.request_balance(asset, Duration::from_secs(15)) {
+    match client.blocking_request_balance(asset, Duration::from_secs(15)) {
         Ok(quantity) => println!("[response] {asset} balance={quantity}"),
         Err(err) => {
             eprintln!("[request] failed: {err}");

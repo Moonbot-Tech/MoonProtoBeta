@@ -62,6 +62,13 @@ pub enum TransferAssetsEvent {
         nonzero_count: usize,
         revision: u64,
     },
+    RefreshCompleted {
+        request_id: u64,
+        requested: usize,
+        updated: usize,
+        failed: usize,
+        revision: u64,
+    },
     UpdateFailed {
         kind: ExchangeKind,
         request_uid: Option<u64>,

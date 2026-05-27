@@ -1,4 +1,4 @@
-//! Request exchange API-key expiration time through `MoonClient`.
+﻿//! Request exchange API-key expiration time through `MoonClient`.
 //!
 //! Run:
 //!   cargo run --example api_expiration_time --release -- "<key_base64>" [host:port]
@@ -29,7 +29,7 @@ fn main() {
         }
     };
 
-    let expiration = match client.request_api_expiration_time(Duration::from_secs(15)) {
+    let expiration = match client.blocking_request_api_expiration_time(Duration::from_secs(15)) {
         Ok(value) => value,
         Err(err) => {
             eprintln!("[request] failed: {err}");

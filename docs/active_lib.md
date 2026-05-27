@@ -39,8 +39,10 @@ send commands; the library maintains protocol and trading state.
   stores and calculates for all markets. `subscribe_trades_for` sends the same
   server subscription but retains/calculates only the selected markets; an empty
   list means all markets.
-- When trades storage is enabled, the runtime also requests the initial 5m
-  candles snapshot and then maintains the current candle from trades.
+- When trades storage is enabled, the runtime requests the initial 5m candles
+  snapshot once for the active storage scope, emits `Event::CandlesSnapshot`
+  only after the history worker has applied it, and then maintains the current
+  candle from trades.
 
 ## UI Shape
 
@@ -51,7 +53,8 @@ send commands; the library maintains protocol and trading state.
   does not mutate `Orders`.
 - Asset-transfer UI calls `refresh_transfer_assets()` and then reads
   `snapshot().transfer_assets()`. The command returns after queuing all wallet
-  refresh requests; `Event::TransferAssets` reports each completed wallet.
+  refresh requests; `Event::TransferAssets` reports each completed wallet and a
+  final `RefreshCompleted` event after all requested wallet kinds have answered.
 - Time fields inherited from Delphi are day values, not Unix timestamps. Use
   `DelphiTime` helpers such as `row.time_delphi().unix_millis()`.
 

@@ -3,10 +3,12 @@
 For normal Active Lib usage, candles are retained market history, not a raw
 chunked response object.
 
-When an application subscribes to trades through `subscribe_all_trades` or
-`subscribe_trades_for`, the runtime also requests the initial full 5m candles
-snapshot. After the chunked response is merged and parsed, Active Lib applies it
-to retained per-market history. Incoming trades then maintain the current 5m
+When an application subscribes to trades through `InitConfig.subscribe_trades`,
+`subscribe_all_trades`, or `subscribe_trades_for`, the runtime requests the
+initial full 5m candles snapshot exactly once for the active storage scope. After
+the chunked response is merged and parsed, Active Lib applies it to retained
+per-market history and emits `Event::CandlesSnapshot` only after the history
+worker acknowledges the barrier. Incoming trades then maintain the current 5m
 candle and derived candle/volume state.
 
 ```rust
@@ -45,21 +47,12 @@ let unix_ms = candle.time_delphi().unix_millis();
 
 The raw time value is a Delphi day value, not Unix time.
 
-## Explicit Refresh
+## Full Snapshot Refresh
 
-`MoonClient::refresh_candles(timeout)` is currently an explicit one-shot helper:
-it waits for a full 5m snapshot, returns the number of parsed market entries,
-and applies candles to retained Active Lib history when storage is active:
-
-```rust
-let markets_received = client.refresh_candles(std::time::Duration::from_secs(30))?;
-println!("candles refreshed for {markets_received} markets");
-```
-
-Low-level diagnostic tools can still call the hidden chunked request helpers and
-inspect the merged `MergedCandles` object. Chart UI should not use that raw
-chunk/zlib state; it should read retained candles through
-`market_history_readers`.
+Normal UI code does not manually request "all candles for all markets". It
+subscribes to trades, waits for `Event::CandlesSnapshot`, then reads retained 5m
+candles from `market_history_readers`. The raw chunked/zlib response object is a
+diagnostic/protocol detail.
 
 ## CoinCard History
 

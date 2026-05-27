@@ -1,4 +1,4 @@
-//! # moonproto
+﻿//! # moonproto
 //!
 //! Rust client for the MoonProto UDP protocol used by MoonBot servers.
 //! It ports the Delphi client behavior for the wire format, AES-128-GCM
@@ -49,12 +49,15 @@
 //! client.stop()?;
 //! ```
 //!
-//! For common one-shot Engine API operations, use [`MoonClient`] helpers such
-//! as [`MoonClient::request_balance`], [`MoonClient::request_hedge_mode`],
-//! [`MoonClient::request_api_expiration_time`], and
-//! [`MoonClient::refresh_candles`]. Demand-driven CoinCard candles use
-//! non-blocking [`MoonClient::request_coin_card_candles`] and arrive as
-//! [`Event::CoinCardCandles`]. Mutation helpers such as
+//! For common one-shot Engine API diagnostics, use explicit [`MoonClient`]
+//! `blocking_*` helpers such as [`MoonClient::blocking_request_balance`],
+//! [`MoonClient::blocking_request_hedge_mode`], and
+//! [`MoonClient::blocking_request_api_expiration_time`]. Demand-driven CoinCard
+//! candles use non-blocking
+//! [`MoonClient::request_coin_card_candles`] and arrive as
+//! [`Event::CoinCardCandles`]. The full 5m candles snapshot is requested
+//! automatically after trades storage is enabled and arrives as
+//! [`Event::CandlesSnapshot`]. Mutation helpers such as
 //! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
 //! [`MoonClient::cancel_all_orders`] also run inside the owned runtime. The
 //! runtime keeps MoonProto pumping, checks server status or channel completion,

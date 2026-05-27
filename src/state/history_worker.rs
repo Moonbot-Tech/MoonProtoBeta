@@ -122,6 +122,9 @@ enum MarketHistoryCommand {
     StreamBatch(MarketHistoryStreamBatch),
     LastPriceBatch(MarketHistoryLastPriceBatch),
     CandlesSnapshot(Vec<MarketHistoryCandlesSnapshot>),
+    Barrier {
+        reply: mpsc::SyncSender<()>,
+    },
     Flush {
         now_time: f64,
         reply: mpsc::SyncSender<()>,
@@ -339,6 +342,16 @@ impl MarketHistoryHandle {
             .is_ok()
     }
 
+    /// Queue a pure worker barrier. When the returned receiver yields, every
+    /// command sent before the barrier has been processed by the worker.
+    pub fn barrier_async(&self) -> Option<mpsc::Receiver<()>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(MarketHistoryCommand::Barrier { reply: reply_tx })
+            .ok()?;
+        Some(reply_rx)
+    }
+
     /// Test/tool barrier: all previously sent batches are processed before this
     /// call returns, then evicted futures rows are compacted into mini-candles.
     pub fn flush(&self, now_time: f64) -> bool {
@@ -409,6 +422,9 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
             }
             Ok(MarketHistoryCommand::CandlesSnapshot(markets)) => {
                 process_candles_snapshot(&mut registry, markets);
+            }
+            Ok(MarketHistoryCommand::Barrier { reply }) => {
+                let _ = reply.send(());
             }
             Ok(MarketHistoryCommand::Flush { now_time, reply }) => {
                 last_now_time = now_time;

@@ -25,13 +25,15 @@
 //! ```
 //!
 //! Profiles:
-//! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
+//! - `MOONPROTO_FIRETEST_PROFILE=quick` — public `MoonClient` path, <=30s
+//!   target health gate:
 //!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
 //!   retained LastPrice/trades, derived trade/LastPrice snapshot, non-blocking
 //!   CoinCard 4h candle request, trades + orderbook streams, ParseFailed=0,
 //!   CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
-//!   health/stress scenario below. Requires `allow_mutation=true`.
+//!   low-level `Client + EventDispatcher` health/stress scenario below plus a
+//!   short `MoonClient` public-path smoke. Requires `allow_mutation=true`.
 //!
 //! FireTest checks live full-parse health for all real server packets. Crafted
 //! malformed parser semantics (Delphi `Read` zero-tail vs `ReadBuffer`
@@ -43,11 +45,11 @@
 //! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
 //! checks can run against the exact same live payload bytes.
 //!
-//! This is a diagnostic/protocol health test, not application example code. It
-//! intentionally owns `Client + EventDispatcher` directly so it can inspect
-//! protocol metrics, err_emu counters, raw strategy payloads, reconnect phases,
-//! and destructive order/settings scenarios. Regular applications should use
-//! `MoonClient`.
+//! This is a diagnostic/protocol health test, not application example code. The
+//! full profile intentionally owns `Client + EventDispatcher` directly so it can
+//! inspect protocol metrics, err_emu counters, raw strategy payloads, reconnect
+//! phases, and destructive order/settings scenarios. The quick profile uses
+//! `MoonClient`, matching the public Active Lib path regular applications use.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -81,7 +83,7 @@ use moonproto::state::{
 use moonproto::{
     connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
     EventDispatcherSnapshot, ExchangeKind, ImportedKeys, InitConfig, InitialStrategies,
-    LifecycleEvent, TradesStreamMode,
+    LifecycleEvent, MoonClient, TradesStreamMode,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -488,10 +490,6 @@ impl SessionStats {
             .unwrap_or(0)
     }
 
-    fn has_engine_method(&self, method: EngineMethod) -> bool {
-        self.engine_method_count(method) > 0
-    }
-
     fn summary(&self) -> String {
         let candles = self
             .candles_complete
@@ -847,10 +845,8 @@ impl Session {
         if let (Some(market_index), Some(book_kind)) = (st.market_index, st.last_book_kind) {
             if let Some(kind) = OrderBookKind::from_u8(book_kind) {
                 if let Some(top) = snapshot.order_books().top_of_book(market_index, kind) {
-                    if let Some(bid) = top.bid {
+                    if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
                         st.last_book_bid = Some(bid.rate);
-                    }
-                    if let Some(ask) = top.ask {
                         st.last_book_ask = Some(ask.rate);
                     }
                 }
@@ -935,41 +931,6 @@ impl Session {
         )
     }
 
-    fn target_last_price_tail(&self) -> Option<LastPricePoint> {
-        let _ = self.history_worker.flush(0.0);
-        let reader = self
-            .history_worker
-            .readers(&self.snapshot().market)?
-            .last_prices?;
-        let mut rows = Vec::new();
-        reader.copy_last(1, &mut rows);
-        rows.into_iter().next()
-    }
-
-    fn target_retained_trade_counts(&self) -> (usize, usize) {
-        let _ = self.history_worker.flush(0.0);
-        let readers = self.history_worker.readers(&self.snapshot().market);
-        let futures = readers
-            .as_ref()
-            .and_then(|readers| readers.futures_trades.as_ref())
-            .map(|reader| {
-                let mut rows = Vec::new();
-                reader.copy_last(64, &mut rows);
-                rows.len()
-            })
-            .unwrap_or(0);
-        let spot = readers
-            .as_ref()
-            .and_then(|readers| readers.spot_trades.as_ref())
-            .map(|reader| {
-                let mut rows = Vec::new();
-                reader.copy_last(64, &mut rows);
-                rows.len()
-            })
-            .unwrap_or(0);
-        (futures, spot)
-    }
-
     fn apply_completed_candles_snapshots(&mut self) {
         while let Ok(markets) = self.candles_snapshot_rx.try_recv() {
             let total_candles = markets.iter().map(|m| m.candles_5m.len()).sum::<usize>();
@@ -989,7 +950,7 @@ impl Session {
                 .unwrap_or((0, 0));
             println!(
                 "FIRETEST candles active-storage applied={} parsed_candles={} target={} target_parsed_candles={} target_retained_candles={} capacity={}",
-                applied, total_candles, target_market, target_parsed, retained, capacity
+                applied.is_some(), total_candles, target_market, target_parsed, retained, capacity
             );
             assert!(
                 target_parsed > 0,
@@ -2034,6 +1995,22 @@ fn record_event(
                         ),
                     );
                 }
+                moonproto::TransferAssetsEvent::RefreshCompleted {
+                    request_id,
+                    requested,
+                    updated,
+                    failed,
+                    revision,
+                } => {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "TransferAssets refresh-complete id={} requested={} updated={} failed={} revision={}",
+                            request_id, requested, updated, failed, revision
+                        ),
+                    );
+                }
                 moonproto::TransferAssetsEvent::UpdateFailed { kind, error, .. } => {
                     st.transfer_asset_failures += 1;
                     log_server_event(
@@ -2256,30 +2233,28 @@ fn record_event(
                     st.target_orderbook_update += 1;
                 }
                 st.last_book_kind = Some(*book_kind);
-                match Some(*top) {
-                    Some(top) => {
-                        if let Some(bid) = top.bid {
-                            st.last_book_bid = Some(bid.rate);
-                        }
-                        if let Some(ask) = top.ask {
-                            st.last_book_ask = Some(ask.rate);
-                        }
-                        if let (Some(bid), Some(ask)) = (st.last_book_bid, st.last_book_ask) {
-                            if bid <= 0.0 || ask <= 0.0 || ask <= bid {
-                                st.market_invariant_error = Some(format!(
-                                    "bad book top for {}: bid={bid:.8} ask={ask:.8}",
-                                    st.market
-                                ));
-                            }
-                        }
-                    }
-                    None if dispatcher.is_some() => {
+                if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
+                    st.last_book_bid = Some(bid.rate);
+                    st.last_book_ask = Some(ask.rate);
+                    if bid.rate <= 0.0 || ask.rate <= 0.0 || ask.rate <= bid.rate {
                         st.market_invariant_error = Some(format!(
-                            "orderbook top unavailable for market={} idx={} kind={}",
-                            st.market, market_index, book_kind
+                            "bad book top for {} kind={book_kind}: bid={:.8} ask={:.8}",
+                            st.market, bid.rate, ask.rate
                         ));
                     }
-                    None => {}
+                } else if dispatcher.is_some() {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "OrderBook target top not complete yet market={} idx={} kind={} top_bid={:?} top_ask={:?}",
+                            st.market,
+                            market_index,
+                            book_kind,
+                            top.bid.map(|level| level.rate),
+                            top.ask.map(|level| level.rate)
+                        ),
+                    );
                 }
                 if st.target_orderbook_full + st.target_orderbook_update <= 8
                     || (st.target_orderbook_full + st.target_orderbook_update).is_power_of_two()
@@ -2777,35 +2752,6 @@ where
     false
 }
 
-fn pump_single_until<F>(
-    session: &mut Session,
-    timeout: Duration,
-    label: &str,
-    mut predicate: F,
-) -> bool
-where
-    F: FnMut(&SessionStats) -> bool,
-{
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        session.pump(PUMP_SLICE);
-        let stats = session.snapshot();
-        if predicate(&stats) {
-            println!("OK: {label} after {:.2}s", start.elapsed().as_secs_f64());
-            return true;
-        }
-    }
-
-    let stats = session.snapshot();
-    eprintln!(
-        "FIRETEST TIMEOUT {label}: A=[{}] A.metrics=[{}]",
-        stats.summary(),
-        session.protocol_summary(),
-    );
-    log_err_emu_snapshot(label, "A", &session.client.err_emu_diagnostics_snapshot());
-    false
-}
-
 fn pump_pair_until_sessions<F>(
     a: &mut Session,
     b: &mut Session,
@@ -2839,6 +2785,71 @@ where
     false
 }
 
+fn has_nonblocking_api_refresh(st: &SessionStats) -> bool {
+    has_transfer_assets_refresh(st) && has_coin_card_candles(st)
+}
+
+fn request_nonblocking_api_refresh(session: &mut Session, cfg: &FireConfig) {
+    session.request_transfer_assets_refresh();
+    session.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
+}
+
+fn pump_pair_until_nonblocking_api_refresh(
+    a: &mut Session,
+    b: &mut Session,
+    cfg: &FireConfig,
+    timeout: Duration,
+) -> bool {
+    request_nonblocking_api_refresh(a, cfg);
+    request_nonblocking_api_refresh(b, cfg);
+    let start = Instant::now();
+    let mut next_retry = start + Duration::from_secs(2);
+    let mut attempts = 1u32;
+    while start.elapsed() < timeout {
+        a.pump(PUMP_SLICE);
+        b.pump(PUMP_SLICE);
+        let a_ok = has_nonblocking_api_refresh(&a.snapshot());
+        let b_ok = has_nonblocking_api_refresh(&b.snapshot());
+        if a_ok && b_ok {
+            println!(
+                "OK: non-blocking transfer assets + CoinCard candles after {:.2}s attempts={attempts}",
+                start.elapsed().as_secs_f64()
+            );
+            return true;
+        }
+        if Instant::now() >= next_retry {
+            attempts += 1;
+            if !a_ok {
+                println!(
+                    "FIRETEST retry non-blocking API for A after {:.2}s",
+                    start.elapsed().as_secs_f64()
+                );
+                request_nonblocking_api_refresh(a, cfg);
+            }
+            if !b_ok {
+                println!(
+                    "FIRETEST retry non-blocking API for B after {:.2}s",
+                    start.elapsed().as_secs_f64()
+                );
+                request_nonblocking_api_refresh(b, cfg);
+            }
+            next_retry += Duration::from_secs(2);
+        }
+    }
+
+    let a_stats = a.snapshot();
+    let b_stats = b.snapshot();
+    eprintln!(
+        "FIRETEST TIMEOUT non-blocking transfer assets + CoinCard candles: A=[{}] A.metrics=[{}] B=[{}] B.metrics=[{}]",
+        a_stats.summary(),
+        a.protocol_summary(),
+        b_stats.summary(),
+        b.protocol_summary()
+    );
+    log_err_emu_pair("non-blocking transfer assets + CoinCard candles", a, b);
+    false
+}
+
 fn has_initial_health(st: &SessionStats) -> bool {
     st.connected_now
         && st.strategy_snapshot_events > 0
@@ -2848,23 +2859,6 @@ fn has_initial_health(st: &SessionStats) -> bool {
         && st.trades_apply > 0
         && st.orderbook_apply > 0
         && st.parse_failed == 0
-}
-
-fn has_quick_health(st: &SessionStats) -> bool {
-    st.connected_now
-        && st.parse_failed == 0
-        && st.strategy_snapshot_events > 0
-        && st.strategy_schema_events > 0
-        && st.strategy_schema_kinds > 0
-        && st.strategy_schema_fields > 0
-        && st.has_engine_method(EngineMethod::BaseCheck)
-        && st.has_engine_method(EngineMethod::AuthCheck)
-        && st.has_engine_method(EngineMethod::GetMarketsList)
-        && st.has_engine_method(EngineMethod::GetMarketsIndexes)
-        && st.has_engine_method(EngineMethod::UpdateMarketsList)
-        && st.has_engine_method(EngineMethod::SubscribeAllTrades)
-        && st.has_engine_method(EngineMethod::SubscribeOrderBook)
-        && has_market_consistency(st)
 }
 
 fn has_transfer_assets_refresh(st: &SessionStats) -> bool {
@@ -3318,109 +3312,363 @@ fn firetest_history_config() -> MarketHistoryConfig {
     }
 }
 
+#[derive(Default)]
+struct MoonClientPathStats {
+    engine_method_counts: HashMap<u8, u64>,
+    parse_failed: u64,
+    strategy_snapshot_events: u64,
+    strategy_schema_events: u64,
+    strategy_schema_kinds: usize,
+    strategy_schema_fields: usize,
+    trades_apply: u64,
+    orderbook_apply: u64,
+    target_orderbook_full: u64,
+    target_orderbook_update: u64,
+    transfer_asset_updated_mask: u8,
+    transfer_asset_failures: u64,
+    transfer_asset_refresh_done: bool,
+    coin_card_updates: u64,
+    coin_card_failures: u64,
+    coin_card_last_count: usize,
+    candles_ready: bool,
+    candles_markets: usize,
+    candles_rows: usize,
+    market_index: Option<u16>,
+    last_book_bid: Option<f64>,
+    last_book_ask: Option<f64>,
+    last_trade_price: Option<f64>,
+    last_market_price: Option<MarketProbePrice>,
+    retained_last_prices: usize,
+    retained_futures_trades: usize,
+    retained_spot_trades: usize,
+    derived_trade_vol_1m: f64,
+    derived_trade_vol_5m: f64,
+    derived_candle_vol_1h: f64,
+    market_invariant_error: Option<String>,
+}
+
+impl MoonClientPathStats {
+    fn engine_method_count(&self, method: EngineMethod) -> u64 {
+        self.engine_method_counts
+            .get(&(method.to_byte()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn has_engine_method(&self, method: EngineMethod) -> bool {
+        self.engine_method_count(method) > 0
+    }
+
+    fn record_event(&mut self, event: &Event, target_market: &str) {
+        match event {
+            Event::EngineResponse(resp) => {
+                *self
+                    .engine_method_counts
+                    .entry(resp.method.to_byte())
+                    .or_insert(0) += 1;
+            }
+            Event::ParseFailed { .. } => {
+                self.parse_failed += 1;
+            }
+            Event::Strat(StratEvent::SnapshotFull { .. })
+            | Event::Strat(StratEvent::SnapshotPartial { .. }) => {
+                self.strategy_snapshot_events += 1;
+            }
+            Event::Strat(StratEvent::SchemaApplied {
+                kind_count,
+                field_count,
+                ..
+            }) => {
+                self.strategy_schema_events += 1;
+                self.strategy_schema_kinds = self.strategy_schema_kinds.max(*kind_count);
+                self.strategy_schema_fields = self.strategy_schema_fields.max(*field_count);
+            }
+            Event::Strat(StratEvent::SchemaParseFailed { .. }) => {
+                self.parse_failed += 1;
+            }
+            Event::Trade(TradesEvent::Applied { .. }) => {
+                self.trades_apply += 1;
+            }
+            Event::OrderBook(OrderBookEvent::Apply {
+                market_name,
+                book_kind,
+                is_full,
+                top,
+                ..
+            }) if market_name.as_deref() == Some(target_market) => {
+                self.orderbook_apply += 1;
+                if *is_full {
+                    self.target_orderbook_full += 1;
+                } else {
+                    self.target_orderbook_update += 1;
+                }
+                if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
+                    self.last_book_bid = Some(bid.rate);
+                    self.last_book_ask = Some(ask.rate);
+                    if bid.rate <= 0.0 || ask.rate <= 0.0 || ask.rate <= bid.rate {
+                        self.market_invariant_error = Some(format!(
+                            "bad MoonClient book top for {target_market} kind={book_kind}: bid={:.8} ask={:.8}",
+                            bid.rate, ask.rate
+                        ));
+                    }
+                }
+            }
+            Event::TransferAssets(ev) => match ev {
+                moonproto::TransferAssetsEvent::Updated { kind, .. } => {
+                    self.transfer_asset_updated_mask |= 1 << kind.as_index();
+                }
+                moonproto::TransferAssetsEvent::RefreshCompleted {
+                    updated, failed, ..
+                } => {
+                    self.transfer_asset_refresh_done = *updated == ExchangeKind::ALL.len();
+                    self.transfer_asset_failures += *failed as u64;
+                }
+                moonproto::TransferAssetsEvent::UpdateFailed { .. } => {
+                    self.transfer_asset_failures += 1;
+                }
+                moonproto::TransferAssetsEvent::TransferApplied { .. } => {}
+            },
+            Event::CoinCardCandles(ev) => match ev {
+                moonproto::CoinCardCandlesEvent::Updated { count, .. } => {
+                    self.coin_card_updates += 1;
+                    self.coin_card_last_count = *count;
+                }
+                moonproto::CoinCardCandlesEvent::UpdateFailed { .. } => {
+                    self.coin_card_failures += 1;
+                }
+            },
+            Event::CandlesSnapshot(ev) => match ev {
+                moonproto::state::CandlesSnapshotEvent::Ready { summary, .. } => {
+                    self.candles_ready = true;
+                    self.candles_markets = summary.retained_markets;
+                    self.candles_rows = summary.retained_candles;
+                }
+                moonproto::state::CandlesSnapshotEvent::Failed { error, .. } => {
+                    self.market_invariant_error =
+                        Some(format!("MoonClient auto candles failed: {error}"));
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn refresh_from_snapshot(&mut self, snapshot: &EventDispatcherSnapshot, target_market: &str) {
+        self.market_index = snapshot.markets().market_index_by_name(target_market);
+        if let Some(price) = snapshot.markets().price(target_market) {
+            self.last_market_price = Some(MarketProbePrice::from(price));
+            if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
+                self.market_invariant_error = Some(format!(
+                    "bad MoonClient UpdateMarketsList price for {target_market}: bid={:.8} ask={:.8}",
+                    price.bid, price.ask
+                ));
+            }
+        }
+        if let Some(state) = snapshot.markets().trade_state(target_market) {
+            if state.last_trade_price > 0.0 {
+                self.last_trade_price = Some(state.last_trade_price);
+            }
+        }
+        if let Some(top) = snapshot.top_of_book(target_market, OrderBookKind::Futures) {
+            if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
+                self.last_book_bid = Some(bid.rate);
+                self.last_book_ask = Some(ask.rate);
+            }
+        }
+        if let Some(readers) = snapshot.market_history_readers(target_market) {
+            if let Some(reader) = readers.last_prices.as_ref() {
+                self.retained_last_prices = reader.bounds().len;
+            }
+            if let Some(reader) = readers.futures_trades.as_ref() {
+                self.retained_futures_trades = reader.bounds().len;
+            }
+            if let Some(reader) = readers.spot_trades.as_ref() {
+                self.retained_spot_trades = reader.bounds().len;
+            }
+        }
+        if let Some(derived) =
+            snapshot.market_history_derived_snapshot(target_market, delphi_now_raw_for_test())
+        {
+            self.derived_trade_vol_1m = derived.trade_volumes.one_minute.total_value();
+            self.derived_trade_vol_5m = derived.trade_volumes.five_minutes.total_value();
+            self.derived_candle_vol_1h = derived.candle_volumes.one_hour;
+        }
+        if let Some(candles) = snapshot
+            .coin_card_candles()
+            .get(target_market, FIRETEST_COIN_CARD_KIND)
+        {
+            self.coin_card_last_count = self.coin_card_last_count.max(candles.len());
+        }
+    }
+
+    fn healthy(&self, require_auto_candles: bool) -> bool {
+        if self.parse_failed != 0 || self.market_invariant_error.is_some() {
+            return false;
+        }
+        let Some(bid) = self.last_book_bid else {
+            return false;
+        };
+        let Some(ask) = self.last_book_ask else {
+            return false;
+        };
+        let Some(trade_price) = self.last_trade_price else {
+            return false;
+        };
+        let Some(market_price) = self.last_market_price else {
+            return false;
+        };
+        self.strategy_snapshot_events > 0
+            && self.strategy_schema_events > 0
+            && self.strategy_schema_kinds > 0
+            && self.strategy_schema_fields > 0
+            && self.has_engine_method(EngineMethod::BaseCheck)
+            && self.has_engine_method(EngineMethod::AuthCheck)
+            && self.has_engine_method(EngineMethod::GetMarketsList)
+            && self.has_engine_method(EngineMethod::GetMarketsIndexes)
+            && self.has_engine_method(EngineMethod::UpdateMarketsList)
+            && self.has_engine_method(EngineMethod::SubscribeAllTrades)
+            && self.has_engine_method(EngineMethod::SubscribeOrderBook)
+            && self.trades_apply > 0
+            && self.orderbook_apply > 0
+            && self.target_orderbook_full > 0
+            && self.target_orderbook_update > 0
+            && self.transfer_asset_updated_mask == 0b111
+            && self.transfer_asset_failures == 0
+            && self.transfer_asset_refresh_done
+            && self.coin_card_updates > 0
+            && self.coin_card_failures == 0
+            && self.coin_card_last_count >= FIRETEST_MIN_COIN_CARD_CANDLES
+            && self.retained_last_prices > 0
+            && self.retained_futures_trades + self.retained_spot_trades > 0
+            && (!require_auto_candles || (self.candles_ready && self.candles_rows > 0))
+            && bid > 0.0
+            && ask > bid
+            && market_price.bid > 0.0
+            && market_price.ask >= market_price.bid
+            && price_near_envelope(trade_price, bid, ask)
+            && price_near_envelope(market_price.bid, bid, ask)
+            && price_near_envelope(market_price.ask, bid, ask)
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
+            self.engine_method_count(EngineMethod::BaseCheck),
+            self.engine_method_count(EngineMethod::AuthCheck),
+            self.engine_method_count(EngineMethod::GetMarketsList),
+            self.engine_method_count(EngineMethod::GetMarketsIndexes),
+            self.engine_method_count(EngineMethod::UpdateMarketsList),
+            self.engine_method_count(EngineMethod::SubscribeAllTrades),
+            self.engine_method_count(EngineMethod::SubscribeOrderBook),
+            self.strategy_snapshot_events,
+            self.strategy_schema_events,
+            self.strategy_schema_kinds,
+            self.strategy_schema_fields,
+            self.trades_apply,
+            self.orderbook_apply,
+            self.target_orderbook_full,
+            self.target_orderbook_update,
+            self.last_book_bid,
+            self.last_book_ask,
+            self.last_trade_price,
+            self.last_market_price.map(|p| (p.bid, p.ask, p.mark_price, p.mark_price_found)),
+            self.transfer_asset_updated_mask,
+            self.transfer_asset_refresh_done,
+            self.transfer_asset_failures,
+            self.coin_card_updates,
+            self.coin_card_last_count,
+            self.candles_ready,
+            self.candles_markets,
+            self.candles_rows,
+            self.retained_last_prices,
+            self.retained_futures_trades,
+            self.retained_spot_trades,
+            self.derived_trade_vol_1m,
+            self.derived_trade_vol_5m,
+            self.derived_candle_vol_1h,
+            self.parse_failed,
+            self.market_invariant_error.as_deref().unwrap_or("none")
+        )
+    }
+}
+
+fn run_moonclient_public_smoke(
+    label: &str,
+    cfg: &FireConfig,
+    keys: ImportedKeys,
+    timeout: Duration,
+    require_auto_candles: bool,
+) -> MoonClientPathStats {
+    let init = InitConfig {
+        mm_orders_subscribe: Some(true),
+        subscribe_trades: Some(TradesStreamMode::TradesOnly),
+        subscribe_orderbooks: vec![cfg.market.clone()],
+        step_timeout: None,
+        initial_strategies: Some(InitialStrategies::new(0, Vec::new())),
+    };
+    let client = MoonClient::connect(
+        ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
+            .with_transport_mode(cfg.mask_ver)
+            .with_client_id(rand::random()),
+        ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
+    )
+    .unwrap_or_else(|err| panic!("FIRETEST {label}: MoonClient connect failed: {err}"));
+
+    client
+        .refresh_transfer_assets()
+        .unwrap_or_else(|err| panic!("FIRETEST {label}: refresh_transfer_assets failed: {err}"));
+    client
+        .request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND)
+        .unwrap_or_else(|err| panic!("FIRETEST {label}: request_coin_card_candles failed: {err}"));
+
+    let start = Instant::now();
+    let mut stats = MoonClientPathStats::default();
+    while start.elapsed() < timeout {
+        for event in client.drain_events() {
+            stats.record_event(&event, &cfg.market);
+        }
+        if let Some(snapshot) = client.snapshot() {
+            stats.refresh_from_snapshot(&snapshot, &cfg.market);
+        }
+        if stats.healthy(require_auto_candles) {
+            break;
+        }
+        std::thread::sleep(PUMP_SLICE);
+    }
+    for event in client.drain_events() {
+        stats.record_event(&event, &cfg.market);
+    }
+    if let Some(snapshot) = client.snapshot() {
+        stats.refresh_from_snapshot(&snapshot, &cfg.market);
+    }
+    let _ = client.stop();
+
+    assert!(
+        stats.healthy(require_auto_candles),
+        "FIRETEST {label}: MoonClient public path did not reach health within {timeout:?}: {}",
+        stats.summary()
+    );
+    println!(
+        "OK: FIRETEST {label}: MoonClient public path healthy after {:.2}s [{}]",
+        start.elapsed().as_secs_f64(),
+        stats.summary()
+    );
+    stats
+}
+
 fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     let start = Instant::now();
     let cfg = quick_profile_config(cfg);
     let _err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
 
     println!(
-        "FIRETEST quick target: <= {}s; one client, err_emu={}%, connect_timeout={:?}, stream_timeout={:?}",
+        "FIRETEST quick target: <= {}s; MoonClient public path, err_emu={}%, connect_timeout={:?}, stream_timeout={:?}",
         QUICK_TOTAL_TARGET_SECS,
         FIRETEST_ERR_EMU_PERCENT,
         cfg.connect_timeout,
         cfg.wait
     );
 
-    let mut a = Session::connect("A", &cfg, keys, None);
-    a.request_transfer_assets_refresh();
-    a.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
-    assert!(
-        a.client.is_authorized(),
-        "quick FireTest: connect_and_init returned but client is not AuthDone"
-    );
-    println!(
-        "OK: quick connect/AuthDone/InitDone after {:.2}s",
-        start.elapsed().as_secs_f64()
-    );
-
-    assert!(
-        pump_single_until(&mut a, cfg.wait, "quick streams/API/market health", |a| {
-            has_quick_health(a) && has_transfer_assets_refresh(a) && has_coin_card_candles(a)
-        }),
-        "quick FireTest did not receive required API methods, transfer assets, non-blocking CoinCard candles, market state, trades and orderbook within {:?}: A=[{}]",
-        cfg.wait,
-        a.snapshot().summary()
-    );
-    a.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
-
-    let st = a.snapshot();
-    println!(
-        "OK: quick methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={}",
-        st.engine_method_count(EngineMethod::BaseCheck),
-        st.engine_method_count(EngineMethod::AuthCheck),
-        st.engine_method_count(EngineMethod::GetMarketsList),
-        st.engine_method_count(EngineMethod::GetMarketsIndexes),
-        st.engine_method_count(EngineMethod::UpdateMarketsList),
-        st.engine_method_count(EngineMethod::SubscribeAllTrades),
-        st.engine_method_count(EngineMethod::SubscribeOrderBook),
-    );
-    println!(
-        "OK: quick market consistency [{}]",
-        st.market_probe_summary()
-    );
-    let last_price = a
-        .target_last_price_tail()
-        .expect("quick FireTest did not retain LastPrice from UpdateMarketsList");
-    assert!(
-        last_price.current > 0.0,
-        "quick retained LastPrice must be positive, got {:?}",
-        last_price
-    );
-    println!(
-        "OK: quick retained LastPrice current={:.8} time={:.8}",
-        last_price.current, last_price.real_time
-    );
-    let (futures_retained, spot_retained) = a.target_retained_trade_counts();
-    assert!(
-        futures_retained + spot_retained > 0,
-        "quick FireTest received target trades but retained no target futures/spot rows"
-    );
-    println!(
-        "OK: quick retained trades futures={} spot={}",
-        futures_retained, spot_retained
-    );
-    let market = a.snapshot().market;
-    let derived = a
-        .history_worker
-        .derived_snapshot(&market, delphi_now_raw_for_test())
-        .expect("quick FireTest retained target market must expose derived snapshot");
-    if futures_retained > 0 {
-        assert!(
-            derived.trade_volumes.five_minutes.total_value() > 0.0,
-            "quick FireTest retained futures trades but derived trade volume stayed zero: {:?}",
-            derived.trade_volumes
-        );
-    }
-    println!(
-        "OK: quick derived trade_vol_1m={:.4} trade_vol_5m={:.4} trade_delta_1m={:.4}% trade_delta_5m={:.4}% last_price_delta_15m={:.4}% last_price_delta_1h={:.4}% candle_vol_1h={:.4}",
-        derived.trade_volumes.one_minute.total_value(),
-        derived.trade_volumes.five_minutes.total_value(),
-        derived.trade_deltas.one_minute,
-        derived.trade_deltas.five_minutes,
-        derived.last_price_deltas.fifteen_minutes,
-        derived.last_price_deltas.one_hour,
-        derived.candle_volumes.one_hour
-    );
-    log_err_emu_snapshot(
-        "quick 10% gate",
-        "A",
-        &a.client.err_emu_diagnostics_snapshot(),
-    );
-    println!("FIRETEST CPU quick A: {}", a.protocol_summary());
-    write_strategy_info_dump(FireProfile::Quick, &cfg, &[("A", &a)]);
-    a.emit_active_lib_report(FireProfile::Quick, start);
-
-    assert_eq!(st.parse_failed, 0, "quick FireTest saw ParseFailed");
+    let _stats = run_moonclient_public_smoke("quick/public", &cfg, keys, cfg.wait, false);
     assert!(
         start.elapsed() <= Duration::from_secs(QUICK_TOTAL_TARGET_SECS),
         "quick FireTest exceeded {}s target: {:.2}s",
@@ -3987,12 +4235,11 @@ fn fire_test_active_library_health() {
     let seeded_strategy = firetest_strategy(&cfg);
     let seeded_strategy_id = seeded_strategy.strategy_id;
 
+    let _public_path_stats =
+        run_moonclient_public_smoke("full/public-smoke", &cfg, keys, cfg.candles_timeout, true);
+
     let mut a = Session::connect("A", &cfg, keys, Some(seeded_strategy.clone()));
     let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
-    a.request_transfer_assets_refresh();
-    b.request_transfer_assets_refresh();
-    a.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
-    b.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
     assert_strategy_field_visible_for_firetest(&a, &cfg, &seeded_strategy);
     assert_strategy_field_visible_for_firetest(&b, &cfg, &seeded_strategy);
     assert!(
@@ -4004,13 +4251,17 @@ fn fire_test_active_library_health() {
 
     assert!(
         pump_pair_until(&mut a, &mut b, cfg.wait, "initial health", |a, b| {
-            has_initial_health(a)
-                && has_initial_health(b)
-                && has_transfer_assets_refresh(a)
-                && has_transfer_assets_refresh(b)
+            has_initial_health(a) && has_initial_health(b)
         }),
-        "FireTest initial health failed: both clients must receive trades, transfer assets and configured orderbook within {:?}",
+        "FireTest initial health failed: both clients must receive trades and configured orderbook within {:?}",
         cfg.wait
+    );
+    assert!(
+        pump_pair_until_nonblocking_api_refresh(&mut a, &mut b, &cfg, cfg.connect_timeout),
+        "FireTest non-blocking API refresh failed within {:?}: A=[{}] B=[{}]",
+        cfg.connect_timeout,
+        a.snapshot().summary(),
+        b.snapshot().summary()
     );
     let _a_initial_settings = request_settings_until(&mut a, cfg.connect_timeout);
     let _b_initial_settings = request_settings_until(&mut b, cfg.connect_timeout);

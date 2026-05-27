@@ -512,8 +512,9 @@ impl Client {
     /// Low-level fire-and-forget `emk_RequestCandlesData`.
     ///
     /// The server sends several chunked `EngineResponse` packets with the same
-    /// `request_uid`. Normal applications should use the high-level
-    /// `MoonClient::refresh_candles` path.
+    /// `request_uid`. Normal applications should use `MoonClient` trades
+    /// subscription; Active Lib requests/applies the initial full 5m snapshot
+    /// automatically.
     #[doc(hidden)]
     pub fn api_request_candles_data(&self) {
         self.send_api_request(&crate::commands::engine_request::request_candles_data());
@@ -547,7 +548,8 @@ impl Client {
     ///
     /// It sends the request, registers the chunked aggregator, and returns a
     /// `Receiver<MergedCandles>`. The main loop must keep running while the
-    /// receiver waits. Normal applications should use `MoonClient::refresh_candles`.
+    /// receiver waits. Normal applications should use `MoonClient` trades
+    /// subscription and read retained candles from market history readers.
     ///
     /// Pending slot lives until complete/error, session reset, another request
     /// with the same UID replaces it, or a one-shot caller timeout removes it.
@@ -575,7 +577,11 @@ impl Client {
         let (uid, rx) = self.api_request_candles_data_async_registered();
         match self.run_until_response(dispatcher, &rx, timeout) {
             Ok(merged) => {
-                dispatcher.apply_candles_snapshot(&merged.markets);
+                if dispatcher.apply_candles_snapshot(&merged.markets).is_some() {
+                    if let Some(rx) = dispatcher.market_history_barrier_async() {
+                        let _ = rx.recv();
+                    }
+                }
                 Ok(merged)
             }
             Err(err) => {

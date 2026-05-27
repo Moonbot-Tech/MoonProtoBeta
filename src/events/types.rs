@@ -201,6 +201,11 @@ pub enum Event {
     TransferAssets(TransferAssetsEvent),
     /// Demand-driven CoinCard candles for one market/history kind.
     CoinCardCandles(crate::state::CoinCardCandlesEvent),
+    /// Initial full 5m candles snapshot for retained Active Lib history.
+    ///
+    /// This is emitted only after the history worker acknowledges that the
+    /// snapshot command has been processed, so readers already see the candles.
+    CandlesSnapshot(crate::state::CandlesSnapshotEvent),
     /// Completion of a non-blocking user-facing Engine API action.
     EngineAction(EngineActionEvent),
     /// Compact arbitrage relay payload after active-library market-index

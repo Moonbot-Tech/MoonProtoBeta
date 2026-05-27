@@ -1,13 +1,13 @@
-# Engine API
+﻿# Engine API
 
 Engine API is the request/response wire surface for server operations:
 health checks, account reads, market list refreshes, candles, orderbook
 snapshots, transfer assets, and account settings.
 
-Use typed `MoonClient::request_*` helpers for common reads only when the caller
-really needs the value in the same synchronous branch. User-facing UI refreshes
-and mutations are Active Lib intents: they queue work, return immediately, and
-publish events/snapshots later. Low-level
+Use explicit `MoonClient::blocking_*` helpers only when scripts, diagnostics, or
+worker code really need the value in the same synchronous branch. User-facing UI
+refreshes and mutations are Active Lib intents: they queue work, return
+immediately, and publish events/snapshots later. Low-level
 `Client::api_*` wrappers are hidden from rustdoc and kept only for custom
 protocol tools that intentionally work with raw `EngineResponse` receivers.
 
@@ -25,12 +25,11 @@ this default when `InitConfig::step_timeout` is `None`.
 ```rust
 use std::time::Duration;
 
-let qty = client.request_balance("USDT", Duration::from_secs(12))?;
-let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
-let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
+let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
+let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
+let api_expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
 let transfer_assets =
-    client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
-let markets_received = client.refresh_candles(Duration::from_secs(30))?;
+    client.blocking_request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 ```
 
 The one-shot helpers validate `EngineResponse::success`. Read helpers parse the
@@ -51,8 +50,9 @@ doing that work automatically.
 
 Chunked `RequestCandlesData` uses its own pending registry internally:
 registered chunks are also consumed and merged from receive-side DataReadInt.
-The normal public helper is `refresh_candles`, which hides the merged zlib
-payload and applies parsed 5m rows to retained market history.
+Normal chart UI does not call this request directly: Active Lib sends it once
+after trades storage is enabled, applies parsed 5m rows to retained market
+history, and emits `Event::CandlesSnapshot` after the history-worker barrier.
 
 For custom raw payloads with caller-owned timeout cleanup, a low-level runtime
 can call `Client::request_engine_response`. Raw `api_*` receivers keep their
@@ -64,23 +64,22 @@ path.
 
 | Group | Methods |
 |---|---|
-| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets` |
 | `MoonClient` async Active Lib refresh | `request_client_settings` / `refresh_settings`, `request_balance_snapshot` / `refresh_balances`, `request_order_snapshot`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
 | `MoonClient` non-blocking mutation/refresh intents | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `transfer_asset` / `do_transfer_asset`, `refresh_markets_balance_full`, `reload_order_book` |
-| Explicit blocking diagnostic helpers | `blocking_request_client_settings`, `blocking_request_balance_snapshot`, `blocking_request_order_snapshot`, `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
+| Explicit blocking diagnostic helpers | `blocking_request_balance`, `blocking_request_hedge_mode`, `blocking_request_api_expiration_time`, `blocking_request_transfer_assets`, `blocking_request_client_settings`, `blocking_request_balance_snapshot`, `blocking_request_order_snapshot`, `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
 
 ## Blocking vs Async
 
 Blocking helpers wait for a specific server response while the owned runtime
-keeps MoonProto pumping. Use them when the caller truly needs the returned value
-in the same synchronous branch before continuing:
+keeps MoonProto pumping. They are intentionally named with `blocking_`. Use them
+when the caller truly needs the returned value in the same synchronous branch
+before continuing:
 
-- `request_balance("USDT", timeout)`;
-- `request_hedge_mode(timeout)`;
-- `request_api_expiration_time(timeout)`;
-- `refresh_candles(timeout)`;
+- `blocking_request_balance("USDT", timeout)`;
+- `blocking_request_hedge_mode(timeout)`;
+- `blocking_request_api_expiration_time(timeout)`;
 - `blocking_request_balance_snapshot(timeout)` /
   `blocking_request_order_snapshot(timeout)`.
 
@@ -97,6 +96,9 @@ snapshots/events:
   `snapshot().settings().client_settings` and emits `Event::Settings`;
 - `request_coin_card_candles(market, kind)`, which fills
   `snapshot().coin_card_candles()` and emits `Event::CoinCardCandles`;
+- the automatic full 5m candles snapshot after trades storage is enabled, which
+  fills `market_history_readers(...).candles_5m` and emits
+  `Event::CandlesSnapshot`;
 - account actions such as `set_leverage`, `set_hedge_mode`,
   `cancel_all_orders`, `change_position_type`, `confirm_risk_limit`,
   `set_ma_mode`, `reload_order_book`, and `transfer_asset`;
@@ -130,27 +132,30 @@ typed subscription gate.
 
 ## Balance
 
-`request_balance(currency)` returns the current quantity for one currency:
+`blocking_request_balance(currency)` is a direct diagnostic read for one
+currency:
 
 ```rust
-let qty = client.request_balance("USDT", Duration::from_secs(12))?;
+let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
 println!("USDT balance={qty}");
 ```
 
 ## Account Settings
 
-`request_hedge_mode()` returns the current hedge-mode flag:
+`blocking_request_hedge_mode()` is a direct diagnostic read for the hedge-mode
+flag:
 
 ```rust
-let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
+let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
 println!("hedge_mode={hedge_mode}");
 ```
 
-`request_api_expiration_time()` returns an `ApiExpirationTime` wrapper and
-exposes `system_time()`, `unix_seconds()`, and `days_until(...)` helpers:
+`blocking_request_api_expiration_time()` is a direct diagnostic read for API-key
+expiration metadata. It returns an `ApiExpirationTime` wrapper and exposes
+`system_time()`, `unix_seconds()`, and `days_until(...)` helpers:
 
 ```rust
-let expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
+let expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
 if let Some(unix) = expiration.unix_seconds() {
     println!("API key expires at unix_seconds={unix}");
 }
@@ -160,14 +165,10 @@ For raw payload access, hidden low-level `Client::api_*` methods remain
 available and return `Receiver<EngineResponse>`. They are for custom runtimes
 and diagnostics, not normal UI code.
 
-`refresh_candles` is the normal explicit full candles refresh helper. It
-registers the chunk aggregator, keeps the runtime pumping, hides the
-chunked/zipped payload, and applies parsed 5m candles to retained market history
-when trades storage is active. Normal chart UI reads candles from
-`snapshot.market_history_readers(market)`.
 Hidden low-level chunk helpers remain available for diagnostics that need
 `MergedCandles`, but regular applications should not build chart state from raw
-chunk/zlib payloads.
+chunk/zlib payloads. Normal chart UI reads retained candles from
+`snapshot.market_history_readers(market)`.
 
 `request_markets_balance_full` asks the server to refresh the full balance
 state. The current reference server normally acknowledges the request with an
@@ -180,9 +181,12 @@ reference server has no request-handler branches for them and returns
 `Unknown method` (error 400).
 
 `refresh_transfer_assets` is the normal Active Lib path for transfer UI. It
-queues the three wallet refresh requests and returns immediately; completed
-responses update `snapshot().transfer_assets()` and emit
-`Event::TransferAssets`:
+queues the three wallet refresh requests and returns immediately. Responses are
+polled by the runtime owner, so waiting for Spot/Futures/Quarterly never blocks
+protocol pumping or other Active Lib work. Each response updates
+`snapshot().transfer_assets()` and emits a per-wallet `Event::TransferAssets`;
+after all requested wallet kinds answer, `TransferAssetsEvent::RefreshCompleted`
+is emitted:
 
 ```rust
 use moonproto::ExchangeKind;
@@ -196,12 +200,12 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-`request_transfer_assets(kind, timeout)` remains available as a direct blocking
-request/response helper for scripts and diagnostics:
+`blocking_request_transfer_assets(kind, timeout)` remains available as a direct
+blocking request/response helper for scripts and diagnostics:
 
 ```rust
 let assets =
-    client.request_transfer_assets(ExchangeKind::Spot, Duration::from_secs(12))?;
+    client.blocking_request_transfer_assets(ExchangeKind::Spot, Duration::from_secs(12))?;
 ```
 
 The typed parser is also available as
@@ -240,7 +244,7 @@ DEFLATE-decompressed when the response was compressed. If the response metadata
 is malformed, parsing fails before an `EngineResponse` is emitted.
 
 Transfer asset rows stored in `TransferAssetsState` and returned by
-`request_transfer_assets`:
+`blocking_request_transfer_assets`:
 
 ```rust
 pub struct TransferAsset {

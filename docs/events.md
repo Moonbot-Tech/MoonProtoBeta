@@ -1,4 +1,4 @@
-# Events And Snapshots
+﻿# Events And Snapshots
 
 `MoonClient` publishes typed events and immutable snapshots. Events tell the
 application what changed; snapshots let UI code read the current retained state.
@@ -20,6 +20,7 @@ for event in client.drain_events() {
         Event::Trade(trade_event) => handle_trade_signal(trade_event),
         Event::Markets(markets_event) => handle_markets_event(markets_event),
         Event::Balance(balance_event) => handle_balance_event(balance_event),
+        Event::CandlesSnapshot(candles_event) => handle_candles_ready(candles_event),
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
         Event::EngineResponse(resp) if !resp.success => {
@@ -67,6 +68,9 @@ pub enum Event {
     Trade(TradesEvent),
     WatcherFills(WatcherFillsEvent),
     Balance(BalanceEvent),
+    TransferAssets(TransferAssetsEvent),
+    CoinCardCandles(CoinCardCandlesEvent),
+    CandlesSnapshot(CandlesSnapshotEvent),
     Arb { uid: u64, payload: ArbPayload },
     Strat(StratEvent),
     Settings(SettingsEvent),
@@ -84,6 +88,10 @@ exact payloads; it is not a recovery mechanism for application code.
 
 `TradesEvent::Applied` is a signal that retained trade/history state has been
 updated. Read actual rows from `MarketHistoryReaders`.
+
+`CandlesSnapshotEvent::Ready` is emitted after the initial full 5m candles
+snapshot has been processed by the history worker. At that point
+`market_history_readers(market).candles_5m` already sees the retained rows.
 
 `WatcherFillsEvent` contains `market_name`, HyperDex user address, decoded fill
 rows, and helper methods for flags/time conversion.
@@ -104,11 +112,12 @@ trades/orderbook sync state before applying new indexed stream packets.
 ## One-Shot Requests
 
 Some explicit script/diagnostic helpers keep the runtime pumping while they
-wait. Any unrelated packets received during the wait are still applied and
-remain available through the normal event receiver:
+wait. They are named with a `blocking_` prefix. Any unrelated packets received
+during the wait are still applied and remain available through the normal event
+receiver:
 
 ```rust
-let qty = client.request_balance("USDT", timeout)?;
+let qty = client.blocking_request_balance("USDT", timeout)?;
 for event in client.drain_events() {
     handle_event(event);
 }

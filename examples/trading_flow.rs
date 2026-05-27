@@ -1,4 +1,4 @@
-//! Compact end-to-end Active Lib flow for application developers.
+﻿//! Compact end-to-end Active Lib flow for application developers.
 //!
 //! It uses only `MoonClient`: connect/init, subscriptions, one-shot reads,
 //! snapshots/events, and order intents.
@@ -51,7 +51,7 @@ fn main() {
         );
     }
 
-    match client.request_balance("USDT", Duration::from_secs(15)) {
+    match client.blocking_request_balance("USDT", Duration::from_secs(15)) {
         Ok(balance) => println!("[balance] USDT={balance}"),
         Err(err) => println!("[balance] request failed: {err}"),
     }

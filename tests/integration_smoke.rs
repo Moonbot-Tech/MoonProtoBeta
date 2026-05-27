@@ -1,4 +1,4 @@
-//! Live-server integration smoke test for the public `MoonClient` happy path.
+﻿//! Live-server integration smoke test for the public `MoonClient` happy path.
 //!
 //! Run:
 //! ```powershell
@@ -89,9 +89,9 @@ fn runtime_smoke_full_happy_path() {
     );
 
     let balance = client
-        .request_balance("USDT", Duration::from_secs(15))
-        .expect("FAIL: MoonClient::request_balance failed");
-    println!("OK: request_balance USDT={balance}");
+        .blocking_request_balance("USDT", Duration::from_secs(15))
+        .expect("FAIL: MoonClient::blocking_request_balance failed");
+    println!("OK: blocking_request_balance USDT={balance}");
 
     let mut trades_packets = 0u32;
     let mut orderbook_applied = 0u32;

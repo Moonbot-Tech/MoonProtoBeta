@@ -1755,6 +1755,76 @@ fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write(
 }
 
 #[test]
+fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
+    let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
+        futures_trades_capacity: 0,
+        spot_trades_capacity: 0,
+        liquidation_capacity: 0,
+        mm_orders_capacity: 0,
+        mm_order_companion_capacity: 0,
+        last_price_capacity: 0,
+        mini_candles_capacity: 0,
+        candles_5m_capacity: 8,
+    });
+
+    let mut d = EventDispatcher::new();
+    d.set_market_history_handle(worker.handle());
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+    d.set_trade_storage_scope(Some(&crate::state::TradeStorageScope::All), 0.0);
+
+    let markets = vec![crate::commands::candles::RequestCandlesMarket {
+        market_name: "BTCUSDT".to_string(),
+        candles_5m: vec![crate::commands::candles::DeepPrice {
+            open_p: 10.0,
+            close_p: 11.0,
+            max_p: 12.0,
+            min_p: 9.0,
+            vol: 123.0,
+            time: 45_000.0,
+        }],
+        buy_wall: [crate::commands::candles::WallItem::default(); 4],
+        sell_wall: [crate::commands::candles::WallItem::default(); 4],
+    }];
+
+    let summary = d
+        .apply_candles_snapshot(&markets)
+        .expect("snapshot is queued to retained history");
+    let barrier = d
+        .market_history_barrier_async()
+        .expect("history worker barrier available");
+    barrier
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("worker processed candles snapshot before event");
+    d.queue_candles_snapshot_event(crate::state::CandlesSnapshotEvent::Ready {
+        request_uid: 42,
+        summary,
+    });
+
+    let readers = worker.readers("BTCUSDT").expect("market reader exists");
+    let candles = readers.candles_5m.expect("candles ring enabled");
+    let mut rows = Vec::new();
+    candles.copy_last(8, &mut rows);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].close(), 11.0);
+
+    assert!(matches!(
+        d.take_queued_events().as_slice(),
+        [Event::CandlesSnapshot(
+            crate::state::CandlesSnapshotEvent::Ready {
+                request_uid: 42,
+                summary: crate::state::CandlesSnapshotApplySummary {
+                    received_markets: 1,
+                    received_candles: 1,
+                    retained_markets: 1,
+                    retained_candles: 1,
+                },
+            }
+        )]
+    ));
+}
+
+#[test]
 fn active_dispatch_history_worker_uses_server_index_mapping_not_market_vector_order() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 8,

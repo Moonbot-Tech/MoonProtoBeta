@@ -1,4 +1,4 @@
-# Client
+﻿# Client
 
 `MoonClient` is the recommended application handle for one MoonProto connection.
 It owns a runtime thread and keeps the active session alive until `stop()` or
@@ -171,13 +171,14 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-One-shot Engine API read helpers also run inside the owned runtime and parse
-their payloads. User-facing mutations are non-blocking Active Lib intents: they
-return an `EngineActionTicket` after queuing the request, and completion arrives
-later as `Event::EngineAction` plus the underlying `Event::EngineResponse`.
+Explicit `blocking_*` Engine API reads also run inside the owned runtime and
+parse their payloads while the protocol keeps pumping. User-facing mutations are
+non-blocking Active Lib intents: they return an `EngineActionTicket` after
+queuing the request, and completion arrives later as `Event::EngineAction` plus
+the underlying `Event::EngineResponse`.
 
 ```rust
-let balance = client.request_balance("USDT", Duration::from_secs(15))?;
+let balance = client.blocking_request_balance("USDT", Duration::from_secs(15))?;
 let ticket = client.set_leverage("BTCUSDT", 20)?;
 client.set_hedge_mode(true)?;
 client.cancel_all_orders()?;
@@ -445,18 +446,17 @@ or set `server_info` manually from a parsed BaseCheck response.
 
 ## Engine API Requests
 
-For common one-shot reads, use `MoonClient` request helpers. The runtime keeps
-the UDP loop alive while the caller waits for the request timeout. For
-user-facing mutations, use non-blocking Active Lib intents:
+For direct one-shot diagnostic reads, use explicit `blocking_*` helpers. The
+runtime keeps the UDP loop alive while the caller waits for the request timeout.
+For user-facing UI refreshes and mutations, use non-blocking Active Lib intents:
 
 ```rust
-let qty = client.request_balance("USDT", Duration::from_secs(12))?;
-let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
-let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
+let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
+let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
+let api_expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
 client.refresh_transfer_assets()?; // async Active Lib update; read snapshot().transfer_assets()
 let transfer_assets =
-    client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
-let markets_received = client.refresh_candles(Duration::from_secs(30))?;
+    client.blocking_request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 let coin_card_ticket = client.request_coin_card_candles(
     "BTCUSDT",
     moonproto::commands::candles::DeepHistoryKind::Hour4,
@@ -467,8 +467,8 @@ client.set_hedge_mode(true)?;
 client.confirm_risk_limit("BTCUSDT")?;
 ```
 
-Read helpers validate the server response and parse the payload. Blocking
-mutation counterparts exist with a `blocking_` prefix for scripts, diagnostics,
+Blocking helpers validate the server response and parse the payload. Blocking
+mutation counterparts also use the `blocking_` prefix for scripts, diagnostics,
 and custom tools that deliberately need a synchronous acknowledgement.
 `request_coin_card_candles` is intentionally non-blocking even though the
 underlying Delphi `Engine.getDeepHistory` call is blocking: Delphi UI sets a
@@ -481,19 +481,9 @@ diagnostic tools. A normal application should not wait on raw receivers from the
 UI thread.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
-pending slot. Use `refresh_candles` for the common one-shot flow:
-
-Registered candle chunks are aggregated from the receive-side DataReadInt path
-while the client loop is active; consumed chunks do not produce raw callback or
-dispatcher events.
-
-```rust
-let markets_received = client.refresh_candles(Duration::from_secs(30))?;
-println!("markets={markets_received}");
-```
-
-`request_candles_data` is kept for diagnostics that need the merged raw protocol
-payload; chart UI should read retained candles from market history readers.
+pending slot. Active Lib sends the full 5m snapshot request automatically after
+trades storage is enabled, emits `Event::CandlesSnapshot` after the history
+worker applies it, and chart UI reads retained rows from market history readers.
 
 ## UI Settings Request
 

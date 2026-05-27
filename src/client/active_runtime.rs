@@ -240,8 +240,9 @@ impl MoonClient {
     /// Request transferable asset refresh for Spot, Futures, and Quarterly.
     ///
     /// This returns as soon as the requests are queued. The runtime applies each
-    /// response to `snapshot().transfer_assets()` and emits
-    /// `Event::TransferAssets` when that wallet kind finishes.
+    /// response to `snapshot().transfer_assets()`, emits per-wallet
+    /// `Event::TransferAssets`, and emits `TransferAssetsEvent::RefreshCompleted`
+    /// after all wallet kinds have answered.
     pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefresh)
     }
@@ -294,8 +295,8 @@ impl MoonClient {
             })
     }
 
-    /// Request one asset balance through Engine API.
-    pub fn request_balance(
+    /// Blocking diagnostic request for one asset balance through Engine API.
+    pub fn blocking_request_balance(
         &self,
         asset: impl Into<String>,
         timeout: Duration,
@@ -310,8 +311,8 @@ impl MoonClient {
         })
     }
 
-    /// Request hedge-mode state through Engine API.
-    pub fn request_hedge_mode(&self, timeout: Duration) -> Result<bool, MoonClientError> {
+    /// Blocking diagnostic request for hedge-mode state through Engine API.
+    pub fn blocking_request_hedge_mode(&self, timeout: Duration) -> Result<bool, MoonClientError> {
         self.send_request(RuntimeCommandRequest::HedgeMode { timeout })
             .and_then(|reply| match reply {
                 RuntimeReply::HedgeMode(result) => result.map_err(MoonClientError::from),
@@ -319,8 +320,8 @@ impl MoonClient {
             })
     }
 
-    /// Request API-key expiration metadata through Engine API.
-    pub fn request_api_expiration_time(
+    /// Blocking diagnostic request for API-key expiration metadata through Engine API.
+    pub fn blocking_request_api_expiration_time(
         &self,
         timeout: Duration,
     ) -> Result<crate::commands::engine_api::ApiExpirationTime, MoonClientError> {
@@ -331,13 +332,13 @@ impl MoonClient {
             })
     }
 
-    /// Request transferable assets through Engine API.
+    /// Blocking diagnostic request for transferable assets through Engine API.
     ///
     /// This is a direct blocking request/response helper. Regular UI code
     /// should prefer `refresh_transfer_assets()` plus
     /// `snapshot().transfer_assets()` so the runtime remains the owner of
     /// Active Lib state.
-    pub fn request_transfer_assets(
+    pub fn blocking_request_transfer_assets(
         &self,
         kind: crate::state::ExchangeKind,
         timeout: Duration,
@@ -500,13 +501,17 @@ impl MoonClient {
             })
     }
 
-    /// Request a full 5m candles refresh and apply it to retained market history.
+    /// Blocking diagnostic full 5m candles refresh.
     ///
-    /// This is the normal Active Lib API for chart state. It hides the
-    /// chunked/zipped protocol payload and returns the number of parsed market
-    /// candle entries in the received snapshot. Read retained candles through
-    /// `snapshot().market_history_readers(market_name)`.
-    pub fn refresh_candles(&self, timeout: Duration) -> Result<usize, MoonClientError> {
+    /// Normal applications do not call this. Active Lib requests the initial
+    /// full 5m snapshot automatically after the first trades subscription, emits
+    /// `Event::CandlesSnapshot` after the history-worker barrier, and then keeps
+    /// retained candles current from trades.
+    #[doc(hidden)]
+    pub fn blocking_refresh_candles_for_diagnostics(
+        &self,
+        timeout: Duration,
+    ) -> Result<usize, MoonClientError> {
         self.request_candles_data(timeout)
             .map(|merged| merged.markets.len())
     }

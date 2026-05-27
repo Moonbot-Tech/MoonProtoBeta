@@ -17,6 +17,10 @@ pub(super) fn runtime_loop(
     snapshot: Arc<RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>>,
 ) {
     let mut pending = RuntimePending::default();
+    if client.trades_storage_scope_intent().is_some() {
+        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
+        schedule_auto_candles_snapshot(&mut client, &mut pending);
+    }
     loop {
         let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut pending);
         if changed {
@@ -28,11 +32,10 @@ pub(super) fn runtime_loop(
 
         client.run_with_dispatcher_worker_queued(ACTIVE_RUNTIME_TICK, &mut dispatcher);
 
-        let candles_changed = poll_auto_candles(&mut pending.auto_candles, &mut dispatcher);
+        let candles_changed = poll_auto_candles(&mut pending, &mut dispatcher);
         let coin_card_changed =
             poll_coin_card_candles(&mut pending.coin_card_candles, &mut dispatcher);
-        let transfer_assets_changed =
-            poll_transfer_assets(&mut pending.transfer_assets, &mut dispatcher);
+        let transfer_assets_changed = poll_transfer_assets(&mut pending, &mut dispatcher);
         poll_engine_actions(&mut pending.engine_actions, &mut dispatcher);
         if candles_changed || coin_card_changed || transfer_assets_changed {
             publish_snapshot(&dispatcher, &snapshot);
@@ -54,15 +57,39 @@ pub(super) fn runtime_loop(
 
 #[derive(Default)]
 struct RuntimePending {
-    auto_candles: Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    auto_candles_scope: Option<std::sync::Arc<crate::state::TradeStorageScope>>,
+    auto_candles_requested: bool,
+    auto_candles: Vec<PendingAutoCandles>,
+    auto_candles_apply: Vec<PendingAutoCandlesApply>,
     coin_card_candles: Vec<PendingCoinCardCandles>,
     transfer_assets: Vec<PendingTransferAssets>,
+    transfer_assets_batches: Vec<PendingTransferAssetsBatch>,
+    next_transfer_assets_batch_id: u64,
     engine_actions: Vec<PendingEngineAction>,
+}
+
+struct PendingAutoCandles {
+    uid: u64,
+    rx: mpsc::Receiver<crate::client::MergedCandles>,
+}
+
+struct PendingAutoCandlesApply {
+    uid: u64,
+    summary: crate::state::CandlesSnapshotApplySummary,
+    rx: mpsc::Receiver<()>,
 }
 
 struct PendingTransferAssets {
     kind: crate::state::ExchangeKind,
+    batch_id: Option<u64>,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+struct PendingTransferAssetsBatch {
+    id: u64,
+    remaining: usize,
+    updated: usize,
+    failed: usize,
 }
 
 struct PendingCoinCardCandles {
@@ -127,22 +154,21 @@ fn handle_command(
         RuntimeCommand::SubscribeAllTrades(want_mm) => {
             client.subscribe_all_trades(want_mm);
             sync_runtime_trade_storage_scope(client, dispatcher);
-            if client.trades_storage_scope_intent().is_some() {
-                schedule_auto_candles_snapshot(client, &mut pending.auto_candles);
-            }
+            schedule_auto_candles_snapshot(client, pending);
             false
         }
         RuntimeCommand::SubscribeTradesFor { want_mm, markets } => {
             client.subscribe_trades_for(want_mm, markets);
             sync_runtime_trade_storage_scope(client, dispatcher);
-            if client.trades_storage_scope_intent().is_some() {
-                schedule_auto_candles_snapshot(client, &mut pending.auto_candles);
-            }
+            schedule_auto_candles_snapshot(client, pending);
             false
         }
         RuntimeCommand::UnsubscribeAllTrades => {
             client.unsubscribe_all_trades();
             pending.auto_candles.clear();
+            pending.auto_candles_apply.clear();
+            pending.auto_candles_requested = false;
+            pending.auto_candles_scope = None;
             sync_runtime_trade_storage_scope(client, dispatcher);
             false
         }
@@ -155,11 +181,11 @@ fn handle_command(
             false
         }
         RuntimeCommand::TransferAssetsRefresh => {
-            schedule_transfer_assets_refresh(client, &mut pending.transfer_assets);
+            schedule_transfer_assets_refresh(client, pending);
             false
         }
         RuntimeCommand::TransferAssetsRefreshKind(kind) => {
-            schedule_transfer_assets_refresh_kind(client, &mut pending.transfer_assets, kind);
+            schedule_transfer_assets_refresh_kind(client, &mut pending.transfer_assets, kind, None);
             false
         }
         RuntimeCommand::EngineAction {
@@ -297,17 +323,43 @@ fn handle_usize_command(
     }
 }
 
-fn schedule_auto_candles_snapshot(
-    client: &mut Client,
-    auto_candles: &mut Vec<mpsc::Receiver<crate::client::MergedCandles>>,
-) {
-    let (_uid, rx) = client.api_request_candles_data_async_registered();
-    auto_candles.push(rx);
+fn schedule_auto_candles_snapshot(client: &mut Client, pending: &mut RuntimePending) {
+    let Some(scope) = client.trades_storage_scope_intent() else {
+        return;
+    };
+    if pending.auto_candles_scope.as_deref() != Some(scope.as_ref()) {
+        pending.auto_candles.clear();
+        pending.auto_candles_apply.clear();
+        pending.auto_candles_requested = false;
+        pending.auto_candles_scope = Some(scope);
+    }
+    if pending.auto_candles_requested {
+        return;
+    }
+    let (uid, rx) = client.api_request_candles_data_async_registered();
+    pending.auto_candles_requested = true;
+    pending.auto_candles.push(PendingAutoCandles { uid, rx });
 }
 
-fn schedule_transfer_assets_refresh(client: &mut Client, pending: &mut Vec<PendingTransferAssets>) {
+fn schedule_transfer_assets_refresh(client: &mut Client, pending: &mut RuntimePending) {
+    pending.next_transfer_assets_batch_id =
+        pending.next_transfer_assets_batch_id.wrapping_add(1).max(1);
+    let batch_id = pending.next_transfer_assets_batch_id;
+    pending
+        .transfer_assets_batches
+        .push(PendingTransferAssetsBatch {
+            id: batch_id,
+            remaining: crate::state::ExchangeKind::ALL.len(),
+            updated: 0,
+            failed: 0,
+        });
     for kind in crate::state::ExchangeKind::ALL {
-        schedule_transfer_assets_refresh_kind(client, pending, kind);
+        schedule_transfer_assets_refresh_kind(
+            client,
+            &mut pending.transfer_assets,
+            kind,
+            Some(batch_id),
+        );
     }
 }
 
@@ -315,9 +367,10 @@ fn schedule_transfer_assets_refresh_kind(
     client: &mut Client,
     pending: &mut Vec<PendingTransferAssets>,
     kind: crate::state::ExchangeKind,
+    batch_id: Option<u64>,
 ) {
     let rx = client.api_update_transfer_assets(kind);
-    pending.push(PendingTransferAssets { kind, rx });
+    pending.push(PendingTransferAssets { kind, batch_id, rx });
 }
 
 fn schedule_engine_action(
@@ -350,19 +403,88 @@ fn sync_runtime_trade_storage_scope(
 }
 
 fn poll_auto_candles(
-    auto_candles: &mut Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    pending: &mut RuntimePending,
     dispatcher: &mut crate::events::EventDispatcher,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
-    while i < auto_candles.len() {
-        match auto_candles[i].try_recv() {
+    while i < pending.auto_candles.len() {
+        match pending.auto_candles[i].rx.try_recv() {
             Ok(merged) => {
-                changed |= dispatcher.apply_candles_snapshot(&merged.markets);
-                auto_candles.swap_remove(i);
+                let request_uid = merged.uid;
+                let fallback_uid = pending.auto_candles[i].uid;
+                let summary = dispatcher.apply_candles_snapshot(&merged.markets);
+                pending.auto_candles.swap_remove(i);
+                if let Some(summary) = summary {
+                    if let Some(rx) = dispatcher.market_history_barrier_async() {
+                        pending.auto_candles_apply.push(PendingAutoCandlesApply {
+                            uid: request_uid,
+                            summary,
+                            rx,
+                        });
+                    } else {
+                        dispatcher.queue_candles_snapshot_event(
+                            crate::state::CandlesSnapshotEvent::Failed {
+                                request_uid: Some(request_uid),
+                                error: "market history worker unavailable after snapshot apply"
+                                    .to_string(),
+                            },
+                        );
+                        changed = true;
+                    }
+                } else {
+                    dispatcher.queue_candles_snapshot_event(
+                        crate::state::CandlesSnapshotEvent::Failed {
+                            request_uid: Some(if request_uid != 0 {
+                                request_uid
+                            } else {
+                                fallback_uid
+                            }),
+                            error: "candles snapshot was not applied to retained history"
+                                .to_string(),
+                        },
+                    );
+                    changed = true;
+                }
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                auto_candles.swap_remove(i);
+                let uid = pending.auto_candles.swap_remove(i).uid;
+                dispatcher.queue_candles_snapshot_event(
+                    crate::state::CandlesSnapshotEvent::Failed {
+                        request_uid: Some(uid),
+                        error: "pending full candles receiver closed before response".to_string(),
+                    },
+                );
+                changed = true;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                i += 1;
+            }
+        }
+    }
+
+    let mut i = 0;
+    while i < pending.auto_candles_apply.len() {
+        match pending.auto_candles_apply[i].rx.try_recv() {
+            Ok(()) => {
+                let applied = pending.auto_candles_apply.swap_remove(i);
+                dispatcher.queue_candles_snapshot_event(
+                    crate::state::CandlesSnapshotEvent::Ready {
+                        request_uid: applied.uid,
+                        summary: applied.summary,
+                    },
+                );
+                changed = true;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let applied = pending.auto_candles_apply.swap_remove(i);
+                dispatcher.queue_candles_snapshot_event(
+                    crate::state::CandlesSnapshotEvent::Failed {
+                        request_uid: Some(applied.uid),
+                        error: "market history worker barrier closed before ack".to_string(),
+                    },
+                );
+                changed = true;
             }
             Err(mpsc::TryRecvError::Empty) => {
                 i += 1;
@@ -403,24 +525,27 @@ fn poll_coin_card_candles(
 }
 
 fn poll_transfer_assets(
-    pending: &mut Vec<PendingTransferAssets>,
+    pending: &mut RuntimePending,
     dispatcher: &mut crate::events::EventDispatcher,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
-    while i < pending.len() {
-        match pending[i].rx.try_recv() {
+    while i < pending.transfer_assets.len() {
+        match pending.transfer_assets[i].rx.try_recv() {
             Ok(resp) => {
-                changed |= dispatcher.apply_transfer_assets_response(pending[i].kind, resp);
-                pending.swap_remove(i);
+                let item = pending.transfer_assets.swap_remove(i);
+                let success = dispatcher.apply_transfer_assets_response(item.kind, resp);
+                changed |= success;
+                finish_transfer_assets_batch_item(pending, dispatcher, item.batch_id, success);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                let item = pending.transfer_assets.swap_remove(i);
                 dispatcher.transfer_assets_request_failed(
-                    pending[i].kind,
+                    item.kind,
                     "pending transfer-assets receiver closed before response",
                 );
                 changed = true;
-                pending.swap_remove(i);
+                finish_transfer_assets_batch_item(pending, dispatcher, item.batch_id, false);
             }
             Err(mpsc::TryRecvError::Empty) => {
                 i += 1;
@@ -428,6 +553,44 @@ fn poll_transfer_assets(
         }
     }
     changed
+}
+
+fn finish_transfer_assets_batch_item(
+    pending: &mut RuntimePending,
+    dispatcher: &mut crate::events::EventDispatcher,
+    batch_id: Option<u64>,
+    success: bool,
+) {
+    let Some(batch_id) = batch_id else {
+        return;
+    };
+    let Some(pos) = pending
+        .transfer_assets_batches
+        .iter()
+        .position(|batch| batch.id == batch_id)
+    else {
+        return;
+    };
+    let batch = &mut pending.transfer_assets_batches[pos];
+    batch.remaining = batch.remaining.saturating_sub(1);
+    if success {
+        batch.updated += 1;
+    } else {
+        batch.failed += 1;
+    }
+    if batch.remaining != 0 {
+        return;
+    }
+    let batch = pending.transfer_assets_batches.swap_remove(pos);
+    dispatcher.queue_events([crate::events::Event::TransferAssets(
+        crate::state::TransferAssetsEvent::RefreshCompleted {
+            request_id: batch.id,
+            requested: batch.updated + batch.failed,
+            updated: batch.updated,
+            failed: batch.failed,
+            revision: dispatcher.transfer_assets().revision(),
+        },
+    )]);
 }
 
 fn poll_engine_actions(
@@ -700,5 +863,92 @@ mod tests {
         assert!(err.missing_base_currency_code);
         let (sliced, high, low) = client.take_send_queues_for_test();
         assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
+    }
+
+    #[test]
+    fn auto_candles_snapshot_is_one_shot_for_current_trades_scope() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::SubscribeAllTrades(false),
+            &mut pending,
+        );
+        assert!(pending.auto_candles_requested);
+        assert_eq!(pending.auto_candles.len(), 1);
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::SubscribeAllTrades(false),
+            &mut pending,
+        );
+        assert_eq!(
+            pending.auto_candles.len(),
+            1,
+            "same trades scope must not schedule duplicate full candles requests"
+        );
+
+        handle_command(
+            &mut client,
+            &mut dispatcher,
+            RuntimeCommand::UnsubscribeAllTrades,
+            &mut pending,
+        );
+        assert!(!pending.auto_candles_requested);
+        assert!(pending.auto_candles.is_empty());
+        assert!(pending.auto_candles_apply.is_empty());
+        assert!(pending.auto_candles_scope.is_none());
+    }
+
+    #[test]
+    fn init_time_trades_scope_schedules_auto_candles_when_runtime_starts() {
+        let mut client = ready_client();
+        client.subscribe_all_trades(false);
+        let mut dispatcher = crate::events::EventDispatcher::new();
+        let mut pending = RuntimePending::default();
+
+        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
+        schedule_auto_candles_snapshot(&mut client, &mut pending);
+
+        assert!(pending.auto_candles_requested);
+        assert_eq!(pending.auto_candles.len(), 1);
+    }
+
+    #[test]
+    fn transfer_assets_batch_emits_completion_after_all_kinds_finish() {
+        let mut pending = RuntimePending::default();
+        pending
+            .transfer_assets_batches
+            .push(PendingTransferAssetsBatch {
+                id: 7,
+                remaining: 3,
+                updated: 0,
+                failed: 0,
+            });
+        let mut dispatcher = crate::events::EventDispatcher::new();
+
+        finish_transfer_assets_batch_item(&mut pending, &mut dispatcher, Some(7), true);
+        assert!(dispatcher.take_queued_events().is_empty());
+        finish_transfer_assets_batch_item(&mut pending, &mut dispatcher, Some(7), false);
+        assert!(dispatcher.take_queued_events().is_empty());
+        finish_transfer_assets_batch_item(&mut pending, &mut dispatcher, Some(7), true);
+
+        assert!(matches!(
+            dispatcher.take_queued_events().as_slice(),
+            [crate::events::Event::TransferAssets(
+                crate::state::TransferAssetsEvent::RefreshCompleted {
+                    request_id: 7,
+                    requested: 3,
+                    updated: 2,
+                    failed: 1,
+                    ..
+                }
+            )]
+        ));
+        assert!(pending.transfer_assets_batches.is_empty());
     }
 }

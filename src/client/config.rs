@@ -20,7 +20,7 @@ pub enum AuthStatus {
 }
 
 /// Error returned by one-shot Engine API helpers such as
-/// [`crate::MoonClient::request_balance`] and
+/// [`crate::MoonClient::blocking_request_balance`] and
 /// [`crate::MoonClient::blocking_request_coin_card_candles`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineRequestError {
