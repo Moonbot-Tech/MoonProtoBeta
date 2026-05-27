@@ -71,7 +71,7 @@ impl TradeCtx {
     }
 }
 
-/// CmdId=6: построить пакет TOrderReplaceCommand.
+/// CmdId=6: build `TOrderReplaceCommand`.
 ///
 /// Delphi `TOrderReplaceCommand.Create` always sends `Epoch=0` and
 /// `Status=OS_None` for client-originated replace commands.
@@ -88,14 +88,14 @@ pub fn build_order_replace(
     out
 }
 
-/// CmdId=9: запрос всех ордеров.
+/// CmdId=9: request all active orders.
 pub fn build_all_statuses_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_base_command_header(&mut out, 9, uid);
     out
 }
 
-/// CmdId=10: TOrderCancelCommand — отмена ордера.
+/// CmdId=10: `TOrderCancelCommand`, cancel one order.
 pub fn build_order_cancel(
     ctx: TradeCtx,
     market_name: &str,
@@ -229,7 +229,7 @@ pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f
     out
 }
 
-/// CmdId=18: TOrderStatusRequest — запрос статуса конкретного ордера.
+/// CmdId=18: `TOrderStatusRequest`, request one order status.
 pub fn build_order_status_request(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_trade_epoch_header(&mut out, 18, ctx, market_name, 0, OrderWorkerStatus::None);
@@ -324,8 +324,9 @@ pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short
     out
 }
 
-/// CmdId=23: TPenaltyCommand — пометить маркет penalty (cooldown).
-/// Аудит docs_api B-04: команда вызывается в TaskWorkers.pas:8361, Unit1.pas:11859/23750.
+/// CmdId=23: `TPenaltyCommand`, mark a market penalty/cooldown.
+///
+/// Delphi call sites: TaskWorkers.pas:8361, Unit1.pas:11859/23750.
 pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
@@ -339,7 +340,7 @@ pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     out
 }
 
-/// CmdId=3: TNewOrderCommand — запрос на создание нового ордера.
+/// CmdId=3: `TNewOrderCommand`, request a new order.
 pub fn build_new_order(
     ctx: TradeCtx,
     market_name: &str,

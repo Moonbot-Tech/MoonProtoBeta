@@ -14,7 +14,7 @@ impl OrderType {
     pub const BuyStop: Self = Self(2);
     pub const BuyLimit: Self = Self(3);
 
-    /// Сохранить raw Delphi ordinal byte.
+    /// Preserve a raw Delphi ordinal byte.
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
@@ -48,9 +48,9 @@ impl std::fmt::Debug for OrderType {
     }
 }
 
-/// TOrderWorkerStatus (MarketsU.pas:39) — состояние торгового ордера в state machine.
+/// TOrderWorkerStatus (MarketsU.pas:39), trading order state-machine status.
 ///
-/// Standard flow для long-позиции:
+/// Standard flow for a long position:
 /// ```text
 ///   None ──► BuySet ──► BuyDone ──► SellSet ──► SelLDone
 ///             │           │           │            │
@@ -58,48 +58,48 @@ impl std::fmt::Debug for OrderType {
 ///          BuyFail    BuyCancel   SellFail    SellCancel
 /// ```
 ///
-/// **Terminal states** (ордер закрыт, дальнейших переходов не будет):
+/// **Terminal states** (the order is closed and no further transition is expected):
 /// `SelLDone`, `SelLAlmostDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
 ///
-/// **Phase semantics** (для UI группировки):
-/// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) — ожидание/исполнение
-///   входа в позицию.
+/// **Phase semantics** for UI grouping:
+/// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) waits for or
+///   completes position entry.
 /// - **Sell phase** (`SellSet`/`SelLAlmostDone`/`SelLDone`/`SellFail`/`SellCancel`) —
-///   выход из позиции (take-profit / stop-loss / manual close).
-/// - `SelLAlmostDone` — sell уже завершился во время replace/market-stop path,
-///   в Delphi worker выходит из цикла так же как при финальных sell-statuses.
+///   exits the position (take-profit, stop-loss, or manual close).
+/// - `SelLAlmostDone` means the sell completed through a replace/market-stop
+///   path; Delphi leaves the worker loop like it does for final sell statuses.
 ///
-/// **Server constraints** (см. ARCHITECTURE.md §17 sync state):
-/// - Откат фазы запрещён сервером (нельзя из SellSet вернуться в BuySet).
-/// - Внутри фазы переходы по статусам валидны (BuySet → BuyDone).
-/// - Terminal состояние не меняется.
+/// **Server constraints**:
+/// - Phase rollback is rejected: a sell phase must not return to buy phase.
+/// - Transitions inside the same phase are valid, e.g. `BuySet -> BuyDone`.
+/// - Terminal state does not change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderWorkerStatus(pub u8);
 
 #[allow(non_upper_case_globals)]
 impl OrderWorkerStatus {
-    /// Initial state — ордер ещё не отправлен на биржу.
+    /// Initial state: the order has not been sent to the exchange yet.
     pub const None: Self = Self(0);
-    /// Buy-ордер не удался (отказ биржи, недостаточно баланса, т.п.). Terminal.
+    /// Buy order failed (exchange rejection, insufficient balance, etc.).
     pub const BuyFail: Self = Self(1);
-    /// Buy-ордер размещён на бирже, ждём fill.
+    /// Buy order is placed on the exchange and waits for fill.
     pub const BuySet: Self = Self(2);
-    /// Buy-ордер отменён (пользователем или системой). Terminal.
+    /// Buy order was cancelled by the user or system.
     pub const BuyCancel: Self = Self(3);
-    /// Buy-ордер исполнен — позиция открыта.
+    /// Buy order filled, position is open.
     pub const BuyDone: Self = Self(4);
-    /// Sell-ордер не удался. Terminal.
+    /// Sell order failed.
     pub const SellFail: Self = Self(5);
-    /// Sell-ордер (закрытие/take-profit) размещён, ждём fill.
+    /// Sell order (close/take-profit) is placed and waits for fill.
     pub const SellSet: Self = Self(6);
-    /// Sell-ордер отменён. Terminal.
+    /// Sell order was cancelled.
     pub const SellCancel: Self = Self(7);
-    /// Sell-ордер полностью исполнен — позиция закрыта.
+    /// Sell order fully filled, position is closed.
     pub const SelLDone: Self = Self(8);
-    /// Sell завершился через intermediate path; terminal для worker/state.
+    /// Sell completed through an intermediate path; terminal for worker/state.
     pub const SelLAlmostDone: Self = Self(9);
 
-    /// Сохранить raw Delphi ordinal byte.
+    /// Preserve a raw Delphi ordinal byte.
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }
@@ -128,7 +128,7 @@ impl OrderWorkerStatus {
         }
     }
 
-    /// Terminal status — ордер закрыт, воркер удалить.
+    /// Terminal status: the order is closed and the worker can be removed.
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -195,17 +195,17 @@ impl std::fmt::Debug for FixedPosition {
 }
 
 /// Sell-side `TMoveAllCmdType` (MoonProtoTradeStruct.pas:148 inline comment).
-/// Описывает интерпретацию параметра `Price`/`PriceZone` в `TMoveAllSellsCommand`.
+/// Describes how `TMoveAllSellsCommand` interprets `Price` / `PriceZone`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MoveAllCmdType(pub u8);
 
 #[allow(non_upper_case_globals)]
 impl MoveAllCmdType {
-    /// `MoveKind` — двигать всех по правилу из `ReplaceMultiKind`.
+    /// Move all matching orders by `ReplaceMultiKind`.
     pub const MoveKind: Self = Self(0);
-    /// `PriceZone` — двигать тех чья цена в зоне `[price_zone.min_p, price_zone.max_p]`.
+    /// Move orders whose price is inside `[price_zone.min_p, price_zone.max_p]`.
     pub const PriceZone: Self = Self(1);
-    /// `Pers` — персональный режим (см. Delphi server logic).
+    /// Percent/personal mode, interpreted by the Delphi server branch.
     pub const Pers: Self = Self(2);
 
     pub const fn from_byte(b: u8) -> Self {

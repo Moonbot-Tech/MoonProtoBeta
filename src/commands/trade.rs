@@ -1,22 +1,23 @@
-//! MPC_Order channel — все 30 подкоманд TBaseTradeCommand.
+//! `MPC_Order` channel: the 30 Delphi `TBaseTradeCommand` subcommands.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoTradeStruct.pas`.
+//! Delphi source: `MoonProto/MoonProtoTradeStruct.pas`.
 //!
-//! ## Архитектура канала
+//! ## Channel Shape
 //!
-//! Каждая команда имеет иерархию:
-//! - `TBaseCommand` — `cmd_id(1) + ver(2) + UID(8)` = 11 байт header.
+//! Each command follows the Delphi inheritance layout:
+//! - `TBaseCommand` — `cmd_id(1) + ver(2) + UID(8)` = 11-byte header.
 //! - `TBaseTradeCommand` extends → CmdClass = MPC_Order (CmdId=0).
 //! - `TBaseMarketCommand` extends → + `currency(1) + platform(1) + market_name:UTF8`.
 //! - `TTradeEpochCommand` extends `TBaseMarketCommand` → + `epoch:u16 + status:u8`.
 //!
-//! Wire-format каждой подкоманды строится байт-за-байтом, начиная с inherited.
+//! Every subcommand is written byte-for-byte, inherited fields first.
 //!
-//! ## Замечание о POrder / TOrderCompact / TStopSettings / TOrderUpdateData
+//! ## Packed Records
 //!
-//! Эти Delphi structures — `packed record` без выравнивания. Публичные Rust-типы
-//! держат обычные поля API/state, а приватные `Wire*` structs ниже зеркалят
-//! fixed wire layout с compile-time проверкой размера.
+//! `TOrderCompact`, `TStopSettings`, and `TOrderUpdateData` are Delphi
+//! `packed record` values. Public Rust structs expose normal fields, while the
+//! private `Wire*` structs mirror the fixed wire layout with compile-time size
+//! checks.
 
 use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
@@ -100,7 +101,7 @@ pub struct VStopUpdateParams {
 // ============================================================================
 
 /// `TNewOrderCommand` (TradeStruct.pas:44-53).
-/// Запрос клиента на создание нового ордера.
+/// Client request to create a new order.
 #[derive(Debug, Clone)]
 pub struct NewOrderCommand {
     pub market: MarketCommandHeader,
@@ -132,7 +133,7 @@ impl NewOrderCommand {
 // ============================================================================
 
 /// `TOrderStatus` (TradeStruct.pas:55-70).
-/// Полный snapshot одного ордера. UKey=UK_OrderStatus.
+/// Full snapshot of one order. UKey=UK_OrderStatus.
 #[derive(Debug, Clone)]
 pub struct OrderStatus {
     pub epoch_header: TradeEpochHeader,
@@ -191,12 +192,12 @@ impl OrderStatus {
 // ============================================================================
 
 /// `TOrderStatusUpdate` (TradeStruct.pas:72-80).
-/// Delta-update полей ордера. UKey=UK_OrderStatusShort.
+/// Delta update for one order. UKey=UK_OrderStatusShort.
 #[derive(Debug, Clone)]
 pub struct OrderStatusUpdate {
     pub epoch_header: TradeEpochHeader,
     pub update_data: OrderUpdateData,
-    /// Soft-read: появилось в v2+. Если отсутствует — = 0.
+    /// Soft-read: added in v2+. Missing tails default to zero.
     pub sell_reason_code: u8,
 }
 
@@ -224,7 +225,7 @@ impl OrderStatusUpdate {
 // ============================================================================
 
 /// `TOrderReplaceCommand` (TradeStruct.pas:83-90). UKey=UK_OrderMove.
-/// Запрос на перемещение цены ордера.
+/// Request to move one order price.
 #[derive(Debug, Clone)]
 pub struct OrderReplaceCommand {
     pub epoch_header: TradeEpochHeader,
@@ -281,7 +282,7 @@ impl OrderReplaceResponse {
 // ============================================================================
 
 /// `TAllStatuses` (TradeStruct.pas:104-114). Priority=Sliced.
-/// Снапшот всех активных ордеров — приходит при reconnect.
+/// Snapshot of all active orders, sent during reconnect/resync.
 #[derive(Debug, Clone)]
 pub struct AllStatuses {
     pub header: BaseCommandHeader,
@@ -308,10 +309,10 @@ impl AllStatuses {
             if r.is_empty() {
                 break;
             }
-            // Каждый order пишется через `o.StoreToStream(Stream)` — то есть **сам** включает
-            // свой CmdId(1) + ver(2) + UID(8) + ... header. Delphi читает через
-            // `TBaseTradeCommand.FromStream(ms)` и затем cast'ит результат к `TOrderStatus`;
-            // значит valid nested item обязан быть CmdId=4.
+            // Each order is written through `o.StoreToStream(Stream)`, so it
+            // includes its own CmdId/ver/UID header. Delphi reads it through
+            // `TBaseTradeCommand.FromStream(ms)` and then casts to
+            // `TOrderStatus`; a valid nested item must therefore be CmdId=4.
             if r.first().copied() != Some(4) {
                 log::warn!(
                     target: "moonproto::trade",
@@ -335,7 +336,7 @@ impl AllStatuses {
 // ============================================================================
 
 /// `TOrderCancelCommand` (TradeStruct.pas:120-123). UKey=UK_OrderMove.
-/// Полностью наследует TTradeEpochCommand без дополнительных полей.
+/// Inherits `TTradeEpochCommand` without extra fields.
 pub type OrderCancelCommand = TradeEpochHeaderTyped;
 
 #[derive(Debug, Clone)]
@@ -356,7 +357,7 @@ impl TradeEpochHeaderTyped {
 // ============================================================================
 
 /// `TJoinOrdersCommand` (TradeStruct.pas:125-132).
-/// Используется также как base для CmdId 15/16/30 (Do*).
+/// Also used as the payload shape for CmdId 15/16/30 (`Do*` commands).
 #[derive(Debug, Clone)]
 pub struct JoinOrdersCommand {
     pub market: MarketCommandHeader,
@@ -533,7 +534,7 @@ impl TurnPanicSellCommand {
 // ============================================================================
 
 /// `TSetImmuneCommand` (TradeStruct.pas:210-223). UKey=UK_ImmuneClicks.
-/// UKey.UID вычисляется как sum(Items.UID).
+/// UKey.UID is calculated as `sum(Items.UID)`.
 #[derive(Debug, Clone)]
 pub struct SetImmuneCommand {
     pub header: BaseCommandHeader,
@@ -561,7 +562,7 @@ impl SetImmuneCommand {
 // ============================================================================
 
 /// `TMoveAllBuysCommand` (TradeStruct.pas:264-273).
-/// **NB**: в отличие от TMoveAllSellsCommand, не имеет PriceZone в wire-format.
+/// Unlike `TMoveAllSellsCommand`, this wire payload has no `PriceZone`.
 #[derive(Debug, Clone)]
 pub struct MoveAllBuysCommand {
     pub market: MarketCommandHeader,

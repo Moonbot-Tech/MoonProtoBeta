@@ -4,81 +4,82 @@ use super::*;
 use crate::commands::registry::CURRENT_PROTO_CMD_VER;
 use std::convert::TryInto;
 
-/// Все распарсенные TBaseTradeCommand подкоманды (CmdId маппинг -> variant).
-/// Эта enum — public API. State::Orders.apply принимает её и применяет.
+/// Parsed `TBaseTradeCommand` subcommands mapped by Delphi CmdId.
+///
+/// This is the low-level protocol enum accepted by `state::Orders::apply`.
 #[derive(Debug, Clone)]
 pub enum TradeCommand {
-    /// CmdId=4: TOrderStatus — полный snapshot ордера.
+    /// CmdId=4: `TOrderStatus`, full order snapshot.
     OrderStatus(Box<OrderStatus>),
-    /// CmdId=5: TOrderStatusUpdate — delta-update полей.
+    /// CmdId=5: `TOrderStatusUpdate`, order delta update.
     OrderStatusUpdate(OrderStatusUpdate),
-    /// CmdId=6: TOrderReplaceCommand — запрос на перемещение цены.
+    /// CmdId=6: `TOrderReplaceCommand`, request to move an order price.
     OrderReplace(OrderReplaceCommand),
-    /// CmdId=7: TOrderReplaceResponse — подтверждение перемещения.
+    /// CmdId=7: `TOrderReplaceResponse`, move acknowledgement/update.
     OrderReplaceResponse(Box<OrderReplaceResponse>),
-    /// CmdId=8: TAllStatuses — снапшот всех ордеров (для CleanupMissing).
+    /// CmdId=8: `TAllStatuses`, full order snapshot for cleanup.
     AllStatuses(AllStatuses),
-    /// CmdId=9: TAllStatusesReq — запрос на получение всех ордеров (client->server).
+    /// CmdId=9: `TAllStatusesReq`, client request for all orders.
     AllStatusesRequest(BaseCommandHeader),
-    /// CmdId=10: TOrderCancelCommand — отмена ордера.
+    /// CmdId=10: `TOrderCancelCommand`, cancel one order.
     OrderCancel(OrderCancelCommand),
-    /// CmdId=11: TJoinOrdersCommand — объединить ордера в одну позицию.
+    /// CmdId=11: `TJoinOrdersCommand`, join orders into one position.
     JoinOrders(JoinOrdersCommand),
-    /// CmdId=12: TSplitOrderCommand — разделить одну позицию на N частей.
+    /// CmdId=12: `TSplitOrderCommand`, split one position/order.
     SplitOrder(SplitOrderCommand),
-    /// CmdId=13: TMoveAllSellsCommand — переместить все sell ордера.
+    /// CmdId=13: `TMoveAllSellsCommand`, move sell orders in bulk.
     MoveAllSells(MoveAllSellsCommand),
-    /// CmdId=14: TDoClosePositionCommand — закрыть позицию.
+    /// CmdId=14: `TDoClosePositionCommand`, close a position.
     DoClosePosition(DoClosePositionCommand),
-    /// CmdId=15: TDoLimitClosePositionCommand — limit-закрытие позиции.
+    /// CmdId=15: `TDoLimitClosePositionCommand`, limit-close a position.
     DoLimitClosePosition(JoinOrdersCommand),
-    /// CmdId=16: TDoSplitPositionCommand — разделить позицию.
+    /// CmdId=16: `TDoSplitPositionCommand`, split a position.
     DoSplitPosition(JoinOrdersCommand),
-    /// CmdId=17: TDoSellOrderCommand — выставить sell с конкретной ценой/размером.
+    /// CmdId=17: `TDoSellOrderCommand`, place sell with price/size.
     DoSellOrder(DoSellOrderCommand),
-    /// CmdId=18: TOrderStatusRequest — запрос конкретного ордера по UID (CleanupMissing).
+    /// CmdId=18: `TOrderStatusRequest`, request one order status.
     OrderStatusRequest(TradeEpochHeader),
-    /// CmdId=19: TOrderNotFound — сервер сообщает что ордер не найден.
+    /// CmdId=19: `TOrderNotFound`, server says the order is missing.
     OrderNotFound(TradeEpochHeader),
-    /// CmdId=20: TOrderStopsUpdate — обновление стопов.
+    /// CmdId=20: `TOrderStopsUpdate`, stop settings update.
     OrderStopsUpdate(OrderStopsUpdate),
-    /// CmdId=21: TTurnPanicSellCommand — включить/выключить panic sell.
+    /// CmdId=21: `TTurnPanicSellCommand`, toggle panic sell.
     TurnPanicSell(TurnPanicSellCommand),
-    /// CmdId=22: TSetImmuneCommand — пометить ордера как immune от UI кликов.
+    /// CmdId=22: `TSetImmuneCommand`, mark orders immune to UI clicks.
     SetImmune(SetImmuneCommand),
-    /// CmdId=23: TPenaltyCommand — пометить маркет penalty (cooldown).
+    /// CmdId=23: `TPenaltyCommand`, set market penalty/cooldown.
     Penalty(MarketCommandHeader),
-    /// CmdId=24: TTradeVisualCommand — base для visual-only команд.
+    /// CmdId=24: `TTradeVisualCommand`, visual-only command base.
     TradeVisual(MarketCommandHeader),
-    /// CmdId=25: TOrderTracePoint — точка трейс-графика.
+    /// CmdId=25: `TOrderTracePoint`, trace chart point.
     OrderTracePoint(OrderTracePoint),
-    /// CmdId=26: TCorridorUpdate — корридор цен.
+    /// CmdId=26: `TCorridorUpdate`, price corridor update.
     CorridorUpdate(CorridorUpdate),
-    /// CmdId=27: TMoveAllBuysCommand — переместить все buy ордера.
+    /// CmdId=27: `TMoveAllBuysCommand`, move buy orders in bulk.
     MoveAllBuys(MoveAllBuysCommand),
-    /// CmdId=28: TBulkReplaceNotify — уведомление о массовом replace.
+    /// CmdId=28: `TBulkReplaceNotify`, bulk replace notification.
     BulkReplaceNotify(BulkReplaceNotify),
-    /// CmdId=29: TVStopUpdate — обновление volume stop.
+    /// CmdId=29: `TVStopUpdate`, volume stop update.
     VStopUpdate(VStopUpdate),
-    /// CmdId=30: TDoMarketSplitPositionCommand — market-split позиции.
+    /// CmdId=30: `TDoMarketSplitPositionCommand`, market-split position.
     DoMarketSplitPosition(JoinOrdersCommand),
 
-    /// CmdId=1: TBaseMarketCommand (raw, без поверх) — используется как ancestor type.
+    /// CmdId=1: raw `TBaseMarketCommand`, used as an ancestor type.
     BaseMarket(MarketCommandHeader),
     /// CmdId=2: TTradeEpochCommand (raw).
     TradeEpoch(TradeEpochHeader),
-    /// CmdId=3: TNewOrderCommand — запрос на создание нового ордера.
+    /// CmdId=3: `TNewOrderCommand`, request to create a new order.
     NewOrder(NewOrderCommand),
 
-    /// Команда с неизвестным CmdId — для forward-compatibility.
+    /// Unknown CmdId, preserved for forward compatibility.
     Unknown { cmd_id: u8, uid: u64 },
 }
 
 impl TradeCommand {
-    /// Распарсить TBaseTradeCommand payload (после dispatch'a по MPC_Order).
+    /// Parse a `TBaseTradeCommand` payload after `MPC_Order` dispatch.
     ///
     /// Wire-format: CmdId(1) + ver(2) + UID(8) + class-specific payload.
-    /// Version gate: если ver > 3 — возвращаем Unknown (forward-compatible skip).
+    /// Version gate: `ver > 3` returns `Unknown` for forward-compatible skip.
     pub fn parse(payload: &[u8]) -> Option<Self> {
         let mut r = payload;
         let peek_cmd_id = if !r.is_empty() {
@@ -86,7 +87,7 @@ impl TradeCommand {
         } else {
             return None;
         };
-        // Peek ver без consume.
+        // Peek version without consuming the buffer.
         if r.len() < 11 {
             return None;
         }
@@ -173,7 +174,7 @@ impl TradeCommand {
         }
     }
 
-    /// UID команды (для матчинга в state).
+    /// Command UID used by state matching.
     pub fn uid(&self) -> u64 {
         match self {
             Self::OrderStatus(c) => c.epoch_header.market.base.uid,

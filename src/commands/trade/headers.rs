@@ -5,7 +5,7 @@ use super::OrderWorkerStatus;
 use crate::commands::registry::{decode_utf8_delphi, write_string};
 use std::convert::TryInto;
 
-/// Базовый header `TBaseCommand`: cmd_id(1) + ver(2) + UID(8) = 11 байт.
+/// Base `TBaseCommand` header: cmd_id(1) + ver(2) + UID(8) = 11 bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct BaseCommandHeader {
     pub cmd_id: u8,
@@ -33,7 +33,7 @@ impl BaseCommandHeader {
 }
 
 /// Header `TBaseMarketCommand`: header + currency:u8 + platform:u8 + market_name:UTF8.
-/// market_name resolves к market_index при apply в state.
+/// `market_name` resolves to `market_index` when applied to state.
 #[derive(Debug, Clone)]
 pub struct MarketCommandHeader {
     pub base: BaseCommandHeader,
