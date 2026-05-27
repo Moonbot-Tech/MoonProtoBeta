@@ -150,6 +150,10 @@ fn handle_command(
             client.balance_request_refresh();
             false
         }
+        RuntimeCommand::OrderSnapshotRefresh => {
+            client.request_all_statuses(rand::random());
+            false
+        }
         RuntimeCommand::TransferAssetsRefresh => {
             schedule_transfer_assets_refresh(client, &mut pending.transfer_assets);
             false

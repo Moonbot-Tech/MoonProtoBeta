@@ -80,24 +80,26 @@ the UI only needs the live balance/position subset.
 
 ## Getting A Fresh Snapshot
 
-Use `MoonClient::request_balance_snapshot` when the application needs a fresh
-full snapshot before continuing:
+Regular UI code calls `MoonClient::request_balance_snapshot()` or
+`MoonClient::refresh_balances()` and reads `snapshot().balances()` after
+`Event::Balance`:
 
 ```rust
-let balances = client.request_balance_snapshot(std::time::Duration::from_secs(15))?;
+client.request_balance_snapshot()?;
 
-println!("balance rows={}", balances.len());
+for event in client.drain_events() {
+    if matches!(event, moonproto::Event::Balance(_)) {
+        if let Some(snapshot) = client.snapshot() {
+            println!("balance rows={}", snapshot.balances().len());
+        }
+    }
+}
 ```
 
-The helper sends the library-level balance refresh request, keeps the runtime
+`blocking_request_balance_snapshot(timeout)` exists for scripts and diagnostics.
+It sends the same library-level balance refresh request, keeps the runtime
 pumping MoonProto, waits for the next full snapshot event, and returns a cloned
 `BalancesState`.
-
-For fire-and-forget refresh in the normal runtime:
-
-```rust
-client.refresh_balances()?;
-```
 
 The next snapshot arrives through the normal `MoonClient` event/snapshot path.
 

@@ -532,31 +532,47 @@ versions) instead of being reset to Rust defaults.
 
 ## Order Snapshot Request
 
-Use `MoonClient::request_order_snapshot` when the application needs the current active
-orders as a one-shot operation:
+Regular UI code queues an order snapshot refresh and then reads the active order
+model after order events:
 
 ```rust
-let orders = client.request_order_snapshot(Duration::from_secs(12))?;
-println!("active orders={}", orders.len());
+client.request_order_snapshot()?;
+
+for event in client.drain_events() {
+    if matches!(event, moonproto::Event::Order(moonproto::state::OrderEvent::Snapshot)) {
+        if let Some(snapshot) = client.snapshot() {
+            println!("active orders={}", snapshot.orders().len());
+        }
+    }
+}
 ```
 
-The helper requests the fresh snapshot, applies it to runtime `Orders`, and
+`blocking_request_order_snapshot(timeout)` is the explicit script/diagnostic
+counterpart. It requests the fresh snapshot, applies it to runtime `Orders`, and
 waits until the dispatcher has finished Delphi missing-worker follow-up requests
 for orders absent from the fresh snapshot.
 
 ## Balance Snapshot Request
 
-Use `MoonClient::request_balance_snapshot` when the application needs a fresh full balance
-read model from the Balance channel:
+Regular UI code queues a full balance refresh and reads the balance model after
+balance events:
 
 ```rust
-let balances = client.request_balance_snapshot(Duration::from_secs(15))?;
-println!("balance markets={}", balances.len());
-println!("btc total={}", balances.global().btc_balance_total);
+client.request_balance_snapshot()?;
+
+for event in client.drain_events() {
+    if matches!(event, moonproto::Event::Balance(_)) {
+        if let Some(snapshot) = client.snapshot() {
+            println!("balance markets={}", snapshot.balances().len());
+            println!("btc total={}", snapshot.balances().global().btc_balance_total);
+        }
+    }
+}
 ```
 
-The helper sends `TRequestBalanceRefresh`, keeps the UDP loop running, waits for
-the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
+`blocking_request_balance_snapshot(timeout)` is the explicit script/diagnostic
+counterpart. It sends `TRequestBalanceRefresh`, keeps the UDP loop running,
+waits for the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
 
 ## Subscriptions
 

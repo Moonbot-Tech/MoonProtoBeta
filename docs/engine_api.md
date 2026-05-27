@@ -64,10 +64,10 @@ path.
 
 | Group | Methods |
 |---|---|
-| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_order_snapshot`, `request_balance_snapshot` |
-| `MoonClient` async Active Lib refresh | `request_client_settings` / `refresh_settings`, `refresh_balances`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
+| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets` |
+| `MoonClient` async Active Lib refresh | `request_client_settings` / `refresh_settings`, `request_balance_snapshot` / `refresh_balances`, `request_order_snapshot`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
 | `MoonClient` non-blocking mutation/refresh intents | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `transfer_asset` / `do_transfer_asset`, `refresh_markets_balance_full`, `reload_order_book` |
-| Explicit blocking diagnostic helpers | `blocking_request_client_settings`, `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
+| Explicit blocking diagnostic helpers | `blocking_request_client_settings`, `blocking_request_balance_snapshot`, `blocking_request_order_snapshot`, `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
 
@@ -81,12 +81,17 @@ in the same synchronous branch before continuing:
 - `request_hedge_mode(timeout)`;
 - `request_api_expiration_time(timeout)`;
 - `refresh_candles(timeout)`;
-- `request_balance_snapshot(timeout)` / `request_order_snapshot(timeout)`.
+- `blocking_request_balance_snapshot(timeout)` /
+  `blocking_request_order_snapshot(timeout)`.
 
 Async Active Lib commands return after queuing work and later update
 snapshots/events:
 
 - `refresh_balances()`;
+- `request_balance_snapshot()`, which fills `snapshot().balances()` and emits
+  `Event::Balance`;
+- `request_order_snapshot()`, which fills `snapshot().orders()` and emits order
+  events;
 - `refresh_transfer_assets()` / `refresh_transfer_assets_kind(kind)`;
 - `request_client_settings()` / `refresh_settings()`, which fills
   `snapshot().settings().client_settings` and emits `Event::Settings`;

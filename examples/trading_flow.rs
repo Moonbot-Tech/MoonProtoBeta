@@ -65,24 +65,24 @@ fn main() {
         println!("[settings] request queue failed: {err}");
     }
 
-    match client.request_order_snapshot(Duration::from_secs(15)) {
-        Ok(orders) => {
-            println!("[orders] count={}", orders.len());
-            if let Some(order) = orders.first() {
-                println!(
-                    "[orders] first uid={} market={} status={:?}; order intents use client.orders()",
-                    order.uid, order.market_name, order.status
-                );
-                // Example only: uncomment in a real trading UI after user action.
-                // client.orders().cancel(order.uid)?;
-            }
-        }
-        Err(err) => println!("[orders] request failed: {err}"),
+    if let Err(err) = client.request_order_snapshot() {
+        println!("[orders] request queue failed: {err}");
     }
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         match client.recv_event_timeout(Duration::from_millis(500)) {
+            Ok(Event::Order(moonproto::state::OrderEvent::Snapshot)) => {
+                if let Some(snapshot) = client.snapshot() {
+                    println!("[orders] count={}", snapshot.orders().len());
+                    if let Some(order) = snapshot.orders().iter().next() {
+                        println!(
+                            "[orders] first uid={} market={} status={:?}; order intents use client.orders()",
+                            order.uid, order.market_name, order.status
+                        );
+                    }
+                }
+            }
             Ok(Event::Order(event)) => println!("[event] order: {event:?}"),
             Ok(Event::OrderBook(event)) => println!("[event] orderbook: {event:?}"),
             Ok(Event::Trade(event)) => println!("[event] trade: {event:?}"),

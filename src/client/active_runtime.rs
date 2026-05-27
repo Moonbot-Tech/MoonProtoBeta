@@ -254,8 +254,16 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefreshKind(kind))
     }
 
-    /// Request a fresh full balance snapshot and return the applied read model.
-    pub fn request_balance_snapshot(
+    /// Request a fresh full balance snapshot and return immediately.
+    ///
+    /// Completion arrives through `Event::Balance`; read the current read model
+    /// through `snapshot().balances()`.
+    pub fn request_balance_snapshot(&self) -> Result<(), MoonClientError> {
+        self.refresh_balances()
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::request_balance_snapshot`].
+    pub fn blocking_request_balance_snapshot(
         &self,
         timeout: Duration,
     ) -> Result<crate::state::BalancesState, MoonClientError> {
@@ -266,8 +274,16 @@ impl MoonClient {
             })
     }
 
-    /// Request a fresh order snapshot and return the applied order list.
-    pub fn request_order_snapshot(
+    /// Request a fresh order snapshot and return immediately.
+    ///
+    /// Completion arrives through order events, including `OrderEvent::Snapshot`;
+    /// read the current read model through `snapshot().orders()`.
+    pub fn request_order_snapshot(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::OrderSnapshotRefresh)
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::request_order_snapshot`].
+    pub fn blocking_request_order_snapshot(
         &self,
         timeout: Duration,
     ) -> Result<Vec<crate::state::Order>, MoonClientError> {

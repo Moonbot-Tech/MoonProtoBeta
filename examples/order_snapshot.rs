@@ -23,7 +23,7 @@ fn main() {
         }
     };
 
-    let mut orders = match client.request_order_snapshot(Duration::from_secs(15)) {
+    let mut orders = match client.blocking_request_order_snapshot(Duration::from_secs(15)) {
         Ok(orders) => orders,
         Err(err) => {
             eprintln!("[request] failed: {err}");

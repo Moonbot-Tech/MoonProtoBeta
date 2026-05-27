@@ -39,7 +39,8 @@ fn main() {
         }
     };
 
-    let balances = match client.request_balance_snapshot(Duration::from_secs(timeout_secs)) {
+    let balances = match client.blocking_request_balance_snapshot(Duration::from_secs(timeout_secs))
+    {
         Ok(balances) => balances,
         Err(err) => {
             eprintln!("[request] failed: {err}");
