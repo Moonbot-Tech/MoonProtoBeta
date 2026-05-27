@@ -3,17 +3,17 @@
 use super::{Order, Orders};
 
 impl Orders {
-    /// Получить ордер по UID.
+    /// Get one order by UID.
     pub fn get(&self, uid: u64) -> Option<&Order> {
         self.map.get(&uid)
     }
 
-    /// Итератор по всем ордерам.
+    /// Iterate all retained orders.
     pub fn iter(&self) -> impl Iterator<Item = &Order> {
         self.map.values()
     }
 
-    /// Количество ордеров.
+    /// Number of retained orders.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -22,7 +22,7 @@ impl Orders {
         self.map.is_empty()
     }
 
-    /// Текущее значение snapshot flag.
+    /// Current snapshot flag value.
     pub fn current_snapshot_flag(&self) -> u8 {
         self.current_snapshot_flag
     }

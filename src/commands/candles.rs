@@ -1,8 +1,10 @@
 //! Candles channel — TDeepPrice records (28-byte packed) for CoinCard and
 //! packed market candles stream for `RequestCandlesData`.
 //!
-//! Источник Delphi: `MarketsU.pas:701-705 TDeepPrice` + `MoonProtoEngineServer.pas:382-395` (`emk_GetCoinCardCandles`)
-//! + `MoonProtoClient.pas:795-876` (chunked candles aggregation для `emk_RequestCandlesData`).
+//! Delphi sources: `MarketsU.pas:701-705 TDeepPrice`,
+//! `MoonProtoEngineServer.pas:382-395` (`emk_GetCoinCardCandles`), and
+//! `MoonProtoClient.pas:795-876` (chunked candles aggregation for
+//! `emk_RequestCandlesData`).
 //!
 //! ## Wire format
 //!
@@ -16,16 +18,17 @@
 //! Time:   f64 (8)  // TDateTime
 //! ```
 //!
-//! ## Запросы
+//! ## Requests
 //!
-//! - **`emk_GetCoinCardCandles`** — простой response: `count:i32 + N × TDeepPrice`.
+//! - **`emk_GetCoinCardCandles`** — simple response:
+//!   `count:i32 + N × TDeepPrice`.
 //! - **`emk_RequestCandlesData`** — chunked: each response starts with
 //!   `ChunkIndex:u16 + ChunkTotal:u16` + chunk_data. After all chunks are merged,
 //!   the resulting bytes are the zlib stream produced by Delphi
 //!   `TMarkets.StoreCandlesToZip`. Parsed `TDeepPricePack.Time` values are adjusted
 //!   with the same local-timezone correction as Delphi `TMarkets.ApplyRecvdStream`.
 //!
-//! Используй `CandlesAggregator` для сборки chunked responses.
+//! Use [`CandlesAggregator`] to merge chunked responses in low-level tools.
 
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -48,7 +51,7 @@ pub(crate) use self::request_parser::{
     read_deep_price_pack_old,
 };
 
-/// Packed `TDeepPrice` (28 bytes). Соответствует Delphi `MarketsU.pas:701-705`.
+/// Packed `TDeepPrice` (28 bytes), matching Delphi `MarketsU.pas:701-705`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
     pub open_p: f32,
@@ -56,7 +59,7 @@ pub struct DeepPrice {
     pub max_p: f32,
     pub min_p: f32,
     pub vol: f32,
-    /// `TDateTime` (Delphi double, дни с 1899-12-30).
+    /// `TDateTime` (Delphi double, days since 1899-12-30).
     pub time: f64,
 }
 
@@ -128,7 +131,7 @@ impl DeepPrice {
         }
     }
 
-    /// Прочитать один record из bytes.
+    /// Read one packed candle record from `data`.
     pub fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos + DEEP_PRICE_SIZE > data.len() {
             return None;
@@ -201,9 +204,11 @@ pub struct RequestCandlesMarket {
 
 /// `TMarketDeepHistoryKind` enum (EngineBase.pas:60).
 ///
-/// **Byte-exact с текущим Delphi**: `(hk_1m, hk_5m, hk_30m, hk_1h, hk_4h, hk_1d)` — 6 значений.
-/// Старая версия (bak/) имела 5 значений без hk_4h. Использование старых ординалов сместило бы
-/// `Day1` на позицию 4 → сервер интерпретировал бы запрос как `hk_4h` (4-часовые свечи).
+/// Byte-exact order in current Delphi:
+/// `(hk_1m, hk_5m, hk_30m, hk_1h, hk_4h, hk_1d)` — six values.
+/// The old backup source had five values without `hk_4h`; using those old
+/// ordinals would shift `Day1` to value 4 and the server would interpret the
+/// request as `hk_4h`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeepHistoryKind {
@@ -219,7 +224,7 @@ pub enum DeepHistoryKind {
 //  Builders
 // =============================================================================
 
-/// `emk_GetCoinCardCandles(market, ticks)` — запрос свечей для CoinCard.
+/// `emk_GetCoinCardCandles(market, ticks)` — request CoinCard candles.
 ///
 /// Wire: market_name + `WriteByte(Ord(ticks))`.
 pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u8> {
@@ -231,8 +236,10 @@ pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u
 //  Response parser
 // =============================================================================
 
-/// Распарсить `emk_GetCoinCardCandles` response: `count:i32 + N × TDeepPrice`.
-/// `data` — `EngineResponse.data` (уже распакованный DEFLATE).
+/// Parse `emk_GetCoinCardCandles` response:
+/// `count:i32 + N × TDeepPrice`.
+///
+/// `data` is already-uncompressed `EngineResponse.data`.
 pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     let mut pos = 0usize;
     let count_raw = i32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));

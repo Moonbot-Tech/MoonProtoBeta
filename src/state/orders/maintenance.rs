@@ -80,9 +80,12 @@ impl Orders {
         events
     }
 
-    /// После TAllStatuses найти ордера, которых **нет** в свежем snapshot.
-    /// Эти UID'ы нужно явно запросить через `build_order_status_request`.
-    /// Соответствует `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
+    /// After `TAllStatuses`, find orders that were absent from the fresh
+    /// snapshot.
+    ///
+    /// These UID's must be explicitly requested through
+    /// `build_order_status_request`. Matches
+    /// `MoonProtoClient.pas:637-666 CleanupMissingWorkers`.
     ///
     /// Delphi checks `not Worker.JobIsDone`, but MoonProto virtual workers set
     /// `JobIsDone` only after `DoTheJobVirtual` returns. While Rust keeps a
@@ -97,19 +100,19 @@ impl Orders {
             .collect()
     }
 
-    /// Установить ServerTimeDelta. Должно вызываться при апдейте Ping
-    /// (`server_time_delta = initial_time - now`).
+    /// Set `ServerTimeDelta`; called when Ping updates
+    /// `server_time_delta = initial_time - now`.
     pub fn set_server_time_delta(&mut self, delta: f64) {
         self.server_time_delta = delta;
     }
 
-    /// Принудительно удалить ордер по UID (например, по решению UI).
+    /// Remove one order by UID.
     pub fn remove(&mut self, uid: u64) -> Option<Order> {
         self.pending_local_visual_orders.remove(&uid);
         self.map.remove(&uid)
     }
 
-    /// Очистить весь state (при reconnect / WantNewHello).
+    /// Clear all order state on reconnect / `WantNewHello`.
     pub fn clear(&mut self) {
         self.map.clear();
         self.pending_local_visual_orders.clear();

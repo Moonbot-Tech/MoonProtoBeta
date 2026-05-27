@@ -1,12 +1,13 @@
-//! MPC_Balance подкоманда CmdId=6 — `TArbPricesCommand`.
+//! MPC_Balance subcommand CmdId=6 — `TArbPricesCommand`.
 //!
-//! Источник Delphi: `MoonProtoBalanceStruct.pas:199-205, 607-633`.
+//! Delphi source: `MoonProtoBalanceStruct.pas:199-205, 607-633`.
 //!
 //! Wire-format:
 //!   BaseCommand header (CmdId=6 + ver:u16 + UID:u64) + len:i32 LE + payload:bytes(len).
 //!
-//! `payload` — raw bytes от kernel'а. Компактный формат декодируется через
-//! [`parse_arb_payload_compact`] (порт `ArbClientU.pas:ParseArbPayloadCompact`).
+//! `payload` is raw kernel data. The compact format is decoded by
+//! [`parse_arb_payload_compact`], the Rust port of
+//! `ArbClientU.pas:ParseArbPayloadCompact`.
 
 use super::registry::CURRENT_PROTO_CMD_VER;
 
@@ -53,8 +54,10 @@ const ARB_VER_MIN: u8 = 1;
 const CMD_PRICE: u8 = 1;
 const CMD_ISOL: u8 = 2;
 
-/// Парсер `TArbPricesCommand`. Принимает payload **уже после** dispatch'а по MPC_Balance.
-/// Возвращает `None` если cmd_id ≠ 6 или payload слишком короткий.
+/// Parse `TArbPricesCommand`.
+///
+/// `payload` must already be routed from the MPC_Balance channel. Returns
+/// `None` when `cmd_id != 6` or the command envelope is too short.
 pub fn parse_arb_prices(payload: &[u8]) -> Option<ArbPricesCommand> {
     if payload.len() < 11 {
         return None;
@@ -200,7 +203,7 @@ fn parse_isolation_compact(data: &[u8], pos: &mut usize) -> Vec<ArbIsolationEntr
     entries
 }
 
-/// Билдер `TArbPricesCommand` (если клиенту нужно слать обратно — rare case).
+/// Build `TArbPricesCommand` for low-level protocol tools.
 pub fn build_arb_prices(uid: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + 4 + payload.len());
     out.push(ARB_PRICES_CMD_ID);

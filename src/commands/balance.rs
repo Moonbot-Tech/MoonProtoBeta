@@ -5,7 +5,10 @@
 /// Only fields with bit set are present in wire data.
 use super::registry::read_string;
 
-/// One market's balance data
+/// One market's decoded balance row.
+///
+/// Normal chart/order UI should read the active values from `Market`; this row
+/// remains useful for account tables, diagnostics, and full balance snapshots.
 #[derive(Debug, Clone, Default)]
 pub struct BalanceItem {
     pub market_name: String,
@@ -70,12 +73,11 @@ pub struct BalanceUpdate {
 // =============================================================================
 
 /// CmdId=5 `TRequestBalanceRefresh` (MoonProtoBalanceStruct.pas:191).
-/// Запрашивает у сервера повторную отправку текущего snapshot балансов.
-/// Empty body — только wrapping заголовок команды (CmdId + ver + uid).
 ///
-/// Priority = MPS_High, encrypted = true, max_retries = 3 (default для High).
-/// Docs_api audit B-03 — отсутствие этого builder'а блокировало возможность
-/// запросить refresh из Rust клиента.
+/// Requests the server to resend the current balance snapshot. The body is
+/// empty; only the command envelope is sent (CmdId + ver + uid).
+///
+/// Priority = `MPS_High`, encrypted = true, max_retries = 3.
 pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
     const CMD_REQUEST_BALANCE_REFRESH: u8 = 5;
     const CURRENT_PROTO_CMD_VER: u16 = 3;

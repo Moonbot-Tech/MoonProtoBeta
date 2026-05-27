@@ -4,26 +4,27 @@ use super::{OrderTraceLine, SellReason};
 use crate::commands::trade::*;
 use std::collections::VecDeque;
 
-/// Один ордер с зеркальным состоянием.
+/// One retained order with Delphi worker-equivalent state.
 ///
-/// Поля соответствуют BOrderWorker fields, которые приходят от сервера через
-/// TOrderStatus / TOrderStatusUpdate / TOrderReplaceResponse / TOrderStopsUpdate /
-/// TVStopUpdate / TCorridorUpdate / TOrderTracePoint.
+/// Fields mirror `BOrderWorker` data received from the server through
+/// `TOrderStatus`, `TOrderStatusUpdate`, `TOrderReplaceResponse`,
+/// `TOrderStopsUpdate`, `TVStopUpdate`, `TCorridorUpdate`, and
+/// `TOrderTracePoint`.
 #[derive(Debug, Clone)]
 pub struct Order {
-    /// Уникальный ID ордера = task UID (MServerTag в Delphi).
+    /// Unique order id = task UID (`MServerTag` in Delphi).
     pub uid: u64,
-    /// Имя маркета (например "BTCUSDT").
+    /// Market name, for example `BTCUSDT`.
     pub market_name: String,
     /// Base currency byte copied from the order command market header.
     pub currency: u8,
     /// Exchange/platform byte copied from the order command market header.
     pub platform: u8,
-    /// Текущая фаза lifecycle.
+    /// Current worker lifecycle status.
     pub status: OrderWorkerStatus,
-    /// Buy ордер на бирже.
+    /// Exchange buy-side order.
     pub buy_order: OrderCompact,
-    /// Sell ордер на бирже.
+    /// Exchange sell-side order.
     pub sell_order: OrderCompact,
     /// Delphi `pBuyOrder.Price`: desired/local replace price, not part of
     /// `TOrderCompact` wire data.
@@ -31,9 +32,9 @@ pub struct Order {
     /// Delphi `pSellOrder.Price`: desired/local replace price, not part of
     /// `TOrderCompact` wire data.
     pub sell_price: f64,
-    /// Настройки стопов.
+    /// Stop settings.
     pub stops: StopSettings,
-    /// VStop состояние.
+    /// VStop state.
     pub vstop_on: bool,
     pub vstop_fixed: bool,
     pub vstop_level: f64,
@@ -42,18 +43,18 @@ pub struct Order {
     pub panic_sell: bool,
     /// Delphi `BOrderWorker.IsMoonShot`, raised by `TCorridorUpdate`.
     pub is_moon_shot: bool,
-    /// Корридор цен (последний апдейт).
+    /// Last corridor price range update.
     pub corridor_price_down: f32,
     pub corridor_price_up: f32,
-    /// Связь со стратегией.
+    /// Strategy linkage.
     pub strat_id: u64,
     pub is_short: bool,
     pub db_id: i32,
-    /// True если order пришёл из server cache (восстановление после reconnect).
+    /// True when the order was restored from server cache after reconnect.
     pub from_cache: bool,
-    /// True если ордер торгуется в emulator mode.
+    /// True when the order runs in emulator mode.
     pub emulator_mode: bool,
-    /// True если UI клики должны игнорироваться (server-forced).
+    /// True when UI clicks must be ignored.
     pub immune_for_clicks: bool,
     /// Rust read-model marker for Delphi `BOrderWorker.vOrder <> nil`.
     ///
@@ -65,31 +66,31 @@ pub struct Order {
     pub pending_buy_cond_price: Option<f64>,
     /// Delphi `vOrder.PendingCancel` for pending `OS_None` orders.
     pub pending_cancel: bool,
-    /// Тип ордера, на котором установлен BulkReplace.
+    /// Side on which BulkReplace is currently marked.
     pub bulk_replace_buy: bool,
     pub bulk_replace_sell: bool,
     /// Delphi `coBuy` order-line state built by `ApplyServerTrace`.
     pub buy_trace_line: Option<OrderTraceLine>,
     /// Delphi `coSell` order-line state built by `ApplyServerTrace`.
     pub sell_trace_line: Option<OrderTraceLine>,
-    /// Trace points (визуализация решения сервера).
+    /// Raw trace points for server-decision visualization.
     ///
     /// This is the raw inbound packet log. For Delphi-equivalent chart state,
     /// use `buy_trace_line` / `sell_trace_line`.
     pub trace_points: VecDeque<OrderTracePoint>,
-    /// True если ордер терминален и ожидает deferred removal.
+    /// True when the order is terminal and awaits deferred removal.
     pub job_is_done: bool,
     /// Delphi `CancellRequest`: server requested worker cancellation.
     pub cancel_request: bool,
-    /// Server-forced removal (TOrderNotFound пришёл).
+    /// Server-forced removal (`TOrderNotFound` arrived).
     pub server_forced_remove: bool,
-    /// Reason code последней продажи.
+    /// Last sell reason byte code.
     pub sell_reason_code: u8,
 
-    // --- Internal sync state (не нужно потребителю) ---
-    /// Per-status monotonic epoch (anti out-of-order). Размер по количеству статусов.
+    // --- Internal sync state ---
+    /// Per-status monotonic epoch used for anti out-of-order checks.
     pub(super) server_latest_epoch: [u16; 10],
-    /// Snapshot flag — обновляется при TAllStatuses.
+    /// Snapshot flag updated by `TAllStatuses`.
     pub(crate) snapshot_flag: u8,
     pub(super) replace_sent_time_ms: i64,
     pub(super) pending_cancel_sent_ms: i64,
@@ -109,13 +110,12 @@ impl Order {
         TradeCtx::with_route(self.uid, self.currency, self.platform)
     }
 
-    /// Причина закрытия как enum. Удобный getter для UI.
-    /// См. [`SellReason`] для описания всех значений.
+    /// Close reason as an enum for UI code.
     pub fn sell_reason(&self) -> SellReason {
         SellReason::from_u8(self.sell_reason_code)
     }
 
-    /// Создать новый Order из TOrderStatus.
+    /// Create a new `Order` from `TOrderStatus`.
     pub(super) fn from_status(status_cmd: &OrderStatus) -> Self {
         Self {
             uid: status_cmd.epoch_header.market.base.uid,

@@ -2,49 +2,50 @@
 
 use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCtx};
 
-/// Причина закрытия ордера. Соответствует Delphi `TSellReasonCode` (MarketsU.pas:245-261).
+/// Order close reason, matching Delphi `TSellReasonCode`
+/// (MarketsU.pas:245-261).
 ///
-/// Сервер может выставить код в поле `sell_reason_code` у `OrderStatusUpdate`.
-/// Delphi обновляет локальную причину продажи только когда код ненулевой и
-/// отличается от предыдущего. Терминал хранит строку, но по wire идёт byte-код.
-/// Используйте `SellReason::from_u8(order.sell_reason_code)` или `Order::sell_reason()`.
+/// The server may set this byte in `OrderStatusUpdate.sell_reason_code`.
+/// Delphi updates the local sell reason only when the code is non-zero and
+/// differs from the previous value. Use
+/// `SellReason::from_u8(order.sell_reason_code)` or `Order::sell_reason()`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SellReason {
-    /// Неизвестная / не выставлена.
+    /// Unknown or unset.
     Unknown = 0,
-    /// Продажа по установленной цене (дефолт).
+    /// Sell at configured price.
     SellPrice = 1,
-    /// Auto Price Down — автоматический спуск цены.
+    /// Auto Price Down.
     AutoPriceDown = 2,
-    /// Sell Level — продажа по уровню.
+    /// Sell Level.
     SellLevel = 3,
-    /// SellSpread — продажа по спреду.
+    /// SellSpread.
     SellSpread = 4,
-    /// SellShot — снайперская продажа.
+    /// SellShot.
     SellShot = 5,
     /// Global / Manual PanicSell.
     PanicSell = 6,
-    /// StopLoss активирован.
+    /// StopLoss activated.
     StopLoss = 7,
-    /// Trailing Stop сработал.
+    /// Trailing Stop fired.
     Trailing = 8,
     /// Market Stop.
     MarketStop = 9,
-    /// Manual Sell (price < 95% от ожидания).
+    /// Manual Sell (price < 95% of expected).
     ManualSell = 10,
-    /// JoinedSell — объединённая продажа.
+    /// JoinedSell.
     JoinedSell = 11,
-    /// SellFromAssets — продажа из активов.
+    /// SellFromAssets.
     SellFromAssets = 12,
     /// BV/SV Stop.
     BvSvStop = 13,
-    /// TakeProfit достигнут.
+    /// TakeProfit reached.
     TakeProfit = 14,
 }
 
 impl SellReason {
-    /// Преобразовать byte в enum. Неизвестные коды (>14) -> `Unknown`.
+    /// Convert a raw byte code to enum. Unknown codes map to `Unknown`.
     pub fn from_u8(b: u8) -> Self {
         match b {
             1 => Self::SellPrice,
@@ -65,7 +66,7 @@ impl SellReason {
         }
     }
 
-    /// Человекочитаемое название (для UI отображения).
+    /// Human-readable UI label.
     pub fn description(&self) -> &'static str {
         match self {
             Self::Unknown => "Unknown",
@@ -191,47 +192,46 @@ impl OrderTraceLine {
     }
 }
 
-/// Результат применения одной команды.
+/// Result of applying one order command.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ApplyResult {
-    /// Команда применена, state обновился.
+    /// Command was applied and state changed.
     Applied,
-    /// Команда устаревшая (epoch < server_latest_epoch для этого status).
+    /// Command is stale for this status epoch.
     OutOfOrder,
-    /// Phase rollback — команда из старой фазы пришла позже.
+    /// Command would roll the worker phase back.
     PhaseRollback,
-    /// Ордер не найден в state (например, TOrderStatusUpdate без предыдущего TOrderStatus).
+    /// Order was not found in state.
     OrderNotFound,
-    /// Команда не относится к Orders state (например, AllStatusesRequest от клиента).
+    /// Command is not applicable to order state.
     NotApplicable,
 }
 
-/// Событие, которое сгенерировалось в результате apply.
-/// Юзер получает через callback и реагирует (UI update / logic).
+/// Event produced by applying an order command.
 #[derive(Debug, Clone)]
 pub enum OrderEvent {
-    /// Новый ордер появился.
+    /// A new order appeared.
     Created(u64),
-    /// Существующий ордер обновился (status / update / replace_response).
+    /// An existing order changed.
     Updated(u64),
-    /// Ордер удалён после deferred cleanup terminal status / TOrderNotFound.
+    /// Order was removed after deferred terminal cleanup / `TOrderNotFound`.
     Removed(u64),
     /// Bulk replace notification.
     BulkReplaced {
         order_type: OrderType,
         uids: Vec<u64>,
     },
-    /// Trace point добавлен.
+    /// Trace point was added.
     TracePoint { uid: u64 },
-    /// Корридор обновлён.
+    /// Corridor state changed.
     CorridorChanged(u64),
-    /// VStop изменился.
+    /// VStop state changed.
     VStopChanged(u64),
-    /// Стопы изменились.
+    /// Stop settings changed.
     StopsChanged(u64),
-    /// TAllStatuses snapshot применён.
+    /// `TAllStatuses` snapshot was applied.
     Snapshot,
-    /// Команда проигнорирована (out-of-order / phase rollback / unknown).
+    /// Command was ignored.
     Ignored { uid: u64, reason: ApplyResult },
 }
 

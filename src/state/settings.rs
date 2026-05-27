@@ -1,22 +1,23 @@
-//! Settings sync state — snapshot последних UI-настроек, полученных от сервера.
+//! Settings sync state — latest UI/settings snapshots received from the server.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoUIStruct.pas`. По observer-модели мы
-//! лишь храним самый свежий snapshot для каждой подкоманды.
-//! Прикладная логика (применение настроек к engine/UI) — задача потребителя.
+//! Delphi source: `MoonProto/MoonProtoUIStruct.pas`. The state layer keeps the
+//! latest snapshot for each supported subcommand; applying those settings to an
+//! application UI/engine is the consumer's responsibility.
 //!
-//! ## Что отслеживается
-//! - `ClientSettings` (CmdId=1): полный snapshot UI настроек (один global slot).
-//! - `LevManage` (CmdId=9): автоматическое управление плечом (один global slot).
-//! - `MMOrdersSubscribe` (CmdId=5): подписка на MM детекцию (bool).
-//! - `SwitchDex` (CmdId=13): текущий выбранный DEX.
-//! - `SwitchSpot` (CmdId=14): 0=Crypto / 1=Predict.
-//! - `ArbActivateNotify` (CmdId=12): TDateTime когда истекает Arb лицензия.
+//! ## Tracked State
+//! - `ClientSettings` (CmdId=1): full UI settings snapshot.
+//! - `LevManage` (CmdId=9): leverage-management settings snapshot.
+//! - `MMOrdersSubscribe` (CmdId=5): market-maker detection subscription flag.
+//! - `SwitchDex` (CmdId=13): current DEX selector.
+//! - `SwitchSpot` (CmdId=14): current spot selector (`0=Crypto`, `1=Predict`).
+//! - `ArbActivateNotify` (CmdId=12): Delphi `TDateTime` expiration value.
 //!
-//! Action-команды (StratStartStop, ResetProfit, TriggerManage, EmuTrades,
-//! UpdateVersion, SettingsRequest) — пробрасываются как `SettingsEvent` без
-//! фиксации в state. `NewMarketNotify` является internal Active Lib trigger:
-//! dispatcher uses it to force listing refresh, and user code gets a market
-//! event only after a refreshed list actually inserts new markets.
+//! Action commands (`StratStartStop`, `ResetProfit`, `TriggerManage`,
+//! `EmuTrades`, `UpdateVersion`, `SettingsRequest`) are surfaced as
+//! `SettingsEvent` values without becoming retained state. `NewMarketNotify`
+//! is an internal Active Lib trigger: the dispatcher uses it to force listing
+//! refresh, and user code receives a market event only after the refreshed list
+//! actually inserts new markets.
 
 use crate::commands::ui::{
     ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, StratStartStop,
@@ -24,47 +25,47 @@ use crate::commands::ui::{
 };
 use crate::time::DelphiTime;
 
-/// Sync state клиентских настроек — обновляется через `apply(UICommand)`.
+/// Synchronized UI/settings state updated by `apply(UICommand)`.
 ///
-/// Settings — это snapshot-state, не аккумулирующая история. Каждый принятый
-/// `TClientSettingsCommand` от сервера полностью заменяет `client_settings`.
+/// Settings are snapshot state, not accumulated history. Every accepted
+/// `TClientSettingsCommand` fully replaces `client_settings`.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
-    /// Последний полученный snapshot настроек клиента (None до первого `SettingsRequest` ответа).
+    /// Last received client settings snapshot.
     pub client_settings: Option<ClientSettingsCommand>,
-    /// Текущий `cfg`-эквивалент для append-only soft-read хвоста `TClientSettingsCommand`.
+    /// Current `cfg` fallback for append-only `TClientSettingsCommand` tails.
     ///
-    /// Delphi `CreateFromStream` подставляет значения из текущего `cfg`, если
-    /// старый packet не содержит хвостовые поля. После каждого полного settings
-    /// snapshot этот fallback обновляется автоматически; до первого snapshot
-    /// application может заполнить его через
+    /// Delphi `CreateFromStream` fills missing append-only tail fields from
+    /// current `cfg` when an old packet does not contain them. After every full
+    /// settings snapshot this fallback is refreshed automatically; before the
+    /// first snapshot, application code may seed it through
     /// [`SettingsState::set_client_settings_fallback`].
     pub client_settings_fallback: ClientSettingsCommand,
-    /// Текущие настройки leverage management (None если ни одного `TLevManageCommand` не получено).
+    /// Current leverage-management settings, if received.
     pub lev_manage: Option<LevManage>,
-    /// Активна ли подписка на market-maker ордера (изменяется через `ui_mm_subscribe`).
+    /// Whether market-maker orders are currently subscribed.
     pub mm_orders_subscribed: bool,
-    /// Имя текущего выбранного DEX (None если не выбран / не futures-режим).
+    /// Current DEX selector.
     pub current_dex: Option<String>,
-    /// Индекс текущего spot (None если не выбран). Конкретные значения биржа-specific.
+    /// Current spot selector. Concrete values are exchange-specific.
     pub current_spot: Option<u8>,
-    /// `TDateTime` (Delphi double): момент когда истекает Arb лицензия.
+    /// `TDateTime` (Delphi double): arbitrage license expiration time.
     pub arb_valid_until: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub enum SettingsEvent {
-    /// Получен новый полный snapshot настроек.
+    /// A fresh full settings snapshot was applied.
     ClientSettingsUpdated,
-    /// Изменился LevManage snapshot.
+    /// Leverage-management snapshot changed.
     LevManageUpdated,
-    /// Изменилась подписка на MM ордера.
+    /// MM-orders subscription flag changed.
     MMSubscribeChanged(bool),
-    /// Сервер запрашивает повторную отправку текущих настроек (CmdId=2).
+    /// Server requests the current settings snapshot again (CmdId=2).
     SettingsRequested { uid: u64 },
-    /// Запрос на старт/стоп всех активных стратегий (v1).
+    /// Start/stop all active strategies request (v1).
     StratStartStopRequested(StratStartStop),
-    /// Запрос на старт/стоп с дельтой checked (v2).
+    /// Start/stop request with checked-state delta (v2).
     StratStartStopV2Requested(StratStartStopV2),
     /// Remote update command (UI CmdId=6): version name + release/test flag.
     ///
@@ -72,22 +73,22 @@ pub enum SettingsEvent {
     /// Rust state layer only surfaces the wire command; application code decides
     /// whether/how to update itself.
     VersionUpdate(UpdateVersion),
-    /// Серия эмулированных тиков (Sliced).
+    /// Emulated tick series (Sliced).
     EmuTrades(EmuTrades),
-    /// Изменения hotkey-триггеров.
+    /// Hotkey trigger-management change.
     TriggerManaged(TriggerManage),
-    /// Запрос на сброс профита (kind: 0=Cur, 1=All).
+    /// Profit reset request (`kind`: 0=current, 1=all).
     ResetProfitRequested(ResetProfit),
-    /// Arb лицензия активирована/обновлена.
+    /// Arbitrage license was activated/refreshed.
     ArbActivated(ArbActivateNotify),
-    /// Сменился текущий DEX.
+    /// Current DEX changed.
     DexSwitched(SwitchDex),
-    /// Сменился текущий spot (0=Crypto, 1=Predict).
+    /// Current spot changed (`0=Crypto`, `1=Predict`).
     SpotSwitched(SwitchSpot),
-    /// Команда с будущей версией. Low-level state API can surface it, while
+    /// Command from a future protocol version. Low-level state API can surface it, while
     /// `EventDispatcher` skips it like Delphi registry `FSkipped`.
     Skipped { cmd_id: u8, uid: u64, ver: u16 },
-    /// Неизвестная подкоманда (forward-compat).
+    /// Unknown subcommand for forward compatibility.
     Unknown { cmd_id: u8, uid: u64 },
 }
 
@@ -110,7 +111,7 @@ impl SettingsState {
         &self.client_settings_fallback
     }
 
-    /// Применить входящую UI-команду к state.
+    /// Apply an inbound UI command to retained state.
     ///
     /// Returns `None` for internal commands that have no public settings event.
     pub fn apply(&mut self, cmd: UICommand) -> Option<SettingsEvent> {
@@ -300,7 +301,7 @@ mod tests {
             ev,
             Some(SettingsEvent::StratStartStopRequested(_))
         ));
-        // state не меняется
+        // No retained state changes.
         assert!(st.client_settings.is_none());
     }
 }

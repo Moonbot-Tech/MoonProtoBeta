@@ -1,24 +1,30 @@
-//! Orders sync state — auto-apply входящих TBaseTradeCommand к локальной модели.
+//! Orders sync state — applies inbound `TBaseTradeCommand` values to the local
+//! active order read-model.
 //!
-//! Источник Delphi: `MoonProtoClient.pas:513-666` (ProcessCommandOrder + CleanupMissingWorkers)
-//! + `TaskWorkers.pas:1428-1509` (AcceptServerCommand + HandleServerCommand) + `DoTheJobVirtual`.
+//! Delphi sources: `MoonProtoClient.pas:513-666`
+//! (`ProcessCommandOrder` + `CleanupMissingWorkers`),
+//! `TaskWorkers.pas:1428-1509`
+//! (`AcceptServerCommand` + `HandleServerCommand`), and `DoTheJobVirtual`.
 //!
-//! ## Что делает этот модуль
+//! ## Module Role
 //!
-//! Зеркало серверных ордеров — клиент применяет команды и получает события.
-//! Это **полная** замена клиентского `BOrderWorker.DoTheJobVirtual` + `WCache` + `CleanupMissingWorkers`.
+//! This is the client-side mirror of server order workers: inbound commands are
+//! applied to retained order state and produce typed events. It replaces the
+//! Delphi client-side `BOrderWorker.DoTheJobVirtual` + `WCache` +
+//! `CleanupMissingWorkers` behavior inside the Rust Active Lib.
 //!
-//! Поддерживается:
+//! Supported behavior:
 //! - Epoch protection (per-status `server_latest_epoch`).
-//! - Phase rollback protection (нельзя откатить в более раннюю фазу).
-//! - Snapshot flag mechanism (`current_snapshot_flag` инкрементируется при TAllStatuses,
-//!   ордера без свежего флага → запрашиваются через `missing_after_snapshot()`).
-//! - BulkReplace tracking (set replace-pending flag на UID'ах).
+//! - Phase rollback protection.
+//! - Snapshot flag mechanism (`current_snapshot_flag` is incremented on
+//!   `TAllStatuses`; orders without the fresh flag are returned by
+//!   `missing_after_snapshot()`).
+//! - BulkReplace tracking.
 //! - Trace points accumulation.
 //! - Corridor state.
 //! - VStop state.
-//! - Deferred removal на терминальном статусе / TOrderNotFound.
-//! - ServerTimeDelta correction для всех TDateTime полей.
+//! - Deferred removal on terminal statuses / `TOrderNotFound`.
+//! - `ServerTimeDelta` correction for all `TDateTime` fields.
 
 use crate::commands::trade::*;
 use crate::state::eps::EpsProfile;
@@ -40,29 +46,30 @@ const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
 const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 
 /// Wrapping-safe epoch comparison.
-/// Соответствует MoonProtoFunc.pas:188-203 `EpochIsOK`:
-///   if LastEpoch = NewEpoch then Result := false;   // ДУБЛИКАТ
+/// Matches MoonProtoFunc.pas:188-203 `EpochIsOK`:
+///   if LastEpoch = NewEpoch then Result := false;   // duplicate
 ///   backDist := LastEpoch - NewEpoch;               // Word wrapping subtraction
-///   if backDist <= 100 then Result := false         // STALE (до 100 назад)
+///   if backDist <= 100 then Result := false         // stale, up to 100 behind
 ///   else Result := true;                            // ACCEPT
 ///
-/// Возвращает `true` если new — действительно новое значение (не дубликат, не stale).
-/// Используется AcceptServerCommand в BOrderWorker (TaskWorkers.pas:1440).
-// `epoch_is_ok` теперь общий через `state::epoch::epoch_is_ok` (audit_rust_quality #1).
-// Окно stale = 100 взято из Delphi `MoonProtoFunc.pas:188-203`.
+/// Returns `true` when `new` is actually new: not duplicate and not stale.
+/// Used by `AcceptServerCommand` in `BOrderWorker` (TaskWorkers.pas:1440).
+// `epoch_is_ok` is shared through `state::epoch::epoch_is_ok`
+// (audit_rust_quality #1). The stale window is 100, from Delphi
+// `MoonProtoFunc.pas:188-203`.
 use super::epoch::epoch_is_ok;
 
-/// Маппинг status → phase number.
-/// Соответствует TaskWorkers.pas:546-555 `StatusPhase`:
+/// Mapping from worker status to Delphi phase number.
+/// Matches TaskWorkers.pas:546-555 `StatusPhase`:
 ///   OS_BuySet              → 1
 ///   OS_BuyDone             → 2
 ///   OS_SellSet             → 3
 ///   OS_SelLAlmostDone /
 ///   OS_SelLDone            → 4
-///   все остальные (None, BuyFail, BuyCancel, SellFail, SellCancel) → 0
+///   all other statuses (None, BuyFail, BuyCancel, SellFail, SellCancel) -> 0
 ///
-/// Phase rollback применяется только когда оба `new_phase > 0` и `cur_phase > 0`
-/// (терминальные статусы с phase=0 не проверяются).
+/// Phase rollback is checked only when both `new_phase > 0` and
+/// `cur_phase > 0`; terminal phase-0 statuses are not checked.
 fn status_phase(s: OrderWorkerStatus) -> u8 {
     match s {
         OrderWorkerStatus::BuySet => 1,
@@ -123,22 +130,23 @@ struct PendingRemoval {
     due_ms: i64,
 }
 
-/// Главная коллекция ордеров.
+/// Main retained orders collection.
 ///
-/// **Однопоточная** — модифицируется только из main thread клиента.
-/// Юзер получает read-only ссылки через `iter()`, `get()`.
+/// Single-owner state: modified only by the client runtime owner. Consumer code
+/// reads it through `iter()` / `get()` or through `MoonClient` snapshots.
 #[derive(Debug, Clone, Default)]
 pub struct Orders {
     map: HashMap<u64, Order>,
     /// Local/UI visual-order markers registered before the first server
     /// `TOrderStatus` creates the read-model entry.
     pending_local_visual_orders: HashSet<u64>,
-    /// UID'ы, которые Delphi worker уже пометил бы как завершающиеся, но ещё
-    /// не удалил бы из `WCache` прямо внутри `ProcessCommandOrder`.
+    /// UID's that Delphi worker would already mark as finishing, but would not
+    /// remove from `WCache` inside `ProcessCommandOrder` yet.
     pending_removals: Vec<PendingRemoval>,
-    /// Инкрементируется при каждом TAllStatuses (CurrentSnapshotFlag в Delphi).
+    /// Incremented on every `TAllStatuses` (`CurrentSnapshotFlag` in Delphi).
     current_snapshot_flag: u8,
-    /// ServerTimeDelta = InitialTime(server) - Now(client). Применяется к временам в командах.
+    /// `ServerTimeDelta = InitialTime(server) - Now(client)`, applied to
+    /// command `TDateTime` fields.
     pub server_time_delta: f64,
     eps_profile: EpsProfile,
 }
@@ -165,20 +173,21 @@ impl Orders {
         self.current_snapshot_flag
     }
 
-    /// Применить команду из канала MPC_Order. Возвращает событие для UI/каллера.
+    /// Apply one inbound `MPC_Order` command and return the resulting event.
     ///
-    /// Это **главная** функция модуля. Внутри:
-    /// 1. Проверка epoch (anti out-of-order).
-    /// 2. Проверка phase rollback.
-    /// 3. Применение к Order (или создание нового).
-    /// 4. ServerTimeDelta correction для TDateTime полей.
-    /// 5. Deferred removal при terminal status / TOrderNotFound.
-    /// 6. Snapshot flag mechanics (CleanupMissing) through dispatcher-level
+    /// This is the main state-transition entry point:
+    /// 1. epoch check;
+    /// 2. phase rollback check;
+    /// 3. update or create `Order`;
+    /// 4. `ServerTimeDelta` correction for `TDateTime` fields;
+    /// 5. deferred removal on terminal status / `TOrderNotFound`;
+    /// 6. snapshot flag mechanics (CleanupMissing) through dispatcher-level
     ///    `TAllStatuses` handling.
-    /// 7. Генерация события.
+    /// 7. event generation.
     ///
-    /// **Замечание**: команды-запросы от клиента (AllStatusesRequest, OrderStatusRequest)
-    /// возвращают `Ignored / NotApplicable` — это **исходящие** команды, не входящие.
+    /// Client-originated request commands (`AllStatusesRequest`,
+    /// `OrderStatusRequest`) return `Ignored / NotApplicable`: they are outgoing
+    /// commands, not inbound state updates.
     pub fn apply(&mut self, cmd: TradeCommand) -> (ApplyResult, OrderEvent) {
         self.apply_at(cmd, 0)
     }
@@ -191,7 +200,7 @@ impl Orders {
             }
         }
         match cmd {
-            // --- Full status (создание или обновление) ---
+            // --- Full status create/update ---
             TradeCommand::OrderStatus(st) => {
                 let new_order = !self.map.contains_key(&uid);
                 let status = st.epoch_header.status;
@@ -365,7 +374,7 @@ impl Orders {
                     target.quantity_base = rr.quantity_base;
                 }
 
-                // Сбрасываем bulk_replace флаг на этой стороне (replace подтверждён).
+                // Clear the bulk_replace flag for this side: replace is acknowledged.
                 if order_type_uses_buy_side(rr.order_type) {
                     entry.buy_price = rr.price;
                     entry.bulk_replace_buy = false;
@@ -515,7 +524,7 @@ impl Orders {
                 },
             ),
 
-            // --- Client-originated команды (исходящие) — игнорируются в state ---
+            // --- Client-originated outgoing commands: ignored by state ---
             TradeCommand::OrderReplace(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
             TradeCommand::OrderCancel(c) => self.apply_noop_trade_epoch(uid, &c.epoch_header),
             TradeCommand::OrderStatusRequest(h) => self.apply_noop_trade_epoch(uid, &h),
@@ -541,7 +550,7 @@ impl Orders {
                 },
             ),
 
-            // --- Прочие ---
+            // --- Other commands ---
             TradeCommand::Penalty(_)
             | TradeCommand::TradeVisual(_)
             | TradeCommand::BaseMarket(_) => (
