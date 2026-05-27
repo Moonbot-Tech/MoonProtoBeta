@@ -29,7 +29,7 @@ impl ProtocolCore<'_> {
             } else {
                 let cpu_start = Instant::now();
                 protocol_metrics.record_writer_cpu(cpu_start.elapsed());
-                // Сокет ещё не привязан — короткая пауза перед повторной попыткой bind.
+                // Socket is not bound yet: short pause before the next bind try.
                 thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             }
         }

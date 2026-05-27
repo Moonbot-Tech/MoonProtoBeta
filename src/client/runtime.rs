@@ -44,30 +44,27 @@ impl Client {
         self.recv_poller = Some(poller);
     }
 
-    /// GetTimeMS equivalent — монотонные миллисекунды с момента старта `Client` (matches
-    /// Delphi GetTickCount64 семантикой "since some fixed past point").
+    /// `GetTimeMS` equivalent: monotonic milliseconds since this `Client`
+    /// started. This matches the Delphi `GetTickCount64` semantic of
+    /// "milliseconds since some fixed point in the past".
     ///
-    /// B-V3-02 fix: ранее использовался `SystemTime::now()` (clock_gettime CLOCK_REALTIME)
-    /// — ~30-100ns per call. На hot path receive loop (50K pps на пике TradesStream)
-    /// это давало 1-5 мс/сек wasted CPU + потенциальный wall-clock jump при NTP-step
-    /// (ломал бы diff'ы). `Instant::elapsed()` использует CLOCK_MONOTONIC (на Linux/Mac)
-    /// либо QueryPerformanceCounter (Windows) — стабильный, ~5-20ns per call, не
-    /// подвержен NTP-корректировкам.
+    /// B-V3-02 fix: the old code used `SystemTime::now()` / realtime clock.
+    /// On the receive hot path that cost extra CPU and could jump under NTP
+    /// adjustments. `Instant::elapsed()` uses a monotonic clock and all callers
+    /// compare differences rather than the absolute epoch.
     ///
-    /// **Semantic change vs предыдущая версия:** возвращает ms since process start,
-    /// не ms since UNIX_EPOCH. Все callers используют **diff** между двумя `now_ms()`,
-    /// так что absolute-base разница не имеет значения.
-    ///
-    /// MUST use same time base everywhere (receive, send, slicing) —
-    /// гарантируется через общий `self._start: Instant`.
+    /// The same time base must be used for receive, send, and slicing; the
+    /// shared `self._start: Instant` enforces that.
     #[inline]
     pub(crate) fn now_ms(&self) -> i64 {
         self._start.elapsed().as_millis() as i64
     }
 
-    /// Получить кэшированный SocketAddr сервера. Резолвится один раз при `bind_socket` или
-    /// первом вызове, далее используется без re-resolve. Закрывает B-05.
-    /// При неудаче resolve — `None`, отправка пакетов не происходит (логируется).
+    /// Return cached server `SocketAddr`.
+    ///
+    /// The address is resolved once on bind or first use and then reused without
+    /// repeated DNS/`getaddrinfo` work. On resolve failure, packets are not sent
+    /// and the failure is logged.
     pub(crate) fn server_socket_addr(&mut self) -> Option<SocketAddr> {
         if let Some(addr) = self.cached_server_addr {
             return Some(addr);
@@ -99,9 +96,10 @@ impl Client {
     /// owns the runtime thread and has no user-selected loop duration.
     #[doc(hidden)]
     pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
-        // Low-level raw API для потребителей которым НЕ нужны active-library
-        // auto-actions (RequestOrderBookFull, trades resend tail-check, и т.п.).
-        // User callback выполняется через app queue, а не внутри protocol tick.
+        // Low-level raw API for consumers that intentionally do not use
+        // active-library auto-actions such as RequestOrderBookFull or trades
+        // resend tail-check. The user callback runs through the app queue, not
+        // inside the protocol tick.
         let (app_tx, app_rx) = mpsc::channel::<RawAppEvent>();
         let lifecycle_pair = if self.lifecycle_event_sender_installed() {
             None
