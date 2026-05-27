@@ -139,13 +139,36 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-Stateful order actions are user intents. They are marshalled into the runtime
-owner, applied to the live `Orders` state, and only then converted to protocol
-commands:
+New order and market-level trade actions are user intents too. They are
+marshalled into the runtime owner, which derives the Delphi route bytes from the
+active session:
+
+```rust
+use moonproto::{NewOrderParams, OrderSide};
+
+client.trade().new_order(
+    NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001),
+)?;
+client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
+```
+
+Existing-order actions are applied to the live `Orders` state first and only
+then converted to protocol commands:
 
 ```rust
 client.orders().move_order(order_uid, new_price)?;
 client.orders().cancel(order_uid)?;
+```
+
+One-shot Engine API helpers also run inside the owned runtime. Read helpers
+parse their payloads; mutation helpers return the successful raw
+`EngineResponse` and convert server failures into `MoonClientError`:
+
+```rust
+let balance = client.request_balance("USDT", Duration::from_secs(15))?;
+client.set_leverage("BTCUSDT", 20, Duration::from_secs(15))?;
+client.set_hedge_mode(true, Duration::from_secs(15))?;
+client.cancel_all_orders(Duration::from_secs(15))?;
 ```
 
 Advanced protocol tools can still own `Client + EventDispatcher` directly, but
@@ -389,27 +412,28 @@ connection readiness and the one-time init requests.
 
 ## Trade Context
 
-This is a low-level/custom-runtime topic. Regular UI actions for already
-tracked orders should use `client.orders()` intents, and new public market-level
-order helpers should be added to `MoonClient` before exposing that flow to
-application developers.
-
-Market-level trade commands need the active server route:
-`base_currency_code` and `exchange_code` from `server_info()`. After
-`connect_and_init`, build that route with:
+This is a low-level/custom-runtime topic. Regular UI actions should not build
+or pass `TradeCtx`:
 
 ```rust
-let ctx = client.random_trade_ctx()?;
-client.new_order(ctx, "BTCUSDT", false, 50_000.0, 0, 0.001);
+client.trade().new_order(NewOrderParams::new(
+    "BTCUSDT",
+    OrderSide::Long,
+    50_000.0,
+    0.001,
+))?;
+client.orders().move_order(order_uid, new_price)?;
 ```
 
-If the application uses a custom init flow, call `request_base_check` first or
-set `server_info` manually from a parsed BaseCheck response.
+The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
+learned during Init/BaseCheck. If a custom low-level runtime calls raw
+`Client::new_order(ctx, ...)` directly, it must call `request_base_check` first
+or set `server_info` manually from a parsed BaseCheck response.
 
 ## Engine API Requests
 
-For common one-shot reads, use `MoonClient` request helpers. The runtime keeps
-the UDP loop alive while the caller waits for the request timeout:
+For common one-shot reads and mutations, use `MoonClient` request helpers. The
+runtime keeps the UDP loop alive while the caller waits for the request timeout:
 
 ```rust
 let qty = client.request_balance("USDT", Duration::from_secs(12))?;
@@ -417,10 +441,15 @@ let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
 let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
 let candles = client.request_candles_data(Duration::from_secs(30))?;
+client.set_leverage("BTCUSDT", 20, Duration::from_secs(12))?;
+client.set_hedge_mode(true, Duration::from_secs(12))?;
+client.confirm_risk_limit("BTCUSDT", Duration::from_secs(12))?;
 ```
 
 These helpers validate the server response and parse the payload. Engine API
-failures are returned as `MoonClientError::EngineRequest`.
+failures are returned as `MoonClientError::EngineRequest`. Mutation helpers
+return the successful raw `EngineResponse` because most mutation replies are
+acknowledgements rather than typed data snapshots.
 
 Low-level `Client::api_*` receivers remain only for custom runtimes and
 diagnostic tools. A normal application should not wait on raw receivers from the

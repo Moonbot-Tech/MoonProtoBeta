@@ -18,7 +18,7 @@
 //! ```ignore
 //! use moonproto::{
 //!     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-//!     MoonClient,
+//!     MoonClient, NewOrderParams, OrderSide,
 //! };
 //!
 //! let keys = import_key(KEY_B64).expect("invalid MoonBot key");
@@ -36,6 +36,8 @@
 //! let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 //!
 //! client.subscribe_orderbook("ETHUSDT")?;
+//! // After the user chooses a market/order side:
+//! // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
 //! // After an order appears in events/snapshots:
 //! // client.orders().move_order(order_uid, 50100.0)?;
 //! for lifecycle in client.drain_lifecycle_events() {
@@ -52,9 +54,12 @@
 //! [`MoonClient::request_api_expiration_time`],
 //! [`MoonClient::request_transfer_assets`],
 //! [`MoonClient::request_coin_card_candles`], and
-//! [`MoonClient::request_candles_data`]. The runtime keeps MoonProto pumping,
-//! checks the server status or channel completion, and parses or merges the
-//! response payload. Events observed during the wait remain available through
+//! [`MoonClient::request_candles_data`]. Mutation helpers such as
+//! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
+//! [`MoonClient::cancel_all_orders`] also run inside the owned runtime. The
+//! runtime keeps MoonProto pumping, checks the server status or channel
+//! completion, and parses or merges the response payload. Events observed
+//! during the wait remain available through
 //! [`MoonClient::drain_events`].
 //!
 //! Regular applications should start with [`MoonClient`]. Lower-level
@@ -116,10 +121,11 @@ pub mod state;
 pub mod transport;
 
 pub use client::{
-    connect_and_init, run_init_sequence, Client, ClientConfig, ConnectConfig, ConnectError,
-    EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders,
-    ProtocolMetricsSnapshot, RefreshConfig, SendPriority, TradeContextError, UniqueKey,
+    connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams, ConnectConfig,
+    ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
+    InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade,
+    NewOrderParams, OrderSide, ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams,
+    SendPriority, SplitOrderParams, TradeContextError, UniqueKey,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};

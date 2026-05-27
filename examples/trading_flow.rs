@@ -56,6 +56,11 @@ fn main() {
         Err(err) => println!("[balance] request failed: {err}"),
     }
 
+    // Example only: uncomment in a real trading UI after explicit user action.
+    // client.trade().new_order(
+    //     moonproto::NewOrderParams::new(market, moonproto::OrderSide::Long, 50_000.0, 0.001),
+    // )?;
+
     match client.request_client_settings(Duration::from_secs(15)) {
         Ok(settings) => println!(
             "[settings] uid={} manual_strategy={} stop_market={}",

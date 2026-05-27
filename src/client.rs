@@ -83,7 +83,10 @@ mod subscription_api;
 mod subscriptions;
 mod transport_state;
 
-pub use active_runtime::{MoonClient, MoonClientError, MoonOrders};
+pub use active_runtime::{
+    ClosePositionParams, MoonClient, MoonClientError, MoonOrders, MoonTrade, NewOrderParams,
+    OrderSide, SellOrderParams, SplitOrderParams,
+};
 pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;
 pub use candles::MergedCandles;

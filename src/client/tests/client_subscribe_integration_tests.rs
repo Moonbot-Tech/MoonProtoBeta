@@ -532,8 +532,8 @@ fn client_move_all_sells_uses_delphi_pre_send_gate() {
 #[test]
 fn client_move_all_buys_uses_buy_only_cmd_type_and_delphi_gate() {
     use crate::commands::trade::{
-        FixedPosition, MoveAllBuysCmdType, OrderWorkerStatus, ReplaceMultiKind, TradeCommand,
-        TradeCtx,
+        FixedPosition, MoveAllBuysCmdType, MoveAllBuysParams, OrderWorkerStatus, ReplaceMultiKind,
+        TradeCommand, TradeCtx,
     };
 
     let ctx = TradeCtx::with_route(0xBEEF, 17, 9);
@@ -546,10 +546,12 @@ fn client_move_all_buys_uses_buy_only_cmd_type_and_delphi_gate() {
             &immune_orders,
             ctx,
             "DOGEUSDT",
-            MoveAllBuysCmdType::MoveKind,
-            ReplaceMultiKind::TopVol,
-            50100.0,
-            FixedPosition::Long,
+            MoveAllBuysParams {
+                cmd_type: MoveAllBuysCmdType::MoveKind,
+                move_kind: ReplaceMultiKind::TopVol,
+                price: 50100.0,
+                side: FixedPosition::Long,
+            },
         ),
         "MoveKind buy overload checks not ImmuneForClicks"
     );
@@ -560,10 +562,12 @@ fn client_move_all_buys_uses_buy_only_cmd_type_and_delphi_gate() {
         &immune_orders,
         ctx,
         "DOGEUSDT",
-        MoveAllBuysCmdType::Pers,
-        ReplaceMultiKind::None,
-        1.5,
-        FixedPosition::Short,
+        MoveAllBuysParams {
+            cmd_type: MoveAllBuysCmdType::Pers,
+            move_kind: ReplaceMultiKind::None,
+            price: 1.5,
+            side: FixedPosition::Short,
+        },
     ));
 
     let (_, high, _) = client.take_send_queues_for_test();

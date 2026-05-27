@@ -67,6 +67,20 @@ pub struct MoveAllSellsParams {
     pub side: FixedPosition,
 }
 
+/// Parameters for `TMoveAllBuysCommand`.
+///
+/// Buy bulk moves have fewer modes than sell bulk moves: Delphi supports
+/// `MoveKind` and `%` (`Pers`), but not buy-side `PriceZone`. Keeping the wire
+/// options together avoids a public API with several adjacent positional
+/// scalars.
+#[derive(Debug, Clone, Copy)]
+pub struct MoveAllBuysParams {
+    pub cmd_type: MoveAllBuysCmdType,
+    pub move_kind: ReplaceMultiKind,
+    pub price: f64,
+    pub side: FixedPosition,
+}
+
 /// Parameters for raw `TVStopUpdate` builders.
 ///
 /// High-level client wrappers derive `status` from the local `Orders` state,

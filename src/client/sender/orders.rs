@@ -78,6 +78,7 @@ impl ClientSender {
     ///
     /// This mirrors [`Client::new_order`]: `MPC_Order`, high priority,
     /// encrypted, `MaxRetries=3`.
+    #[doc(hidden)]
     pub fn new_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
@@ -86,11 +87,11 @@ impl ClientSender {
         price: f64,
         strat_id: u64,
         order_size: f64,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_new_order(
             ctx, market, is_short, price, strat_id, order_size,
         );
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 
     #[inline]
@@ -132,9 +133,10 @@ impl ClientSender {
     ///
     /// This is fire-and-forget. Use [`Client::request_order_snapshot`] when the
     /// caller owns the `Client` and wants to wait for the applied snapshot.
-    pub fn request_all_statuses(&self, uid: u64) {
+    #[doc(hidden)]
+    pub fn request_all_statuses(&self, uid: u64) -> bool {
         let raw = crate::commands::trade::build_all_statuses_request(uid);
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 
     /// Apply Delphi cancel request locally and send `TOrderCancelCommand`.
@@ -155,12 +157,19 @@ impl ClientSender {
     }
 
     /// Send `TJoinOrdersCommand`.
-    pub fn join_orders(&self, ctx: crate::commands::trade::TradeCtx, market: &str, is_short: bool) {
+    #[doc(hidden)]
+    pub fn join_orders(
+        &self,
+        ctx: crate::commands::trade::TradeCtx,
+        market: &str,
+        is_short: bool,
+    ) -> bool {
         let raw = crate::commands::trade::build_join_orders(ctx, market, is_short);
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 
     /// Send `TSplitOrderCommand`.
+    #[doc(hidden)]
     pub fn split_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
@@ -168,7 +177,7 @@ impl ClientSender {
         split_parts: i32,
         split_small: bool,
         split_small_sell: bool,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_split_order(
             ctx,
             market,
@@ -176,24 +185,25 @@ impl ClientSender {
             split_small,
             split_small_sell,
         );
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 
     /// Split an order already tracked by `EventDispatcher::orders()`.
+    #[doc(hidden)]
     pub fn split_tracked_order(
         &self,
         order: &crate::state::Order,
         split_parts: i32,
         split_small: bool,
         split_small_sell: bool,
-    ) {
+    ) -> bool {
         self.split_order(
             order.trade_ctx(),
             &order.market_name,
             split_parts,
             split_small,
             split_small_sell,
-        );
+        )
     }
 
     /// Send `TMoveAllSellsCommand` if Delphi active-client gate finds a candidate order.
@@ -216,60 +226,70 @@ impl ClientSender {
     }
 
     /// Send `TDoClosePositionCommand` (`MaxRetries=1`).
+    #[doc(hidden)]
     pub fn do_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         market_sell: bool,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_do_close_position(ctx, market, market_sell);
-        self.send_trade(raw, 1);
+        self.send_trade(raw, 1)
     }
 
     /// Send `TDoLimitClosePositionCommand` (`MaxRetries=1`).
+    #[doc(hidden)]
     pub fn do_limit_close_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         is_short: bool,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_do_limit_close_position(ctx, market, is_short);
-        self.send_trade(raw, 1);
+        self.send_trade(raw, 1)
     }
 
     /// Send `TDoSplitPositionCommand` (`MaxRetries=1`).
+    #[doc(hidden)]
     pub fn do_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         is_short: bool,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_do_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1);
+        self.send_trade(raw, 1)
     }
 
     /// Send `TDoSellOrderCommand` (`MaxRetries=1`).
+    #[doc(hidden)]
     pub fn do_sell_order(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         price: f64,
         size: f64,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_do_sell_order(ctx, market, price, size);
-        self.send_trade(raw, 1);
+        self.send_trade(raw, 1)
     }
 
     /// Send `TOrderStatusRequest`.
-    pub fn request_order_status(&self, ctx: crate::commands::trade::TradeCtx, market: &str) {
+    #[doc(hidden)]
+    pub fn request_order_status(
+        &self,
+        ctx: crate::commands::trade::TradeCtx,
+        market: &str,
+    ) -> bool {
         let raw = crate::commands::trade::build_order_status_request(ctx, market);
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 
     /// Request a fresh status for an order already tracked by
     /// `EventDispatcher::orders()`.
-    pub fn request_tracked_order_status(&self, order: &crate::state::Order) {
-        self.request_order_status(order.trade_ctx(), &order.market_name);
+    #[doc(hidden)]
+    pub fn request_tracked_order_status(&self, order: &crate::state::Order) -> bool {
+        self.request_order_status(order.trade_ctx(), &order.market_name)
     }
 
     /// Apply Delphi `SendStopsIfChanged` locally and send `TOrderStopsUpdate`.
@@ -391,20 +411,20 @@ impl ClientSender {
         orders: &crate::state::Orders,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
-        cmd_type: crate::commands::trade::MoveAllBuysCmdType,
-        move_kind: crate::commands::trade::ReplaceMultiKind,
-        price: f64,
-        side: crate::commands::trade::FixedPosition,
+        params: crate::commands::trade::MoveAllBuysParams,
     ) -> bool {
         if !self.domain_ready_for_typed_send() {
             return false;
         }
-        if !orders.has_move_all_buys_candidate(market, cmd_type, move_kind, side) {
+        if !orders.has_move_all_buys_candidate(
+            market,
+            params.cmd_type,
+            params.move_kind,
+            params.side,
+        ) {
             return false;
         }
-        let raw = crate::commands::trade::build_move_all_buys(
-            ctx, market, cmd_type, move_kind, price, side,
-        );
+        let raw = crate::commands::trade::build_move_all_buys(ctx, market, params);
         self.send_trade(raw, 3);
         true
     }
@@ -446,19 +466,21 @@ impl ClientSender {
     }
 
     /// Send `TDoMarketSplitPositionCommand` (`MaxRetries=1`).
+    #[doc(hidden)]
     pub fn do_market_split_position(
         &self,
         ctx: crate::commands::trade::TradeCtx,
         market: &str,
         is_short: bool,
-    ) {
+    ) -> bool {
         let raw = crate::commands::trade::build_do_market_split_position(ctx, market, is_short);
-        self.send_trade(raw, 1);
+        self.send_trade(raw, 1)
     }
 
     /// Send `TPenaltyCommand`.
-    pub fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) {
+    #[doc(hidden)]
+    pub fn penalty(&self, ctx: crate::commands::trade::TradeCtx, market: &str) -> bool {
         let raw = crate::commands::trade::build_penalty(ctx, market);
-        self.send_trade(raw, 3);
+        self.send_trade(raw, 3)
     }
 }

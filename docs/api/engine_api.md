@@ -69,6 +69,7 @@ UID is registered again.
 | Group | Methods |
 |---|---|
 | `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_candles_data`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
+| `MoonClient` mutation/refresh helpers | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
 | Low-level init reads | `request_base_check`, `request_auth_check` |
 | Init/auth | `api_base_check`, `api_auth_check` |
 | Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |

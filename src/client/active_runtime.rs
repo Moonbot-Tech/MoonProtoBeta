@@ -20,6 +20,8 @@ pub enum MoonClientError {
     RequestDisconnected,
     /// Engine API helper failed.
     EngineRequest(EngineRequestError),
+    /// Session route fields required by market-level trade actions are missing.
+    TradeContext(TradeContextError),
     /// The runtime thread stopped, panicked, or its command channel is closed.
     RuntimeStopped,
 }
@@ -31,6 +33,7 @@ impl std::fmt::Display for MoonClientError {
             Self::RequestTimeout => write!(f, "MoonProto request timed out"),
             Self::RequestDisconnected => write!(f, "MoonProto request channel disconnected"),
             Self::EngineRequest(err) => write!(f, "{err}"),
+            Self::TradeContext(err) => write!(f, "{err}"),
             Self::RuntimeStopped => write!(f, "MoonProto runtime is stopped"),
         }
     }
@@ -41,6 +44,7 @@ impl std::error::Error for MoonClientError {
         match self {
             Self::Connect(err) => Some(err),
             Self::EngineRequest(err) => Some(err),
+            Self::TradeContext(err) => Some(err),
             Self::RequestTimeout | Self::RequestDisconnected => None,
             Self::RuntimeStopped => None,
         }
@@ -65,6 +69,107 @@ impl From<mpsc::RecvTimeoutError> for MoonClientError {
 impl From<EngineRequestError> for MoonClientError {
     fn from(err: EngineRequestError) -> Self {
         Self::EngineRequest(err)
+    }
+}
+
+impl From<TradeContextError> for MoonClientError {
+    fn from(err: TradeContextError) -> Self {
+        Self::TradeContext(err)
+    }
+}
+
+/// Long/short side for user-facing market trade intents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderSide {
+    Long,
+    Short,
+}
+
+impl OrderSide {
+    pub const fn is_short(self) -> bool {
+        matches!(self, Self::Short)
+    }
+}
+
+/// User-facing parameters for opening a new order.
+#[derive(Debug, Clone)]
+pub struct NewOrderParams {
+    pub market: String,
+    pub side: OrderSide,
+    pub price: f64,
+    pub size: f64,
+    /// `None` sends Delphi `StratID=0`.
+    pub strategy_id: Option<u64>,
+}
+
+impl NewOrderParams {
+    pub fn new(market: impl Into<String>, side: OrderSide, price: f64, size: f64) -> Self {
+        Self {
+            market: market.into(),
+            side,
+            price,
+            size,
+            strategy_id: None,
+        }
+    }
+
+    pub fn with_strategy_id(mut self, strategy_id: u64) -> Self {
+        self.strategy_id = Some(strategy_id);
+        self
+    }
+}
+
+/// User-facing parameters for `TSplitOrderCommand`.
+#[derive(Debug, Clone)]
+pub struct SplitOrderParams {
+    pub market: String,
+    pub parts: i32,
+    pub split_small: bool,
+    pub split_small_sell: bool,
+}
+
+impl SplitOrderParams {
+    pub fn new(market: impl Into<String>, parts: i32) -> Self {
+        Self {
+            market: market.into(),
+            parts,
+            split_small: false,
+            split_small_sell: false,
+        }
+    }
+}
+
+/// User-facing parameters for market close.
+#[derive(Debug, Clone)]
+pub struct ClosePositionParams {
+    pub market: String,
+    pub market_sell: bool,
+}
+
+impl ClosePositionParams {
+    pub fn new(market: impl Into<String>) -> Self {
+        Self {
+            market: market.into(),
+            market_sell: true,
+        }
+    }
+}
+
+/// User-facing parameters for `TDoSellOrderCommand`.
+#[derive(Debug, Clone)]
+pub struct SellOrderParams {
+    pub market: String,
+    pub price: f64,
+    pub size: f64,
+}
+
+impl SellOrderParams {
+    pub fn new(market: impl Into<String>, price: f64, size: f64) -> Self {
+        Self {
+            market: market.into(),
+            price,
+            size,
+        }
     }
 }
 
@@ -194,6 +299,14 @@ impl MoonClient {
     /// Order intent API. The live `Orders` state remains owned by the runtime.
     pub fn orders(&self) -> MoonOrders {
         MoonOrders {
+            tx: self.tx.clone(),
+        }
+    }
+
+    /// Market-level trade intent API. The runtime derives `TradeCtx` from the
+    /// active session route learned during Init/BaseCheck.
+    pub fn trade(&self) -> MoonTrade {
+        MoonTrade {
             tx: self.tx.clone(),
         }
     }
@@ -350,6 +463,122 @@ impl MoonClient {
         })
     }
 
+    /// Request server-side full balance refresh. The current server normally
+    /// returns an empty successful EngineResponse; the balance state arrives
+    /// through the normal balance channel.
+    pub fn request_markets_balance_full(
+        &self,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::get_markets_balance_full(),
+            timeout,
+        )
+    }
+
+    /// Cancel all exchange orders through Engine API.
+    pub fn cancel_all_orders(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::cancel_all_orders(),
+            timeout,
+        )
+    }
+
+    /// Set leverage for a market through Engine API.
+    pub fn set_leverage(
+        &self,
+        market: impl AsRef<str>,
+        new_leverage: i32,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
+            timeout,
+        )
+    }
+
+    /// Set account hedge mode through Engine API.
+    pub fn set_hedge_mode(
+        &self,
+        hedge_mode: bool,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_hedge_mode(hedge_mode),
+            timeout,
+        )
+    }
+
+    /// Change position type for a market through Engine API.
+    pub fn change_position_type(
+        &self,
+        market: impl AsRef<str>,
+        position_type: u8,
+        new_market: bool,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::change_position_type(
+                market.as_ref(),
+                position_type,
+                new_market,
+            ),
+            timeout,
+        )
+    }
+
+    /// Convert dust to BNB through Engine API.
+    pub fn convert_dust_bnb(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(crate::commands::engine_request::convert_dust_bnb(), timeout)
+    }
+
+    /// Confirm risk limit for a market through Engine API.
+    pub fn confirm_risk_limit(
+        &self,
+        market: impl AsRef<str>,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
+            timeout,
+        )
+    }
+
+    /// Set MA mode through Engine API.
+    pub fn set_ma_mode(
+        &self,
+        ma_mode: bool,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_ma_mode(ma_mode),
+            timeout,
+        )
+    }
+
+    /// Transfer an asset between exchange wallets through Engine API.
+    pub fn do_transfer_asset(
+        &self,
+        asset: impl AsRef<str>,
+        qty: f64,
+        from: u8,
+        to: u8,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::do_transfer_asset(asset.as_ref(), qty, from, to),
+            timeout,
+        )
+    }
+
+    /// Reload orderbook data through Engine API.
+    pub fn reload_order_book(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::reload_order_book(),
+            timeout,
+        )
+    }
+
     /// Request chunked candles and return the merged response.
     pub fn request_candles_data(
         &self,
@@ -378,6 +607,28 @@ impl MoonClient {
             RuntimeReply::CoinCardCandles(result) => result.map_err(MoonClientError::from),
             _ => Err(MoonClientError::RuntimeStopped),
         })
+    }
+
+    fn request_engine_success(
+        &self,
+        payload: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<EngineResponse, MoonClientError> {
+        let response = self
+            .send_request(RuntimeCommandRequest::EngineRaw { payload, timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::EngineRaw(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })?;
+        if response.success {
+            Ok(response)
+        } else {
+            Err(MoonClientError::EngineRequest(EngineRequestError::Server {
+                method: response.method,
+                code: response.error_code,
+                message: response.error_msg,
+            }))
+        }
     }
 
     /// Request a fresh UI/settings snapshot through the active runtime.
@@ -595,6 +846,11 @@ impl MoonOrders {
         self.send_bool(RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on })
     }
 
+    /// Request a fresh status for one tracked order by UID.
+    pub fn request_status(&self, uid: u64) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeCommandKind::RequestOrderStatus { uid })
+    }
+
     /// Apply market-level panic sell button semantics.
     pub fn switch_panic_sell_by_market(
         &self,
@@ -613,6 +869,127 @@ impl MoonOrders {
             .send(RuntimeCommand::OrderAction { kind, reply: tx })
             .map_err(|_| MoonClientError::RuntimeStopped)?;
         rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+    }
+}
+
+/// Market-level trade intent handle.
+///
+/// These actions create or manage orders by market name. The caller does not
+/// pass `TradeCtx`; the runtime owner derives Delphi route bytes from the
+/// active session and queues the same wire commands as the low-level `Client`.
+#[derive(Clone)]
+pub struct MoonTrade {
+    tx: mpsc::Sender<RuntimeCommand>,
+}
+
+impl MoonTrade {
+    /// Send `TNewOrderCommand`.
+    pub fn new_order(&self, params: NewOrderParams) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::NewOrder(params))
+    }
+
+    /// Send `TJoinOrdersCommand`.
+    pub fn join_orders(
+        &self,
+        market_name: impl Into<String>,
+        side: OrderSide,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::JoinOrders {
+            market_name: market_name.into(),
+            side,
+        })
+    }
+
+    /// Send `TSplitOrderCommand`.
+    pub fn split_order(&self, params: SplitOrderParams) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::SplitOrder(params))
+    }
+
+    /// Send gated `TMoveAllSellsCommand`.
+    pub fn move_all_sells(
+        &self,
+        market_name: impl Into<String>,
+        params: crate::commands::trade::MoveAllSellsParams,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::MoveAllSells {
+            market_name: market_name.into(),
+            params,
+        })
+    }
+
+    /// Send gated `TMoveAllBuysCommand`.
+    pub fn move_all_buys(
+        &self,
+        market_name: impl Into<String>,
+        params: crate::commands::trade::MoveAllBuysParams,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::MoveAllBuys {
+            market_name: market_name.into(),
+            params,
+        })
+    }
+
+    /// Send `TDoClosePositionCommand`.
+    pub fn close_position(&self, params: ClosePositionParams) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::ClosePosition(params))
+    }
+
+    /// Send `TDoLimitClosePositionCommand`.
+    pub fn limit_close_position(
+        &self,
+        market_name: impl Into<String>,
+        side: OrderSide,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::LimitClosePosition {
+            market_name: market_name.into(),
+            side,
+        })
+    }
+
+    /// Send `TDoSplitPositionCommand`.
+    pub fn split_position(
+        &self,
+        market_name: impl Into<String>,
+        side: OrderSide,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::SplitPosition {
+            market_name: market_name.into(),
+            side,
+        })
+    }
+
+    /// Send `TDoSellOrderCommand`.
+    pub fn sell_order(&self, params: SellOrderParams) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::SellOrder(params))
+    }
+
+    /// Send `TDoMarketSplitPositionCommand`.
+    pub fn market_split_position(
+        &self,
+        market_name: impl Into<String>,
+        side: OrderSide,
+    ) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::MarketSplitPosition {
+            market_name: market_name.into(),
+            side,
+        })
+    }
+
+    /// Send `TPenaltyCommand`.
+    pub fn penalty(&self, market_name: impl Into<String>) -> Result<bool, MoonClientError> {
+        self.send_bool(RuntimeTradeCommandKind::Penalty {
+            market_name: market_name.into(),
+        })
+    }
+
+    fn send_bool(&self, kind: RuntimeTradeCommandKind) -> Result<bool, MoonClientError> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(RuntimeCommand::TradeAction { kind, reply: tx })
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
+        rx.recv()
+            .map_err(|_| MoonClientError::RuntimeStopped)?
+            .map_err(MoonClientError::from)
     }
 }
 
@@ -653,6 +1030,10 @@ enum RuntimeCommand {
         kind: RuntimeCommandKind,
         reply: mpsc::Sender<bool>,
     },
+    TradeAction {
+        kind: RuntimeTradeCommandKind,
+        reply: mpsc::Sender<Result<bool, TradeContextError>>,
+    },
 }
 
 enum RuntimeCommandRequest {
@@ -687,6 +1068,10 @@ enum RuntimeCommandRequest {
     ClientSettings {
         timeout: Duration,
     },
+    EngineRaw {
+        payload: Vec<u8>,
+        timeout: Duration,
+    },
 }
 
 enum RuntimeReply {
@@ -699,6 +1084,7 @@ enum RuntimeReply {
     CandlesData(Result<MergedCandles, mpsc::RecvTimeoutError>),
     CoinCardCandles(Result<Vec<crate::commands::candles::DeepPrice>, EngineRequestError>),
     ClientSettings(Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError>),
+    EngineRaw(Result<EngineResponse, mpsc::RecvTimeoutError>),
 }
 
 enum UiRuntimeCommand {
@@ -750,9 +1136,46 @@ enum RuntimeCommandKind {
         uid: u64,
         turn_on: bool,
     },
+    RequestOrderStatus {
+        uid: u64,
+    },
     SwitchPanicSellByMarket {
         market_name: String,
         turn_on: bool,
+    },
+}
+
+enum RuntimeTradeCommandKind {
+    NewOrder(NewOrderParams),
+    JoinOrders {
+        market_name: String,
+        side: OrderSide,
+    },
+    SplitOrder(SplitOrderParams),
+    MoveAllSells {
+        market_name: String,
+        params: crate::commands::trade::MoveAllSellsParams,
+    },
+    MoveAllBuys {
+        market_name: String,
+        params: crate::commands::trade::MoveAllBuysParams,
+    },
+    ClosePosition(ClosePositionParams),
+    LimitClosePosition {
+        market_name: String,
+        side: OrderSide,
+    },
+    SplitPosition {
+        market_name: String,
+        side: OrderSide,
+    },
+    SellOrder(SellOrderParams),
+    MarketSplitPosition {
+        market_name: String,
+        side: OrderSide,
+    },
+    Penalty {
+        market_name: String,
     },
 }
 
@@ -890,6 +1313,11 @@ fn handle_command(
             let _ = reply.send(result);
             result
         }
+        RuntimeCommand::TradeAction { kind, reply } => {
+            let result = handle_trade_action(client, dispatcher, kind);
+            let _ = reply.send(result);
+            false
+        }
     }
 }
 
@@ -949,6 +1377,10 @@ fn handle_request_command(
         RuntimeCommandRequest::ClientSettings { timeout } => (
             RuntimeReply::ClientSettings(client.request_client_settings(dispatcher, timeout)),
             true,
+        ),
+        RuntimeCommandRequest::EngineRaw { payload, timeout } => (
+            RuntimeReply::EngineRaw(client.request_engine_response(dispatcher, &payload, timeout)),
+            false,
         ),
     }
 }
@@ -1025,10 +1457,88 @@ fn handle_order_action(
         RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on } => {
             client.turn_tracked_order_panic_sell(dispatcher.orders_mut(), uid, turn_on)
         }
+        RuntimeCommandKind::RequestOrderStatus { uid } => {
+            let Some(order) = dispatcher.orders().get(uid).cloned() else {
+                return false;
+            };
+            client.request_tracked_order_status(&order)
+        }
         RuntimeCommandKind::SwitchPanicSellByMarket {
             market_name,
             turn_on,
         } => client.switch_panic_sell_by_market(dispatcher.orders_mut(), &market_name, turn_on),
+    }
+}
+
+fn handle_trade_action(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    kind: RuntimeTradeCommandKind,
+) -> Result<bool, TradeContextError> {
+    match kind {
+        RuntimeTradeCommandKind::NewOrder(params) => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.new_order(
+                ctx,
+                &params.market,
+                params.side.is_short(),
+                params.price,
+                params.strategy_id.unwrap_or(0),
+                params.size,
+            ))
+        }
+        RuntimeTradeCommandKind::JoinOrders { market_name, side } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.join_orders(ctx, &market_name, side.is_short()))
+        }
+        RuntimeTradeCommandKind::SplitOrder(params) => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.split_order(
+                ctx,
+                &params.market,
+                params.parts,
+                params.split_small,
+                params.split_small_sell,
+            ))
+        }
+        RuntimeTradeCommandKind::MoveAllSells {
+            market_name,
+            params,
+        } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.move_all_sells(dispatcher.orders(), ctx, &market_name, params))
+        }
+        RuntimeTradeCommandKind::MoveAllBuys {
+            market_name,
+            params,
+        } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.move_all_buys(dispatcher.orders(), ctx, &market_name, params))
+        }
+        RuntimeTradeCommandKind::ClosePosition(params) => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.do_close_position(ctx, &params.market, params.market_sell))
+        }
+        RuntimeTradeCommandKind::LimitClosePosition { market_name, side } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.do_limit_close_position(ctx, &market_name, side.is_short()))
+        }
+        RuntimeTradeCommandKind::SplitPosition { market_name, side } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.do_split_position(ctx, &market_name, side.is_short()))
+        }
+        RuntimeTradeCommandKind::SellOrder(params) => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.do_sell_order(ctx, &params.market, params.price, params.size))
+        }
+        RuntimeTradeCommandKind::MarketSplitPosition { market_name, side } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.do_market_split_position(ctx, &market_name, side.is_short()))
+        }
+        RuntimeTradeCommandKind::Penalty { market_name } => {
+            let ctx = client.random_trade_ctx()?;
+            Ok(client.penalty(ctx, &market_name))
+        }
     }
 }
 
@@ -1049,4 +1559,90 @@ fn publish_snapshot(
     snapshot: &RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>,
 ) {
     *snapshot.write().unwrap() = Some(Arc::new(dispatcher.snapshot()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::engine_api::ServerInfo;
+    use crate::commands::trade::TradeCommand;
+
+    fn dummy_cfg() -> ClientConfig {
+        ClientConfig {
+            server_ip: "127.0.0.1".to_string(),
+            server_port: 3000,
+            master_key: [0; 16],
+            mac_key: [0; 16],
+            mask_ver: 0,
+            client_id: 0,
+            ntp_host: None,
+            refresh: RefreshConfig {
+                update_markets_every: None,
+                check_tags_every: None,
+            },
+        }
+    }
+
+    fn ready_client() -> Client {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        client.set_server_info(ServerInfo {
+            exchange_code: Some(9),
+            base_currency_code: Some(17),
+            ..Default::default()
+        });
+        client
+    }
+
+    #[test]
+    fn moon_trade_new_order_derives_route_and_builds_delphi_wire() {
+        let mut client = ready_client();
+        let mut dispatcher = crate::events::EventDispatcher::new();
+
+        let queued = handle_trade_action(
+            &mut client,
+            &mut dispatcher,
+            RuntimeTradeCommandKind::NewOrder(
+                NewOrderParams::new("DOGEUSDT", OrderSide::Short, 12.5, 0.25).with_strategy_id(42),
+            ),
+        )
+        .expect("BaseCheck route is present");
+
+        assert!(queued);
+        let (_, high, _) = client.take_send_queues_for_test();
+        assert_eq!(high.len(), 1);
+        match TradeCommand::parse(&high[0].data).expect("valid new order") {
+            TradeCommand::NewOrder(cmd) => {
+                assert_eq!(cmd.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.market.currency, 17);
+                assert_eq!(cmd.market.platform, 9);
+                assert!(cmd.is_short);
+                assert_eq!(cmd.price, 12.5);
+                assert_eq!(cmd.strat_id, 42);
+                assert_eq!(cmd.order_size, 0.25);
+            }
+            other => panic!("unexpected trade command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moon_trade_returns_route_error_before_base_check_fields() {
+        let mut client = Client::new(dummy_cfg());
+        client.testing_set_domain_ready(true);
+        let mut dispatcher = crate::events::EventDispatcher::new();
+
+        let err = handle_trade_action(
+            &mut client,
+            &mut dispatcher,
+            RuntimeTradeCommandKind::Penalty {
+                market_name: "DOGEUSDT".to_string(),
+            },
+        )
+        .expect_err("new Client has no BaseCheck route");
+
+        assert!(err.missing_exchange_code);
+        assert!(err.missing_base_currency_code);
+        let (sliced, high, low) = client.take_send_queues_for_test();
+        assert!(sliced.is_empty() && high.is_empty() && low.is_empty());
+    }
 }

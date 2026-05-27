@@ -276,14 +276,7 @@ pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
 }
 
 /// CmdId=27: TMoveAllBuysCommand.
-pub fn build_move_all_buys(
-    ctx: TradeCtx,
-    market_name: &str,
-    cmd_type: MoveAllBuysCmdType,
-    move_kind: ReplaceMultiKind,
-    price: f64,
-    side: FixedPosition,
-) -> Vec<u8> {
+pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, params: MoveAllBuysParams) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
     write_market_header(
         &mut out,
@@ -293,10 +286,10 @@ pub fn build_move_all_buys(
         ctx.currency,
         ctx.platform,
     );
-    out.push(cmd_type.to_byte());
-    out.push(move_kind.to_byte());
-    out.extend_from_slice(&price.to_le_bytes());
-    out.push(side.to_byte());
+    out.push(params.cmd_type.to_byte());
+    out.push(params.move_kind.to_byte());
+    out.extend_from_slice(&params.price.to_le_bytes());
+    out.push(params.side.to_byte());
     out
 }
 

@@ -10,6 +10,7 @@ client.orders().update_stops(order_uid, stops)?;
 client.orders().update_vstop(order_uid, true, false, 50000.0, 12.0)?;
 client.orders().set_immune(items)?;
 client.orders().turn_panic_sell(order_uid, true)?;
+client.orders().request_status(order_uid)?;
 client.orders().switch_panic_sell_by_market("BTCUSDT", true)?;
 ```
 
@@ -35,6 +36,44 @@ are not the live order-worker state. The live state remains inside the runtime,
 where replace-in-flight, pending cancel, previous Stops/VStop, panic, and immune
 flags are checked exactly once before sending.
 
+## Market Trade Intents
+
+New orders and market-level actions use `client.trade()`. User code does not
+build `TradeCtx`; the runtime derives the route bytes learned during Init
+BaseCheck:
+
+```rust
+use moonproto::{NewOrderParams, OrderSide};
+
+client.trade().new_order(
+    NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001)
+        .with_strategy_id(strategy_id),
+)?;
+
+client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
+client.trade().limit_close_position("BTCUSDT", OrderSide::Long)?;
+client.trade().penalty("BTCUSDT")?;
+```
+
+Bulk buy/sell moves keep the Delphi mode enums in typed parameter structs:
+
+```rust
+use moonproto::commands::trade::{
+    FixedPosition, MoveAllBuysCmdType, MoveAllBuysParams, ReplaceMultiKind,
+};
+
+client.trade().move_all_buys("BTCUSDT", MoveAllBuysParams {
+    cmd_type: MoveAllBuysCmdType::MoveKind,
+    move_kind: ReplaceMultiKind::TopVol,
+    price: 50_100.0,
+    side: FixedPosition::Long,
+})?;
+```
+
+If Init/BaseCheck route fields are unavailable, these methods return
+`MoonClientError::TradeContext` instead of exposing `TradeCtx` to application
+code.
+
 ## Init Gate
 
 Trade actions are gated by Init. Before the one-time Init opens `domain_ready`,
@@ -53,6 +92,11 @@ session state alive automatically.
 - `set_immune` updates only found active local orders and sends nothing if no
   target order exists.
 - panic-sell methods update live local panic flags before sending.
+- `client.trade().new_order`, join/split/close/sell/penalty commands derive
+  `TradeCtx` from the session route and do not require caller-supplied protocol
+  ordinals.
+- `move_all_sells` and `move_all_buys` read the live order state and send only
+  when the same Delphi active-client pre-send gates find a candidate order.
 
 Epoch/status/route fields are intentionally not caller-supplied in the normal
 API. They come from BaseCheck and the tracked order state.
