@@ -5,7 +5,7 @@ use crate::state::history::{
     RollingTradeVolumeSnapshot, TradeHistoryRow,
 };
 
-use super::{MarketHistoryStore, EPS_MARKET, FIVE_MINUTES_DAYS, SECONDS_PER_DAY};
+use super::{MarketHistoryStore, FIVE_MINUTES_DAYS, SECONDS_PER_DAY};
 
 impl MarketHistoryStore {
     pub fn refresh_derived_analytics(&mut self, now_time: f64) {
@@ -94,7 +94,7 @@ impl MarketHistoryStore {
         &self,
         now_time: f64,
     ) -> (DerivedDeltaSnapshot, CandleVolumeSnapshot) {
-        let mut acc = CandleDerivedAccumulator::new(now_time);
+        let mut acc = CandleDerivedAccumulator::new(now_time, self.eps_profile.eps);
         if let Some(reader) = self.readers.candles_5m.as_ref() {
             reader.with_last(reader.capacity(), |view| {
                 view.for_each(|row| acc.add(*row));
@@ -109,7 +109,7 @@ impl MarketHistoryStore {
     }
 
     fn last_price_deltas_one_pass(&self, now_time: f64) -> DerivedDeltaSnapshot {
-        let mut acc = LastPriceDeltaAccumulator::new(now_time);
+        let mut acc = LastPriceDeltaAccumulator::new(now_time, self.eps_profile.eps);
         if let Some(reader) = self.readers.last_prices.as_ref() {
             reader.with_last(reader.capacity(), |view| {
                 view.for_each(|row| acc.add(*row));
@@ -119,8 +119,8 @@ impl MarketHistoryStore {
     }
 }
 
-fn delta_percent(min_price: f64, max_price: f64) -> f64 {
-    if min_price <= EPS_MARKET || max_price <= EPS_MARKET || max_price < min_price {
+fn delta_percent(min_price: f64, max_price: f64, eps: f64) -> f64 {
+    if min_price <= eps || max_price <= eps || max_price < min_price {
         return 0.0;
     }
     (max_price / min_price - 1.0) * 100.0
@@ -198,15 +198,17 @@ struct CandleWindow {
     min_price: f32,
     max_price: f32,
     volume: f64,
+    eps: f64,
 }
 
 impl CandleWindow {
-    fn new(window_seconds: f64) -> Self {
+    fn new(window_seconds: f64, eps: f64) -> Self {
         Self {
             window_days: window_seconds / SECONDS_PER_DAY,
             min_price: 0.0,
             max_price: 0.0,
             volume: 0.0,
+            eps,
         }
     }
 
@@ -228,7 +230,11 @@ impl CandleWindow {
     }
 
     fn finish_delta(self) -> f64 {
-        delta_percent(f64::from(self.min_price), f64::from(self.max_price))
+        delta_percent(
+            f64::from(self.min_price),
+            f64::from(self.max_price),
+            self.eps,
+        )
     }
 }
 
@@ -248,20 +254,20 @@ struct CandleDerivedAccumulator {
 }
 
 impl CandleDerivedAccumulator {
-    fn new(now_time: f64) -> Self {
+    fn new(now_time: f64, eps: f64) -> Self {
         Self {
             now_time,
-            five_minutes: CandleWindow::new(5.0 * 60.0),
-            fifteen_minutes: CandleWindow::new(15.0 * 60.0),
-            thirty_minutes: CandleWindow::new(30.0 * 60.0),
-            one_hour: CandleWindow::new(60.0 * 60.0),
-            two_hours_volume: CandleWindow::new(2.0 * 60.0 * 60.0),
-            three_hours_volume: CandleWindow::new(3.0 * 60.0 * 60.0),
-            twenty_four_hours_volume: CandleWindow::new(24.0 * 60.0 * 60.0),
-            seventy_two_hours: CandleWindow::new(72.0 * 60.0 * 60.0),
-            last2h_delta_like_delphi: CandleWindow::new(3.0 * 60.0 * 60.0),
-            last3h_delta_like_delphi: CandleWindow::new(4.0 * 60.0 * 60.0),
-            last24h_delta_like_delphi: CandleWindow::new(25.0 * 60.0 * 60.0),
+            five_minutes: CandleWindow::new(5.0 * 60.0, eps),
+            fifteen_minutes: CandleWindow::new(15.0 * 60.0, eps),
+            thirty_minutes: CandleWindow::new(30.0 * 60.0, eps),
+            one_hour: CandleWindow::new(60.0 * 60.0, eps),
+            two_hours_volume: CandleWindow::new(2.0 * 60.0 * 60.0, eps),
+            three_hours_volume: CandleWindow::new(3.0 * 60.0 * 60.0, eps),
+            twenty_four_hours_volume: CandleWindow::new(24.0 * 60.0 * 60.0, eps),
+            seventy_two_hours: CandleWindow::new(72.0 * 60.0 * 60.0, eps),
+            last2h_delta_like_delphi: CandleWindow::new(3.0 * 60.0 * 60.0, eps),
+            last3h_delta_like_delphi: CandleWindow::new(4.0 * 60.0 * 60.0, eps),
+            last24h_delta_like_delphi: CandleWindow::new(25.0 * 60.0 * 60.0, eps),
         }
     }
 
@@ -313,14 +319,16 @@ struct LastPriceWindow {
     window_days: f64,
     min_price: f32,
     max_price: f32,
+    eps: f64,
 }
 
 impl LastPriceWindow {
-    fn new(window_seconds: f64) -> Self {
+    fn new(window_seconds: f64, eps: f64) -> Self {
         Self {
             window_days: window_seconds / SECONDS_PER_DAY,
             min_price: 0.0,
             max_price: 0.0,
+            eps,
         }
     }
 
@@ -340,7 +348,11 @@ impl LastPriceWindow {
     }
 
     fn finish_delta(self) -> f64 {
-        delta_percent(f64::from(self.min_price), f64::from(self.max_price))
+        delta_percent(
+            f64::from(self.min_price),
+            f64::from(self.max_price),
+            self.eps,
+        )
     }
 }
 
@@ -354,14 +366,14 @@ struct LastPriceDeltaAccumulator {
 }
 
 impl LastPriceDeltaAccumulator {
-    fn new(now_time: f64) -> Self {
+    fn new(now_time: f64, eps: f64) -> Self {
         Self {
             now_time,
-            one_minute: LastPriceWindow::new(60.0),
-            five_minutes: LastPriceWindow::new(5.0 * 60.0),
-            fifteen_minutes: LastPriceWindow::new(15.0 * 60.0),
-            thirty_minutes: LastPriceWindow::new(30.0 * 60.0),
-            one_hour: LastPriceWindow::new(60.0 * 60.0),
+            one_minute: LastPriceWindow::new(60.0, eps),
+            five_minutes: LastPriceWindow::new(5.0 * 60.0, eps),
+            fifteen_minutes: LastPriceWindow::new(15.0 * 60.0, eps),
+            thirty_minutes: LastPriceWindow::new(30.0 * 60.0, eps),
+            one_hour: LastPriceWindow::new(60.0 * 60.0, eps),
         }
     }
 

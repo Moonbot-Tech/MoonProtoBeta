@@ -1,6 +1,6 @@
 //! Server market-index mapping and stale-index gates.
 
-use super::{MarketsEvent, MarketsState, EPS_MARKET};
+use super::{MarketsEvent, MarketsState};
 
 impl MarketsState {
     /// Применить ответ `emk_GetMarketsIndexes`.
@@ -66,7 +66,7 @@ impl MarketsState {
         m_index: u16,
         ask: f64,
     ) -> bool {
-        if ask <= EPS_MARKET {
+        if ask <= self.eps_profile.eps {
             return false;
         }
         let Some(idx) = self.local_pos_for_server_index(m_index) else {
@@ -75,7 +75,7 @@ impl MarketsState {
         let Some(slot) = self.prices.get_mut(idx) else {
             return false;
         };
-        slot.chart_price_step = EPS_MARKET.max(ask / 5000.0);
+        slot.chart_price_step = self.eps_profile.eps.max(ask / 5000.0);
         true
     }
 }

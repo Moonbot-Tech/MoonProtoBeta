@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
 use crate::commands::trade::TradeCtx;
 use crate::protocol::Command;
+use crate::state::eps::EpsProfile;
 use crate::state::orders::OrderCancelSend;
 use crate::state::{MarketsEvent, OrderBookEvent, OrderEvent, TradesEvent};
 
@@ -24,6 +25,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) domain_ready: bool,
     pub(crate) trades_storage_scope: Option<Arc<crate::state::TradeStorageScope>>,
     pub(crate) copy_max_leverage_from_markets_list: bool,
+    pub(crate) eps_profile: EpsProfile,
     pub(crate) server_base_currency_name: Option<String>,
     pub(crate) server_base_currency_code: Option<u8>,
 }
@@ -43,6 +45,7 @@ impl ActiveDispatchContext {
             copy_max_leverage_from_markets_list: copy_max_leverage_from_markets_list(
                 client.server_info(),
             ),
+            eps_profile: EpsProfile::from_exchange_code(client.server_info().exchange_code),
             server_base_currency_name: client.server_info().base_currency_name.clone(),
             server_base_currency_code: client.server_info().base_currency_code,
         }
@@ -106,6 +109,7 @@ impl EventDispatcher {
         if self.server_time_delta_source.is_none() {
             self.server_time_delta_source = Some(Arc::clone(&ctx.server_time_delta_source));
         }
+        self.set_eps_profile(ctx.eps_profile);
         self.markets
             .set_copy_max_leverage_from_markets_list(ctx.copy_max_leverage_from_markets_list);
         self.markets.set_server_base_currency(

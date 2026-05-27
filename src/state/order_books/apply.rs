@@ -1,7 +1,8 @@
 //! Apply full/diff orderbook packets into the read model.
 
-use super::{BookKey, OrderBookLevel, OrderBookSnapshot, EPS, EPS_M};
+use super::{BookKey, OrderBookLevel, OrderBookSnapshot};
 use crate::commands::order_book::{OrderBookUpdate, OrderLevel};
+use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
 
 pub(super) fn apply_cached_packet(
@@ -9,11 +10,12 @@ pub(super) fn apply_cached_packet(
     scratch: &mut Vec<OrderBookLevel>,
     key: BookKey,
     pkt: &OrderBookUpdate,
+    eps: EpsProfile,
 ) {
     if pkt.is_full {
         apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
     } else {
-        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells);
+        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells, eps);
     }
 }
 
@@ -47,6 +49,7 @@ pub(super) fn apply_diff_book(
     seq: u16,
     buy_diff: &[OrderLevel],
     sell_diff: &[OrderLevel],
+    eps: EpsProfile,
 ) {
     let book = books.entry(key).or_insert_with(|| OrderBookSnapshot {
         market_index: key.0,
@@ -55,17 +58,50 @@ pub(super) fn apply_diff_book(
         buys: Vec::new(),
         sells: Vec::new(),
     });
-    apply_order_book_diff_keep_zero(&mut book.buys, scratch, buy_diff, sell_diff, true);
-    apply_order_book_diff_keep_zero(&mut book.sells, scratch, sell_diff, buy_diff, false);
+    apply_order_book_diff_keep_zero_with_eps(
+        &mut book.buys,
+        scratch,
+        buy_diff,
+        sell_diff,
+        true,
+        eps,
+    );
+    apply_order_book_diff_keep_zero_with_eps(
+        &mut book.sells,
+        scratch,
+        sell_diff,
+        buy_diff,
+        false,
+        eps,
+    );
     book.seq = seq;
 }
 
+#[cfg(test)]
 pub(crate) fn apply_order_book_diff_keep_zero(
     book: &mut Vec<OrderBookLevel>,
     scratch: &mut Vec<OrderBookLevel>,
     diff: &[OrderLevel],
     shrink: &[OrderLevel],
     is_buy_book: bool,
+) {
+    apply_order_book_diff_keep_zero_with_eps(
+        book,
+        scratch,
+        diff,
+        shrink,
+        is_buy_book,
+        EpsProfile::BINANCE,
+    );
+}
+
+pub(crate) fn apply_order_book_diff_keep_zero_with_eps(
+    book: &mut Vec<OrderBookLevel>,
+    scratch: &mut Vec<OrderBookLevel>,
+    diff: &[OrderLevel],
+    shrink: &[OrderLevel],
+    is_buy_book: bool,
+    eps: EpsProfile,
 ) {
     if diff.is_empty() {
         return;
@@ -81,22 +117,22 @@ pub(crate) fn apply_order_book_diff_keep_zero(
         let diff_rate = diff_level.rate as f64;
 
         if is_buy_book {
-            while k < scratch.len() && scratch[k].rate > diff_rate + EPS_M {
+            while k < scratch.len() && scratch[k].rate > diff_rate + eps.eps_m {
                 book.push(scratch[k]);
                 k += 1;
             }
         } else {
-            while k < scratch.len() && scratch[k].rate < diff_rate - EPS_M {
+            while k < scratch.len() && scratch[k].rate < diff_rate - eps.eps_m {
                 book.push(scratch[k]);
                 k += 1;
             }
         }
 
-        if (diff_level.quantity as f64) > EPS {
+        if (diff_level.quantity as f64) > eps.eps {
             book.push((*diff_level).into());
         }
 
-        if k < scratch.len() && (scratch[k].rate - diff_rate).abs() < EPS_M {
+        if k < scratch.len() && (scratch[k].rate - diff_rate).abs() < eps.eps_m {
             k += 1;
         }
     }
@@ -109,7 +145,7 @@ pub(crate) fn apply_order_book_diff_keep_zero(
     let mut cut_price = -1.0;
     for level in shrink {
         let rate = level.rate as f64;
-        if rate > EPS_M {
+        if rate > eps.eps_m {
             cut_price = rate;
             break;
         }

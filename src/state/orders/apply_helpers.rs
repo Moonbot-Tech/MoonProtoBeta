@@ -30,6 +30,7 @@ impl Orders {
         server_time_delta: f64,
         new_order: bool,
         pending_local_visual_order: bool,
+        price_eps: f64,
     ) {
         let mut buy = st.buy_order;
         let mut sell = st.sell_order;
@@ -75,11 +76,11 @@ impl Orders {
             entry.last_buy_actual_price = entry.buy_order.actual_price;
             entry.last_sell_actual_price = entry.sell_order.actual_price;
         } else {
-            if (entry.buy_order.actual_price - entry.last_buy_actual_price).abs() > PRICE_EPS {
+            if (entry.buy_order.actual_price - entry.last_buy_actual_price).abs() > price_eps {
                 entry.buy_price = entry.buy_order.actual_price;
                 entry.last_buy_actual_price = entry.buy_order.actual_price;
             }
-            if (entry.sell_order.actual_price - entry.last_sell_actual_price).abs() > PRICE_EPS {
+            if (entry.sell_order.actual_price - entry.last_sell_actual_price).abs() > price_eps {
                 entry.sell_price = entry.sell_order.actual_price;
                 entry.last_sell_actual_price = entry.sell_order.actual_price;
             }

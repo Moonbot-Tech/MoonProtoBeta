@@ -9,6 +9,7 @@ use crate::commands::engine_api::{
 };
 use crate::commands::market::parse_markets_indexes_response;
 use crate::protocol::Command;
+use crate::state::eps::EpsProfile;
 use crate::state::markets::MarketLastPriceHistoryInput;
 use crate::state::{MarketHistoryLastPriceBatch, MarketHistoryLastPriceInput, MarketsEvent};
 
@@ -90,6 +91,7 @@ impl EventDispatcher {
                 }
                 EngineMethod::BaseCheck => {
                     let info = parse_base_check_response(&resp.data);
+                    self.set_eps_profile(EpsProfile::from_exchange_code(info.exchange_code));
                     self.markets.set_copy_max_leverage_from_markets_list(
                         copy_max_leverage_from_markets_list(&info),
                     );

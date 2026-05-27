@@ -36,6 +36,7 @@ use crate::commands::engine_api::{EngineResponse, ServerInfo};
 use crate::commands::trade::{OrderType, TradeCtx};
 use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
+use crate::state::eps::{EpsProfile, DELPHI_PLATFORM_FGATE};
 use crate::state::{
     BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot,
     MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders, MarketHistoryWorker,
@@ -62,8 +63,6 @@ pub use snapshot::EventDispatcherSnapshot;
 pub use types::{
     Event, MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
-
-const DELPHI_PLATFORM_FGATE: u8 = 9;
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
     info.exchange_code == Some(DELPHI_PLATFORM_FGATE)
@@ -150,6 +149,10 @@ pub struct EventDispatcher {
     /// `None` means trades stream is not subscribed and retained trade/candle/
     /// derived state must stay disabled.
     trade_storage_scope: Option<TradeStorageScope>,
+    /// Delphi `_eps` / `_epsStep` / `_epsM` profile selected from
+    /// `ServerInfo::exchange_code`. Hidden from public API; unknown/missing
+    /// exchange falls back to the Huobi-class profile.
+    eps_profile: EpsProfile,
     last_market_history_scope: Option<TradeStorageScope>,
     last_market_history_markets_version: Option<u64>,
 }
@@ -177,6 +180,7 @@ impl Default for EventDispatcher {
             owned_market_history: None,
             market_history_auto_enabled: true,
             trade_storage_scope: None,
+            eps_profile: EpsProfile::default(),
             last_market_history_scope: None,
             last_market_history_markets_version: None,
         }
@@ -193,6 +197,20 @@ impl EventDispatcher {
             cmd,
             len: payload.len(),
             payload: payload.to_vec(),
+        }
+    }
+
+    fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        if self.eps_profile == eps_profile {
+            return;
+        }
+        self.eps_profile = eps_profile;
+        self.balances.set_eps_profile(eps_profile);
+        self.orders.set_eps_profile(eps_profile);
+        self.order_books.set_eps_profile(eps_profile);
+        self.markets.set_eps_profile(eps_profile);
+        if let Some(handle) = &self.market_history {
+            handle.set_eps_profile(eps_profile);
         }
     }
 

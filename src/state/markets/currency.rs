@@ -4,7 +4,7 @@ use crate::commands::market::BaseCurrency;
 
 use super::{
     text::{replace_text_ascii_case_insensitive, same_text_ascii},
-    BaseCurrencyPrice, CorrMarket, MarketsState, EPS_MARKET,
+    BaseCurrencyPrice, CorrMarket, MarketsState,
 };
 
 impl MarketsState {
@@ -157,7 +157,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.price(name))
             .map(|p| p.ask)
-            .filter(|ask| *ask > EPS_MARKET)
+            .filter(|ask| *ask > self.eps_profile.eps)
         {
             return Some(price);
         }
@@ -166,7 +166,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.price(name))
             .map(|p| p.ask)
-            .filter(|ask| *ask > EPS_MARKET)
+            .filter(|ask| *ask > self.eps_profile.eps)
         {
             return Some(1.0 / price);
         }
@@ -175,7 +175,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.corr_prices.get(name))
             .copied()
-            .filter(|price| *price > EPS_MARKET)
+            .filter(|price| *price > self.eps_profile.eps)
         {
             return Some(price);
         }
@@ -184,7 +184,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.corr_prices.get(name))
             .copied()
-            .filter(|price| *price > EPS_MARKET)
+            .filter(|price| *price > self.eps_profile.eps)
         {
             return Some(1.0 / price);
         }

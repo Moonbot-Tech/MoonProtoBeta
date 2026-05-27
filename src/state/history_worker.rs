@@ -10,6 +10,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::state::eps::EpsProfile;
 use crate::state::history::{
     Candle5mRow, MarketDerivedSnapshot, RollingTradeVolumeSnapshot, TradesPacketTimeShift,
 };
@@ -97,6 +98,7 @@ pub struct MarketHistoryWorker {
 }
 
 enum MarketHistoryCommand {
+    SetEpsProfile(EpsProfile),
     ConfigureMarkets {
         market_slots: Vec<Option<Arc<str>>>,
         scope: Option<TradeStorageScope>,
@@ -186,6 +188,12 @@ impl Drop for MarketHistoryWorker {
 }
 
 impl MarketHistoryHandle {
+    pub(crate) fn set_eps_profile(&self, eps_profile: EpsProfile) -> bool {
+        self.tx
+            .send(MarketHistoryCommand::SetEpsProfile(eps_profile))
+            .is_ok()
+    }
+
     pub fn configure_markets(
         &self,
         market_names: Vec<String>,
@@ -306,6 +314,9 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
 
     loop {
         match rx.recv_timeout(STORE_WORKER_RECV_TIMEOUT) {
+            Ok(MarketHistoryCommand::SetEpsProfile(eps_profile)) => {
+                registry.set_eps_profile(eps_profile);
+            }
             Ok(MarketHistoryCommand::ConfigureMarkets {
                 market_slots,
                 scope,

@@ -17,6 +17,46 @@ fn make_pkt(market_idx: u16, book_kind: u8, seq: u16, is_full: bool) -> OrderBoo
 }
 
 #[test]
+fn eps_profile_changes_diff_quantity_filter_like_delphi_exchange_table() {
+    let small_qty = 0.000000005_f32;
+    let full = OrderBookUpdate {
+        market_index: 30,
+        seq: 1,
+        is_full: true,
+        book_kind: 0,
+        buys: vec![],
+        sells: vec![],
+    };
+    let diff = OrderBookUpdate {
+        market_index: 30,
+        seq: 2,
+        is_full: false,
+        book_kind: 0,
+        buys: vec![level(100.0, small_qty)],
+        sells: vec![],
+    };
+
+    let mut huobi = OrderBooks::new();
+    huobi.set_eps_profile(EpsProfile::HUOBI);
+    let _ = huobi.on_packet(full.clone(), 0);
+    let _ = huobi.on_packet(diff.clone(), 1);
+    assert_eq!(
+        huobi.book_by_kind(30, 0).unwrap().buys.len(),
+        1,
+        "Huobi-class Delphi _eps=1e-12 keeps this non-zero level"
+    );
+
+    let mut binance = OrderBooks::new();
+    binance.set_eps_profile(EpsProfile::BINANCE);
+    let _ = binance.on_packet(full, 0);
+    let _ = binance.on_packet(diff, 1);
+    assert!(
+        binance.book_by_kind(30, 0).unwrap().buys.is_empty(),
+        "Binance-class Delphi _eps=1e-8 filters the same tiny quantity"
+    );
+}
+
+#[test]
 fn full_then_inorder_diffs() {
     let mut ob = OrderBooks::new();
     let events = ob.on_packet(make_pkt(1, 0, 10, true), 1000);

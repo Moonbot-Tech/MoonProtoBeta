@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 
 use crate::commands::order_book::{compare_seq, OrderBookUpdate};
+use crate::state::eps::EpsProfile;
 
 mod apply;
 mod cache;
@@ -44,9 +45,6 @@ pub use self::types::{
     ApplyResult, BookKey, OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot,
     TopOfBook,
 };
-
-const EPS: f64 = 0.00000001;
-const EPS_M: f64 = 0.000000009;
 
 /// Кэш считается corrupted, если непустой дольше этого порога (мс).
 /// Соответствует `MoonProtoOrderBook.pas:9` `BOOK_EXPIRED_TIMEOUT = 800`.
@@ -65,6 +63,7 @@ pub struct OrderBooks {
     caches: HashMap<BookKey, OrderBookCache>,
     books: HashMap<BookKey, OrderBookSnapshot>,
     diff_scratch: Vec<OrderBookLevel>,
+    eps_profile: EpsProfile,
 }
 
 impl OrderBooks {
@@ -73,7 +72,12 @@ impl OrderBooks {
             caches: HashMap::new(),
             books: HashMap::new(),
             diff_scratch: Vec::new(),
+            eps_profile: EpsProfile::default(),
         }
+    }
+
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        self.eps_profile = eps_profile;
     }
 
     /// Обработать один распарсенный `MPC_OrderBook` пакет.
@@ -124,6 +128,7 @@ impl OrderBooks {
                 seq,
                 &pkt.buys,
                 &pkt.sells,
+                self.eps_profile,
             );
             cache.last_applied_seq = seq;
             events.push(OrderBookEvent::Apply {
@@ -161,6 +166,7 @@ impl OrderBooks {
                 pkt.seq,
                 &pkt.buys,
                 &pkt.sells,
+                self.eps_profile,
             );
             cache.expected_seq = pkt.seq.wrapping_add(1);
             cache.last_applied_seq = pkt.seq;
@@ -230,7 +236,13 @@ impl OrderBooks {
 
             // O(1) pop_front вместо O(N) remove(0).
             let entry = cache.packets.pop_front().unwrap();
-            apply_cached_packet(&mut self.books, &mut self.diff_scratch, key, &entry.pkt);
+            apply_cached_packet(
+                &mut self.books,
+                &mut self.diff_scratch,
+                key,
+                &entry.pkt,
+                self.eps_profile,
+            );
             cache.expected_seq = entry.seq.wrapping_add(1);
             cache.last_applied_seq = entry.seq;
             events.push(OrderBookEvent::Apply {

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::state::eps::EpsProfile;
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
     LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarketDerivedSnapshot, MiniCandle,
@@ -14,7 +15,6 @@ use crate::state::history::{
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
-const EPS_MARKET: f64 = 1e-12;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const FIVE_MINUTES_DAYS: f64 = 5.0 / (24.0 * 60.0);
 
@@ -61,10 +61,18 @@ pub struct MarketHistoryStore {
     candle_deltas_dirty: bool,
     candle_deltas_bucket: Option<i64>,
     derived: MarketDerivedSnapshot,
+    eps_profile: EpsProfile,
 }
 
 impl MarketHistoryStore {
     pub fn new(config: MarketHistoryConfig) -> Self {
+        Self::new_with_eps_profile(config, EpsProfile::default())
+    }
+
+    pub(crate) fn new_with_eps_profile(
+        config: MarketHistoryConfig,
+        eps_profile: EpsProfile,
+    ) -> Self {
         let (futures_trades, futures_reader) =
             optional_ring::<TradeHistoryRow>(config.futures_trades_capacity);
         let (spot_trades, spot_reader) =
@@ -106,7 +114,12 @@ impl MarketHistoryStore {
             candle_deltas_dirty: false,
             candle_deltas_bucket: None,
             derived: MarketDerivedSnapshot::default(),
+            eps_profile,
         }
+    }
+
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        self.eps_profile = eps_profile;
     }
 
     pub fn readers(&self) -> MarketHistoryReaders {
@@ -156,9 +169,8 @@ impl MarketHistoryStore {
         is_btc_market: bool,
         is_base_usdt_market: bool,
     ) -> Option<u64> {
-        if current <= EPS_MARKET
-            || (bid <= EPS_MARKET && ask <= EPS_MARKET)
-            || (!is_btc_market && !is_base_usdt_market)
+        let eps = self.eps_profile.eps;
+        if current <= eps || (bid <= eps && ask <= eps) || (!is_btc_market && !is_base_usdt_market)
         {
             return None;
         }

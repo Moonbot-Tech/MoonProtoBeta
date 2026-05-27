@@ -13,9 +13,8 @@
 //! reset missing rows to default values without a global epoch gate.
 
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
+use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
-
-const BALANCE_EPS: f64 = 0.00000001;
 
 /// Глобальные суммарные балансы аккаунта (в BTC equivalent).
 #[derive(Debug, Clone, Default)]
@@ -54,6 +53,7 @@ pub struct BalancesState {
     pub last_epoch: u16,
     /// Последний применённый epoch по market_name (Delphi `m.LastBalanceEpoch`).
     last_epoch_by_market: HashMap<String, u16>,
+    eps_profile: EpsProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -77,8 +77,16 @@ impl BalancesState {
         Self::default()
     }
 
-    fn preserve_max_value(mut item: BalanceItem, previous_max_value: Option<f64>) -> BalanceItem {
-        if item.max_value.partial_cmp(&BALANCE_EPS) != Some(std::cmp::Ordering::Greater) {
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        self.eps_profile = eps_profile;
+    }
+
+    fn preserve_max_value(
+        mut item: BalanceItem,
+        previous_max_value: Option<f64>,
+        eps: f64,
+    ) -> BalanceItem {
+        if item.max_value.partial_cmp(&eps) != Some(std::cmp::Ordering::Greater) {
             item.max_value = previous_max_value.unwrap_or(0.0);
         }
         item
@@ -89,7 +97,7 @@ impl BalancesState {
             .by_market
             .get(&item.market_name)
             .map(|prev| prev.max_value);
-        Self::preserve_max_value(item, previous_max_value)
+        Self::preserve_max_value(item, previous_max_value, self.eps_profile.eps)
     }
 
     fn insert_balance_mark_epoch(&mut self, item: BalanceItem, epoch: u16) -> bool {
@@ -233,7 +241,7 @@ impl BalancesState {
                 .get(&it.market_name)
                 .map(|prev| prev.max_value)
                 .or_else(|| previous_map.get(&it.market_name).map(|prev| prev.max_value));
-            let it = Self::preserve_max_value(it, previous_max_value);
+            let it = Self::preserve_max_value(it, previous_max_value, self.eps_profile.eps);
             self.last_epoch_by_market
                 .insert(it.market_name.clone(), upd.epoch);
             new_map.insert(it.market_name.clone(), it);

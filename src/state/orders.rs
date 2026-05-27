@@ -21,6 +21,7 @@
 //! - ServerTimeDelta correction для всех TDateTime полей.
 
 use crate::commands::trade::*;
+use crate::state::eps::EpsProfile;
 use std::collections::{HashMap, HashSet};
 
 mod accessors;
@@ -35,7 +36,6 @@ pub use self::types::{ApplyResult, OrderEvent, OrderTraceChartPoint, OrderTraceL
 pub(crate) use self::types::{OrderCancelSend, PanicSellSend};
 
 const BULK_REPLACE_TIMEOUT_MS: i64 = 5000;
-const PRICE_EPS: f64 = 0.000000009;
 const SELL_DONE_REMOVAL_GRACE_MS: i64 = 400;
 const PENDING_CANCEL_REPEAT_MS: i64 = 32;
 
@@ -140,6 +140,7 @@ pub struct Orders {
     current_snapshot_flag: u8,
     /// ServerTimeDelta = InitialTime(server) - Now(client). Применяется к временам в командах.
     pub server_time_delta: f64,
+    eps_profile: EpsProfile,
 }
 
 impl Orders {
@@ -150,7 +151,12 @@ impl Orders {
             pending_removals: Vec::new(),
             current_snapshot_flag: 0,
             server_time_delta: 0.0,
+            eps_profile: EpsProfile::default(),
         }
+    }
+
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        self.eps_profile = eps_profile;
     }
 
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
@@ -221,6 +227,7 @@ impl Orders {
                         self.server_time_delta,
                         new_order,
                         pending_local_visual_order,
+                        self.eps_profile.eps_m,
                     );
                     entry.snapshot_flag = self.current_snapshot_flag;
                     entry.job_is_done

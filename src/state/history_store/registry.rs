@@ -8,6 +8,7 @@ use super::*;
 #[derive(Default)]
 pub struct MarketHistoryRegistry {
     default_config: MarketHistoryConfig,
+    eps_profile: crate::state::eps::EpsProfile,
     stores: HashMap<SharedMarketName, MarketHistoryStore>,
     stores_by_index: Vec<Option<SharedMarketName>>,
 }
@@ -16,8 +17,19 @@ impl MarketHistoryRegistry {
     pub fn new(default_config: MarketHistoryConfig) -> Self {
         Self {
             default_config,
+            eps_profile: crate::state::eps::EpsProfile::default(),
             stores: HashMap::new(),
             stores_by_index: Vec::new(),
+        }
+    }
+
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: crate::state::eps::EpsProfile) {
+        if self.eps_profile == eps_profile {
+            return;
+        }
+        self.eps_profile = eps_profile;
+        for store in self.stores.values_mut() {
+            store.set_eps_profile(eps_profile);
         }
     }
 
@@ -56,9 +68,9 @@ impl MarketHistoryRegistry {
         &mut self,
         market_name: SharedMarketName,
     ) -> &mut MarketHistoryStore {
-        self.stores
-            .entry(market_name)
-            .or_insert_with(|| MarketHistoryStore::new(self.default_config))
+        self.stores.entry(market_name).or_insert_with(|| {
+            MarketHistoryStore::new_with_eps_profile(self.default_config, self.eps_profile)
+        })
     }
 
     pub fn configure_markets(

@@ -6,7 +6,7 @@ use crate::commands::market::{
     MarketPriceUpdate, MarketsPricesResponse,
 };
 
-use super::{same_text_ascii, MarketLastPriceHistoryInput, MarketsEvent, MarketsState, EPS_MARKET};
+use super::{same_text_ascii, MarketLastPriceHistoryInput, MarketsEvent, MarketsState};
 
 impl MarketsState {
     /// Применить ответ `emk_UpdateMarketsList`.
@@ -164,8 +164,8 @@ impl MarketsState {
             slot.last_ask = slot.ask;
             slot.p_last = (slot.bid + slot.ask) * 0.5;
             slot.min_lot_size = (bn_step_size.max(bn_min_qty) * slot.p_last).max(bn_min_notional);
-            if slot.ask > EPS_MARKET {
-                slot.chart_price_step = EPS_MARKET.max(slot.ask / 5000.0);
+            if slot.ask > self.eps_profile.eps {
+                slot.chart_price_step = self.eps_profile.eps.max(slot.ask / 5000.0);
             }
             if send_funding {
                 slot.funding_rate = p.funding_rate;

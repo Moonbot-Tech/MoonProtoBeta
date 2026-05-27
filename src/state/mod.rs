@@ -15,6 +15,7 @@
 
 pub mod balances;
 pub mod epoch;
+pub(crate) mod eps;
 pub mod history;
 pub mod history_store;
 pub mod history_worker;

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::commands::market::{CorrMarket, Market, MarketTokenTags, TokenTags};
-const EPS_MARKET: f64 = 1e-12;
+use crate::state::eps::EpsProfile;
 
 mod accessors;
 mod currency;
@@ -98,6 +98,7 @@ pub struct MarketsState {
     server_base_currency_name: Option<String>,
     server_base_currency_code: Option<u8>,
     last_markets_list_timing: Option<MarketsListApplyTiming>,
+    eps_profile: EpsProfile,
 }
 
 impl MarketsState {
@@ -130,8 +131,17 @@ impl MarketsState {
         if is_spot {
             state.apply_spot_trade_like_delphi(now_ms);
         } else {
-            state.apply_futures_trade_like_delphi(f64::from(price), f64::from(qty), now_ms);
+            state.apply_futures_trade_like_delphi(
+                f64::from(price),
+                f64::from(qty),
+                now_ms,
+                self.eps_profile.eps,
+            );
         }
+    }
+
+    pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {
+        self.eps_profile = eps_profile;
     }
 
     pub fn markets_list_refresh_needed(&self) -> bool {

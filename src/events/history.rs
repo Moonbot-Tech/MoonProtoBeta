@@ -11,6 +11,7 @@ impl EventDispatcher {
     pub fn set_market_history_handle(&mut self, handle: MarketHistoryHandle) {
         self.owned_market_history = None;
         self.market_history_auto_enabled = false;
+        handle.set_eps_profile(self.eps_profile);
         self.market_history = Some(handle);
         self.last_market_history_scope = None;
         self.last_market_history_markets_version = None;
@@ -133,6 +134,9 @@ impl EventDispatcher {
         let worker = MarketHistoryWorker::spawn(MarketHistoryConfig::default());
         self.market_history = Some(worker.handle());
         self.owned_market_history = Some(worker);
+        if let Some(handle) = &self.market_history {
+            handle.set_eps_profile(self.eps_profile);
+        }
         self.last_market_history_scope = None;
         self.last_market_history_markets_version = None;
     }

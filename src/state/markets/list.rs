@@ -9,9 +9,7 @@ use crate::commands::market::{
     read_corr_market, read_market_with_local_shift, EngineStreamReader, Market, MarketsListResponse,
 };
 
-use super::{
-    MarketHandle, MarketPrice, MarketsEvent, MarketsListApplyTiming, MarketsState, EPS_MARKET,
-};
+use super::{MarketHandle, MarketPrice, MarketsEvent, MarketsListApplyTiming, MarketsState};
 
 impl MarketsState {
     /// Применить ответ `emk_GetMarketsList`.
@@ -64,6 +62,7 @@ impl MarketsState {
                         market,
                         incoming,
                         self.copy_max_leverage_from_markets_list,
+                        self.eps_profile.eps,
                     );
                     price.funding_time = market.funding_time;
                     consumed.insert(market.bn_market_name.clone(), true);
@@ -251,6 +250,7 @@ impl MarketsState {
                         existing,
                         &market,
                         self.copy_max_leverage_from_markets_list,
+                        self.eps_profile.eps,
                     );
                 });
             }
@@ -303,6 +303,7 @@ fn merge_market_like_delphi_get_markets_list(
     dst: &mut Market,
     src: &Market,
     copy_max_leverage: bool,
+    eps: f64,
 ) {
     dst.bn_tick_size = src.bn_tick_size;
     dst.bn_step_size = src.bn_step_size;
@@ -311,7 +312,7 @@ fn merge_market_like_delphi_get_markets_list(
     dst.bn_min_qty = src.bn_min_qty;
     dst.bn_max_qty = src.bn_max_qty;
     dst.bn_min_notional = src.bn_min_notional;
-    if src.bn_max_value > EPS_MARKET {
+    if src.bn_max_value > eps {
         dst.bn_max_value = src.bn_max_value;
     }
     dst.bn_iceberg_parts = src.bn_iceberg_parts;

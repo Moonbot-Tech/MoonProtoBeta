@@ -200,7 +200,7 @@ impl Orders {
         let order_type = match order.status {
             OrderWorkerStatus::None => {
                 let prev = order.pending_buy_cond_price?;
-                if (prev - new_price).abs() <= PRICE_EPS {
+                if (prev - new_price).abs() <= self.eps_profile.eps_m {
                     return None;
                 }
                 order.pending_buy_cond_price = Some(new_price);

@@ -153,16 +153,22 @@ pub struct MarketTradeState {
 }
 
 impl MarketTradeState {
-    pub(super) fn apply_futures_trade_like_delphi(&mut self, price: f64, qty: f64, now_ms: i64) {
+    pub(super) fn apply_futures_trade_like_delphi(
+        &mut self,
+        price: f64,
+        qty: f64,
+        now_ms: i64,
+        eps: f64,
+    ) {
         let is_sell = qty < 0.0;
         self.last_got_all_trades_ms = now_ms;
         self.last_trade_price = price;
         self.last_trade_was_sell = is_sell;
 
-        if self.last_trade_price_ema15 < super::EPS_MARKET {
+        if self.last_trade_price_ema15 < eps {
             self.last_trade_price_ema15 = price;
         }
-        if self.last_trade_price_ema5 < super::EPS_MARKET {
+        if self.last_trade_price_ema5 < eps {
             self.last_trade_price_ema5 = price;
         }
         self.last_trade_price_ema15 = (self.last_trade_price_ema15 * 15.0 + price) / 16.0;

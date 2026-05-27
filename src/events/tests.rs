@@ -1751,6 +1751,7 @@ fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_d
         domain_ready: true,
         trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
         copy_max_leverage_from_markets_list: false,
+        eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".to_string()),
         server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
     };
@@ -1852,6 +1853,7 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_del
         domain_ready: true,
         trades_storage_scope: Some(Arc::new(TradeStorageScope::All)),
         copy_max_leverage_from_markets_list: false,
+        eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".to_string()),
         server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
     };

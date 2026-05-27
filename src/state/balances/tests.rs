@@ -302,6 +302,25 @@ fn max_value_zero_preserves_previous_like_delphi() {
 }
 
 #[test]
+fn max_value_eps_profile_matches_delphi_exchange_table() {
+    let mut huobi = BalancesState::new();
+    huobi.set_eps_profile(EpsProfile::HUOBI);
+    let mut tiny_for_binance = make_item("BTCUSDT", 100.0);
+    tiny_for_binance.max_value = 0.000000005;
+    huobi.apply(upd(3, 1, vec![tiny_for_binance.clone()]));
+    assert_eq!(huobi.get("BTCUSDT").unwrap().max_value, 0.000000005);
+
+    let mut binance = BalancesState::new();
+    binance.set_eps_profile(EpsProfile::BINANCE);
+    binance.apply(upd(3, 1, vec![tiny_for_binance]));
+    assert_eq!(
+        binance.get("BTCUSDT").unwrap().max_value,
+        0.0,
+        "Delphi Binance _eps=1e-8 treats this bnMaxValue as absent"
+    );
+}
+
+#[test]
 fn max_value_positive_updates_previous() {
     let mut s = BalancesState::new();
     let mut first = make_item("BTCUSDT", 100.0);
