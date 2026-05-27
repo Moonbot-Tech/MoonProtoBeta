@@ -77,7 +77,7 @@ fn runtime_smoke_full_happy_path() {
         "FAIL: markets are empty after Init"
     );
     assert!(
-        snapshot.markets().indexes_synchronized,
+        snapshot.markets().indexes_synchronized(),
         "FAIL: market indexes gate is closed after Init"
     );
     println!(

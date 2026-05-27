@@ -36,30 +36,30 @@ pub struct MarketsState {
     ///
     /// Each item is a stable `MarketHandle`, matching Delphi `TMarket` object
     /// references stored in `TMarkets = TSlowSafeList<TMarket>`.
-    pub markets: Arc<Vec<MarketHandle>>,
+    pub(crate) markets: Arc<Vec<MarketHandle>>,
     /// `market_name` → индекс в `markets` (internal fast lookup for parallel arrays).
-    pub by_name: HashMap<String, usize>,
+    pub(crate) by_name: HashMap<String, usize>,
     /// COW `market_name` → stable handle lookup exposed by [`Self::get`].
-    pub handles_by_name: Arc<HashMap<String, MarketHandle>>,
+    pub(crate) handles_by_name: Arc<HashMap<String, MarketHandle>>,
     /// Корреляционные маркеты (BTC-маркеты для расчётов), key = `bn_market_name`.
-    pub corr_markets: HashMap<String, CorrMarket>,
+    pub(crate) corr_markets: HashMap<String, CorrMarket>,
     /// Цены маркетов по `mIndex` (параллельный массив, обновляется prices apply).
-    pub prices: Vec<MarketPrice>,
+    pub(crate) prices: Vec<MarketPrice>,
     /// Текущие цены CorrMarkets, key = `bn_market_name`.
-    pub corr_prices: HashMap<String, f64>,
+    pub(crate) corr_prices: HashMap<String, f64>,
     /// Delphi `BaseCurDict`: base currency name -> price/ref state.
-    pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
+    pub(crate) base_currency_prices: HashMap<String, BaseCurrencyPrice>,
     /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
-    pub ref_btc_corr_markets: HashMap<String, String>,
+    pub(crate) ref_btc_corr_markets: HashMap<String, String>,
     /// Live trade tail state keyed by `bn_market_name`.
     ///
     /// Delphi stores these fields directly on `TMarket`; Rust keeps the wire
     /// market snapshot clean and stores the non-wire live tail here.
-    pub trade_states: HashMap<String, MarketTradeState>,
+    pub(crate) trade_states: HashMap<String, MarketTradeState>,
     /// Теги монет, key = `market_name`.
-    pub token_tags: HashMap<String, TokenTags>,
+    pub(crate) token_tags: HashMap<String, TokenTags>,
     /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
-    pub market_indexes: Vec<String>,
+    pub(crate) market_indexes: Vec<String>,
     /// `true` если последняя пачка `emk_GetMarketsIndexes` была получена для текущего
     /// `PeerAppToken`. При server-restart (`PeerAppToken` сменился) Client сбрасывает в
     /// `false` и отправляет fresh `api_get_markets_indexes()`. До получения ответа
@@ -67,14 +67,14 @@ pub struct MarketsState {
     /// несут market_idx по новой нумерации, локальные state ещё знают старую.
     ///
     /// Аналог Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <> PeerAppToken then exit`.
-    pub indexes_synchronized: bool,
+    pub(crate) indexes_synchronized: bool,
     /// Delphi `NewMarketFound` analogue: set when a price row points at a server
     /// market index/name that is not present in the current market list.
     ///
     /// It is intentionally kept true after scheduling `GetMarketsList` and is
     /// cleared only by a successful list apply, matching Delphi's synchronous
     /// `Engine.GetMarketsList()` path.
-    pub markets_list_refresh_needed: bool,
+    pub(crate) markets_list_refresh_needed: bool,
     /// Delphi `ES_MaxLevInGetMarkets in EngineProp`: existing markets copy
     /// `MaxLeverage` from `GetMarketsList` only for platforms that set this
     /// support flag. New markets still receive the incoming value because they

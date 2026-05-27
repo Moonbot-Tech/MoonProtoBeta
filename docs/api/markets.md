@@ -180,7 +180,7 @@ pub enum MarketsEvent {
 }
 ```
 
-`MarketsState.indexes_synchronized` is a critical invariant.
+`MarketsState::indexes_synchronized()` is a critical invariant.
 The one-time Init always fetches the initial map. After server restart the
 runtime can mark it stale. If the one-time Init already completed, reconnect
 restore sends `GetMarketsIndexes` again automatically and then refreshes prices
@@ -191,22 +191,10 @@ mapping is stale.
 
 ## Public State
 
-```rust
-pub struct MarketsState {
-    pub markets: Vec<Market>,
-    pub by_name: HashMap<String, usize>,
-    pub corr_markets: HashMap<String, CorrMarket>,
-    pub prices: Vec<MarketPrice>,
-    pub corr_prices: HashMap<String, f64>,
-    pub base_currency_prices: HashMap<String, BaseCurrencyPrice>,
-    pub ref_btc_corr_markets: HashMap<String, String>,
-    pub trade_states: HashMap<String, MarketTradeState>,
-    pub token_tags: HashMap<String, TokenTags>,
-    pub market_indexes: Vec<String>,
-    pub indexes_synchronized: bool,
-    pub markets_list_refresh_needed: bool,
-}
-```
+`MarketsState` is a read API over the live market catalog. Its internal COW
+maps/lists are not public surface: use `iter()`, `get()`, `market_*`,
+`price*`, `tags()`, `trade_state()`, and the count helpers instead of reaching
+into storage fields.
 
 ```rust
 pub struct MarketPrice {
@@ -304,12 +292,20 @@ Convenience methods:
 let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
+for handle in markets.iter() {
+    handle.with(|market| {
+        println!("{} {}", market.bn_market_name, market.status_trading);
+    });
+}
+
 let btc = markets.get("BTCUSDT"); // Option<MarketHandle>
 let btc_snapshot = markets.market_snapshot("BTCUSDT");
 markets.market_name_by_index(0);
 markets.market_by_index(0);
 markets.market_snapshot_by_index(0);
 markets.market_index_by_name("BTCUSDT");
+markets.market_index_names();
+markets.indexes_synchronized();
 markets.price("BTCUSDT");
 markets.price_by_index(0);
 markets.ref_btc_corr_market("DOGEUSDT");

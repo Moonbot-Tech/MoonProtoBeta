@@ -39,7 +39,7 @@ fn main() {
         std::process::exit(4);
     }
 
-    for market in markets.markets.iter().take(limit) {
+    for market in markets.iter().take(limit) {
         market.with(|market| {
             println!(
                 "[market] {} base={} status={} trading={} max_lev={} tick={} step={}",

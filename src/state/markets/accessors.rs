@@ -3,6 +3,28 @@
 use super::*;
 
 impl MarketsState {
+    /// Iterate stable Delphi-like market handles in current `mIndex` order.
+    ///
+    /// The returned handles may be kept across listing refreshes. The enclosing
+    /// list/dictionaries are COW-replaced, while each handle points at the live
+    /// market object.
+    pub fn iter(&self) -> impl Iterator<Item = &MarketHandle> {
+        self.markets.iter()
+    }
+
+    /// Current `GetMarketsIndexes` mapping is fresh for the active server token.
+    pub fn indexes_synchronized(&self) -> bool {
+        self.indexes_synchronized
+    }
+
+    /// Current server `mIndex -> market_name` mapping.
+    ///
+    /// This is empty before Init completes and may be stale only while
+    /// [`Self::indexes_synchronized`] is false.
+    pub fn market_index_names(&self) -> &[String] {
+        &self.market_indexes
+    }
+
     /// Получить стабильный Delphi-like handle маркета по имени.
     ///
     /// The handle remains valid after listing refresh because the surrounding
