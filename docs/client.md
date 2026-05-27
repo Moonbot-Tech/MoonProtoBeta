@@ -461,6 +461,7 @@ let coin_card_ticket = client.request_coin_card_candles(
     "BTCUSDT",
     moonproto::commands::candles::DeepHistoryKind::Hour4,
 )?;
+client.request_client_settings()?; // async; read Event::Settings + snapshot().settings()
 client.set_leverage("BTCUSDT", 20)?;
 client.set_hedge_mode(true)?;
 client.confirm_risk_limit("BTCUSDT")?;
@@ -496,19 +497,31 @@ payload; chart UI should read retained candles from market history readers.
 
 ## UI Settings Request
 
-The UI settings channel is not an Engine API request, so it has no pending
-`Receiver`. Use `request_client_settings` for the common one-shot flow:
+The UI settings channel is not an Engine API request, so it has no Engine API
+pending `Receiver`. Regular UI code queues a refresh request and reacts to the
+settings event:
 
 ```rust
-let settings = client.request_client_settings(Duration::from_secs(12))?;
-println!("xSell={}", settings.x_sell);
+client.request_client_settings()?;
+
+for event in client.drain_events() {
+    if matches!(
+        event,
+        moonproto::Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated)
+    ) {
+        if let Some(snapshot) = client.snapshot() {
+            if let Some(settings) = &snapshot.settings().client_settings {
+                println!("xSell={}", settings.x_sell);
+            }
+        }
+    }
+}
 ```
 
-`request_client_settings` completes on the next applied settings snapshot. It
-does not require the command UID to change because the server may answer with
-the current settings object unchanged. The low-level UI request is
-fire-and-forget, so this helper may reissue the refresh request inside the same
-timeout window.
+`blocking_request_client_settings(timeout)` is the explicit script/diagnostic
+counterpart. It waits for the next applied settings snapshot and does not require
+the command UID to change because the server may answer with the current
+settings object unchanged.
 
 If an application already has local UI settings before connecting, pass them to
 the dispatcher with `set_client_settings_fallback`. This preserves Delphi

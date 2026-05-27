@@ -61,12 +61,8 @@ fn main() {
     //     moonproto::NewOrderParams::new(market, moonproto::OrderSide::Long, 50_000.0, 0.001),
     // )?;
 
-    match client.request_client_settings(Duration::from_secs(15)) {
-        Ok(settings) => println!(
-            "[settings] uid={} manual_strategy={} stop_market={}",
-            settings.uid, settings.use_manual_strategy, settings.use_stop_market
-        ),
-        Err(err) => println!("[settings] request failed: {err}"),
+    if let Err(err) = client.request_client_settings() {
+        println!("[settings] request queue failed: {err}");
     }
 
     match client.request_order_snapshot(Duration::from_secs(15)) {
@@ -91,6 +87,16 @@ fn main() {
             Ok(Event::OrderBook(event)) => println!("[event] orderbook: {event:?}"),
             Ok(Event::Trade(event)) => println!("[event] trade: {event:?}"),
             Ok(Event::Markets(event)) => println!("[event] markets: {event:?}"),
+            Ok(Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated)) => {
+                if let Some(snapshot) = client.snapshot() {
+                    if let Some(settings) = &snapshot.settings().client_settings {
+                        println!(
+                            "[settings] uid={} manual_strategy={} stop_market={}",
+                            settings.uid, settings.use_manual_strategy, settings.use_stop_market
+                        );
+                    }
+                }
+            }
             Ok(_) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

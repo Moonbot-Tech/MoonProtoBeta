@@ -698,12 +698,21 @@ impl MoonClient {
     }
 
     /// Request a fresh UI/settings snapshot through the active runtime.
-    pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
+    ///
+    /// The command returns after being queued. Completion arrives as
+    /// `Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and the latest
+    /// value is readable through `snapshot().settings().client_settings`.
+    pub fn request_client_settings(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
     }
 
-    /// Request the current UI/settings snapshot and return the applied value.
-    pub fn request_client_settings(
+    /// Alias for [`Self::request_client_settings`].
+    pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
+        self.request_client_settings()
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::request_client_settings`].
+    pub fn blocking_request_client_settings(
         &self,
         timeout: Duration,
     ) -> Result<crate::commands::ui::ClientSettingsCommand, MoonClientError> {

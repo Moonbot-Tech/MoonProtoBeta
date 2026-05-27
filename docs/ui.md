@@ -38,21 +38,34 @@ and arb validity time.
 
 ## Requesting Current Settings
 
-For a one-shot fetch, use `request_client_settings`. It sends
-a settings refresh request, keeps the runtime pumping, and returns the next
-`ClientSettingsCommand` snapshot applied by the active runtime. The returned
-snapshot may have the same internal command UID as the previous snapshot; the
-API guarantee is a newly received/applied settings packet, not UID monotonicity.
-Because the settings refresh is fire-and-forget, the helper may reissue it while
-the timeout is still open:
+For UI code, use `request_client_settings`. It queues a settings refresh request
+and returns immediately. The server answers by sending a
+`TClientSettingsCommand`; Active Lib applies it, emits
+`Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and stores the latest
+value in `snapshot().settings().client_settings`.
 
 ```rust
-let settings = client.request_client_settings(std::time::Duration::from_secs(12))?;
-println!("xSell={}", settings.x_sell);
+client.request_client_settings()?;
+
+for event in client.drain_events() {
+    if matches!(
+        event,
+        moonproto::Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated)
+    ) {
+        if let Some(settings) = client
+            .snapshot()
+            .and_then(|state| state.settings().client_settings.clone())
+        {
+            println!("xSell={}", settings.x_sell);
+        }
+    }
+}
 ```
 
-The lower-level event path remains useful for long-running UI screens that want
-to react to every later settings update.
+`blocking_request_client_settings(timeout)` exists for scripts and diagnostics
+that deliberately need to wait for the next applied snapshot. The returned
+snapshot may have the same internal command UID as the previous snapshot; the
+guarantee is a newly received/applied settings packet, not UID monotonicity.
 
 ## Sending UI Commands
 
@@ -60,6 +73,7 @@ Regular applications send UI commands through `MoonClient`:
 
 ```rust
 client.refresh_settings()?;
+client.request_client_settings()?;
 client.send_settings(settings)?;
 client.set_mm_orders_subscription(true)?;
 client.request_version_update("", true)?;            // release update button

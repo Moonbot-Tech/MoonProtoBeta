@@ -23,7 +23,7 @@ fn main() {
         }
     };
 
-    let settings = match client.request_client_settings(Duration::from_secs(15)) {
+    let settings = match client.blocking_request_client_settings(Duration::from_secs(15)) {
         Ok(settings) => settings,
         Err(err) => {
             eprintln!("[request] failed: {err}");

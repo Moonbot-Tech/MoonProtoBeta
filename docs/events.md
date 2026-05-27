@@ -103,16 +103,19 @@ trades/orderbook sync state before applying new indexed stream packets.
 
 ## One-Shot Requests
 
-`MoonClient::request_*` helpers keep the runtime pumping while they wait. Any
-unrelated packets received during the wait are still applied and remain
-available through the normal event receiver:
+Some explicit script/diagnostic helpers keep the runtime pumping while they
+wait. Any unrelated packets received during the wait are still applied and
+remain available through the normal event receiver:
 
 ```rust
-let settings = client.request_client_settings(timeout)?;
+let qty = client.request_balance("USDT", timeout)?;
 for event in client.drain_events() {
     handle_event(event);
 }
 ```
+
+Regular UI refreshes such as `request_client_settings()` return immediately and
+publish completion through domain events plus snapshots.
 
 ## Retained History
 
