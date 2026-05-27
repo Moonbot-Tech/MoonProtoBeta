@@ -5,9 +5,9 @@
 //!
 //! ## What It Does
 //!
-//! - [`transport_pack`] packs a command into a wire-ready UDP datagram: header,
-//!   HMAC-CRC32C MAC, obfuscation using a xoshiro128+ keystream XOR, and
-//!   selected transport mode handling.
+//! - the client send path packs a command into a wire-ready UDP datagram:
+//!   header, HMAC-CRC32C MAC, obfuscation using a xoshiro128+ keystream XOR,
+//!   and selected transport mode handling.
 //! - [`transport_unpack`] performs the reverse operation: MAC verification,
 //!   de-obfuscation, and header parsing.
 //! - [`outer_light_crypt`] and [`calculate_mac32`] are standalone helpers for
@@ -24,16 +24,12 @@
 //! ## Example
 //!
 //! ```ignore
-//! use moonproto::transport::{transport_pack, transport_unpack, MoonKey};
+//! use moonproto::transport::{transport_unpack, MoonKey};
 //!
 //! let mac_key: MoonKey = [0u8; 16];
 //! let payload = b"Hello MoonProto";
 //! let cmd: u8 = 1;   // Command::Hello
 //! let client_id: u64 = 0x1234_5678_ABCD_EF00;
-//!
-//! // C → S
-//! let (packet, _extra) = transport_pack(&mac_key, cmd, client_id, payload, 0);
-//! // socket.send_to(&packet, server_addr).unwrap();
 //!
 //! // S → C (receive side)
 //! // let mut buf = [0u8; 65535];
@@ -45,7 +41,7 @@
 //!
 //! ## Performance
 //!
-//! Hot-path functions (`transport_pack`/`transport_unpack`/`outer_light_crypt`/
+//! Hot-path functions (`transport_unpack`/`outer_light_crypt`/
 //! `calculate_mac32`/header serializers) remain marked `#[inline]`; keep that
 //! unless a measured full-LTO profile replaces the current fast dev workflow.
 
@@ -56,7 +52,7 @@ mod outer_crypt;
 
 use log::warn;
 
-pub use extended::TransportModeState;
+pub(crate) use extended::ClientTransportModeState;
 pub use header::{ClientMsgHeader, ServerMsgHeader, TRANSPORT_VER};
 pub use mac::{calculate_mac32, MacContext};
 pub use outer_crypt::outer_light_crypt;
@@ -65,66 +61,12 @@ pub use outer_crypt::outer_light_crypt;
 /// layer.
 pub type MoonKey = [u8; 16];
 
-/// Pack a command into a wire-ready UDP datagram.
-/// mask_ver: 0 = V0/base transport, 1/2 = V1/V2.
-/// Unsupported values are treated as mode 0.
-/// Returns: (main_packet, optional_extra_packet)
-/// If extended transport needs an additional packet sent, it's returned as the second element.
+/// Pack one client command into a wire-ready UDP datagram.
 ///
-/// **Hot-path note**: this allocates a new `Vec` and computes the HMAC ipad/opad
-/// state from scratch for each packet (128 XOR operations plus CRC32C). For
-/// thousands of packets per second, prefer [`transport_pack_into_with_mac`]: it
-/// reuses the output buffer and a cached [`MacContext`] (one `crc32c_append`
-/// instead of ipad+data+opad).
-///
-/// `#[inline]` is required here because this is the library's single send path
-/// and is called from `moonproto::client` across the crate boundary. The body is
-/// not tiny, but inlining lets LLVM optimize it together with the caller, whose
-/// next step is typically sending the buffer to a socket. This improves register
-/// allocation. Audit B-V2-04. Do not remove.
+/// This is intentionally stateful: V2 must use the per-client
+/// [`ClientTransportModeState`] counter, matching Delphi `SentCountDNS`.
 #[inline]
-pub fn transport_pack(
-    mac_key: &MoonKey,
-    cmd: u8,
-    client_id: u64,
-    payload: &[u8],
-    mask_ver: u8,
-) -> (Vec<u8>, Option<Vec<u8>>) {
-    let mut buf = Vec::with_capacity(header::CLIENT_HDR_SIZE + payload.len());
-    let mac_ctx = MacContext::new(mac_key);
-    let mut mode_state = TransportModeState::new();
-    let extra = transport_pack_into_with_mac_and_state(
-        &mut buf,
-        &mac_ctx,
-        mac_key,
-        cmd,
-        client_id,
-        payload,
-        mask_ver,
-        &mut mode_state,
-    );
-    (buf, extra)
-}
-
-/// Zero-alloc pack: writes a wire-ready UDP datagram into the provided `buf`.
-/// The caller can reuse one `Vec<u8>` across sends, avoiding allocator churn.
-/// Uses a cached [`MacContext`] instead of recomputing the HMAC ipad/opad state
-/// for every packet.
-///
-/// `mac_key` is still required for `outer_light_crypt`; the xoshiro128+
-/// keystream is initialized directly from the 16-byte key, not from
-/// `MacContext`.
-///
-/// **Contract**: this function calls `buf.clear()` internally and overwrites the
-/// contents. Capacity is preserved, which is where the allocation saving comes
-/// from.
-///
-/// Returns an optional extra packet for `mask_ver` 1/2 when the selected
-/// transport mode requires one. For long-lived V2 sessions prefer
-/// [`transport_pack_into_with_mac_and_state`] so the per-client warmup counter
-/// matches Delphi `SentCountDNS`.
-#[inline]
-pub fn transport_pack_into_with_mac(
+pub(crate) fn pack_client_packet(
     buf: &mut Vec<u8>,
     mac_ctx: &MacContext,
     mac_key: &MoonKey,
@@ -132,31 +74,7 @@ pub fn transport_pack_into_with_mac(
     client_id: u64,
     payload: &[u8],
     mask_ver: u8,
-) -> Option<Vec<u8>> {
-    let mut mode_state = TransportModeState::new();
-    transport_pack_into_with_mac_and_state(
-        buf,
-        mac_ctx,
-        mac_key,
-        cmd,
-        client_id,
-        payload,
-        mask_ver,
-        &mut mode_state,
-    )
-}
-
-/// Stateful zero-alloc pack used by `Client`.
-#[inline]
-pub fn transport_pack_into_with_mac_and_state(
-    buf: &mut Vec<u8>,
-    mac_ctx: &MacContext,
-    mac_key: &MoonKey,
-    cmd: u8,
-    client_id: u64,
-    payload: &[u8],
-    mask_ver: u8,
-    mode_state: &mut TransportModeState,
+    mode_state: &mut ClientTransportModeState,
 ) -> Option<Vec<u8>> {
     let hdr = ClientMsgHeader::new(cmd, client_id);
 
@@ -173,7 +91,7 @@ pub fn transport_pack_into_with_mac_and_state(
     // Obfuscation (always, all modes)
     outer_light_crypt(buf, mac_key);
 
-    extended::wrap_outgoing_client(buf, normalized_transport_mode(mask_ver), mode_state)
+    extended::wrap_client_packet(buf, normalize_mode(mask_ver), mode_state)
 }
 
 /// Unpack a received UDP datagram. Verifies MAC and version.
@@ -213,8 +131,7 @@ pub fn transport_unpack_with_mac(
     raw: &[u8],
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
-    let mut buf: Vec<u8> =
-        extended::unwrap_incoming_client(raw, normalized_transport_mode(mask_ver))?;
+    let mut buf: Vec<u8> = extended::unwrap_server_packet(raw, normalize_mode(mask_ver))?;
 
     if buf.len() < header::SERVER_HDR_SIZE {
         return None;
@@ -251,7 +168,7 @@ pub fn transport_unpack_with_mac(
 }
 
 #[inline]
-fn normalized_transport_mode(mask_ver: u8) -> u8 {
+fn normalize_mode(mask_ver: u8) -> u8 {
     match mask_ver {
         1 | 2 => mask_ver,
         _ => 0,
@@ -295,7 +212,7 @@ mod tests {
         let mac_key = [7u8; 16];
         let payload = b"mode1-stun-payload";
         let mut packet = build_server_packet(&mac_key, 42, payload);
-        extended::wrap_outgoing_client(&mut packet, 1, &mut TransportModeState::new());
+        extended::wrap_client_packet(&mut packet, 1, &mut ClientTransportModeState::new());
 
         let (hdr, decoded) = transport_unpack(&mac_key, &packet, 1).expect("mode1 unpack");
 
@@ -307,11 +224,11 @@ mod tests {
     fn mode2_dns_warmup_is_ignored_and_normal_packet_unpacks() {
         let mac_key = [7u8; 16];
         let payload = b"mode2-payload";
-        let mut state = TransportModeState::new();
+        let mut state = ClientTransportModeState::new();
         let extra = {
             let mut buf = Vec::new();
             let mac_ctx = MacContext::new(&mac_key);
-            transport_pack_into_with_mac_and_state(
+            pack_client_packet(
                 &mut buf, &mac_ctx, &mac_key, 44, 123, payload, 2, &mut state,
             )
         };

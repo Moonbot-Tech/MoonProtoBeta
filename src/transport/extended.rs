@@ -39,11 +39,11 @@ const DNS_WARMUP_INTERVAL: u32 = 100;
 /// Delphi keeps `SentCountDNS` in `TMoonProtoUDPClient` and resets it before
 /// each reconnect bind. Rust keeps the same machine effect here.
 #[derive(Debug, Clone, Default)]
-pub struct TransportModeState {
+pub(crate) struct ClientTransportModeState {
     sent_count_dns: u32,
 }
 
-impl TransportModeState {
+impl ClientTransportModeState {
     pub fn new() -> Self {
         Self::default()
     }
@@ -63,10 +63,10 @@ impl TransportModeState {
     }
 }
 
-pub(crate) fn wrap_outgoing_client(
+pub(crate) fn wrap_client_packet(
     data: &mut Vec<u8>,
     mask_ver: u8,
-    state: &mut TransportModeState,
+    state: &mut ClientTransportModeState,
 ) -> Option<Vec<u8>> {
     match mask_ver {
         1 => {
@@ -78,7 +78,7 @@ pub(crate) fn wrap_outgoing_client(
     }
 }
 
-pub(crate) fn unwrap_incoming_client(raw: &[u8], mask_ver: u8) -> Option<Vec<u8>> {
+pub(crate) fn unwrap_server_packet(raw: &[u8], mask_ver: u8) -> Option<Vec<u8>> {
     match mask_ver {
         1 => unwrap_from_stun(raw),
         2 if is_dns_warmup(raw) => None,
@@ -224,7 +224,7 @@ mod tests {
         assert!(is_dns_warmup(&DNS_WARMUP_REQUEST));
         assert!(is_dns_warmup(&DNS_WARMUP_RESPONSE));
 
-        let mut state = TransportModeState::new();
+        let mut state = ClientTransportModeState::new();
         assert_eq!(
             state.next_dns_warmup_packet(),
             Some(DNS_WARMUP_REQUEST.to_vec())

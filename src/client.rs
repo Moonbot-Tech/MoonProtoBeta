@@ -459,7 +459,7 @@ pub struct Client {
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
 
     /// Cached MAC context — один раз вычисленные ipad CRC + opad block для `cfg.mac_key`.
-    /// Используется в transport_pack/unpack hot-path вместо пересчёта HMAC ipad/opad
+    /// Используется в transport pack/unpack hot-path вместо пересчёта HMAC ipad/opad
     /// (128 XOR + crc32c) на каждом пакете. См. `crate::transport::MacContext`.
     ///
     /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в
@@ -469,9 +469,9 @@ pub struct Client {
 
     /// Delphi `SentCountDNS` equivalent for transport mode V2.
     /// Lives on the client, not in a global/static transport helper.
-    transport_mode_state: crate::transport::TransportModeState,
+    transport_mode_state: crate::transport::ClientTransportModeState,
 
-    /// Reusable buffer для `transport_pack_into_with_mac` — экономит alloc/dealloc на каждый
+    /// Reusable buffer для client transport pack — экономит alloc/dealloc на каждый
     /// исходящий пакет. Capacity растёт до peak packet size и переиспользуется.
     /// audit_rust_quality #4: 50K pps × 1500б = 75 MB/s allocator pressure eximinated.
     send_buf: Vec<u8>,
@@ -650,7 +650,7 @@ impl Client {
             check_tags_burst_sent: CHECK_TAGS_BURST_COUNT,
             last_check_tags_burst_ms: i64::MIN / 2,
             mac_ctx,
-            transport_mode_state: crate::transport::TransportModeState::new(),
+            transport_mode_state: crate::transport::ClientTransportModeState::new(),
             send_buf: Vec::with_capacity(2048), // типичный send packet ~500-1500 байт
         }
     }

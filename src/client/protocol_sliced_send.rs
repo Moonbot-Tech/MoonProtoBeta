@@ -292,7 +292,7 @@ impl ProtocolCore<'_> {
             };
             let extra = {
                 let slice = &client.sending[idx].slices[block_num];
-                crate::transport::transport_pack_into_with_mac_and_state(
+                crate::transport::pack_client_packet(
                     &mut client.send_buf,
                     &client.mac_ctx,
                     &client.cfg.mac_key,
