@@ -1537,7 +1537,8 @@ fn record_event(
                 &st,
                 event_no,
                 format!(
-                    "ParseFailed cmd={cmd:?} len={len} head={}{}",
+                    "ParseFailed cmd={cmd:?} len={len} hash={:016X} head={}{}",
+                    fnv1a64(payload),
                     hex_preview(payload, 32),
                     dump_suffix
                 ),
@@ -2159,9 +2160,14 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
 fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
     let completed_settings =
         dg.completed_cmd == Some(Command::UI.to_byte()) && dg.completed_ui_cmd_id == Some(1);
+    let completed_orderbook = dg.completed_cmd == Some(Command::OrderBook.to_byte());
     let block0_ui = dg
         .block0_wire_cmd
         .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::UI)
+        .unwrap_or(false);
+    let block0_orderbook = dg
+        .block0_wire_cmd
+        .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::OrderBook)
         .unwrap_or(false);
     let block0_known_settings = dg.block0_ui_cmd_id == Some(1);
     let completed_api = dg.completed_cmd == Some(Command::API.to_byte());
@@ -2171,6 +2177,8 @@ fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
         .unwrap_or(false);
     completed_api
         || block0_api
+        || completed_orderbook
+        || block0_orderbook
         || completed_settings
         || (block0_ui && (block0_known_settings || dg.block0_ui_cmd_id.is_none()))
 }
@@ -2198,8 +2206,21 @@ fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagn
     let pure_err = pure_err_emu_p
         .map(|v| format!("{:.8}%", v * 100.0))
         .unwrap_or_else(|| "not attributable to observed ErrEmu drops".to_string());
+    let payload_head = dg
+        .completed_payload_head
+        .map(|head| hex_preview(&head[..dg.completed_payload_head_len.min(head.len())], 8))
+        .unwrap_or_else(|| "none".to_string());
+    let payload_hash = dg
+        .completed_payload_hash
+        .map(|hash| format!("{hash:016X}"))
+        .unwrap_or_else(|| "none".to_string());
+    let observation = if dg.completed_cmd.is_some() && !missing.is_empty() {
+        " observation=incomplete-window"
+    } else {
+        ""
+    };
     format!(
-        "Sliced d={} blocks={}/{} attempts={} delivered_packets={} dropped_packets={} wire_cmd={:?} ui_cmd={:?} complete_cmd={:?} complete_ui={:?} complete_api_method={:?} complete_api_uid={:?} complete_api_success={:?} payload_len={:?} missing=[{}] pure_err_emu_fail_p={}",
+        "Sliced d={} blocks={}/{} attempts={} delivered_packets={} dropped_packets={} wire_cmd={:?} ui_cmd={:?} complete_cmd={:?} complete_ui={:?} complete_api_method={:?} complete_api_uid={:?} complete_api_success={:?} payload_len={:?} payload_hash={} payload_head={} missing=[{}] pure_err_emu_fail_p={}{}",
         dg.datagram_num,
         dg.delivered_unique_blocks(),
         dg.blocks_count,
@@ -2214,9 +2235,21 @@ fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagn
         dg.completed_api_uid,
         dg.completed_api_success,
         dg.completed_payload_len,
+        payload_hash,
+        payload_head,
         missing_preview,
         pure_err,
+        observation,
     )
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
 }
 
 fn preview_u8(values: &[u8], limit: usize) -> String {

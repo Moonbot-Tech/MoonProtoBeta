@@ -78,6 +78,9 @@ pub struct ErrEmuSlicedDatagramDiagnostics {
     pub completed_api_uid: Option<u64>,
     pub completed_api_success: Option<bool>,
     pub completed_payload_len: Option<usize>,
+    pub completed_payload_head: Option<[u8; 8]>,
+    pub completed_payload_head_len: usize,
+    pub completed_payload_hash: Option<u64>,
     pub delivered_packets: u64,
     pub dropped_packets: u64,
     pub blocks: Vec<ErrEmuSlicedBlockDiagnostics>,
@@ -171,6 +174,9 @@ struct ErrEmuSlicedDatagramState {
     completed_api_uid: Option<u64>,
     completed_api_success: Option<bool>,
     completed_payload_len: Option<usize>,
+    completed_payload_head: Option<[u8; 8]>,
+    completed_payload_head_len: usize,
+    completed_payload_hash: Option<u64>,
     delivered_packets: u64,
     dropped_packets: u64,
     blocks: HashMap<u8, ErrEmuSlicedBlockState>,
@@ -265,6 +271,12 @@ impl ErrEmuDiagnosticsState {
         let dg = self.sliced.entry(key).or_default();
         dg.completed_cmd = Some(cmd);
         dg.completed_payload_len = Some(payload.len());
+        let head_len = payload.len().min(8);
+        let mut head = [0u8; 8];
+        head[..head_len].copy_from_slice(&payload[..head_len]);
+        dg.completed_payload_head = Some(head);
+        dg.completed_payload_head_len = head_len;
+        dg.completed_payload_hash = Some(fnv1a64(payload));
         if Command::from_byte(cmd) == Command::UI {
             dg.completed_ui_cmd_id = payload.first().copied();
         }
@@ -349,6 +361,9 @@ impl ErrEmuDiagnosticsState {
                     completed_api_uid: dg.completed_api_uid,
                     completed_api_success: dg.completed_api_success,
                     completed_payload_len: dg.completed_payload_len,
+                    completed_payload_head: dg.completed_payload_head,
+                    completed_payload_head_len: dg.completed_payload_head_len,
+                    completed_payload_hash: dg.completed_payload_hash,
                     delivered_packets: dg.delivered_packets,
                     dropped_packets: dg.dropped_packets,
                     blocks,
@@ -509,4 +524,36 @@ mod tests {
                 && dg.completed_cmd == Some(Command::API.to_byte())
         }));
     }
+
+    #[test]
+    fn sliced_diagnostics_record_completed_payload_head_for_parse_failure_correlation() {
+        let mut state = ErrEmuDiagnosticsState::default();
+        let payload = [0x47, 0x43, 0x00, 0x00, 0x41, 0x10, 0x01, 0x00, 0x99];
+        state.record_sliced_complete(191, 10, Command::OrderBook.to_byte(), &payload);
+
+        let snapshot = state.snapshot(50);
+        let dg = snapshot
+            .sliced
+            .iter()
+            .find(|dg| dg.datagram_num == 191)
+            .expect("completed sliced datagram");
+
+        assert_eq!(dg.completed_cmd, Some(Command::OrderBook.to_byte()));
+        assert_eq!(dg.completed_payload_len, Some(9));
+        assert_eq!(dg.completed_payload_head_len, 8);
+        assert_eq!(
+            dg.completed_payload_head,
+            Some([0x47, 0x43, 0x00, 0x00, 0x41, 0x10, 0x01, 0x00])
+        );
+        assert_eq!(dg.completed_payload_hash, Some(fnv1a64(&payload)));
+    }
+}
+
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
 }
