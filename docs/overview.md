@@ -1,4 +1,4 @@
-# moonproto API Overview
+# MoonProto API Overview
 
 `moonproto` is the public Rust client library for MoonProto servers. It is not a
 passive packet parser: it owns the session lifecycle and performs the recovery
@@ -88,12 +88,17 @@ for event in client.drain_events() {
 - Runs the active session until explicit `stop()` or drop; applications do not
   choose a protocol-loop duration.
 - Publishes typed events and immutable snapshots for UI read models.
+- Keeps chart-visible market state on the selected market/history model:
+  balance/position/liquidation fields live on `Market`, arb prices live in
+  `Market::arb_slots`, and retained trades/5m candles are available through
+  `snapshot.market_history_readers(market)` when trades storage is enabled.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the Delphi-style process-level NTP syncer by default with
   `ClientConfig::new` (`pool.ntp.org`). Use `with_ntp_host` to override the
   host, or `without_ntp` only for tests and tools that manage corrected time
   themselves.
-- Aggregates chunked candle responses through `request_candles_data`.
+- Aggregates chunked candle responses; trades subscription also schedules the
+  initial 5m candles snapshot for retained history.
 
 ## String Compatibility Notes
 

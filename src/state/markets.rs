@@ -15,6 +15,8 @@ use crate::commands::market::{CorrMarket, Market, MarketTokenTags, TokenTags};
 use crate::state::eps::EpsProfile;
 
 mod accessors;
+mod arb;
+mod balances;
 mod currency;
 mod indexes;
 mod list;

@@ -19,6 +19,8 @@
 //! - `WriteBool`: 1 байт (0=false, иначе true)
 //! - `WriteStr`: u16 LE prefix + UTF-8 bytes (как `registry::write_string`)
 
+use std::collections::HashMap;
+
 use super::candles::current_local_time_shift_minutes;
 const MINS_IN_DAY: f64 = 1440.0;
 
@@ -136,12 +138,16 @@ impl ListedType {
 }
 
 // =============================================================================
-//  Market struct (42 поля)
+//  Market struct
 // =============================================================================
 
-/// Полная информация о маркете, byte-exact с `WriteMarketToStream`
-/// (MoonProtoSerialization.pas:42-98). 10 strings + 6 ints + 1 int64 + 20 doubles
-/// + 5 bools + 1 byte (v2 FuturesType).
+/// Живой market object Active Lib.
+///
+/// Первые wire-поля byte-exact с `WriteMarketToStream`
+/// (MoonProtoSerialization.pas:42-98): 10 strings + 6 ints + 1 int64 +
+/// 20 doubles + 5 bools + 1 byte (v2 FuturesType). Следующие поля зеркалят
+/// Delphi `TMarket` live state, который обновляется другими protocol commands
+/// и не сериализуется через `WriteMarketToStream`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Market {
     // --- Strings (10) ---
@@ -193,6 +199,32 @@ pub struct Market {
     pub bn_only_isolated: bool,
     // --- v2: FuturesType ---
     pub futures_type: BaseCurrency,
+    // --- Active Lib live balance / position state (Delphi TMarket fields) ---
+    pub initial_balance: f64,
+    pub locked_balance: f64,
+    pub pos_size: f64,
+    pub pos_price: f64,
+    pub liq_price: f64,
+    pub pos_dir: u8,
+    pub long_pos_size: f64,
+    pub long_pos_price: f64,
+    pub long_liq_price: f64,
+    pub long_position_type: u8,
+    pub short_pos_size: f64,
+    pub short_pos_price: f64,
+    pub short_liq_price: f64,
+    pub short_position_type: u8,
+    pub asset_balance: f64,
+    pub asset_balance_full: f64,
+    pub total_profit_b: f64,
+    pub total_profit_l: f64,
+    pub total_profit_s: f64,
+    pub leverage_x: i32,
+    pub position_type: u8,
+    pub balance_hash: u64,
+    pub last_balance_epoch: u16,
+    // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
+    pub arb_slots: HashMap<u8, MarketArbSlot>,
 }
 
 impl Market {
@@ -203,6 +235,49 @@ impl Market {
             ListedType::SPOT
         } else {
             ListedType::BOTH
+        }
+    }
+
+    /// Delphi `TMarket.FTotalProfit`.
+    pub fn total_profit(&self) -> f64 {
+        self.total_profit_b + self.total_profit_l + self.total_profit_s
+    }
+}
+
+pub const ARB_PRICE_RING_LEN: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketArbPricePoint {
+    pub price: f32,
+    pub time: f64,
+    pub my_price: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketArbNowEntry {
+    pub price: f32,
+    pub time: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketArbSlot {
+    pub ring: [MarketArbPricePoint; ARB_PRICE_RING_LEN],
+    pub enabled: bool,
+    pub head: u8,
+    pub isolated_flags: u8,
+    pub isolated_flags_tmp: u8,
+    pub now: MarketArbNowEntry,
+}
+
+impl Default for MarketArbSlot {
+    fn default() -> Self {
+        Self {
+            ring: [MarketArbPricePoint::default(); ARB_PRICE_RING_LEN],
+            enabled: false,
+            head: 0,
+            isolated_flags: 0,
+            isolated_flags_tmp: 0,
+            now: MarketArbNowEntry::default(),
         }
     }
 }
@@ -322,6 +397,30 @@ pub(crate) fn read_market_with_local_shift(
         bn_iceberg,
         bn_only_isolated,
         futures_type,
+        initial_balance: 0.0,
+        locked_balance: 0.0,
+        pos_size: 0.0,
+        pos_price: 0.0,
+        liq_price: 0.0,
+        pos_dir: 0,
+        long_pos_size: 0.0,
+        long_pos_price: 0.0,
+        long_liq_price: 0.0,
+        long_position_type: 0,
+        short_pos_size: 0.0,
+        short_pos_price: 0.0,
+        short_liq_price: 0.0,
+        short_position_type: 0,
+        asset_balance: 0.0,
+        asset_balance_full: 0.0,
+        total_profit_b: 0.0,
+        total_profit_l: 0.0,
+        total_profit_s: 0.0,
+        leverage_x: 1,
+        position_type: 0,
+        balance_hash: 0,
+        last_balance_epoch: 0,
+        arb_slots: HashMap::new(),
     })
 }
 

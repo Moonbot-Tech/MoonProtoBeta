@@ -128,7 +128,12 @@ let markets = state.markets();
 
 if let Some(market) = markets.get("BTCUSDT") {
     market.with(|market| {
-        println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
+        println!(
+            "tick={} max_lev={} liq={}",
+            market.bn_tick_size,
+            market.max_leverage,
+            market.liq_price
+        );
     });
 }
 
@@ -145,6 +150,16 @@ if tags.contains(TokenTags::ALPHA) {
     println!("BTCUSDT has ALPHA tag");
 }
 ```
+
+Balance and position packets update these same live `Market` objects. For chart
+UI this is the normal path: keep the selected `MarketHandle` and read fields
+such as `pos_size`, `pos_price`, `liq_price`, `leverage_x`, `asset_balance`,
+`total_profit_*`, and `bn_max_value` from it. `BalancesState` is the account
+totals / low-level row view, not the primary per-market UI object.
+
+Arbitrage relay packets also apply to the live market. Use
+`Market::arb_slots` from the selected handle; raw arb `market_index` blocks are
+diagnostic protocol details.
 
 ## Init and Refresh
 

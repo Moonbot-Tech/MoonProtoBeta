@@ -10,7 +10,12 @@ use crate::commands::balance::parse_balance;
 use crate::protocol::Command;
 
 impl EventDispatcher {
-    pub(super) fn client_new_data_balance(&mut self, payload: &[u8], out: &mut Vec<Event>) {
+    pub(super) fn client_new_data_balance(
+        &mut self,
+        payload: &[u8],
+        now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) {
         if payload.len() < 11 {
             out.push(Self::parse_failed(Command::Balance, payload));
             return;
@@ -25,8 +30,9 @@ impl EventDispatcher {
             0 | 1 | 2 | 5 => {}
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
+                    let ev = self.markets.apply_balance_update_like_delphi(&upd);
                     let markets = &self.markets;
-                    let ev =
+                    let _legacy_ev =
                         self.balances
                             .apply_with_known_markets(upd, &markets.by_name, |name| {
                                 markets.get(name).is_some_and(|handle| {
@@ -41,6 +47,16 @@ impl EventDispatcher {
                 Some(arb) => {
                     if let Some(parsed) = parse_arb_payload_compact(&arb.payload) {
                         let parsed = self.filter_arb_payload_to_known_markets(parsed);
+                        let wanted = self
+                            .settings
+                            .client_settings
+                            .as_ref()
+                            .map(|settings| &settings.arb_config.wanted);
+                        self.markets.apply_arb_payload_like_delphi(
+                            &parsed,
+                            wanted,
+                            now_time_days.unwrap_or_default(),
+                        );
                         out.push(Event::Arb {
                             uid: arb.uid,
                             payload: parsed,

@@ -1,58 +1,42 @@
-# Arbitrage Relay Events
+# Arbitrage State
 
-The Active Lib can expose compact arbitrage price and isolation relay messages
-as `Event::Arb`. This is not part of the normal balance read model, even though
-the Delphi protocol transports it on the same internal channel as balances.
+Arbitrage relay packets are transported through `MPC_Balance`, but the normal
+Active Lib state is per market.
 
-In the normal active-library flow, init enables this delivery together with the
-balance/market refresh path. A raw transport-only client that has not completed
-init should not expect arbitrage relay events.
-
-## Active Library Path
-
-`MoonClient` filters relay records through the current server market-index map
-before exposing `Event::Arb`. Records for unknown indexes are consumed but not
-exposed, matching the Delphi client.
+When the current client settings enable an arbitrage platform, incoming compact
+arb prices are applied to the live `Market` object:
 
 ```rust
-use moonproto::commands::arb::ArbPayload;
-use moonproto::Event;
+let Some(state) = client.snapshot() else { return; };
 
-for event in client.drain_events() {
-    if let Event::Arb { uid, payload } = event {
-        match payload {
-            ArbPayload::Price { blocks, .. } => {
-                println!("arb prices uid={uid} markets={}", blocks.len());
-            }
-            ArbPayload::Isolation { entries, .. } => {
-                println!("arb isolation uid={uid} entries={}", entries.len());
-            }
+if let Some(btc) = state.markets().get("BTCUSDT") {
+    btc.with(|m| {
+        if let Some(slot) = m.arb_slots.get(&7) {
+            println!("price={} isolated={}", slot.now.price, slot.isolated_flags);
         }
-    }
+    });
 }
 ```
 
-## Public Types
+`Market::arb_slots` is keyed by platform code. Each slot mirrors the useful
+parts of Delphi `TMarket.ArbSlots` / `TMarket.ArbNow`:
 
 ```rust
-pub enum ArbPayload {
-    Price { version: u8, blocks: Vec<ArbPriceBlock> },
-    Isolation { version: u8, entries: Vec<ArbIsolationEntry> },
-}
-
-pub struct ArbPriceBlock {
-    pub market_index: u16,
-    pub prices: Vec<ArbPriceItem>,
-}
-
-pub struct ArbPriceItem {
-    pub platform_code: u8,
-    pub price: f32,
-}
-
-pub struct ArbIsolationEntry {
-    pub market_index: u16,
-    pub platform_code: u8,
-    pub flags: u8,
+pub struct MarketArbSlot {
+    pub ring: [MarketArbPricePoint; 10],
+    pub enabled: bool,
+    pub head: u8,
+    pub isolated_flags: u8,
+    pub now: MarketArbNowEntry,
 }
 ```
+
+Isolation snapshots are committed like Delphi: received temporary flags replace
+the current `isolated_flags`, then the temporary staging flags are cleared.
+
+## Low-Level Events
+
+`Event::Arb { uid, payload }` still exists as a diagnostic/protocol event.
+Its `ArbPayload` contains compact packet blocks with server `market_index`
+values. Do not build chart UI around those indexes; use the selected
+`MarketHandle` and `Market::arb_slots` instead.

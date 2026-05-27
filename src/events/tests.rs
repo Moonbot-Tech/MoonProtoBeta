@@ -306,6 +306,59 @@ fn balance_payload_with_items(cmd_id: u8, uid: u64, epoch: u16, items: &[(&str, 
     out
 }
 
+fn write_balance_item_position(
+    out: &mut Vec<u8>,
+    market_name: &str,
+    initial_balance: f64,
+    liq_price: f64,
+    max_value: f64,
+    leverage_x: i32,
+) {
+    write_string(out, market_name);
+    out.extend_from_slice(&77u64.to_le_bytes());
+    let flags = (1u32 << 0) | (1u32 << 4) | (1u32 << 19) | (1u32 << 20);
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.extend_from_slice(&initial_balance.to_le_bytes());
+    out.extend_from_slice(&liq_price.to_le_bytes());
+    out.extend_from_slice(&max_value.to_le_bytes());
+    out.extend_from_slice(&leverage_x.to_le_bytes());
+}
+
+fn balance_payload_with_position(
+    cmd_id: u8,
+    uid: u64,
+    epoch: u16,
+    market_name: &str,
+    initial_balance: f64,
+    liq_price: f64,
+    max_value: f64,
+    leverage_x: i32,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(cmd_id);
+    out.extend_from_slice(&3u16.to_le_bytes());
+    out.extend_from_slice(&uid.to_le_bytes());
+    out.extend_from_slice(&epoch.to_le_bytes());
+    if cmd_id == 4 {
+        out.push(0);
+    } else {
+        out.extend_from_slice(&1.0f64.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+        out.extend_from_slice(&0.0f64.to_le_bytes());
+    }
+    out.extend_from_slice(&1i32.to_le_bytes());
+    write_balance_item_position(
+        &mut out,
+        market_name,
+        initial_balance,
+        liq_price,
+        max_value,
+        leverage_x,
+    );
+    out
+}
+
 fn event_market(name: &str) -> Market {
     Market {
         bn_market_name: name.to_string(),
@@ -351,6 +404,30 @@ fn event_market(name: &str) -> Market {
         bn_iceberg: false,
         bn_only_isolated: false,
         futures_type: BaseCurrency::USDT,
+        initial_balance: 0.0,
+        locked_balance: 0.0,
+        pos_size: 0.0,
+        pos_price: 0.0,
+        liq_price: 0.0,
+        pos_dir: 0,
+        long_pos_size: 0.0,
+        long_pos_price: 0.0,
+        long_liq_price: 0.0,
+        long_position_type: 0,
+        short_pos_size: 0.0,
+        short_pos_price: 0.0,
+        short_liq_price: 0.0,
+        short_position_type: 0,
+        asset_balance: 0.0,
+        asset_balance_full: 0.0,
+        total_profit_b: 0.0,
+        total_profit_l: 0.0,
+        total_profit_s: 0.0,
+        leverage_x: 1,
+        position_type: 0,
+        balance_hash: 0,
+        last_balance_epoch: 0,
+        arb_slots: std::collections::HashMap::new(),
     }
 }
 
@@ -1086,6 +1163,65 @@ fn dispatcher_routes_arb_to_typed_event() {
 }
 
 #[test]
+fn dispatcher_applies_arb_price_to_live_market_like_delphi_tmarket() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+    let mut settings = ClientSettingsCommand::default();
+    settings.arb_config.wanted[7] = true;
+    d.settings.client_settings = Some(settings);
+
+    let mut compact = vec![2u8];
+    compact.extend_from_slice(&0u16.to_le_bytes());
+    compact.push(1);
+    compact.push(7);
+    compact.extend_from_slice(&123.25f32.to_le_bytes());
+
+    let payload = build_arb_prices(9, &compact);
+    let events = d.dispatch(Command::Balance, &payload, 1000);
+
+    assert!(matches!(events.as_slice(), [Event::Arb { .. }]));
+    let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
+    let slot = btc
+        .arb_slots
+        .get(&7)
+        .expect("Delphi ApplyArbPrice initializes TMarket.ArbSlots");
+    assert!(slot.enabled);
+    assert_eq!(slot.head, 1);
+    assert_eq!(slot.ring[1].price, 123.25);
+    assert_eq!(slot.now.price, 123.25);
+}
+
+#[test]
+fn dispatcher_applies_arb_isolation_commit_to_live_market_like_delphi() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+    let mut settings = ClientSettingsCommand::default();
+    settings.arb_config.wanted[7] = true;
+    d.settings.client_settings = Some(settings);
+
+    let mut price = vec![2u8];
+    price.extend_from_slice(&0u16.to_le_bytes());
+    price.push(1);
+    price.push(7);
+    price.extend_from_slice(&123.25f32.to_le_bytes());
+    let _ = d.dispatch(Command::Balance, &build_arb_prices(9, &price), 1000);
+
+    let mut isolation = vec![3u8, 2u8];
+    isolation.extend_from_slice(&1u16.to_le_bytes());
+    isolation.extend_from_slice(&0u16.to_le_bytes());
+    isolation.push(7);
+    isolation.push(0b11);
+    let _ = d.dispatch(Command::Balance, &build_arb_prices(10, &isolation), 1001);
+
+    let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
+    let slot = btc.arb_slots.get(&7).unwrap();
+    assert_eq!(slot.isolated_flags, 0b11);
+    assert_eq!(slot.isolated_flags_tmp, 0);
+}
+
+#[test]
 fn dispatcher_filters_unknown_arb_price_blocks_like_delphi_find_by_server_index() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
@@ -1248,6 +1384,14 @@ fn dispatcher_filters_balance_items_through_markets_state() {
     ));
     assert!(d.balances.get("BTCUSDT").is_some());
     assert!(d.balances.get("UNKNOWNUSDT").is_none());
+    assert_eq!(
+        d.markets
+            .get("BTCUSDT")
+            .unwrap()
+            .with(|market| market.initial_balance),
+        100.0
+    );
+    assert!(d.markets.get("UNKNOWNUSDT").is_none());
 }
 
 #[test]
@@ -1273,6 +1417,86 @@ fn dispatcher_full_balance_creates_default_for_all_known_markets_like_delphi() {
         .expect("Delphi OnBalanceSnapshot resets every known TMarket");
     assert_eq!(eth.initial_balance, 0.0);
     assert_eq!(eth.leverage_x, 1);
+    let eth_market = d.markets.get("ETHUSDT").unwrap().snapshot();
+    assert_eq!(eth_market.initial_balance, 0.0);
+    assert_eq!(eth_market.leverage_x, 1);
+}
+
+#[test]
+fn dispatcher_balance_updates_live_market_fields_like_delphi_tmarket() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+
+    let payload = balance_payload_with_position(3, 10, 5, "BTCUSDT", 100.0, 12345.0, 999.0, 25);
+    let events = d.dispatch(Command::Balance, &payload, 1000);
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Balance(BalanceEvent::SnapshotApplied {
+            count: 1,
+            epoch: 5
+        })]
+    ));
+    let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
+    assert_eq!(btc.initial_balance, 100.0);
+    assert_eq!(btc.liq_price, 12345.0);
+    assert_eq!(btc.bn_max_value, 999.0);
+    assert_eq!(btc.leverage_x, 25);
+    assert_eq!(btc.balance_hash, 77);
+    assert_eq!(btc.last_balance_epoch, 5);
+}
+
+#[test]
+fn dispatcher_full_balance_resets_missing_live_market_but_preserves_hash_epoch_like_delphi() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT", "ETHUSDT"]);
+
+    let eth_payload = balance_payload_with_position(3, 10, 5, "ETHUSDT", 44.0, 22.0, 333.0, 7);
+    let _ = d.dispatch(Command::Balance, &eth_payload, 1000);
+    let before = d.markets.get("ETHUSDT").unwrap().snapshot();
+    assert_eq!(before.initial_balance, 44.0);
+    assert_eq!(before.liq_price, 22.0);
+    assert_eq!(before.bn_max_value, 333.0);
+    assert_eq!(before.last_balance_epoch, 5);
+
+    let btc_only = balance_payload_with_items(3, 11, 6, &[("BTCUSDT", 1.0)]);
+    let _ = d.dispatch(Command::Balance, &btc_only, 1001);
+
+    let after = d.markets.get("ETHUSDT").unwrap().snapshot();
+    assert_eq!(after.initial_balance, 0.0);
+    assert_eq!(after.liq_price, 0.0);
+    assert_eq!(after.total_profit(), 0.0);
+    assert_eq!(after.leverage_x, 1);
+    assert_eq!(after.bn_max_value, 333.0);
+    assert_eq!(after.balance_hash, 77);
+    assert_eq!(after.last_balance_epoch, 5);
+}
+
+#[test]
+fn dispatcher_balance_incremental_epoch_gate_uses_live_market_epoch_like_delphi() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+
+    let fresh = balance_payload_with_position(3, 10, 100, "BTCUSDT", 10.0, 20.0, 30.0, 3);
+    let _ = d.dispatch(Command::Balance, &fresh, 1000);
+
+    let stale = balance_payload_with_position(4, 11, 99, "BTCUSDT", 90.0, 80.0, 70.0, 9);
+    let events = d.dispatch(Command::Balance, &stale, 1001);
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Balance(BalanceEvent::IncrementalApplied {
+            count: 0,
+            epoch: 99,
+            ..
+        })]
+    ));
+    let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
+    assert_eq!(btc.initial_balance, 10.0);
+    assert_eq!(btc.liq_price, 20.0);
+    assert_eq!(btc.bn_max_value, 30.0);
+    assert_eq!(btc.leverage_x, 3);
+    assert_eq!(btc.last_balance_epoch, 100);
 }
 
 #[test]

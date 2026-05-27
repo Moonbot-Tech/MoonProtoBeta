@@ -49,6 +49,30 @@ fn sample_market(name: &str, with_v2: bool) -> Market {
         } else {
             BaseCurrency::EMPTY
         },
+        initial_balance: 0.0,
+        locked_balance: 0.0,
+        pos_size: 0.0,
+        pos_price: 0.0,
+        liq_price: 0.0,
+        pos_dir: 0,
+        long_pos_size: 0.0,
+        long_pos_price: 0.0,
+        long_liq_price: 0.0,
+        long_position_type: 0,
+        short_pos_size: 0.0,
+        short_pos_price: 0.0,
+        short_liq_price: 0.0,
+        short_position_type: 0,
+        asset_balance: 0.0,
+        asset_balance_full: 0.0,
+        total_profit_b: 0.0,
+        total_profit_l: 0.0,
+        total_profit_s: 0.0,
+        leverage_x: 1,
+        position_type: 0,
+        balance_hash: 0,
+        last_balance_epoch: 0,
+        arb_slots: std::collections::HashMap::new(),
     }
 }
 

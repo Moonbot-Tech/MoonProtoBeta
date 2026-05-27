@@ -102,7 +102,7 @@ impl EventDispatcher {
         handle.apply_candles_snapshot(rows)
     }
 
-    pub(super) fn set_trade_storage_scope(
+    pub(crate) fn set_trade_storage_scope(
         &mut self,
         scope: Option<&TradeStorageScope>,
         now_time_days: f64,

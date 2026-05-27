@@ -129,9 +129,11 @@ For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
 `api_check_expiration_time` remain available and return
 `Receiver<EngineResponse>`.
 
-`request_candles_data` is the high-level API for the full candles snapshot
-request. It registers the chunk aggregator, keeps the runtime pumping, and
-returns one `MergedCandles` value after all chunks are merged.
+`request_candles_data` is an explicit full candles refresh/diagnostic helper.
+It registers the chunk aggregator, keeps the runtime pumping, returns one
+`MergedCandles` value after all chunks are merged, and applies parsed 5m candles
+to retained market history when trades storage is active. Normal chart UI reads
+candles from `snapshot.market_history_readers(market)`.
 Use `api_request_candles_data_async` only for custom async flows that already
 own a running client loop.
 

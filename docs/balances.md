@@ -1,17 +1,29 @@
 # Balances
 
-The Active Lib keeps a live balance read model for the connected MoonBot
-session. Application code normally does not parse balance packets directly:
-run `MoonClient`, read balances from `client.snapshot()`, and react to
-`Event::Balance` when the state changes.
+The Active Lib keeps live account and position state for the connected MoonBot
+session. Application code normally does not parse balance packets directly.
+
+For UI attached to a market chart, read position fields from `Market`, not from
+a separate balance row. This mirrors Delphi: balance packets mutate the live
+`TMarket` object, and chart/order UI reads that object.
 
 ## What The Library Maintains
 
-`BalancesState` stores:
+`MarketsState` stores per-market balance/position fields directly on each live
+`Market`:
+
+- `initial_balance`, `locked_balance`;
+- `pos_size`, `pos_price`, `liq_price`, `pos_dir`;
+- long/short hedge position fields;
+- `asset_balance`, `asset_balance_full`;
+- `total_profit_b`, `total_profit_l`, `total_profit_s`;
+- `bn_max_value`, `leverage_x`, `position_type`;
+- `balance_hash`, `last_balance_epoch`.
+
+`BalancesState` remains the account-level/low-level balance view:
 
 - global account totals in BTC equivalent;
 - one `BalanceItem` per known market;
-- per-market position, liquidation, PnL, leverage, and spot asset values;
 - per-market epoch tracking so stale incremental rows are ignored.
 
 Rows are keyed by market name, for example `"BTCUSDT"`.
@@ -21,9 +33,10 @@ Incoming balance rows are applied only for markets already known to
 create an orphan balance row.
 
 Full snapshots are authoritative for the current known market universe. If a
-known market is missing from a full snapshot, the library keeps a default
-zero-balance row for it with `leverage_x = 1`. Existing preserved Delphi fields
-such as `balance_hash`, `max_value`, and the per-market last epoch are retained.
+known market is missing from a full snapshot, the library resets the live market
+balance/position fields to zero and `leverage_x = 1`, while preserving
+Delphi-preserved fields such as `balance_hash`, `bn_max_value`, and the
+per-market last epoch.
 
 Incremental updates merge only the changed rows and optionally update global
 totals. Stale incremental rows are skipped per market.
@@ -32,19 +45,21 @@ totals. Stale incremental rows are skipped per market.
 
 ```rust
 let Some(state) = client.snapshot() else { return; };
-let balances = state.balances();
+let markets = state.markets();
 
-if let Some(btc) = balances.get("BTCUSDT") {
-    println!(
-        "pos={} entry={} liq={} lev={}x",
-        btc.pos_size,
-        btc.pos_price,
-        btc.liq_price,
-        btc.leverage_x
-    );
+if let Some(eth) = markets.get("ETHUSDT") {
+    eth.with(|m| {
+        println!(
+            "pos={} entry={} liq={} lev={}x",
+            m.pos_size,
+            m.pos_price,
+            m.liq_price,
+            m.leverage_x
+        );
+    });
 }
 
-let global = &balances.global;
+let global = &state.balances().global;
 println!(
     "btc_total={} locked={} full={}",
     global.btc_balance_total,
@@ -53,8 +68,9 @@ println!(
 );
 ```
 
-The snapshot is immutable and safe for UI code to keep. Call `client.snapshot()`
-again after draining events when the UI wants the latest read model.
+The snapshot is immutable and safe for UI code to keep. `MarketHandle` values
+are stable across listing refreshes, so a chart can keep the handle for the
+selected market and read fresh fields from it.
 
 ## Getting A Fresh Snapshot
 
@@ -108,7 +124,11 @@ for event in client.drain_events() {
 `SnapshotApplied.count` and `IncrementalApplied.count` are counts of rows that
 actually changed the read model after market filtering and stale-epoch checks.
 
-## BalanceItem Fields
+## Low-Level BalanceItem Fields
+
+`BalanceItem` is the decoded packet row and the secondary balance-table view.
+It is useful for diagnostics and account tables. Market UI should normally read
+the same position/liquidation fields from `Market`.
 
 ```rust
 pub struct BalanceItem {
