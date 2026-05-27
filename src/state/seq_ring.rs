@@ -373,8 +373,7 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         out: &mut Vec<T>,
     ) -> Option<SeqRingReadMeta> {
         let state = self.inner.state.read();
-        let time_clipped = state.is_time_before_retained_min(time);
-        let start_seq = state.first_seq_at_or_after_time(time);
+        let (start_seq, time_clipped) = state.first_seq_at_or_after_time_with_clip(time);
         let (mut meta, end_seq) = state.read_meta(start_seq, limit);
         meta.clipped |= time_clipped;
         let (first, second) = state.slices(meta.actual_start_seq, end_seq);
@@ -395,11 +394,8 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
     ) -> Option<SeqRingReadMeta> {
         let state = self.inner.state.read();
         let bounds = state.bounds();
-        let time_clipped = state.is_time_before_retained_min(from_time);
-        let start_seq = state
-            .first_seq_at_or_after_time(from_time)
-            .max(bounds.oldest_seq)
-            .min(bounds.next_seq);
+        let (start_seq, time_clipped) = state.first_seq_at_or_after_time_with_clip(from_time);
+        let start_seq = start_seq.max(bounds.oldest_seq).min(bounds.next_seq);
 
         out.clear();
         out.reserve(limit.min(bounds.len));
@@ -493,16 +489,21 @@ impl<T: SeqRingTimedRow> SeqRingState<T> {
         bounds.next_seq
     }
 
-    fn is_time_before_retained_min(&self, time: f64) -> bool {
+    fn first_seq_at_or_after_time_with_clip(&self, time: f64) -> (u64, bool) {
         let bounds = self.bounds();
         if bounds.len == 0 {
-            return false;
+            return (bounds.next_seq, false);
         }
-        let mut min_time = self.row_at_seq(bounds.oldest_seq).seq_ring_time();
-        for seq in (bounds.oldest_seq + 1)..bounds.next_seq {
-            min_time = min_time.min(self.row_at_seq(seq).seq_ring_time());
+        let mut first = bounds.next_seq;
+        let mut min_time = f64::INFINITY;
+        for seq in bounds.oldest_seq..bounds.next_seq {
+            let row_time = self.row_at_seq(seq).seq_ring_time();
+            if first == bounds.next_seq && row_time >= time {
+                first = seq;
+            }
+            min_time = min_time.min(row_time);
         }
-        time < min_time
+        (first, time < min_time)
     }
 }
 

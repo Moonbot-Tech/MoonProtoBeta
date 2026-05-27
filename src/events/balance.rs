@@ -25,9 +25,14 @@ impl EventDispatcher {
             0 | 1 | 2 | 5 => {}
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
-                    let ev = self
-                        .balances
-                        .apply_with_known_markets(upd, &self.markets.by_name);
+                    let markets = &self.markets;
+                    let ev =
+                        self.balances
+                            .apply_with_known_markets(upd, &markets.by_name, |name| {
+                                markets.get(name).is_some_and(|handle| {
+                                    handle.with(|market| market.is_btc_market)
+                                })
+                            });
                     out.push(Event::Balance(ev));
                 }
                 None => out.push(Self::parse_failed(Command::Balance, payload)),

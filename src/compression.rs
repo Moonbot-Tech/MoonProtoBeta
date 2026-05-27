@@ -85,9 +85,9 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
 
     let mut dst = vec![0u8; out_size];
 
-    // Используем thread-local scratch buffer для offsets (32 KB). См. doc на
-    // DECOMPRESS_OFFSETS — stale содержимое безвредно (bounds check + write-before-read
-    // инварианты алгоритма).
+    // Используем thread-local scratch buffer для offsets (32 KB). Reset обязателен:
+    // Delphi создаёт чистый scratch для каждого decode, а stale offset может
+    // изменить malformed-stream effect и byte-exact воспроизводимость.
     let result = DECOMPRESS_OFFSETS.with(|cell| {
         match cell.try_borrow_mut() {
             Ok(mut guard) => {

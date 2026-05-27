@@ -129,6 +129,7 @@ pub struct SlicedData {
     // BlocksCount as the completion test.
     block_spans: [BlockSpan; 256],
     block_payloads: Vec<u8>,
+    max_present_block_num: u8,
     received_count: usize,
     completion_returned: bool,
     pub ack_flags: [u8; 32], // TMoonProtoFlag256 = set of byte = 32 bytes
@@ -143,6 +144,7 @@ impl SlicedData {
             blocks_count: count,
             block_spans: [BlockSpan::default(); 256],
             block_payloads: Vec::new(),
+            max_present_block_num: 0,
             received_count: 0,
             completion_returned: false,
             ack_flags: [0u8; 32],
@@ -161,6 +163,7 @@ impl SlicedData {
         if span.present {
             self.dup_count = self.dup_count.saturating_add(1);
         } else {
+            self.max_present_block_num = self.max_present_block_num.max(block_num);
             let offset = self.block_payloads.len();
             self.block_payloads.extend_from_slice(payload);
             *span = BlockSpan {
@@ -186,15 +189,17 @@ impl SlicedData {
             return None;
         }
         // B-V2-09/B-V2-14: receive pieces live in one dense buffer plus
-        // BlockNum->span metadata. Iterating block numbers 0..255 preserves the
-        // same sorted-by-BlockNum effect as Delphi's sorted slice list, including
-        // malformed BlockNum > MaxBlockNum cases.
+        // BlockNum->span metadata. Iterating only to the highest actually
+        // received BlockNum preserves the same sorted-by-BlockNum effect as
+        // Delphi's sorted slice list, including malformed BlockNum >
+        // MaxBlockNum cases, without scanning the unused tail on every
+        // assembly.
         let total = self.block_payloads.len();
         let mut cmd = 0u8;
         let mut saw_block_zero = false;
         let mut result = Vec::with_capacity(total.saturating_sub(1));
 
-        for block_num in 0..=u8::MAX {
+        for block_num in 0..=self.max_present_block_num {
             let span = self.block_spans[block_num as usize];
             if !span.present {
                 continue;

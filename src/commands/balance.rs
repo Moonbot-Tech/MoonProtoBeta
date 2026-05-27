@@ -42,6 +42,13 @@ pub struct BalanceItem {
     pub position_type: u8,
 }
 
+impl BalanceItem {
+    /// Delphi `TMarket.FTotalProfit = FTotalProfitB + FTotalProfitL + FTotalProfitS`.
+    pub fn total_profit(&self) -> f64 {
+        self.total_profit_b + self.total_profit_l + self.total_profit_s
+    }
+}
+
 /// Balance update payload.
 ///
 /// `cmd_id=2` has the same item layout as a full snapshot, but the Delphi

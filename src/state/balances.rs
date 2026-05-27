@@ -28,6 +28,9 @@ pub struct GlobalBalance {
     pub btc_balance_full: f64,
     /// Баланс specialCoin (USDT для futures, BUSD/USDC при MA mode и т.д.).
     pub special_coin_balance: f64,
+    /// Delphi `TMarkets.FTotalPNL`: сумма per-market `total_profit` только по
+    /// `TMarket.IsBTCMarket`.
+    pub total_pnl: f64,
 }
 
 /// Sync state балансов клиента. Обновляется через `apply(BalanceUpdate)` при
@@ -143,7 +146,7 @@ impl BalancesState {
     where
         F: Fn(&str) -> bool,
     {
-        self.apply_internal(upd, is_known_market, None)
+        self.apply_internal(upd, is_known_market, None, |_| false)
     }
 
     /// Active-library balance apply with the full known-market universe.
@@ -156,24 +159,28 @@ impl BalancesState {
         &mut self,
         upd: BalanceUpdate,
         known_market_names: &HashMap<String, usize>,
+        is_btc_market: impl Fn(&str) -> bool,
     ) -> BalanceEvent {
         self.apply_internal(
             upd,
             |name| known_market_names.contains_key(name),
             Some(known_market_names),
+            is_btc_market,
         )
     }
 
-    fn apply_internal<F>(
+    fn apply_internal<F, B>(
         &mut self,
         upd: BalanceUpdate,
         is_known_market: F,
         full_known_markets: Option<&HashMap<String, usize>>,
+        is_btc_market: B,
     ) -> BalanceEvent
     where
         F: Fn(&str) -> bool,
+        B: Fn(&str) -> bool,
     {
-        match upd.cmd_id {
+        let ev = match upd.cmd_id {
             2 => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
@@ -184,7 +191,14 @@ impl BalancesState {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
             },
+        };
+        if matches!(
+            ev,
+            BalanceEvent::SnapshotApplied { .. } | BalanceEvent::IncrementalApplied { .. }
+        ) {
+            self.recalc_total_pnl(is_btc_market);
         }
+        ev
     }
 
     /// Full snapshot: маркеты не в Items получают default (Delphi:1253-1275).
@@ -202,6 +216,7 @@ impl BalancesState {
             btc_balance_locked: upd.btc_balance_locked,
             btc_balance_full: upd.btc_balance_full,
             special_coin_balance: upd.special_coin_balance,
+            total_pnl: self.global.total_pnl,
         };
 
         // Replace state — маркеты НЕ в snapshot сбрасываются в default, but
@@ -275,6 +290,7 @@ impl BalancesState {
                 btc_balance_locked: upd.btc_balance_locked,
                 btc_balance_full: upd.btc_balance_full,
                 special_coin_balance: upd.special_coin_balance,
+                total_pnl: self.global.total_pnl,
             };
         }
         let mut count = 0;
@@ -317,6 +333,15 @@ impl BalancesState {
         self.last_epoch_by_market.clear();
         self.global = GlobalBalance::default();
         self.last_epoch = 0;
+    }
+
+    fn recalc_total_pnl(&mut self, is_btc_market: impl Fn(&str) -> bool) {
+        self.global.total_pnl = self
+            .by_market
+            .values()
+            .filter(|item| is_btc_market(&item.market_name))
+            .map(BalanceItem::total_profit)
+            .sum();
     }
 }
 

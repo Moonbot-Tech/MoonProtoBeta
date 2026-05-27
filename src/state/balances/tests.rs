@@ -200,7 +200,11 @@ fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_
     let mut s = BalancesState::new();
     let known = HashMap::from([("BTCUSDT".to_string(), 0), ("ETHUSDT".to_string(), 1)]);
 
-    let ev = s.apply_with_known_markets(upd(3, 10, vec![make_item("BTCUSDT", 100.0)]), &known);
+    let ev = s.apply_with_known_markets(
+        upd(3, 10, vec![make_item("BTCUSDT", 100.0)]),
+        &known,
+        |name| name == "BTCUSDT",
+    );
 
     assert!(matches!(
         ev,
@@ -217,7 +221,11 @@ fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_
     assert_eq!(eth.leverage_x, 1);
     assert_eq!(eth.position_type, 0);
 
-    let stale = s.apply_with_known_markets(upd(4, 0, vec![make_item("ETHUSDT", 55.0)]), &known);
+    let stale = s.apply_with_known_markets(
+        upd(4, 0, vec![make_item("ETHUSDT", 55.0)]),
+        &known,
+        |name| name == "BTCUSDT",
+    );
     assert!(matches!(
         stale,
         BalanceEvent::IncrementalApplied { count: 0, .. }
@@ -227,6 +235,42 @@ fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_
         0.0,
         "new default row has Delphi LastBalanceEpoch=0, so duplicate epoch 0 is stale"
     );
+}
+
+#[test]
+fn recalc_total_pnl_matches_delphi_btc_market_sum() {
+    let mut s = BalancesState::new();
+    let known = HashMap::from([
+        ("BTCUSDT".to_string(), 0),
+        ("ETHBTC".to_string(), 1),
+        ("ETHUSDT".to_string(), 2),
+    ]);
+    let mut btc = make_item("BTCUSDT", 0.0);
+    btc.total_profit_b = 1.0;
+    btc.total_profit_l = 2.0;
+    btc.total_profit_s = 3.0;
+    let mut eth_btc = make_item("ETHBTC", 0.0);
+    eth_btc.total_profit_b = -0.5;
+    eth_btc.total_profit_l = 0.25;
+    eth_btc.total_profit_s = 1.25;
+    let mut eth_usdt = make_item("ETHUSDT", 0.0);
+    eth_usdt.total_profit_b = 100.0;
+
+    s.apply_with_known_markets(upd(3, 10, vec![btc, eth_btc, eth_usdt]), &known, |name| {
+        name == "BTCUSDT" || name == "ETHBTC"
+    });
+
+    assert_eq!(s.get("BTCUSDT").unwrap().total_profit(), 6.0);
+    assert_eq!(s.get("ETHBTC").unwrap().total_profit(), 1.0);
+    assert_eq!(s.global.total_pnl, 7.0);
+
+    let mut btc_inc = make_item("BTCUSDT", 0.0);
+    btc_inc.total_profit_s = 10.0;
+    s.apply_with_known_markets(upd(4, 11, vec![btc_inc]), &known, |name| {
+        name == "BTCUSDT" || name == "ETHBTC"
+    });
+
+    assert_eq!(s.global.total_pnl, 11.0);
 }
 
 #[test]
