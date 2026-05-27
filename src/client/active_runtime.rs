@@ -314,13 +314,12 @@ impl MoonClient {
         })
     }
 
-    /// Request server-side full balance refresh. The current server normally
-    /// returns an empty successful EngineResponse; the balance state arrives
-    /// through the normal balance channel.
-    pub fn request_markets_balance_full(
-        &self,
-        timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    /// Request server-side full balance refresh.
+    ///
+    /// The current server normally acknowledges the request with an empty
+    /// Engine API payload; the balance state arrives through the normal balance
+    /// channel.
+    pub fn request_markets_balance_full(&self, timeout: Duration) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::get_markets_balance_full(),
             timeout,
@@ -328,7 +327,7 @@ impl MoonClient {
     }
 
     /// Cancel all exchange orders through Engine API.
-    pub fn cancel_all_orders(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+    pub fn cancel_all_orders(&self, timeout: Duration) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::cancel_all_orders(),
             timeout,
@@ -341,7 +340,7 @@ impl MoonClient {
         market: impl AsRef<str>,
         new_leverage: i32,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
             timeout,
@@ -353,7 +352,7 @@ impl MoonClient {
         &self,
         hedge_mode: bool,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::set_hedge_mode(hedge_mode),
             timeout,
@@ -367,7 +366,7 @@ impl MoonClient {
         position_type: u8,
         new_market: bool,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::change_position_type(
                 market.as_ref(),
@@ -379,7 +378,7 @@ impl MoonClient {
     }
 
     /// Convert dust to BNB through Engine API.
-    pub fn convert_dust_bnb(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+    pub fn convert_dust_bnb(&self, timeout: Duration) -> Result<(), MoonClientError> {
         self.request_engine_success(crate::commands::engine_request::convert_dust_bnb(), timeout)
     }
 
@@ -388,7 +387,7 @@ impl MoonClient {
         &self,
         market: impl AsRef<str>,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
             timeout,
@@ -396,11 +395,7 @@ impl MoonClient {
     }
 
     /// Set MA mode through Engine API.
-    pub fn set_ma_mode(
-        &self,
-        ma_mode: bool,
-        timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    pub fn set_ma_mode(&self, ma_mode: bool, timeout: Duration) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::set_ma_mode(ma_mode),
             timeout,
@@ -415,7 +410,7 @@ impl MoonClient {
         from: u8,
         to: u8,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::do_transfer_asset(asset.as_ref(), qty, from, to),
             timeout,
@@ -423,7 +418,7 @@ impl MoonClient {
     }
 
     /// Reload orderbook data through Engine API.
-    pub fn reload_order_book(&self, timeout: Duration) -> Result<EngineResponse, MoonClientError> {
+    pub fn reload_order_book(&self, timeout: Duration) -> Result<(), MoonClientError> {
         self.request_engine_success(
             crate::commands::engine_request::reload_order_book(),
             timeout,
@@ -476,7 +471,7 @@ impl MoonClient {
         &self,
         payload: Vec<u8>,
         timeout: Duration,
-    ) -> Result<EngineResponse, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         let response = self
             .send_request(RuntimeCommandRequest::EngineRaw { payload, timeout })
             .and_then(|reply| match reply {
@@ -484,7 +479,7 @@ impl MoonClient {
                 _ => Err(MoonClientError::RuntimeStopped),
             })?;
         if response.success {
-            Ok(response)
+            Ok(())
         } else {
             Err(MoonClientError::EngineRequest(EngineRequestError::Server {
                 method: response.method,

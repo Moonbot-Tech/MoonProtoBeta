@@ -172,8 +172,8 @@ if let Some(snapshot) = client.snapshot() {
 ```
 
 One-shot Engine API helpers also run inside the owned runtime. Read helpers
-parse their payloads; mutation helpers return the successful raw
-`EngineResponse` and convert server failures into `MoonClientError`:
+parse their payloads; mutation helpers return `Ok(())` after the server accepts
+the operation and convert server failures into `MoonClientError`:
 
 ```rust
 let balance = client.request_balance("USDT", Duration::from_secs(15))?;
@@ -460,8 +460,8 @@ client.confirm_risk_limit("BTCUSDT", Duration::from_secs(12))?;
 
 These helpers validate the server response and parse the payload. Engine API
 failures are returned as `MoonClientError::EngineRequest`. Mutation helpers
-return the successful raw `EngineResponse` because most mutation replies are
-acknowledgements rather than typed data snapshots.
+return `Ok(())` because most mutation replies are acknowledgements rather than
+typed data snapshots.
 
 Low-level `Client::api_*` receivers remain only for custom runtimes and
 diagnostic tools. A normal application should not wait on raw receivers from the

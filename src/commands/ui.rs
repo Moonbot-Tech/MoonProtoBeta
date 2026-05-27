@@ -1,9 +1,9 @@
-//! MPC_UI канал — 14 подкоманд TBaseUICommand.
+//! MoonProto UI/settings command channel.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoUIStruct.pas` (~790 строк).
+//! Delphi source: `MoonProto/MoonProtoUIStruct.pas`.
 //!
-//! ## CmdId маппинг
-//! - 1  — `TClientSettingsCommand`  (Sliced, UK_BaseUISettings) — большой snapshot настроек UI
+//! ## CmdId mapping
+//! - 1  — `TClientSettingsCommand`  (Sliced, UK_BaseUISettings) — full UI/settings snapshot
 //! - 2  — `TSettingsRequest`        (empty)
 //! - 3  — `TStratStartStopCommand`  (boolean IsStart)
 //! - 4  — `TStratStartStopCommandV2` (IsStart + Items[StratCheckedItem])
@@ -18,15 +18,19 @@
 //! - 13 — `TSwitchDexCommand`       (ShortString\[15\] DexName, UK_DexSwitch, High)
 //! - 14 — `TSwitchSpotCommand`      (byte SpotIndex, UK_SpotSwitch, High)
 //!
-//! ## Замечание про ASCfg / ASCfg2
-//! `TAutoStartConfig` (104 байта) и `TAutoStartConfig2` (168 байт) — это packed records
-//! из `Config.pas`. На проводе они передаются как `Word size + bytes(size)` blob с soft-read
-//! (если sz > SizeOf — лишнее skip'ится; если sz < SizeOf — partial read). В порте они
-//! сохраняются как **raw `Vec<u8>`** — потребитель сам решает как распарсить.
+//! ## ASCfg / ASCfg2 blobs
+//! `TAutoStartConfig` (104 bytes) and `TAutoStartConfig2` (168 bytes) are
+//! Delphi packed records from `Config.pas`. On the wire they are encoded as
+//! `Word size + bytes(size)` with soft-read semantics: extra tail bytes are
+//! skipped and short payloads are partially copied. MoonProto stores them as
+//! raw blobs because there is no stable public Active Lib model for those
+//! nested UI-only settings yet.
 //!
 //! ## ArbConfig compact format
-//! Не raw record! На проводе: `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte
-//! + colorCount*5 bytes`. `wantedSet` — Delphi `set of byte` (32 байта = 256 битовая маска).
+//! This is not a raw Delphi record. The wire form is
+//! `ver:byte + wantedSet:bytes(32) + flags:byte + colorCount:byte +
+//! colorCount*5 bytes`. `wantedSet` is Delphi `set of byte`
+//! (32 bytes = 256-bit mask).
 
 use super::registry::{decode_utf8_delphi, read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strat::StratCheckedItem;
@@ -106,11 +110,13 @@ pub const ARB_CONFIG_VER: u8 = 1;
 //  ArbConfig — compact wire form (NOT raw record)
 // =============================================================================
 
-/// ArbConfig compact form, как пишется в `TClientSettingsCommand`.
-/// Источник: `MoonProtoUIStruct.pas:370-393` (Read) / `450-468` (Write).
+/// Compact `ArbConfig` form as embedded into `TClientSettingsCommand`.
+///
+/// Delphi source: `MoonProtoUIStruct.pas:370-393` (read) and `450-468`
+/// (write).
 #[derive(Debug, Clone)]
 pub struct ArbConfigCompact {
-    /// 256-битная маска "wanted" платформ (Delphi `set of byte`).
+    /// 256-bit "wanted platform" mask, matching Delphi `set of byte`.
     pub wanted: [bool; 256],
     pub show_absolute: bool,
     pub show_numbers: bool,
@@ -120,7 +126,7 @@ pub struct ArbConfigCompact {
 }
 
 impl Default for ArbConfigCompact {
-    /// Defaults из `InitArbConfigDefaults` (ArbTypes.pas:87): ShowLines=true, ShowPercent=true.
+    /// Defaults from `InitArbConfigDefaults`: show lines and percentages.
     fn default() -> Self {
         Self {
             wanted: [false; 256],
@@ -134,16 +140,16 @@ impl Default for ArbConfigCompact {
 }
 
 // =============================================================================
-//  EmuTradePoint (6 байт packed)
+//  EmuTradePoint (6-byte packed record)
 // =============================================================================
 
-/// `TEmuTradePoint = packed record TimeDeltaMS:Word(2) + Price:Single(4)` = 6 байт.
+/// `TEmuTradePoint = packed record TimeDeltaMS:Word(2) + Price:Single(4)` = 6 bytes.
 /// Source: MoonProtoUIStruct.pas:115-118.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmuTradePoint {
-    /// Дельта от BaseTime в миллисекундах (0..65535).
+    /// Delta from `BaseTime` in milliseconds.
     pub time_delta_ms: u16,
-    /// Цена. Знак отрицательный = Sell.
+    /// Trade price. Negative sign means sell side.
     pub price: f32,
 }
 
@@ -192,31 +198,29 @@ impl EmuTradePoint {
 //  Subcommand payloads
 // =============================================================================
 
-/// CmdId=1 `TClientSettingsCommand` — большой snapshot настроек MoonBot UI.
+/// CmdId=1 `TClientSettingsCommand` — full MoonBot UI/settings snapshot.
 ///
-/// Многие поля append-only soft-read: в зависимости от версии сервера часть полей
-/// может отсутствовать. Delphi `CreateFromStream` берёт часть недостающего хвоста
-/// из текущего `cfg`; в active path это делает
+/// Many fields are append-only soft-read fields: depending on server version,
+/// part of the tail may be absent. Delphi `CreateFromStream` fills the missing
+/// tail from current `cfg`; in the Active Lib path this is handled by
 /// [`UICommand::parse_with_client_settings_fallback`].
 ///
-/// B-01 (docs_api iter-2): `#[derive(Default)]` для удобства потребителя.
-/// Из Delphi `TClientSettingsCommand.Create` пользователь получал готовую структуру
-/// с дефолтами; в Rust раньше нужно было руками заполнять ~30 полей. Теперь:
+/// `Default` gives the same ergonomic starting point as Delphi
+/// `TClientSettingsCommand.Create`: create defaults, change the fields the UI
+/// owns, then send the snapshot through the high-level active client.
 /// ```ignore
 /// let mut settings = ClientSettingsCommand::default();
 /// settings.x_sell = 3;
 /// settings.use_g_take_profit = true;
 /// settings.g_take_profit = 1.5;
-/// client.ui_send_settings(&settings);
+/// client.send_settings(settings)?;
 /// ```
-/// `uid` will be `0` by default. The high-level `Client::ui_send_settings`
-/// wrapper generates a fresh wire UID and uses Delphi's fixed `UKey.UID = 1`
-/// for queue deduplication. Set this field only when using the low-level
-/// builder directly.
+/// `uid` is `0` by default. High-level send helpers write a fresh wire UID and
+/// use Delphi's fixed settings UKey slot for queue deduplication. Set this
+/// field manually only when using the low-level builder directly.
 #[derive(Debug, Clone, Default)]
 pub struct ClientSettingsCommand {
-    /// Wire command UID. Leave it as `0` when using `Client::ui_send_settings`;
-    /// the wrapper writes a fresh UID and uses the fixed Delphi settings UKey.
+    /// Wire command UID. Leave it as `0` when using high-level send helpers.
     /// Set it manually only when using `build_client_settings` directly.
     pub uid: u64,
     // --- always present (v1+) ---
@@ -235,24 +239,25 @@ pub struct ClientSettingsCommand {
     // --- v2+ ---
     pub buy_iceberg: bool,
     pub sell_iceberg: bool,
-    /// Из `cfg.OrdersControl.SignOrders` (Config.pas:682). Заливается ВНУТРЬ глобальной конфигурации
-    /// в Delphi, потому полей класса под него нет — храним в команде явно.
+    /// `cfg.OrdersControl.SignOrders` value mirrored explicitly in the Rust
+    /// snapshot. Delphi writes it into global config instead of storing a
+    /// separate command field.
     pub sign_orders: bool,
     // --- always present (v1+) ---
     pub coins_black_list_text: String,
     pub use_coins_black_list: bool,
     pub temp_bl_symbols: Vec<String>,
-    /// `TempBLTimes[i]: TDateTime` — дельта (в днях) оставшегося времени блокировки.
+    /// `TempBLTimes[i]: TDateTime` delta in days.
     pub temp_bl_times: Vec<f64>,
-    // --- soft-read (опциональны, могут отсутствовать в старых пакетах) ---
+    // --- soft-read tail (optional in older packets) ---
     pub use_manual_strategy: bool,
     pub manual_strategy_id: u64,
     pub free_position_check: bool,
     pub vol_drop_level: i32,
     pub use_stop_market: bool,
-    /// `TAutoStartConfig` blob (size 104 в текущей версии Delphi). Хранится как raw.
+    /// `TAutoStartConfig` blob (104 bytes in the current Delphi version).
     pub as_cfg: Vec<u8>,
-    /// `TAutoStartConfig2` blob (size 168 в текущей версии Delphi).
+    /// `TAutoStartConfig2` blob (168 bytes in the current Delphi version).
     pub as_cfg2: Vec<u8>,
     /// HotkeysConfig.SPrice[1..6].
     pub s_price: [f32; 6],
@@ -260,7 +265,7 @@ pub struct ClientSettingsCommand {
     pub sb_num: u8,
     /// MultiOrders.JoinSellKind (TJoinSellKind: 0=None, 1=FixPrice, 2=FixProfit).
     pub join_sell_kind: u8,
-    /// ArbConfig в compact-формате (НЕ raw record).
+    /// Compact `ArbConfig` form, not a raw Delphi record.
     pub arb_config: ArbConfigCompact,
 }
 
@@ -271,7 +276,7 @@ pub struct StratStartStop {
     pub is_start: bool,
 }
 
-/// CmdId=4 `TStratStartStopCommandV2`. Содержит дельту checked-стратегий.
+/// CmdId=4 `TStratStartStopCommandV2`, carrying checked-strategy deltas.
 #[derive(Debug, Clone)]
 pub struct StratStartStopV2 {
     pub uid: u64,
@@ -299,12 +304,12 @@ pub struct UpdateVersion {
     pub is_release: bool,
 }
 
-/// CmdId=7 `TEmuTradesCommand` (Priority=Sliced). Серия эмулированных тиков для одного маркета.
+/// CmdId=7 `TEmuTradesCommand` (Priority=Sliced), emulated ticks for one market.
 #[derive(Debug, Clone)]
 pub struct EmuTrades {
     pub uid: u64,
     pub m_index: u16,
-    /// `BaseTime: TDateTime` (Delphi double, дни с 1899-12-30).
+    /// `BaseTime: TDateTime` (Delphi double, days since 1899-12-30).
     pub base_time: f64,
     pub points: Vec<EmuTradePoint>,
 }
@@ -319,7 +324,7 @@ pub struct NewMarketNotify {
 #[derive(Debug, Clone)]
 pub struct LevManage {
     pub uid: u64,
-    /// Версия внутри принятой команды. Outgoing builder always writes
+    /// Version byte read from the incoming command. Outgoing builder always writes
     /// Delphi's `LevCmdVer = 1`, regardless of this read-model field.
     pub cmd_ver: u8,
     pub auto_max_order: bool,
@@ -360,7 +365,8 @@ pub struct ArbActivateNotify {
 }
 
 /// CmdId=13 `TSwitchDexCommand` (High, UK_DexSwitch).
-/// `DexName: ShortString[15]` = 16 байт на проводе (1 байт длины + до 15 байт ASCII).
+/// `DexName: ShortString[15]` = 16 wire bytes: one length byte plus up to
+/// 15 ASCII bytes.
 #[derive(Debug, Clone)]
 pub struct SwitchDex {
     pub uid: u64,

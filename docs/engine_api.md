@@ -4,10 +4,11 @@ Engine API is the request/response surface for one-shot server operations:
 health checks, account reads, market list refreshes, candles, orderbook
 snapshots, transfer assets, and account settings.
 
-Use typed `MoonClient::request_*` helpers for common one-shot reads. The runtime
-keeps pumping MoonProto while the caller waits for the response timeout. Use
-low-level `Client::api_*` wrappers only when a custom asynchronous flow needs
-the raw `EngineResponse` receiver.
+Use typed `MoonClient::request_*` helpers for common one-shot reads and
+`MoonClient` mutation helpers for one-shot account operations. The runtime keeps
+pumping MoonProto while the caller waits for the response timeout. Low-level
+`Client::api_*` wrappers are hidden from rustdoc and kept only for custom
+protocol tools that intentionally work with raw `EngineResponse` receivers.
 
 `EngineMethod` is the public method identifier type. Known values are constants
 (`EngineMethod::BaseCheck`, `EngineMethod::RequestCandlesData`, ...), and
@@ -35,9 +36,10 @@ let history = client.request_coin_card_candles(
 let markets_received = client.refresh_candles(Duration::from_secs(30))?;
 ```
 
-The one-shot helpers validate `EngineResponse::success` and parse the
-method-specific payload. They return `MoonClientError`; Engine API failures are
-wrapped as `MoonClientError::EngineRequest`.
+The one-shot helpers validate `EngineResponse::success`. Read helpers parse the
+method-specific payload. Mutation helpers return `Ok(())` after a successful
+acknowledgement and wrap Engine API failures as
+`MoonClientError::EngineRequest`.
 
 Advanced protocol tools can use the lower-level receiver path. Normal
 applications should not wait on raw receivers from the UI thread: a raw
@@ -55,27 +57,20 @@ registered chunks are also consumed and merged from receive-side DataReadInt.
 The normal public helper is `refresh_candles`, which hides the merged zlib
 payload and applies parsed 5m rows to retained market history.
 
-For custom raw payloads with caller-owned timeout cleanup, call
-`Client::request_engine_response`. Raw `api_*` receivers keep their pending slot
-until a matching response arrives, a reconnect clears the session, or the same
-UID is registered again.
+For custom raw payloads with caller-owned timeout cleanup, a low-level runtime
+can call `Client::request_engine_response`. Raw `api_*` receivers keep their
+pending slot until a matching response arrives, a reconnect clears the session,
+or the same UID is registered again. Regular applications should not use this
+path.
 
 ## Client Wrappers
 
 | Group | Methods |
 |---|---|
 | `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
-| `MoonClient` mutation/refresh helpers | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
+| `MoonClient` mutation/refresh helpers returning `Ok(())` on accepted server ack | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
-| Init/auth | `api_base_check`, `api_auth_check` |
-| Markets | `api_get_markets_list`, `api_get_markets_indexes`, `api_update_markets_list`, `api_check_binance_tags` |
-| Balance | `api_get_balance(currency)`, `api_get_markets_balance_full` |
-| Orders | `api_get_order`, `api_get_open_orders`, `api_get_active_orders`, `api_cancel_all_orders` |
-| Account settings | `api_set_leverage(market, lev)`, `api_set_hedge_mode(bool)`, `api_query_hedge_mode`, `api_check_expiration_time` |
-| Trades | `api_subscribe_all_trades(want_mm_orders)`, `api_unsubscribe_all_trades`, `api_trades_resend_batches(packet_nums)` |
-| Orderbooks | `api_subscribe_order_book(markets)`, `api_unsubscribe_order_book(markets)`, `api_request_order_book_full(market_idx, kind)`, `api_reload_order_book` |
-| Position/transfer | `api_change_position_type`, `api_convert_dust_bnb`, `api_confirm_risk_limit`, `api_set_ma_mode`, `api_do_transfer_asset`, `api_update_transfer_assets` |
-| Candles | `refresh_candles`, `request_coin_card_candles`, `api_get_coin_card_candles` |
+| Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
 
 For subscriptions, prefer the registry-aware APIs:
 
@@ -123,9 +118,9 @@ if let Some(unix) = expiration.unix_seconds() {
 }
 ```
 
-For raw payload access, `api_get_balance`, `api_query_hedge_mode`, and
-`api_check_expiration_time` remain available and return
-`Receiver<EngineResponse>`.
+For raw payload access, hidden low-level `Client::api_*` methods remain
+available and return `Receiver<EngineResponse>`. They are for custom runtimes
+and diagnostics, not normal UI code.
 
 `refresh_candles` is the normal explicit full candles refresh helper. It
 registers the chunk aggregator, keeps the runtime pumping, hides the
@@ -136,17 +131,18 @@ Hidden low-level chunk helpers remain available for diagnostics that need
 `MergedCandles`, but regular applications should not build chart state from raw
 chunk/zlib payloads.
 
-`api_get_markets_balance_full` is intentionally low-level. The current reference
-server accepts the request, but does not serialize the balance snapshot yet, so
-a successful response has an empty `data` payload.
+`request_markets_balance_full` asks the server to refresh the full balance
+state. The current reference server normally acknowledges the request with an
+empty payload; the actual balance data arrives through the normal balance
+channel and is applied to `MarketsState` / `BalancesState`.
 
-`api_get_order`, `api_get_open_orders`, and `api_get_active_orders` are retained
-as low-level wrappers for compatibility. The current reference server has no
-request-handler branches for them and returns `Unknown method` (error 400).
+Hidden raw wrappers such as `api_get_order`, `api_get_open_orders`, and
+`api_get_active_orders` are retained for compatibility tools. The current
+reference server has no request-handler branches for them and returns
+`Unknown method` (error 400).
 
-`api_update_transfer_assets` is a normal request/response Engine API call, not a
-fire-and-forget notification. Regular applications should use
-`request_transfer_assets`:
+`request_transfer_assets` is the normal request/response helper for transferable
+assets:
 
 ```rust
 let assets = client.request_transfer_assets(0, Duration::from_secs(12))?;

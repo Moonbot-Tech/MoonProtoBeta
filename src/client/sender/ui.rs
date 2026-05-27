@@ -3,6 +3,7 @@
 use super::*;
 
 impl ClientSender {
+    #[doc(hidden)]
     /// Mark Delphi `ServerUpdateSent` from a thread-safe sender.
     ///
     /// Call this when sending raw UI update/switch payloads through

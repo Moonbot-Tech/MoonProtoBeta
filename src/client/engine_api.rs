@@ -4,6 +4,7 @@ impl Client {
     /// Convenience: send an Engine API request (MPS_Sliced, encrypted, MaxRetries=6).
     /// Matches Delphi: `TEngineRequest` has explicit `MoonCmdPriority(MPS_Sliced)`,
     /// and `TCommandRegistry.InitRegistry` gives Sliced commands `MaxRetries=6`.
+    #[doc(hidden)]
     pub fn send_api_request(&self, request_payload: &[u8]) {
         self.send_api_request_at(request_payload, self.now_ms());
     }
@@ -55,9 +56,10 @@ impl Client {
     /// queued. Other raw Engine API requests are rejected before `api_pending`
     /// registration; because this method is non-fallible, it returns a closed
     /// receiver in that case.
+    #[doc(hidden)]
     pub fn send_api_request_async(&self, request_payload: &[u8]) -> mpsc::Receiver<EngineResponse> {
-        // D-V2-01 fix: безопасный slice-доступ к uid. Старая версия `request_payload[3..11]`
-        // паниковала при len<11 — public API не должен валить процесс из-за плохого input'а.
+        // Keep malformed raw requests as errors, not process panics: older code
+        // sliced `request_payload[3..11]` directly.
         let Some(uid) = engine_request_uid(request_payload) else {
             log::warn!(target: "moonproto::client",
                 "send_api_request_async: malformed Engine API request ({} bytes) — not queued",
@@ -88,6 +90,7 @@ impl Client {
     /// request/response operation: it registers the pending UID, sends the
     /// request, pumps the low-level active worker in short ticks, and removes
     /// the pending slot if the caller's timeout expires.
+    #[doc(hidden)]
     pub fn request_engine_response(
         &mut self,
         dispatcher: &mut crate::events::EventDispatcher,
@@ -254,35 +257,41 @@ impl Client {
     }
 
     // ====================================================================
-    //  High-level Engine API wrappers (convenience over send_api_request_async)
+    //  Low-level Engine API wrappers (custom runtimes / diagnostics)
     // ====================================================================
 
     /// `emk_BaseCheck` — initial probe (call before AuthCheck during handshake).
+    #[doc(hidden)]
     pub fn api_base_check(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::base_check())
     }
 
     /// `emk_AuthCheck` — verify credentials and get account info.
+    #[doc(hidden)]
     pub fn api_auth_check(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::auth_check())
     }
 
     /// `emk_GetMarketsList` — full markets list snapshot.
+    #[doc(hidden)]
     pub fn api_get_markets_list(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_markets_list())
     }
 
-    /// `emk_GetMarketsIndexes` — market names в порядке mIndex.
+    /// `emk_GetMarketsIndexes` — market names in server mIndex order.
+    #[doc(hidden)]
     pub fn api_get_markets_indexes(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_markets_indexes())
     }
 
-    /// `emk_UpdateMarketsList` — обновление цен по mIndex.
+    /// `emk_UpdateMarketsList` — price/funding update by server mIndex.
+    #[doc(hidden)]
     pub fn api_update_markets_list(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::update_markets_list())
     }
 
-    /// `emk_GetBalance` для одной валюты.
+    /// `emk_GetBalance` for one currency.
+    #[doc(hidden)]
     pub fn api_get_balance(&self, currency: &str) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_balance(currency))
     }
@@ -291,6 +300,7 @@ impl Client {
     ///
     /// The current Delphi server does not serialize a balance snapshot in this
     /// response yet, so a successful response normally has empty `data`.
+    #[doc(hidden)]
     pub fn api_get_markets_balance_full(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_markets_balance_full())
     }
@@ -299,6 +309,7 @@ impl Client {
     ///
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method`.
+    #[doc(hidden)]
     pub fn api_get_order(&self, order_uid: u64) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_order(order_uid))
     }
@@ -307,6 +318,7 @@ impl Client {
     ///
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method`.
+    #[doc(hidden)]
     pub fn api_get_open_orders(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_open_orders())
     }
@@ -315,16 +327,19 @@ impl Client {
     ///
     /// The current Delphi reference server has no request-handler branch for this
     /// method and returns `Unknown method`.
+    #[doc(hidden)]
     pub fn api_get_active_orders(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::get_active_orders())
     }
 
     /// `emk_CancelAllOrders`.
+    #[doc(hidden)]
     pub fn api_cancel_all_orders(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::cancel_all_orders())
     }
 
     /// `emk_SetLeverage(market, new_leverage)`.
+    #[doc(hidden)]
     pub fn api_set_leverage(&self, market: &str, new_lev: i32) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::set_leverage(
             market, new_lev,
@@ -332,26 +347,31 @@ impl Client {
     }
 
     /// `emk_SetHedgeMode(enabled)`.
+    #[doc(hidden)]
     pub fn api_set_hedge_mode(&self, hedge_mode: bool) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::set_hedge_mode(hedge_mode))
     }
 
     /// `emk_QueryHedgeMode`.
+    #[doc(hidden)]
     pub fn api_query_hedge_mode(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::query_hedge_mode())
     }
 
     /// `emk_CheckAPIExpirationTime`.
+    #[doc(hidden)]
     pub fn api_check_expiration_time(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::check_api_expiration_time())
     }
 
-    /// `emk_CheckBinanceTags` — теги монет.
+    /// `emk_CheckBinanceTags` — coin tags.
+    #[doc(hidden)]
     pub fn api_check_binance_tags(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::check_binance_tags())
     }
 
     /// `emk_SubscribeAllTrades`.
+    #[doc(hidden)]
     pub fn api_subscribe_all_trades(&self, want_mm_orders: bool) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::subscribe_all_trades(
             want_mm_orders,
@@ -359,30 +379,36 @@ impl Client {
     }
 
     /// `emk_UnsubscribeAllTrades`.
+    #[doc(hidden)]
     pub fn api_unsubscribe_all_trades(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::unsubscribe_all_trades())
     }
 
-    /// `emk_SubscribeOrderBook` — `markets` empty = подписка на все.
+    /// `emk_SubscribeOrderBook`; empty `markets` means subscribe to all.
     ///
-    /// **Low-level вариант** (не обновляет subscription registry, не resolve'ит market_name).
-    /// Для нормальной работы используй [`Client::subscribe_orderbook`].
+    /// Low-level variant: it does not update the subscription registry and
+    /// does not resolve market handles. Normal applications should use
+    /// [`Client::subscribe_orderbook`].
+    #[doc(hidden)]
     pub fn api_subscribe_order_book(&self, markets: &[&str]) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::subscribe_order_book(
             markets,
         ))
     }
 
-    /// `emk_UnsubscribeOrderBook` — `markets` empty = отписка от всех.
+    /// `emk_UnsubscribeOrderBook`; empty `markets` means unsubscribe from all.
     ///
-    /// **Low-level вариант** (не обновляет registry). См. [`Client::unsubscribe_orderbook`].
+    /// Low-level variant: it does not update the subscription registry.
+    /// Normal applications should use [`Client::unsubscribe_orderbook`].
+    #[doc(hidden)]
     pub fn api_unsubscribe_order_book(&self, markets: &[&str]) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::unsubscribe_order_book(
             markets,
         ))
     }
 
-    /// `emk_RequestOrderBookFull(market_idx, book_kind)` — запрос полного snapshot.
+    /// `emk_RequestOrderBookFull(market_idx, book_kind)` — request a full snapshot.
+    #[doc(hidden)]
     pub fn api_request_order_book_full(
         &self,
         market_idx: u16,
@@ -394,11 +420,13 @@ impl Client {
     }
 
     /// `emk_ReloadOrderBook`.
+    #[doc(hidden)]
     pub fn api_reload_order_book(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::reload_order_book())
     }
 
     /// `emk_ChangePositionType(market, type, new_market)`.
+    #[doc(hidden)]
     pub fn api_change_position_type(
         &self,
         market: &str,
@@ -411,21 +439,25 @@ impl Client {
     }
 
     /// `emk_ConvertDustBNB`.
+    #[doc(hidden)]
     pub fn api_convert_dust_bnb(&self) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::convert_dust_bnb())
     }
 
     /// `emk_ConfirmRiskLimit(market)`.
+    #[doc(hidden)]
     pub fn api_confirm_risk_limit(&self, market: &str) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::confirm_risk_limit(market))
     }
 
     /// `emk_SetMAMode(enabled)`.
+    #[doc(hidden)]
     pub fn api_set_ma_mode(&self, ma_mode: bool) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::set_ma_mode(ma_mode))
     }
 
     /// `emk_DoTransferAsset(asset, q, from, to)`.
+    #[doc(hidden)]
     pub fn api_do_transfer_asset(
         &self,
         asset: &str,
@@ -439,14 +471,17 @@ impl Client {
     }
 
     /// `emk_UpdateTransferAssets(kind)`.
+    #[doc(hidden)]
     pub fn api_update_transfer_assets(&self, kind: u8) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::update_transfer_assets(
             kind,
         ))
     }
 
-    /// `emk_TradesResend(packet_nums)` — multi-batch (auto-split по 200).
-    /// Возвращает массив receivers (по одному на batch).
+    /// `emk_TradesResend(packet_nums)` — multi-batch request, split by 200 ids.
+    ///
+    /// Returns one receiver per batch.
+    #[doc(hidden)]
     pub fn api_trades_resend_batches(
         &self,
         packet_nums: &[u16],
@@ -457,9 +492,10 @@ impl Client {
             .collect()
     }
 
-    /// `emk_GetCoinCardCandles(market, ticks)` — запрос свечей для CoinCard (не chunked).
-    /// Response — `count:i32 + N × TDeepPrice(28 bytes)`. Парсить через
-    /// `commands::candles::parse_coin_card_candles_response(&resp.data)`.
+    /// `emk_GetCoinCardCandles(market, ticks)` — non-chunked CoinCard candles.
+    ///
+    /// Response is `count:i32 + N * TDeepPrice(28 bytes)`.
+    #[doc(hidden)]
     pub fn api_get_coin_card_candles(
         &self,
         market: &str,
@@ -470,11 +506,11 @@ impl Client {
         ))
     }
 
-    /// `emk_RequestCandlesData` — низкоуровневый fire-and-forget. Сервер пришлёт
-    /// несколько chunked `EngineResponse`-пакетов с одинаковым `request_uid`.
-    /// **Для нормальной работы используй [`Client::api_request_candles_data_async`]**
-    /// — он автоматически агрегирует chunks через [`CandlesAggregator`] и возвращает
-    /// `Receiver<MergedCandles>` для blocking-ожидания финального результата.
+    /// Low-level fire-and-forget `emk_RequestCandlesData`.
+    ///
+    /// The server sends several chunked `EngineResponse` packets with the same
+    /// `request_uid`. Normal applications should use the high-level
+    /// `MoonClient::refresh_candles` path.
     #[doc(hidden)]
     pub fn api_request_candles_data(&self) {
         self.send_api_request(&crate::commands::engine_request::request_candles_data());
@@ -484,7 +520,8 @@ impl Client {
         &mut self,
     ) -> (u64, mpsc::Receiver<MergedCandles>) {
         let raw = crate::commands::engine_request::request_candles_data();
-        // UID извлекается из BaseCommand header offset 3..11 (тот же что в send_api_request_async).
+        // UID comes from the BaseCommand header at offset 3..11, same as
+        // `send_api_request_async`.
         let uid = raw
             .get(3..11)
             .and_then(|s| s.try_into().ok())
@@ -495,22 +532,19 @@ impl Client {
             aggregator: CandlesAggregator::new(),
             sender: tx,
         };
-        // Замещение существующего slot'а допустимо — старый sender дропнется, его
-        // receiver получит Err(Disconnected) (что корректно при двойном вызове).
+        // Replacing an existing slot is allowed: the old sender is dropped and
+        // its receiver observes Disconnected, which is the correct double-call
+        // behavior for this diagnostic helper.
         self.pending_candles.insert(uid, partial);
         self.send_api_request(&raw);
         (uid, rx)
     }
 
-    /// **Async-вариант `emk_RequestCandlesData`** — отправляет запрос и регистрирует
-    /// chunked aggregator. Возвращает `Receiver<MergedCandles>` — потребитель ждёт
-    /// его пока main loop продолжает крутиться и получает уже собранный zlib stream
-    /// от Delphi `TMarkets.StoreCandlesToZip` плюс parsed market entries.
+    /// Async diagnostic variant of `emk_RequestCandlesData`.
     ///
-    /// Сервер шлёт несколько `EngineResponse` пакетов с одинаковым `request_uid`,
-    /// каждый — chunk `ChunkIndex:u16 + ChunkTotal:u16 + payload`. Liба сама агрегирует
-    /// через `CandlesAggregator`, парсит через `parse_request_candles_data_response`,
-    /// уведомляет sender → потребитель получает `MergedCandles`.
+    /// It sends the request, registers the chunked aggregator, and returns a
+    /// `Receiver<MergedCandles>`. The main loop must keep running while the
+    /// receiver waits. Normal applications should use `MoonClient::refresh_candles`.
     ///
     /// Pending slot lives until complete/error, session reset, another request
     /// with the same UID replaces it, or a one-shot caller timeout removes it.

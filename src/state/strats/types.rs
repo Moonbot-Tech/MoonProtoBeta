@@ -6,22 +6,22 @@ pub(crate) struct StrategySnapshotPayloadCache {
     pub data: Vec<u8>,
 }
 
-/// Информация по одной стратегии — то что хранится клиентом.
+/// Lightweight strategy row kept by the active client.
 #[derive(Debug, Clone)]
 pub struct StrategyInfo {
-    /// Уникальный идентификатор стратегии (от сервера). 0 = не валидный.
+    /// Server strategy identifier. `0` is not a valid live strategy id.
     pub strategy_id: u64,
-    /// Версия стратегии из `TStrategySerializer` header.
+    /// Strategy version from the `TStrategySerializer` header.
     pub strategy_ver: i32,
-    /// Время последнего апдейта (TDateTime f64 packed как UInt64).
+    /// Last update time as the packed integer value carried by the serializer.
     pub last_date: u64,
-    /// Цена продажи из decoded snapshot field `SellPrice`, если это поле есть.
+    /// Sell price copied from decoded snapshot field `SellPrice`, when present.
     pub sell_price: f64,
-    /// Checked-state (для UI start/stop).
+    /// Current checked-state used by strategy start/stop UI.
     pub checked: bool,
     /// Last server-acknowledged checked-state (`TStrategy.PrevChecked`).
     pub prev_checked: bool,
-    /// Folder path в дереве стратегий (из последнего TStratDelete / Snapshot).
+    /// Folder path in the strategy tree.
     pub folder_path: String,
 }
 
@@ -41,50 +41,76 @@ impl StrategyInfo {
 
 #[derive(Debug, Clone)]
 pub enum StratEvent {
-    /// Полный snapshot (`Full=true`) успешно применён dispatcher'ом.
+    /// Full snapshot (`Full=true`) was decoded and applied.
     SnapshotFull {
         server_epoch: u64,
         raw_data: Vec<u8>,
     },
-    /// Частичный snapshot (`Full=false`) успешно применён dispatcher'ом.
+    /// Partial snapshot (`Full=false`) was decoded and applied.
     SnapshotPartial {
         server_epoch: u64,
         raw_data: Vec<u8>,
     },
-    /// Результат `TStratDelete`: Delphi сначала пробует удалить StrategyID,
-    /// затем FolderPath. Событие приходит только если хотя бы одна операция
-    /// реально изменила state.
+    /// Result of `TStratDelete`.
+    ///
+    /// Delphi first tries to delete `StrategyID`, then tries `FolderPath`.
+    /// The event is emitted only when at least one part changed state.
     Deleted {
         strategy_id: u64,
         folder_path: String,
         strategy_deleted: bool,
         folder_deleted: bool,
     },
-    /// Checked-флаги синхронизированы (полная замена или delta).
+    /// Checked flags were synchronized, either by full replace or by delta.
     CheckedSynced { changed: usize, is_delta: bool },
-    /// Эхо checked-state от сервера (после нашего sync).
+    /// Server echo for a checked-state sync sent by this client.
     CheckedEcho { count: usize },
-    /// **Сервер просит у нас snapshot стратегий**.
-    /// Это `TStratSnapshotRequest` от сервера. Delphi отвечает fresh rebuild'ом
-    /// из живого `Strats`; Rust dispatcher делает то же из `StratsState`.
-    /// Если приложение ещё не дало стратегий и серверный snapshot ещё не пришёл,
-    /// ответом будет корректный пустой `TStratSnapshot`.
+    /// Server requests this client's strategy snapshot.
+    ///
+    /// This is inbound `TStratSnapshotRequest`. Delphi answers by rebuilding a
+    /// fresh `TStratSnapshot` from live `Strats`; the Rust dispatcher does the
+    /// same from `StratsState`. If the application has not provided local
+    /// strategies yet and no server snapshot was applied, the answer is a valid
+    /// empty `TStratSnapshot`.
     SnapshotRequested { uid: u64 },
-    /// Получена и распарсена schema стратегий (`TStratSchema`, CmdId=8).
+    /// Strategy schema (`TStratSchema`, CmdId=8) was received and parsed.
     SchemaApplied {
         raw_len: usize,
         format_version: u8,
         kind_count: usize,
         field_count: usize,
     },
-    /// Сервер прислал `TStratSchema`, но raw-deflate/body не распарсились.
+    /// Server sent `TStratSchema`, but the raw-deflate/body parse failed.
     SchemaParseFailed { raw_len: usize },
-    /// Диагностический вариант для raw parser/users. Client receive path does
-    /// not emit it because Delphi client ignores incoming `TStratSchemaRequest`.
+    /// Diagnostic variant for raw parser users. The client receive path does
+    /// not emit it because the Delphi client ignores incoming
+    /// `TStratSchemaRequest`.
     SchemaRequested { uid: u64 },
     /// Low-level diagnostic for commands that the client state does not apply.
     /// The active dispatcher does not emit this for Delphi-inapplicable
     /// incoming command classes such as unknown/skipped, schema request, or
     /// sell-price update.
     Ignored,
+}
+
+impl StratEvent {
+    /// Server epoch for full/partial strategy snapshots.
+    pub fn snapshot_server_epoch(&self) -> Option<u64> {
+        match self {
+            StratEvent::SnapshotFull { server_epoch, .. }
+            | StratEvent::SnapshotPartial { server_epoch, .. } => Some(*server_epoch),
+            _ => None,
+        }
+    }
+
+    /// Raw snapshot payload length for diagnostics without touching the bytes.
+    pub fn snapshot_raw_len(&self) -> Option<usize> {
+        match self {
+            StratEvent::SnapshotFull { raw_data, .. }
+            | StratEvent::SnapshotPartial { raw_data, .. } => Some(raw_data.len()),
+            StratEvent::SchemaApplied { raw_len, .. }
+            | StratEvent::SchemaParseFailed { raw_len } => Some(*raw_len),
+            _ => None,
+        }
+    }
 }

@@ -95,7 +95,8 @@ for event in client.drain_events() {
 
 `raw_data` is still present in snapshot events for diagnostics and custom
 decoders, but normal applications should read `state.strategy_snapshot(...)` or
-`state.strategy_snapshots()`.
+`state.strategy_snapshots()`. For logging without touching the raw bytes, use
+`StratEvent::snapshot_server_epoch()` and `StratEvent::snapshot_raw_len()`.
 
 ## Strategy Schema
 
