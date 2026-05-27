@@ -2718,16 +2718,22 @@ fn run_high_loss_simple_ops_gate(
     request_orders_until(a, timeout);
 
     let before_streams = a.snapshot();
-    assert!(
-        pump_pair_until(a, b, timeout, "high-loss live streams", |a, _| {
-            a.trades_apply > before_streams.trades_apply
-                && a.orderbook_apply > before_streams.orderbook_apply
-                && a.parse_failed == before_streams.parse_failed
-        }),
-        "client A did not receive trades and orderbook under err_emu={} within {:?}",
-        FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
-        timeout
-    );
+    let streams_ok = pump_pair_until(a, b, timeout, "high-loss live streams", |a, _| {
+        a.trades_apply > before_streams.trades_apply
+            && a.orderbook_apply > before_streams.orderbook_apply
+            && a.parse_failed == before_streams.parse_failed
+    });
+    if !streams_ok {
+        let after = a.snapshot();
+        log_err_emu_pair("high-loss live streams failure", a, b);
+        panic!(
+            "client A high-loss stream gate failed under err_emu={} within {:?}: before=[{}] after=[{}]",
+            FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
+            timeout,
+            before_streams.summary(),
+            after.summary()
+        );
+    }
     println!("OK: high-loss live streams delivered");
 
     let before_blackhole = a.snapshot();
@@ -2759,21 +2765,27 @@ fn run_high_loss_simple_ops_gate(
     println!("OK: high-loss reconnect completed");
 
     let after_reconnect = a.snapshot();
-    assert!(
-        pump_pair_until(
-            a,
-            b,
-            timeout,
-            "high-loss streams after reconnect",
-            |a, _| {
-                a.trades_apply > after_reconnect.trades_apply
-                    && a.orderbook_apply > after_reconnect.orderbook_apply
-                    && a.parse_failed == after_reconnect.parse_failed
-            }
-        ),
-        "client A did not receive trades/orderbook after high-loss reconnect within {:?}",
-        timeout
+    let streams_after_reconnect_ok = pump_pair_until(
+        a,
+        b,
+        timeout,
+        "high-loss streams after reconnect",
+        |a, _| {
+            a.trades_apply > after_reconnect.trades_apply
+                && a.orderbook_apply > after_reconnect.orderbook_apply
+                && a.parse_failed == after_reconnect.parse_failed
+        },
     );
+    if !streams_after_reconnect_ok {
+        let after = a.snapshot();
+        log_err_emu_pair("high-loss streams after reconnect failure", a, b);
+        panic!(
+            "client A high-loss post-reconnect stream gate failed within {:?}: before=[{}] after=[{}]",
+            timeout,
+            after_reconnect.summary(),
+            after.summary()
+        );
+    }
     println!("OK: high-loss streams after reconnect delivered");
     log_err_emu_pair("high-loss simple ops gate", a, b);
 }
