@@ -11,7 +11,7 @@
 //!
 //! Normal applications read these models through immutable `MoonClient`
 //! snapshots. Custom runtimes can read them through `EventDispatcher` getters.
-//! The per-channel guides live in `moonproto/docs/api/<channel>.md`.
+//! The per-channel guides live in `moonproto/docs/<channel>.md`.
 
 pub mod balances;
 pub mod epoch;

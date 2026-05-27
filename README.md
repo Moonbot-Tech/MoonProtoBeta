@@ -228,22 +228,22 @@ Diagnostic / protocol-tool examples intentionally use lower-level APIs:
 
 ## API Docs
 
-Public API notes live in `docs/api/`.
+Public API notes live in `docs/`.
 
 Start here:
 
-- `docs/api/overview.md`
-- `docs/api/client.md`
-- `docs/api/events.md`
-- `docs/api/lifecycle.md`
-- `docs/api/markets.md`
-- `docs/api/trades.md`
-- `docs/api/order_books.md`
-- `docs/api/orders.md`
-- `docs/api/candles.md`
-- `docs/api/engine_api.md`
-- `docs/api/strats.md`
-- `docs/api/multi_server.md`
+- `docs/overview.md`
+- `docs/client.md`
+- `docs/events.md`
+- `docs/lifecycle.md`
+- `docs/markets.md`
+- `docs/trades.md`
+- `docs/order_books.md`
+- `docs/orders.md`
+- `docs/candles.md`
+- `docs/engine_api.md`
+- `docs/strats.md`
+- `docs/multi_server.md`
 
 ## Repository Layout
 
@@ -255,7 +255,7 @@ src/state/        read-model state: markets, trades, books, orders, balances
 src/transport/    built-in low-level transport and optional moonext loader
 tests/            integration, polling, and FireTest
 examples/         runnable live/manual examples
-docs/api/         API documentation
+docs/             API documentation
 ```
 
 ## License

@@ -7,7 +7,7 @@
 //!
 //! The builders and parsers preserve the Delphi wire formats: base command
 //! header, command id, version, UID, per-command priority/retry semantics, and
-//! exact field order. See `docs/api/` for public Active Lib/API guides.
+//! exact field order. See `docs/` for public Active Lib/API guides.
 
 pub mod arb;
 pub mod balance;

@@ -2,5 +2,5 @@ target/
 *.exe
 
 # Raw protocol reference is internal maintainer documentation. The public crate
-# documents Active Lib/API behavior under docs/api/.
+# documents Active Lib/API behavior under docs/.
 docs/commands/
