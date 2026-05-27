@@ -41,12 +41,12 @@ impl StratsState {
         }
     }
 
-    /// Последняя schema стратегий, полученная через `TStratSchemaRequest` в Init.
+    /// Latest strategy schema received through `TStratSchemaRequest` during Init.
     pub fn strategy_schema(&self) -> Option<&StrategySchema> {
         self.schema.as_deref()
     }
 
-    /// Raw-deflate blob последней schema, как пришёл в `TStratSchema.Data`.
+    /// Raw DEFLATE blob of the latest schema as received in `TStratSchema.Data`.
     pub fn strategy_schema_raw(&self) -> Option<&[u8]> {
         self.schema_raw.as_deref().map(Vec::as_slice)
     }

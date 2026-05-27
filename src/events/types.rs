@@ -4,7 +4,7 @@ use super::*;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::EngineMethod;
-use crate::state::ExchangeKind;
+use crate::state::{AccountEvent, ExchangeKind};
 use crate::time::DelphiTime;
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -177,6 +177,28 @@ pub struct EngineActionEvent {
     pub error_msg: String,
 }
 
+/// Arbitrage relay was applied to retained market state.
+///
+/// Delphi applies compact arb payloads directly to `TMarket.ArbSlots` /
+/// `TMarket.ArbNow`. Active Lib follows that model: this event is a signal for
+/// UI code to refresh selected market handles, not a raw packet surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArbEvent {
+    PricesApplied {
+        uid: u64,
+        version: u8,
+        market_blocks: usize,
+        price_items: usize,
+        applied_prices: usize,
+    },
+    IsolationApplied {
+        uid: u64,
+        version: u8,
+        entries: usize,
+        applied_entries: usize,
+    },
+}
+
 /// All typed events emitted by [`EventDispatcher`].
 #[derive(Debug)]
 pub enum Event {
@@ -197,6 +219,9 @@ pub enum Event {
     /// Balance read-model event: full snapshots and incremental updates.
     /// Internal/base/request balance packets are consumed without a public event.
     Balance(BalanceEvent),
+    /// Account-level async refresh state: hedge mode, API-key expiration, and
+    /// similar scalar account metadata.
+    Account(AccountEvent),
     /// Transferable wallet assets refreshed through Engine API.
     TransferAssets(TransferAssetsEvent),
     /// Demand-driven CoinCard candles for one market/history kind.
@@ -208,9 +233,8 @@ pub enum Event {
     CandlesSnapshot(crate::state::CandlesSnapshotEvent),
     /// Completion of a non-blocking user-facing Engine API action.
     EngineAction(EngineActionEvent),
-    /// Compact arbitrage relay payload after active-library market-index
-    /// filtering.
-    Arb { uid: u64, payload: ArbPayload },
+    /// Compact arbitrage relay applied to retained market state.
+    Arb(ArbEvent),
     /// Strat channel: snapshot/delete/sell-price update.
     Strat(StratEvent),
     /// UI channel: settings updated, MM subscribe changed, etc.

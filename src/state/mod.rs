@@ -4,6 +4,7 @@
 //! - `Orders` for trade-command state.
 //! - `Strats` for strategy snapshots and updates.
 //! - `Balances` for account and per-market balances.
+//! - `Account` for account-mode/API-expiration refresh state.
 //! - `Markets` for Engine API market list, indexes, prices, and tags.
 //! - `OrderBooks` for snapshots, diffs, and reordering caches.
 //! - `Trades` for stream packets and automatic gap recovery.
@@ -13,6 +14,7 @@
 //! snapshots. Custom runtimes can read them through `EventDispatcher` getters.
 //! The per-channel guides live in `moonproto/docs/<channel>.md`.
 
+pub mod account;
 pub mod balances;
 pub mod coin_card_candles;
 pub mod epoch;
@@ -29,6 +31,7 @@ pub mod strats;
 pub mod trades;
 pub mod transfer_assets;
 
+pub use account::{AccountEvent, AccountState};
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use coin_card_candles::{CoinCardCandlesEvent, CoinCardCandlesState};
 pub use history::{

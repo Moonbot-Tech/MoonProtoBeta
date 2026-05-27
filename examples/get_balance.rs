@@ -1,4 +1,7 @@
-﻿//! Fetch one asset balance through the high-level Active Lib runtime.
+﻿//! Diagnostic one-shot asset balance read through the high-level runtime.
+//!
+//! Regular UI code should read maintained balance/position state from
+//! `MoonClient::snapshot()` after balance events.
 //!
 //! Run:
 //!   cargo run --example get_balance --release -- "<key_base64>" [host:port] [asset]

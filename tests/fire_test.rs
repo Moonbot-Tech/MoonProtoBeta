@@ -41,6 +41,11 @@
 //! At the end of each profile it prints an ActiveLib UI-state report for
 //! BTCUSDT/ETHUSDT: LastPrice/MarkPrice retained lines, volumes, deltas,
 //! funding, balances/assets, and order events already observed during the run.
+//! The full profile also switches the server to real/non-emulator mode for one
+//! SOLUSDT limit-long cancel test: place 1000 USD 5% below market, wait for the
+//! real server order UID, then cancel through the tracked ActiveLib order path.
+//! Binance balance updates are intentionally not tied to that exact order:
+//! FireTest only requires the full run to receive and apply live balance events.
 //! Strategy snapshots are also dumped as raw `TStratSnapshot.Data` files under
 //! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
 //! checks can run against the exact same live payload bytes.
@@ -59,7 +64,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
-use moonproto::commands::arb::ArbPayload;
 use moonproto::commands::candles::{
     parse_request_candles_data_response, CandlesAggregator, DeepHistoryKind, RequestCandlesMarket,
 };
@@ -99,6 +103,9 @@ const DEFAULT_RECONNECT_TIMEOUT_SECS: u64 = 30;
 const PUMP_SLICE: Duration = Duration::from_millis(50);
 const PRICE_NEIGHBORHOOD_PCT: f64 = 0.05;
 const FIRETEST_ORDER_SIZE_USD: f64 = 1000.0;
+const FIRETEST_REAL_BALANCE_ORDER_MARKET: &str = "SOLUSDT";
+const FIRETEST_REAL_BALANCE_ORDER_DISCOUNT: f64 = 0.05;
+const FIRETEST_REAL_BALANCE_ORDER_TIMEOUT: Duration = Duration::from_secs(5);
 const EPS: f64 = 1e-9;
 const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
@@ -111,6 +118,15 @@ const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
 enum FireProfile {
     Quick,
     Full,
+}
+
+#[derive(Clone)]
+struct ParseFailureRecord {
+    event_no: u64,
+    cmd: Command,
+    len: usize,
+    hash: u64,
+    dump: Option<PathBuf>,
 }
 
 impl FireProfile {
@@ -405,6 +421,7 @@ struct SessionStats {
     coin_card_failures: u64,
     coin_card_last_count: usize,
     parse_failed: u64,
+    parse_failures: Vec<ParseFailureRecord>,
     candles_requested: bool,
     candles_chunks: u64,
     candles_ignored: u64,
@@ -468,6 +485,7 @@ impl Clone for SessionStats {
             coin_card_failures: self.coin_card_failures,
             coin_card_last_count: self.coin_card_last_count,
             parse_failed: self.parse_failed,
+            parse_failures: self.parse_failures.clone(),
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
             candles_ignored: self.candles_ignored,
@@ -491,6 +509,19 @@ impl SessionStats {
     }
 
     fn summary(&self) -> String {
+        let parse_failed_detail = if self.parse_failures.is_empty() {
+            String::new()
+        } else {
+            let recent = self.parse_failures.iter().rev().take(4).collect::<Vec<_>>();
+            let mut parts = Vec::with_capacity(recent.len());
+            for pf in recent.iter().rev() {
+                parts.push(format!(
+                    "#{}:{:?}:len{}:{:016X}",
+                    pf.event_no, pf.cmd, pf.len, pf.hash
+                ));
+            }
+            format!(" [{}]", parts.join(","))
+        };
         let candles = self
             .candles_complete
             .as_ref()
@@ -508,7 +539,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={}{} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -542,6 +573,7 @@ impl SessionStats {
             self.coin_card_failures,
             self.coin_card_last_count,
             self.parse_failed,
+            parse_failed_detail,
             candles
         )
     }
@@ -579,6 +611,7 @@ struct Session {
     transfer_assets_rx: Vec<PendingTransferAssets>,
     coin_card_candles_rx: Vec<PendingCoinCardCandles>,
     stats: Arc<Mutex<SessionStats>>,
+    parse_failure_correlations_logged: usize,
 }
 
 struct PendingTransferAssets {
@@ -677,6 +710,7 @@ impl Session {
             transfer_assets_rx: Vec::new(),
             coin_card_candles_rx: Vec::new(),
             stats,
+            parse_failure_correlations_logged: 0,
         };
         session.drain_queued();
         session
@@ -694,6 +728,7 @@ impl Session {
             &mut self.dispatcher,
             Box::new(move |event| record_event(&stats, event, None, Some(&candles_snapshot_tx))),
         );
+        self.log_new_parse_failure_correlations("immediate");
         self.drain_queued();
         self.refresh_stats_from_dispatcher(false);
         self.apply_completed_candles_snapshots();
@@ -713,6 +748,25 @@ impl Session {
             );
         }
         self.apply_completed_candles_snapshots();
+    }
+
+    fn log_new_parse_failure_correlations(&mut self, label: &str) {
+        let (session_label, records, total) = {
+            let st = self.stats.lock().unwrap();
+            let records = st
+                .parse_failures
+                .iter()
+                .skip(self.parse_failure_correlations_logged)
+                .cloned()
+                .collect::<Vec<_>>();
+            (st.label.clone(), records, st.parse_failures.len())
+        };
+        if records.is_empty() {
+            return;
+        }
+        let diag = self.client.err_emu_diagnostics_snapshot();
+        log_parse_failure_correlations(label, &session_label, &diag, &records);
+        self.parse_failure_correlations_logged = total;
     }
 
     fn request_transfer_assets_refresh(&mut self) {
@@ -1419,6 +1473,11 @@ impl Session {
     fn replace_order(&mut self, uid: u64, new_price: f64) -> bool {
         self.client
             .replace_tracked_order(self.dispatcher.orders_mut(), uid, new_price)
+    }
+
+    fn cancel_order(&mut self, uid: u64) -> bool {
+        self.client
+            .cancel_tracked_order(self.dispatcher.orders_mut(), uid)
     }
 
     fn panic_sell_order(&mut self, uid: u64, turn_on: bool) -> bool {
@@ -2310,12 +2369,8 @@ fn record_event(
         Event::EngineResponse(resp) => {
             record_engine_response(&mut st, event_no, resp, candles_snapshot_tx);
         }
-        Event::Arb { uid, payload } => {
-            log_server_event(
-                &st,
-                event_no,
-                format!("Arb uid={} {}", uid, arb_summary(payload)),
-            );
+        Event::Arb(arb) => {
+            log_server_event(&st, event_no, format!("Arb {}", arb_summary(arb)));
         }
         Event::ServerLog { time, msg } => {
             st.server_logs += 1;
@@ -2342,7 +2397,15 @@ fn record_event(
         }
         Event::ParseFailed { cmd, len, payload } => {
             st.parse_failed += 1;
+            let hash = fnv1a64(payload);
             let dump = write_parse_failed_dump(&st.label, event_no, *cmd, payload);
+            st.parse_failures.push(ParseFailureRecord {
+                event_no,
+                cmd: *cmd,
+                len: *len,
+                hash,
+                dump: dump.clone(),
+            });
             let dump_suffix = dump
                 .as_ref()
                 .map(|path| format!(" dump={}", path.display()))
@@ -2352,7 +2415,7 @@ fn record_event(
                 event_no,
                 format!(
                     "ParseFailed cmd={cmd:?} len={len} hash={:016X} head={}{}",
-                    fnv1a64(payload),
+                    hash,
                     hex_preview(payload, 32),
                     dump_suffix
                 ),
@@ -2577,36 +2640,29 @@ fn record_engine_response(
     log_server_event(st, event_no, detail);
 }
 
-fn arb_summary(payload: &ArbPayload) -> String {
-    match payload {
-        ArbPayload::Price { version, blocks } => {
-            let price_items: usize = blocks.iter().map(|b| b.prices.len()).sum();
-            let preview = blocks
-                .iter()
-                .take(8)
-                .map(|b| format!("{}:{}", b.market_index, b.prices.len()))
-                .collect::<Vec<_>>()
-                .join(",");
+fn arb_summary(event: &moonproto::ArbEvent) -> String {
+    match event {
+        moonproto::ArbEvent::PricesApplied {
+            uid,
+            version,
+            market_blocks,
+            price_items,
+            applied_prices,
+        } => {
             format!(
-                "Price version={} blocks={} price_items={} preview=[{}]",
-                version,
-                blocks.len(),
-                price_items,
-                preview
+                "PricesApplied uid={} version={} market_blocks={} price_items={} applied_prices={}",
+                uid, version, market_blocks, price_items, applied_prices
             )
         }
-        ArbPayload::Isolation { version, entries } => {
-            let preview = entries
-                .iter()
-                .take(8)
-                .map(|e| format!("{}:{}:{}", e.market_index, e.platform_code, e.flags))
-                .collect::<Vec<_>>()
-                .join(",");
+        moonproto::ArbEvent::IsolationApplied {
+            uid,
+            version,
+            entries,
+            applied_entries,
+        } => {
             format!(
-                "Isolation version={} entries={} preview=[{}]",
-                version,
-                entries.len(),
-                preview
+                "IsolationApplied uid={} version={} entries={} applied_entries={}",
+                uid, version, entries, applied_entries
             )
         }
     }
@@ -2913,8 +2969,20 @@ fn price_near_envelope(price: f64, bid: f64, ask: f64) -> bool {
 }
 
 fn log_err_emu_pair(label: &str, a: &Session, b: &Session) {
-    log_err_emu_snapshot(label, "A", &a.client.err_emu_diagnostics_snapshot());
-    log_err_emu_snapshot(label, "B", &b.client.err_emu_diagnostics_snapshot());
+    let a_stats = a.snapshot();
+    let b_stats = b.snapshot();
+    log_err_emu_snapshot(
+        label,
+        "A",
+        &a.client.err_emu_diagnostics_snapshot(),
+        &a_stats.parse_failures,
+    );
+    log_err_emu_snapshot(
+        label,
+        "B",
+        &b.client.err_emu_diagnostics_snapshot(),
+        &b_stats.parse_failures,
+    );
 }
 
 fn log_protocol_cpu_pair(label: &str, a: &Session, b: &Session) {
@@ -2922,7 +2990,12 @@ fn log_protocol_cpu_pair(label: &str, a: &Session, b: &Session) {
     println!("FIRETEST CPU {label} B: {}", b.protocol_summary());
 }
 
-fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
+fn log_err_emu_snapshot(
+    label: &str,
+    session: &str,
+    diag: &ErrEmuDiagnostics,
+    parse_failures: &[ParseFailureRecord],
+) {
     if diag.valid_packets == 0 {
         eprintln!(
             "FIRETEST ErrEmu {label} {session}: no packets counted while err_emu was enabled"
@@ -2996,6 +3069,8 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
         }
     }
 
+    log_parse_failure_correlations(label, session, diag, parse_failures);
+
     let candidates: Vec<_> = diag
         .sliced
         .iter()
@@ -3011,6 +3086,44 @@ fn log_err_emu_snapshot(label: &str, session: &str, diag: &ErrEmuDiagnostics) {
                 "FIRETEST ErrEmu {label} {session}: {}",
                 describe_sliced_candidate(diag.configured_rate, dg)
             );
+        }
+    }
+}
+
+fn log_parse_failure_correlations(
+    label: &str,
+    session: &str,
+    diag: &ErrEmuDiagnostics,
+    parse_failures: &[ParseFailureRecord],
+) {
+    for pf in parse_failures.iter().rev().take(8).rev() {
+        let dump = pf
+            .dump
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<none>".to_string());
+        eprintln!(
+            "FIRETEST ErrEmu {label} {session}: parse_failed event={} cmd={:?} len={} hash={:016X} dump={}",
+            pf.event_no, pf.cmd, pf.len, pf.hash, dump
+        );
+        let matches = diag
+            .sliced
+            .iter()
+            .filter(|dg| dg.completed_payload_hash == Some(pf.hash))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            eprintln!(
+                "FIRETEST ErrEmu {label} {session}: parse_failed hash {:016X} has no completed Sliced match in current diagnostics window",
+                pf.hash
+            );
+        } else {
+            for dg in matches {
+                eprintln!(
+                    "FIRETEST ErrEmu {label} {session}: parse_failed hash {:016X} matched {}",
+                    pf.hash,
+                    describe_sliced_candidate(diag.configured_rate, dg)
+                );
+            }
         }
     }
 }
@@ -3971,6 +4084,44 @@ fn ensure_server_emulator_mode(
     Some(original)
 }
 
+fn ensure_server_real_order_mode(
+    cfg: &FireConfig,
+    a: &mut Session,
+    b: &mut Session,
+) -> Option<ClientSettingsCommand> {
+    let original = request_settings_until(a, cfg.connect_timeout);
+    if !original.emu_mode {
+        println!("OK: server emulator mode is already disabled");
+        return None;
+    }
+
+    let mut real = original.clone();
+    real.emu_mode = false;
+    println!("FIRETEST real order cancel: disabling server emulator mode through UI settings");
+    a.client.ui_send_settings(&real);
+    assert!(
+        pump_pair_until(
+            a,
+            b,
+            cfg.connect_timeout,
+            "disable emulator mode",
+            |a, b| {
+                a.last_settings
+                    .as_ref()
+                    .map(|settings| !settings.emu_mode)
+                    .unwrap_or(false)
+                    && b.last_settings
+                        .as_ref()
+                        .map(|settings| !settings.emu_mode)
+                        .unwrap_or(false)
+            }
+        ),
+        "server emulator mode=false was not confirmed within {:?}",
+        cfg.connect_timeout
+    );
+    Some(original)
+}
+
 fn restore_server_emulator_mode(
     cfg: &FireConfig,
     a: &mut Session,
@@ -4007,6 +4158,194 @@ fn restore_server_emulator_mode(
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MarketBalanceProbe {
+    initial_balance: f64,
+    locked_balance: f64,
+    pos_size: f64,
+    pos_price: f64,
+    asset_balance: f64,
+    asset_balance_full: f64,
+    total_profit: f64,
+    balance_hash: u64,
+    epoch: u16,
+}
+
+impl MarketBalanceProbe {
+    fn summary(self) -> String {
+        format!(
+            "init={:.8} locked={:.8} pos={:.8}@{:.8} asset={:.8}/{:.8} pnl={:.8} hash={} epoch={}",
+            self.initial_balance,
+            self.locked_balance,
+            self.pos_size,
+            self.pos_price,
+            self.asset_balance,
+            self.asset_balance_full,
+            self.total_profit,
+            self.balance_hash,
+            self.epoch
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlobalBalanceProbe {
+    btc_balance_total: f64,
+    btc_balance_locked: f64,
+    btc_balance_full: f64,
+    special_coin_balance: f64,
+    total_pnl: f64,
+}
+
+impl GlobalBalanceProbe {
+    fn summary(self) -> String {
+        format!(
+            "btc_total={:.8} btc_locked={:.8} btc_full={:.8} special_coin={:.8} total_pnl={:.8}",
+            self.btc_balance_total,
+            self.btc_balance_locked,
+            self.btc_balance_full,
+            self.special_coin_balance,
+            self.total_pnl
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveBalanceProbe {
+    market: MarketBalanceProbe,
+    global: GlobalBalanceProbe,
+}
+
+impl ActiveBalanceProbe {
+    fn summary(self) -> String {
+        format!(
+            "market=[{}] global=[{}]",
+            self.market.summary(),
+            self.global.summary()
+        )
+    }
+}
+
+fn active_balance_probe(session: &Session, market: &str) -> ActiveBalanceProbe {
+    let handle = session
+        .dispatcher
+        .markets()
+        .get(market)
+        .unwrap_or_else(|| panic!("market {market} is not present in ActiveLib MarketsState"));
+    let pos = handle.balance_position();
+    let global = session.dispatcher.balances().global();
+    ActiveBalanceProbe {
+        market: MarketBalanceProbe {
+            initial_balance: pos.initial_balance,
+            locked_balance: pos.locked_balance,
+            pos_size: pos.pos_size,
+            pos_price: pos.pos_price,
+            asset_balance: pos.asset_balance,
+            asset_balance_full: pos.asset_balance_full,
+            total_profit: pos.total_profit(),
+            balance_hash: pos.balance_hash,
+            epoch: pos.last_balance_epoch,
+        },
+        global: GlobalBalanceProbe {
+            btc_balance_total: global.btc_balance_total,
+            btc_balance_locked: global.btc_balance_locked,
+            btc_balance_full: global.btc_balance_full,
+            special_coin_balance: global.special_coin_balance,
+            total_pnl: global.total_pnl,
+        },
+    }
+}
+
+fn market_live_ask(session: &Session, market: &str) -> Option<f64> {
+    session
+        .dispatcher
+        .markets()
+        .price(market)
+        .and_then(|price| {
+            [price.ask, price.last_ask, price.bid, price.mark_price]
+                .into_iter()
+                .find(|value| value.is_finite() && *value > EPS)
+        })
+}
+
+fn order_uid_for_request_or_new_market(
+    st: &SessionStats,
+    before_uids: &[u64],
+    request_uid: u64,
+    market: &str,
+) -> Option<u64> {
+    st.order_uid_by_request
+        .get(&request_uid)
+        .copied()
+        .or_else(|| {
+            st.order_status_by_uid.iter().find_map(|(uid, _)| {
+                (!before_uids.contains(uid)
+                    && st
+                        .order_market_by_uid
+                        .get(uid)
+                        .map(|seen| seen == market)
+                        .unwrap_or(false))
+                .then_some(*uid)
+            })
+        })
+}
+
+fn cancel_if_known(
+    session: &mut Session,
+    before_uids: &[u64],
+    request_uid: u64,
+    market: &str,
+) -> Option<u64> {
+    let st = session.snapshot();
+    let uid = order_uid_for_request_or_new_market(&st, before_uids, request_uid, market)?;
+    if session.cancel_order(uid) {
+        println!("FIRETEST real order cancel: cleanup cancel queued uid={uid}");
+    } else {
+        println!("FIRETEST real order cancel: cleanup cancel gate refused uid={uid}");
+    }
+    Some(uid)
+}
+
+fn order_is_present(session: &Session, uid: u64) -> bool {
+    session
+        .dispatcher
+        .orders()
+        .iter()
+        .any(|order| order.uid == uid)
+}
+
+fn assert_balance_stream_seen(session: &Session) {
+    let st = session.snapshot();
+    let global = session.dispatcher.balances().global();
+    assert!(
+        st.balance_events >= 2 && st.balance_snapshot_events >= 1,
+        "FireTest balance stream: session {} saw too few balance events: total={} snapshots={} increments={}",
+        st.label,
+        st.balance_events,
+        st.balance_snapshot_events,
+        st.balance_incremental_events
+    );
+    assert!(
+        global.btc_balance_total.abs()
+            + global.btc_balance_full.abs()
+            + global.special_coin_balance.abs()
+            > EPS,
+        "FireTest balance stream: session {} has zero global balances after balance events",
+        st.label
+    );
+    println!(
+        "OK: balance stream session={} events={} snapshots={} increments={} global=[btc_total={:.8} btc_locked={:.8} btc_full={:.8} special_coin={:.8}]",
+        st.label,
+        st.balance_events,
+        st.balance_snapshot_events,
+        st.balance_incremental_events,
+        global.btc_balance_total,
+        global.btc_balance_locked,
+        global.btc_balance_full,
+        global.special_coin_balance
+    );
+}
+
 fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
     let restore_emu_mode = ensure_server_emulator_mode(cfg, a, b);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4016,6 +4355,124 @@ fn run_order_lifecycle_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) 
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
     }
+}
+
+fn run_real_order_cancel_gate(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
+    let restore_emu_mode = ensure_server_real_order_mode(cfg, a, b);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_real_order_cancel_gate_body(a, b);
+    }));
+    restore_server_emulator_mode(cfg, a, b, restore_emu_mode);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
+    let market = FIRETEST_REAL_BALANCE_ORDER_MARKET;
+    assert_balance_stream_seen(a);
+    assert_balance_stream_seen(b);
+
+    let ask = pump_pair_until_sessions(
+        a,
+        b,
+        FIRETEST_REAL_BALANCE_ORDER_TIMEOUT,
+        "SOL live price before real order cancel",
+        |a, _| market_live_ask(a, market).is_some(),
+    )
+    .then(|| market_live_ask(a, market))
+    .flatten()
+    .unwrap_or_else(|| {
+        panic!(
+            "FireTest real order cancel: no live ask/price for {market} within {:?}",
+            FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
+        )
+    });
+    let price = ask * (1.0 - FIRETEST_REAL_BALANCE_ORDER_DISCOUNT);
+    let baseline = active_balance_probe(a, market);
+    let before_uids = a
+        .dispatcher
+        .orders()
+        .iter()
+        .map(|order| order.uid)
+        .collect::<Vec<_>>();
+    let request_uid = a.send_new_order(market, false, price, 0, FIRETEST_ORDER_SIZE_USD);
+    println!(
+        "FIRETEST real order cancel: sent long request_uid={} market={} ask={:.8} limit={:.8} size_usd={} baseline_balance=[{}]",
+        request_uid,
+        market,
+        ask,
+        price,
+        FIRETEST_ORDER_SIZE_USD,
+        baseline.summary()
+    );
+
+    let start = Instant::now();
+    let mut server_uid = None;
+    while start.elapsed() < FIRETEST_REAL_BALANCE_ORDER_TIMEOUT {
+        a.pump(PUMP_SLICE);
+        b.pump(PUMP_SLICE);
+        let st = a.snapshot();
+        if server_uid.is_none() {
+            server_uid =
+                order_uid_for_request_or_new_market(&st, &before_uids, request_uid, market);
+        }
+        if let Some(uid) = server_uid {
+            assert!(
+                a.cancel_order(uid),
+                "cancel_order did not pass Delphi local gate for uid={uid}"
+            );
+            println!(
+                "FIRETEST real order cancel: server uid={} arrived after {:.2}s; cancel queued immediately",
+                uid,
+                start.elapsed().as_secs_f64()
+            );
+            break;
+        }
+    }
+
+    let Some(server_uid) = server_uid else {
+        let _ = cancel_if_known(a, &before_uids, request_uid, market);
+        panic!(
+            "FireTest real order cancel: server order uid for {market} did not arrive within {:?}",
+            FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
+        );
+    };
+
+    let cancel_start = Instant::now();
+    let removed = loop {
+        if cancel_start.elapsed() >= FIRETEST_REAL_BALANCE_ORDER_TIMEOUT {
+            break false;
+        }
+        a.pump(PUMP_SLICE);
+        b.pump(PUMP_SLICE);
+        if !order_is_present(a, server_uid) {
+            let current = active_balance_probe(a, market);
+            println!(
+                "FIRETEST real order cancel: order removed after cancel in {:.2}s uid={} current_balance=[{}]",
+                cancel_start.elapsed().as_secs_f64(),
+                server_uid,
+                current.summary()
+            );
+            break true;
+        }
+        if matches!(
+            a.snapshot().order_status_by_uid.get(&server_uid).copied(),
+            Some(OrderWorkerStatus::BuyDone | OrderWorkerStatus::SelLDone)
+        ) {
+            panic!(
+                "FireTest real order cancel: uid={server_uid} unexpectedly filled/closed; limit was 5% below market"
+            );
+        }
+    };
+    assert!(
+        removed,
+        "FireTest real order cancel: {market} order uid={server_uid} was not removed within {:?} after cancel",
+        FIRETEST_REAL_BALANCE_ORDER_TIMEOUT
+    );
+    assert_balance_stream_seen(a);
+    assert_balance_stream_seen(b);
+    println!("OK: real non-emulator SOL order was created, canceled, and removed; balance stream was observed independently");
 }
 
 fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
@@ -4314,6 +4771,7 @@ fn fire_test_active_library_health() {
     b.client.reset_err_emu_diagnostics();
 
     run_order_lifecycle_gate(&cfg, &mut a, &mut b);
+    run_real_order_cancel_gate(&cfg, &mut a, &mut b);
 
     let a_initial = a.snapshot();
     let original_settings = a_initial

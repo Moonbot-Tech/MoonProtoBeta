@@ -1,4 +1,7 @@
-﻿//! Request exchange API-key expiration time through `MoonClient`.
+﻿//! Diagnostic one-shot API-key expiration read through `MoonClient`.
+//!
+//! Regular UI code should call `refresh_api_expiration_time()` and read
+//! `snapshot().account().api_expiration()` after `Event::Account`.
 //!
 //! Run:
 //!   cargo run --example api_expiration_time --release -- "<key_base64>" [host:port]

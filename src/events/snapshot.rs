@@ -16,6 +16,7 @@ pub struct EventDispatcherSnapshot {
     orders: Orders,
     order_books: OrderBooks,
     trades: TradesState,
+    account: AccountState,
     balances: BalancesState,
     transfer_assets: TransferAssetsState,
     coin_card_candles: crate::state::CoinCardCandlesState,
@@ -57,6 +58,11 @@ impl EventDispatcherSnapshot {
     /// Read-only trades-stream state.
     pub fn trades(&self) -> &TradesState {
         &self.trades
+    }
+
+    /// Read-only account-level state.
+    pub fn account(&self) -> &AccountState {
+        &self.account
     }
 
     /// Read-only balance state.
@@ -186,6 +192,7 @@ impl EventDispatcher {
             orders: self.orders.clone(),
             order_books: self.order_books.clone(),
             trades: self.trades.clone(),
+            account: self.account.clone(),
             balances: self.balances.clone(),
             transfer_assets: self.transfer_assets.clone(),
             coin_card_candles: self.coin_card_candles.clone(),

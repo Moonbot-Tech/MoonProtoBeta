@@ -280,12 +280,12 @@ pub struct ClientConfig {
     pub master_key: MoonKey,
     /// Transport MAC/obfuscation key imported from MoonBot.
     pub mac_key: MoonKey,
-    /// Transport mode: `0` for base transport, `1`/`2` for extended `moonext`.
+    /// Transport mode: `0` for V0/base transport, `1`/`2` for V1/V2.
     ///
     /// [`Self::with_transport_mode`] normalizes unsupported extended modes back
-    /// to `0` when `moonext` is not available. Direct struct literals can still
-    /// set this field for low-level tests/tools, but normal application code
-    /// should go through the builder.
+    /// to `0` when extended transport support is unavailable. Direct struct
+    /// literals can still set this field for low-level tests/tools, but normal
+    /// application code should go through the builder.
     pub mask_ver: u8,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
@@ -309,7 +309,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    /// Create config with production defaults for V0 (open base transport):
+    /// Create config with production defaults for V0/base transport:
     /// - `mask_ver = 0`;
     /// - `client_id = rand::random()`;
     /// - `ntp_host = Some("pool.ntp.org")` (shared process-level syncer);
@@ -339,8 +339,8 @@ impl ClientConfig {
 
     /// Override transport mode.
     ///
-    /// `0` is always available. Modes `1` and `2` require optional `moonext`;
-    /// unsupported values and unavailable extended modes fall back to `0`.
+    /// `0` is always available. Modes `1` and `2` select V1/V2; unsupported
+    /// values and unavailable extended modes fall back to `0`.
     /// This keeps the public prototype working in V0 instead of creating a
     /// half-configured client that can send but cannot unwrap extended replies.
     /// UI code should still call [`crate::extended_transport_available`] before

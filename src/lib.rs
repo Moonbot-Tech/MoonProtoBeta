@@ -1,4 +1,4 @@
-﻿//! # moonproto
+//! # moonproto
 //!
 //! Rust client for the MoonProto UDP protocol used by MoonBot servers.
 //! It ports the Delphi client behavior for the wire format, AES-128-GCM
@@ -49,11 +49,11 @@
 //! client.stop()?;
 //! ```
 //!
-//! For common one-shot Engine API diagnostics, use explicit [`MoonClient`]
-//! `blocking_*` helpers such as [`MoonClient::blocking_request_balance`],
-//! [`MoonClient::blocking_request_hedge_mode`], and
-//! [`MoonClient::blocking_request_api_expiration_time`]. Demand-driven CoinCard
-//! candles use non-blocking
+//! Account/UI refreshes are Active Lib intents: [`MoonClient::refresh_hedge_mode`]
+//! and [`MoonClient::refresh_api_expiration_time`] update
+//! [`EventDispatcherSnapshot::account`] and emit [`Event::Account`]. Explicit
+//! [`MoonClient`] `blocking_*` helpers remain for scripts and diagnostics.
+//! Demand-driven CoinCard candles use non-blocking
 //! [`MoonClient::request_coin_card_candles`] and arrive as
 //! [`Event::CoinCardCandles`]. The full 5m candles snapshot is requested
 //! automatically after trades storage is enabled and arrives as
@@ -78,11 +78,11 @@
 //!
 //! ## Transport Modes
 //!
-//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V0 does not
-//! require the optional `moonext` binary. Extended transport modes V1/V2
-//! (`mask_ver = 1` or `2`) require `moonext`; UI code should call
-//! [`extended_transport_available`] before offering those modes. The public
-//! builder falls back to V0 when `moonext` is absent.
+//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V0 is
+//! always available. V1/V2 (`mask_ver = 1` or `2`) are extended transport modes
+//! that must match the server-side connection setting; UI code should call
+//! [`extended_transport_available`] before offering them. The public builder
+//! falls back to V0 when extended transport support is unavailable.
 //!
 //! Working examples: `examples/trading_flow.rs`, `examples/history_bars.rs`,
 //! `examples/list_markets.rs`, `examples/get_balance.rs`, `examples/query_hedge_mode.rs`,
@@ -110,7 +110,7 @@
 //! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
 //! - [`compression`] — SynLZ/DEFLATE helpers for wire-format payloads.
 //! - [`transport`] — low-level wire layer: MAC, obfuscation, headers, and
-//!   optional `moonext` loading for extended transport modes 1/2.
+//!   transport modes V0/V1/V2.
 
 mod api_pending;
 mod app_queue;
@@ -137,7 +137,7 @@ pub use client::{
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
 pub use events::{
-    EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
     MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{

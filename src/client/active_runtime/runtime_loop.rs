@@ -36,8 +36,10 @@ pub(super) fn runtime_loop(
         let coin_card_changed =
             poll_coin_card_candles(&mut pending.coin_card_candles, &mut dispatcher);
         let transfer_assets_changed = poll_transfer_assets(&mut pending, &mut dispatcher);
+        let account_changed =
+            poll_account_refreshes(&mut pending.account_refreshes, &mut dispatcher);
         poll_engine_actions(&mut pending.engine_actions, &mut dispatcher);
-        if candles_changed || coin_card_changed || transfer_assets_changed {
+        if candles_changed || coin_card_changed || transfer_assets_changed || account_changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
 
@@ -62,6 +64,7 @@ struct RuntimePending {
     auto_candles: Vec<PendingAutoCandles>,
     auto_candles_apply: Vec<PendingAutoCandlesApply>,
     coin_card_candles: Vec<PendingCoinCardCandles>,
+    account_refreshes: Vec<PendingAccountRefresh>,
     transfer_assets: Vec<PendingTransferAssets>,
     transfer_assets_batches: Vec<PendingTransferAssetsBatch>,
     next_transfer_assets_batch_id: u64,
@@ -95,6 +98,18 @@ struct PendingTransferAssetsBatch {
 struct PendingCoinCardCandles {
     ticket: super::CoinCardCandlesTicket,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+struct PendingAccountRefresh {
+    kind: PendingAccountRefreshKind,
+    request_uid: u64,
+    rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+#[derive(Clone, Copy)]
+enum PendingAccountRefreshKind {
+    HedgeMode,
+    ApiExpiration,
 }
 
 struct PendingEngineAction {
@@ -174,6 +189,24 @@ fn handle_command(
         }
         RuntimeCommand::BalanceRefresh => {
             client.balance_request_refresh();
+            false
+        }
+        RuntimeCommand::AccountHedgeModeRefresh => {
+            schedule_account_refresh(
+                client,
+                &mut pending.account_refreshes,
+                PendingAccountRefreshKind::HedgeMode,
+                crate::commands::engine_request::query_hedge_mode(),
+            );
+            false
+        }
+        RuntimeCommand::AccountApiExpirationRefresh => {
+            schedule_account_refresh(
+                client,
+                &mut pending.account_refreshes,
+                PendingAccountRefreshKind::ApiExpiration,
+                crate::commands::engine_request::check_api_expiration_time(),
+            );
             false
         }
         RuntimeCommand::OrderSnapshotRefresh => {
@@ -394,6 +427,21 @@ fn schedule_coin_card_candles(
     pending.push(PendingCoinCardCandles { ticket, rx });
 }
 
+fn schedule_account_refresh(
+    client: &mut Client,
+    pending: &mut Vec<PendingAccountRefresh>,
+    kind: PendingAccountRefreshKind,
+    payload: Vec<u8>,
+) {
+    let request_uid = engine_request_uid(&payload).unwrap_or(0);
+    let rx = client.send_api_request_async(&payload);
+    pending.push(PendingAccountRefresh {
+        kind,
+        request_uid,
+        rx,
+    });
+}
+
 fn sync_runtime_trade_storage_scope(
     client: &Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -546,6 +594,47 @@ fn poll_transfer_assets(
                 );
                 changed = true;
                 finish_transfer_assets_batch_item(pending, dispatcher, item.batch_id, false);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                i += 1;
+            }
+        }
+    }
+    changed
+}
+
+fn poll_account_refreshes(
+    pending: &mut Vec<PendingAccountRefresh>,
+    dispatcher: &mut crate::events::EventDispatcher,
+) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i < pending.len() {
+        match pending[i].rx.try_recv() {
+            Ok(resp) => {
+                let item = pending.swap_remove(i);
+                changed |= match item.kind {
+                    PendingAccountRefreshKind::HedgeMode => {
+                        dispatcher.apply_hedge_mode_response(resp)
+                    }
+                    PendingAccountRefreshKind::ApiExpiration => {
+                        dispatcher.apply_api_expiration_response(resp)
+                    }
+                };
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let item = pending.swap_remove(i);
+                match item.kind {
+                    PendingAccountRefreshKind::HedgeMode => dispatcher.hedge_mode_request_failed(
+                        Some(item.request_uid),
+                        "pending hedge-mode receiver closed before response",
+                    ),
+                    PendingAccountRefreshKind::ApiExpiration => dispatcher
+                        .api_expiration_request_failed(
+                            Some(item.request_uid),
+                            "pending API-expiration receiver closed before response",
+                        ),
+                }
             }
             Err(mpsc::TryRecvError::Empty) => {
                 i += 1;

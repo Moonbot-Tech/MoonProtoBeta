@@ -1,4 +1,7 @@
-﻿//! Query account hedge mode through the high-level Active Lib runtime.
+﻿//! Diagnostic one-shot hedge-mode read through the high-level runtime.
+//!
+//! Regular UI code should call `refresh_hedge_mode()` and read
+//! `snapshot().account().hedge_mode()` after `Event::Account`.
 //!
 //! Run:
 //!   cargo run --example query_hedge_mode --release -- "<key_base64>" [host:port]

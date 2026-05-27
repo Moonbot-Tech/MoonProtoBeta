@@ -237,6 +237,22 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
     }
 
+    /// Request a fresh hedge-mode value and return immediately.
+    ///
+    /// Completion arrives through `Event::Account`; read the current value from
+    /// `snapshot().account().hedge_mode()`.
+    pub fn refresh_hedge_mode(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::AccountHedgeModeRefresh)
+    }
+
+    /// Request fresh API-key expiration metadata and return immediately.
+    ///
+    /// Completion arrives through `Event::Account`; read the current value from
+    /// `snapshot().account().api_expiration()`.
+    pub fn refresh_api_expiration_time(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::AccountApiExpirationRefresh)
+    }
+
     /// Request transferable asset refresh for Spot, Futures, and Quarterly.
     ///
     /// This returns as soon as the requests are queued. The runtime applies each

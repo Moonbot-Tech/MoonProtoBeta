@@ -1,6 +1,6 @@
 ﻿//! Compact end-to-end Active Lib flow for application developers.
 //!
-//! It uses only `MoonClient`: connect/init, subscriptions, one-shot reads,
+//! It uses only `MoonClient`: connect/init, subscriptions, async refreshes,
 //! snapshots/events, and order intents.
 //!
 //! Run:
@@ -51,9 +51,8 @@ fn main() {
         );
     }
 
-    match client.blocking_request_balance("USDT", Duration::from_secs(15)) {
-        Ok(balance) => println!("[balance] USDT={balance}"),
-        Err(err) => println!("[balance] request failed: {err}"),
+    if let Err(err) = client.request_balance_snapshot() {
+        println!("[balance] request queue failed: {err}");
     }
 
     // Example only: uncomment in a real trading UI after explicit user action.
@@ -84,6 +83,18 @@ fn main() {
                 }
             }
             Ok(Event::Order(event)) => println!("[event] order: {event:?}"),
+            Ok(Event::Balance(event)) => {
+                println!("[event] balance: {event:?}");
+                if let Some(snapshot) = client.snapshot() {
+                    let global = snapshot.balances().global();
+                    println!(
+                        "[balance] btc_total={:.8} btc_full={:.8} special_coin={:.8}",
+                        global.btc_balance_total,
+                        global.btc_balance_full,
+                        global.special_coin_balance
+                    );
+                }
+            }
             Ok(Event::OrderBook(event)) => println!("[event] orderbook: {event:?}"),
             Ok(Event::Trade(event)) => println!("[event] trade: {event:?}"),
             Ok(Event::Markets(event)) => println!("[event] markets: {event:?}"),

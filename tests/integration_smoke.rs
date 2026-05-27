@@ -88,10 +88,46 @@ fn runtime_smoke_full_happy_path() {
         snapshot.strategy_snapshot_vec().len()
     );
 
-    let balance = client
-        .blocking_request_balance("USDT", Duration::from_secs(15))
-        .expect("FAIL: MoonClient::blocking_request_balance failed");
-    println!("OK: blocking_request_balance USDT={balance}");
+    client
+        .request_balance_snapshot()
+        .expect("FAIL: MoonClient::request_balance_snapshot failed");
+    let balance_deadline = Instant::now() + Duration::from_secs(15);
+    let mut balance_events = 0u32;
+    while Instant::now() < balance_deadline {
+        match client.recv_event_timeout(Duration::from_millis(500)) {
+            Ok(Event::Balance(_)) => {
+                balance_events += 1;
+                break;
+            }
+            Ok(Event::ParseFailed { cmd, len, .. }) => {
+                panic!("FAIL: ParseFailed while waiting balance snapshot cmd={cmd:?} len={len}");
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("FAIL: runtime stopped while waiting balance snapshot");
+            }
+        }
+    }
+    assert!(
+        balance_events > 0,
+        "FAIL: no Balance event after request_balance_snapshot"
+    );
+    let snapshot = client
+        .snapshot()
+        .expect("FAIL: no snapshot after balance refresh");
+    let global = snapshot.balances().global();
+    assert!(
+        global.btc_balance_total.abs()
+            + global.btc_balance_full.abs()
+            + global.special_coin_balance.abs()
+            > 0.0,
+        "FAIL: maintained global balances are zero after balance refresh"
+    );
+    println!(
+        "OK: maintained_balance_state events={balance_events} btc_total={:.8} btc_full={:.8} special_coin={:.8}",
+        global.btc_balance_total, global.btc_balance_full, global.special_coin_balance
+    );
 
     let mut trades_packets = 0u32;
     let mut orderbook_applied = 0u32;

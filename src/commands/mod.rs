@@ -26,7 +26,6 @@ pub mod trades_stream;
 pub mod ui;
 
 // Re-exports
-pub use arb::{ArbIsolationEntry, ArbPayload, ArbPriceBlock, ArbPriceItem};
 pub use balance::{BalanceItem, BalanceUpdate};
 pub use engine_api::{
     parse_auth_check_response, parse_get_balance_response, parse_query_hedge_mode_response,

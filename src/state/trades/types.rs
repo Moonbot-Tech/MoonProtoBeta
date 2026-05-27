@@ -1,21 +1,23 @@
-/// Результат применения TradesStream packet-number state.
+/// Result of applying the TradesStream packet-number state.
 #[derive(Debug, Clone)]
 pub enum TradesEvent {
-    /// Пакет применён.
+    /// Packet was applied.
     ///
-    /// Active Lib уже раздаёт rows по market state и retained `SeqRing`
-    /// storage до эмита этого события. Событие является лёгким сигналом
-    /// "новые rows доступны"; оно намеренно не содержит owned `TradesPacket`,
-    /// чтобы hot path не собирал `Vec` ради public callback.
+    /// Active Lib has already written rows into market state and retained
+    /// `SeqRing` storage before this event is emitted. The event is a light
+    /// "new rows are available" signal; it intentionally does not carry an
+    /// owned `TradesPacket`, so the hot path does not build a `Vec` only for
+    /// the public callback.
     Applied { packet_num: u16, base_time: f64 },
-    /// Обнаружен gap: пропущены packet_num в `[start..=end]`. Bucket создан, retry проверяется через `tick()`.
+    /// A packet-number gap was detected: `[start..=end]` is missing. The
+    /// recovery bucket was created; retry is driven by `tick()`.
     GapDetected { start: u16, end: u16 },
-    /// Пакет был фактически дубликат (packet_num == last).
-    /// Delphi не двигает gap-state для него, но всё равно применяет payload дальше.
+    /// Packet number was a duplicate (`packet_num == last`).
+    /// Delphi does not advance gap-state for it, but still applies the payload.
     Duplicate,
-    /// Пакет пришёл вне диапазона — может быть после reset, отображает packet_num.
+    /// Packet number was outside the accepted range, usually after a reset.
     OutOfOrder { packet_num: u16 },
-    /// Принят out-of-order пакет, который был помечен в одном из gap-bucket'ов (`recvd[i]=true`).
+    /// An out-of-order packet filled one slot in an existing gap bucket.
     GapFilled {
         packet_num: u16,
         bucket_seq_range: (u16, u16),
@@ -26,7 +28,7 @@ pub enum TradesEvent {
     /// automatically; applications must not send their own duplicate request
     /// because they saw this event.
     ResendRequested { packet_nums: Vec<u16> },
-    /// Bucket закрыт: получены все trades или исчерпан retry лимит.
+    /// Recovery bucket was closed: all packets arrived or retry limit expired.
     BucketClosed {
         start: u16,
         end: u16,

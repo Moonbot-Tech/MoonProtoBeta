@@ -4,7 +4,7 @@
 //! against known markets, and expose compact arbitrage payload only for known
 //! market indexes.
 
-use super::{Event, EventDispatcher};
+use super::{ArbEvent, Event, EventDispatcher};
 use crate::commands::arb::{parse_arb_payload_compact, parse_arb_prices, ArbPayload};
 use crate::commands::balance::parse_balance;
 use crate::protocol::Command;
@@ -52,14 +52,31 @@ impl EventDispatcher {
                             .client_settings
                             .as_ref()
                             .map(|settings| &settings.arb_config.wanted);
-                        self.markets.apply_arb_payload_like_delphi(
+                        let summary = self.markets.apply_arb_payload_like_delphi(
                             &parsed,
                             wanted,
                             now_time_days.unwrap_or_default(),
                         );
-                        out.push(Event::Arb {
-                            uid: arb.uid,
-                            payload: parsed,
+                        out.push(match &parsed {
+                            ArbPayload::Price { version, blocks } => {
+                                let price_items =
+                                    blocks.iter().map(|block| block.prices.len()).sum();
+                                Event::Arb(ArbEvent::PricesApplied {
+                                    uid: arb.uid,
+                                    version: *version,
+                                    market_blocks: blocks.len(),
+                                    price_items,
+                                    applied_prices: summary.applied_prices,
+                                })
+                            }
+                            ArbPayload::Isolation { version, entries } => {
+                                Event::Arb(ArbEvent::IsolationApplied {
+                                    uid: arb.uid,
+                                    version: *version,
+                                    entries: entries.len(),
+                                    applied_entries: summary.applied_isolation_entries,
+                                })
+                            }
                         });
                     }
                 }

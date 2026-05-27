@@ -55,17 +55,12 @@ if let Some(network) = info.network {
 - `refresh = RefreshConfig::default()` (`UpdateMarketsList` every 2 seconds and
   `CheckBinanceTags` every 60 seconds after Init).
 
-`mask_ver = 0` is the base transport and does not require `moonext`. Transport
-modes `1` and `2` are extended modes and require the optional `moonext` binary to
-be available to the process. UI code should call
-`moonproto::extended_transport_available()` before offering V1/V2; if it returns
-`false`, only V0 should be selectable. The normal builder
-`ClientConfig::with_transport_mode(1 | 2)` also falls back to V0 when `moonext`
-is absent, so a public prototype without the closed binary still runs in base
-transport mode. Unsupported mode values also normalize to V0.
-
-The transport implementation is built into `moonproto` as `moonproto::transport`.
-Consumers do not need a separate `moonproto-transport` crate.
+`mask_ver = 0` is V0/base transport. Transport modes `1` and `2` select V1/V2.
+The selected mode must match the server-side connection setting. UI code should
+call `moonproto::extended_transport_available()` before offering V1/V2; if it
+returns `false`, only V0 should be selectable. The normal builder
+`ClientConfig::with_transport_mode(1 | 2)` also falls back to V0 when extended
+transport support is unavailable. Unsupported mode values also normalize to V0.
 
 Override only what you need:
 
@@ -127,9 +122,13 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
-`MoonClient` owns the runtime thread. Applications do not choose a finite
-protocol-loop duration; the session runs until explicit `stop()` or drop. UI
-code reads typed events, lifecycle events, and immutable snapshots:
+`MoonClient::connect` is a startup barrier: it returns only after AuthDone and
+the one-time Init sequence succeeded, so the returned handle is ready for normal
+Active Lib work. Desktop apps should call it from their terminal/runtime startup
+task, not from a paint/input callback. After that, `MoonClient` owns the runtime
+thread. Applications do not choose a finite protocol-loop duration; the session
+runs until explicit `stop()` or drop. UI code reads typed events, lifecycle
+events, and immutable snapshots:
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
@@ -171,14 +170,15 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-Explicit `blocking_*` Engine API reads also run inside the owned runtime and
-parse their payloads while the protocol keeps pumping. User-facing mutations are
-non-blocking Active Lib intents: they return an `EngineActionTicket` after
-queuing the request, and completion arrives later as `Event::EngineAction` plus
-the underlying `Event::EngineResponse`.
+Explicit `blocking_*` Engine API reads exist for scripts and diagnostics; they
+also run inside the owned runtime and parse their payloads while the protocol
+keeps pumping. Regular UI code reads maintained state and uses non-blocking
+Active Lib intents. Mutations return an `EngineActionTicket` after queuing the
+request, and completion arrives later as `Event::EngineAction` plus the
+underlying `Event::EngineResponse`.
 
 ```rust
-let balance = client.blocking_request_balance("USDT", Duration::from_secs(15))?;
+client.refresh_hedge_mode()?;
 let ticket = client.set_leverage("BTCUSDT", 20)?;
 client.set_hedge_mode(true)?;
 client.cancel_all_orders()?;
@@ -451,12 +451,9 @@ runtime keeps the UDP loop alive while the caller waits for the request timeout.
 For user-facing UI refreshes and mutations, use non-blocking Active Lib intents:
 
 ```rust
-let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
-let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
-let api_expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
-client.refresh_transfer_assets()?; // async Active Lib update; read snapshot().transfer_assets()
-let transfer_assets =
-    client.blocking_request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
+client.refresh_hedge_mode()?; // async; read Event::Account + snapshot().account()
+client.refresh_api_expiration_time()?; // async; read Event::Account + snapshot().account()
+client.refresh_transfer_assets()?; // async; read snapshot().transfer_assets()
 let coin_card_ticket = client.request_coin_card_candles(
     "BTCUSDT",
     moonproto::commands::candles::DeepHistoryKind::Hour4,
@@ -470,6 +467,9 @@ client.confirm_risk_limit("BTCUSDT")?;
 Blocking helpers validate the server response and parse the payload. Blocking
 mutation counterparts also use the `blocking_` prefix for scripts, diagnostics,
 and custom tools that deliberately need a synchronous acknowledgement.
+Direct scalar helpers such as `blocking_request_balance`,
+`blocking_request_hedge_mode`, and `blocking_request_api_expiration_time` are
+diagnostic/script reads, not the normal UI balance/account-state model.
 `request_coin_card_candles` is intentionally non-blocking even though the
 underlying Delphi `Engine.getDeepHistory` call is blocking: Delphi UI sets a
 need flag and the background worker fills `TMarket.CoinCardCandles`. In Rust,
@@ -696,5 +696,6 @@ client.stop()?;
 ```
 
 `stop` schedules `LogOff`, closes the socket path, and joins the runtime thread.
-Dropping `MoonClient` performs the same shutdown best-effort. To reconnect after
-final shutdown, create a new `MoonClient`.
+It is a shutdown barrier, not an Engine API wait. Dropping `MoonClient` performs
+the same shutdown best-effort. To reconnect after final shutdown, create a new
+`MoonClient`.

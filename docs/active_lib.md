@@ -23,6 +23,9 @@ send commands; the library maintains protocol and trading state.
 - Transferable wallet assets for Spot, Futures, and Quarterly wallets. These
   are separate from per-market balances and are refreshed by an explicit async
   Active Lib command.
+- Account-level scalar state such as hedge mode and API-key expiration. UI
+  queues async refresh intents and reads `snapshot().account()` after
+  `Event::Account`.
 - Orders and order traces, including local stateful effects for move/cancel,
   stops, vstop, panic, immune, and snapshot cleanup.
 - Strategy schema and strategy snapshots. Applications can provide local

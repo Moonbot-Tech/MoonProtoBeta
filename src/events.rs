@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::app_queue::AppQueue;
-use crate::commands::arb::ArbPayload;
 use crate::commands::engine_api::{
     parse_update_transfer_assets_response, EngineMethod, EngineResponse, ServerInfo,
 };
@@ -40,10 +39,10 @@ use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
 use crate::state::eps::{EpsProfile, DELPHI_PLATFORM_FGATE};
 use crate::state::{
-    BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot, MarketHistoryCandlesSnapshot,
-    MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders, MarketHistoryWorker,
-    MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders,
-    RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
+    AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
+    MarketHistoryCandlesSnapshot, MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders,
+    MarketHistoryWorker, MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent,
+    Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
     TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
 };
 
@@ -63,8 +62,8 @@ mod ui;
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::EventDispatcherSnapshot;
 pub use types::{
-    EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest, StrategySnapshotReply,
-    WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest,
+    StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
@@ -83,6 +82,7 @@ pub struct EventDispatcher {
     pub(crate) orders: Orders,
     pub(crate) order_books: OrderBooks,
     pub(crate) trades: TradesState,
+    pub(crate) account: AccountState,
     pub(crate) balances: BalancesState,
     pub(crate) transfer_assets: TransferAssetsState,
     pub(crate) coin_card_candles: crate::state::CoinCardCandlesState,
@@ -170,6 +170,7 @@ impl Default for EventDispatcher {
             orders: Orders::default(),
             order_books: OrderBooks::default(),
             trades: TradesState::default(),
+            account: AccountState::default(),
             balances: BalancesState::default(),
             transfer_assets: TransferAssetsState::default(),
             coin_card_candles: crate::state::CoinCardCandlesState::default(),
@@ -298,6 +299,15 @@ impl EventDispatcher {
         &self.trades
     }
 
+    /// Read-only account-level state such as hedge mode and API-key expiration.
+    ///
+    /// Delphi updates these from worker paths; Active Lib exposes the retained
+    /// state here and lets UI request refreshes asynchronously through
+    /// `MoonClient`.
+    pub fn account(&self) -> &AccountState {
+        &self.account
+    }
+
     pub(crate) fn trades_server_token(&self) -> u64 {
         self.trades_server_token
     }
@@ -367,6 +377,44 @@ impl EventDispatcher {
                 request_uid: None,
                 error: error.into(),
             })]);
+    }
+
+    /// Apply one async `emk_QueryHedgeMode` response to Active Lib account
+    /// state.
+    pub fn apply_hedge_mode_response(&mut self, resp: EngineResponse) -> bool {
+        let event = self.account.apply_hedge_mode_response(resp);
+        let changed = matches!(event, AccountEvent::HedgeModeUpdated { .. });
+        self.queued_events.extend([Event::Account(event)]);
+        changed
+    }
+
+    pub(crate) fn hedge_mode_request_failed(
+        &mut self,
+        request_uid: Option<u64>,
+        error: impl Into<String>,
+    ) {
+        let event = self.account.hedge_mode_request_failed(request_uid, error);
+        self.queued_events.extend([Event::Account(event)]);
+    }
+
+    /// Apply one async `emk_CheckAPIExpirationTime` response to Active Lib
+    /// account state.
+    pub fn apply_api_expiration_response(&mut self, resp: EngineResponse) -> bool {
+        let event = self.account.apply_api_expiration_response(resp);
+        let changed = matches!(event, AccountEvent::ApiExpirationUpdated { .. });
+        self.queued_events.extend([Event::Account(event)]);
+        changed
+    }
+
+    pub(crate) fn api_expiration_request_failed(
+        &mut self,
+        request_uid: Option<u64>,
+        error: impl Into<String>,
+    ) {
+        let event = self
+            .account
+            .api_expiration_request_failed(request_uid, error);
+        self.queued_events.extend([Event::Account(event)]);
     }
 
     /// Apply one async `emk_GetCoinCardCandles` response to demand-driven

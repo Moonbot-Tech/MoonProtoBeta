@@ -34,9 +34,9 @@ the current `isolated_flags`, then the temporary staging flags are cleared.
 Use `MarketHandle::arb_now(platform_code)` when the UI only needs the latest
 price/time and not the 10-point Delphi ring.
 
-## Low-Level Events
+## Events
 
-`Event::Arb { uid, payload }` still exists as a diagnostic/protocol event.
-Its `ArbPayload` contains compact packet blocks with server `market_index`
-values. Do not build chart UI around those indexes; use the selected
+`Event::Arb(ArbEvent)` is a signal/summary that compact arb data was applied.
+It intentionally does not expose raw server `market_index` blocks as the normal
+UI surface. Do not build chart UI around packet indexes; use the selected
 `MarketHandle::arb_slot` / `arb_now` instead.

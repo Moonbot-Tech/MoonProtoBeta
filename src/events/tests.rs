@@ -1147,17 +1147,19 @@ fn dispatcher_routes_arb_to_typed_event() {
     let events = d.dispatch(Command::Balance, &payload, 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::Arb { uid, payload } => match payload {
-            ArbPayload::Price { version, blocks } => {
-                assert_eq!(*uid, 9);
-                assert_eq!(*version, 2);
-                assert_eq!(blocks.len(), 1);
-                assert_eq!(blocks[0].market_index, 0);
-                assert_eq!(blocks[0].prices[0].platform_code, 7);
-                assert_eq!(blocks[0].prices[0].price, 123.25);
-            }
-            other => panic!("expected ArbPayload::Price, got {:?}", other),
-        },
+        Event::Arb(ArbEvent::PricesApplied {
+            uid,
+            version,
+            market_blocks,
+            price_items,
+            applied_prices,
+        }) => {
+            assert_eq!(*uid, 9);
+            assert_eq!(*version, 2);
+            assert_eq!(*market_blocks, 1);
+            assert_eq!(*price_items, 1);
+            assert_eq!(*applied_prices, 0);
+        }
         other => panic!("expected typed Arb event, got {:?}", other),
     }
 }
@@ -1180,7 +1182,13 @@ fn dispatcher_applies_arb_price_to_live_market_like_delphi_tmarket() {
     let payload = build_arb_prices(9, &compact);
     let events = d.dispatch(Command::Balance, &payload, 1000);
 
-    assert!(matches!(events.as_slice(), [Event::Arb { .. }]));
+    assert!(matches!(
+        events.as_slice(),
+        [Event::Arb(ArbEvent::PricesApplied {
+            applied_prices: 1,
+            ..
+        })]
+    ));
     let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
     let slot = btc
         .arb_slots
@@ -1242,13 +1250,13 @@ fn dispatcher_filters_unknown_arb_price_blocks_like_delphi_find_by_server_index(
 
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::Arb {
-            payload: ArbPayload::Price { blocks, .. },
+        Event::Arb(ArbEvent::PricesApplied {
+            market_blocks,
+            price_items,
             ..
-        } => {
-            assert_eq!(blocks.len(), 1);
-            assert_eq!(blocks[0].market_index, 0);
-            assert_eq!(blocks[0].prices[0].platform_code, 7);
+        }) => {
+            assert_eq!(*market_blocks, 1);
+            assert_eq!(*price_items, 1);
         }
         other => panic!("expected filtered Arb price event, got {other:?}"),
     }
@@ -1274,14 +1282,13 @@ fn dispatcher_filters_unknown_arb_isolation_entries_like_delphi_find_by_server_i
 
     assert_eq!(events.len(), 1);
     match &events[0] {
-        Event::Arb {
-            payload: ArbPayload::Isolation { entries, .. },
+        Event::Arb(ArbEvent::IsolationApplied {
+            entries,
+            applied_entries,
             ..
-        } => {
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].market_index, 0);
-            assert_eq!(entries[0].platform_code, 7);
-            assert_eq!(entries[0].flags, 0b01);
+        }) => {
+            assert_eq!(*entries, 1);
+            assert_eq!(*applied_entries, 0);
         }
         other => panic!("expected filtered Arb isolation event, got {other:?}"),
     }

@@ -10,15 +10,22 @@ use crate::commands::market::{Market, MarketArbPricePoint, ARB_PRICE_RING_LEN};
 
 use super::MarketsState;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ArbApplySummary {
+    pub applied_prices: usize,
+    pub applied_isolation_entries: usize,
+}
+
 impl MarketsState {
     pub(crate) fn apply_arb_payload_like_delphi(
         &mut self,
         payload: &ArbPayload,
         wanted_platforms: Option<&[bool; 256]>,
         now_time_days: f64,
-    ) {
+    ) -> ArbApplySummary {
+        let mut summary = ArbApplySummary::default();
         let Some(wanted_platforms) = wanted_platforms else {
-            return;
+            return summary;
         };
 
         match payload {
@@ -38,13 +45,15 @@ impl MarketsState {
                     };
                     handle.with_mut(|market| {
                         for item in &block.prices {
-                            apply_arb_price_like_delphi(
+                            if apply_arb_price_like_delphi(
                                 market,
                                 item,
                                 wanted_platforms,
                                 now_time_days,
                                 my_price,
-                            );
+                            ) {
+                                summary.applied_prices += 1;
+                            }
                         }
                     });
                 }
@@ -63,11 +72,13 @@ impl MarketsState {
                             .entry(entry.platform_code)
                             .or_default()
                             .isolated_flags_tmp = entry.flags;
+                        summary.applied_isolation_entries += 1;
                     });
                 }
                 self.arb_isol_commit_like_delphi();
             }
         }
+        summary
     }
 
     fn arb_isol_commit_like_delphi(&mut self) {
@@ -88,9 +99,9 @@ fn apply_arb_price_like_delphi(
     wanted_platforms: &[bool; 256],
     now_time_days: f64,
     my_price: f32,
-) {
+) -> bool {
     if !wanted_platforms[item.platform_code as usize] {
-        return;
+        return false;
     }
 
     let slot = market.arb_slots.entry(item.platform_code).or_default();
@@ -104,4 +115,5 @@ fn apply_arb_price_like_delphi(
     slot.head = head;
     slot.now.price = item.price;
     slot.now.time = now_time_days;
+    true
 }

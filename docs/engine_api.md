@@ -23,19 +23,20 @@ this default when `InitConfig::step_timeout` is `None`.
 ## Waiting for a Response
 
 ```rust
-use std::time::Duration;
-
-let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
-let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
-let api_expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
-let transfer_assets =
-    client.blocking_request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
+client.request_balance_snapshot()?;
+client.refresh_hedge_mode()?;
+client.refresh_api_expiration_time()?;
+client.refresh_transfer_assets()?;
 ```
 
-The one-shot helpers validate `EngineResponse::success`. Read helpers parse the
-method-specific payload. Mutation helpers return `Ok(())` after a successful
-acknowledgement and wrap Engine API failures as
-`MoonClientError::EngineRequest`.
+These calls queue work into the Active Lib runtime and return immediately.
+Completion arrives as typed events, and the updated values are read from
+`MoonClient::snapshot()`. This is the normal UI shape: the runtime keeps the
+protocol loop alive and owns the state.
+
+Explicit one-shot `blocking_*` helpers still exist for scripts and diagnostics.
+They validate `EngineResponse::success`, parse method-specific payloads, and
+wrap Engine API failures as `MoonClientError::EngineRequest`.
 
 Advanced protocol tools can use the lower-level receiver path. Normal
 applications should not wait on raw receivers from the UI thread: a raw
@@ -64,7 +65,7 @@ path.
 
 | Group | Methods |
 |---|---|
-| `MoonClient` async Active Lib refresh | `request_client_settings` / `refresh_settings`, `request_balance_snapshot` / `refresh_balances`, `request_order_snapshot`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
+| `MoonClient` async Active Lib refresh | `request_client_settings` / `refresh_settings`, `refresh_hedge_mode`, `refresh_api_expiration_time`, `request_balance_snapshot` / `refresh_balances`, `request_order_snapshot`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
 | `MoonClient` non-blocking mutation/refresh intents | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `transfer_asset` / `do_transfer_asset`, `refresh_markets_balance_full`, `reload_order_book` |
 | Explicit blocking diagnostic helpers | `blocking_request_balance`, `blocking_request_hedge_mode`, `blocking_request_api_expiration_time`, `blocking_request_transfer_assets`, `blocking_request_client_settings`, `blocking_request_balance_snapshot`, `blocking_request_order_snapshot`, `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
@@ -77,11 +78,12 @@ keeps MoonProto pumping. They are intentionally named with `blocking_`. Use them
 when the caller truly needs the returned value in the same synchronous branch
 before continuing:
 
-- `blocking_request_balance("USDT", timeout)`;
-- `blocking_request_hedge_mode(timeout)`;
-- `blocking_request_api_expiration_time(timeout)`;
-- `blocking_request_balance_snapshot(timeout)` /
-  `blocking_request_order_snapshot(timeout)`.
+- scripts/diagnostics that intentionally need a synchronous scalar or snapshot.
+
+Direct scalar reads such as `blocking_request_balance`,
+`blocking_request_hedge_mode`, and `blocking_request_api_expiration_time` are
+diagnostic/script helpers. Normal UI should read maintained state or queue the
+async refresh listed below.
 
 Async Active Lib commands return after queuing work and later update
 snapshots/events:
@@ -89,6 +91,10 @@ snapshots/events:
 - `refresh_balances()`;
 - `request_balance_snapshot()`, which fills `snapshot().balances()` and emits
   `Event::Balance`;
+- `refresh_hedge_mode()`, which fills `snapshot().account().hedge_mode()` and
+  emits `Event::Account`;
+- `refresh_api_expiration_time()`, which fills
+  `snapshot().account().api_expiration()` and emits `Event::Account`;
 - `request_order_snapshot()`, which fills `snapshot().orders()` and emits order
   events;
 - `refresh_transfer_assets()` / `refresh_transfer_assets_kind(kind)`;
@@ -133,28 +139,46 @@ typed subscription gate.
 ## Balance
 
 `blocking_request_balance(currency)` is a direct diagnostic read for one
-currency:
+currency. It is not the normal chart/UI balance model. Regular UI reads
+per-market balance/position fields from `snapshot().markets().get(...).balance_position()`
+and account totals from `snapshot().balances()` after normal balance events.
 
 ```rust
-let qty = client.blocking_request_balance("USDT", Duration::from_secs(12))?;
-println!("USDT balance={qty}");
+client.request_balance_snapshot()?;
+
+if let Some(snapshot) = client.snapshot() {
+    let global = snapshot.balances().global();
+    println!("available={}", global.btc_balance_total);
+    if let Some(market) = snapshot.markets().get("BTCUSDT") {
+        let pos = market.balance_position();
+        println!("pos_size={} liq={}", pos.pos_size, pos.liq_price);
+    }
+}
 ```
 
 ## Account Settings
 
-`blocking_request_hedge_mode()` is a direct diagnostic read for the hedge-mode
-flag:
+Regular UI queues account refreshes and reads retained account state:
+
+```rust
+client.refresh_hedge_mode()?;
+client.refresh_api_expiration_time()?;
+
+for event in client.drain_events() {
+    if matches!(event, moonproto::Event::Account(_)) {
+        if let Some(snapshot) = client.snapshot() {
+            println!("hedge_mode={:?}", snapshot.account().hedge_mode());
+            println!("api_expiration={:?}", snapshot.account().api_expiration());
+        }
+    }
+}
+```
+
+The explicit blocking counterparts remain available for scripts/diagnostics
+that really need a synchronous scalar:
 
 ```rust
 let hedge_mode = client.blocking_request_hedge_mode(Duration::from_secs(12))?;
-println!("hedge_mode={hedge_mode}");
-```
-
-`blocking_request_api_expiration_time()` is a direct diagnostic read for API-key
-expiration metadata. It returns an `ApiExpirationTime` wrapper and exposes
-`system_time()`, `unix_seconds()`, and `days_until(...)` helpers:
-
-```rust
 let expiration = client.blocking_request_api_expiration_time(Duration::from_secs(12))?;
 if let Some(unix) = expiration.unix_seconds() {
     println!("API key expires at unix_seconds={unix}");

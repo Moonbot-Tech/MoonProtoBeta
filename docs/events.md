@@ -6,7 +6,9 @@ application what changed; snapshots let UI code read the current retained state.
 Connection lifecycle is a separate stream. Use `drain_lifecycle_events`,
 `try_recv_lifecycle_event`, or `recv_lifecycle_event_timeout` for connection
 status. Use `drain_events`, `try_recv_event`, or `recv_event_timeout` for domain
-events.
+events. The `recv_*_timeout` helpers block only the caller while waiting on the
+already-running event queue; they do not pause the runtime thread and are not
+Engine API request/response waits.
 
 ## Recommended Loop
 
@@ -20,6 +22,7 @@ for event in client.drain_events() {
         Event::Trade(trade_event) => handle_trade_signal(trade_event),
         Event::Markets(markets_event) => handle_markets_event(markets_event),
         Event::Balance(balance_event) => handle_balance_event(balance_event),
+        Event::Account(account_event) => handle_account_event(account_event),
         Event::CandlesSnapshot(candles_event) => handle_candles_ready(candles_event),
         Event::Strat(strat_event) => handle_strategy_event(strat_event),
         Event::Settings(settings_event) => handle_settings_event(settings_event),
@@ -68,10 +71,11 @@ pub enum Event {
     Trade(TradesEvent),
     WatcherFills(WatcherFillsEvent),
     Balance(BalanceEvent),
+    Account(AccountEvent),
     TransferAssets(TransferAssetsEvent),
     CoinCardCandles(CoinCardCandlesEvent),
     CandlesSnapshot(CandlesSnapshotEvent),
-    Arb { uid: u64, payload: ArbPayload },
+    Arb(ArbEvent),
     Strat(StratEvent),
     Settings(SettingsEvent),
     Markets(MarketsEvent),
@@ -93,6 +97,11 @@ updated. Read actual rows from `MarketHistoryReaders`.
 snapshot has been processed by the history worker. At that point
 `market_history_readers(market).candles_5m` already sees the retained rows.
 
+`ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
+`TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads
+`MarketHandle::arb_slot(platform_code)` / `arb_now(platform_code)` from the
+selected market instead of handling raw server `market_index` blocks.
+
 `WatcherFillsEvent` contains `market_name`, HyperDex user address, decoded fill
 rows, and helper methods for flags/time conversion.
 
@@ -111,20 +120,25 @@ trades/orderbook sync state before applying new indexed stream packets.
 
 ## One-Shot Requests
 
-Some explicit script/diagnostic helpers keep the runtime pumping while they
-wait. They are named with a `blocking_` prefix. Any unrelated packets received
-during the wait are still applied and remain available through the normal event
-receiver:
+Normal UI code queues refresh intents and drains events. Any unrelated packets
+received while the runtime is active are still applied and remain available
+through the normal event receiver:
 
 ```rust
-let qty = client.blocking_request_balance("USDT", timeout)?;
+client.request_balance_snapshot()?;
+
 for event in client.drain_events() {
     handle_event(event);
 }
 ```
 
-Regular UI refreshes such as `request_client_settings()` return immediately and
-publish completion through domain events plus snapshots.
+Regular UI refreshes such as `request_client_settings()`, `refresh_hedge_mode()`,
+and `refresh_api_expiration_time()` return immediately and publish completion
+through domain events plus snapshots. Account refresh results are readable from
+`snapshot().account()`.
+
+Explicit script/diagnostic helpers keep the runtime pumping while they wait.
+They are named with a `blocking_` prefix and are not the normal UI event path.
 
 ## Retained History
 

@@ -6,15 +6,15 @@
 //! ## What It Does
 //!
 //! - [`transport_pack`] packs a command into a wire-ready UDP datagram: header,
-//!   HMAC-CRC32C MAC, obfuscation using a xoshiro128+ keystream XOR, and optional
-//!   `moonext` mode 1/2 wrapping.
+//!   HMAC-CRC32C MAC, obfuscation using a xoshiro128+ keystream XOR, and
+//!   selected transport mode handling.
 //! - [`transport_unpack`] performs the reverse operation: MAC verification,
 //!   de-obfuscation, and header parsing.
 //! - [`outer_light_crypt`] and [`calculate_mac32`] are standalone helpers for
 //!   code that needs to work with packets without full packing or unpacking.
-//! - [`ext_loader`] dynamically loads `moonext` for extended transport mode 1/2.
-//!   Without `moonext`, requested extended modes are treated as mode 0 (base
-//!   transport), matching the public prototype rule: no closed binary, V0 only.
+//! - V0 is always available. V1/V2 are used only when
+//!   [`ext_available`] returns `true`; otherwise requested extended modes are
+//!   treated as V0.
 //!
 //! ## What It Does Not Do
 //!
@@ -51,13 +51,7 @@
 //! `calculate_mac32`/header serializers) remain marked `#[inline]`; keep that
 //! unless a measured full-LTO profile replaces the current fast dev workflow.
 
-/// Dynamic loader for the optional closed-source `moonext` transport wrapper.
-///
-/// Most client applications should not call this module directly. Use
-/// [`transport_pack`] / [`transport_unpack`] with `mask_ver = 1` or `2`; those
-/// functions delegate to `moonext` when the binary is available and fall back to
-/// base transport when it is not.
-pub mod ext_loader;
+mod ext_loader;
 mod header;
 mod mac;
 mod outer_crypt;
@@ -74,8 +68,8 @@ pub use outer_crypt::outer_light_crypt;
 pub type MoonKey = [u8; 16];
 
 /// Pack a command into a wire-ready UDP datagram.
-/// mask_ver: 0 = base transport, 1/2 = extended when moonext is available.
-/// Unsupported values or unavailable moonext are treated as mode 0.
+/// mask_ver: 0 = V0/base transport, 1/2 = V1/V2 when available.
+/// Unsupported values or unavailable extended modes are treated as mode 0.
 /// Returns: (main_packet, optional_extra_packet)
 /// If extended transport needs an additional packet sent, it's returned as the second element.
 ///
@@ -119,8 +113,8 @@ pub fn transport_pack(
 /// contents. Capacity is preserved, which is where the allocation saving comes
 /// from.
 ///
-/// Returns an optional extra packet for `mask_ver` 1/2 when `moonext` requests
-/// one.
+/// Returns an optional extra packet for `mask_ver` 1/2 when the selected
+/// transport mode requires one.
 #[inline]
 pub fn transport_pack_into_with_mac(
     buf: &mut Vec<u8>,
@@ -146,8 +140,8 @@ pub fn transport_pack_into_with_mac(
     // Obfuscation (always, all modes)
     outer_light_crypt(buf, mac_key);
 
-    // Extended transport (modes 1/2): delegate to moonext only when the closed
-    // binary is available. Without it, the open crate supports V0 only.
+    // Extended transport (modes 1/2) is active only when available; otherwise
+    // the open crate supports V0.
     if extended_transport_enabled(mask_ver) {
         let (_ok, extra_pkt) = ext_loader::ext_wrap(buf, mask_ver, false);
         extra_pkt
@@ -193,9 +187,9 @@ pub fn transport_unpack_with_mac(
     raw: &[u8],
     mask_ver: u8,
 ) -> Option<(ServerMsgHeader, Vec<u8>)> {
-    // Extended transport (modes 1/2): let moonext handle it only when present.
-    // Without moonext, requested extended modes are normalized to V0 so direct
-    // low-level callers do not create a send-but-never-receive half-mode.
+    // Extended transport (modes 1/2) is active only when available. Otherwise
+    // requested extended modes are normalized to V0 so direct low-level callers
+    // do not create a send-but-never-receive half-mode.
     let mut buf: Vec<u8> = if extended_transport_enabled(mask_ver) {
         ext_loader::ext_unwrap(raw, mask_ver)?
     } else {

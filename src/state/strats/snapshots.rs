@@ -45,7 +45,7 @@ impl StratsState {
         }
     }
 
-    /// Обновить стратегию из распарсенного TStrategySerializer snapshot'а.
+    /// Update lightweight strategy state from decoded snapshot header fields.
     pub fn upsert(&mut self, strategy_id: u64, last_date: u64, folder_path: String) {
         let entry = self.get_or_insert(strategy_id);
         entry.last_date = last_date;
@@ -54,10 +54,10 @@ impl StratsState {
         self.create_folders_for_path(&path);
     }
 
-    /// Заменить owned strategy list списком из приложения.
+    /// Replace the application-owned strategy list.
     ///
-    /// Это public API для active library: пользовательский код вызывает его до
-    /// init, dispatcher дальше сам поддерживает этот список через протокол.
+    /// User code normally calls this before init. After that the dispatcher owns
+    /// the list, sends it during init, and maintains it through the protocol.
     pub fn replace_with_snapshots(&mut self, strategies: &[StrategySnapshot]) {
         self.clear_entries();
         for strategy in strategies {
@@ -65,10 +65,11 @@ impl StratsState {
         }
     }
 
-    /// Вставить/обновить одну application-owned стратегию без rollback guard.
+    /// Insert or replace one application-owned strategy without rollback guard.
     ///
-    /// Для локального списка приложение является источником правды, поэтому явно
-    /// переданный snapshot должен заменить прежний даже при равных датах/версиях.
+    /// For the local strategy list the application is the source of truth, so an
+    /// explicit snapshot replaces the previous value even with equal dates or
+    /// versions.
     pub fn upsert_local_snapshot(&mut self, strategy: StrategySnapshot) {
         self.insert_snapshot_unchecked(strategy);
     }
@@ -88,9 +89,11 @@ impl StratsState {
         self.invalidate_snapshot_payload_cache();
     }
 
-    /// Применить decoded snapshot одной стратегии (после `parse_strategy_batch`).
-    /// Обновляет `last_date`, `folder_path`, `checked` из header'а и сохраняет
-    /// полный `StrategySnapshot` для API и ответа на `TStratSnapshotRequest`.
+    /// Apply one decoded strategy snapshot after `parse_strategy_batch`.
+    ///
+    /// Updates `last_date`, `folder_path`, and `checked` from the header and
+    /// stores the full `StrategySnapshot` for API reads and
+    /// `TStratSnapshotRequest` replies.
     pub fn upsert_from_snapshot(&mut self, s: &StrategySnapshot) -> bool {
         {
             let (existed, entry) = self.get_or_insert_with_existed(s.strategy_id);
@@ -129,11 +132,10 @@ impl StratsState {
         true
     }
 
-    /// Применить всю batch стратегий из `TStratSnapshot.data` (DEFLATE-compressed payload).
-    /// Возвращает декодированный `StrategyBatch` для дальнейшего использования потребителем
-    /// (поля стратегий доступны как `StrategyFields`).
+    /// Apply the full strategy batch from `TStratSnapshot.data`.
     ///
-    /// Возвращает `None` если payload повреждён.
+    /// Returns the decoded `StrategyBatch` so callers can inspect the
+    /// `StrategyFields`. Returns `None` when the compressed payload is malformed.
     pub fn apply_snapshot_decoded_with_mode(
         &mut self,
         deflate_data: &[u8],

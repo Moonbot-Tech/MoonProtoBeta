@@ -10,15 +10,13 @@ Rust client library for the MoonProto UDP protocol used by MoonBot servers.
 
 The crate contains the transport layer, handshake, reconnect, reliable sliced
 datagrams, typed command parsers/builders, read-model state, and the active
-session API. The old separate `moonproto-transport` crate is no longer needed:
-transport is available as `moonproto::transport`.
+session API.
 
-Current public prototype works without `moonext` in V0/base transport mode.
-Extended V1/V2 modes require the optional closed binary
-`moonext.dll` / `libmoonext.so` / `libmoonext.dylib`; until that binary is
-present, keep transport mode `0`. `ClientConfig::with_transport_mode(1 | 2)`
-falls back to V0 when `moonext` is absent; unsupported mode values also
-normalize to V0.
+MoonProto supports transport modes V0, V1, and V2. The selected mode must match
+the server-side connection setting. V0 is always available. UI code should offer
+V1/V2 only when `moonproto::extended_transport_available()` returns `true`;
+`ClientConfig::with_transport_mode(1 | 2)` falls back to V0 when extended
+transport support is unavailable. Unsupported mode values also normalize to V0.
 
 ## Credentials
 
@@ -200,6 +198,10 @@ Full profile runs the destructive/stress gate:
 - client-side `err_emu=10%` before connect;
 - full chunked candles snapshot under loss;
 - settings/strategy broadcast between clients;
+- emulator-mode order lifecycle plus real non-emulator SOLUSDT cancel gate:
+  place a $1000 long limit 5% below market, cancel it through the tracked
+  ActiveLib order path, and separately verify live balance events/state without
+  a manual balance request;
 - `err_emu=50%` simple-operation/reconnect gate;
 - forced reconnect and stream delivery after reconnect;
 - detailed server-message, sliced, retry, parse, and CPU diagnostics.
@@ -258,7 +260,7 @@ src/client/       active client/session, init, reconnect, send/receive paths
 src/commands/     typed MoonProto command parsers/builders
 src/events/       public events and dispatcher
 src/state/        read-model state: markets, trades, books, orders, balances
-src/transport/    built-in low-level transport and optional moonext loader
+src/transport/    built-in low-level transport modes V0/V1/V2
 tests/            integration, polling, and FireTest
 examples/         runnable live/manual examples
 docs/             API documentation
@@ -273,7 +275,7 @@ Apache-2.0 section 4(d).
 
 ## Development Notes
 
-- V0/base transport must work without `moonext`.
+- V0/base transport must work without extended transport support.
 - V1/V2 must only be offered when `moonproto::extended_transport_available()`
   returns `true`.
 - Keep live credentials outside the public repo.

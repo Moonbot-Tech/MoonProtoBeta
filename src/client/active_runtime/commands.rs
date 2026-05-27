@@ -16,6 +16,8 @@ pub(super) enum RuntimeCommand {
     },
     UnsubscribeAllTrades,
     BalanceRefresh,
+    AccountHedgeModeRefresh,
+    AccountApiExpirationRefresh,
     OrderSnapshotRefresh,
     TransferAssetsRefresh,
     TransferAssetsRefreshKind(crate::state::ExchangeKind),
