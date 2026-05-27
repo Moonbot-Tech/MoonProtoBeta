@@ -1,7 +1,7 @@
 //! Settings sync state — snapshot последних UI-настроек, полученных от сервера.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoUIStruct.pas`. По модели DEVIATION #5
-//! (observer-модель) — мы лишь храним самый свежий snapshot для каждой подкоманды.
+//! Источник Delphi: `MoonProto/MoonProtoUIStruct.pas`. По observer-модели мы
+//! лишь храним самый свежий snapshot для каждой подкоманды.
 //! Прикладная логика (применение настроек к engine/UI) — задача потребителя.
 //!
 //! ## Что отслеживается

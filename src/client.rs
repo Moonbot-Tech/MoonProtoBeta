@@ -448,7 +448,7 @@ pub struct Client {
     /// `self.server_time_delta` и с глобальным `SERVER_TIME_DELTA_DAYS`,
     /// который нужен только raw `EventDispatcher::dispatch_into` без handle.
     ///
-    /// **Multi-Client** (DEVIATION #23): `EventDispatcher` должен быть привязан к
+    /// **Multi-Client**: `EventDispatcher` должен быть привязан к
     /// этому handle через `EventDispatcher::set_server_time_delta_source(handle)`
     /// или автоматически через active runtime. Без
     /// привязки EventDispatcher падает обратно на global, что при multi-Client даёт

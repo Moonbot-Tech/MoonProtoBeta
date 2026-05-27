@@ -34,8 +34,8 @@ fn get_ntp_offset_days() -> f64 {
 /// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
 /// через `MoonClient` / low-level active pump и **не использует** это global значение.
 ///
-/// DEVIATION #23 закрыт: multi-Client больше не страдает от перезаписи —
-/// каждый Client имеет свой `Arc<AtomicU64>` handle.
+/// Multi-client sessions do not share this value in the active path: each
+/// `Client` has its own `Arc<AtomicU64>` handle.
 static SERVER_TIME_DELTA_DAYS: AtomicU64 = AtomicU64::new(0);
 
 /// Установить fallback server_time_delta (в днях, как TDateTime).

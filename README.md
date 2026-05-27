@@ -39,8 +39,8 @@ before connecting.
 For live tests, put the config outside this crate repo. By default FireTest reads
 `../moonproto.firetest.conf` relative to the `moonproto/` directory. You can
 override the path with `MOONPROTO_FIRETEST_CONFIG`.
-In the original private workspace this means the config lives in the workspace
-root next to the `moonproto/` directory, not inside the public crate.
+Keep this file next to the checkout, not inside the public crate, so live
+credentials never become part of commits or packages.
 
 ```text
 server = HOST:PORT

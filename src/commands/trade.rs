@@ -1,6 +1,6 @@
 //! MPC_Order channel — все 30 подкоманд TBaseTradeCommand.
 //!
-//! Источник Delphi: `X:\proj-X\MoonBot\src\MoonProto\MoonProtoTradeStruct.pas` (966 строк).
+//! Источник Delphi: `MoonProto/MoonProtoTradeStruct.pas`.
 //!
 //! ## Архитектура канала
 //!

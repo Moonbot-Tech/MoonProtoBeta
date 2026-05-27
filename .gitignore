@@ -1,8 +1,8 @@
 target/
 *.exe
 
-# Internal work plans live in ../spec_pipeline/work and must not be published
-# with the public moonproto crate snapshot.
+# Internal work plans must not be published with the public moonproto crate
+# snapshot.
 docs/delphi_threading_rewrite_plan.md
 
 # Raw protocol reference is internal maintainer documentation. The public crate

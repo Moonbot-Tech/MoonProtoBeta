@@ -82,7 +82,6 @@ impl Client {
     ///
     /// `MoonClient` and the low-level active pump link this automatically.
     ///
-    /// См. `DEVIATION.md #23` (single-Client → multi-Client refactor).
     pub fn server_time_delta_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
         Arc::clone(&self.server_time_delta_handle)
     }

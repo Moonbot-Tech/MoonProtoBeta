@@ -4,11 +4,9 @@
 /// Open source code does NOT know what moonext does internally.
 /// It just calls wrap/unwrap and sends whatever moonext tells it to send.
 ///
-/// ## FFI ABI (real, vs CLAUDE.md simplified description)
+/// ## FFI ABI
 ///
-/// CLAUDE.md project rules describe a simplified ABI:
-/// `moon_ext_wrap(buf, len, mode) -> u32`. The **real** ABI used by the closed-source
-/// moonext.dll/.so/.dylib is extended (see DEVIATION #13 — ПОДТВЕРЖДЕНО):
+/// The closed-source moonext library uses this extended ABI:
 ///
 /// - `moon_ext_wrap(buf: *mut u8, len: u32, cap: u32, mode: u8, is_server: u8,
 ///                   extra_buf: *mut u8, extra_len: *mut u32) -> u32`

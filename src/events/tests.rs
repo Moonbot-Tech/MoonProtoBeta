@@ -2191,7 +2191,7 @@ fn dispatch_into_active_drops_domain_commands_before_init() {
 }
 
 // =========================================================================
-//  Multi-Client ServerTimeDelta tests (DEVIATION #23)
+//  Multi-Client ServerTimeDelta tests
 // =========================================================================
 
 /// Helper для тестов: дни конвертирует в seconds для удобства сравнения.
@@ -2249,7 +2249,7 @@ fn delta_handle_update_visible_to_dispatcher() {
 #[test]
 fn two_dispatchers_with_distinct_handles_are_isolated() {
     // **Core multi-Client gurantee**: два EventDispatcher'а с разными handle'ами
-    // (один на Client) видят разные delta. Это и есть фикс DEVIATION #23.
+    // (один на Client) видят разные delta.
     let h_a = Arc::new(AtomicU64::new(0));
     let h_b = Arc::new(AtomicU64::new(0));
     let mut d_a = EventDispatcher::new();

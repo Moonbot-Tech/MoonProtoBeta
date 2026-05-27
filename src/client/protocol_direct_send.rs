@@ -47,7 +47,7 @@ impl ProtocolCore<'_> {
     pub(crate) fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
         // Auto-compression (matches Delphi TMoonProtoDataToSend.Create pas:661-672).
         // Сжимает payload > 64 байт если результат < 95% оригинала. Inner cmd получает
-        // COMPRESSED_FLAG (0x80). Закрывает DEVIATION #11.
+        // COMPRESSED_FLAG (0x80).
         let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
 
         if item.encrypted {
@@ -142,7 +142,7 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn batch_send_direct(&mut self, item: &SendItem) {
-        // Auto-compression (DEVIATION #11 — закрыто).
+        // Auto-compression for large direct-send payloads.
         let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
 
         // Encrypt if needed

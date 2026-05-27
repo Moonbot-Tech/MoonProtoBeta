@@ -233,8 +233,8 @@ loss counters collected while `set_err_emu` is enabled. Use
 changing the loss rate.
 
 The snapshot includes total valid/delivered/dropped incoming packets,
-per-command counters, outgoing packets skipped by the hidden FireTest blackhole
-hook, and per-sliced-datagram counters. For sliced datagrams the API
+per-command counters, test-only outgoing drop counters, and per-sliced-datagram
+counters. For sliced datagrams the API
 reports:
 
 - `datagram_num`, `blocks_count`, delivered/dropped packet attempts, and

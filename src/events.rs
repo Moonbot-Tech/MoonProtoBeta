@@ -114,7 +114,7 @@ pub struct EventDispatcher {
     /// Per-Client `ServerTimeDelta` source. Если `Some` — `dispatch_into` для
     /// `Command::Order` читает delta отсюда (multi-Client safe). Если `None` —
     /// fallback на global `SERVER_TIME_DELTA_DAYS` для raw `dispatch_into`
-    /// потребителей без линковки. См. `DEVIATION.md #23`.
+    /// потребителей без линковки.
     ///
     /// Привязка: либо явный вызов [`Self::set_server_time_delta_source`] с
     /// `client.server_time_delta_handle()`, либо автоматически через active

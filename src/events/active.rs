@@ -105,7 +105,7 @@ impl EventDispatcher {
         // После первого вызова `dispatch_into_active` все последующие dispatch'и
         // используют Client-specific delta (а не global). Это критично при multi-Client:
         // global перезаписывается последним активным Client'ом, что без линковки давало
-        // off-by-50-1000ms timestamps в ордерах других Client'ов. См. DEVIATION #23.
+        // off-by-50-1000ms timestamps в ордерах других Client'ов.
         if self.server_time_delta_source.is_none() {
             self.server_time_delta_source = Some(Arc::clone(&ctx.server_time_delta_source));
         }

@@ -1,5 +1,5 @@
 //! SynLZ decompression — byte-exact port of mORMot SynLZdecompress1pas.
-//! Source: mormot.core.base.pas:10493-10735 (C:\files\dcomp12\mormot\core\mormot.core.base.pas)
+//! Source: mORMot `mormot.core.base.pas` SynLZ implementation.
 //!
 //! Header format VERIFIED against mORMot source (SynLZdecompressdestlen, line 10493):
 //!   result := PWord(in_p)^;
