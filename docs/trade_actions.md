@@ -24,7 +24,13 @@ does not mutate a snapshot and does not pass `&mut Orders` around.
 ```rust
 if let Some(snapshot) = client.snapshot() {
     if let Some(order) = snapshot.orders().get(order_uid) {
-        println!("price={} qty={}", order.price, order.quantity);
+        println!(
+            "buy_actual={} buy_qty={} sell_actual={} sell_qty={}",
+            order.buy_order.actual_price,
+            order.buy_order.quantity,
+            order.sell_order.actual_price,
+            order.sell_order.quantity
+        );
     }
 }
 
