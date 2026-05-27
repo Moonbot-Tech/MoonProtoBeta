@@ -306,7 +306,7 @@ are preserved as their original byte instead of being collapsed to
 `BaseCurrency::UNKNOWN`. For older servers that do not provide this field,
 `Market::futures_type` is `BaseCurrency::EMPTY`.
 
-`Market::listed_type_like_delphi()` returns the Delphi `TListedOnExchange`
+`Market::listed_type()` returns the Delphi `TListedOnExchange`
 post-processing result for `GetMarketsList`: `BaseCurrency::EMPTY` means
 `ListedType::SPOT`; any other `futures_type` means `ListedType::BOTH`.
 `ListedType` is a public ordinal wrapper for the derived listing kind.

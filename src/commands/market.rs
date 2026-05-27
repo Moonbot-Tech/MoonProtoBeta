@@ -229,14 +229,20 @@ pub struct Market {
 }
 
 impl Market {
-    /// Delphi `GetMarketsList` post-pass:
-    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
-    pub fn listed_type_like_delphi(&self) -> ListedType {
+    /// Listed-on-exchange kind derived from `futures_type`.
+    pub fn listed_type(&self) -> ListedType {
         if self.futures_type == BaseCurrency::EMPTY {
             ListedType::SPOT
         } else {
             ListedType::BOTH
         }
+    }
+
+    /// Delphi `GetMarketsList` post-pass:
+    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
+    #[doc(hidden)]
+    pub fn listed_type_like_delphi(&self) -> ListedType {
+        self.listed_type()
     }
 
     /// Delphi `TMarket.FTotalProfit`.

@@ -109,18 +109,15 @@ fn market_v1_defaults_futures_type_to_empty_like_delphi_create_base() {
 fn market_listed_type_matches_delphi_get_markets_list_post_pass() {
     let mut spot = sample_market("BTC", false);
     spot.futures_type = BaseCurrency::EMPTY;
-    assert_eq!(spot.listed_type_like_delphi(), ListedType::SPOT);
+    assert_eq!(spot.listed_type(), ListedType::SPOT);
 
     let mut both = sample_market("ETH", true);
     both.futures_type = BaseCurrency::USDT;
-    assert_eq!(both.listed_type_like_delphi(), ListedType::BOTH);
+    assert_eq!(both.listed_type(), ListedType::BOTH);
 
     let mut unknown_non_empty = sample_market("NEW", true);
     unknown_non_empty.futures_type = BaseCurrency::UNKNOWN;
-    assert_eq!(
-        unknown_non_empty.listed_type_like_delphi(),
-        ListedType::BOTH
-    );
+    assert_eq!(unknown_non_empty.listed_type(), ListedType::BOTH);
 }
 
 #[test]
