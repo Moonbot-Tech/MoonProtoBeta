@@ -199,6 +199,8 @@ pub enum Event {
     Balance(BalanceEvent),
     /// Transferable wallet assets refreshed through Engine API.
     TransferAssets(TransferAssetsEvent),
+    /// Demand-driven CoinCard candles for one market/history kind.
+    CoinCardCandles(crate::state::CoinCardCandlesEvent),
     /// Completion of a non-blocking user-facing Engine API action.
     EngineAction(EngineActionEvent),
     /// Compact arbitrage relay payload after active-library market-index

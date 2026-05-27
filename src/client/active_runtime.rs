@@ -18,8 +18,8 @@ use commands::{
 pub use handles::{MoonOrders, MoonTrade, OrderTarget};
 use runtime_loop::{publish_queued_events, publish_snapshot, runtime_loop};
 pub use types::{
-    ClosePositionParams, EngineActionTicket, MoonClientError, NewOrderParams, OrderSide,
-    SellOrderParams, SplitOrderParams, TradesStreamMode,
+    ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonClientError,
+    NewOrderParams, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode,
 };
 
 /// High-level Active Lib client for regular applications.
@@ -495,8 +495,33 @@ impl MoonClient {
             .map(|merged| merged.markets.len())
     }
 
-    /// Request one market's historical candles through Engine API.
+    /// Request CoinCard deep-history candles and return immediately.
+    ///
+    /// These are demand-driven candles such as Delphi `hk_4h` for CoinCard UI.
+    /// They are separate from the retained 5m candles that Active Lib loads and
+    /// maintains from trades. Completion arrives as `Event::CoinCardCandles`;
+    /// read the latest rows through `snapshot().coin_card_candles()`.
     pub fn request_coin_card_candles(
+        &self,
+        market: impl Into<String>,
+        ticks: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<CoinCardCandlesTicket, MoonClientError> {
+        let market = market.into();
+        let payload = crate::commands::candles::get_coin_card_candles(&market, ticks);
+        let ticket = CoinCardCandlesTicket {
+            market,
+            kind: ticks,
+            request_uid: engine_request_uid(&payload),
+        };
+        self.send_no_reply(RuntimeCommand::CoinCardCandles {
+            ticket: ticket.clone(),
+            payload,
+        })?;
+        Ok(ticket)
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::request_coin_card_candles`].
+    pub fn blocking_request_coin_card_candles(
         &self,
         market: impl Into<String>,
         ticks: crate::commands::candles::DeepHistoryKind,

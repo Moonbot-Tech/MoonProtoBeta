@@ -27,8 +27,9 @@
 //! Profiles:
 //! - `MOONPROTO_FIRETEST_PROFILE=quick` — one client, <=30s target health gate:
 //!   connect/AuthDone/InitDone, BaseCheck/AuthCheck, markets/indexes/update,
-//!   retained LastPrice/trades, derived trade/LastPrice snapshot, trades +
-//!   orderbook streams, ParseFailed=0, CPU summary.
+//!   retained LastPrice/trades, derived trade/LastPrice snapshot, non-blocking
+//!   CoinCard 4h candle request, trades + orderbook streams, ParseFailed=0,
+//!   CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
 //!   health/stress scenario below. Requires `allow_mutation=true`.
 //!
@@ -58,7 +59,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
 use moonproto::commands::arb::ArbPayload;
 use moonproto::commands::candles::{
-    parse_request_candles_data_response, CandlesAggregator, RequestCandlesMarket,
+    parse_request_candles_data_response, CandlesAggregator, DeepHistoryKind, RequestCandlesMarket,
 };
 use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
 use moonproto::commands::engine_request;
@@ -101,6 +102,8 @@ const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
 const QUICK_TOTAL_TARGET_SECS: u64 = 30;
 const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
+const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
+const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FireProfile {
@@ -395,6 +398,10 @@ struct SessionStats {
     transfer_asset_events: u64,
     transfer_asset_updated_mask: u8,
     transfer_asset_failures: u64,
+    coin_card_events: u64,
+    coin_card_updates: u64,
+    coin_card_failures: u64,
+    coin_card_last_count: usize,
     parse_failed: u64,
     candles_requested: bool,
     candles_chunks: u64,
@@ -454,6 +461,10 @@ impl Clone for SessionStats {
             transfer_asset_events: self.transfer_asset_events,
             transfer_asset_updated_mask: self.transfer_asset_updated_mask,
             transfer_asset_failures: self.transfer_asset_failures,
+            coin_card_events: self.coin_card_events,
+            coin_card_updates: self.coin_card_updates,
+            coin_card_failures: self.coin_card_failures,
+            coin_card_last_count: self.coin_card_last_count,
             parse_failed: self.parse_failed,
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
@@ -499,7 +510,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} coin_card_events={} updates={} failures={} last_count={} parse_failed={} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -528,6 +539,10 @@ impl SessionStats {
             self.transfer_asset_events,
             self.transfer_asset_updated_mask,
             self.transfer_asset_failures,
+            self.coin_card_events,
+            self.coin_card_updates,
+            self.coin_card_failures,
+            self.coin_card_last_count,
             self.parse_failed,
             candles
         )
@@ -564,11 +579,18 @@ struct Session {
     candles_snapshot_tx: mpsc::Sender<Vec<RequestCandlesMarket>>,
     candles_snapshot_rx: mpsc::Receiver<Vec<RequestCandlesMarket>>,
     transfer_assets_rx: Vec<PendingTransferAssets>,
+    coin_card_candles_rx: Vec<PendingCoinCardCandles>,
     stats: Arc<Mutex<SessionStats>>,
 }
 
 struct PendingTransferAssets {
     kind: ExchangeKind,
+    rx: mpsc::Receiver<EngineResponse>,
+}
+
+struct PendingCoinCardCandles {
+    market: String,
+    kind: DeepHistoryKind,
     rx: mpsc::Receiver<EngineResponse>,
 }
 
@@ -655,6 +677,7 @@ impl Session {
             candles_snapshot_tx,
             candles_snapshot_rx,
             transfer_assets_rx: Vec::new(),
+            coin_card_candles_rx: Vec::new(),
             stats,
         };
         session.drain_queued();
@@ -677,6 +700,7 @@ impl Session {
         self.refresh_stats_from_dispatcher(false);
         self.apply_completed_candles_snapshots();
         self.apply_completed_transfer_assets();
+        self.apply_completed_coin_card_candles();
     }
 
     fn drain_queued(&mut self) {
@@ -709,6 +733,40 @@ impl Session {
         );
     }
 
+    fn request_coin_card_candles(&mut self, market: &str, kind: DeepHistoryKind) {
+        let rx = self.client.api_get_coin_card_candles(market, kind);
+        self.coin_card_candles_rx.push(PendingCoinCardCandles {
+            market: market.to_string(),
+            kind,
+            rx,
+        });
+        println!(
+            "FIRETEST non-blocking CoinCard candles queued market={} kind={kind:?}",
+            market
+        );
+    }
+
+    fn coin_card_candles_count(&self, market: &str, kind: DeepHistoryKind) -> usize {
+        self.dispatcher
+            .coin_card_candles()
+            .get(market, kind)
+            .map(|rows| rows.len())
+            .unwrap_or(0)
+    }
+
+    fn assert_coin_card_candles_healthy(&self, market: &str, kind: DeepHistoryKind) {
+        let count = self.coin_card_candles_count(market, kind);
+        assert!(
+            count >= FIRETEST_MIN_COIN_CARD_CANDLES,
+            "FireTest non-blocking CoinCard candles returned too few rows for {market} {kind:?}: got {count}, expected at least {}",
+            FIRETEST_MIN_COIN_CARD_CANDLES
+        );
+        println!(
+            "OK: non-blocking CoinCard candles market={} kind={kind:?} count={}",
+            market, count
+        );
+    }
+
     fn apply_completed_transfer_assets(&mut self) {
         let mut produced_event = false;
         let mut i = 0;
@@ -725,6 +783,38 @@ impl Session {
                     panic!(
                         "FireTest transfer assets receiver closed before response for {}",
                         kind.name()
+                    );
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                }
+            }
+        }
+        if produced_event {
+            self.drain_queued();
+            self.refresh_stats_from_dispatcher(false);
+        }
+    }
+
+    fn apply_completed_coin_card_candles(&mut self) {
+        let mut produced_event = false;
+        let mut i = 0;
+        while i < self.coin_card_candles_rx.len() {
+            match self.coin_card_candles_rx[i].rx.try_recv() {
+                Ok(resp) => {
+                    let pending = self.coin_card_candles_rx.swap_remove(i);
+                    self.dispatcher.apply_coin_card_candles_response(
+                        pending.market,
+                        pending.kind,
+                        resp,
+                    );
+                    produced_event = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let pending = self.coin_card_candles_rx.swap_remove(i);
+                    panic!(
+                        "FireTest CoinCard candles receiver closed before response for {} {:?}",
+                        pending.market, pending.kind
                     );
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -1975,6 +2065,45 @@ fn record_event(
                 }
             }
         }
+        Event::CoinCardCandles(ev) => {
+            st.coin_card_events += 1;
+            match ev {
+                moonproto::CoinCardCandlesEvent::Updated {
+                    market,
+                    kind,
+                    request_uid,
+                    count,
+                    revision,
+                } => {
+                    st.coin_card_updates += 1;
+                    st.coin_card_last_count = *count;
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "CoinCardCandles market={} kind={:?} uid={} count={} revision={}",
+                            market, kind, request_uid, count, revision
+                        ),
+                    );
+                }
+                moonproto::CoinCardCandlesEvent::UpdateFailed {
+                    market,
+                    kind,
+                    request_uid,
+                    error,
+                } => {
+                    st.coin_card_failures += 1;
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "CoinCardCandles failed market={} kind={:?} uid={:?} error={}",
+                            market, kind, request_uid, error
+                        ),
+                    );
+                }
+            }
+        }
         Event::Markets(ev) => {
             st.market_events += 1;
             if let Some(dispatcher) = dispatcher {
@@ -2742,6 +2871,12 @@ fn has_transfer_assets_refresh(st: &SessionStats) -> bool {
     st.transfer_asset_updated_mask == 0b111 && st.transfer_asset_failures == 0
 }
 
+fn has_coin_card_candles(st: &SessionStats) -> bool {
+    st.coin_card_updates > 0
+        && st.coin_card_failures == 0
+        && st.coin_card_last_count >= FIRETEST_MIN_COIN_CARD_CANDLES
+}
+
 fn has_market_consistency(st: &SessionStats) -> bool {
     if !st.connected_now || st.parse_failed != 0 || st.market_invariant_error.is_some() {
         return false;
@@ -3198,6 +3333,7 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
 
     let mut a = Session::connect("A", &cfg, keys, None);
     a.request_transfer_assets_refresh();
+    a.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
     assert!(
         a.client.is_authorized(),
         "quick FireTest: connect_and_init returned but client is not AuthDone"
@@ -3209,12 +3345,13 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
 
     assert!(
         pump_single_until(&mut a, cfg.wait, "quick streams/API/market health", |a| {
-            has_quick_health(a) && has_transfer_assets_refresh(a)
+            has_quick_health(a) && has_transfer_assets_refresh(a) && has_coin_card_candles(a)
         }),
-        "quick FireTest did not receive required API methods, transfer assets, market state, trades and orderbook within {:?}: A=[{}]",
+        "quick FireTest did not receive required API methods, transfer assets, non-blocking CoinCard candles, market state, trades and orderbook within {:?}: A=[{}]",
         cfg.wait,
         a.snapshot().summary()
     );
+    a.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
 
     let st = a.snapshot();
     println!(
@@ -3854,6 +3991,8 @@ fn fire_test_active_library_health() {
     let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
     a.request_transfer_assets_refresh();
     b.request_transfer_assets_refresh();
+    a.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
+    b.request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND);
     assert_strategy_field_visible_for_firetest(&a, &cfg, &seeded_strategy);
     assert_strategy_field_visible_for_firetest(&b, &cfg, &seeded_strategy);
     assert!(
@@ -4056,6 +4195,8 @@ fn fire_test_active_library_health() {
     );
 
     pump_pair_for(&mut a, &mut b, Duration::from_millis(200));
+    a.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
+    b.assert_coin_card_candles_healthy(&cfg.market, FIRETEST_COIN_CARD_KIND);
     log_protocol_cpu_pair("final", &a, &b);
     write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
     a.emit_active_lib_report(FireProfile::Full, start);

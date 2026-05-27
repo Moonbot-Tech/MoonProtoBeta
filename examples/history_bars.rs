@@ -55,13 +55,14 @@ fn main() {
     };
 
     println!("[request] candles market={market} kind={kind:?}");
-    let candles = match client.request_coin_card_candles(market, kind, Duration::from_secs(15)) {
-        Ok(candles) => candles,
-        Err(err) => {
-            eprintln!("[request] failed: {err}");
-            std::process::exit(3);
-        }
-    };
+    let candles =
+        match client.blocking_request_coin_card_candles(market, kind, Duration::from_secs(15)) {
+            Ok(candles) => candles,
+            Err(err) => {
+                eprintln!("[request] failed: {err}");
+                std::process::exit(3);
+            }
+        };
     println!("[response] {} candles", candles.len());
     if let Some(first) = candles.first() {
         print_candle("first", first);

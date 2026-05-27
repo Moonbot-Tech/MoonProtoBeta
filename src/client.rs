@@ -84,8 +84,9 @@ mod subscriptions;
 mod transport_state;
 
 pub use active_runtime::{
-    ClosePositionParams, EngineActionTicket, MoonClient, MoonClientError, MoonOrders, MoonTrade,
-    NewOrderParams, OrderSide, OrderTarget, SellOrderParams, SplitOrderParams, TradesStreamMode,
+    ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonClient, MoonClientError,
+    MoonOrders, MoonTrade, NewOrderParams, OrderSide, OrderTarget, SellOrderParams,
+    SplitOrderParams, TradesStreamMode,
 };
 pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;

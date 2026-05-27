@@ -18,6 +18,7 @@ pub struct EventDispatcherSnapshot {
     trades: TradesState,
     balances: BalancesState,
     transfer_assets: TransferAssetsState,
+    coin_card_candles: crate::state::CoinCardCandlesState,
     strats: StratsState,
     settings: SettingsState,
     markets: MarketsState,
@@ -66,6 +67,11 @@ impl EventDispatcherSnapshot {
     /// Read-only transferable asset lists by wallet kind.
     pub fn transfer_assets(&self) -> &TransferAssetsState {
         &self.transfer_assets
+    }
+
+    /// Demand-driven CoinCard candles by market/history kind.
+    pub fn coin_card_candles(&self) -> &crate::state::CoinCardCandlesState {
+        &self.coin_card_candles
     }
 
     /// Read-only strategy state.
@@ -182,6 +188,7 @@ impl EventDispatcher {
             trades: self.trades.clone(),
             balances: self.balances.clone(),
             transfer_assets: self.transfer_assets.clone(),
+            coin_card_candles: self.coin_card_candles.clone(),
             strats: self.strats.clone(),
             settings: self.settings.clone(),
             markets: self.markets.clone(),

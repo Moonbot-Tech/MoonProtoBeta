@@ -1,12 +1,13 @@
 # Engine API
 
-Engine API is the request/response surface for one-shot server operations:
+Engine API is the request/response wire surface for server operations:
 health checks, account reads, market list refreshes, candles, orderbook
 snapshots, transfer assets, and account settings.
 
-Use typed `MoonClient::request_*` helpers for common one-shot reads and
-`MoonClient` mutation helpers for one-shot account operations. The runtime keeps
-pumping MoonProto while the caller waits for the response timeout. Low-level
+Use typed `MoonClient::request_*` helpers for common reads only when the caller
+really needs the value in the same synchronous branch. User-facing UI refreshes
+and mutations are Active Lib intents: they queue work, return immediately, and
+publish events/snapshots later. Low-level
 `Client::api_*` wrappers are hidden from rustdoc and kept only for custom
 protocol tools that intentionally work with raw `EngineResponse` receivers.
 
@@ -29,11 +30,6 @@ let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
 let transfer_assets =
     client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
-let history = client.request_coin_card_candles(
-    "BTCUSDT",
-    moonproto::commands::candles::DeepHistoryKind::Hour1,
-    Duration::from_secs(12),
-)?;
 let markets_received = client.refresh_candles(Duration::from_secs(30))?;
 ```
 
@@ -68,10 +64,10 @@ path.
 
 | Group | Methods |
 |---|---|
-| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
-| `MoonClient` async Active Lib refresh | `refresh_balances`, `refresh_transfer_assets`, `refresh_transfer_assets_kind` |
+| `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
+| `MoonClient` async Active Lib refresh | `refresh_balances`, `refresh_transfer_assets`, `refresh_transfer_assets_kind`, `request_coin_card_candles` |
 | `MoonClient` non-blocking mutation/refresh intents | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `transfer_asset` / `do_transfer_asset`, `refresh_markets_balance_full`, `reload_order_book` |
-| Explicit blocking diagnostic mutations | `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
+| Explicit blocking diagnostic helpers | `blocking_request_coin_card_candles`, `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
 
@@ -84,7 +80,6 @@ in the same synchronous branch before continuing:
 - `request_balance("USDT", timeout)`;
 - `request_hedge_mode(timeout)`;
 - `request_api_expiration_time(timeout)`;
-- `request_coin_card_candles(market, kind, timeout)`;
 - `refresh_candles(timeout)`;
 - `request_balance_snapshot(timeout)` / `request_order_snapshot(timeout)`.
 
@@ -93,6 +88,8 @@ snapshots/events:
 
 - `refresh_balances()`;
 - `refresh_transfer_assets()` / `refresh_transfer_assets_kind(kind)`;
+- `request_coin_card_candles(market, kind)`, which fills
+  `snapshot().coin_card_candles()` and emits `Event::CoinCardCandles`;
 - account actions such as `set_leverage`, `set_hedge_mode`,
   `cancel_all_orders`, `change_position_type`, `confirm_risk_limit`,
   `set_ma_mode`, `reload_order_book`, and `transfer_asset`;

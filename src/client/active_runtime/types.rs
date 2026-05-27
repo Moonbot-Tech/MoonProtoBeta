@@ -13,6 +13,17 @@ pub struct EngineActionTicket {
     pub method: crate::commands::EngineMethod,
 }
 
+/// Ticket returned after a demand-driven CoinCard candles request is queued.
+///
+/// Completion arrives as [`crate::events::Event::CoinCardCandles`]; the candles
+/// are then readable from `snapshot().coin_card_candles()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoinCardCandlesTicket {
+    pub market: String,
+    pub kind: crate::commands::candles::DeepHistoryKind,
+    pub request_uid: Option<u64>,
+}
+
 /// Error returned by the high-level [`MoonClient`](super::MoonClient) runtime API.
 #[derive(Debug)]
 pub enum MoonClientError {

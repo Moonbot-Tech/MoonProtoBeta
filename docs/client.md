@@ -457,6 +457,10 @@ client.refresh_transfer_assets()?; // async Active Lib update; read snapshot().t
 let transfer_assets =
     client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 let markets_received = client.refresh_candles(Duration::from_secs(30))?;
+let coin_card_ticket = client.request_coin_card_candles(
+    "BTCUSDT",
+    moonproto::commands::candles::DeepHistoryKind::Hour4,
+)?;
 client.set_leverage("BTCUSDT", 20)?;
 client.set_hedge_mode(true)?;
 client.confirm_risk_limit("BTCUSDT")?;
@@ -465,6 +469,11 @@ client.confirm_risk_limit("BTCUSDT")?;
 Read helpers validate the server response and parse the payload. Blocking
 mutation counterparts exist with a `blocking_` prefix for scripts, diagnostics,
 and custom tools that deliberately need a synchronous acknowledgement.
+`request_coin_card_candles` is intentionally non-blocking even though the
+underlying Delphi `Engine.getDeepHistory` call is blocking: Delphi UI sets a
+need flag and the background worker fills `TMarket.CoinCardCandles`. In Rust,
+completion arrives as `Event::CoinCardCandles` and the rows are readable through
+`snapshot().coin_card_candles()`.
 
 Low-level `Client::api_*` receivers remain only for custom runtimes and
 diagnostic tools. A normal application should not wait on raw receivers from the

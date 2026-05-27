@@ -23,6 +23,10 @@ pub(super) enum RuntimeCommand {
         ticket: super::EngineActionTicket,
         payload: Vec<u8>,
     },
+    CoinCardCandles {
+        ticket: super::CoinCardCandlesTicket,
+        payload: Vec<u8>,
+    },
     Ui(UiRuntimeCommand),
     Strat(StratRuntimeCommand),
     StrategySetChecked {

@@ -221,7 +221,7 @@ pub struct RequestCandlesMarket {
 /// ordinals would shift `Day1` to value 4 and the server would interpret the
 /// request as `hk_4h`.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeepHistoryKind {
     Min1 = 0,  // hk_1m
     Min5 = 1,  // hk_5m

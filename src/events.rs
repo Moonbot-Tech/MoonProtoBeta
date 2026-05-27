@@ -85,6 +85,7 @@ pub struct EventDispatcher {
     pub(crate) trades: TradesState,
     pub(crate) balances: BalancesState,
     pub(crate) transfer_assets: TransferAssetsState,
+    pub(crate) coin_card_candles: crate::state::CoinCardCandlesState,
     pub(crate) strats: StratsState,
     pub(crate) settings: SettingsState,
     pub(crate) markets: MarketsState,
@@ -171,6 +172,7 @@ impl Default for EventDispatcher {
             trades: TradesState::default(),
             balances: BalancesState::default(),
             transfer_assets: TransferAssetsState::default(),
+            coin_card_candles: crate::state::CoinCardCandlesState::default(),
             strats: StratsState::default(),
             settings: SettingsState::default(),
             markets: MarketsState::default(),
@@ -313,6 +315,14 @@ impl EventDispatcher {
         &self.transfer_assets
     }
 
+    /// Demand-driven CoinCard candles loaded through
+    /// `MoonClient::request_coin_card_candles`.
+    ///
+    /// This is separate from retained 5m market history.
+    pub fn coin_card_candles(&self) -> &crate::state::CoinCardCandlesState {
+        &self.coin_card_candles
+    }
+
     /// Apply one async `emk_UpdateTransferAssets` response to Active Lib state.
     pub fn apply_transfer_assets_response(
         &mut self,
@@ -357,6 +367,67 @@ impl EventDispatcher {
                 request_uid: None,
                 error: error.into(),
             })]);
+    }
+
+    /// Apply one async `emk_GetCoinCardCandles` response to demand-driven
+    /// CoinCard candle state.
+    ///
+    /// Regular applications should call
+    /// `MoonClient::request_coin_card_candles`; this method is for custom
+    /// low-level runtimes and diagnostics that own `Client + EventDispatcher`.
+    pub fn apply_coin_card_candles_response(
+        &mut self,
+        market: String,
+        kind: crate::commands::candles::DeepHistoryKind,
+        resp: EngineResponse,
+    ) -> bool {
+        let event = if resp.method != EngineMethod::GetCoinCardCandles {
+            crate::state::CoinCardCandlesEvent::UpdateFailed {
+                market,
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("unexpected EngineMethod {:?}", resp.method),
+            }
+        } else if !resp.success {
+            crate::state::CoinCardCandlesEvent::UpdateFailed {
+                market,
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
+            }
+        } else if let Some(candles) =
+            crate::commands::candles::parse_coin_card_candles_response(&resp.data)
+        {
+            self.coin_card_candles
+                .apply_update(market, kind, resp.request_uid, candles)
+        } else {
+            crate::state::CoinCardCandlesEvent::UpdateFailed {
+                market,
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("parse failed data_len={}", resp.data.len()),
+            }
+        };
+        let changed = matches!(event, crate::state::CoinCardCandlesEvent::Updated { .. });
+        self.queued_events.extend([Event::CoinCardCandles(event)]);
+        changed
+    }
+
+    pub(crate) fn coin_card_candles_request_failed(
+        &mut self,
+        market: String,
+        kind: crate::commands::candles::DeepHistoryKind,
+        request_uid: Option<u64>,
+        error: impl Into<String>,
+    ) {
+        self.queued_events.extend([Event::CoinCardCandles(
+            crate::state::CoinCardCandlesEvent::UpdateFailed {
+                market,
+                kind,
+                request_uid,
+                error: error.into(),
+            },
+        )]);
     }
 
     pub(crate) fn queue_engine_action_response(

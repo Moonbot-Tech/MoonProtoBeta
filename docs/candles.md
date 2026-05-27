@@ -61,12 +61,40 @@ inspect the merged `MergedCandles` object. Chart UI should not use that raw
 chunk/zlib state; it should read retained candles through
 `market_history_readers`.
 
-For one market and one history kind, `request_coin_card_candles` returns the
-server response as `Vec<DeepPrice>` and does not replace retained 5m history.
+## CoinCard History
+
+`request_coin_card_candles(market, kind)` is a demand-driven, non-blocking UI
+request. It mirrors Delphi's CoinCard path: UI marks the market as needing deep
+history, a background owner calls blocking `Engine.getDeepHistory`, then
+`TMarket.CoinCardCandles` is updated.
+
+These rows are separate from retained 5m history. Typical UI usage:
+
+```rust
+use moonproto::commands::candles::DeepHistoryKind;
+use moonproto::Event;
+
+let ticket = client.request_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour4)?;
+
+for event in client.drain_events() {
+    if let Event::CoinCardCandles(ev) = event {
+        println!("coin-card candles event: {ev:?}");
+    }
+}
+
+if let Some(snapshot) = client.snapshot() {
+    if let Some(rows) = snapshot
+        .coin_card_candles()
+        .get("BTCUSDT", DeepHistoryKind::Hour4)
+    {
+        println!("rows={}", rows.len());
+    }
+}
+```
+
 `DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
 `volume()` / `time_delphi()` helpers.
 
-The UI-facing non-blocking chart refresh shape is still under the API blocking
-audit. Do not build a desktop UI around waiting on candle requests from the UI
-thread; use retained history readers for rendering and treat explicit candle
-requests as worker/script operations until that pass is closed.
+`blocking_request_coin_card_candles(market, kind, timeout)` exists for scripts,
+tests, and diagnostics that deliberately need a synchronous `Vec<DeepPrice>`.
+Desktop UI code should use the non-blocking request plus event/snapshot state.

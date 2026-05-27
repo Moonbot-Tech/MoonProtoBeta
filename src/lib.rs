@@ -51,14 +51,14 @@
 //!
 //! For common one-shot Engine API operations, use [`MoonClient`] helpers such
 //! as [`MoonClient::request_balance`], [`MoonClient::request_hedge_mode`],
-//! [`MoonClient::request_api_expiration_time`],
-//! [`MoonClient::request_coin_card_candles`], and
-//! [`MoonClient::refresh_candles`]. Mutation helpers such as
+//! [`MoonClient::request_api_expiration_time`], and
+//! [`MoonClient::refresh_candles`]. Demand-driven CoinCard candles use
+//! non-blocking [`MoonClient::request_coin_card_candles`] and arrive as
+//! [`Event::CoinCardCandles`]. Mutation helpers such as
 //! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
 //! [`MoonClient::cancel_all_orders`] also run inside the owned runtime. The
-//! runtime keeps MoonProto pumping, checks the server status or channel
-//! completion, and parses or merges the response payload. Events observed
-//! during the wait remain available through
+//! runtime keeps MoonProto pumping, checks server status or channel completion,
+//! and parses or merges response payloads. Events remain available through
 //! [`MoonClient::drain_events`].
 //! Transfer UI should normally use [`MoonClient::refresh_transfer_assets`] and
 //! read [`EventDispatcherSnapshot::transfer_assets`] after
@@ -124,12 +124,12 @@ pub mod time;
 pub mod transport;
 
 pub use client::{
-    connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams, ConnectConfig,
-    ConnectError, EngineActionTicket, EngineRequestError, EventFn, EventWithStateFn, InitConfig,
-    InitError, InitResult, InitialStrategies, LifecycleEvent, MoonClient, MoonClientError,
-    MoonOrders, MoonTrade, NewOrderParams, OrderSide, OrderTarget, ProtocolMetricsSnapshot,
-    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
-    TradesStreamMode, UniqueKey,
+    connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams,
+    CoinCardCandlesTicket, ConnectConfig, ConnectError, EngineActionTicket, EngineRequestError,
+    EventFn, EventWithStateFn, InitConfig, InitError, InitResult, InitialStrategies,
+    LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade, NewOrderParams, OrderSide,
+    OrderTarget, ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams, SendPriority,
+    SplitOrderParams, TradeContextError, TradesStreamMode, UniqueKey,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
@@ -142,6 +142,9 @@ pub use key_import::{
     ImportedKeys, ImportedNetworkConfig,
 };
 pub use protocol::Command;
-pub use state::{ExchangeKind, TransferAssetsEvent, TransferAssetsState};
+pub use state::{
+    CoinCardCandlesEvent, CoinCardCandlesState, ExchangeKind, TransferAssetsEvent,
+    TransferAssetsState,
+};
 pub use time::DelphiTime;
 pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};

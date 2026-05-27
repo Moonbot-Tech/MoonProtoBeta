@@ -29,10 +29,12 @@ pub(super) fn runtime_loop(
         client.run_with_dispatcher_worker_queued(ACTIVE_RUNTIME_TICK, &mut dispatcher);
 
         let candles_changed = poll_auto_candles(&mut pending.auto_candles, &mut dispatcher);
+        let coin_card_changed =
+            poll_coin_card_candles(&mut pending.coin_card_candles, &mut dispatcher);
         let transfer_assets_changed =
             poll_transfer_assets(&mut pending.transfer_assets, &mut dispatcher);
         poll_engine_actions(&mut pending.engine_actions, &mut dispatcher);
-        if candles_changed || transfer_assets_changed {
+        if candles_changed || coin_card_changed || transfer_assets_changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
 
@@ -53,12 +55,18 @@ pub(super) fn runtime_loop(
 #[derive(Default)]
 struct RuntimePending {
     auto_candles: Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    coin_card_candles: Vec<PendingCoinCardCandles>,
     transfer_assets: Vec<PendingTransferAssets>,
     engine_actions: Vec<PendingEngineAction>,
 }
 
 struct PendingTransferAssets {
     kind: crate::state::ExchangeKind,
+    rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+struct PendingCoinCardCandles {
+    ticket: super::CoinCardCandlesTicket,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
 }
 
@@ -156,6 +164,10 @@ fn handle_command(
             payload,
         } => {
             schedule_engine_action(client, &mut pending.engine_actions, kind, ticket, payload);
+            false
+        }
+        RuntimeCommand::CoinCardCandles { ticket, payload } => {
+            schedule_coin_card_candles(client, &mut pending.coin_card_candles, ticket, payload);
             false
         }
         RuntimeCommand::Ui(cmd) => {
@@ -315,6 +327,16 @@ fn schedule_engine_action(
     pending.push(PendingEngineAction { kind, ticket, rx });
 }
 
+fn schedule_coin_card_candles(
+    client: &mut Client,
+    pending: &mut Vec<PendingCoinCardCandles>,
+    ticket: super::CoinCardCandlesTicket,
+    payload: Vec<u8>,
+) {
+    let rx = client.send_api_request_async(&payload);
+    pending.push(PendingCoinCardCandles { ticket, rx });
+}
+
 fn sync_runtime_trade_storage_scope(
     client: &Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -337,6 +359,36 @@ fn poll_auto_candles(
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 auto_candles.swap_remove(i);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                i += 1;
+            }
+        }
+    }
+    changed
+}
+
+fn poll_coin_card_candles(
+    pending: &mut Vec<PendingCoinCardCandles>,
+    dispatcher: &mut crate::events::EventDispatcher,
+) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i < pending.len() {
+        match pending[i].rx.try_recv() {
+            Ok(resp) => {
+                let ticket = pending.swap_remove(i).ticket;
+                changed |=
+                    dispatcher.apply_coin_card_candles_response(ticket.market, ticket.kind, resp);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let ticket = pending.swap_remove(i).ticket;
+                dispatcher.coin_card_candles_request_failed(
+                    ticket.market,
+                    ticket.kind,
+                    ticket.request_uid,
+                    "pending CoinCard candles receiver closed before response",
+                );
             }
             Err(mpsc::TryRecvError::Empty) => {
                 i += 1;
