@@ -237,6 +237,23 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
     }
 
+    /// Request transferable asset refresh for Spot, Futures, and Quarterly.
+    ///
+    /// This returns as soon as the requests are queued. The runtime applies each
+    /// response to `snapshot().transfer_assets()` and emits
+    /// `Event::TransferAssets` when that wallet kind finishes.
+    pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::TransferAssetsRefresh)
+    }
+
+    /// Request transferable asset refresh for one wallet kind.
+    pub fn refresh_transfer_assets_kind(
+        &self,
+        kind: crate::state::ExchangeKind,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::TransferAssetsRefreshKind(kind))
+    }
+
     /// Request a fresh full balance snapshot and return the applied read model.
     pub fn request_balance_snapshot(
         &self,
@@ -299,19 +316,21 @@ impl MoonClient {
     }
 
     /// Request transferable assets through Engine API.
+    ///
+    /// This is a direct blocking request/response helper. Regular UI code
+    /// should prefer `refresh_transfer_assets()` plus
+    /// `snapshot().transfer_assets()` so the runtime remains the owner of
+    /// Active Lib state.
     pub fn request_transfer_assets(
         &self,
-        balance_type: u8,
+        kind: crate::state::ExchangeKind,
         timeout: Duration,
     ) -> Result<Vec<crate::commands::engine_api::TransferAsset>, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::TransferAssets {
-            balance_type,
-            timeout,
-        })
-        .and_then(|reply| match reply {
-            RuntimeReply::TransferAssets(result) => result.map_err(MoonClientError::from),
-            _ => Err(MoonClientError::RuntimeStopped),
-        })
+        self.send_request(RuntimeCommandRequest::TransferAssets { kind, timeout })
+            .and_then(|reply| match reply {
+                RuntimeReply::TransferAssets(result) => result.map_err(MoonClientError::from),
+                _ => Err(MoonClientError::RuntimeStopped),
+            })
     }
 
     /// Request server-side full balance refresh.

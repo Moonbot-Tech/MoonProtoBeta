@@ -26,6 +26,7 @@ pub mod seq_ring;
 pub mod settings;
 pub mod strats;
 pub mod trades;
+pub mod transfer_assets;
 
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use history::{
@@ -64,3 +65,4 @@ pub(crate) use trades::TradesPacketEffect;
 pub use trades::{
     iter_trades_resend_response, TradesEvent, TradesResendResponsePackets, TradesState,
 };
+pub use transfer_assets::{ExchangeKind, TransferAssetsEvent, TransferAssetsState};

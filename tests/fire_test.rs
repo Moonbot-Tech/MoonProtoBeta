@@ -79,8 +79,8 @@ use moonproto::state::{
 };
 use moonproto::{
     connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
-    EventDispatcherSnapshot, ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent,
-    TradesStreamMode,
+    EventDispatcherSnapshot, ExchangeKind, ImportedKeys, InitConfig, InitialStrategies,
+    LifecycleEvent, TradesStreamMode,
 };
 
 const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -392,6 +392,9 @@ struct SessionStats {
     balance_events: u64,
     balance_snapshot_events: u64,
     balance_incremental_events: u64,
+    transfer_asset_events: u64,
+    transfer_asset_updated_mask: u8,
+    transfer_asset_failures: u64,
     parse_failed: u64,
     candles_requested: bool,
     candles_chunks: u64,
@@ -448,6 +451,9 @@ impl Clone for SessionStats {
             balance_events: self.balance_events,
             balance_snapshot_events: self.balance_snapshot_events,
             balance_incremental_events: self.balance_incremental_events,
+            transfer_asset_events: self.transfer_asset_events,
+            transfer_asset_updated_mask: self.transfer_asset_updated_mask,
+            transfer_asset_failures: self.transfer_asset_failures,
             parse_failed: self.parse_failed,
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
@@ -493,7 +499,7 @@ impl SessionStats {
                 )
             });
         format!(
-            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} parse_failed={} candles={}",
+            "connected_now={} fresh={} again={} reconnecting={} disconnected={} server_events={} engine={} raw={} logs={} settings={} strats={} strat_snapshots={} schema_events={} schema_kinds={} schema_fields={} strategy_rows={} markets={} trades={} target_trade_packets={} books={} target_book_full={} target_book_update={} market_probe=[{}] order_events={} balances={} transfer_assets={} mask={:#05b} failures={} parse_failed={} candles={}",
             self.connected_now,
             self.connected_fresh,
             self.connected_again,
@@ -518,6 +524,10 @@ impl SessionStats {
             self.target_orderbook_update,
             self.market_probe_summary(),
             self.order_events,
+            self.balance_events,
+            self.transfer_asset_events,
+            self.transfer_asset_updated_mask,
+            self.transfer_asset_failures,
             self.parse_failed,
             candles
         )
@@ -553,7 +563,13 @@ struct Session {
     history_worker: MarketHistoryWorker,
     candles_snapshot_tx: mpsc::Sender<Vec<RequestCandlesMarket>>,
     candles_snapshot_rx: mpsc::Receiver<Vec<RequestCandlesMarket>>,
+    transfer_assets_rx: Vec<PendingTransferAssets>,
     stats: Arc<Mutex<SessionStats>>,
+}
+
+struct PendingTransferAssets {
+    kind: ExchangeKind,
+    rx: mpsc::Receiver<EngineResponse>,
 }
 
 impl Session {
@@ -638,6 +654,7 @@ impl Session {
             history_worker,
             candles_snapshot_tx,
             candles_snapshot_rx,
+            transfer_assets_rx: Vec::new(),
             stats,
         };
         session.drain_queued();
@@ -659,6 +676,7 @@ impl Session {
         self.drain_queued();
         self.refresh_stats_from_dispatcher(false);
         self.apply_completed_candles_snapshots();
+        self.apply_completed_transfer_assets();
     }
 
     fn drain_queued(&mut self) {
@@ -673,6 +691,51 @@ impl Session {
             );
         }
         self.apply_completed_candles_snapshots();
+    }
+
+    fn request_transfer_assets_refresh(&mut self) {
+        for kind in ExchangeKind::ALL {
+            let rx = self.client.api_update_transfer_assets(kind);
+            self.transfer_assets_rx
+                .push(PendingTransferAssets { kind, rx });
+        }
+        println!(
+            "FIRETEST transfer assets refresh queued kinds=[{}]",
+            ExchangeKind::ALL
+                .into_iter()
+                .map(ExchangeKind::name)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+
+    fn apply_completed_transfer_assets(&mut self) {
+        let mut produced_event = false;
+        let mut i = 0;
+        while i < self.transfer_assets_rx.len() {
+            match self.transfer_assets_rx[i].rx.try_recv() {
+                Ok(resp) => {
+                    let kind = self.transfer_assets_rx[i].kind;
+                    self.dispatcher.apply_transfer_assets_response(kind, resp);
+                    produced_event = true;
+                    self.transfer_assets_rx.swap_remove(i);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let kind = self.transfer_assets_rx[i].kind;
+                    panic!(
+                        "FireTest transfer assets receiver closed before response for {}",
+                        kind.name()
+                    );
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                }
+            }
+        }
+        if produced_event {
+            self.drain_queued();
+            self.refresh_stats_from_dispatcher(false);
+        }
     }
 
     fn refresh_stats_from_dispatcher(&self, log_changes: bool) {
@@ -1219,6 +1282,38 @@ impl Session {
             "FIRETEST ActiveLib balance_item_assets nonzero_count={} preview=[{}]",
             balance_item_assets.len(),
             raw_preview
+        );
+
+        let mut total_transfer_nonzero = 0usize;
+        for (kind, rows) in snapshot.transfer_assets().iter() {
+            let nonzero = rows
+                .iter()
+                .filter(|asset| asset.amount.abs().max(asset.total.abs()) > EPS)
+                .count();
+            total_transfer_nonzero += nonzero;
+            let preview = rows
+                .iter()
+                .take(16)
+                .map(|asset| format!("{}:{:.8}/{:.8}", asset.currency, asset.amount, asset.total))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "FIRETEST ActiveLib transfer_assets kind={} revision={} rows={} nonzero={} preview=[{}]",
+                kind.name(),
+                snapshot.transfer_assets().kind_revision(kind),
+                rows.len(),
+                nonzero,
+                preview
+            );
+            assert!(
+                snapshot.transfer_assets().kind_revision(kind) > 0,
+                "ActiveLib transfer assets for {} were not refreshed",
+                kind.name()
+            );
+        }
+        assert!(
+            total_transfer_nonzero > 0,
+            "ActiveLib transfer assets were refreshed but all amount/total values are zero"
         );
     }
 
@@ -1825,6 +1920,39 @@ fn record_event(
                 BalanceEvent::Ignored { .. } | BalanceEvent::EpochStale { .. } => {}
             }
             log_server_event(&st, event_no, format!("Balance {ev:?}"));
+        }
+        Event::TransferAssets(ev) => {
+            st.transfer_asset_events += 1;
+            match ev {
+                moonproto::TransferAssetsEvent::Updated {
+                    kind,
+                    count,
+                    nonzero_count,
+                    revision,
+                    ..
+                } => {
+                    st.transfer_asset_updated_mask |= 1 << kind.to_byte();
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "TransferAssets kind={} count={} nonzero={} revision={}",
+                            kind.name(),
+                            count,
+                            nonzero_count,
+                            revision
+                        ),
+                    );
+                }
+                moonproto::TransferAssetsEvent::UpdateFailed { kind, error, .. } => {
+                    st.transfer_asset_failures += 1;
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!("TransferAssets kind={} failed={}", kind.name(), error),
+                    );
+                }
+            }
         }
         Event::Markets(ev) => {
             st.market_events += 1;
@@ -2589,6 +2717,10 @@ fn has_quick_health(st: &SessionStats) -> bool {
         && has_market_consistency(st)
 }
 
+fn has_transfer_assets_refresh(st: &SessionStats) -> bool {
+    st.transfer_asset_updated_mask == 0b111 && st.transfer_asset_failures == 0
+}
+
 fn has_market_consistency(st: &SessionStats) -> bool {
     if !st.connected_now || st.parse_failed != 0 || st.market_invariant_error.is_some() {
         return false;
@@ -3044,6 +3176,7 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     );
 
     let mut a = Session::connect("A", &cfg, keys, None);
+    a.request_transfer_assets_refresh();
     assert!(
         a.client.is_authorized(),
         "quick FireTest: connect_and_init returned but client is not AuthDone"
@@ -3055,9 +3188,9 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
 
     assert!(
         pump_single_until(&mut a, cfg.wait, "quick streams/API/market health", |a| {
-            has_quick_health(a)
+            has_quick_health(a) && has_transfer_assets_refresh(a)
         }),
-        "quick FireTest did not receive required API methods, market state, trades and orderbook within {:?}: A=[{}]",
+        "quick FireTest did not receive required API methods, transfer assets, market state, trades and orderbook within {:?}: A=[{}]",
         cfg.wait,
         a.snapshot().summary()
     );
@@ -3698,6 +3831,8 @@ fn fire_test_active_library_health() {
 
     let mut a = Session::connect("A", &cfg, keys, Some(seeded_strategy.clone()));
     let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
+    a.request_transfer_assets_refresh();
+    b.request_transfer_assets_refresh();
     assert_strategy_field_visible_for_firetest(&a, &cfg, &seeded_strategy);
     assert_strategy_field_visible_for_firetest(&b, &cfg, &seeded_strategy);
     assert!(
@@ -3709,9 +3844,12 @@ fn fire_test_active_library_health() {
 
     assert!(
         pump_pair_until(&mut a, &mut b, cfg.wait, "initial health", |a, b| {
-            has_initial_health(a) && has_initial_health(b)
+            has_initial_health(a)
+                && has_initial_health(b)
+                && has_transfer_assets_refresh(a)
+                && has_transfer_assets_refresh(b)
         }),
-        "FireTest initial health failed: both clients must receive trades and configured orderbook within {:?}",
+        "FireTest initial health failed: both clients must receive trades, transfer assets and configured orderbook within {:?}",
         cfg.wait
     );
     let _a_initial_settings = request_settings_until(&mut a, cfg.connect_timeout);

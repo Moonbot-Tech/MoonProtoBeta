@@ -16,6 +16,8 @@ pub(super) enum RuntimeCommand {
     },
     UnsubscribeAllTrades,
     BalanceRefresh,
+    TransferAssetsRefresh,
+    TransferAssetsRefreshKind(crate::state::ExchangeKind),
     Ui(UiRuntimeCommand),
     Strat(StratRuntimeCommand),
     StrategySetChecked {
@@ -63,7 +65,7 @@ pub(super) enum RuntimeCommandRequest {
         timeout: Duration,
     },
     TransferAssets {
-        balance_type: u8,
+        kind: crate::state::ExchangeKind,
         timeout: Duration,
     },
     CandlesData {

@@ -32,7 +32,9 @@ use std::sync::Arc;
 
 use crate::app_queue::AppQueue;
 use crate::commands::arb::ArbPayload;
-use crate::commands::engine_api::{EngineResponse, ServerInfo};
+use crate::commands::engine_api::{
+    parse_update_transfer_assets_response, EngineMethod, EngineResponse, ServerInfo,
+};
 use crate::commands::trade::{OrderType, TradeCtx};
 use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
@@ -42,7 +44,7 @@ use crate::state::{
     MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders, MarketHistoryWorker,
     MarketsEvent, MarketsState, OrderBookEvent, OrderBooks, OrderEvent, Orders,
     RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
-    TradeStorageScope, TradesEvent, TradesState,
+    TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
 };
 
 mod active;
@@ -81,6 +83,7 @@ pub struct EventDispatcher {
     pub(crate) order_books: OrderBooks,
     pub(crate) trades: TradesState,
     pub(crate) balances: BalancesState,
+    pub(crate) transfer_assets: TransferAssetsState,
     pub(crate) strats: StratsState,
     pub(crate) settings: SettingsState,
     pub(crate) markets: MarketsState,
@@ -166,6 +169,7 @@ impl Default for EventDispatcher {
             order_books: OrderBooks::default(),
             trades: TradesState::default(),
             balances: BalancesState::default(),
+            transfer_assets: TransferAssetsState::default(),
             strats: StratsState::default(),
             settings: SettingsState::default(),
             markets: MarketsState::default(),
@@ -298,6 +302,60 @@ impl EventDispatcher {
     /// Read-only balance state for account totals and per-market balances.
     pub fn balances(&self) -> &BalancesState {
         &self.balances
+    }
+
+    /// Read-only transferable asset lists by wallet kind.
+    ///
+    /// These are not market balances. They mirror Delphi `Markets.FAssets` and
+    /// are refreshed asynchronously through `MoonClient::refresh_transfer_assets`.
+    pub fn transfer_assets(&self) -> &TransferAssetsState {
+        &self.transfer_assets
+    }
+
+    /// Apply one async `emk_UpdateTransferAssets` response to Active Lib state.
+    pub fn apply_transfer_assets_response(
+        &mut self,
+        kind: crate::state::ExchangeKind,
+        resp: EngineResponse,
+    ) -> bool {
+        let event = if resp.method != EngineMethod::UpdateTransferAssets {
+            TransferAssetsEvent::UpdateFailed {
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("unexpected EngineMethod {:?}", resp.method),
+            }
+        } else if !resp.success {
+            TransferAssetsEvent::UpdateFailed {
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("server error {} {}", resp.error_code, resp.error_msg.trim()),
+            }
+        } else if let Some(assets) = parse_update_transfer_assets_response(&resp.data) {
+            self.transfer_assets
+                .apply_update(kind, resp.request_uid, assets)
+        } else {
+            TransferAssetsEvent::UpdateFailed {
+                kind,
+                request_uid: Some(resp.request_uid),
+                error: format!("parse failed data_len={}", resp.data.len()),
+            }
+        };
+        let changed = matches!(event, TransferAssetsEvent::Updated { .. });
+        self.queued_events.extend([Event::TransferAssets(event)]);
+        changed
+    }
+
+    pub(crate) fn transfer_assets_request_failed(
+        &mut self,
+        kind: crate::state::ExchangeKind,
+        error: impl Into<String>,
+    ) {
+        self.queued_events
+            .extend([Event::TransferAssets(TransferAssetsEvent::UpdateFailed {
+                kind,
+                request_uid: None,
+                error: error.into(),
+            })]);
     }
 
     /// Read-only strategy state and decoded strategy snapshots.

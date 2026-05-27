@@ -229,12 +229,12 @@ impl Client {
     pub fn request_transfer_assets(
         &mut self,
         dispatcher: &mut crate::events::EventDispatcher,
-        kind: u8,
+        kind: crate::state::ExchangeKind,
         timeout: Duration,
     ) -> Result<Vec<TransferAsset>, EngineRequestError> {
         self.request_engine_parsed(
             dispatcher,
-            &crate::commands::engine_request::update_transfer_assets(kind),
+            &crate::commands::engine_request::update_transfer_assets(kind.to_byte()),
             timeout,
             parse_update_transfer_assets_response,
         )
@@ -472,9 +472,12 @@ impl Client {
 
     /// `emk_UpdateTransferAssets(kind)`.
     #[doc(hidden)]
-    pub fn api_update_transfer_assets(&self, kind: u8) -> mpsc::Receiver<EngineResponse> {
+    pub fn api_update_transfer_assets(
+        &self,
+        kind: crate::state::ExchangeKind,
+    ) -> mpsc::Receiver<EngineResponse> {
         self.send_api_request_async(&crate::commands::engine_request::update_transfer_assets(
-            kind,
+            kind.to_byte(),
         ))
     }
 

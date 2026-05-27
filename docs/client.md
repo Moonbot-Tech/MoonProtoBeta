@@ -451,7 +451,9 @@ runtime keeps the UDP loop alive while the caller waits for the request timeout:
 let qty = client.request_balance("USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
-let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
+client.refresh_transfer_assets()?; // async Active Lib update; read snapshot().transfer_assets()
+let transfer_assets =
+    client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 let markets_received = client.refresh_candles(Duration::from_secs(30))?;
 client.set_leverage("BTCUSDT", 20, Duration::from_secs(12))?;
 client.set_hedge_mode(true, Duration::from_secs(12))?;

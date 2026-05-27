@@ -52,7 +52,6 @@
 //! For common one-shot Engine API operations, use [`MoonClient`] helpers such
 //! as [`MoonClient::request_balance`], [`MoonClient::request_hedge_mode`],
 //! [`MoonClient::request_api_expiration_time`],
-//! [`MoonClient::request_transfer_assets`],
 //! [`MoonClient::request_coin_card_candles`], and
 //! [`MoonClient::refresh_candles`]. Mutation helpers such as
 //! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
@@ -61,6 +60,9 @@
 //! completion, and parses or merges the response payload. Events observed
 //! during the wait remain available through
 //! [`MoonClient::drain_events`].
+//! Transfer UI should normally use [`MoonClient::refresh_transfer_assets`] and
+//! read [`EventDispatcherSnapshot::transfer_assets`] after
+//! [`Event::TransferAssets`].
 //!
 //! Regular applications should start with [`MoonClient`]. Lower-level
 //! [`Client`] and [`EventDispatcher`] APIs remain
@@ -140,5 +142,6 @@ pub use key_import::{
     ImportedKeys, ImportedNetworkConfig,
 };
 pub use protocol::Command;
+pub use state::{ExchangeKind, TransferAssetsEvent, TransferAssetsState};
 pub use time::DelphiTime;
 pub use transport::{ext_available as extended_transport_available, MoonKey, ServerMsgHeader};

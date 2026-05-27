@@ -27,7 +27,8 @@ use std::time::Duration;
 let qty = client.request_balance("USDT", Duration::from_secs(12))?;
 let hedge_mode = client.request_hedge_mode(Duration::from_secs(12))?;
 let api_expiration = client.request_api_expiration_time(Duration::from_secs(12))?;
-let transfer_assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
+let transfer_assets =
+    client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 let history = client.request_coin_card_candles(
     "BTCUSDT",
     moonproto::commands::candles::DeepHistoryKind::Hour1,
@@ -68,9 +69,34 @@ path.
 | Group | Methods |
 |---|---|
 | `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
+| `MoonClient` async Active Lib refresh | `refresh_balances`, `refresh_transfer_assets`, `refresh_transfer_assets_kind` |
 | `MoonClient` mutation/refresh helpers returning `Ok(())` on accepted server ack | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
+
+## Blocking vs Async
+
+Blocking helpers wait for a specific server response while the owned runtime
+keeps MoonProto pumping. Use them when the caller truly needs the returned value
+before continuing:
+
+- `request_balance("USDT", timeout)`;
+- `request_hedge_mode(timeout)`;
+- `request_api_expiration_time(timeout)`;
+- `request_coin_card_candles(market, kind, timeout)`;
+- `refresh_candles(timeout)`;
+- `request_balance_snapshot(timeout)` / `request_order_snapshot(timeout)`;
+- account actions that need an acknowledgement, such as `set_leverage`,
+  `set_hedge_mode`, and `cancel_all_orders`.
+
+Async Active Lib commands return after queuing work and later update
+snapshots/events:
+
+- `refresh_balances()`;
+- `refresh_transfer_assets()` / `refresh_transfer_assets_kind(kind)`;
+- subscriptions and order/trade intents such as `subscribe_orderbook`,
+  `subscribe_all_trades`, `client.orders().move_order(...)`, and
+  `client.trade().new_order(...)`.
 
 For subscriptions, prefer the registry-aware APIs:
 
@@ -141,14 +167,29 @@ Hidden raw wrappers such as `api_get_order`, `api_get_open_orders`, and
 reference server has no request-handler branches for them and returns
 `Unknown method` (error 400).
 
-`request_transfer_assets` is the normal request/response helper for transferable
-assets:
+`refresh_transfer_assets` is the normal Active Lib path for transfer UI. It
+queues the three wallet refresh requests and returns immediately; completed
+responses update `snapshot().transfer_assets()` and emit
+`Event::TransferAssets`:
 
 ```rust
-let assets = client.request_transfer_assets(0, Duration::from_secs(12))?;
-for asset in assets {
-    println!("{} transferable={} total={}", asset.currency, asset.amount, asset.total);
+use moonproto::ExchangeKind;
+
+client.refresh_transfer_assets()?;
+
+if let Some(snapshot) = client.snapshot() {
+    for asset in snapshot.transfer_assets().get(ExchangeKind::Futures) {
+        println!("{} transferable={} total={}", asset.currency, asset.amount, asset.total);
+    }
 }
+```
+
+`request_transfer_assets(kind, timeout)` remains available as a direct blocking
+request/response helper for scripts and diagnostics:
+
+```rust
+let assets =
+    client.request_transfer_assets(ExchangeKind::Spot, Duration::from_secs(12))?;
 ```
 
 The typed parser is also available as
@@ -186,7 +227,8 @@ the exact method identifier that the server sent. `data` is already
 DEFLATE-decompressed when the response was compressed. If the response metadata
 is malformed, parsing fails before an `EngineResponse` is emitted.
 
-Transfer asset rows returned by `request_transfer_assets`:
+Transfer asset rows stored in `TransferAssetsState` and returned by
+`request_transfer_assets`:
 
 ```rust
 pub struct TransferAsset {
@@ -198,6 +240,16 @@ pub struct TransferAsset {
 
 `amount` is the transferable quantity; `total` is the exchange-reported total
 for the same asset row.
+
+Wallet kinds use Delphi `TExchangeKind` order:
+
+```rust
+pub enum ExchangeKind {
+    Spot,
+    Futures,
+    Quarterly,
+}
+```
 
 ## Auto-Apply Through EventDispatcher
 
@@ -211,6 +263,10 @@ applied to the markets read model automatically:
 
 The dispatcher emits `Event::Markets(...)` and `Event::EngineResponse(...)` for
 these responses.
+
+`UpdateTransferAssets` is applied by the active runtime when requested through
+`refresh_transfer_assets`; because the response is consumed by the pending
+request registry, the public notification is `Event::TransferAssets(...)`.
 
 ## ServerInfo
 

@@ -16,9 +16,9 @@ pub(super) fn runtime_loop(
     events_tx: mpsc::Sender<crate::events::Event>,
     snapshot: Arc<RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>>,
 ) {
-    let mut auto_candles = Vec::new();
+    let mut pending = RuntimePending::default();
     loop {
-        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut auto_candles);
+        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut pending);
         if changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
@@ -28,7 +28,10 @@ pub(super) fn runtime_loop(
 
         client.run_with_dispatcher_worker_queued(ACTIVE_RUNTIME_TICK, &mut dispatcher);
 
-        if poll_auto_candles(&mut auto_candles, &mut dispatcher) {
+        let candles_changed = poll_auto_candles(&mut pending.auto_candles, &mut dispatcher);
+        let transfer_assets_changed =
+            poll_transfer_assets(&mut pending.transfer_assets, &mut dispatcher);
+        if candles_changed || transfer_assets_changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
 
@@ -36,7 +39,7 @@ pub(super) fn runtime_loop(
             publish_snapshot(&dispatcher, &snapshot);
         }
 
-        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut auto_candles);
+        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut pending);
         if changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
@@ -46,11 +49,22 @@ pub(super) fn runtime_loop(
     }
 }
 
+#[derive(Default)]
+struct RuntimePending {
+    auto_candles: Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    transfer_assets: Vec<PendingTransferAssets>,
+}
+
+struct PendingTransferAssets {
+    kind: crate::state::ExchangeKind,
+    rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
 fn drain_commands(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     rx: &mpsc::Receiver<RuntimeCommand>,
-    auto_candles: &mut Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    pending: &mut RuntimePending,
 ) -> (bool, bool) {
     let mut changed = false;
     loop {
@@ -59,7 +73,7 @@ fn drain_commands(
                 return (true, changed);
             }
             Ok(cmd) => {
-                changed |= handle_command(client, dispatcher, cmd, auto_candles);
+                changed |= handle_command(client, dispatcher, cmd, pending);
             }
             Err(mpsc::TryRecvError::Empty) => return (false, changed),
         }
@@ -70,7 +84,7 @@ fn handle_command(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     cmd: RuntimeCommand,
-    auto_candles: &mut Vec<mpsc::Receiver<crate::client::MergedCandles>>,
+    pending: &mut RuntimePending,
 ) -> bool {
     match cmd {
         RuntimeCommand::Stop => false,
@@ -98,7 +112,7 @@ fn handle_command(
             client.subscribe_all_trades(want_mm);
             sync_runtime_trade_storage_scope(client, dispatcher);
             if client.trades_storage_scope_intent().is_some() {
-                schedule_auto_candles_snapshot(client, auto_candles);
+                schedule_auto_candles_snapshot(client, &mut pending.auto_candles);
             }
             false
         }
@@ -106,18 +120,26 @@ fn handle_command(
             client.subscribe_trades_for(want_mm, markets);
             sync_runtime_trade_storage_scope(client, dispatcher);
             if client.trades_storage_scope_intent().is_some() {
-                schedule_auto_candles_snapshot(client, auto_candles);
+                schedule_auto_candles_snapshot(client, &mut pending.auto_candles);
             }
             false
         }
         RuntimeCommand::UnsubscribeAllTrades => {
             client.unsubscribe_all_trades();
-            auto_candles.clear();
+            pending.auto_candles.clear();
             sync_runtime_trade_storage_scope(client, dispatcher);
             false
         }
         RuntimeCommand::BalanceRefresh => {
             client.balance_request_refresh();
+            false
+        }
+        RuntimeCommand::TransferAssetsRefresh => {
+            schedule_transfer_assets_refresh(client, &mut pending.transfer_assets);
+            false
+        }
+        RuntimeCommand::TransferAssetsRefreshKind(kind) => {
+            schedule_transfer_assets_refresh_kind(client, &mut pending.transfer_assets, kind);
             false
         }
         RuntimeCommand::Ui(cmd) => {
@@ -196,15 +218,8 @@ fn handle_request_command(
             ),
             false,
         ),
-        RuntimeCommandRequest::TransferAssets {
-            balance_type,
-            timeout,
-        } => (
-            RuntimeReply::TransferAssets(client.request_transfer_assets(
-                dispatcher,
-                balance_type,
-                timeout,
-            )),
+        RuntimeCommandRequest::TransferAssets { kind, timeout } => (
+            RuntimeReply::TransferAssets(client.request_transfer_assets(dispatcher, kind, timeout)),
             false,
         ),
         RuntimeCommandRequest::CandlesData { timeout } => (
@@ -243,8 +258,8 @@ fn handle_usize_command(
             dispatcher.ui_strat_start_stop_v2(client, is_start)
         }
         _ => {
-            let mut auto_candles = Vec::new();
-            handle_command(client, dispatcher, cmd, &mut auto_candles);
+            let mut pending = RuntimePending::default();
+            handle_command(client, dispatcher, cmd, &mut pending);
             0
         }
     }
@@ -256,6 +271,21 @@ fn schedule_auto_candles_snapshot(
 ) {
     let (_uid, rx) = client.api_request_candles_data_async_registered();
     auto_candles.push(rx);
+}
+
+fn schedule_transfer_assets_refresh(client: &mut Client, pending: &mut Vec<PendingTransferAssets>) {
+    for kind in crate::state::ExchangeKind::ALL {
+        schedule_transfer_assets_refresh_kind(client, pending, kind);
+    }
+}
+
+fn schedule_transfer_assets_refresh_kind(
+    client: &mut Client,
+    pending: &mut Vec<PendingTransferAssets>,
+    kind: crate::state::ExchangeKind,
+) {
+    let rx = client.api_update_transfer_assets(kind);
+    pending.push(PendingTransferAssets { kind, rx });
 }
 
 fn sync_runtime_trade_storage_scope(
@@ -280,6 +310,34 @@ fn poll_auto_candles(
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 auto_candles.swap_remove(i);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                i += 1;
+            }
+        }
+    }
+    changed
+}
+
+fn poll_transfer_assets(
+    pending: &mut Vec<PendingTransferAssets>,
+    dispatcher: &mut crate::events::EventDispatcher,
+) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i < pending.len() {
+        match pending[i].rx.try_recv() {
+            Ok(resp) => {
+                changed |= dispatcher.apply_transfer_assets_response(pending[i].kind, resp);
+                pending.swap_remove(i);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                dispatcher.transfer_assets_request_failed(
+                    pending[i].kind,
+                    "pending transfer-assets receiver closed before response",
+                );
+                changed = true;
+                pending.swap_remove(i);
             }
             Err(mpsc::TryRecvError::Empty) => {
                 i += 1;

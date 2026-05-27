@@ -17,6 +17,7 @@ pub struct EventDispatcherSnapshot {
     order_books: OrderBooks,
     trades: TradesState,
     balances: BalancesState,
+    transfer_assets: TransferAssetsState,
     strats: StratsState,
     settings: SettingsState,
     markets: MarketsState,
@@ -60,6 +61,11 @@ impl EventDispatcherSnapshot {
     /// Read-only balance state.
     pub fn balances(&self) -> &BalancesState {
         &self.balances
+    }
+
+    /// Read-only transferable asset lists by wallet kind.
+    pub fn transfer_assets(&self) -> &TransferAssetsState {
+        &self.transfer_assets
     }
 
     /// Read-only strategy state.
@@ -175,6 +181,7 @@ impl EventDispatcher {
             order_books: self.order_books.clone(),
             trades: self.trades.clone(),
             balances: self.balances.clone(),
+            transfer_assets: self.transfer_assets.clone(),
             strats: self.strats.clone(),
             settings: self.settings.clone(),
             markets: self.markets.clone(),

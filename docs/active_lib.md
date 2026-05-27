@@ -20,6 +20,9 @@ send commands; the library maintains protocol and trading state.
   balance fields, arb slots, last trade tail, LastPrice line, MarkPrice line,
   retained trades, retained 5m candles, and derived volume/delta snapshots when
   trades storage is enabled.
+- Transferable wallet assets for Spot, Futures, and Quarterly wallets. These
+  are separate from per-market balances and are refreshed by an explicit async
+  Active Lib command.
 - Orders and order traces, including local stateful effects for move/cancel,
   stops, vstop, panic, immune, and snapshot cleanup.
 - Strategy schema and strategy snapshots. Applications can provide local
@@ -46,6 +49,9 @@ send commands; the library maintains protocol and trading state.
   `client.trade()`.
 - Stateful order actions are marshalled to the runtime owner; application code
   does not mutate `Orders`.
+- Asset-transfer UI calls `refresh_transfer_assets()` and then reads
+  `snapshot().transfer_assets()`. The command returns after queuing all wallet
+  refresh requests; `Event::TransferAssets` reports each completed wallet.
 - Time fields inherited from Delphi are day values, not Unix timestamps. Use
   `DelphiTime` helpers such as `row.time_delphi().unix_millis()`.
 

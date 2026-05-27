@@ -147,6 +147,8 @@ pub enum Event {
     /// Balance read-model event: full snapshots and incremental updates.
     /// Internal/base/request balance packets are consumed without a public event.
     Balance(BalanceEvent),
+    /// Transferable wallet assets refreshed through Engine API.
+    TransferAssets(TransferAssetsEvent),
     /// Compact arbitrage relay payload after active-library market-index
     /// filtering.
     Arb { uid: u64, payload: ArbPayload },

@@ -28,6 +28,11 @@ a separate balance row. This mirrors Delphi: balance packets mutate the live
 
 Rows are keyed by market name, for example `"BTCUSDT"`.
 
+Transferable wallet assets are a different state model. They are not embedded
+in `BalanceItem` and they are not chart-position fields. Use
+`MoonClient::refresh_transfer_assets()` and `snapshot().transfer_assets()` for
+the Spot/Futures/Quarterly asset lists used by transfer UI.
+
 Incoming balance rows are applied only for markets already known to
 `MarketsState`. This matches the Delphi client: an unknown market name does not
 create an orphan balance row.
@@ -124,6 +129,40 @@ for event in client.drain_events() {
 
 `SnapshotApplied.count` and `IncrementalApplied.count` are counts of rows that
 actually changed the read model after market filtering and stale-epoch checks.
+
+## Transferable Assets
+
+Delphi refreshes `Markets.FAssets[EX_Spot]`, `Markets.FAssets[EX_Futures]`,
+and `Markets.FAssets[EX_QFutures]` by starting one worker per wallet kind.
+Rust Active Lib exposes the same user effect without blocking the caller:
+
+```rust
+use moonproto::{Event, ExchangeKind};
+
+client.refresh_transfer_assets()?;
+
+for event in client.drain_events() {
+    if let Event::TransferAssets(ev) = event {
+        println!("transfer assets event: {ev:?}");
+    }
+}
+
+if let Some(snapshot) = client.snapshot() {
+    for asset in snapshot.transfer_assets().get(ExchangeKind::Futures) {
+        println!(
+            "{} transferable={} total={}",
+            asset.currency,
+            asset.amount,
+            asset.total
+        );
+    }
+}
+```
+
+`refresh_transfer_assets()` queues all three Engine API requests and returns
+immediately. Each completed response updates the library-owned state and emits
+`Event::TransferAssets`. Use `refresh_transfer_assets_kind(kind)` if the UI
+only needs one wallet.
 
 ## Low-Level Rows
 
