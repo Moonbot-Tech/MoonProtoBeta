@@ -1,16 +1,17 @@
-//! Strats sync state — apply StratCommand'ы к локальной модели стратегий.
+//! Strategy sync state maintained from `MPC_Strat` commands.
 //!
-//! Источник Delphi: `MoonProtoClient.pas:689-800 ProcessStratCommand`.
+//! Delphi source: `MoonProtoClient.pas:689-800 ProcessStratCommand`.
 //!
-//! ## Декодинг TStratSnapshot.Data
+//! `TStratSnapshot.Data` decoding:
 //!
-//! Сервер шлёт сериализованную пачку стратегий в `TStratSnapshot.data: Vec<u8>` через
-//! `TStrategySerializer` (RTTI-driven). `apply_snapshot_decoded()` парсит этот blob через
-//! `commands::strategy_serializer::parse_strategy_batch_with_schema` и применяет каждую стратегию в state
-//! с Delphi rollback guard по `StrategyLastDate`/`StrategyVer`.
-//! State хранит и lightweight `StrategyInfo`, и полный decoded `StrategySnapshot`.
-//! Поэтому active library может сама отвечать на `TStratSnapshotRequest`, а
-//! приложение может читать последний полный snapshot через public API.
+//! The server sends an RTTI-driven serialized strategy batch in
+//! `TStratSnapshot.data`. `apply_snapshot_decoded()` parses that blob through
+//! `commands::strategy_serializer::parse_strategy_batch_with_schema` and applies
+//! every strategy with the Delphi rollback guard by `StrategyLastDate` /
+//! `StrategyVer`. State keeps both lightweight `StrategyInfo` and the full
+//! decoded `StrategySnapshot`, so the Active Lib can answer
+//! `TStratSnapshotRequest` itself and applications can read the latest snapshot
+//! through public API.
 
 use crate::commands::strat::{StratCheckedItem, StratCommand};
 use crate::commands::strategy_schema::StrategySchema;
@@ -26,31 +27,30 @@ mod types;
 pub(crate) use self::types::StrategySnapshotPayloadCache;
 pub use self::types::{StratEvent, StrategyInfo};
 
-/// Sync state стратегий клиента — обновляется через `apply(StratCommand)` при получении
-/// `MPC_Strat` от сервера.
+/// Client strategy sync state.
 ///
-/// **Snapshot применяется через `apply_snapshot_decoded(deflate_data)`** — для полного
-/// snapshot'а dispatcher распаковывает raw payload через
-/// [`crate::commands::strategy_serializer`] и применяет декодированный batch.
+/// Full snapshots are applied through `apply_snapshot_decoded(deflate_data)`:
+/// the dispatcher decompresses the raw payload through
+/// [`crate::commands::strategy_serializer`] and applies the decoded batch.
 #[derive(Debug, Clone, Default)]
 pub struct StratsState {
-    /// `strategy_id → StrategyInfo`. Удаляется при `TStratDelete`.
+    /// `strategy_id -> StrategyInfo`; entries are removed by `TStratDelete`.
     pub by_id: HashMap<u64, StrategyInfo>,
     /// Delphi `TStrategies` list order. `by_id` is only the lookup index.
     order: Vec<u64>,
     /// Delphi folder tree analogue, keyed case-insensitively like `SameText`.
     /// Values keep the first observed spelling of the full folder path.
     folders_by_key: HashMap<String, String>,
-    /// `strategy_id → StrategySnapshot`. Полный decoded snapshot, которым владеет
-    /// active library: из него строится ответ на `TStratSnapshotRequest` и его же
-    /// читает пользовательский код через API.
+    /// Full decoded strategy snapshots owned by the Active Lib.
+    ///
+    /// They are used both for answering `TStratSnapshotRequest` and for
+    /// application reads through public API.
     snapshots_by_id: HashMap<u64, Arc<StrategySnapshot>>,
-    /// Серверный epoch последнего применённого snapshot'а — для детекции
-    /// out-of-order snapshot'ов после reconnect'а.
+    /// Server epoch of the latest applied snapshot.
     pub last_server_epoch: u64,
-    /// Последний raw `TStratSchema.Data` blob.
+    /// Latest raw `TStratSchema.Data` blob.
     schema_raw: Option<Arc<Vec<u8>>>,
-    /// Последняя decoded schema стратегий.
+    /// Latest decoded strategy schema.
     schema: Option<Arc<StrategySchema>>,
     /// `TStratSchema` field name -> TypeID cache for Delphi `BuildReaderProps`.
     /// Stored behind `Arc` so `EventDispatcherSnapshot` clones remain cheap.
@@ -89,7 +89,7 @@ impl StratsState {
         self.invalidate_snapshot_payload_cache();
     }
 
-    /// Применить распарсенную команду.
+    /// Apply one decoded strategy command.
     ///
     /// For `TStratSnapshot`, this returns the raw snapshot event; the active
     /// dispatcher performs the serializer decode/apply and advances

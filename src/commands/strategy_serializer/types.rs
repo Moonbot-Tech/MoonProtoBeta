@@ -18,7 +18,7 @@ pub mod field_names {
     pub const SELL_FROM_ASSET: &str = "SellFromAsset";
 }
 
-/// Decoded поле стратегии. Соответствует Delphi `TValue` после RTTI-десериализации.
+/// Decoded strategy field value, equivalent to Delphi `TValue` after RTTI deserialization.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldValue {
     Bool(bool),
@@ -34,7 +34,7 @@ pub enum FieldValue {
 }
 
 impl FieldValue {
-    /// Zero значение для указанного TypeID. Используется когда установлен `TID_ZERO_FLAG`.
+    /// Zero value for one TypeID, used when `TID_ZERO_FLAG` is set.
     pub fn zero(type_id: u8) -> Option<Self> {
         Some(match type_id & 0x7F {
             TID_BOOL => FieldValue::Bool(false),
@@ -70,8 +70,8 @@ impl FieldValue {
         self.type_id() == (type_id & 0x7F)
     }
 
-    /// True если значение эквивалентно zero для своего типа.
-    /// Соответствует `IsZeroValue` (StrategySerializer.pas:337-355).
+    /// True when this value is equivalent to zero for its own TypeID.
+    /// Matches `IsZeroValue` in `StrategySerializer.pas`.
     pub fn is_zero(&self) -> bool {
         match self {
             FieldValue::Bool(b) => !*b,
@@ -91,8 +91,8 @@ impl FieldValue {
         self.matches_type_id(type_id) && self.is_zero()
     }
 
-    /// Сравнение как Delphi `IsDefaultValue`: float/single через `1e-10`,
-    /// остальные типы точно, и только при совпавшем TypeID.
+    /// Compare like Delphi `IsDefaultValue`: floats use `1e-10`, other types
+    /// compare exactly, and both sides must match the given TypeID.
     pub fn equals_delphi_value_for_type_id(&self, other: &Self, type_id: u8) -> bool {
         if !self.matches_type_id(type_id) || !other.matches_type_id(type_id) {
             return false;
@@ -113,18 +113,20 @@ impl FieldValue {
     }
 }
 
-/// Распакованный snapshot одной стратегии. Поля хранятся в `StrategyFields` по
-/// имени; потребитель использует `FieldValue::*` extractors для строгой
-/// типизации.
+/// Decoded snapshot of one strategy.
+///
+/// Fields are stored by Delphi field name. Consumers can use `FieldValue::*`
+/// extractors, typed getters on `StrategyFields`, or higher-level convenience
+/// methods on `StrategySnapshot`.
 #[derive(Debug, Clone)]
 pub struct StrategySnapshot {
     pub strategy_id: u64,
     pub strategy_ver: i32,
-    /// Unix epoch ms (TDateTime -> UnixTimeToDelphi на стороне сервера, см. pas:671).
+    /// Unix epoch milliseconds, converted to Delphi time by the server.
     pub last_date: u64,
     pub checked: bool,
     pub kind: u8,
-    /// Folder path (из PathDict по PathID; пустая строка если PathID out-of-range).
+    /// Folder path from `PathDict` by `PathID`; empty when `PathID` is out of range.
     pub path: String,
     pub fields: StrategyFields,
 }

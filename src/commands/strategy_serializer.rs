@@ -1,17 +1,17 @@
 //! `TStrategySerializer` reader/writer — Delphi wire-format port.
 //!
-//! Источник Delphi: `MoonProto/StrategySerializer.pas` (~1118 строк).
+//! Delphi source: `MoonProto/StrategySerializer.pas`.
 //!
-//! ## Назначение
-//! Парсит RTTI-driven binary snapshot стратегий из payload'а `TStratSnapshot.data`.
-//! Сервер (Delphi MoonBot) использует RTTI для итерации по public-полям `TStrategy`;
-//! Rust-клиент не имеет RTTI, поэтому хранит поля как `StrategyFields`:
-//! плотный список `(FieldName, FieldValue)` с lookup по имени.
-//! Для typed writer и Delphi `ReadField` TypeID-проверок Rust использует live
-//! `TStratSchema`, полученную от сервера, а не статическую копию `TStrategy`
-//! field order/defaults.
+//! It parses RTTI-driven binary strategy snapshots from `TStratSnapshot.data`.
+//! The Delphi server iterates public `TStrategy` fields through RTTI. Rust does
+//! not have that RTTI, so it stores fields as `StrategyFields`: a compact list
+//! of `(FieldName, FieldValue)` pairs with name lookup.
 //!
-//! ## Wire format (после DEFLATE decompression, raw -15)
+//! Typed writing and Delphi `ReadField` TypeID checks use the live
+//! `TStratSchema` fetched during Init, not a stale hardcoded copy of
+//! `TStrategy` field order/defaults.
+//!
+//! Wire format after raw DEFLATE decompression:
 //!
 //! ```text
 //! NameDict:    Count:u16 + (NameLen:u8 + Name:bytes[NameLen]) * Count    // UTF-8
@@ -23,12 +23,12 @@
 //!     StrategyLastDate:  u64    // unix epoch ms
 //!     Checked:           u8     // boolean
 //!     Kind:              u8     // TStrategyKind ordinal
-//!     PathID:            u16    // index в PathDict
+//!     PathID:            u16    // index in PathDict
 //!     FieldCount:        u16
 //!     Fields[FieldCount]:
-//!         FieldIdx:      u16    // index в NameDict
-//!         TypeID:        u8     // (с возможным флагом TID_ZERO_FLAG = 0x80)
-//!         [value]               // отсутствует если ZERO_FLAG установлен; иначе зависит от типа
+//!         FieldIdx:      u16    // index in NameDict
+//!         TypeID:        u8     // may include TID_ZERO_FLAG = 0x80
+//!         [value]               // absent when ZERO_FLAG is set
 //! ```
 //!
 //! ## TypeID constants
@@ -42,10 +42,11 @@
 //! - `TID_UINT32=8`:  4 bytes (unsigned)
 //! - `TID_UINT64=9`:  8 bytes (unsigned)
 //! - `TID_SINGLE=10`: 4 bytes (f32)
-//! - `TID_ZERO_FLAG = 0x80` (high bit): значение = zero для соответствующего типа, value bytes отсутствуют.
+//! - `TID_ZERO_FLAG = 0x80` (high bit): value is the zero value for that TypeID.
 //!
 //! ## Unknown TypeID
-//! Reader делает fallback skip 8 байт (как Delphi `SkipFieldByTypeID`).
+//! The reader falls back to an 8-byte skip, matching Delphi
+//! `SkipFieldByTypeID`.
 
 #[cfg(test)]
 use super::strategy_schema::{StrategySchema, StrategySchemaField};

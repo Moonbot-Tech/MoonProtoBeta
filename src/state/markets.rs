@@ -1,12 +1,13 @@
-//! Markets sync state — snapshot маркетов, поддерживается через Engine API ответы.
+//! Markets sync state maintained from Engine API responses.
 //!
-//! Источник Delphi: `MarketsU.pas` (TMarket, TCorrMarket) + `MoonProtoEngineServer.pas`.
+//! Delphi source: `MarketsU.pas` (`TMarket`, `TCorrMarket`) plus
+//! `MoonProtoEngineServer.pas`.
 //!
-//! ## Поток обновлений
-//! - При запуске клиент шлёт `emk_GetMarketsList` → получает полный список (Markets + CorrMarkets).
-//! - Периодически (~2 секунды по Delphi worker cadence) `emk_UpdateMarketsList` → обновление цен/funding.
-//! - `emk_GetMarketsIndexes` → имена в порядке индексов (mIndex).
-//! - Периодически (~60 секунд + hourly burst) `emk_CheckBinanceTags` → теги монет.
+//! Update flow:
+//! - startup sends `emk_GetMarketsList` and receives the full markets plus CorrMarkets list;
+//! - periodic `emk_UpdateMarketsList` updates prices and funding;
+//! - `emk_GetMarketsIndexes` supplies names in current server `mIndex` order;
+//! - periodic `emk_CheckBinanceTags` updates token tags.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,12 +35,12 @@ pub use self::types::{
 
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
-    /// Маркеты в порядке `mIndex` (как они приходят в `emk_GetMarketsList`).
+    /// Markets in `mIndex` order as received from `emk_GetMarketsList`.
     ///
     /// Each item is a stable `MarketHandle`, matching Delphi `TMarket` object
     /// references stored in `TMarkets = TSlowSafeList<TMarket>`.
     pub(crate) markets: Arc<Vec<MarketHandle>>,
-    /// `market_name` → индекс в `markets` (internal fast lookup for parallel arrays).
+    /// `market_name` -> index in `markets` for internal parallel arrays.
     pub(crate) by_name: Arc<HashMap<String, usize>>,
     /// COW `market_name` → stable handle lookup exposed by [`Self::get`].
     pub(crate) handles_by_name: Arc<HashMap<String, MarketHandle>>,
@@ -49,11 +50,11 @@ pub struct MarketsState {
     /// after `GetMarketsIndexes`; this reverse map keeps the public
     /// name-to-index helper O(1) instead of scanning the whole index vector.
     pub(crate) market_index_by_name: Arc<HashMap<String, u16>>,
-    /// Корреляционные маркеты (BTC-маркеты для расчётов), key = `bn_market_name`.
+    /// Correlation markets used for BTC/reference calculations, keyed by `bn_market_name`.
     pub(crate) corr_markets: HashMap<String, CorrMarket>,
-    /// Цены маркетов по `mIndex` (параллельный массив, обновляется prices apply).
+    /// Market prices by `mIndex`, updated by price apply.
     pub(crate) prices: Vec<MarketPrice>,
-    /// Текущие цены CorrMarkets, key = `bn_market_name`.
+    /// Current CorrMarket prices keyed by `bn_market_name`.
     pub(crate) corr_prices: HashMap<String, f64>,
     /// Delphi `BaseCurDict`: base currency name -> price/ref state.
     pub(crate) base_currency_prices: HashMap<String, BaseCurrencyPrice>,
@@ -64,17 +65,17 @@ pub struct MarketsState {
     /// Delphi stores these fields directly on `TMarket`; Rust keeps the wire
     /// market snapshot clean and stores the non-wire live tail here.
     pub(crate) trade_states: HashMap<String, MarketTradeState>,
-    /// Теги монет, key = `market_name`.
+    /// Token tags keyed by `market_name`.
     pub(crate) token_tags: HashMap<String, TokenTags>,
-    /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
+    /// Canonical `mIndex` -> market name mapping from `emk_GetMarketsIndexes`.
     pub(crate) market_indexes: Arc<Vec<String>>,
-    /// `true` если последняя пачка `emk_GetMarketsIndexes` была получена для текущего
-    /// `PeerAppToken`. При server-restart (`PeerAppToken` сменился) Client сбрасывает в
-    /// `false` и отправляет fresh `api_get_markets_indexes()`. До получения ответа
-    /// `EventDispatcher` дропает входящие `TradesStream` / `OrderBook` пакеты — они
-    /// несут market_idx по новой нумерации, локальные state ещё знают старую.
+    /// True when the latest `emk_GetMarketsIndexes` response belongs to the
+    /// current `PeerAppToken`.
     ///
-    /// Аналог Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <> PeerAppToken then exit`.
+    /// After a server restart, market indexes may change. Until fresh indexes
+    /// arrive, `EventDispatcher` drops `TradesStream` and `OrderBook` packets so
+    /// new server indexes cannot corrupt the old local map. This mirrors Delphi
+    /// `MoonProtoEngine.pas:1580`.
     pub(crate) indexes_synchronized: bool,
     /// Delphi `NewMarketFound` analogue: set when a price row points at a server
     /// market index/name that is not present in the current market list.

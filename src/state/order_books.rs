@@ -1,16 +1,18 @@
-//! OrderBook sync state — reordering buffer + gap detection + auto-request-full.
+//! OrderBook sync state: reordering buffer, gap detection, and auto full-refresh request.
 //!
-//! Источник Delphi: `MoonProtoOrderBook.pas:32-720` (TOrderBookCache + MoonProto_TryApplyCached).
+//! Delphi source: `MoonProtoOrderBook.pas:32-720`
+//! (`TOrderBookCache` plus `MoonProto_TryApplyCached`).
 //!
-//! ## Что делает этот модуль
+//! What this module does:
 //!
-//! Сервер шлёт `MPC_OrderBook` пакеты с `seq:u16` (wrapping). При потере UDP-пакета пропадает
-//! seq → кэш накапливает out-of-order пакеты. Если cache долго непустой (> `BOOK_EXPIRED_TIMEOUT`),
-//! помечается corrupted → клиент отправляет `emk_RequestOrderBookFull` (throttle 5s).
+//! The server sends `MPC_OrderBook` packets with a wrapping `seq: u16`.
+//! When a UDP packet is lost, the cache accumulates out-of-order packets. If a
+//! cache remains non-empty longer than `BOOK_EXPIRED_TIMEOUT`, it becomes
+//! corrupted and the client requests a full orderbook snapshot, throttled to 5s.
 //!
-//! Каждый (market_index, book_kind) имеет свой кэш — pairs обслуживаются независимо.
+//! Each `(market_index, book_kind)` pair has an independent cache.
 //!
-//! ## Использование
+//! Low-level usage:
 //!
 //! ```ignore
 //! let mut state = OrderBooks::new();
@@ -46,18 +48,18 @@ pub use self::types::{
     TopOfBook,
 };
 
-/// Кэш считается corrupted, если непустой дольше этого порога (мс).
-/// Соответствует `MoonProtoOrderBook.pas:9` `BOOK_EXPIRED_TIMEOUT = 800`.
+/// Cache becomes corrupted if it stays non-empty longer than this threshold.
+/// Matches `MoonProtoOrderBook.pas:9 BOOK_EXPIRED_TIMEOUT = 800`.
 const BOOK_EXPIRED_TIMEOUT: i64 = 800;
 
-/// Минимальный интервал между запросами Full snapshot (мс).
-/// Соответствует `MoonProtoOrderBook.pas:10` `BOOK_FULL_REQUEST_THROTTLE = 5000`.
+/// Minimum interval between full-snapshot requests.
+/// Matches `MoonProtoOrderBook.pas:10 BOOK_FULL_REQUEST_THROTTLE = 5000`.
 const BOOK_FULL_REQUEST_THROTTLE: i64 = 5000;
 
-/// Лимит размера кэша. Соответствует `MoonProtoOrderBook.pas:11` `BOOK_CACHE_MAX_PACKETS = 64`.
+/// Cache size limit. Matches `MoonProtoOrderBook.pas:11 BOOK_CACHE_MAX_PACKETS = 64`.
 const BOOK_CACHE_MAX_PACKETS: usize = 64;
 
-/// Главный sync state — кэш на каждый (market_index, book_kind).
+/// Orderbook sync state with one cache per `(market_index, book_kind)`.
 #[derive(Debug, Clone, Default)]
 pub struct OrderBooks {
     caches: HashMap<BookKey, OrderBookCache>,
@@ -80,17 +82,15 @@ impl OrderBooks {
         self.eps_profile = eps_profile;
     }
 
-    /// Обработать один распарсенный `MPC_OrderBook` пакет.
-    /// `now_ms` — текущее время в миллисекундах (из `client.now_ms()`).
-    /// Возвращает список событий: Apply (может быть несколько при разгребании cache), RequestFullNeeded, Ignored.
-    #[must_use = "OrderBookEvent's must be processed — low-level пропуск RequestFullNeeded ведёт к persistent corrupted orderbook"]
+    /// Process one decoded `MPC_OrderBook` packet and return generated events.
+    #[must_use = "OrderBookEvent values must be processed; ignoring RequestFullNeeded can leave a low-level orderbook corrupted"]
     pub fn on_packet(&mut self, pkt: OrderBookUpdate, now_ms: i64) -> Vec<OrderBookEvent> {
         let mut events = Vec::new();
         self.on_packet_into(pkt, now_ms, &mut events);
         events
     }
 
-    /// Обработать один packet в caller-owned event buffer.
+    /// Process one packet into a caller-owned event buffer.
     pub fn on_packet_into(
         &mut self,
         pkt: OrderBookUpdate,
@@ -246,8 +246,8 @@ impl OrderBooks {
         });
     }
 
-    /// Разгрести cache — применить все последовательные пакеты `expected_seq, +1, +2 ...`.
-    /// Соответствует `MoonProto_TryApplyCached` (MoonProtoOrderBook.pas:682-720).
+    /// Drain cache by applying consecutive packets starting at `expected_seq`.
+    /// Matches `MoonProto_TryApplyCached` in `MoonProtoOrderBook.pas:682-720`.
     fn drain_cache(&mut self, key: BookKey, events: &mut Vec<OrderBookEvent>) {
         let cache = match self.caches.get_mut(&key) {
             Some(c) => c,
@@ -295,7 +295,7 @@ impl OrderBooks {
         cache.check_cache_empty();
     }
 
-    /// Сбросить весь state (например при reconnect / WantNewHello).
+    /// Clear the whole state, for example on reconnect or `WantNewHello`.
     pub fn clear(&mut self) {
         for (_, c) in self.caches.iter_mut() {
             c.clear();
@@ -323,7 +323,7 @@ impl OrderBooks {
         self.caches.clear();
     }
 
-    /// Количество активных кэшей.
+    /// Number of active caches.
     pub fn len(&self) -> usize {
         self.caches.len()
     }

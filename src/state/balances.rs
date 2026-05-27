@@ -16,59 +16,57 @@ use crate::commands::balance::{BalanceItem, BalanceUpdate};
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
 
-/// Глобальные суммарные балансы аккаунта (в BTC equivalent).
+/// Global account balance totals in BTC-equivalent units.
 #[derive(Debug, Clone, Default)]
 pub struct GlobalBalance {
-    /// Доступный баланс в BTC (свободный + locked, минус долги).
+    /// Available BTC-equivalent balance.
     pub btc_balance_total: f64,
-    /// Заблокированная часть баланса в BTC (в открытых ордерах / залогах).
+    /// Locked BTC-equivalent balance.
     pub btc_balance_locked: f64,
-    /// Полный баланс включая нереализованную прибыль/убыток в BTC equivalent.
+    /// Full BTC-equivalent balance including unrealized PnL.
     pub btc_balance_full: f64,
-    /// Баланс specialCoin (USDT для futures, BUSD/USDC при MA mode и т.д.).
+    /// Special-coin balance (USDT for futures, BUSD/USDC in MA mode, etc.).
     pub special_coin_balance: f64,
-    /// Delphi `TMarkets.FTotalPNL`: сумма per-market `total_profit` только по
-    /// `TMarket.IsBTCMarket`.
+    /// Delphi `TMarkets.FTotalPNL`: sum of per-market `total_profit` for
+    /// `TMarket.IsBTCMarket` markets only.
     pub total_pnl: f64,
 }
 
-/// Sync state балансов клиента. Обновляется через `apply(BalanceUpdate)` при
-/// получении full/incremental balance updates от сервера. Используется в
-/// [`crate::events::EventDispatcher`].
+/// Client balance sync state maintained by [`crate::events::EventDispatcher`].
 ///
-/// **Семантика snapshot vs incremental**:
-/// - `cmd_id=2` (exact `TBalanceCommand`): не применяется к state, как в Delphi.
-/// - `cmd_id=3` (full snapshot): обновляются полученные, **остальные сбрасываются**.
-/// - `cmd_id=4` (incremental): обновление дельты + опциональный обнов globals.
+/// Snapshot vs incremental semantics:
+/// - `cmd_id=2` (plain `TBalanceCommand`) is recognized but not applied, like Delphi.
+/// - `cmd_id=3` (full snapshot) updates received markets and resets missing rows.
+/// - `cmd_id=4` (incremental) updates changed rows and optionally globals.
 #[derive(Debug, Clone, Default)]
 pub struct BalancesState {
-    /// Глобальные суммы (BTC, special coin, locked).
+    /// Global totals (BTC, special coin, locked).
     pub global: GlobalBalance,
-    /// Per-маркет балансы: ключ = `market_name` (e.g. "BTCUSDT"), значение = строка `BalanceItem`.
+    /// Per-market balance rows keyed by `market_name`, for example `"BTCUSDT"`.
     pub by_market: HashMap<String, BalanceItem>,
-    /// Последний применённый epoch любого accepted balance-пакета.
+    /// Last applied epoch for any accepted balance packet.
     ///
-    /// Это поле оставлено для диагностики. Для отбрасывания stale incremental
-    /// items используется `last_epoch_by_market`, как в Delphi.
+    /// This field is diagnostic. Stale incremental rows are filtered through
+    /// `last_epoch_by_market`, matching Delphi `m.LastBalanceEpoch`.
     pub last_epoch: u16,
-    /// Последний применённый epoch по market_name (Delphi `m.LastBalanceEpoch`).
+    /// Last applied epoch by market name.
     last_epoch_by_market: HashMap<String, u16>,
     eps_profile: EpsProfile,
 }
 
 #[derive(Debug, Clone)]
 pub enum BalanceEvent {
-    /// Применён full snapshot: N маркетов получили данные, остальные сброшены в default.
+    /// Full snapshot applied: N markets received rows, missing rows were reset.
     SnapshotApplied { count: usize, epoch: u16 },
-    /// Применён incremental update: N маркетов изменилось, globals обновлены если global_changed=true.
+    /// Incremental update applied.
     IncrementalApplied {
         count: usize,
         epoch: u16,
         global_changed: bool,
     },
-    /// Команда распознана, но Delphi-клиент не применяет её к balance state.
+    /// Command was recognized, but Delphi does not apply it to balance state.
     Ignored { cmd_id: u8, epoch: u16 },
-    /// Epoch не прошёл (старее last_epoch wrap-safe).
+    /// Epoch check rejected the packet as stale.
     EpochStale { incoming: u16, last: u16 },
 }
 
@@ -135,17 +133,19 @@ impl BalancesState {
         self.insert_balance_mark_epoch(item, epoch)
     }
 
-    /// Применить распарсенный `BalanceUpdate`.
-    /// Epoch protection для incremental: `EpochIsOK` byte-exact с
-    /// `MoonProtoFunc.pas:188-203`, применяется per-market как в Delphi.
+    /// Apply one decoded `BalanceUpdate`.
+    ///
+    /// Incremental epoch protection is byte-equivalent to Delphi
+    /// `MoonProtoFunc.pas:188-203 EpochIsOK` and is applied per market.
     pub fn apply(&mut self, upd: BalanceUpdate) -> BalanceEvent {
         self.apply_filtered(upd, |_| true)
     }
 
-    /// Применить balance update только для market names, известных текущему списку
-    /// Markets. Это active-library путь, соответствующий Delphi
-    /// `Markets.MarketByNameFast(item.MarketName)`: unknown market не создаёт
-    /// отдельный balance entry.
+    /// Apply a balance update only for markets known to the current market list.
+    ///
+    /// This is the active-library path matching Delphi
+    /// `Markets.MarketByNameFast(item.MarketName)`: unknown markets do not
+    /// create independent balance rows.
     pub(crate) fn apply_filtered<F>(
         &mut self,
         upd: BalanceUpdate,
@@ -209,7 +209,7 @@ impl BalancesState {
         ev
     }
 
-    /// Full snapshot: маркеты не в Items получают default (Delphi:1253-1275).
+    /// Full snapshot: markets missing from `Items` receive default values.
     fn apply_full_snapshot<F>(
         &mut self,
         upd: BalanceUpdate,
