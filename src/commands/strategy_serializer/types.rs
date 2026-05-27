@@ -282,6 +282,7 @@ impl StrategySnapshot {
         self.kind_like_delphi()
     }
 
+    #[doc(hidden)]
     pub fn kind_like_delphi(&self) -> StrategyKind {
         StrategyKind(self.kind)
     }
@@ -302,6 +303,7 @@ impl StrategySnapshot {
         self.auto_buy_like_delphi()
     }
 
+    #[doc(hidden)]
     pub fn auto_buy_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::AUTO_BUY)
     }
@@ -310,6 +312,7 @@ impl StrategySnapshot {
         self.run_detect_on_kernel_like_delphi()
     }
 
+    #[doc(hidden)]
     pub fn run_detect_on_kernel_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::RUN_DETECT_ON_KERNEL)
     }
@@ -318,6 +321,7 @@ impl StrategySnapshot {
         self.short_like_delphi()
     }
 
+    #[doc(hidden)]
     pub fn short_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::SHORT)
     }
@@ -326,6 +330,7 @@ impl StrategySnapshot {
         self.sell_from_asset_like_delphi()
     }
 
+    #[doc(hidden)]
     pub fn sell_from_asset_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::SELL_FROM_ASSET)
     }
@@ -334,6 +339,7 @@ impl StrategySnapshot {
         self.can_auto_buy_like_delphi()
     }
 
+    #[doc(hidden)]
     /// Delphi `TStrategy.CanAutoBuy`.
     pub fn can_auto_buy_like_delphi(&self) -> bool {
         (self.auto_buy_like_delphi() || self.kind_like_delphi() == StrategyKind::MOON_SHOT)
@@ -344,6 +350,7 @@ impl StrategySnapshot {
         self.active_like_delphi(mode)
     }
 
+    #[doc(hidden)]
     /// Delphi `TStratForm.CheckActive` / `bStartCheckedClick` active assignment.
     pub fn active_like_delphi(&self, mode: StrategyActiveMode) -> bool {
         match mode {

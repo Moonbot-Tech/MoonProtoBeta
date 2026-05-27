@@ -249,6 +249,7 @@ impl StratsState {
         out
     }
 
+    #[doc(hidden)]
     /// Delphi `TStrategies.IsThereListingStrat`.
     pub fn is_there_listing_strat_like_delphi(&self, mode: StrategyActiveMode) -> bool {
         self.snapshots().any(|s| {
@@ -260,6 +261,7 @@ impl StratsState {
         self.is_there_listing_strat_like_delphi(mode)
     }
 
+    #[doc(hidden)]
     /// Delphi `TStrategies.IsThereListingSell`.
     pub fn is_there_listing_sell_like_delphi(
         &self,

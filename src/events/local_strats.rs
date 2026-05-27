@@ -87,6 +87,7 @@ impl EventDispatcher {
         items.len()
     }
 
+    #[doc(hidden)]
     /// Send Delphi `TStratStartStopCommandV2.Create(is_start)`.
     ///
     /// The command is always queued after the client's Init gate is open, even

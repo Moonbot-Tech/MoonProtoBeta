@@ -13,6 +13,7 @@ impl ClientSender {
             .store(true, Ordering::Relaxed);
     }
 
+    #[doc(hidden)]
     /// Send `TClientSettingsCommand`.
     pub fn ui_send_settings(&self, settings: &crate::commands::ui::ClientSettingsCommand) {
         let mut wire_settings = settings.clone();
@@ -28,18 +29,21 @@ impl ClientSender {
         );
     }
 
+    #[doc(hidden)]
     /// Send `TSettingsRequest`.
     pub fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TStratStartStopCommand`.
     pub fn ui_strat_start_stop(&self, is_start: bool) {
         let raw = crate::commands::ui::build_strat_start_stop(rand::random(), is_start);
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TStratStartStopCommandV2` with an explicit checked delta.
     ///
     /// Regular active-library callers should prefer
@@ -54,6 +58,7 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TMMOrdersSubscribeCommand`.
     pub fn ui_mm_subscribe(&self, subscribe: bool) {
         if let Err(e) = self.try_ui_mm_subscribe(subscribe) {
@@ -62,6 +67,7 @@ impl ClientSender {
         }
     }
 
+    #[doc(hidden)]
     /// Fallible `TMMOrdersSubscribeCommand`.
     pub fn try_ui_mm_subscribe(&self, subscribe: bool) -> Result<(), SubscribeError> {
         if !self.shared.app_queue_alive.load(Ordering::Relaxed) {
@@ -83,6 +89,7 @@ impl ClientSender {
         )
     }
 
+    #[doc(hidden)]
     /// Send `TUpdateVersionCommand` and mark Delphi `ServerUpdateSent`.
     pub fn ui_update_version(&self, version_name: &str, is_release: bool) {
         let raw =
@@ -92,6 +99,7 @@ impl ClientSender {
         }
     }
 
+    #[doc(hidden)]
     /// Send `TEmuTradesCommand`.
     pub fn ui_emu_trades(
         &self,
@@ -103,6 +111,7 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
+    #[doc(hidden)]
     /// Send `TLevManageCommand`.
     pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
         let uid: u64 = rand::random();
@@ -117,6 +126,7 @@ impl ClientSender {
         );
     }
 
+    #[doc(hidden)]
     /// Send `TTriggerManageCommand`.
     pub fn ui_trigger_manage(&self, action: u8, all_markets: bool, markets: &[u16], keys: &[u16]) {
         let raw = crate::commands::ui::build_trigger_manage(
@@ -129,18 +139,21 @@ impl ClientSender {
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
+    #[doc(hidden)]
     /// Send `TResetProfitCommand`.
     pub fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TArbActivateNotify`.
     pub fn ui_arb_activate_notify(&self, arb_valid: f64) {
         let raw = crate::commands::ui::build_arb_activate_notify(rand::random(), arb_valid);
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TSwitchDexCommand` and mark Delphi `ServerUpdateSent`.
     pub fn ui_switch_dex(&self, dex_name: &str) {
         let uid = rand::random();
@@ -157,6 +170,7 @@ impl ClientSender {
         }
     }
 
+    #[doc(hidden)]
     /// Send `TSwitchSpotCommand` and mark Delphi `ServerUpdateSent`.
     pub fn ui_switch_spot(&self, spot_index: u8) {
         let uid = rand::random();

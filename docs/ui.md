@@ -68,9 +68,9 @@ client.switch_dex("Main")?;
 client.switch_spot(0)?;
 ```
 
-Low-level custom runtimes can still use `Client::ui_*` helpers. The `ui_`
-prefix belongs to the wire channel; normal application code should use the
-high-level method names above.
+Low-level protocol tools can still build the same wire payloads through
+`commands::ui`, but normal application code should use the high-level method
+names above.
 
 For strategy start/stop with an explicit checked-state delta, normal UI code
 uses `MoonClient`. The runtime owns strategy checked-state and sends only items
@@ -153,7 +153,7 @@ sent, while others always keep the latest user action as a distinct command:
 | Command | Pending behavior |
 |---|---|
 | `send_settings` | Only the latest pending settings snapshot is kept. |
-| `ui_lev_manage` | Only the latest pending leverage-management snapshot is kept. |
+| leverage-management settings snapshot | Only the latest pending snapshot is kept. |
 | `set_mm_orders_subscription` | Rapid live subscribe/unsubscribe commands are queued as distinct commands. The reconnect registry still remembers the latest desired value. |
 | `switch_dex` | Switch commands are queued as distinct commands. |
 | `switch_spot` | Switch commands are queued as distinct commands. |

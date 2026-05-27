@@ -9,6 +9,7 @@ impl Client {
     //  Аудит docs_api B-01: было 14 build_* функций без Client-обёрток.
     // ====================================================================
 
+    #[doc(hidden)]
     /// Send `TClientSettingsCommand` (UI CmdId=1, Sliced,
     /// `UK_BaseUISettings`).
     ///
@@ -28,6 +29,7 @@ impl Client {
         );
     }
 
+    #[doc(hidden)]
     /// Send `TSettingsRequest` (UI CmdId=2, High) to request current settings.
     pub fn ui_settings_request(&self) {
         let raw = crate::commands::ui::build_settings_request(rand::random());
@@ -80,6 +82,7 @@ impl Client {
         }
     }
 
+    #[doc(hidden)]
     /// Send `TStratStartStopCommand` (UI CmdId=3, High) to start or stop all
     /// strategies.
     pub fn ui_strat_start_stop(&self, is_start: bool) {
@@ -87,6 +90,7 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TStratStartStopCommandV2` (UI CmdId=4, High) with an explicit
     /// checked delta.
     ///
@@ -102,12 +106,14 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TMMOrdersSubscribeCommand` (UI CmdId=5, High,
     /// `UK_TurnMMDetection`) to set the market-maker orders subscription flag.
     pub fn ui_mm_subscribe(&self, subscribe: bool) {
         self.sender().ui_mm_subscribe(subscribe);
     }
 
+    #[doc(hidden)]
     /// `TUpdateVersionCommand` (UI CmdId=6, High) — request a MoonBot version update.
     ///
     /// Delphi uses this from the update UI:
@@ -127,6 +133,7 @@ impl Client {
         }
     }
 
+    #[doc(hidden)]
     /// Send `TEmuTradesCommand` (UI CmdId=7, Sliced) with emulated trades for a
     /// test market.
     pub fn ui_emu_trades(
@@ -139,6 +146,7 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
+    #[doc(hidden)]
     /// Send `TLevManageCommand` (UI CmdId=9, Sliced,
     /// `UK_LevManageSettings`) with leverage-management settings.
     pub fn ui_lev_manage(&self, cmd: &crate::commands::ui::LevManage) {
@@ -154,6 +162,7 @@ impl Client {
         );
     }
 
+    #[doc(hidden)]
     /// Send `TTriggerManageCommand` (UI CmdId=10, Sliced) for batch trigger
     /// management over all markets or selected market/key pairs.
     pub fn ui_trigger_manage(&self, action: u8, all_markets: bool, markets: &[u16], keys: &[u16]) {
@@ -167,12 +176,14 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::Sliced, true, 6);
     }
 
+    #[doc(hidden)]
     /// Send `TResetProfitCommand` (UI CmdId=11, High) to reset profit counters.
     pub fn ui_reset_profit(&self, kind: u8) {
         let raw = crate::commands::ui::build_reset_profit(rand::random(), kind);
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TArbActivateNotify` (UI CmdId=12, High) with an arbitration-valid
     /// timestamp.
     pub fn ui_arb_activate_notify(&self, arb_valid: f64) {
@@ -180,6 +191,7 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
+    #[doc(hidden)]
     /// Send `TSwitchDexCommand` (UI CmdId=13, High, `UK_DexSwitch`).
     ///
     /// The DEX name is truncated to the Delphi 15-byte short-string payload.
@@ -198,6 +210,7 @@ impl Client {
         }
     }
 
+    #[doc(hidden)]
     /// Send `TSwitchSpotCommand` (UI CmdId=14, High, `UK_SpotSwitch`) to select
     /// the spot mode.
     pub fn ui_switch_spot(&self, spot_index: u8) {
