@@ -286,7 +286,7 @@ fn pending_api_response_still_reaches_dispatcher_state() {
     client.apply_active_actions(actions.drain(..));
 
     assert!(dispatcher.markets().indexes_synchronized);
-    assert_eq!(dispatcher.markets().market_indexes, names);
+    assert_eq!(dispatcher.markets().market_index_names(), names.as_slice());
 }
 
 #[test]

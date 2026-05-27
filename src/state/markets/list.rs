@@ -107,7 +107,7 @@ impl MarketsState {
         self.check_corr_markets_like_delphi();
         self.check_currency_ref_markets_like_delphi();
         if allow_new_markets {
-            self.market_indexes = incoming_server_names;
+            self.market_indexes = Arc::new(incoming_server_names);
             self.indexes_synchronized = true;
         }
         self.markets_list_refresh_needed = false;
@@ -197,7 +197,7 @@ impl MarketsState {
 
         let index_rebuild_start = Instant::now();
         if allow_new_markets {
-            self.market_indexes = incoming_server_names;
+            self.market_indexes = Arc::new(incoming_server_names);
             self.indexes_synchronized = true;
         }
         let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);
@@ -273,7 +273,7 @@ impl MarketsState {
         let handles_by_name =
             pending_handles_by_name.get_or_insert_with(|| (*self.handles_by_name).clone());
         handles_by_name.insert(name.clone(), handle.clone());
-        self.by_name.insert(name.clone(), idx);
+        Arc::make_mut(&mut self.by_name).insert(name.clone(), idx);
         self.trade_states.entry(name).or_default();
         self.prices.push(handle.with(market_price_from_market));
         true
@@ -283,14 +283,14 @@ impl MarketsState {
         &mut self,
         lookup_entries: Vec<(String, MarketHandle)>,
     ) {
-        self.by_name.clear();
-        self.by_name.reserve(lookup_entries.len());
+        let mut by_name = HashMap::with_capacity(lookup_entries.len());
         let mut handles_by_name = HashMap::with_capacity(lookup_entries.len());
         for (i, (name, handle)) in lookup_entries.into_iter().enumerate() {
-            self.by_name.insert(name.clone(), i);
+            by_name.insert(name.clone(), i);
             self.trade_states.entry(name.clone()).or_default();
             handles_by_name.insert(name, handle);
         }
+        self.by_name = Arc::new(by_name);
         self.handles_by_name = Arc::new(handles_by_name);
     }
 

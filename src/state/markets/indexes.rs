@@ -8,7 +8,7 @@ impl MarketsState {
     /// обработку TradesStream / OrderBook пакетов.
     pub fn apply_markets_indexes(&mut self, names: Vec<String>) -> MarketsEvent {
         let count = names.len();
-        self.market_indexes = names;
+        self.market_indexes = std::sync::Arc::new(names);
         self.indexes_synchronized = true;
         MarketsEvent::IndexesUpdated { count }
     }

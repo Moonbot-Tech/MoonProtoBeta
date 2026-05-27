@@ -1224,7 +1224,7 @@ fn apply_markets_indexes() {
     let names = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
     let ev = st.apply_markets_indexes(names.clone());
     assert!(matches!(ev, MarketsEvent::IndexesUpdated { count: 2 }));
-    assert_eq!(st.market_indexes, names);
+    assert_eq!(st.market_index_names(), names.as_slice());
 }
 
 #[test]

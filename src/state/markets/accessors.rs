@@ -22,7 +22,7 @@ impl MarketsState {
     /// This is empty before Init completes and may be stale only while
     /// [`Self::indexes_synchronized`] is false.
     pub fn market_index_names(&self) -> &[String] {
-        &self.market_indexes
+        self.market_indexes.as_slice()
     }
 
     /// Получить стабильный Delphi-like handle маркета по имени.

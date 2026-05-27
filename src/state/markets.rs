@@ -38,7 +38,7 @@ pub struct MarketsState {
     /// references stored in `TMarkets = TSlowSafeList<TMarket>`.
     pub(crate) markets: Arc<Vec<MarketHandle>>,
     /// `market_name` → индекс в `markets` (internal fast lookup for parallel arrays).
-    pub(crate) by_name: HashMap<String, usize>,
+    pub(crate) by_name: Arc<HashMap<String, usize>>,
     /// COW `market_name` → stable handle lookup exposed by [`Self::get`].
     pub(crate) handles_by_name: Arc<HashMap<String, MarketHandle>>,
     /// Корреляционные маркеты (BTC-маркеты для расчётов), key = `bn_market_name`.
@@ -59,7 +59,7 @@ pub struct MarketsState {
     /// Теги монет, key = `market_name`.
     pub(crate) token_tags: HashMap<String, TokenTags>,
     /// Канонический mIndex → имя маркета (из `emk_GetMarketsIndexes`).
-    pub(crate) market_indexes: Vec<String>,
+    pub(crate) market_indexes: Arc<Vec<String>>,
     /// `true` если последняя пачка `emk_GetMarketsIndexes` была получена для текущего
     /// `PeerAppToken`. При server-restart (`PeerAppToken` сменился) Client сбрасывает в
     /// `false` и отправляет fresh `api_get_markets_indexes()`. До получения ответа

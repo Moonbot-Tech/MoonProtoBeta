@@ -1313,8 +1313,8 @@ fn dispatcher_blocks_orderbook_until_indexes_sync() {
 fn dispatcher_drops_orderbook_for_unknown_market_index() {
     let mut d = EventDispatcher::new();
     d.markets.indexes_synchronized = true;
-    d.markets.market_indexes = vec!["BTCUSDT".to_string()];
-    d.markets.by_name.insert("BTCUSDT".to_string(), 0);
+    d.markets.market_indexes = std::sync::Arc::new(vec!["BTCUSDT".to_string()]);
+    std::sync::Arc::make_mut(&mut d.markets.by_name).insert("BTCUSDT".to_string(), 0);
 
     let events = d.dispatch(Command::OrderBook, &order_book_payload(1), 1000);
     assert!(
@@ -1326,8 +1326,8 @@ fn dispatcher_drops_orderbook_for_unknown_market_index() {
         "unknown index must not create OrderBooks cache"
     );
 
-    d.markets.market_indexes = vec!["UNKNOWNUSDT".to_string()];
-    d.markets.by_name.clear();
+    d.markets.market_indexes = std::sync::Arc::new(vec!["UNKNOWNUSDT".to_string()]);
+    std::sync::Arc::make_mut(&mut d.markets.by_name).clear();
     let events = d.dispatch(Command::OrderBook, &order_book_payload(0), 1000);
     assert!(
         events.is_empty(),
@@ -2075,8 +2075,8 @@ fn raw_dispatch_exposes_missing_order_status_requests_after_snapshot() {
 fn dispatch_into_active_consumes_orderbook_full_request_event() {
     let mut d = EventDispatcher::new();
     d.markets.indexes_synchronized = true;
-    d.markets.market_indexes = vec!["BTCUSDT".to_string()];
-    d.markets.by_name.insert("BTCUSDT".to_string(), 0);
+    d.markets.market_indexes = std::sync::Arc::new(vec!["BTCUSDT".to_string()]);
+    std::sync::Arc::make_mut(&mut d.markets.by_name).insert("BTCUSDT".to_string(), 0);
 
     let mut client = crate::client::Client::new(dummy_client_cfg());
     client.testing_set_domain_ready(true);
