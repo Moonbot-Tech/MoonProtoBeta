@@ -134,6 +134,7 @@ let system_time = trade.time_delphi().system_time();
 | `client.md` | `MoonClient`, config, init, subscriptions, requests |
 | `events.md` | `MoonClient` events, immutable snapshots, low-level dispatcher |
 | `lifecycle.md` | Connection and critical status events |
+| `time.md` | Delphi `TDateTime` conversion helpers |
 | `engine_api.md` | Engine RPC wrappers and response parsing |
 | `trade_actions.md` | High-level trading commands |
 | `orders.md` | Order state and order events |

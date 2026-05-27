@@ -95,6 +95,22 @@ for event in client.drain_events() {
 }
 ```
 
+For rendering the full current book, read it from the snapshot by market name:
+
+```rust
+use moonproto::state::OrderBookKind;
+
+let Some(state) = client.snapshot() else { return; };
+
+if let Some(book) = state.order_book("BTCUSDT", OrderBookKind::Futures) {
+    draw_orderbook(&book.buys, &book.sells);
+}
+
+if let Some(top) = state.top_of_book("BTCUSDT", OrderBookKind::Futures) {
+    draw_top(top.bid, top.ask);
+}
+```
+
 ## Types
 
 ```rust
@@ -160,7 +176,9 @@ pub enum OrderBookEvent {
 ```
 
 `OrderBookKind`, `TopOfBook`, and the current `OrderBookSnapshot` are the normal
-UI-facing pieces. `OrderBookUpdate` keeps the decoded packet form and still
+UI-facing pieces. For normal UI code, prefer
+`EventDispatcherSnapshot::order_book(market_name, kind)` and
+`EventDispatcherSnapshot::top_of_book(market_name, kind)`. `OrderBookUpdate` keeps the decoded packet form and still
 contains `market_index` / raw `book_kind`; it is useful for diagnostics and
 custom protocol tools, not for normal chart lookup.
 

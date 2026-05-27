@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::commands::strategy_serializer::StrategySnapshot;
+use crate::state::{OrderBookKind, OrderBookSnapshot, TopOfBook};
 
 /// Immutable read-model copy published by `MoonClient` and by custom
 /// low-level active runtimes.
@@ -32,6 +33,23 @@ impl EventDispatcherSnapshot {
     /// Read-only orderbook state.
     pub fn order_books(&self) -> &OrderBooks {
         &self.order_books
+    }
+
+    /// Current applied orderbook for a market name.
+    ///
+    /// This is the UI-facing path: it resolves the current server market index
+    /// through the maintained markets state and then reads the matching applied
+    /// book. It returns `None` while market indexes are stale or the book has
+    /// not arrived yet.
+    pub fn order_book(&self, market_name: &str, kind: OrderBookKind) -> Option<&OrderBookSnapshot> {
+        let market_index = self.markets.market_index_by_name(market_name)?;
+        self.order_books.book(market_index, kind)
+    }
+
+    /// Best bid/ask from the current applied orderbook for a market name.
+    pub fn top_of_book(&self, market_name: &str, kind: OrderBookKind) -> Option<TopOfBook> {
+        self.order_book(market_name, kind)
+            .map(OrderBookSnapshot::top)
     }
 
     /// Read-only trades-stream state.

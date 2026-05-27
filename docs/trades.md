@@ -321,12 +321,6 @@ pub struct RollingTradeVolumeSnapshot {
     pub three_minutes: TradeVolumeTotals,
     pub five_minutes: TradeVolumeTotals,
 }
-
-pub struct RollingTradeVolumeSnapshot {
-    pub one_minute: TradeVolumeTotals,
-    pub three_minutes: TradeVolumeTotals,
-    pub five_minutes: TradeVolumeTotals,
-}
 ```
 
 The internal rolling-volume accumulator uses 5-second buckets and updates from

@@ -237,6 +237,7 @@ Start here:
 - `docs/client.md`
 - `docs/events.md`
 - `docs/lifecycle.md`
+- `docs/time.md`
 - `docs/markets.md`
 - `docs/trades.md`
 - `docs/order_books.md`

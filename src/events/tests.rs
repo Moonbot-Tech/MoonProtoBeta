@@ -1564,6 +1564,38 @@ fn dispatcher_drops_orderbook_for_unknown_market_index() {
 }
 
 #[test]
+fn snapshot_reads_current_orderbook_by_market_name() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    let events = d.dispatch(
+        Command::OrderBook,
+        &order_book_payload_full_with_levels(0, 1, &[(100.0, 1.0)], &[(101.0, 2.0)]),
+        1000,
+    );
+    assert!(
+        events.iter().any(|ev| matches!(ev, Event::OrderBook(
+            OrderBookEvent::Apply { market_name, .. }
+        ) if market_name.as_deref() == Some("BTCUSDT"))),
+        "active dispatcher should resolve market name before publishing event"
+    );
+
+    let snapshot = d.snapshot();
+    let book = snapshot
+        .order_book("BTCUSDT", OrderBookKind::Futures)
+        .expect("current book by market name");
+    assert_eq!(book.buys[0].rate, 100.0);
+    assert_eq!(book.sells[0].rate, 101.0);
+
+    let top = snapshot
+        .top_of_book("BTCUSDT", OrderBookKind::Futures)
+        .expect("top by market name");
+    assert_eq!(top.bid.unwrap().rate, 100.0);
+    assert_eq!(top.ask.unwrap().rate, 101.0);
+}
+
+#[test]
 fn dispatcher_blocks_trades_until_indexes_sync() {
     let mut d = EventDispatcher::new();
     let dummy_payload = vec![0u8; 16];
