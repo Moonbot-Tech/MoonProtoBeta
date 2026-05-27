@@ -18,6 +18,11 @@ pub(super) enum RuntimeCommand {
     BalanceRefresh,
     TransferAssetsRefresh,
     TransferAssetsRefreshKind(crate::state::ExchangeKind),
+    EngineAction {
+        kind: crate::events::EngineActionKind,
+        ticket: super::EngineActionTicket,
+        payload: Vec<u8>,
+    },
     Ui(UiRuntimeCommand),
     Strat(StratRuntimeCommand),
     StrategySetChecked {

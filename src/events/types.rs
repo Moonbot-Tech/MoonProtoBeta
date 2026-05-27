@@ -3,6 +3,8 @@
 use super::*;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
+use crate::commands::EngineMethod;
+use crate::state::ExchangeKind;
 use crate::time::DelphiTime;
 
 /// Fresh strategy snapshot override returned by the application for a server
@@ -127,6 +129,54 @@ pub struct WatcherFillsEvent {
     pub fills: Vec<WatcherFillEvent>,
 }
 
+/// User-facing asynchronous Engine API action kind.
+///
+/// Delphi low-level `TMoonProtoEngine` often implements these commands through
+/// `SendAndWait`, but UI code wraps them in `TThread.CreateAnonymousThread`.
+/// Active Lib exposes that same user effect as non-blocking intents.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineActionKind {
+    MarketsBalanceFullRefresh,
+    CancelAllOrders,
+    SetLeverage {
+        market: String,
+        new_leverage: i32,
+    },
+    SetHedgeMode {
+        hedge_mode: bool,
+    },
+    ChangePositionType {
+        market: String,
+        position_type: u8,
+        new_market: bool,
+    },
+    ConvertDustBnb,
+    ConfirmRiskLimit {
+        market: String,
+    },
+    SetMaMode {
+        ma_mode: bool,
+    },
+    TransferAsset {
+        asset: String,
+        qty: f64,
+        from: ExchangeKind,
+        to: ExchangeKind,
+    },
+    ReloadOrderBook,
+}
+
+/// Completion of an asynchronous user-facing Engine API action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineActionEvent {
+    pub kind: EngineActionKind,
+    pub request_uid: Option<u64>,
+    pub method: EngineMethod,
+    pub success: bool,
+    pub error_code: i32,
+    pub error_msg: String,
+}
+
 /// All typed events emitted by [`EventDispatcher`].
 #[derive(Debug)]
 pub enum Event {
@@ -149,6 +199,8 @@ pub enum Event {
     Balance(BalanceEvent),
     /// Transferable wallet assets refreshed through Engine API.
     TransferAssets(TransferAssetsEvent),
+    /// Completion of a non-blocking user-facing Engine API action.
+    EngineAction(EngineActionEvent),
     /// Compact arbitrage relay payload after active-library market-index
     /// filtering.
     Arb { uid: u64, payload: ArbPayload },

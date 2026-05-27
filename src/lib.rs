@@ -125,17 +125,17 @@ pub mod transport;
 
 pub use client::{
     connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams, ConnectConfig,
-    ConnectError, EngineRequestError, EventFn, EventWithStateFn, InitConfig, InitError, InitResult,
-    InitialStrategies, LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade,
-    NewOrderParams, OrderSide, OrderTarget, ProtocolMetricsSnapshot, RefreshConfig,
-    SellOrderParams, SendPriority, SplitOrderParams, TradeContextError, TradesStreamMode,
-    UniqueKey,
+    ConnectError, EngineActionTicket, EngineRequestError, EventFn, EventWithStateFn, InitConfig,
+    InitError, InitResult, InitialStrategies, LifecycleEvent, MoonClient, MoonClientError,
+    MoonOrders, MoonTrade, NewOrderParams, OrderSide, OrderTarget, ProtocolMetricsSnapshot,
+    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
+    TradesStreamMode, UniqueKey,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
 pub use events::{
-    Event, EventDispatcher, EventDispatcherSnapshot, MissingOrderStatusRequest,
-    StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
+    EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
+    MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,

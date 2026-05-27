@@ -18,8 +18,8 @@ use commands::{
 pub use handles::{MoonOrders, MoonTrade, OrderTarget};
 use runtime_loop::{publish_queued_events, publish_snapshot, runtime_loop};
 pub use types::{
-    ClosePositionParams, MoonClientError, NewOrderParams, OrderSide, SellOrderParams,
-    SplitOrderParams, TradesStreamMode,
+    ClosePositionParams, EngineActionTicket, MoonClientError, NewOrderParams, OrderSide,
+    SellOrderParams, SplitOrderParams, TradesStreamMode,
 };
 
 /// High-level Active Lib client for regular applications.
@@ -333,114 +333,141 @@ impl MoonClient {
             })
     }
 
-    /// Request server-side full balance refresh.
+    /// Request server-side full balance refresh and return immediately.
     ///
-    /// The current server normally acknowledges the request with an empty
-    /// Engine API payload; the balance state arrives through the normal balance
-    /// channel.
-    pub fn request_markets_balance_full(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    /// The balance state arrives through the normal balance channel.
+    pub fn refresh_markets_balance_full(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::MarketsBalanceFullRefresh,
             crate::commands::engine_request::get_markets_balance_full(),
-            timeout,
         )
     }
 
-    /// Cancel all exchange orders through Engine API.
-    pub fn cancel_all_orders(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    /// Cancel all exchange orders through Engine API and return immediately.
+    pub fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::CancelAllOrders,
             crate::commands::engine_request::cancel_all_orders(),
-            timeout,
         )
     }
 
-    /// Set leverage for a market through Engine API.
+    /// Set leverage for a market through Engine API and return immediately.
     pub fn set_leverage(
         &self,
         market: impl AsRef<str>,
         new_leverage: i32,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        let market = market.as_ref();
+        self.queue_engine_action(
+            crate::events::EngineActionKind::SetLeverage {
+                market: market.to_string(),
+                new_leverage,
+            },
             crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
-            timeout,
         )
     }
 
-    /// Set account hedge mode through Engine API.
-    pub fn set_hedge_mode(
-        &self,
-        hedge_mode: bool,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    /// Set account hedge mode through Engine API and return immediately.
+    pub fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::SetHedgeMode { hedge_mode },
             crate::commands::engine_request::set_hedge_mode(hedge_mode),
-            timeout,
         )
     }
 
-    /// Change position type for a market through Engine API.
+    /// Change position type for a market through Engine API and return immediately.
     pub fn change_position_type(
         &self,
         market: impl AsRef<str>,
         position_type: u8,
         new_market: bool,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        let market = market.as_ref();
+        self.queue_engine_action(
+            crate::events::EngineActionKind::ChangePositionType {
+                market: market.to_string(),
+                position_type,
+                new_market,
+            },
             crate::commands::engine_request::change_position_type(
                 market.as_ref(),
                 position_type,
                 new_market,
             ),
-            timeout,
         )
     }
 
-    /// Convert dust to BNB through Engine API.
-    pub fn convert_dust_bnb(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(crate::commands::engine_request::convert_dust_bnb(), timeout)
+    /// Convert dust to BNB through Engine API and return immediately.
+    pub fn convert_dust_bnb(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::ConvertDustBnb,
+            crate::commands::engine_request::convert_dust_bnb(),
+        )
     }
 
-    /// Confirm risk limit for a market through Engine API.
+    /// Confirm risk limit for a market through Engine API and return immediately.
     pub fn confirm_risk_limit(
         &self,
         market: impl AsRef<str>,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        let market = market.as_ref();
+        self.queue_engine_action(
+            crate::events::EngineActionKind::ConfirmRiskLimit {
+                market: market.to_string(),
+            },
             crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
-            timeout,
         )
     }
 
-    /// Set MA mode through Engine API.
-    pub fn set_ma_mode(&self, ma_mode: bool, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    /// Set MA mode through Engine API and return immediately.
+    pub fn set_ma_mode(&self, ma_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::SetMaMode { ma_mode },
             crate::commands::engine_request::set_ma_mode(ma_mode),
-            timeout,
         )
     }
 
-    /// Transfer an asset between exchange wallets through Engine API.
+    /// Transfer an asset between exchange wallets through Engine API and return immediately.
+    pub fn transfer_asset(
+        &self,
+        asset: impl AsRef<str>,
+        qty: f64,
+        from: crate::state::ExchangeKind,
+        to: crate::state::ExchangeKind,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        let asset = asset.as_ref();
+        self.queue_engine_action(
+            crate::events::EngineActionKind::TransferAsset {
+                asset: asset.to_string(),
+                qty,
+                from,
+                to,
+            },
+            crate::commands::engine_request::do_transfer_asset(
+                asset,
+                qty,
+                from.to_byte(),
+                to.to_byte(),
+            ),
+        )
+    }
+
+    /// Delphi-name alias for [`Self::transfer_asset`].
     pub fn do_transfer_asset(
         &self,
         asset: impl AsRef<str>,
         qty: f64,
-        from: u8,
-        to: u8,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::do_transfer_asset(asset.as_ref(), qty, from, to),
-            timeout,
-        )
+        from: crate::state::ExchangeKind,
+        to: crate::state::ExchangeKind,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.transfer_asset(asset, qty, from, to)
     }
 
-    /// Reload orderbook data through Engine API.
-    pub fn reload_order_book(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
+    /// Reload orderbook data through Engine API and return immediately.
+    pub fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.queue_engine_action(
+            crate::events::EngineActionKind::ReloadOrderBook,
             crate::commands::engine_request::reload_order_book(),
-            timeout,
         )
     }
 
@@ -486,6 +513,24 @@ impl MoonClient {
         })
     }
 
+    fn queue_engine_action(
+        &self,
+        kind: crate::events::EngineActionKind,
+        payload: Vec<u8>,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        let ticket = EngineActionTicket {
+            kind: kind.clone(),
+            request_uid: engine_request_uid(&payload),
+            method: engine_request_method(&payload).unwrap_or(crate::commands::EngineMethod::None),
+        };
+        self.send_no_reply(RuntimeCommand::EngineAction {
+            kind,
+            ticket: ticket.clone(),
+            payload,
+        })?;
+        Ok(ticket)
+    }
+
     fn request_engine_success(
         &self,
         payload: Vec<u8>,
@@ -506,6 +551,125 @@ impl MoonClient {
                 message: response.error_msg,
             }))
         }
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::refresh_markets_balance_full`].
+    pub fn blocking_request_markets_balance_full(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::get_markets_balance_full(),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::cancel_all_orders`].
+    pub fn blocking_cancel_all_orders(&self, timeout: Duration) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::cancel_all_orders(),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::set_leverage`].
+    pub fn blocking_set_leverage(
+        &self,
+        market: impl AsRef<str>,
+        new_leverage: i32,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::set_hedge_mode`].
+    pub fn blocking_set_hedge_mode(
+        &self,
+        hedge_mode: bool,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_hedge_mode(hedge_mode),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::change_position_type`].
+    pub fn blocking_change_position_type(
+        &self,
+        market: impl AsRef<str>,
+        position_type: u8,
+        new_market: bool,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::change_position_type(
+                market.as_ref(),
+                position_type,
+                new_market,
+            ),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::convert_dust_bnb`].
+    pub fn blocking_convert_dust_bnb(&self, timeout: Duration) -> Result<(), MoonClientError> {
+        self.request_engine_success(crate::commands::engine_request::convert_dust_bnb(), timeout)
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::confirm_risk_limit`].
+    pub fn blocking_confirm_risk_limit(
+        &self,
+        market: impl AsRef<str>,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::set_ma_mode`].
+    pub fn blocking_set_ma_mode(
+        &self,
+        ma_mode: bool,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::set_ma_mode(ma_mode),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::transfer_asset`].
+    pub fn blocking_do_transfer_asset(
+        &self,
+        asset: impl AsRef<str>,
+        qty: f64,
+        from: crate::state::ExchangeKind,
+        to: crate::state::ExchangeKind,
+        timeout: Duration,
+    ) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::do_transfer_asset(
+                asset.as_ref(),
+                qty,
+                from.to_byte(),
+                to.to_byte(),
+            ),
+            timeout,
+        )
+    }
+
+    /// Blocking diagnostic counterpart of [`Self::reload_order_book`].
+    pub fn blocking_reload_order_book(&self, timeout: Duration) -> Result<(), MoonClientError> {
+        self.request_engine_success(
+            crate::commands::engine_request::reload_order_book(),
+            timeout,
+        )
     }
 
     /// Request a fresh UI/settings snapshot through the active runtime.

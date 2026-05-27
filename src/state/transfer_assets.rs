@@ -67,6 +67,14 @@ pub enum TransferAssetsEvent {
         request_uid: Option<u64>,
         error: String,
     },
+    TransferApplied {
+        asset: String,
+        qty: f64,
+        from: ExchangeKind,
+        to: ExchangeKind,
+        request_uid: u64,
+        revision: u64,
+    },
 }
 
 /// Current transferable asset lists by exchange wallet kind.
@@ -126,6 +134,51 @@ impl TransferAssetsState {
             revision: self.revision,
         }
     }
+
+    pub(crate) fn apply_transfer_like_delphi(
+        &mut self,
+        asset: &str,
+        qty: f64,
+        from: ExchangeKind,
+        to: ExchangeKind,
+        request_uid: u64,
+    ) -> TransferAssetsEvent {
+        self.revision = self.revision.wrapping_add(1).max(1);
+        self.revision_by_kind[from.as_index()] = self.revision;
+        self.revision_by_kind[to.as_index()] = self.revision;
+
+        let to_assets = &mut self.by_kind[to.as_index()];
+        if let Some(row) = to_assets
+            .iter_mut()
+            .find(|row| row.currency.eq_ignore_ascii_case(asset))
+        {
+            row.amount += qty;
+            row.total += qty;
+        } else {
+            to_assets.push(TransferAsset {
+                currency: asset.to_string(),
+                amount: qty,
+                total: qty,
+            });
+        }
+
+        if let Some(row) = self.by_kind[from.as_index()]
+            .iter_mut()
+            .find(|row| row.currency.eq_ignore_ascii_case(asset))
+        {
+            row.amount = (row.amount - qty).max(0.0);
+            row.total = (row.total - qty).max(0.0);
+        }
+
+        TransferAssetsEvent::TransferApplied {
+            asset: asset.to_string(),
+            qty,
+            from,
+            to,
+            request_uid,
+            revision: self.revision,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,5 +214,34 @@ mod tests {
         assert_eq!(state.kind_revision(ExchangeKind::Spot), 1);
         assert_eq!(state.kind_revision(ExchangeKind::Futures), 2);
         assert_eq!(state.revision(), 2);
+    }
+
+    #[test]
+    fn apply_transfer_moves_amounts_like_delphi_after_success() {
+        let mut state = TransferAssetsState::new();
+        state.apply_update(ExchangeKind::Spot, 10, vec![asset("USDT", 10.0, 12.0)]);
+        state.apply_update(ExchangeKind::Futures, 11, vec![asset("USDT", 1.0, 2.0)]);
+
+        let ev = state.apply_transfer_like_delphi(
+            "usdt",
+            3.0,
+            ExchangeKind::Spot,
+            ExchangeKind::Futures,
+            99,
+        );
+
+        assert!(matches!(
+            ev,
+            TransferAssetsEvent::TransferApplied {
+                from: ExchangeKind::Spot,
+                to: ExchangeKind::Futures,
+                request_uid: 99,
+                ..
+            }
+        ));
+        assert_eq!(state.get(ExchangeKind::Spot)[0].amount, 7.0);
+        assert_eq!(state.get(ExchangeKind::Spot)[0].total, 9.0);
+        assert_eq!(state.get(ExchangeKind::Futures)[0].amount, 4.0);
+        assert_eq!(state.get(ExchangeKind::Futures)[0].total, 5.0);
     }
 }

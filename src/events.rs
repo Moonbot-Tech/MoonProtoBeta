@@ -63,7 +63,8 @@ mod ui;
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
 pub use snapshot::EventDispatcherSnapshot;
 pub use types::{
-    Event, MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
+    EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest, StrategySnapshotReply,
+    WatcherFillEvent, WatcherFillsEvent,
 };
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
@@ -355,6 +356,58 @@ impl EventDispatcher {
                 kind,
                 request_uid: None,
                 error: error.into(),
+            })]);
+    }
+
+    pub(crate) fn queue_engine_action_response(
+        &mut self,
+        kind: EngineActionKind,
+        resp: EngineResponse,
+    ) {
+        if resp.success {
+            if let EngineActionKind::TransferAsset {
+                asset,
+                qty,
+                from,
+                to,
+            } = &kind
+            {
+                let ev = self.transfer_assets.apply_transfer_like_delphi(
+                    asset,
+                    *qty,
+                    *from,
+                    *to,
+                    resp.request_uid,
+                );
+                self.queued_events.extend([Event::TransferAssets(ev)]);
+            }
+        }
+        self.queued_events
+            .extend([Event::EngineAction(EngineActionEvent {
+                kind,
+                request_uid: Some(resp.request_uid),
+                method: resp.method,
+                success: resp.success,
+                error_code: resp.error_code,
+                error_msg: resp.error_msg,
+            })]);
+    }
+
+    pub(crate) fn queue_engine_action_disconnected(
+        &mut self,
+        kind: EngineActionKind,
+        request_uid: Option<u64>,
+        method: EngineMethod,
+        error: impl Into<String>,
+    ) {
+        self.queued_events
+            .extend([Event::EngineAction(EngineActionEvent {
+                kind,
+                request_uid,
+                method,
+                success: false,
+                error_code: 0,
+                error_msg: error.into(),
             })]);
     }
 

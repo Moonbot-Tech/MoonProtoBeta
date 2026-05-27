@@ -171,15 +171,16 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-One-shot Engine API helpers also run inside the owned runtime. Read helpers
-parse their payloads; mutation helpers return `Ok(())` after the server accepts
-the operation and convert server failures into `MoonClientError`:
+One-shot Engine API read helpers also run inside the owned runtime and parse
+their payloads. User-facing mutations are non-blocking Active Lib intents: they
+return an `EngineActionTicket` after queuing the request, and completion arrives
+later as `Event::EngineAction` plus the underlying `Event::EngineResponse`.
 
 ```rust
 let balance = client.request_balance("USDT", Duration::from_secs(15))?;
-client.set_leverage("BTCUSDT", 20, Duration::from_secs(15))?;
-client.set_hedge_mode(true, Duration::from_secs(15))?;
-client.cancel_all_orders(Duration::from_secs(15))?;
+let ticket = client.set_leverage("BTCUSDT", 20)?;
+client.set_hedge_mode(true)?;
+client.cancel_all_orders()?;
 ```
 
 Advanced protocol tools can still own `Client + EventDispatcher` directly, but
@@ -444,8 +445,9 @@ or set `server_info` manually from a parsed BaseCheck response.
 
 ## Engine API Requests
 
-For common one-shot reads and mutations, use `MoonClient` request helpers. The
-runtime keeps the UDP loop alive while the caller waits for the request timeout:
+For common one-shot reads, use `MoonClient` request helpers. The runtime keeps
+the UDP loop alive while the caller waits for the request timeout. For
+user-facing mutations, use non-blocking Active Lib intents:
 
 ```rust
 let qty = client.request_balance("USDT", Duration::from_secs(12))?;
@@ -455,15 +457,14 @@ client.refresh_transfer_assets()?; // async Active Lib update; read snapshot().t
 let transfer_assets =
     client.request_transfer_assets(moonproto::ExchangeKind::Spot, Duration::from_secs(12))?;
 let markets_received = client.refresh_candles(Duration::from_secs(30))?;
-client.set_leverage("BTCUSDT", 20, Duration::from_secs(12))?;
-client.set_hedge_mode(true, Duration::from_secs(12))?;
-client.confirm_risk_limit("BTCUSDT", Duration::from_secs(12))?;
+client.set_leverage("BTCUSDT", 20)?;
+client.set_hedge_mode(true)?;
+client.confirm_risk_limit("BTCUSDT")?;
 ```
 
-These helpers validate the server response and parse the payload. Engine API
-failures are returned as `MoonClientError::EngineRequest`. Mutation helpers
-return `Ok(())` because most mutation replies are acknowledgements rather than
-typed data snapshots.
+Read helpers validate the server response and parse the payload. Blocking
+mutation counterparts exist with a `blocking_` prefix for scripts, diagnostics,
+and custom tools that deliberately need a synchronous acknowledgement.
 
 Low-level `Client::api_*` receivers remain only for custom runtimes and
 diagnostic tools. A normal application should not wait on raw receivers from the

@@ -153,9 +153,11 @@ until `stop()` or drop.
 See `docs/active_lib.md` for the maintained-state contract.
 
 Engine API helpers that mutate server/exchange state also run through the owned
-runtime. Examples: `client.set_leverage(...)`, `client.set_hedge_mode(...)`,
+runtime and return immediately after queuing the intent. Completion arrives as
+`Event::EngineAction` / `Event::EngineResponse`. Examples:
+`client.set_leverage(...)`, `client.set_hedge_mode(...)`,
 `client.cancel_all_orders(...)`, `client.confirm_risk_limit(...)`, and
-`client.do_transfer_asset(...)`.
+`client.transfer_asset(...)`.
 
 ## Tests
 

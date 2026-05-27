@@ -31,6 +31,7 @@ pub(super) fn runtime_loop(
         let candles_changed = poll_auto_candles(&mut pending.auto_candles, &mut dispatcher);
         let transfer_assets_changed =
             poll_transfer_assets(&mut pending.transfer_assets, &mut dispatcher);
+        poll_engine_actions(&mut pending.engine_actions, &mut dispatcher);
         if candles_changed || transfer_assets_changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
@@ -53,10 +54,17 @@ pub(super) fn runtime_loop(
 struct RuntimePending {
     auto_candles: Vec<mpsc::Receiver<crate::client::MergedCandles>>,
     transfer_assets: Vec<PendingTransferAssets>,
+    engine_actions: Vec<PendingEngineAction>,
 }
 
 struct PendingTransferAssets {
     kind: crate::state::ExchangeKind,
+    rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+struct PendingEngineAction {
+    kind: crate::events::EngineActionKind,
+    ticket: super::EngineActionTicket,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
 }
 
@@ -140,6 +148,14 @@ fn handle_command(
         }
         RuntimeCommand::TransferAssetsRefreshKind(kind) => {
             schedule_transfer_assets_refresh_kind(client, &mut pending.transfer_assets, kind);
+            false
+        }
+        RuntimeCommand::EngineAction {
+            kind,
+            ticket,
+            payload,
+        } => {
+            schedule_engine_action(client, &mut pending.engine_actions, kind, ticket, payload);
             false
         }
         RuntimeCommand::Ui(cmd) => {
@@ -288,6 +304,17 @@ fn schedule_transfer_assets_refresh_kind(
     pending.push(PendingTransferAssets { kind, rx });
 }
 
+fn schedule_engine_action(
+    client: &mut Client,
+    pending: &mut Vec<PendingEngineAction>,
+    kind: crate::events::EngineActionKind,
+    ticket: super::EngineActionTicket,
+    payload: Vec<u8>,
+) {
+    let rx = client.send_api_request_async(&payload);
+    pending.push(PendingEngineAction { kind, ticket, rx });
+}
+
 fn sync_runtime_trade_storage_scope(
     client: &Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -345,6 +372,34 @@ fn poll_transfer_assets(
         }
     }
     changed
+}
+
+fn poll_engine_actions(
+    pending: &mut Vec<PendingEngineAction>,
+    dispatcher: &mut crate::events::EventDispatcher,
+) {
+    let mut i = 0;
+    while i < pending.len() {
+        match pending[i].rx.try_recv() {
+            Ok(resp) => {
+                let kind = pending[i].kind.clone();
+                dispatcher.queue_engine_action_response(kind, resp);
+                pending.swap_remove(i);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let action = pending.swap_remove(i);
+                dispatcher.queue_engine_action_disconnected(
+                    action.kind,
+                    action.ticket.request_uid,
+                    action.ticket.method,
+                    "pending Engine API action receiver closed before response",
+                );
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                i += 1;
+            }
+        }
+    }
 }
 
 fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {

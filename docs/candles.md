@@ -47,9 +47,9 @@ The raw time value is a Delphi day value, not Unix time.
 
 ## Explicit Refresh
 
-Use `MoonClient::refresh_candles(timeout)` when the UI wants to force a fresh
-full 5m snapshot. The helper returns the number of parsed market entries and
-applies candles to retained Active Lib history when storage is active:
+`MoonClient::refresh_candles(timeout)` is currently an explicit one-shot helper:
+it waits for a full 5m snapshot, returns the number of parsed market entries,
+and applies candles to retained Active Lib history when storage is active:
 
 ```rust
 let markets_received = client.refresh_candles(std::time::Duration::from_secs(30))?;
@@ -65,3 +65,8 @@ For one market and one history kind, `request_coin_card_candles` returns the
 server response as `Vec<DeepPrice>` and does not replace retained 5m history.
 `DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
 `volume()` / `time_delphi()` helpers.
+
+The UI-facing non-blocking chart refresh shape is still under the API blocking
+audit. Do not build a desktop UI around waiting on candle requests from the UI
+thread; use retained history readers for rendering and treat explicit candle
+requests as worker/script operations until that pass is closed.

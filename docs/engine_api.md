@@ -70,7 +70,8 @@ path.
 |---|---|
 | `MoonClient` typed reads | `request_balance`, `request_hedge_mode`, `request_api_expiration_time`, `request_transfer_assets`, `request_coin_card_candles`, `request_client_settings`, `request_order_snapshot`, `request_balance_snapshot` |
 | `MoonClient` async Active Lib refresh | `refresh_balances`, `refresh_transfer_assets`, `refresh_transfer_assets_kind` |
-| `MoonClient` mutation/refresh helpers returning `Ok(())` on accepted server ack | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `do_transfer_asset`, `request_markets_balance_full`, `reload_order_book` |
+| `MoonClient` non-blocking mutation/refresh intents | `set_leverage`, `set_hedge_mode`, `cancel_all_orders`, `change_position_type`, `convert_dust_bnb`, `confirm_risk_limit`, `set_ma_mode`, `transfer_asset` / `do_transfer_asset`, `refresh_markets_balance_full`, `reload_order_book` |
+| Explicit blocking diagnostic mutations | `blocking_set_leverage`, `blocking_set_hedge_mode`, `blocking_cancel_all_orders`, `blocking_change_position_type`, `blocking_convert_dust_bnb`, `blocking_confirm_risk_limit`, `blocking_set_ma_mode`, `blocking_do_transfer_asset`, `blocking_request_markets_balance_full`, `blocking_reload_order_book` |
 | Low-level custom-runtime init reads | `request_base_check`, `request_auth_check` |
 | Low-level raw receiver wrappers hidden from rustdoc | `Client::api_*` |
 
@@ -78,25 +79,32 @@ path.
 
 Blocking helpers wait for a specific server response while the owned runtime
 keeps MoonProto pumping. Use them when the caller truly needs the returned value
-before continuing:
+in the same synchronous branch before continuing:
 
 - `request_balance("USDT", timeout)`;
 - `request_hedge_mode(timeout)`;
 - `request_api_expiration_time(timeout)`;
 - `request_coin_card_candles(market, kind, timeout)`;
 - `refresh_candles(timeout)`;
-- `request_balance_snapshot(timeout)` / `request_order_snapshot(timeout)`;
-- account actions that need an acknowledgement, such as `set_leverage`,
-  `set_hedge_mode`, and `cancel_all_orders`.
+- `request_balance_snapshot(timeout)` / `request_order_snapshot(timeout)`.
 
 Async Active Lib commands return after queuing work and later update
 snapshots/events:
 
 - `refresh_balances()`;
 - `refresh_transfer_assets()` / `refresh_transfer_assets_kind(kind)`;
+- account actions such as `set_leverage`, `set_hedge_mode`,
+  `cancel_all_orders`, `change_position_type`, `confirm_risk_limit`,
+  `set_ma_mode`, `reload_order_book`, and `transfer_asset`;
 - subscriptions and order/trade intents such as `subscribe_orderbook`,
   `subscribe_all_trades`, `client.orders().move_order(...)`, and
   `client.trade().new_order(...)`.
+
+Rule for public API shape: when the Delphi UI wraps a blocking
+`TMoonProtoEngine` call in `TThread.CreateAnonymousThread`, or the caller does
+not need the result in the same synchronous method, the regular Rust Active Lib
+method must be non-blocking. Blocking counterparts remain explicitly named with
+`blocking_` for scripts, diagnostics, and custom tools.
 
 For subscriptions, prefer the registry-aware APIs:
 

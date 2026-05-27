@@ -1952,6 +1952,27 @@ fn record_event(
                         format!("TransferAssets kind={} failed={}", kind.name(), error),
                     );
                 }
+                moonproto::TransferAssetsEvent::TransferApplied {
+                    asset,
+                    qty,
+                    from,
+                    to,
+                    revision,
+                    ..
+                } => {
+                    log_server_event(
+                        &st,
+                        event_no,
+                        format!(
+                            "TransferAssets local-transfer asset={} qty={:.8} from={} to={} revision={}",
+                            asset,
+                            qty,
+                            from.name(),
+                            to.name(),
+                            revision
+                        ),
+                    );
+                }
             }
         }
         Event::Markets(ev) => {

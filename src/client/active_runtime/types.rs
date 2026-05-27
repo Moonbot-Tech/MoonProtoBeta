@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Ticket returned after Active Lib has queued a non-blocking Engine API action.
+///
+/// The server result arrives later as [`crate::events::Event::EngineAction`] and
+/// as the underlying [`crate::events::Event::EngineResponse`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineActionTicket {
+    pub kind: crate::events::EngineActionKind,
+    pub request_uid: Option<u64>,
+    pub method: crate::commands::EngineMethod,
+}
+
 /// Error returned by the high-level [`MoonClient`](super::MoonClient) runtime API.
 #[derive(Debug)]
 pub enum MoonClientError {
