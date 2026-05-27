@@ -31,24 +31,19 @@ If trades storage is disabled, chunked candles are not kept in market history.
 
 ## Candle Row
 
-```rust
-pub struct Candle5mRow {
-    pub time:    f64,
-    pub open_p:  f32,
-    pub close_p: f32,
-    pub max_p:   f32,
-    pub min_p:   f32,
-    pub vol:     f32,
-}
-```
-
-`time` is a Delphi-compatible day value, not Unix time. Prefer the helper
-methods in application code:
+`Candle5mRow` stores Delphi-compatible raw fields internally, but application
+code should use the OHLCV/time helpers instead of the raw Delphi field names:
 
 ```rust
+let open = candle.open();
 let high = candle.high();
+let low = candle.low();
+let close = candle.close();
+let volume = candle.volume();
 let unix_ms = candle.time_delphi().unix_millis();
 ```
+
+The raw time value is a Delphi day value, not Unix time.
 
 ## Explicit Refresh
 
@@ -69,4 +64,4 @@ chunk/zlib state; it should read retained candles through
 For one market and one history kind, `request_coin_card_candles` returns the
 server response as `Vec<DeepPrice>` and does not replace retained 5m history.
 `DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
-`time_delphi()` helpers.
+`volume()` / `time_delphi()` helpers.

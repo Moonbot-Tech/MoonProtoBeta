@@ -237,20 +237,14 @@ pub struct MiniCandle {
     pub sell_vol: f32,
 }
 
-pub struct Candle5mRow {
-    pub open_p: f32,
-    pub close_p: f32,
-    pub max_p: f32,
-    pub min_p: f32,
-    pub vol: f32,
-    pub time: f64,
-}
+pub struct Candle5mRow { /* raw Delphi-compatible storage fields are hidden from docs */ }
 
 impl Candle5mRow {
     pub fn open(self) -> f32;
     pub fn high(self) -> f32;
     pub fn low(self) -> f32;
     pub fn close(self) -> f32;
+    pub fn volume(self) -> f32;
     pub fn time_delphi(self) -> DelphiTime;
 }
 

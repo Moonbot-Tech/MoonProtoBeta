@@ -192,11 +192,17 @@ impl SeqRingTimedRow for LastPricePoint {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct Candle5mRow {
+    #[doc(hidden)]
     pub open_p: f32,
+    #[doc(hidden)]
     pub close_p: f32,
+    #[doc(hidden)]
     pub max_p: f32,
+    #[doc(hidden)]
     pub min_p: f32,
+    #[doc(hidden)]
     pub vol: f32,
+    #[doc(hidden)]
     pub time: f64,
 }
 
@@ -230,6 +236,11 @@ impl Candle5mRow {
     #[inline]
     pub fn low(self) -> f32 {
         self.min_p
+    }
+
+    #[inline]
+    pub fn volume(self) -> f32 {
+        self.vol
     }
 
     #[inline]

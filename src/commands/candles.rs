@@ -54,12 +54,18 @@ pub(crate) use self::request_parser::{
 /// Packed `TDeepPrice` (28 bytes), matching Delphi `MarketsU.pas:701-705`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
+    #[doc(hidden)]
     pub open_p: f32,
+    #[doc(hidden)]
     pub close_p: f32,
+    #[doc(hidden)]
     pub max_p: f32,
+    #[doc(hidden)]
     pub min_p: f32,
+    #[doc(hidden)]
     pub vol: f32,
     /// `TDateTime` (Delphi double, days since 1899-12-30).
+    #[doc(hidden)]
     pub time: f64,
 }
 
@@ -97,6 +103,11 @@ impl DeepPrice {
     #[inline]
     pub fn low(self) -> f32 {
         self.min_p
+    }
+
+    #[inline]
+    pub fn volume(self) -> f32 {
+        self.vol
     }
 
     #[inline]
