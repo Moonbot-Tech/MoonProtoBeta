@@ -2124,6 +2124,13 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_del
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].current, 101.0);
     assert_eq!(rows[0].real_time, 45_000.5);
+
+    let mark_prices = worker.readers("BTCUSDT").unwrap().mark_prices.unwrap();
+    let mut mark_rows = Vec::new();
+    mark_prices.copy_last(4, &mut mark_rows);
+    assert_eq!(mark_rows.len(), 1);
+    assert_eq!(mark_rows[0].current, 101.0);
+    assert_eq!(mark_rows[0].real_time, 45_000.5);
 }
 
 #[test]

@@ -188,6 +188,7 @@ Quick profile target is under 30 seconds and checks one client:
 - strategy schema receive/apply;
 - trades and orderbook subscriptions;
 - retained trades/LastPrice/derived history state;
+- retained MarkPrice line and funding/balance/order UI state;
 - ParseFailed equals zero;
 - CPU summary for protocol/apply paths.
 

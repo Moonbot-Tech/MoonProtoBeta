@@ -42,6 +42,8 @@ pub struct MarketHistoryLastPriceInput {
     pub current: f64,
     pub bid: f64,
     pub ask: f64,
+    pub mark_price: f64,
+    pub mark_price_found: bool,
     pub is_btc_market: bool,
     pub is_base_usdt_market: bool,
 }
@@ -443,6 +445,7 @@ fn process_last_price_batch(
             row.is_btc_market,
             row.is_base_usdt_market,
         );
+        store.append_mark_price(row.mark_price, batch.now_time, row.mark_price_found);
     }
 }
 

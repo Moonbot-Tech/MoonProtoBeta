@@ -279,6 +279,21 @@ drawn from `Market.HistoryPrice`.
 The retained-history worker appends a `LastPricePoint` only when Delphi
 `TMarket.AddFrom` would add a `HistoryPrice` row: `pLast > 0`, bid or ask is
 present, and the market is a BTC market or a base-USDT market.
+
+The retained MarkPrice line row has the same shape:
+
+```rust
+pub struct MarkPricePoint {
+    pub current: f32,
+    pub real_time: f64, // Delphi TDateTime
+}
+```
+
+It is filled from `UpdateMarketsList -> MarketPrice.mark_price` when the server
+marks the value as present. UI code can compare the MarkPrice line with the
+LastPrice line for the same market; both are retained by the same
+`MarketHistoryWorker`.
+
 When trades retained storage is active, `EventDispatcher` queues these rows into
 its `MarketHistoryWorker` immediately. The default worker is lazy-created from
 the all-trades subscription scope; `set_market_history_handle` is only needed

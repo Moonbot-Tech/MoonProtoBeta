@@ -190,6 +190,8 @@ pub(crate) struct MarketLastPriceHistoryInput {
     pub current: f64,
     pub bid: f64,
     pub ask: f64,
+    pub mark_price: f64,
+    pub mark_price_found: bool,
     pub is_btc_market: bool,
     pub is_base_usdt_market: bool,
 }

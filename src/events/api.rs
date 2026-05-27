@@ -125,6 +125,8 @@ impl EventDispatcher {
                 current: row.current,
                 bid: row.bid,
                 ask: row.ask,
+                mark_price: row.mark_price,
+                mark_price_found: row.mark_price_found,
                 is_btc_market: row.is_btc_market,
                 is_base_usdt_market: row.is_base_usdt_market,
             })

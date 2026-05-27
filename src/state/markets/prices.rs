@@ -125,6 +125,8 @@ impl MarketsState {
                 current: slot.p_last,
                 bid: slot.bid,
                 ask: slot.ask,
+                mark_price: slot.mark_price,
+                mark_price_found: slot.mark_price_found,
                 is_btc_market,
                 is_base_usdt_market,
             });
@@ -178,6 +180,8 @@ impl MarketsState {
                 current: slot.p_last,
                 bid: slot.bid,
                 ask: slot.ask,
+                mark_price: slot.mark_price,
+                mark_price_found: slot.mark_price_found,
                 is_btc_market,
                 is_base_usdt_market,
             })

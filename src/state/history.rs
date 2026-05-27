@@ -182,6 +182,31 @@ impl SeqRingTimedRow for LastPricePoint {
     }
 }
 
+/// Active Lib retained MarkPrice chart line row.
+///
+/// The source value is `UpdateMarketsList -> MarketPrice.mark_price`. Unlike
+/// `LastPricePoint`, this line is maintained for every retained market when the
+/// server marks the row as present.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct MarkPricePoint {
+    pub current: f32,
+    pub real_time: f64,
+}
+
+impl MarkPricePoint {
+    #[inline]
+    pub fn time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.real_time)
+    }
+}
+
+impl SeqRingTimedRow for MarkPricePoint {
+    fn seq_ring_time(&self) -> f64 {
+        self.real_time
+    }
+}
+
 /// Active Lib retained 5-minute candle row.
 ///
 /// The source snapshot is Delphi `TDeepPrice` / `TDeepPricePack`, but the row

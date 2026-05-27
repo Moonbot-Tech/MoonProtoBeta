@@ -17,9 +17,9 @@ send commands; the library maintains protocol and trading state.
 - Markets, market indexes, prices, tags, funding, mark price, and listing
   refresh.
 - Per-market chart-visible fields: position size/entry/liquidation/leverage,
-  balance fields, arb slots, last trade tail, LastPrice line, retained trades,
-  retained 5m candles, and derived volume/delta snapshots when trades storage is
-  enabled.
+  balance fields, arb slots, last trade tail, LastPrice line, MarkPrice line,
+  retained trades, retained 5m candles, and derived volume/delta snapshots when
+  trades storage is enabled.
 - Orders and order traces, including local stateful effects for move/cancel,
   stops, vstop, panic, immune, and snapshot cleanup.
 - Strategy schema and strategy snapshots. Applications can provide local

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use crate::state::eps::EpsProfile;
 use crate::state::history::{
     compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
-    LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarketDerivedSnapshot, MiniCandle,
-    RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
+    LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot,
+    MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow,
+    TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 
@@ -39,6 +40,7 @@ pub struct MarketHistoryReaders {
     pub mm_orders: Option<SeqRingReader<MMOrderHistoryRow>>,
     pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
+    pub mark_prices: Option<SeqRingReader<MarkPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
     pub candles_5m: Option<SeqRingReader<Candle5mRow>>,
 }
@@ -50,6 +52,7 @@ pub struct MarketHistoryStore {
     mm_orders: Option<SeqRingWriter<MMOrderHistoryRow>>,
     mm_order_companion: Option<SeqRingWriter<MMOrderCompanionData>>,
     last_prices: Option<SeqRingWriter<LastPricePoint>>,
+    mark_prices: Option<SeqRingWriter<MarkPricePoint>>,
     mini_candles: Option<SeqRingWriter<MiniCandle>>,
     candles_5m: Option<SeqRingWriter<Candle5mRow>>,
     readers: MarketHistoryReaders,
@@ -84,6 +87,8 @@ impl MarketHistoryStore {
             optional_ring::<MMOrderCompanionData>(config.mm_order_companion_capacity);
         let (last_prices, last_reader) =
             optional_ring::<LastPricePoint>(config.last_price_capacity);
+        let (mark_prices, mark_reader) =
+            optional_ring::<MarkPricePoint>(config.last_price_capacity);
         let (mini_candles, mini_reader) = optional_ring::<MiniCandle>(config.mini_candles_capacity);
         let (candles_5m, candles_reader) = optional_ring::<Candle5mRow>(config.candles_5m_capacity);
 
@@ -94,6 +99,7 @@ impl MarketHistoryStore {
             mm_orders,
             mm_order_companion,
             last_prices,
+            mark_prices,
             mini_candles,
             candles_5m,
             readers: MarketHistoryReaders {
@@ -103,6 +109,7 @@ impl MarketHistoryStore {
                 mm_orders: mm_reader,
                 mm_order_companion: mm_companion_reader,
                 last_prices: last_reader,
+                mark_prices: mark_reader,
                 mini_candles: mini_reader,
                 candles_5m: candles_reader,
             },
@@ -176,6 +183,23 @@ impl MarketHistoryStore {
         }
         self.last_prices.as_mut().map(|writer| {
             writer.push(LastPricePoint {
+                current: current as f32,
+                real_time,
+            })
+        })
+    }
+
+    pub(crate) fn append_mark_price(
+        &mut self,
+        current: f64,
+        real_time: f64,
+        mark_price_found: bool,
+    ) -> Option<u64> {
+        if !mark_price_found || current <= self.eps_profile.eps {
+            return None;
+        }
+        self.mark_prices.as_mut().map(|writer| {
+            writer.push(MarkPricePoint {
                 current: current as f32,
                 real_time,
             })

@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use crate::state::history::{
-    Candle5mRow, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MiniCandle,
-    TradeHistoryRow,
+    Candle5mRow, LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint,
+    MiniCandle, TradeHistoryRow,
 };
 
 pub(super) const GIB: usize = 1024 * 1024 * 1024;
@@ -13,6 +13,7 @@ const TRADE_SLOT_BYTES: usize = size_of::<TradeHistoryRow>();
 const MM_ORDER_SLOT_BYTES: usize = size_of::<MMOrderHistoryRow>();
 const MM_COMPANION_SLOT_BYTES: usize = size_of::<MMOrderCompanionData>();
 const LAST_PRICE_SLOT_BYTES: usize = size_of::<LastPricePoint>();
+const MARK_PRICE_SLOT_BYTES: usize = size_of::<MarkPricePoint>();
 const MINI_CANDLE_SLOT_BYTES: usize = size_of::<MiniCandle>();
 const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
 
@@ -151,6 +152,7 @@ impl MarketHistoryConfig {
             + self.mm_orders_capacity * MM_ORDER_SLOT_BYTES
             + self.mm_order_companion_capacity * MM_COMPANION_SLOT_BYTES
             + self.last_price_capacity * LAST_PRICE_SLOT_BYTES
+            + self.last_price_capacity * MARK_PRICE_SLOT_BYTES
             + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES
             + self.candles_5m_capacity * CANDLE_5M_SLOT_BYTES
     }

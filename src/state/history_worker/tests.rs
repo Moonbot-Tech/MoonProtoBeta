@@ -104,6 +104,8 @@ fn worker_stores_last_price_batch_for_enabled_market() {
                 current: 100.5,
                 bid: 100.0,
                 ask: 101.0,
+                mark_price: 100.75,
+                mark_price_found: true,
                 is_btc_market: true,
                 is_base_usdt_market: false,
             }],
@@ -115,6 +117,13 @@ fn worker_stores_last_price_batch_for_enabled_market() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].current, 100.5);
     assert_eq!(out[0].real_time, 45_000.25);
+
+    let mark_prices = worker.readers("BTCUSDT").unwrap().mark_prices.unwrap();
+    let mut mark_out = Vec::new();
+    mark_prices.copy_last(4, &mut mark_out);
+    assert_eq!(mark_out.len(), 1);
+    assert_eq!(mark_out[0].current, 100.75);
+    assert_eq!(mark_out[0].real_time, 45_000.25);
 }
 
 #[test]

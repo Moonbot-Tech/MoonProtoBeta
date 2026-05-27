@@ -35,6 +35,9 @@
 //! FireTest checks live full-parse health for all real server packets. Crafted
 //! malformed parser semantics (Delphi `Read` zero-tail vs `ReadBuffer`
 //! fail-fast) belong in deterministic unit/parser tests next to each parser.
+//! At the end of each profile it prints an ActiveLib UI-state report for
+//! BTCUSDT/ETHUSDT: LastPrice/MarkPrice retained lines, volumes, deltas,
+//! funding, balances/assets, and order events already observed during the run.
 //! Strategy snapshots are also dumped as raw `TStratSnapshot.Data` files under
 //! `target/firetest_strategy_raw/` by default, so Delphi/Rust serializer and CPU
 //! checks can run against the exact same live payload bytes.
@@ -70,8 +73,9 @@ use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
 use moonproto::protocol::Command;
 use moonproto::state::{
-    LastPricePoint, MarketHistoryConfig, MarketHistoryWorker, MarketPrice, OrderBookEvent,
-    OrderBookKind, SettingsEvent, StratEvent, TradesEvent,
+    BalanceEvent, LastPricePoint, MarkPricePoint, MarketHistoryConfig, MarketHistoryWorker,
+    MarketPrice, OrderBookEvent, OrderBookKind, OrderEvent, SettingsEvent, StratEvent,
+    TradeHistoryRow, TradesEvent,
 };
 use moonproto::{
     connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
@@ -96,6 +100,7 @@ const EPS: f64 = 1e-9;
 const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
 const QUICK_TOTAL_TARGET_SECS: u64 = 30;
+const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FireProfile {
@@ -379,10 +384,14 @@ struct SessionStats {
     last_market_price: Option<MarketProbePrice>,
     market_invariant_error: Option<String>,
     order_events: u64,
+    order_event_kinds: HashMap<&'static str, u64>,
     order_uid_by_request: HashMap<u64, u64>,
     order_status_by_uid: HashMap<u64, OrderWorkerStatus>,
     order_market_by_uid: HashMap<u64, String>,
     order_sell_reason_by_uid: HashMap<u64, String>,
+    balance_events: u64,
+    balance_snapshot_events: u64,
+    balance_incremental_events: u64,
     parse_failed: u64,
     candles_requested: bool,
     candles_chunks: u64,
@@ -431,10 +440,14 @@ impl Clone for SessionStats {
             last_market_price: self.last_market_price,
             market_invariant_error: self.market_invariant_error.clone(),
             order_events: self.order_events,
+            order_event_kinds: self.order_event_kinds.clone(),
             order_uid_by_request: self.order_uid_by_request.clone(),
             order_status_by_uid: self.order_status_by_uid.clone(),
             order_market_by_uid: self.order_market_by_uid.clone(),
             order_sell_reason_by_uid: self.order_sell_reason_by_uid.clone(),
+            balance_events: self.balance_events,
+            balance_snapshot_events: self.balance_snapshot_events,
+            balance_incremental_events: self.balance_incremental_events,
             parse_failed: self.parse_failed,
             candles_requested: self.candles_requested,
             candles_chunks: self.candles_chunks,
@@ -859,6 +872,371 @@ impl Session {
         }
     }
 
+    fn emit_active_lib_report(&mut self, profile: FireProfile, started_at: Instant) {
+        self.drain_queued();
+        let now_time = delphi_now_raw_for_test();
+        let _ = self.history_worker.flush(now_time);
+        self.refresh_stats_from_dispatcher(false);
+
+        let snapshot = self.dispatcher.snapshot();
+        let st = self.snapshot();
+        let elapsed = started_at.elapsed().as_secs_f64();
+        let update_count = st.engine_method_count(EngineMethod::UpdateMarketsList);
+        println!(
+            "FIRETEST ActiveLib report profile={} session={} elapsed={:.2}s update_markets={} balance_events={} snapshots={} increments={} orders_seen={} current_orders={} order_event_kinds=[{}]",
+            profile.as_str(),
+            st.label,
+            elapsed,
+            update_count,
+            st.balance_events,
+            st.balance_snapshot_events,
+            st.balance_incremental_events,
+            st.order_status_by_uid.len(),
+            snapshot.orders().len(),
+            format_count_map(&st.order_event_kinds),
+        );
+
+        for market in ACTIVE_LIB_REPORT_MARKETS {
+            self.emit_active_lib_market_report(profile, &snapshot, market, now_time);
+        }
+        self.emit_balance_asset_report(&snapshot);
+        self.emit_order_report(&snapshot, &st);
+    }
+
+    fn emit_active_lib_market_report(
+        &self,
+        profile: FireProfile,
+        snapshot: &EventDispatcherSnapshot,
+        market: &str,
+        now_time: f64,
+    ) {
+        let Some(readers) = self.history_worker.readers(market) else {
+            println!(
+                "FIRETEST ActiveLib market={market}: no retained readers; reason=market not retained by trades storage scope"
+            );
+            return;
+        };
+
+        let mut last_prices = Vec::new();
+        if let Some(reader) = readers.last_prices.as_ref() {
+            reader.copy_last(reader.capacity(), &mut last_prices);
+        }
+        let mut mark_prices = Vec::new();
+        if let Some(reader) = readers.mark_prices.as_ref() {
+            reader.copy_last(reader.capacity(), &mut mark_prices);
+        }
+        let mut futures_25 = Vec::new();
+        let mut futures_60 = Vec::new();
+        let mut futures_all = Vec::new();
+        if let Some(reader) = readers.futures_trades.as_ref() {
+            reader.copy_last(reader.capacity(), &mut futures_all);
+            let from_25 = now_time - 25.0 / 86_400.0;
+            let from_60 = now_time - 60.0 / 86_400.0;
+            reader.copy_time_range(
+                from_25,
+                now_time + 1.0 / 86_400.0,
+                reader.capacity(),
+                &mut futures_25,
+            );
+            reader.copy_time_range(
+                from_60,
+                now_time + 1.0 / 86_400.0,
+                reader.capacity(),
+                &mut futures_60,
+            );
+        }
+        let mut spot_all = Vec::new();
+        if let Some(reader) = readers.spot_trades.as_ref() {
+            reader.copy_last(reader.capacity(), &mut spot_all);
+        }
+
+        let last_stats = price_line_stats(last_prices.iter().map(|p| (p.real_time, p.current)));
+        let mark_stats = price_line_stats(mark_prices.iter().map(|p| (p.real_time, p.current)));
+        let last_delta_1m = price_delta_for_window(
+            last_prices.iter().map(|p| (p.real_time, p.current)),
+            now_time,
+            60.0,
+        );
+        let last_delta_1h = price_delta_for_window(
+            last_prices.iter().map(|p| (p.real_time, p.current)),
+            now_time,
+            3600.0,
+        );
+        let mark_delta_1m = price_delta_for_window(
+            mark_prices.iter().map(|p| (p.real_time, p.current)),
+            now_time,
+            60.0,
+        );
+        let manual_25 = trade_volume(&futures_25);
+        let manual_60 = trade_volume(&futures_60);
+        let derived = self.history_worker.derived_snapshot(market, now_time);
+        let price = snapshot.markets().price(market).copied();
+        let handle = snapshot.markets().get(market);
+        let balance = handle.as_ref().map(|handle| handle.balance_position());
+
+        println!(
+            "FIRETEST ActiveLib market={market} LastPrice count={} expected_by_updates~{} span={:.2}s expected_by_2s_span~{} min={:.8} max={:.8} delta_all={:.4}% delta_1m={:.4}% delta_1h={:.4}% values=[{}]",
+            last_stats.count,
+            self.snapshot().engine_method_count(EngineMethod::UpdateMarketsList),
+            last_stats.span_secs,
+            expected_price_points_for_span(last_stats),
+            last_stats.min,
+            last_stats.max,
+            last_stats.delta_percent,
+            last_delta_1m,
+            last_delta_1h,
+            format_last_price_values(&last_prices),
+        );
+        println!(
+            "FIRETEST ActiveLib market={market} MarkPrice count={} span={:.2}s expected_by_2s_span~{} min={:.8} max={:.8} delta_all={:.4}% delta_1m={:.4}% values=[{}]",
+            mark_stats.count,
+            mark_stats.span_secs,
+            expected_price_points_for_span(mark_stats),
+            mark_stats.min,
+            mark_stats.max,
+            mark_stats.delta_percent,
+            mark_delta_1m,
+            format_mark_price_values(&mark_prices),
+        );
+
+        if let (Some(last), Some(mark)) = (last_prices.last(), mark_prices.last()) {
+            let rel = rel_diff(f64::from(last.current), f64::from(mark.current));
+            println!(
+                "FIRETEST ActiveLib market={market} LastPrice_vs_MarkPrice last={:.8} mark={:.8} rel_diff={:.4}%",
+                last.current,
+                mark.current,
+                rel * 100.0
+            );
+            assert!(
+                rel <= PRICE_NEIGHBORHOOD_PCT,
+                "ActiveLib {market}: MarkPrice diverged from LastPrice by {:.4}%",
+                rel * 100.0
+            );
+        }
+
+        let Some(derived) = derived else {
+            panic!("ActiveLib {market}: missing derived snapshot");
+        };
+        println!(
+            "FIRETEST ActiveLib market={market} trades retained futures={} spot={} manual_vol_25s={:.4} manual_vol_60s={:.4} active_vol_1m={:.4} active_vol_3m={:.4} active_vol_5m={:.4}",
+            futures_all.len(),
+            spot_all.len(),
+            manual_25,
+            manual_60,
+            derived.trade_volumes.one_minute.total_value(),
+            derived.trade_volumes.three_minutes.total_value(),
+            derived.trade_volumes.five_minutes.total_value(),
+        );
+        println!(
+            "FIRETEST ActiveLib market={market} deltas trade(1m={:.4}% 5m={:.4}%) last_price(1m={:.4}% 5m={:.4}% 15m={:.4}% 30m={:.4}% 1h={:.4}%) candle(5m={:.4}% 15m={:.4}% 30m={:.4}% 1h={:.4}% 2h={:.4}% 3h={:.4}% 24h={:.4}% 72h={:.4}%) combined(1m={:.4}% 5m={:.4}% 15m={:.4}% 30m={:.4}% 1h={:.4}% 2h={:.4}% 3h={:.4}% 24h={:.4}% 72h={:.4}%)",
+            derived.trade_deltas.one_minute,
+            derived.trade_deltas.five_minutes,
+            derived.last_price_deltas.one_minute,
+            derived.last_price_deltas.five_minutes,
+            derived.last_price_deltas.fifteen_minutes,
+            derived.last_price_deltas.thirty_minutes,
+            derived.last_price_deltas.one_hour,
+            derived.candle_deltas.five_minutes,
+            derived.candle_deltas.fifteen_minutes,
+            derived.candle_deltas.thirty_minutes,
+            derived.candle_deltas.one_hour,
+            derived.candle_deltas.two_hours,
+            derived.candle_deltas.three_hours,
+            derived.candle_deltas.twenty_four_hours,
+            derived.candle_deltas.seventy_two_hours,
+            derived.deltas.one_minute,
+            derived.deltas.five_minutes,
+            derived.deltas.fifteen_minutes,
+            derived.deltas.thirty_minutes,
+            derived.deltas.one_hour,
+            derived.deltas.two_hours,
+            derived.deltas.three_hours,
+            derived.deltas.twenty_four_hours,
+            derived.deltas.seventy_two_hours,
+        );
+        println!(
+            "FIRETEST ActiveLib market={market} volumes candle(5m={:.4} 15m={:.4} 30m={:.4} 1h={:.4} 2h={:.4} 3h={:.4} 24h={:.4} 72h={:.4}) trade_buy_sell_1m=({:.4}/{:.4}) trade_buy_sell_5m=({:.4}/{:.4})",
+            derived.candle_volumes.five_minutes,
+            derived.candle_volumes.fifteen_minutes,
+            derived.candle_volumes.thirty_minutes,
+            derived.candle_volumes.one_hour,
+            derived.candle_volumes.two_hours,
+            derived.candle_volumes.three_hours,
+            derived.candle_volumes.twenty_four_hours,
+            derived.candle_volumes.seventy_two_hours,
+            derived.trade_volumes.one_minute.buy_value,
+            derived.trade_volumes.one_minute.sell_value,
+            derived.trade_volumes.five_minutes.buy_value,
+            derived.trade_volumes.five_minutes.sell_value,
+        );
+
+        let zero_reason = active_lib_zero_reason(profile, last_stats, futures_all.len());
+        let zero_fields = active_lib_zero_fields(&derived, profile);
+        if !zero_fields.is_empty() {
+            println!(
+                "FIRETEST ActiveLib market={market} ZERO_FIELDS [{}] reason={zero_reason}",
+                zero_fields.join(",")
+            );
+        }
+
+        assert!(
+            last_stats.count > 0,
+            "ActiveLib {market}: LastPrice history is empty"
+        );
+        assert!(
+            mark_stats.count > 0,
+            "ActiveLib {market}: MarkPrice history is empty"
+        );
+        assert!(
+            last_stats.delta_percent <= 10.0,
+            "ActiveLib {market}: LastPrice delta looks insane: {:.4}%",
+            last_stats.delta_percent
+        );
+        assert!(
+            mark_stats.delta_percent <= 10.0,
+            "ActiveLib {market}: MarkPrice delta looks insane: {:.4}%",
+            mark_stats.delta_percent
+        );
+        assert!(
+            manual_25 <= manual_60 + EPS,
+            "ActiveLib {market}: manual 25s volume exceeds 60s volume: {manual_25} > {manual_60}"
+        );
+        if manual_60 > EPS {
+            assert!(
+                derived.trade_volumes.one_minute.total_value() > EPS,
+                "ActiveLib {market}: manual 60s trade volume is non-zero but active 1m volume is zero"
+            );
+        }
+
+        if let Some(price) = price {
+            let funding_hours = (price.funding_time - now_time) * 24.0;
+            println!(
+                "FIRETEST ActiveLib market={market} funding_rate={:.8} funding_time={:.8} funding_hours_from_now={:.3} mark_current={:.8}/{} bid={:.8} ask={:.8}",
+                price.funding_rate,
+                price.funding_time,
+                funding_hours,
+                price.mark_price,
+                price.mark_price_found,
+                price.bid,
+                price.ask,
+            );
+            assert!(
+                price.funding_time <= EPS || funding_hours.abs() <= 12.0,
+                "ActiveLib {market}: funding time is outside 12h window: {funding_hours:.3}h"
+            );
+        }
+        if let Some(balance) = balance {
+            println!(
+                "FIRETEST ActiveLib market={market} balance init={:.8} locked={:.8} pos_size={:.8} pos_price={:.8} liq={:.8} leverage={} asset={:.8}/{:.8} pnl={:.8} epoch={}",
+                balance.initial_balance,
+                balance.locked_balance,
+                balance.pos_size,
+                balance.pos_price,
+                balance.liq_price,
+                balance.leverage_x,
+                balance.asset_balance,
+                balance.asset_balance_full,
+                balance.total_profit(),
+                balance.last_balance_epoch,
+            );
+        }
+    }
+
+    fn emit_balance_asset_report(&self, snapshot: &EventDispatcherSnapshot) {
+        let balances = snapshot.balances();
+        println!(
+            "FIRETEST ActiveLib balances global btc_total={:.8} btc_locked={:.8} btc_full={:.8} special_coin={:.8} total_pnl={:.8} rows={}",
+            balances.global.btc_balance_total,
+            balances.global.btc_balance_locked,
+            balances.global.btc_balance_full,
+            balances.global.special_coin_balance,
+            balances.global.total_pnl,
+            balances.by_market.len(),
+        );
+        assert!(
+            balances.global.btc_balance_total.abs()
+                + balances.global.btc_balance_full.abs()
+                + balances.global.special_coin_balance.abs()
+                > EPS,
+            "ActiveLib global balances are zero"
+        );
+
+        let mut assets = snapshot
+            .markets()
+            .iter()
+            .filter_map(|handle| {
+                handle.with(|market| {
+                    let amount = market
+                        .asset_balance_full
+                        .abs()
+                        .max(market.asset_balance.abs());
+                    (amount > EPS).then(|| {
+                        (
+                            market.bn_market_currency.clone(),
+                            market.bn_market_name.clone(),
+                            market.asset_balance,
+                            market.asset_balance_full,
+                        )
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        assets.sort_by(|a, b| b.3.abs().total_cmp(&a.3.abs()));
+        let preview = assets
+            .iter()
+            .take(12)
+            .map(|(asset, market, bal, full)| format!("{asset}:{market}:{bal:.8}/{full:.8}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "FIRETEST ActiveLib assets nonzero_count={} preview=[{}]",
+            assets.len(),
+            preview
+        );
+
+        let mut balance_item_assets = balances
+            .by_market
+            .values()
+            .filter_map(|item| {
+                let amount = item.asset_balance_full.abs().max(item.asset_balance.abs());
+                (amount > EPS).then(|| {
+                    (
+                        item.market_name.clone(),
+                        item.asset_balance,
+                        item.asset_balance_full,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        balance_item_assets.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
+        let raw_preview = balance_item_assets
+            .iter()
+            .take(12)
+            .map(|(market, bal, full)| format!("{market}:{bal:.8}/{full:.8}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "FIRETEST ActiveLib balance_item_assets nonzero_count={} preview=[{}]",
+            balance_item_assets.len(),
+            raw_preview
+        );
+    }
+
+    fn emit_order_report(&self, snapshot: &EventDispatcherSnapshot, st: &SessionStats) {
+        let mut statuses = HashMap::<String, u64>::new();
+        for order in snapshot.orders().iter() {
+            *statuses.entry(format!("{:?}", order.status)).or_default() += 1;
+        }
+        println!(
+            "FIRETEST ActiveLib orders seen_total={} current={} statuses=[{}] events=[{}] markets_seen=[{}]",
+            st.order_status_by_uid.len(),
+            snapshot.orders().len(),
+            format_count_map(&statuses),
+            format_count_map(&st.order_event_kinds),
+            format_order_market_preview(st),
+        );
+    }
+
     fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
         self.dispatcher.strategy_snapshot(strategy_id).cloned()
     }
@@ -1199,6 +1577,177 @@ fn field_value_text(value: &FieldValue) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PriceLineStats {
+    count: usize,
+    min: f64,
+    max: f64,
+    delta_percent: f64,
+    span_secs: f64,
+}
+
+fn price_line_stats<I>(rows: I) -> PriceLineStats
+where
+    I: IntoIterator<Item = (f64, f32)>,
+{
+    let mut count = 0usize;
+    let mut min = f64::INFINITY;
+    let mut max = 0.0f64;
+    let mut first_time = 0.0f64;
+    let mut last_time = 0.0f64;
+    for (time, price) in rows {
+        if price <= 0.0 {
+            continue;
+        }
+        let price = f64::from(price);
+        if count == 0 {
+            first_time = time;
+        }
+        last_time = time;
+        count += 1;
+        min = min.min(price);
+        max = max.max(price);
+    }
+    let delta_percent = if count > 0 && min > 0.0 && max >= min {
+        (max / min - 1.0) * 100.0
+    } else {
+        0.0
+    };
+    PriceLineStats {
+        count,
+        min: if count > 0 { min } else { 0.0 },
+        max,
+        delta_percent,
+        span_secs: if count > 1 {
+            ((last_time - first_time) * 86_400.0).max(0.0)
+        } else {
+            0.0
+        },
+    }
+}
+
+fn expected_price_points_for_span(stats: PriceLineStats) -> usize {
+    if stats.count == 0 {
+        0
+    } else {
+        (stats.span_secs / 2.0).floor() as usize + 1
+    }
+}
+
+fn price_delta_for_window<I>(rows: I, now_time: f64, window_seconds: f64) -> f64
+where
+    I: IntoIterator<Item = (f64, f32)>,
+{
+    let from_time = now_time - window_seconds / 86_400.0;
+    price_line_stats(
+        rows.into_iter()
+            .filter(|(time, _)| *time >= from_time && *time <= now_time),
+    )
+    .delta_percent
+}
+
+fn format_last_price_values(rows: &[LastPricePoint]) -> String {
+    rows.iter()
+        .map(|p| format!("{:.8}", p.current))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_mark_price_values(rows: &[MarkPricePoint]) -> String {
+    rows.iter()
+        .map(|p| format!("{:.8}", p.current))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn trade_volume(rows: &[TradeHistoryRow]) -> f64 {
+    rows.iter().map(|row| f64::from(row.traded_value())).sum()
+}
+
+fn rel_diff(a: f64, b: f64) -> f64 {
+    let denom = a.abs().max(b.abs()).max(EPS);
+    (a - b).abs() / denom
+}
+
+fn active_lib_zero_reason(
+    profile: FireProfile,
+    last_stats: PriceLineStats,
+    futures_count: usize,
+) -> String {
+    if last_stats.count == 0 {
+        "LastPrice storage did not receive UpdateMarketsList rows".to_string()
+    } else if futures_count == 0 {
+        "TradesStream retained no futures rows for this market".to_string()
+    } else if profile == FireProfile::Quick {
+        format!(
+            "quick profile captured only {:.2}s of retained price line; zero deltas can be a real flat price sample, and long candle windows may be absent",
+            last_stats.span_secs
+        )
+    } else {
+        "possible quiet market or ActiveLib derived-state bug; inspect fields".to_string()
+    }
+}
+
+fn active_lib_zero_fields(
+    derived: &moonproto::state::MarketDerivedSnapshot,
+    profile: FireProfile,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if derived.trade_volumes.one_minute.total_value() <= EPS {
+        fields.push("trade_vol_1m");
+    }
+    if derived.trade_volumes.five_minutes.total_value() <= EPS {
+        fields.push("trade_vol_5m");
+    }
+    if derived.trade_deltas.one_minute.abs() <= EPS {
+        fields.push("trade_delta_1m");
+    }
+    if derived.trade_deltas.five_minutes.abs() <= EPS {
+        fields.push("trade_delta_5m");
+    }
+    if derived.last_price_deltas.one_minute.abs() <= EPS {
+        fields.push("last_price_delta_1m");
+    }
+    if derived.last_price_deltas.one_hour.abs() <= EPS {
+        fields.push("last_price_delta_1h");
+    }
+    if profile == FireProfile::Full {
+        if derived.candle_volumes.one_hour <= EPS {
+            fields.push("candle_vol_1h");
+        }
+        if derived.candle_volumes.twenty_four_hours <= EPS {
+            fields.push("candle_vol_24h");
+        }
+        if derived.candle_deltas.one_hour.abs() <= EPS {
+            fields.push("candle_delta_1h");
+        }
+        if derived.deltas.one_hour.abs() <= EPS {
+            fields.push("combined_delta_1h");
+        }
+    }
+    fields
+}
+
+fn format_count_map<K>(map: &HashMap<K, u64>) -> String
+where
+    K: ToString + Eq + std::hash::Hash,
+{
+    let mut rows = map
+        .iter()
+        .map(|(key, value)| format!("{}={}", key.to_string(), value))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows.join(" ")
+}
+
+fn format_order_market_preview(st: &SessionStats) -> String {
+    let mut markets = HashMap::<String, u64>::new();
+    for market in st.order_market_by_uid.values() {
+        *markets.entry(market.clone()).or_default() += 1;
+    }
+    format_count_map(&markets)
+}
+
 fn avg_us(total_ns: u64, count: u64) -> u64 {
     if count == 0 {
         0
@@ -1260,10 +1809,22 @@ fn record_event(
     match event {
         Event::Order(ev) => {
             st.order_events += 1;
+            *st.order_event_kinds
+                .entry(order_event_kind(ev))
+                .or_default() += 1;
             if let Some(dispatcher) = dispatcher {
                 record_order_state_snapshot(&mut st, dispatcher);
             }
             log_server_event(&st, event_no, format!("Order {ev:?}"));
+        }
+        Event::Balance(ev) => {
+            st.balance_events += 1;
+            match ev {
+                BalanceEvent::SnapshotApplied { .. } => st.balance_snapshot_events += 1,
+                BalanceEvent::IncrementalApplied { .. } => st.balance_incremental_events += 1,
+                BalanceEvent::Ignored { .. } | BalanceEvent::EpochStale { .. } => {}
+            }
+            log_server_event(&st, event_no, format!("Balance {ev:?}"));
         }
         Event::Markets(ev) => {
             st.market_events += 1;
@@ -1586,6 +2147,21 @@ fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &EventDispatch
             .insert(order.uid, order.market_name.clone());
         st.order_sell_reason_by_uid
             .insert(order.uid, order.sell_reason().description().to_string());
+    }
+}
+
+fn order_event_kind(ev: &OrderEvent) -> &'static str {
+    match ev {
+        OrderEvent::Created(_) => "Created",
+        OrderEvent::Updated(_) => "Updated",
+        OrderEvent::Removed(_) => "Removed",
+        OrderEvent::BulkReplaced { .. } => "BulkReplaced",
+        OrderEvent::TracePoint { .. } => "TracePoint",
+        OrderEvent::CorridorChanged(_) => "CorridorChanged",
+        OrderEvent::VStopChanged(_) => "VStopChanged",
+        OrderEvent::StopsChanged(_) => "StopsChanged",
+        OrderEvent::Snapshot => "Snapshot",
+        OrderEvent::Ignored { .. } => "Ignored",
     }
 }
 
@@ -2443,12 +3019,12 @@ fn quick_profile_config(cfg: &FireConfig) -> FireConfig {
 
 fn firetest_history_config() -> MarketHistoryConfig {
     MarketHistoryConfig {
-        futures_trades_capacity: 64,
-        spot_trades_capacity: 64,
+        futures_trades_capacity: 4096,
+        spot_trades_capacity: 2048,
         liquidation_capacity: 0,
         mm_orders_capacity: 0,
         mm_order_companion_capacity: 0,
-        last_price_capacity: 64,
+        last_price_capacity: 1024,
         mini_candles_capacity: 0,
         candles_5m_capacity: 512,
     }
@@ -2551,6 +3127,7 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     );
     println!("FIRETEST CPU quick A: {}", a.protocol_summary());
     write_strategy_info_dump(FireProfile::Quick, &cfg, &[("A", &a)]);
+    a.emit_active_lib_report(FireProfile::Quick, start);
 
     assert_eq!(st.parse_failed, 0, "quick FireTest saw ParseFailed");
     assert!(
@@ -3081,6 +3658,7 @@ fn is_usd_like_base(base_currency_name: Option<&str>) -> bool {
 #[test]
 #[ignore = "live MoonBot server required; create ../moonproto.firetest.conf"]
 fn fire_test_active_library_health() {
+    let start = Instant::now();
     let cfg = FireConfig::load_required();
     let profile = FireProfile::from_env();
     let key_info = parse_key_info(&cfg.key_b64).expect("invalid MoonProto key in FireTest config");
@@ -3321,5 +3899,6 @@ fn fire_test_active_library_health() {
     pump_pair_for(&mut a, &mut b, Duration::from_millis(200));
     log_protocol_cpu_pair("final", &a, &b);
     write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
+    a.emit_active_lib_report(FireProfile::Full, start);
     println!("FIRETEST_PASS");
 }

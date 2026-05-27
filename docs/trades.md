@@ -117,6 +117,7 @@ pub struct MarketHistoryReaders {
     pub mm_orders: Option<SeqRingReader<MMOrderHistoryRow>>,
     pub mm_order_companion: Option<SeqRingReader<MMOrderCompanionData>>,
     pub last_prices: Option<SeqRingReader<LastPricePoint>>,
+    pub mark_prices: Option<SeqRingReader<MarkPricePoint>>,
     pub mini_candles: Option<SeqRingReader<MiniCandle>>,
     pub candles_5m: Option<SeqRingReader<Candle5mRow>>,
 }
@@ -192,6 +193,7 @@ When trades storage is enabled, Active Lib also maintains:
 
 - current 5-minute candle and retained 5-minute candles;
 - retained LastPrice line from market updates;
+- retained MarkPrice line from market updates;
 - rolling 1/3/5-minute trade volumes;
 - candle volumes for 5m, 15m, 30m, 1h, 2h, 3h, 24h, and 72h;
 - trade, candle, LastPrice, and combined delta snapshots.
