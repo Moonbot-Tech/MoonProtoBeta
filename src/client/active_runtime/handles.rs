@@ -1,8 +1,8 @@
 //! High-level Active Lib intent handles.
 
 use super::{
-    MoonClientError, NewOrderParams, OrderSide, RuntimeCommand, RuntimeCommandKind,
-    RuntimeTradeCommandKind, SellOrderParams, SplitOrderParams,
+    commands::{RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind},
+    MoonClientError, NewOrderParams, OrderSide, SellOrderParams, SplitOrderParams,
 };
 use std::sync::mpsc;
 
