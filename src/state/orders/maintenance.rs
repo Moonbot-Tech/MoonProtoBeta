@@ -55,30 +55,61 @@ impl Orders {
     pub(crate) fn tick_bulk_replace_timeouts(&mut self, now_ms: i64) -> Vec<OrderEvent> {
         let mut events = Vec::new();
         for entry in self.map.values_mut() {
-            let entry = std::sync::Arc::make_mut(entry);
-            let Some(current_replace_flag) = (match entry.status {
-                OrderWorkerStatus::BuySet => Some(&mut entry.bulk_replace_buy),
-                OrderWorkerStatus::SellSet => Some(&mut entry.bulk_replace_sell),
-                _ => None,
-            }) else {
-                continue;
+            // O1 (sverka #14): evaluate the change through the shared Arc first;
+            // only `make_mut` the order that actually mutates. The old order
+            // deep-cloned every Order each tick before these guards.
+            let flag = match entry.status {
+                OrderWorkerStatus::BuySet => entry.bulk_replace_buy,
+                OrderWorkerStatus::SellSet => entry.bulk_replace_sell,
+                _ => continue,
             };
-
-            if entry.replace_sent_time_ms > 0 && !*current_replace_flag {
-                entry.replace_sent_time_ms = 0;
+            if entry.replace_sent_time_ms <= 0 {
+                continue;
+            }
+            let timed_out =
+                flag && (now_ms - entry.replace_sent_time_ms).abs() > BULK_REPLACE_TIMEOUT_MS;
+            if flag && !timed_out {
+                // Replace flag still pending and not yet timed out: nothing to do.
                 continue;
             }
 
-            if *current_replace_flag
-                && entry.replace_sent_time_ms > 0
-                && (now_ms - entry.replace_sent_time_ms).abs() > BULK_REPLACE_TIMEOUT_MS
-            {
-                *current_replace_flag = false;
+            let entry = std::sync::Arc::make_mut(entry);
+            if !flag {
+                // Stale send time without an active replace flag: clear the time.
+                entry.replace_sent_time_ms = 0;
+            } else {
+                // flag && timed_out: clear the flag + time and emit an update.
+                match entry.status {
+                    OrderWorkerStatus::BuySet => entry.bulk_replace_buy = false,
+                    OrderWorkerStatus::SellSet => entry.bulk_replace_sell = false,
+                    _ => {}
+                }
                 entry.replace_sent_time_ms = 0;
                 events.push(OrderEvent::Updated(entry.uid));
             }
         }
         events
+    }
+
+    /// Read-only dirty-guard for the periodic order maintenance ticks (O1,
+    /// sverka #14).
+    ///
+    /// Returns `true` if any of the per-tick order operations (bulk-replace
+    /// timeout, deferred removal, pending-cancel resend) would mutate state. The
+    /// caller checks this through a shared borrow first, so an idle writer tick
+    /// never escalates `CowState<Orders>` to `make_mut` (which would clone the
+    /// whole order map). Conservative superset: it gates on the presence of the
+    /// relevant flags rather than exact timing, so it can never skip due work.
+    pub(crate) fn has_due_tick_work(&self, now_ms: i64) -> bool {
+        if self.pending_removals.iter().any(|p| now_ms >= p.due_ms) {
+            return true;
+        }
+        self.map.values().any(|o| {
+            o.pending_cancel
+                || o.replace_sent_time_ms > 0
+                || o.bulk_replace_buy
+                || o.bulk_replace_sell
+        })
     }
 
     /// After `TAllStatuses`, find orders that were absent from the fresh

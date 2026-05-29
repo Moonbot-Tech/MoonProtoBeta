@@ -289,7 +289,10 @@ impl Orders {
     pub(crate) fn tick_pending_cancel_resends(&mut self, now_ms: i64) -> Vec<OrderCancelSend> {
         let mut sends = Vec::new();
         for order in self.map.values_mut() {
-            let order = std::sync::Arc::make_mut(order);
+            // O1 (sverka #14): read the guard conditions through the shared Arc
+            // first and only escalate to `make_mut` for the order that actually
+            // resends. The old order made every Order mutable (deep-cloning its
+            // String/Vec fields) on every tick before these `continue` guards.
             if order.status != OrderWorkerStatus::None || !order.pending_cancel {
                 continue;
             }
@@ -301,6 +304,7 @@ impl Orders {
             {
                 continue;
             }
+            let order = std::sync::Arc::make_mut(order);
             order.pending_cancel_sent_ms = now_ms.max(1);
             sends.push(OrderCancelSend::PendingReplaceThenCancel {
                 ctx: order.trade_ctx(),

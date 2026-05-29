@@ -76,6 +76,13 @@ impl EventDispatcher {
         out: &mut Vec<Event>,
         actions: &mut Vec<ActiveAction>,
     ) {
+        // O1 (sverka #14): read-only dirty-guard. The writer tick calls this on
+        // every maintenance pass; skip the `&mut` order ticks entirely when
+        // nothing is due, so an idle tick never clones the published Orders map
+        // through `CowState::make_mut`. The check borrows `orders` shared.
+        if !self.orders.has_due_tick_work(now_ms) {
+            return;
+        }
         self.tick_orders_into(now_ms, out);
         for request in self.orders.tick_pending_cancel_resends(now_ms) {
             actions.push(ActiveAction::OrderCancel { request });

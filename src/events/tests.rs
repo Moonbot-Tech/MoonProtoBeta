@@ -1903,6 +1903,47 @@ fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
 }
 
 #[test]
+fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
+    // O1 regression guard (sverka journal_review #14): periodic_orders_tick runs
+    // on every writer maintenance pass. With a published snapshot alive
+    // (refcount >= 2) the old code escalated `CowState<Orders>` to `make_mut` on
+    // EVERY tick — cloning the whole order map even when nothing was due. The
+    // read-only dirty-guard (`has_due_tick_work`) must skip that.
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+
+    // Seed one freshly-applied order: no pending cancel, no bulk-replace timer,
+    // no due removal.
+    let uid = 0x1234;
+    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    let payload = all_statuses_payload(0x55, &[status]);
+    let _ = d.dispatch(Command::Order, &payload, 1000);
+
+    // Published snapshot keeps the orders domain alive (refcount 2) — the
+    // condition that turns any `&mut` order apply into a full container clone.
+    let held = d.orders.clone();
+    let ptr_before = d.orders.arc_ptr();
+    assert_eq!(
+        ptr_before,
+        held.arc_ptr(),
+        "snapshot clone shares the live orders allocation"
+    );
+
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+    d.tick_orders_active_actions(2000, &mut out, &mut actions);
+
+    assert_eq!(
+        d.orders.arc_ptr(),
+        ptr_before,
+        "an idle orders tick must not copy-on-write clone the Orders map"
+    );
+    assert!(actions.is_empty(), "an idle tick produces no order actions");
+
+    drop(held);
+}
+
+#[test]
 fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 8,
