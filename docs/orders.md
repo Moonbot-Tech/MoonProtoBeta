@@ -52,6 +52,8 @@ rate can also ignore individual events and read the latest snapshot each frame.
 pub struct Order {
     pub uid: u64,
     pub market_name: String,
+    pub currency: BaseCurrency,
+    pub platform: ExchangeCode,
     pub status: OrderWorkerStatus,
     pub buy_order: OrderCompact,
     pub sell_order: OrderCompact,
@@ -65,10 +67,15 @@ pub struct Order {
     pub panic_sell: bool,
     pub immune_for_clicks: bool,
     pub is_short: bool,
+    pub sell_reason: SellReason,
     pub strat_id: u64,
     pub emulator_mode: bool,
 }
 ```
+
+`currency` and `platform` are typed Delphi route values retained from the
+server order state. Normal code does not write them manually; order actions use
+them to build the correct wire header.
 
 `buy_order` and `sell_order` contain exchange-side order values such as
 `actual_price`, `quantity`, `quantity_remaining`, `mean_price`, `leverage`, and
@@ -80,40 +87,58 @@ Order timestamps are Delphi `TDateTime` values on the wire. Use
 `open_time_delphi()`, `close_time_delphi()`, and `create_time_delphi()` on
 `OrderCompact` instead of interpreting raw `f64` fields directly.
 
+`sell_reason` is a typed `SellReason` value. Use
+`order.sell_reason.description()` for a Delphi-compatible UI label, and use
+`to_byte()` only in low-level protocol diagnostics.
+
 ## Status
 
 ```rust
-pub struct OrderWorkerStatus(pub u8);
+pub struct OrderWorkerStatus;
 
 impl OrderWorkerStatus {
-    pub const None: Self = Self(0);
-    pub const BuyFail: Self = Self(1);
-    pub const BuySet: Self = Self(2);
-    pub const BuyCancel: Self = Self(3);
-    pub const BuyDone: Self = Self(4);
-    pub const SellFail: Self = Self(5);
-    pub const SellSet: Self = Self(6);
-    pub const SellCancel: Self = Self(7);
-    pub const SelLDone: Self = Self(8);
-    pub const SelLAlmostDone: Self = Self(9);
+    pub const None: Self;
+    pub const BuyFail: Self;
+    pub const BuySet: Self;
+    pub const BuyCancel: Self;
+    pub const BuyDone: Self;
+    pub const SellFail: Self;
+    pub const SellSet: Self;
+    pub const SellCancel: Self;
+    pub const SellDone: Self;
+    pub const SellAlmostDone: Self;
+
+    pub const fn from_byte(raw: u8) -> Self;
+    pub const fn to_byte(self) -> u8;
 }
 ```
 
 `OrderWorkerStatus::is_terminal()` returns true for final states. Unknown future
-status bytes are preserved as `OrderWorkerStatus(n)` instead of being rejected.
+status bytes are preserved instead of being rejected; use
+`OrderWorkerStatus::from_byte(raw)` / `to_byte()` only in protocol tools.
 
 ## Actions
 
 Order actions go through `client.orders()`:
 
 ```rust
+use moonproto::VStopParams;
+
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(order_uid) else { return; };
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order)?;
 client.orders().update_stops(order, stops)?;
-client.orders().update_vstop(order, true, false, 50_000.0, 12.0)?;
+client.orders().update_vstop(
+    order,
+    VStopParams {
+        enabled: true,
+        fixed: false,
+        level: 50_000.0,
+        volume: 12.0,
+    },
+)?;
 client.orders().turn_panic_sell(order, true)?;
 client.orders().request_status(order)?;
 ```
@@ -152,8 +177,9 @@ commands.
 
 Server trace points are retained in two forms:
 
-- `buy_trace_line` and `sell_trace_line` are the chart-ready read model.
-- `trace_points` is the raw inbound diagnostic log.
+`buy_trace_line` and `sell_trace_line` are the chart-ready read model. The raw
+inbound trace packet log is retained for diagnostics but is not the normal chart
+API.
 
 For chart timestamps, use `OrderTraceChartPoint::time_delphi()`.
 
@@ -168,9 +194,9 @@ Terminal order updates are removed after the current receive batch. Sell-done
 orders keep a short grace window so immediately following visual trace packets
 can still attach to the order, matching the Delphi client behavior.
 
-## Low-Level Tools
+## Protocol Data
 
-`commands::trade::*`, `TradeCommand::parse`, and `Orders::apply` remain public
-for protocol tests, packet replay, and custom runtimes. Regular applications
-should use `MoonClient`, snapshots, events, and the `client.orders()` /
-`client.trade()` handles.
+`commands::trade::*`, `TradeCommand::parse`, and `Orders::apply` document the
+wire/state model for tests and packet replay. Regular applications should use
+`MoonClient`, snapshots, events, and the `client.orders()` / `client.trade()`
+handles.

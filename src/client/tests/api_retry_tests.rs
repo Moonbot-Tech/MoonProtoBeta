@@ -6,7 +6,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {

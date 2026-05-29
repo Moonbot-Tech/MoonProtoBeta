@@ -7,6 +7,63 @@
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64, I64 as LeI64, U64 as LeU64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+use super::enums::{OrderSubType, OrderType};
+
+/// Delphi packed `boolean` byte.
+///
+/// `ms.Read(record, SizeOf(record))` preserves the raw byte. The wrapper keeps
+/// that byte for protocol parity while giving UI/API code a named type instead
+/// of naked `u8` flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct DelphiBool(u8);
+
+impl DelphiBool {
+    pub const FALSE: Self = Self(0);
+    pub const TRUE: Self = Self(1);
+
+    #[doc(hidden)]
+    pub const fn from_byte(raw: u8) -> Self {
+        Self(raw)
+    }
+
+    pub const fn from_bool(value: bool) -> Self {
+        if value {
+            Self::TRUE
+        } else {
+            Self::FALSE
+        }
+    }
+
+    #[doc(hidden)]
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn get(self) -> bool {
+        self.0 != 0
+    }
+
+    pub const fn is_true(self) -> bool {
+        self.get()
+    }
+
+    pub const fn is_false(self) -> bool {
+        !self.get()
+    }
+}
+
+impl From<bool> for DelphiBool {
+    fn from(value: bool) -> Self {
+        Self::from_bool(value)
+    }
+}
+
+impl From<DelphiBool> for bool {
+    fn from(value: DelphiBool) -> Self {
+        value.get()
+    }
+}
+
 /// TPriceZone (Vars.pas:73) — packed record: `MinP, MaxP: double`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PriceZone {
@@ -80,15 +137,15 @@ pub struct OrderCompact {
     pub tmp_btc: f64,
     pub create_time: f64,
     pub panic_sell_down: f32,
-    pub order_type: u8,
-    pub sub_type: u8,
+    pub order_type: OrderType,
+    pub sub_type: OrderSubType,
     pub stop_flag: u8,
     pub partial_done: u8,
     pub leverage: u8,
-    pub is_opened: u8,
-    pub is_closed: u8,
-    pub canceled: u8,
-    pub is_short: u8,
+    pub is_opened: DelphiBool,
+    pub is_closed: DelphiBool,
+    pub canceled: DelphiBool,
+    pub is_short: DelphiBool,
 }
 
 #[repr(C, packed)]
@@ -140,15 +197,15 @@ impl OrderCompact {
             tmp_btc: wire.tmp_btc.get(),
             create_time: wire.create_time.get(),
             panic_sell_down: wire.panic_sell_down.get(),
-            order_type: wire.order_type,
-            sub_type: wire.sub_type,
+            order_type: OrderType::from_byte(wire.order_type),
+            sub_type: OrderSubType::from_byte(wire.sub_type),
             stop_flag: wire.stop_flag,
             partial_done: wire.partial_done,
             leverage: wire.leverage,
-            is_opened: wire.is_opened,
-            is_closed: wire.is_closed,
-            canceled: wire.canceled,
-            is_short: wire.is_short,
+            is_opened: DelphiBool::from_byte(wire.is_opened),
+            is_closed: DelphiBool::from_byte(wire.is_closed),
+            canceled: DelphiBool::from_byte(wire.canceled),
+            is_short: DelphiBool::from_byte(wire.is_short),
         }
     }
 
@@ -168,18 +225,19 @@ impl OrderCompact {
             tmp_btc: LeF64::new(self.tmp_btc),
             create_time: LeF64::new(self.create_time),
             panic_sell_down: LeF32::new(self.panic_sell_down),
-            order_type: self.order_type,
-            sub_type: self.sub_type,
+            order_type: self.order_type.to_byte(),
+            sub_type: self.sub_type.to_byte(),
             stop_flag: self.stop_flag,
             partial_done: self.partial_done,
             leverage: self.leverage,
-            is_opened: self.is_opened,
-            is_closed: self.is_closed,
-            canceled: self.canceled,
-            is_short: self.is_short,
+            is_opened: self.is_opened.to_byte(),
+            is_closed: self.is_closed.to_byte(),
+            canceled: self.canceled.to_byte(),
+            is_short: self.is_short.to_byte(),
         }
     }
 
+    #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_COMPACT_SIZE {
             return None;
@@ -196,6 +254,7 @@ impl OrderCompact {
         Self::from_wire(wire)
     }
 
+    #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
@@ -234,17 +293,17 @@ impl OrderCompact {
 /// `TStopSettings` (MarketsU.pas:215), 46-byte packed record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StopSettings {
-    pub stop_loss_on: u8,
-    pub sl_fixed: u8,
+    pub stop_loss_on: DelphiBool,
+    pub sl_fixed: DelphiBool,
     pub sl_level: f64,
     pub sl_spread: f64,
-    pub trailing_on: u8,
-    pub trailing_fixed: u8,
+    pub trailing_on: DelphiBool,
+    pub trailing_fixed: DelphiBool,
     pub trailing_level: f64,
     pub ts_spread: f64,
-    pub use_take_profit: u8,
+    pub use_take_profit: DelphiBool,
     pub take_profit: f64,
-    pub take_profit_changed: u8,
+    pub take_profit_changed: DelphiBool,
 }
 
 #[repr(C, packed)]
@@ -285,36 +344,37 @@ impl PartialEq for StopSettings {
 impl StopSettings {
     fn from_wire(wire: WireStopSettings) -> Self {
         Self {
-            stop_loss_on: wire.stop_loss_on,
-            sl_fixed: wire.sl_fixed,
+            stop_loss_on: DelphiBool::from_byte(wire.stop_loss_on),
+            sl_fixed: DelphiBool::from_byte(wire.sl_fixed),
             sl_level: wire.sl_level.get(),
             sl_spread: wire.sl_spread.get(),
-            trailing_on: wire.trailing_on,
-            trailing_fixed: wire.trailing_fixed,
+            trailing_on: DelphiBool::from_byte(wire.trailing_on),
+            trailing_fixed: DelphiBool::from_byte(wire.trailing_fixed),
             trailing_level: wire.trailing_level.get(),
             ts_spread: wire.ts_spread.get(),
-            use_take_profit: wire.use_take_profit,
+            use_take_profit: DelphiBool::from_byte(wire.use_take_profit),
             take_profit: wire.take_profit.get(),
-            take_profit_changed: wire.take_profit_changed,
+            take_profit_changed: DelphiBool::from_byte(wire.take_profit_changed),
         }
     }
 
     fn to_wire(self) -> WireStopSettings {
         WireStopSettings {
-            stop_loss_on: self.stop_loss_on,
-            sl_fixed: self.sl_fixed,
+            stop_loss_on: self.stop_loss_on.to_byte(),
+            sl_fixed: self.sl_fixed.to_byte(),
             sl_level: LeF64::new(self.sl_level),
             sl_spread: LeF64::new(self.sl_spread),
-            trailing_on: self.trailing_on,
-            trailing_fixed: self.trailing_fixed,
+            trailing_on: self.trailing_on.to_byte(),
+            trailing_fixed: self.trailing_fixed.to_byte(),
             trailing_level: LeF64::new(self.trailing_level),
             ts_spread: LeF64::new(self.ts_spread),
-            use_take_profit: self.use_take_profit,
+            use_take_profit: self.use_take_profit.to_byte(),
             take_profit: LeF64::new(self.take_profit),
-            take_profit_changed: self.take_profit_changed,
+            take_profit_changed: self.take_profit_changed.to_byte(),
         }
     }
 
+    #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < STOP_SETTINGS_SIZE {
             return None;
@@ -331,6 +391,7 @@ impl StopSettings {
         Self::from_wire(wire)
     }
 
+    #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
@@ -400,6 +461,7 @@ impl OrderUpdateData {
         }
     }
 
+    #[doc(hidden)]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < ORDER_UPDATE_DATA_SIZE {
             return None;

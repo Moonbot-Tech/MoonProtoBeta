@@ -2,8 +2,8 @@ use super::*;
 use crate::commands::arb::build_arb_prices;
 use crate::commands::balance::build_request_balance_refresh;
 use crate::commands::market::{
-    build_markets_prices_response, write_market, BaseCurrency, Market, MarketPriceUpdate,
-    MarketsListResponse, MarketsPricesResponse,
+    build_markets_prices_response, write_market, BaseCurrency, ExchangeCode, Market,
+    MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse, PositionType,
 };
 use crate::commands::registry::{write_string, CURRENT_PROTO_CMD_VER};
 use crate::commands::strat::{
@@ -400,7 +400,7 @@ fn event_market(name: &str) -> Market {
         volume: 0.0,
         is_btc_market: false,
         status_trading: true,
-        bn_is_fucking_shib: false,
+        has_1000_prefix_alias: false,
         bn_iceberg: false,
         bn_only_isolated: false,
         futures_type: BaseCurrency::USDT,
@@ -409,22 +409,22 @@ fn event_market(name: &str) -> Market {
         pos_size: 0.0,
         pos_price: 0.0,
         liq_price: 0.0,
-        pos_dir: 0,
+        pos_dir: OrderType::Sell,
         long_pos_size: 0.0,
         long_pos_price: 0.0,
         long_liq_price: 0.0,
-        long_position_type: 0,
+        long_position_type: PositionType::Cross,
         short_pos_size: 0.0,
         short_pos_price: 0.0,
         short_liq_price: 0.0,
-        short_position_type: 0,
+        short_position_type: PositionType::Cross,
         asset_balance: 0.0,
         asset_balance_full: 0.0,
         total_profit_b: 0.0,
         total_profit_l: 0.0,
         total_profit_s: 0.0,
         leverage_x: 1,
-        position_type: 0,
+        position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
         arb_slots: std::collections::HashMap::new(),
@@ -541,6 +541,27 @@ fn dispatcher_routes_order_to_orders_state() {
 }
 
 #[test]
+fn dispatcher_snapshot_is_immutable_after_later_domain_mutation() {
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+
+    let before = d.snapshot();
+    let uid = 0x123;
+    let status = order_status_for_test(uid, "BTCUSDT", 7, 9, OrderWorkerStatus::BuySet);
+    let payload = all_statuses_payload(0x55, &[status]);
+    let _ = d.dispatch(Command::Order, &payload, 1000);
+
+    assert!(
+        before.orders().is_empty(),
+        "published snapshots must be immutable even when the live dispatcher mutates the same domain later"
+    );
+    assert!(
+        d.snapshot().orders().get(uid).is_some(),
+        "live dispatcher must still publish the later domain mutation"
+    );
+}
+
+#[test]
 fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
@@ -654,7 +675,7 @@ fn dispatcher_keeps_sell_done_order_for_delphi_final_trace_grace() {
             "BTCUSDT",
             7,
             9,
-            OrderWorkerStatus::SelLDone,
+            OrderWorkerStatus::SellDone,
         ))),
         1001,
         &mut out,
@@ -1192,10 +1213,10 @@ fn dispatcher_applies_arb_price_to_live_market_like_delphi_tmarket() {
     let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
     let slot = btc
         .arb_slots
-        .get(&7)
+        .get(&crate::commands::market::ArbPlatformCode::ByBit)
         .expect("Delphi ApplyArbPrice initializes TMarket.ArbSlots");
     assert!(slot.enabled);
-    assert_eq!(slot.head, 1);
+    assert_eq!(slot.head_index(), 1);
     assert_eq!(slot.ring[1].price, 123.25);
     assert_eq!(slot.now.price, 123.25);
 }
@@ -1224,9 +1245,18 @@ fn dispatcher_applies_arb_isolation_commit_to_live_market_like_delphi() {
     let _ = d.dispatch(Command::Balance, &build_arb_prices(10, &isolation), 1001);
 
     let btc = d.markets.get("BTCUSDT").unwrap().snapshot();
-    let slot = btc.arb_slots.get(&7).unwrap();
-    assert_eq!(slot.isolated_flags, 0b11);
-    assert_eq!(slot.isolated_flags_tmp, 0);
+    let slot = btc
+        .arb_slots
+        .get(&crate::commands::market::ArbPlatformCode::ByBit)
+        .unwrap();
+    assert_eq!(
+        slot.isolated_flags,
+        crate::commands::market::ArbIsolationFlags::from_byte(0b11)
+    );
+    assert_eq!(
+        slot.isolated_flags_tmp,
+        crate::commands::market::ArbIsolationFlags::None
+    );
 }
 
 #[test]
@@ -1517,7 +1547,7 @@ fn dispatcher_corrupted_order_returns_parse_failed() {
 #[test]
 fn dispatcher_ctx_unused_warning_silenced() {
     // Suppress dead_code warning for TradeCtx if not used elsewhere
-    let _ = TradeCtx::with_route(1, 1, 4);
+    let _ = TradeCtx::with_route_bytes(1, 1, 4);
 }
 
 #[test]
@@ -1783,11 +1813,11 @@ fn candles_snapshot_ready_after_worker_barrier_exposes_reader_rows() {
     let markets = vec![crate::commands::candles::RequestCandlesMarket {
         market_name: "BTCUSDT".to_string(),
         candles_5m: vec![crate::commands::candles::DeepPrice {
-            open_p: 10.0,
-            close_p: 11.0,
-            max_p: 12.0,
-            min_p: 9.0,
-            vol: 123.0,
+            open: 10.0,
+            close: 11.0,
+            high: 12.0,
+            low: 9.0,
+            volume: 123.0,
             time: 45_000.0,
         }],
         buy_wall: [crate::commands::candles::WallItem::default(); 4],
@@ -2034,7 +2064,7 @@ fn active_dispatch_queues_all_retained_stream_section_kinds_into_history_worker(
     let mut mm_rows = Vec::new();
     mm_orders.copy_last(8, &mut mm_rows);
     assert_eq!(mm_rows.len(), 1);
-    assert_eq!(mm_rows[0].vol, 5.0);
+    assert_eq!(mm_rows[0].volume, 5.0);
     assert_eq!(mm_rows[0].q, -4.0);
 
     let mut companion_rows = Vec::new();
@@ -2086,7 +2116,7 @@ fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_d
         copy_max_leverage_from_markets_list: false,
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".to_string()),
-        server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
+        server_base_currency_code: Some(BaseCurrency::BTC),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();
@@ -2106,7 +2136,7 @@ fn active_dispatch_emits_typed_watcher_fills_like_delphi_process_watcher_fills_d
             _ => None,
         })
         .expect("WatcherFills section must reach user code as typed domain event");
-    assert_eq!(watcher.market_index, 0);
+    assert_eq!(watcher.market_index(), 0);
     assert_eq!(watcher.market_name, "BTCUSDT");
     assert_eq!(watcher.user, user);
     assert_eq!(watcher.fills.len(), 1);
@@ -2188,7 +2218,7 @@ fn active_dispatch_queues_update_markets_last_price_into_history_worker_like_del
         copy_max_leverage_from_markets_list: false,
         eps_profile: EpsProfile::default(),
         server_base_currency_name: Some("BTC".to_string()),
-        server_base_currency_code: Some(BaseCurrency::BTC.to_byte()),
+        server_base_currency_code: Some(BaseCurrency::BTC),
     };
     let mut out = Vec::new();
     let mut actions = Vec::new();
@@ -2408,8 +2438,8 @@ fn raw_dispatch_exposes_missing_order_status_requests_after_snapshot() {
     let missing = d.missing_order_status_requests_after_snapshot();
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].ctx.uid, stale_uid);
-    assert_eq!(missing[0].ctx.currency, 7);
-    assert_eq!(missing[0].ctx.platform, 9);
+    assert_eq!(missing[0].ctx.currency, BaseCurrency::from_byte(7));
+    assert_eq!(missing[0].ctx.platform, ExchangeCode::from_byte(9));
     assert_eq!(missing[0].market_name, "BTCUSDT");
 }
 
@@ -2468,6 +2498,11 @@ fn dispatch_into_active_consumes_orderbook_full_request_event() {
             Event::OrderBook(OrderBookEvent::RequestFullNeeded { .. })
         )),
         "active dispatcher должен потреблять RequestFullNeeded как внутренний control-event"
+    );
+    assert!(
+        !out.iter()
+            .any(|ev| matches!(ev, Event::OrderBook(OrderBookEvent::Ignored { .. }))),
+        "active dispatcher должен скрывать диагностические ignored orderbook events от UI path"
     );
 
     let mut found = false;
@@ -2639,7 +2674,7 @@ fn dummy_client_cfg() -> crate::client::ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: crate::client::TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: crate::client::RefreshConfig {
@@ -3316,6 +3351,61 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
         )
     });
     assert!(has_event);
+}
+
+#[test]
+fn pre_init_snapshot_request_is_latched_until_post_init_flush() {
+    let mut d = EventDispatcher::new();
+    let provider_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = std::sync::Arc::clone(&provider_calls);
+    d.set_strategy_snapshot_provider(move |uid| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(uid, 123);
+        Some(StrategySnapshotReply::from_payload(
+            11,
+            22,
+            true,
+            vec![0x10, 0x20],
+        ))
+    });
+
+    let client = crate::client::Client::new(dummy_client_cfg());
+    assert!(!client.is_domain_ready());
+    let mut out = Vec::new();
+    let mut actions = Vec::new();
+    let payload = crate::commands::strat::build_snapshot_request(123);
+
+    dispatch_active_packet_for_test(
+        &mut d,
+        Command::Strat,
+        &payload,
+        0,
+        &mut out,
+        &client,
+        &mut actions,
+    );
+
+    assert!(
+        actions.is_empty(),
+        "pre-init TStratSnapshotRequest is a latch, not an immediate Strat send"
+    );
+    assert_eq!(
+        provider_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "provider must not be called before post-init flush"
+    );
+    assert!(out.iter().any(|ev| matches!(
+        ev,
+        Event::Strat(crate::state::StratEvent::SnapshotRequested { uid: 123 })
+    )));
+
+    let reply = d
+        .pending_or_local_strategy_snapshot_reply()
+        .expect("post-init flush must answer the latched request");
+    assert_eq!(reply.server_epoch, 11);
+    assert_eq!(reply.client_max_last_date, 22);
+    assert_eq!(reply.data, vec![0x10, 0x20]);
+    assert_eq!(provider_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 fn raw_strat_snapshot_payload(uid: u64, server_epoch: u64, full: bool, data: &[u8]) -> Vec<u8> {

@@ -49,8 +49,8 @@ impl EventDispatcher {
         // dispatch без Client source. Без этого Orders::apply применяет AdjustTime со старым
         // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
         // Multi-client safe ServerTimeDelta source is linked by the active path.
-        self.orders
-            .set_server_time_delta(self.current_server_time_delta());
+        let server_time_delta = self.current_server_time_delta();
+        self.orders.set_server_time_delta(server_time_delta);
         let (apply_result, ev) = self.orders.apply_at(tc, now_ms);
         if apply_result == ApplyResult::Applied {
             out.push(Event::Order(ev));

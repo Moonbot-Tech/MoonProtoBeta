@@ -6,7 +6,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -838,6 +838,33 @@ fn sliced_retry_uses_delphi_last_checked_slices_outer_gate() {
 
     writer(&mut client).retry_sliced(1206);
     assert_eq!(client.sending[0].sent_count, 2);
+}
+
+#[test]
+fn sliced_retry_uses_startup_floor_until_ping_reports_rtt() {
+    let mut client = Client::new(dummy_cfg());
+    client.round_trip_delay = 0;
+    client.trip_delay_k = 1.1;
+    client.last_set_trip_k = 1000;
+    client.actual_sleep_time = 5.0;
+    client.can_send_rate = 1_000_000;
+    client.sending.push(sent_sliced_with_lengths(&[10], 0));
+
+    writer(&mut client).retry_sliced(1000);
+    assert_eq!(client.sending[0].sent_count, 2);
+
+    writer(&mut client).retry_sliced(1010);
+    assert_eq!(
+        client.sending[0].sent_count, 2,
+        "unknown RTT must not burn Sliced retries on a 10ms local tick"
+    );
+
+    writer(&mut client).retry_sliced(1231);
+    assert_eq!(
+        client.sending[0].sent_count, 3,
+        "retry uses the startup RTT floor until Ping supplies a real RTT"
+    );
+    assert_eq!(client.sending[0].retry_count, 1);
 }
 
 #[test]

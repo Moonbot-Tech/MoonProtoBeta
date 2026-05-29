@@ -17,6 +17,7 @@ pub use decoder::{
 pub use owned::{parse_trades_packet, parse_watcher_fills};
 pub use types::{
     watcher_fill_flags, LiqOrder, MMOrder, Trade, TradeSection, TradesPacket, WatcherFill,
+    WatcherFillFlags,
 };
 pub use wire::WATCHER_FILL_RECORD_SIZE;
 

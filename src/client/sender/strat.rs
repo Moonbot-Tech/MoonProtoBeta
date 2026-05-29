@@ -4,6 +4,7 @@ use super::*;
 
 impl ClientSender {
     /// Send `TStratSchemaRequest`.
+    #[doc(hidden)]
     pub fn strat_schema_request(&self) {
         let raw = crate::commands::strat::build_schema_request(rand::random());
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
@@ -21,6 +22,7 @@ impl ClientSender {
     }
 
     /// Send `TStratSnapshot` from an already serialized strategy payload.
+    #[doc(hidden)]
     pub fn strat_send_snapshot_payload(
         &self,
         server_epoch: u64,
@@ -44,6 +46,7 @@ impl ClientSender {
     /// `schema` must be the live `TStratSchema` fetched during Init; typed
     /// strategy serialization uses it for Delphi field order, PropMask
     /// visibility, TypeID checks, and defaults.
+    #[doc(hidden)]
     pub fn strat_send_snapshot_batch(
         &self,
         server_epoch: u64,
@@ -63,12 +66,14 @@ impl ClientSender {
     }
 
     /// Send `TStratDelete` for one strategy or folder.
+    #[doc(hidden)]
     pub fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
         let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
     }
 
     /// Send `TStratSellPriceUpdate` for one strategy.
+    #[doc(hidden)]
     pub fn strat_sell_price_update(&self, strategy_id: u64, sell_price: f64) {
         let raw = crate::commands::strat::build_sell_price_update(
             rand::random(),
@@ -90,6 +95,7 @@ impl ClientSender {
     /// Regular active-library callers should prefer
     /// `EventDispatcher::send_strategy_checked_delta`, which builds
     /// `TStrategies.GetCheckedDelta` from owned strategy state.
+    #[doc(hidden)]
     pub fn strat_checked_sync(
         &self,
         items: &[crate::commands::strat::StratCheckedItem],

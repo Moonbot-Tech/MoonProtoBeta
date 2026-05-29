@@ -35,6 +35,18 @@ const CMD_CHECKED_ECHO: u8 = 6;
 const CMD_SCHEMA_REQUEST: u8 = 7;
 const CMD_SCHEMA: u8 = 8;
 
+pub(crate) fn is_snapshot_request_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(CMD_SNAPSHOT_REQUEST)
+}
+
+pub(crate) fn is_schema_request_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(CMD_SCHEMA_REQUEST)
+}
+
+pub(crate) fn is_schema_payload(payload: &[u8]) -> bool {
+    payload.first().copied() == Some(CMD_SCHEMA)
+}
+
 /// Один элемент TStratCheckedItem: `StrategyID:UInt64 + Checked:bool` (9 байт).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StratCheckedItem {
@@ -187,6 +199,7 @@ impl StratCommand {
     /// Wire-form: `cmd_id(1) + ver(2) + UID(8) + class-specific`.
     /// Version gate: если `ver > 3` — возвращаем Skipped (Delphi registry
     /// `FSkipped` forward-compat path).
+    #[doc(hidden)]
     pub fn parse(payload: &[u8]) -> Option<Self> {
         if payload.len() < 11 {
             return None;
@@ -341,6 +354,7 @@ pub(crate) fn build_snapshot_request(uid: u64) -> Vec<u8> {
 }
 
 /// `TStratSchemaRequest` (CmdId=7).
+#[doc(hidden)]
 pub fn build_schema_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_SCHEMA_REQUEST, uid);
@@ -357,6 +371,7 @@ pub fn build_schema_request(uid: u64) -> Vec<u8> {
 /// strategy list": a non-empty `TStrategySerializer` payload with zero
 /// dictionaries and zero strategies. A wire `Size=0` snapshot is malformed for
 /// normal client sends.
+#[doc(hidden)]
 pub fn build_snapshot(
     uid: u64,
     server_epoch: u64,
@@ -388,6 +403,7 @@ pub fn build_snapshot(
 /// `CreateFromList`: it serializes strategies through `StrategyBatchBuilder`,
 /// computes `ClientMaxLastDate`, and wraps the result as CmdId=2. The builder
 /// needs live `TStratSchema` for Delphi field order/default parity.
+#[doc(hidden)]
 pub fn build_snapshot_from_strategies(
     uid: u64,
     server_epoch: u64,
@@ -406,6 +422,7 @@ pub fn build_snapshot_from_strategies(
 }
 
 /// `TStratDelete` (CmdId=3).
+#[doc(hidden)]
 pub fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_DELETE, uid);
@@ -415,6 +432,7 @@ pub fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
 }
 
 /// `TStratSellPriceUpdate` (CmdId=4).
+#[doc(hidden)]
 pub fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_SELL_PRICE_UPDATE, uid);
@@ -424,6 +442,7 @@ pub fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> V
 }
 
 /// `TStratCheckedSync` (CmdId=5).
+#[doc(hidden)]
 pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) -> Vec<u8> {
     let count = items.len() as u16;
     let count_usize = usize::from(count);

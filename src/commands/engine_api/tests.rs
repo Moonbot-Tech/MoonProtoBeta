@@ -366,6 +366,7 @@ mod parse_engine_response_tests {
 #[cfg(test)]
 mod base_check_tests {
     use super::*;
+    use crate::commands::market::{BaseCurrency, ExchangeCode};
 
     /// Helper: build wire-payload for BaseCheck response from a fully-populated `ServerInfo`.
     /// Reverse of `parse_base_check_response` for round-trip testing.
@@ -385,7 +386,7 @@ mod base_check_tests {
         let Some(ex_code) = info.exchange_code else {
             return buf;
         };
-        buf.push(ex_code);
+        buf.push(ex_code.to_byte());
         let Some(ex_name) = &info.exchange_name else {
             return buf;
         };
@@ -393,7 +394,7 @@ mod base_check_tests {
         let Some(mask) = info.exchange_type_mask else {
             return buf;
         };
-        buf.push(mask);
+        buf.push(mask.to_byte());
         let Some(dex) = &info.dex_name else {
             return buf;
         };
@@ -405,7 +406,7 @@ mod base_check_tests {
         let Some(bc_code) = info.base_currency_code else {
             return buf;
         };
-        buf.push(bc_code);
+        buf.push(bc_code.to_byte());
         let Some(sv) = info.server_version else {
             return buf;
         };
@@ -433,13 +434,13 @@ mod base_check_tests {
         let original = ServerInfo {
             bot_id: Some(0x12_34_56_78_9A_BC_DE_F0_i64),
             server_name: Some("Binance Main".to_string()),
-            exchange_code: Some(1),
+            exchange_code: Some(ExchangeCode::from_byte(1)),
             exchange_name: Some("Binance Futures".to_string()),
             exchange_type_mask: Some(exchange_type_flags::FUTURES),
             dex_name: Some(String::new()), // не HL futures → пусто
             base_currency_name: Some("USDT".to_string()),
-            base_currency_code: Some(1), // BC_USDT
-            server_version: Some(763),   // v7.63
+            base_currency_code: Some(BaseCurrency::USDT),
+            server_version: Some(763), // v7.63
             moonproto_version: Some(3),
         };
         let payload = encode_full(&original);
@@ -455,12 +456,12 @@ mod base_check_tests {
         let original = ServerInfo {
             bot_id: Some(123456789),
             server_name: Some("S".repeat(65_537)),
-            exchange_code: Some(3),
+            exchange_code: Some(ExchangeCode::Binance),
             exchange_name: Some("Exchange".to_string()),
             exchange_type_mask: Some(exchange_type_flags::SPOT | exchange_type_flags::FUTURES),
             dex_name: Some("Dex".to_string()),
             base_currency_name: Some("USDT".to_string()),
-            base_currency_code: Some(1),
+            base_currency_code: Some(BaseCurrency::USDT),
             server_version: Some(763),
             moonproto_version: Some(3),
         };
@@ -468,7 +469,7 @@ mod base_check_tests {
         let payload = encode_full(&original);
         let parsed = parse_base_check_response(&payload);
         assert_eq!(parsed.server_name, Some("S".to_string()));
-        assert_eq!(parsed.exchange_code, Some(3));
+        assert_eq!(parsed.exchange_code, Some(ExchangeCode::Binance));
         assert_eq!(parsed.moonproto_version, Some(3));
     }
 
@@ -478,12 +479,12 @@ mod base_check_tests {
         let original = ServerInfo {
             bot_id: Some(42),
             server_name: Some("Hyper Test".to_string()),
-            exchange_code: Some(7),
+            exchange_code: Some(ExchangeCode::ByBit),
             exchange_name: Some("Hyper".to_string()),
             exchange_type_mask: Some(exchange_type_flags::FUTURES | exchange_type_flags::DEX),
             dex_name: Some("HIP3-PERPS".to_string()),
             base_currency_name: Some("USDC".to_string()),
-            base_currency_code: Some(5),
+            base_currency_code: Some(BaseCurrency::TUSD),
             server_version: Some(763),
             moonproto_version: Some(3),
         };
@@ -529,12 +530,12 @@ mod base_check_tests {
         let info_partial = ServerInfo {
             bot_id: Some(1),
             server_name: Some("y".to_string()),
-            exchange_code: Some(2),
+            exchange_code: Some(ExchangeCode::FBybit),
             exchange_name: Some("Bybit".to_string()),
             exchange_type_mask: Some(exchange_type_flags::FUTURES),
             dex_name: Some(String::new()),
             base_currency_name: Some("USD".to_string()),
-            base_currency_code: Some(3),
+            base_currency_code: Some(BaseCurrency::BNB),
             server_version: None,
             moonproto_version: None,
         };
@@ -543,7 +544,7 @@ mod base_check_tests {
         payload.extend_from_slice(&[0xAA, 0xBB]);
         let parsed = parse_base_check_response(&payload);
         assert_eq!(parsed.bot_id, Some(1));
-        assert_eq!(parsed.base_currency_code, Some(3));
+        assert_eq!(parsed.base_currency_code, Some(BaseCurrency::BNB));
         assert!(parsed.server_version.is_none());
         assert!(parsed.moonproto_version.is_none());
     }
@@ -554,12 +555,12 @@ mod base_check_tests {
         let info_partial = ServerInfo {
             bot_id: Some(0xABC_i64),
             server_name: Some("Test".to_string()),
-            exchange_code: Some(4),
+            exchange_code: Some(ExchangeCode::FBinance),
             exchange_name: Some("Hyper".to_string()),
             exchange_type_mask: Some(exchange_type_flags::DEX | exchange_type_flags::FUTURES),
             dex_name: Some("DEX-NAME".to_string()),
             base_currency_name: Some("USDC".to_string()),
-            base_currency_code: Some(5),
+            base_currency_code: Some(BaseCurrency::TUSD),
             server_version: Some(763),
             moonproto_version: None,
         };
@@ -575,12 +576,12 @@ mod base_check_tests {
         let info = ServerInfo {
             bot_id: Some(99),
             server_name: Some("HL Predict".to_string()),
-            exchange_code: Some(7),
+            exchange_code: Some(ExchangeCode::ByBit),
             exchange_name: Some("Hyper".to_string()),
             exchange_type_mask: Some(exchange_type_flags::DEX | exchange_type_flags::PREDICT),
             dex_name: Some(String::new()),
             base_currency_name: Some("USDC".to_string()),
-            base_currency_code: Some(5),
+            base_currency_code: Some(BaseCurrency::TUSD),
             server_version: Some(763),
             moonproto_version: Some(3),
         };
@@ -677,8 +678,8 @@ mod auth_check_tests {
         assert_eq!(resp.known_dexes[0].collateral_token, 0);
         assert_eq!(resp.known_dexes[1].name, "usdh");
         assert_eq!(resp.known_dexes[1].collateral_token, 360);
-        assert_eq!(resp.hl_dex_market, Some(7));
-        assert_eq!(resp.hl_spot_market, Some(3));
+        assert_eq!(resp.hl_dex_market, Some(HyperDexIndex::from_byte(7)));
+        assert_eq!(resp.hl_spot_market, Some(HyperDexIndex::from_byte(3)));
     }
 
     #[test]

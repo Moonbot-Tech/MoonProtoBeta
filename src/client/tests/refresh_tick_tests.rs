@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 fn dummy_cfg(refresh: RefreshConfig) -> ClientConfig {
     ClientConfig {
@@ -6,7 +6,7 @@ fn dummy_cfg(refresh: RefreshConfig) -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh,
@@ -50,7 +50,7 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
     let initial_markets_ms = client.last_update_markets_ms;
     let initial_tags_ms = client.last_check_tags_ms;
 
-    client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+    client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert_eq!(
         client.last_update_markets_ms, initial_markets_ms,
@@ -66,7 +66,7 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
     );
 
     client.testing_set_domain_ready(true);
-    client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+    client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert_ne!(
         client.last_update_markets_ms, initial_markets_ms,
@@ -91,7 +91,7 @@ fn default_refresh_starts_after_domain_init() {
     let initial_markets_ms = client.last_update_markets_ms;
     let initial_tags_ms = client.last_check_tags_ms;
 
-    client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+    client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert_ne!(client.last_update_markets_ms, initial_markets_ms);
     assert_ne!(client.last_check_tags_ms, initial_tags_ms);
@@ -212,6 +212,42 @@ fn tick_both_intervals_independent() {
     writer(&mut client).tick_periodic_refresh(600);
     assert_eq!(client.last_update_markets_ms, 600);
     assert_eq!(client.last_check_tags_ms, 600);
+}
+
+#[test]
+fn tick_stale_peer_app_token_sends_indexes_before_update_markets() {
+    let mut client = Client::new(dummy_cfg(RefreshConfig {
+        update_markets_every: Some(Duration::from_millis(100)),
+        check_tags_every: Some(Duration::from_millis(100)),
+    }));
+    client.set_domain_ready(true);
+    client.domain_restore = DomainRestoreIntent {
+        fetch_indexes: true,
+    };
+    client.peer_app_token = 0x2222;
+    client.tracked_indexes_peer_app_token = 0x1111;
+    client.last_update_markets_ms = 0;
+    client.last_check_tags_ms = 0;
+
+    writer(&mut client).tick_periodic_refresh_at(150, 42);
+
+    let methods = drain_api_methods(&client);
+    assert!(
+        methods.contains(&EngineMethod::GetMarketsIndexes.to_byte()),
+        "Delphi UpdateMarketsList first synchronously refreshes SrvMarkets when PeerAppToken changed"
+    );
+    assert!(
+        !methods.contains(&EngineMethod::UpdateMarketsList.to_byte()),
+        "UpdateMarketsList must wait until GetMarketsIndexes is valid for current PeerAppToken"
+    );
+    assert!(
+        methods.contains(&EngineMethod::CheckBinanceTags.to_byte()),
+        "token tag refresh is independent from server-index mapping"
+    );
+    assert_eq!(
+        client.last_update_markets_ms, 0,
+        "skipped price refresh must not consume its periodic interval"
+    );
 }
 
 #[test]

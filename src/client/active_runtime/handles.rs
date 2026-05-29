@@ -2,7 +2,8 @@
 
 use super::{
     commands::{RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind},
-    MoonClientError, NewOrderParams, OrderSide, SellOrderParams, SplitOrderParams,
+    CoinCardCandlesTicket, EngineActionTicket, MoonClient, MoonClientError, NewOrderParams,
+    NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 use std::sync::mpsc;
 
@@ -47,20 +48,27 @@ pub struct MoonOrders {
 }
 
 impl MoonOrders {
+    /// Request a fresh order snapshot and return immediately.
+    pub fn request_snapshot(&self) -> Result<(), MoonClientError> {
+        self.tx
+            .send(RuntimeCommand::OrderSnapshotRefresh)
+            .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+
     /// Move/replace one tracked order.
     pub fn move_order(
         &self,
         order: impl Into<OrderTarget>,
         new_price: f64,
-    ) -> Result<bool, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::MoveOrder { uid, new_price })
+        self.send_intent(RuntimeCommandKind::MoveOrder { uid, new_price })
     }
 
     /// Cancel one tracked order.
-    pub fn cancel(&self, order: impl Into<OrderTarget>) -> Result<bool, MoonClientError> {
+    pub fn cancel(&self, order: impl Into<OrderTarget>) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::CancelOrder { uid })
+        self.send_intent(RuntimeCommandKind::CancelOrder { uid })
     }
 
     /// Update Stops for one tracked order.
@@ -68,36 +76,27 @@ impl MoonOrders {
         &self,
         order: impl Into<OrderTarget>,
         stops: crate::commands::trade::StopSettings,
-    ) -> Result<bool, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::UpdateStops { uid, stops })
+        self.send_intent(RuntimeCommandKind::UpdateStops { uid, stops })
     }
 
     /// Update VStop for one tracked order.
     pub fn update_vstop(
         &self,
         order: impl Into<OrderTarget>,
-        on: bool,
-        fixed: bool,
-        level: f64,
-        vol: f64,
-    ) -> Result<bool, MoonClientError> {
+        params: VStopParams,
+    ) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::UpdateVStop {
-            uid,
-            on,
-            fixed,
-            level,
-            vol,
-        })
+        self.send_intent(RuntimeCommandKind::UpdateVStop { uid, params })
     }
 
     /// Apply click-immune intent for found active orders.
     pub fn set_immune(
         &self,
         items: Vec<crate::commands::trade::ImmuneItem>,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeCommandKind::SetImmune { items })
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeCommandKind::SetImmune { items })
     }
 
     /// Toggle panic sell for one tracked order.
@@ -105,15 +104,15 @@ impl MoonOrders {
         &self,
         order: impl Into<OrderTarget>,
         turn_on: bool,
-    ) -> Result<bool, MoonClientError> {
+    ) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on })
+        self.send_intent(RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on })
     }
 
     /// Request a fresh status for one tracked order.
-    pub fn request_status(&self, order: impl Into<OrderTarget>) -> Result<bool, MoonClientError> {
+    pub fn request_status(&self, order: impl Into<OrderTarget>) -> Result<(), MoonClientError> {
         let uid = order.into().uid();
-        self.send_bool(RuntimeCommandKind::RequestOrderStatus { uid })
+        self.send_intent(RuntimeCommandKind::RequestOrderStatus { uid })
     }
 
     /// Apply market-level panic sell button semantics.
@@ -121,19 +120,17 @@ impl MoonOrders {
         &self,
         market_name: impl Into<String>,
         turn_on: bool,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeCommandKind::SwitchPanicSellByMarket {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeCommandKind::SwitchPanicSellByMarket {
             market_name: market_name.into(),
             turn_on,
         })
     }
 
-    fn send_bool(&self, kind: RuntimeCommandKind) -> Result<bool, MoonClientError> {
-        let (tx, rx) = mpsc::channel();
+    fn send_intent(&self, kind: RuntimeCommandKind) -> Result<(), MoonClientError> {
         self.tx
-            .send(RuntimeCommand::OrderAction { kind, reply: tx })
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
-        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+            .send(RuntimeCommand::OrderAction(kind))
+            .map_err(|_| MoonClientError::RuntimeStopped)
     }
 }
 
@@ -149,8 +146,13 @@ pub struct MoonTrade {
 
 impl MoonTrade {
     /// Send `TNewOrderCommand`.
-    pub fn new_order(&self, params: NewOrderParams) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::NewOrder(params))
+    pub fn new_order(&self, params: NewOrderParams) -> Result<NewOrderTicket, MoonClientError> {
+        let request_uid = random_nonzero_u64();
+        self.send_intent(RuntimeTradeCommandKind::NewOrder {
+            params,
+            request_uid,
+        })?;
+        Ok(NewOrderTicket { request_uid })
     }
 
     /// Send `TJoinOrdersCommand`.
@@ -158,16 +160,16 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         side: OrderSide,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::JoinOrders {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::JoinOrders {
             market_name: market_name.into(),
             side,
         })
     }
 
     /// Send `TSplitOrderCommand`.
-    pub fn split_order(&self, params: SplitOrderParams) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::SplitOrder(params))
+    pub fn split_order(&self, params: SplitOrderParams) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::SplitOrder(params))
     }
 
     /// Send gated `TMoveAllSellsCommand`.
@@ -175,8 +177,8 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         params: crate::commands::trade::MoveAllSellsParams,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::MoveAllSells {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::MoveAllSells {
             market_name: market_name.into(),
             params,
         })
@@ -187,8 +189,8 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         params: crate::commands::trade::MoveAllBuysParams,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::MoveAllBuys {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::MoveAllBuys {
             market_name: market_name.into(),
             params,
         })
@@ -198,8 +200,8 @@ impl MoonTrade {
     pub fn close_position(
         &self,
         params: super::ClosePositionParams,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::ClosePosition(params))
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::ClosePosition(params))
     }
 
     /// Send `TDoLimitClosePositionCommand`.
@@ -207,8 +209,8 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         side: OrderSide,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::LimitClosePosition {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::LimitClosePosition {
             market_name: market_name.into(),
             side,
         })
@@ -219,16 +221,16 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         side: OrderSide,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::SplitPosition {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::SplitPosition {
             market_name: market_name.into(),
             side,
         })
     }
 
     /// Send `TDoSellOrderCommand`.
-    pub fn sell_order(&self, params: SellOrderParams) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::SellOrder(params))
+    pub fn sell_order(&self, params: SellOrderParams) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::SellOrder(params))
     }
 
     /// Send `TDoMarketSplitPositionCommand`.
@@ -236,27 +238,337 @@ impl MoonTrade {
         &self,
         market_name: impl Into<String>,
         side: OrderSide,
-    ) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::MarketSplitPosition {
+    ) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::MarketSplitPosition {
             market_name: market_name.into(),
             side,
         })
     }
 
     /// Send `TPenaltyCommand`.
-    pub fn penalty(&self, market_name: impl Into<String>) -> Result<bool, MoonClientError> {
-        self.send_bool(RuntimeTradeCommandKind::Penalty {
+    pub fn penalty(&self, market_name: impl Into<String>) -> Result<(), MoonClientError> {
+        self.send_intent(RuntimeTradeCommandKind::Penalty {
             market_name: market_name.into(),
         })
     }
 
-    fn send_bool(&self, kind: RuntimeTradeCommandKind) -> Result<bool, MoonClientError> {
-        let (tx, rx) = mpsc::channel();
+    fn send_intent(&self, kind: RuntimeTradeCommandKind) -> Result<(), MoonClientError> {
         self.tx
-            .send(RuntimeCommand::TradeAction { kind, reply: tx })
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
-        rx.recv()
-            .map_err(|_| MoonClientError::RuntimeStopped)?
-            .map_err(MoonClientError::from)
+            .send(RuntimeCommand::TradeAction(kind))
+            .map_err(|_| MoonClientError::RuntimeStopped)
+    }
+}
+
+fn random_nonzero_u64() -> u64 {
+    loop {
+        let value = rand::random::<u64>();
+        if value != 0 {
+            return value;
+        }
+    }
+}
+
+/// Stream subscription handle for orderbooks and trades.
+///
+/// This is the user-facing Active Lib shape for market streams: the runtime
+/// remembers these intents and restores them after reconnects.
+pub struct MoonStreams<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonStreams<'_> {
+    /// Subscribe to one orderbook by market name.
+    pub fn subscribe_orderbook(
+        &self,
+        market_name: impl Into<String>,
+    ) -> Result<(), MoonClientError> {
+        self.client.subscribe_orderbook(market_name)
+    }
+
+    /// Subscribe to several orderbooks by market name.
+    pub fn subscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client.subscribe_orderbooks(market_names)
+    }
+
+    /// Unsubscribe from one orderbook by market name.
+    pub fn unsubscribe_orderbook(
+        &self,
+        market_name: impl Into<String>,
+    ) -> Result<(), MoonClientError> {
+        self.client.unsubscribe_orderbook(market_name)
+    }
+
+    /// Unsubscribe from several orderbooks by market name.
+    pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client.unsubscribe_orderbooks(market_names)
+    }
+
+    /// Unsubscribe from all remembered orderbooks.
+    pub fn unsubscribe_all_orderbooks(&self) -> Result<(), MoonClientError> {
+        self.client.unsubscribe_all_orderbooks()
+    }
+
+    /// Subscribe to all trades and retain Active Lib data for all markets.
+    pub fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
+        self.client.subscribe_all_trades(mode)
+    }
+
+    /// Subscribe to all trades on the wire and retain Active Lib data only for
+    /// the listed markets. An empty list means all markets.
+    pub fn subscribe_trades_for<I, S>(
+        &self,
+        mode: TradesStreamMode,
+        market_names: I,
+    ) -> Result<(), MoonClientError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client.subscribe_trades_for(mode, market_names)
+    }
+
+    /// Unsubscribe from all trades and clear the reconnect registry intent.
+    pub fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
+        self.client.unsubscribe_all_trades()
+    }
+
+    /// Reload orderbook data through Engine API.
+    pub fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.reload_order_book()
+    }
+}
+
+/// Balance, position, and transferable-assets refresh handle.
+pub struct MoonBalances<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonBalances<'_> {
+    /// Request a fresh balance/position snapshot and return immediately.
+    pub fn refresh(&self) -> Result<(), MoonClientError> {
+        self.client.refresh_balances()
+    }
+
+    /// Request a fresh balance/position snapshot and return immediately.
+    pub fn refresh_markets(&self) -> Result<(), MoonClientError> {
+        self.client.refresh_balances()
+    }
+
+    /// Request server-side full balance refresh and return immediately.
+    pub fn refresh_markets_full(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.refresh_markets_balance_full()
+    }
+
+    /// Request transferable asset refresh for Spot, Futures, and Quarterly.
+    pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
+        self.client.refresh_transfer_assets()
+    }
+
+    /// Request transferable asset refresh for one wallet kind.
+    pub fn refresh_transfer_assets_kind(
+        &self,
+        kind: crate::state::ExchangeKind,
+    ) -> Result<(), MoonClientError> {
+        self.client.refresh_transfer_assets_kind(kind)
+    }
+
+    /// Transfer an asset between exchange wallets through Engine API.
+    pub fn transfer_asset(
+        &self,
+        asset: impl AsRef<str>,
+        qty: f64,
+        from: crate::state::ExchangeKind,
+        to: crate::state::ExchangeKind,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.transfer_asset(asset, qty, from, to)
+    }
+
+    /// Convert dust to BNB through Engine API.
+    pub fn convert_dust_bnb(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.convert_dust_bnb()
+    }
+}
+
+/// Account metadata and account-level Engine API handle.
+pub struct MoonAccount<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonAccount<'_> {
+    /// Request a fresh hedge-mode value and return immediately.
+    pub fn refresh_hedge_mode(&self) -> Result<(), MoonClientError> {
+        self.client.refresh_hedge_mode()
+    }
+
+    /// Request fresh API-key expiration metadata and return immediately.
+    pub fn refresh_api_expiration_time(&self) -> Result<(), MoonClientError> {
+        self.client.refresh_api_expiration_time()
+    }
+
+    /// Set leverage for a market through Engine API.
+    pub fn set_leverage(
+        &self,
+        market: impl AsRef<str>,
+        new_leverage: i32,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.set_leverage(market, new_leverage)
+    }
+
+    /// Set account hedge mode through Engine API.
+    pub fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.set_hedge_mode(hedge_mode)
+    }
+
+    /// Cancel all exchange orders through Engine API.
+    pub fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.cancel_all_orders()
+    }
+
+    /// Change position type for a market through Engine API.
+    pub fn change_position_type(
+        &self,
+        market: impl AsRef<str>,
+        position_type: crate::commands::market::PositionType,
+        new_market: bool,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.client
+            .change_position_type(market, position_type, new_market)
+    }
+
+    /// Confirm risk limit for a market through Engine API.
+    pub fn confirm_risk_limit(
+        &self,
+        market: impl AsRef<str>,
+    ) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.confirm_risk_limit(market)
+    }
+
+    /// Set MA mode through Engine API.
+    pub fn set_ma_mode(&self, ma_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+        self.client.set_ma_mode(ma_mode)
+    }
+}
+
+/// UI/settings command handle.
+pub struct MoonSettings<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonSettings<'_> {
+    /// Request a fresh UI/settings snapshot and return immediately.
+    pub fn refresh(&self) -> Result<(), MoonClientError> {
+        self.client.request_client_settings()
+    }
+
+    /// Set the market-maker orders subscription flag.
+    pub fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
+        self.client.set_mm_orders_subscription(subscribe)
+    }
+
+    /// Send a full client-settings snapshot.
+    pub fn send(
+        &self,
+        settings: crate::commands::ui::ClientSettingsCommand,
+    ) -> Result<(), MoonClientError> {
+        self.client.send_settings(settings)
+    }
+
+    /// Request a MoonBot version update.
+    pub fn request_version_update(
+        &self,
+        version_name: impl Into<String>,
+        is_release: bool,
+    ) -> Result<(), MoonClientError> {
+        self.client.request_version_update(version_name, is_release)
+    }
+
+    /// Switch DEX mode.
+    pub fn switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+        self.client.switch_dex(dex_name)
+    }
+
+    /// Switch spot mode.
+    pub fn switch_spot(
+        &self,
+        spot: crate::commands::ui::SpotMarketKind,
+    ) -> Result<(), MoonClientError> {
+        self.client.switch_spot(spot)
+    }
+}
+
+/// Demand-driven candle request handle.
+pub struct MoonCandles<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonCandles<'_> {
+    /// Request CoinCard deep-history candles and return immediately.
+    pub fn request_coin_card(
+        &self,
+        market: impl Into<String>,
+        ticks: crate::commands::candles::DeepHistoryKind,
+    ) -> Result<CoinCardCandlesTicket, MoonClientError> {
+        self.client.request_coin_card_candles(market, ticks)
+    }
+}
+
+/// Strategy-state command handle.
+pub struct MoonStrategies<'a> {
+    pub(super) client: &'a MoonClient,
+}
+
+impl MoonStrategies<'_> {
+    /// Send a strategy sell-price update.
+    pub fn sell_price_update(
+        &self,
+        strategy_id: u64,
+        sell_price: f64,
+    ) -> Result<(), MoonClientError> {
+        self.client.strat_sell_price_update(strategy_id, sell_price)
+    }
+
+    /// Delete one strategy or folder.
+    pub fn delete(
+        &self,
+        strategy_id: u64,
+        folder_path: impl Into<String>,
+    ) -> Result<(), MoonClientError> {
+        self.client.strat_delete(strategy_id, folder_path)
+    }
+
+    /// Replace the Active Lib local strategy list and send a snapshot batch.
+    pub fn send_snapshot_batch(
+        &self,
+        strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
+    ) -> Result<(), MoonClientError> {
+        self.client.send_strategy_snapshot_batch(strategies)
+    }
+
+    /// Change a local strategy checked flag in the active runtime state.
+    pub fn set_checked(&self, strategy_id: u64, checked: bool) -> Result<(), MoonClientError> {
+        self.client.set_strategy_checked(strategy_id, checked)
+    }
+
+    /// Send Delphi checked-state delta if any local strategy changed.
+    pub fn send_checked_delta(&self) -> Result<(), MoonClientError> {
+        self.client.send_strategy_checked_delta()
+    }
+
+    /// Start checked strategies.
+    pub fn start(&self) -> Result<(), MoonClientError> {
+        self.client.strategy_start_stop(true)
+    }
+
+    /// Stop checked strategies.
+    pub fn stop(&self) -> Result<(), MoonClientError> {
+        self.client.strategy_start_stop(false)
     }
 }

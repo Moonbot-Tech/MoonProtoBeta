@@ -1,6 +1,7 @@
 //! OrderBook public/read-model types.
 
 use crate::commands::order_book::OrderLevel;
+use std::sync::Arc;
 
 /// Orderbook kind: futures or spot. Wire format is one byte.
 ///
@@ -33,7 +34,13 @@ impl OrderBookKind {
     }
 }
 
-/// Cache key: `(market_index, book_kind)`. `book_kind`: 0=Futures, 1=Spot.
+impl Default for OrderBookKind {
+    fn default() -> Self {
+        Self::Futures
+    }
+}
+
+/// Internal cache key: `(market_index, raw book_kind)`.
 pub type BookKey = (u16, u8);
 
 /// One applied orderbook level stored in the client read model.
@@ -66,14 +73,22 @@ pub struct TopOfBook {
 /// Applied current book for one `(market_index, book_kind)` pair.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OrderBookSnapshot {
-    pub market_index: u16,
-    pub book_kind: u8,
+    pub(crate) market_index: u16,
+    pub kind: OrderBookKind,
     pub seq: u16,
     pub buys: Vec<OrderBookLevel>,
     pub sells: Vec<OrderBookLevel>,
 }
 
 impl OrderBookSnapshot {
+    /// Server-local market index retained for protocol diagnostics and custom
+    /// low-level runtimes. Regular UI code should resolve books by market name
+    /// through `EventDispatcherSnapshot::order_book`.
+    #[inline]
+    pub fn market_index(&self) -> u16 {
+        self.market_index
+    }
+
     pub fn top(&self) -> TopOfBook {
         TopOfBook {
             bid: self.buys.first().copied(),
@@ -100,14 +115,13 @@ pub enum ApplyResult {
 pub enum OrderBookEvent {
     /// Packet was applied; `OrderBooks` has already updated the read model.
     ///
-    /// `market_index` and raw `book_kind` are kept for diagnostics and low-level
-    /// tools. Normal UI code should use `market_name`, `kind`, and `top`: they
-    /// describe the already-applied book without forcing the caller to resolve
-    /// server indexes or inspect diff rows.
+    /// `market_index` is kept for diagnostics and low-level tools. Normal UI
+    /// code should use `market_name`, `kind`, and `top`: they describe the
+    /// already-applied book without forcing the caller to resolve server indexes
+    /// or inspect diff rows.
     Apply {
         market_index: u16,
-        market_name: Option<String>,
-        book_kind: u8,
+        market_name: Option<Arc<str>>,
         kind: OrderBookKind,
         is_full: bool,
         seq: u16,
@@ -121,11 +135,14 @@ pub enum OrderBookEvent {
     /// Low-level control event: send `emk_RequestOrderBookFull` (throttle already
     /// applied). `EventDispatcher::dispatch_into_active` consumes this internally
     /// before invoking application callbacks.
-    RequestFullNeeded { market_index: u16, book_kind: u8 },
+    RequestFullNeeded {
+        market_index: u16,
+        kind: OrderBookKind,
+    },
     /// Packet was ignored (stale / no full yet / cache).
     Ignored {
         market_index: u16,
-        book_kind: u8,
+        kind: OrderBookKind,
         seq: u16,
         reason: ApplyResult,
     },
@@ -141,17 +158,14 @@ impl OrderBookEvent {
     }
 
     pub fn book_kind_raw(&self) -> u8 {
-        match self {
-            Self::Apply { book_kind, .. }
-            | Self::RequestFullNeeded { book_kind, .. }
-            | Self::Ignored { book_kind, .. } => *book_kind,
-        }
+        self.kind().as_u8()
     }
 
-    pub fn kind(&self) -> Option<OrderBookKind> {
+    pub fn kind(&self) -> OrderBookKind {
         match self {
-            Self::Apply { kind, .. } => Some(*kind),
-            _ => OrderBookKind::from_u8(self.book_kind_raw()),
+            Self::Apply { kind, .. }
+            | Self::RequestFullNeeded { kind, .. }
+            | Self::Ignored { kind, .. } => *kind,
         }
     }
 

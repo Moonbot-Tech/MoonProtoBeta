@@ -211,6 +211,7 @@ fn parse_isolation_compact(data: &[u8], pos: &mut usize) -> Vec<ArbIsolationEntr
 }
 
 /// Build `TArbPricesCommand` for low-level protocol tools.
+#[doc(hidden)]
 pub fn build_arb_prices(uid: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + 4 + payload.len());
     out.push(ARB_PRICES_CMD_ID);

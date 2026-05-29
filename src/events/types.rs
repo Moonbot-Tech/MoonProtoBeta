@@ -1,6 +1,7 @@
 //! Public event/read-model types.
 
 use super::*;
+use crate::commands::market::PositionType;
 use crate::commands::strategy_schema::StrategySchema;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::commands::EngineMethod;
@@ -101,7 +102,7 @@ pub struct WatcherFillEvent {
     pub qty: f32,
     pub z_btc: f32,
     pub position: f32,
-    /// Raw `TOrderType` ordinal. Unknown values are preserved like Delphi enum bytes.
+    /// Delphi `TOrderType`; unknown raw bytes are preserved like Delphi enum bytes.
     pub order_type: OrderType,
     pub is_short: bool,
     pub is_open: bool,
@@ -123,10 +124,21 @@ impl WatcherFillEvent {
 /// Typed watcher fills from one `TradesStream` WatcherFills section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatcherFillsEvent {
-    pub market_index: u16,
+    pub(crate) market_index: u16,
     pub market_name: String,
     pub user: [u8; 20],
     pub fills: Vec<WatcherFillEvent>,
+}
+
+impl WatcherFillsEvent {
+    /// Server-local market index retained for protocol diagnostics.
+    ///
+    /// Normal UI code should use [`Self::market_name`] and market handles from
+    /// the snapshot/read model.
+    #[doc(hidden)]
+    pub fn market_index(&self) -> u16 {
+        self.market_index
+    }
 }
 
 /// User-facing asynchronous Engine API action kind.
@@ -147,7 +159,7 @@ pub enum EngineActionKind {
     },
     ChangePositionType {
         market: String,
-        position_type: u8,
+        position_type: PositionType,
         new_market: bool,
     },
     ConvertDustBnb,

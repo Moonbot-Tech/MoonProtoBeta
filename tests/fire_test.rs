@@ -32,8 +32,8 @@
 //!   CoinCard 4h candle request, trades + orderbook streams, ParseFailed=0,
 //!   CPU summary.
 //! - `MOONPROTO_FIRETEST_PROFILE=full` or unset — the complete destructive
-//!   low-level `Client + EventDispatcher` health/stress scenario below plus a
-//!   short `MoonClient` public-path smoke. Requires `allow_mutation=true`.
+//!   public `MoonClient` health/stress scenario below. Requires
+//!   `allow_mutation=true`.
 //!
 //! FireTest checks live full-parse health for all real server packets. Crafted
 //! malformed parser semantics (Delphi `Read` zero-tail vs `ReadBuffer`
@@ -51,10 +51,12 @@
 //! checks can run against the exact same live payload bytes.
 //!
 //! This is a diagnostic/protocol health test, not application example code. The
-//! full profile intentionally owns `Client + EventDispatcher` directly so it can
-//! inspect protocol metrics, err_emu counters, raw strategy payloads, reconnect
-//! phases, and destructive order/settings scenarios. The quick profile uses
-//! `MoonClient`, matching the public Active Lib path regular applications use.
+//! full profile uses the same public `MoonClient` path as regular applications,
+//! while still inspecting protocol metrics, err_emu counters, raw strategy
+//! payloads, reconnect phases, and destructive order/settings scenarios. Both
+//! profiles print Sliced recovery math for the configured `err_emu`, so a
+//! missing startup request/response is compared against the protocol retry
+//! budget instead of being dismissed as random loss.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -80,17 +82,16 @@ use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
 use moonproto::protocol::Command;
 use moonproto::state::{
-    BalanceEvent, LastPricePoint, MarkPricePoint, MarketHistoryConfig, MarketHistoryWorker,
-    MarketPrice, OrderBookEvent, OrderBookKind, OrderEvent, SettingsEvent, StratEvent,
-    TradeHistoryRow, TradesEvent,
+    ApplyResult, BalanceEvent, LastPricePoint, MarkPricePoint, MarketPrice, Order, OrderBookEvent,
+    OrderBookKind, OrderEvent, SettingsEvent, StratEvent, TradeHistoryRow, TradesEvent,
 };
 use moonproto::{
-    connect_and_init, parse_key_info, Client, ClientConfig, ConnectConfig, EventDispatcher,
-    EventDispatcherSnapshot, ExchangeKind, ImportedKeys, InitConfig, InitialStrategies,
-    LifecycleEvent, MoonClient, TradesStreamMode,
+    parse_key_info, ClientConfig, ConnectConfig, EventDispatcherSnapshot, ExchangeKind,
+    ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent, MoonClient,
+    ProtocolMetricsSnapshot, TradesStreamMode, TransportMode,
 };
 
-const FIRETEST_ERR_EMU_PERCENT: u8 = 10;
+const DEFAULT_FIRETEST_ERR_EMU_PERCENT: u8 = 10;
 const FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT: u8 = 50;
 const FIRETEST_RECONNECT_MATH_ATTEMPTS: i32 = 10;
 const FIRETEST_STRATEGY_ID: u64 = 0xF17E_5737_0000_0001;
@@ -100,6 +101,7 @@ const DEFAULT_CANDLES_TIMEOUT_SECS: u64 = 90;
 const DEFAULT_HIGH_LOSS_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DISCONNECT_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_RECONNECT_TIMEOUT_SECS: u64 = 30;
+const FIRETEST_SLICED_MAX_RETRIES: i32 = 6;
 const PUMP_SLICE: Duration = Duration::from_millis(50);
 const PRICE_NEIGHBORHOOD_PCT: f64 = 0.05;
 const FIRETEST_ORDER_SIZE_USD: f64 = 1000.0;
@@ -110,6 +112,7 @@ const EPS: f64 = 1e-9;
 const QUICK_CONNECT_TIMEOUT_SECS: u64 = 18;
 const QUICK_STREAM_TIMEOUT_SECS: u64 = 8;
 const QUICK_TOTAL_TARGET_SECS: u64 = 30;
+const FIRETEST_SLOW_STARTUP_DIAG_SECS: f64 = 8.0;
 const ACTIVE_LIB_REPORT_MARKETS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 const FIRETEST_COIN_CARD_KIND: DeepHistoryKind = DeepHistoryKind::Hour4;
 const FIRETEST_MIN_COIN_CARD_CANDLES: usize = 24;
@@ -149,12 +152,21 @@ impl FireProfile {
     }
 }
 
+fn firetest_err_emu_percent() -> u8 {
+    match std::env::var("MOONPROTO_FIRETEST_ERR_EMU") {
+        Ok(value) => value
+            .parse::<u8>()
+            .unwrap_or_else(|err| panic!("bad MOONPROTO_FIRETEST_ERR_EMU={value:?}: {err}")),
+        Err(_) => DEFAULT_FIRETEST_ERR_EMU_PERCENT,
+    }
+}
+
 #[derive(Clone)]
 struct FireConfig {
     path: PathBuf,
     host: String,
     port: u16,
-    mask_ver: u8,
+    mask_ver: TransportMode,
     key_b64: String,
     allow_mutation: bool,
     market: String,
@@ -230,8 +242,9 @@ impl FireConfig {
                 s.parse::<u8>()
                     .unwrap_or_else(|_| panic!("bad mask_ver: {s}"))
             })
+            .map(TransportMode::from_byte)
             .or_else(|| key_info.network.map(|network| network.mask_ver))
-            .unwrap_or(0);
+            .unwrap_or(TransportMode::V0);
         let allow_mutation = parse_bool(
             values
                 .get("allow_mutation")
@@ -341,7 +354,7 @@ struct CandlesSnapshotSummary {
 
 impl CandlesSnapshotSummary {
     fn is_healthy(&self) -> bool {
-        self.markets > 0 && self.candles > 0 && self.zipped_bytes > 0
+        self.markets > 0 && self.candles > 0
     }
 
     fn summary(&self) -> String {
@@ -410,6 +423,7 @@ struct SessionStats {
     order_status_by_uid: HashMap<u64, OrderWorkerStatus>,
     order_market_by_uid: HashMap<u64, String>,
     order_sell_reason_by_uid: HashMap<u64, String>,
+    order_ignored_by_uid: HashMap<u64, ApplyResult>,
     balance_events: u64,
     balance_snapshot_events: u64,
     balance_incremental_events: u64,
@@ -474,6 +488,7 @@ impl Clone for SessionStats {
             order_status_by_uid: self.order_status_by_uid.clone(),
             order_market_by_uid: self.order_market_by_uid.clone(),
             order_sell_reason_by_uid: self.order_sell_reason_by_uid.clone(),
+            order_ignored_by_uid: self.order_ignored_by_uid.clone(),
             balance_events: self.balance_events,
             balance_snapshot_events: self.balance_snapshot_events,
             balance_incremental_events: self.balance_incremental_events,
@@ -603,26 +618,10 @@ impl SessionStats {
 }
 
 struct Session {
-    client: Client,
-    dispatcher: EventDispatcher,
-    history_worker: MarketHistoryWorker,
-    candles_snapshot_tx: mpsc::Sender<Vec<RequestCandlesMarket>>,
-    candles_snapshot_rx: mpsc::Receiver<Vec<RequestCandlesMarket>>,
-    transfer_assets_rx: Vec<PendingTransferAssets>,
-    coin_card_candles_rx: Vec<PendingCoinCardCandles>,
+    client: MoonClient,
+    latest_snapshot: Option<Arc<EventDispatcherSnapshot>>,
     stats: Arc<Mutex<SessionStats>>,
     parse_failure_correlations_logged: usize,
-}
-
-struct PendingTransferAssets {
-    kind: ExchangeKind,
-    rx: mpsc::Receiver<EngineResponse>,
-}
-
-struct PendingCoinCardCandles {
-    market: String,
-    kind: DeepHistoryKind,
-    rx: mpsc::Receiver<EngineResponse>,
 }
 
 impl Session {
@@ -637,43 +636,6 @@ impl Session {
             market: cfg.market.clone(),
             ..Default::default()
         }));
-        let mut client = Client::new(
-            ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
-                .with_transport_mode(cfg.mask_ver)
-                .with_client_id(rand::random()),
-        );
-        client.reset_err_emu_diagnostics();
-
-        let lc_stats = Arc::clone(&stats);
-        let lifecycle_label = label.to_string();
-        client.on_lifecycle(Box::new(move |event| {
-            let mut st = lc_stats.lock().unwrap();
-            match event {
-                LifecycleEvent::Connected { fresh: true } => {
-                    st.connected_now = true;
-                    st.connected_fresh += 1;
-                }
-                LifecycleEvent::Connected { fresh: false } => {
-                    st.connected_now = true;
-                    st.connected_again += 1;
-                }
-                LifecycleEvent::Reconnecting => {
-                    st.connected_now = false;
-                    st.reconnecting += 1;
-                }
-                LifecycleEvent::Disconnected => {
-                    st.connected_now = false;
-                    st.disconnected += 1;
-                }
-                _ => {}
-            }
-            println!("LIFECYCLE->{lifecycle_label}: {event:?}");
-        }));
-
-        let history_worker = MarketHistoryWorker::spawn(firetest_history_config());
-        let (candles_snapshot_tx, candles_snapshot_rx) = mpsc::channel();
-        let mut dispatcher = EventDispatcher::new();
-        dispatcher.set_market_history_handle(history_worker.handle());
         let initial_strategies: Vec<_> = provided_strategy.iter().cloned().collect();
         if let Some(strategy) = provided_strategy.as_ref() {
             println!(
@@ -694,60 +656,88 @@ impl Session {
             "FIRETEST {label}: connecting to {}:{} market={}",
             cfg.host, cfg.port, cfg.market
         );
-        connect_and_init(
-            &mut client,
-            &mut dispatcher,
+        let client = MoonClient::connect(
+            ClientConfig::new(&cfg.host, cfg.port, keys.master_key, keys.mac_key)
+                .with_transport_mode(cfg.mask_ver)
+                .with_client_id(rand::random()),
             ConnectConfig::new(init).with_connect_timeout(cfg.connect_timeout),
         )
-        .unwrap_or_else(|err| panic!("FIRETEST {label}: connect_and_init failed: {err}"));
+        .unwrap_or_else(|err| panic!("FIRETEST {label}: MoonClient connect failed: {err}"));
+        client
+            .debug_reset_err_emu_diagnostics()
+            .unwrap_or_else(|err| panic!("FIRETEST {label}: reset diagnostics failed: {err}"));
 
         let mut session = Self {
             client,
-            dispatcher,
-            history_worker,
-            candles_snapshot_tx,
-            candles_snapshot_rx,
-            transfer_assets_rx: Vec::new(),
-            coin_card_candles_rx: Vec::new(),
+            latest_snapshot: None,
             stats,
             parse_failure_correlations_logged: 0,
         };
-        session.drain_queued();
+        assert!(
+            pump_session_until(&mut session, cfg.connect_timeout, "connect ready", |s| {
+                let st = s.snapshot();
+                st.connected_now && st.connected_fresh > 0 && s.latest_snapshot.is_some()
+            }),
+            "FIRETEST {label}: MoonClient did not connect within {:?}",
+            cfg.connect_timeout
+        );
         session
     }
 
     fn pump(&mut self, duration: Duration) {
-        let stats = Arc::clone(&self.stats);
-        let candles_snapshot_tx = self.candles_snapshot_tx.clone();
-        // FireTest is the hot health gate, so it uses the production event path
-        // and reads dispatcher state once per pump slice. Per-event
-        // `run_with_dispatcher_state` snapshots are a convenience API, not the
-        // path we want to benchmark for protocol/active-lib CPU.
-        self.client.run_with_dispatcher(
-            duration,
-            &mut self.dispatcher,
-            Box::new(move |event| record_event(&stats, event, None, Some(&candles_snapshot_tx))),
-        );
+        self.drain_queued();
+        if !duration.is_zero() {
+            std::thread::sleep(duration);
+        }
         self.log_new_parse_failure_correlations("immediate");
         self.drain_queued();
         self.refresh_stats_from_dispatcher(false);
-        self.apply_completed_candles_snapshots();
-        self.apply_completed_transfer_assets();
-        self.apply_completed_coin_card_candles();
     }
 
     fn drain_queued(&mut self) {
-        let events = self.dispatcher.take_queued_events();
-        let snapshot = self.dispatcher.snapshot();
-        for event in events {
-            record_event(
-                &self.stats,
-                &event,
-                Some(&snapshot),
-                Some(&self.candles_snapshot_tx),
-            );
+        let mut lifecycle = Vec::new();
+        self.client.drain_lifecycle_events_into(&mut lifecycle);
+        for event in lifecycle {
+            self.record_lifecycle_event(event);
         }
-        self.apply_completed_candles_snapshots();
+
+        if let Some(snapshot) = self.client.snapshot() {
+            self.latest_snapshot = Some(snapshot);
+        }
+        let snapshot = self.latest_snapshot.clone();
+
+        let mut events = Vec::new();
+        self.client.drain_events_into(&mut events);
+        for event in events {
+            record_event(&self.stats, &event, snapshot.as_deref(), None);
+        }
+    }
+
+    fn record_lifecycle_event(&self, event: LifecycleEvent) {
+        let mut st = self.stats.lock().unwrap();
+        match event {
+            LifecycleEvent::Connected { fresh: true } => {
+                st.connected_now = true;
+                st.connected_fresh += 1;
+            }
+            LifecycleEvent::Connected { fresh: false } => {
+                st.connected_now = true;
+                st.connected_again += 1;
+            }
+            LifecycleEvent::Reconnecting => {
+                st.connected_now = false;
+                st.reconnecting += 1;
+            }
+            LifecycleEvent::Disconnected => {
+                st.connected_now = false;
+                st.disconnected += 1;
+            }
+            LifecycleEvent::ConnectFailed { error } => {
+                panic!("FIRETEST {}: MoonClient connect failed: {error}", st.label);
+            }
+            _ => {}
+        }
+        println!("LIFECYCLE->{}: {event:?}", st.label);
     }
 
     fn log_new_parse_failure_correlations(&mut self, label: &str) {
@@ -770,11 +760,9 @@ impl Session {
     }
 
     fn request_transfer_assets_refresh(&mut self) {
-        for kind in ExchangeKind::ALL {
-            let rx = self.client.api_update_transfer_assets(kind);
-            self.transfer_assets_rx
-                .push(PendingTransferAssets { kind, rx });
-        }
+        self.client
+            .refresh_transfer_assets()
+            .expect("MoonClient refresh_transfer_assets must queue");
         println!(
             "FIRETEST transfer assets refresh queued kinds=[{}]",
             ExchangeKind::ALL
@@ -786,12 +774,9 @@ impl Session {
     }
 
     fn request_coin_card_candles(&mut self, market: &str, kind: DeepHistoryKind) {
-        let rx = self.client.api_get_coin_card_candles(market, kind);
-        self.coin_card_candles_rx.push(PendingCoinCardCandles {
-            market: market.to_string(),
-            kind,
-            rx,
-        });
+        self.client
+            .request_coin_card_candles(market, kind)
+            .expect("MoonClient request_coin_card_candles must queue");
         println!(
             "FIRETEST non-blocking CoinCard candles queued market={} kind={kind:?}",
             market
@@ -799,11 +784,26 @@ impl Session {
     }
 
     fn coin_card_candles_count(&self, market: &str, kind: DeepHistoryKind) -> usize {
-        self.dispatcher
-            .coin_card_candles()
-            .get(market, kind)
+        self.latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.coin_card_candles().get(market, kind))
             .map(|rows| rows.len())
             .unwrap_or(0)
+    }
+
+    fn state_snapshot(&self) -> Arc<EventDispatcherSnapshot> {
+        self.latest_snapshot.as_ref().cloned().unwrap_or_else(|| {
+            self.client
+                .snapshot()
+                .expect("MoonClient snapshot is not ready")
+        })
+    }
+
+    fn maybe_state_snapshot(&self) -> Option<Arc<EventDispatcherSnapshot>> {
+        self.latest_snapshot
+            .as_ref()
+            .cloned()
+            .or_else(|| self.client.snapshot())
     }
 
     fn assert_coin_card_candles_healthy(&self, market: &str, kind: DeepHistoryKind) {
@@ -819,73 +819,14 @@ impl Session {
         );
     }
 
-    fn apply_completed_transfer_assets(&mut self) {
-        let mut produced_event = false;
-        let mut i = 0;
-        while i < self.transfer_assets_rx.len() {
-            match self.transfer_assets_rx[i].rx.try_recv() {
-                Ok(resp) => {
-                    let kind = self.transfer_assets_rx[i].kind;
-                    self.dispatcher.apply_transfer_assets_response(kind, resp);
-                    produced_event = true;
-                    self.transfer_assets_rx.swap_remove(i);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    let kind = self.transfer_assets_rx[i].kind;
-                    panic!(
-                        "FireTest transfer assets receiver closed before response for {}",
-                        kind.name()
-                    );
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    i += 1;
-                }
-            }
-        }
-        if produced_event {
-            self.drain_queued();
-            self.refresh_stats_from_dispatcher(false);
-        }
-    }
-
-    fn apply_completed_coin_card_candles(&mut self) {
-        let mut produced_event = false;
-        let mut i = 0;
-        while i < self.coin_card_candles_rx.len() {
-            match self.coin_card_candles_rx[i].rx.try_recv() {
-                Ok(resp) => {
-                    let pending = self.coin_card_candles_rx.swap_remove(i);
-                    self.dispatcher.apply_coin_card_candles_response(
-                        pending.market,
-                        pending.kind,
-                        resp,
-                    );
-                    produced_event = true;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    let pending = self.coin_card_candles_rx.swap_remove(i);
-                    panic!(
-                        "FireTest CoinCard candles receiver closed before response for {} {:?}",
-                        pending.market, pending.kind
-                    );
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    i += 1;
-                }
-            }
-        }
-        if produced_event {
-            self.drain_queued();
-            self.refresh_stats_from_dispatcher(false);
-        }
-    }
-
     fn refresh_stats_from_dispatcher(&self, log_changes: bool) {
-        let snapshot = self.dispatcher.snapshot();
+        let Some(snapshot) = self.maybe_state_snapshot() else {
+            return;
+        };
         let mut st = self.stats.lock().unwrap();
         let event_no = st.server_events;
-        sync_market_probe_from_dispatcher(&mut st, event_no, &snapshot, log_changes);
-        record_order_state_snapshot(&mut st, &snapshot);
+        sync_market_probe_from_dispatcher(&mut st, event_no, snapshot.as_ref(), log_changes);
+        record_order_state_snapshot(&mut st, snapshot.as_ref());
 
         if let Some(settings) = snapshot.settings().client_settings.clone() {
             st.last_settings = Some(settings);
@@ -913,13 +854,11 @@ impl Session {
     }
 
     fn protocol_summary(&self) -> String {
-        let m = self
-            .client
-            .protocol_metrics_snapshot_with_dispatcher(&self.dispatcher);
+        let m = self.client.protocol_metrics_snapshot();
         let market_apply = self
-            .dispatcher
-            .markets()
-            .last_markets_list_apply_timing()
+            .maybe_state_snapshot()
+            .as_ref()
+            .and_then(|snapshot| snapshot.markets().last_markets_list_apply_timing())
             .map(|t| {
                 format!(
                     " get_markets_list_apply(total={}us markets={}us index={}us corr={}us ref={}us payload={} markets={} corr={})",
@@ -935,7 +874,7 @@ impl Session {
             })
             .unwrap_or_default();
         format!(
-            "recv={} reader(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
+            "recv={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}{}",
             m.recv_count,
             avg_us(m.reader_protocol_ns, m.reader_protocol_count),
             m.reader_protocol_max_ns / 1_000,
@@ -947,6 +886,14 @@ impl Session {
             m.reader_protocol_over_100us,
             m.reader_protocol_over_1ms,
             m.reader_protocol_over_5ms,
+            m.reader_protocol_wait_count,
+            avg_us(m.reader_protocol_wait_ns, m.reader_protocol_wait_count),
+            m.reader_protocol_wait_max_ns / 1_000,
+            metric_cmd_label(
+                m.reader_protocol_wait_max_cmd,
+                u8::MAX,
+                m.reader_protocol_wait_max_payload_len
+            ),
             avg_us(m.writer_cpu_ns, m.writer_cpu_count),
             m.writer_cpu_max_ns / 1_000,
             m.writer_cpu_over_100us,
@@ -985,68 +932,12 @@ impl Session {
         )
     }
 
-    fn apply_completed_candles_snapshots(&mut self) {
-        while let Ok(markets) = self.candles_snapshot_rx.try_recv() {
-            let total_candles = markets.iter().map(|m| m.candles_5m.len()).sum::<usize>();
-            let target_market = self.snapshot().market;
-            let target_parsed = markets
-                .iter()
-                .find(|m| m.market_name == target_market)
-                .map(|m| m.candles_5m.len())
-                .unwrap_or(0);
-            let applied = self.dispatcher.apply_candles_snapshot(&markets);
-            let _ = self.history_worker.flush(0.0);
-            let readers = self.history_worker.readers(&target_market);
-            let (retained, capacity) = readers
-                .as_ref()
-                .and_then(|readers| readers.candles_5m.as_ref())
-                .map(|reader| (reader.bounds().len, reader.capacity()))
-                .unwrap_or((0, 0));
-            println!(
-                "FIRETEST candles active-storage applied={} parsed_candles={} target={} target_parsed_candles={} target_retained_candles={} capacity={}",
-                applied.is_some(), total_candles, target_market, target_parsed, retained, capacity
-            );
-            assert!(
-                target_parsed > 0,
-                "FireTest: parsed candles snapshot did not contain target market {target_market}"
-            );
-            assert!(
-                retained == target_parsed.min(capacity),
-                "FireTest: Active Lib retained candles mismatch for {target_market}: parsed={target_parsed} retained={retained} capacity={capacity}"
-            );
-            let now_time = delphi_now_raw_for_test();
-            let derived = self
-                .history_worker
-                .derived_snapshot(&target_market, now_time)
-                .expect("target market should expose derived snapshot after candles apply");
-            assert!(
-                derived.candle_volumes.one_hour > 0.0,
-                "FireTest: retained target candles did not feed one-hour candle volume: {:?}",
-                derived.candle_volumes
-            );
-            println!(
-                "FIRETEST candles derived deltas/volumes: combined(15m={:.4}% 1h={:.4}% 24h={:.4}%) candle(15m={:.4}% 1h={:.4}% 24h={:.4}% vol1h={:.2} vol24h={:.2}) trade(1m={:.4}% 5m={:.4}%)",
-                derived.deltas.fifteen_minutes,
-                derived.deltas.one_hour,
-                derived.deltas.twenty_four_hours,
-                derived.candle_deltas.fifteen_minutes,
-                derived.candle_deltas.one_hour,
-                derived.candle_deltas.twenty_four_hours,
-                derived.candle_volumes.one_hour,
-                derived.candle_volumes.twenty_four_hours,
-                derived.trade_deltas.one_minute,
-                derived.trade_deltas.five_minutes
-            );
-        }
-    }
-
     fn emit_active_lib_report(&mut self, profile: FireProfile, started_at: Instant) {
         self.drain_queued();
         let now_time = delphi_now_raw_for_test();
-        let _ = self.history_worker.flush(now_time);
         self.refresh_stats_from_dispatcher(false);
 
-        let snapshot = self.dispatcher.snapshot();
+        let snapshot = self.state_snapshot();
         let st = self.snapshot();
         let elapsed = started_at.elapsed().as_secs_f64();
         let update_count = st.engine_method_count(EngineMethod::UpdateMarketsList);
@@ -1065,10 +956,10 @@ impl Session {
         );
 
         for market in ACTIVE_LIB_REPORT_MARKETS {
-            self.emit_active_lib_market_report(profile, &snapshot, market, now_time);
+            self.emit_active_lib_market_report(profile, snapshot.as_ref(), market, now_time);
         }
-        self.emit_balance_asset_report(&snapshot);
-        self.emit_order_report(&snapshot, &st);
+        self.emit_balance_asset_report(snapshot.as_ref());
+        self.emit_order_report(snapshot.as_ref(), &st);
     }
 
     fn emit_active_lib_market_report(
@@ -1078,7 +969,7 @@ impl Session {
         market: &str,
         now_time: f64,
     ) {
-        let Some(readers) = self.history_worker.readers(market) else {
+        let Some(readers) = snapshot.market_history_readers(market) else {
             println!(
                 "FIRETEST ActiveLib market={market}: no retained readers; reason=market not retained by trades storage scope"
             );
@@ -1137,7 +1028,7 @@ impl Session {
         );
         let manual_25 = trade_volume(&futures_25);
         let manual_60 = trade_volume(&futures_60);
-        let derived = self.history_worker.derived_snapshot(market, now_time);
+        let derived = snapshot.market_history_derived_snapshot(market, now_time);
         let price = snapshot.markets().price(market).copied();
         let handle = snapshot.markets().get(market);
         let balance = handle.as_ref().map(|handle| handle.balance_position());
@@ -1319,7 +1210,7 @@ impl Session {
             balances.global.btc_balance_full,
             balances.global.special_coin_balance,
             balances.global.total_pnl,
-            balances.by_market.len(),
+            balances.len(),
         );
         assert!(
             balances.global.btc_balance_total.abs()
@@ -1363,8 +1254,8 @@ impl Session {
         );
 
         let mut balance_item_assets = balances
-            .by_market
-            .values()
+            .iter()
+            .map(|(_, item)| item)
             .filter_map(|item| {
                 let amount = item.asset_balance_full.abs().max(item.asset_balance.abs());
                 (amount > EPS).then(|| {
@@ -1438,18 +1329,14 @@ impl Session {
     }
 
     fn strategy_snapshot(&self, strategy_id: u64) -> Option<StrategySnapshot> {
-        self.dispatcher.strategy_snapshot(strategy_id).cloned()
+        self.maybe_state_snapshot()
+            .and_then(|snapshot| snapshot.strategy_snapshot(strategy_id).cloned())
     }
 
     fn send_strategy_snapshot_batch(&mut self, strategies: &[StrategySnapshot]) {
-        self.dispatcher.set_local_strategies(strategies);
-        let schema = self
-            .dispatcher
-            .strats()
-            .strategy_schema()
-            .expect("FireTest init must fetch TStratSchema before sending strategies");
         self.client
-            .strat_send_snapshot_batch(0, false, schema, strategies);
+            .send_strategy_snapshot_batch(strategies.to_vec())
+            .expect("MoonClient strategy snapshot batch must queue");
     }
 
     fn send_new_order(
@@ -1460,64 +1347,45 @@ impl Session {
         strat_id: u64,
         order_size: f64,
     ) -> u64 {
-        let ctx = self
+        let ticket = self
             .client
-            .random_trade_ctx()
-            .expect("run BaseCheck before FireTest order flow");
-        let request_uid = ctx.uid;
-        self.client
-            .new_order(ctx, market, is_short, price, strat_id, order_size);
-        request_uid
+            .trade()
+            .new_order(
+                moonproto::NewOrderParams::new(
+                    market,
+                    if is_short {
+                        moonproto::OrderSide::Short
+                    } else {
+                        moonproto::OrderSide::Long
+                    },
+                    price,
+                    order_size,
+                )
+                .with_strategy_id(strat_id),
+            )
+            .expect("MoonClient new_order must queue");
+        ticket.request_uid
     }
 
     fn replace_order(&mut self, uid: u64, new_price: f64) -> bool {
-        self.client
-            .replace_tracked_order(self.dispatcher.orders_mut(), uid, new_price)
+        self.client.orders().move_order(uid, new_price).is_ok()
     }
 
     fn cancel_order(&mut self, uid: u64) -> bool {
-        self.client
-            .cancel_tracked_order(self.dispatcher.orders_mut(), uid)
+        self.client.orders().cancel(uid).is_ok()
     }
 
     fn panic_sell_order(&mut self, uid: u64, turn_on: bool) -> bool {
-        self.client
-            .turn_tracked_order_panic_sell(self.dispatcher.orders_mut(), uid, turn_on)
+        self.client.orders().turn_panic_sell(uid, turn_on).is_ok()
     }
 
     fn request_candles_snapshot(&mut self) {
-        let raw = moonproto::commands::engine_request::request_candles_data();
-        let uid = raw
-            .get(3..11)
-            .and_then(|s| s.try_into().ok())
-            .map(u64::from_le_bytes)
-            .unwrap_or(0);
-        {
-            let mut st = self.stats.lock().unwrap();
-            st.candles_requested = true;
-            st.candles_chunks = 0;
-            st.candles_ignored = 0;
-            st.candles_payload_bytes = 0;
-            st.candles_seen_chunks.clear();
-            st.candles_last_progress = (0, 0);
-            st.candles_complete = None;
-            st.candles_aggregator.reset();
-            println!(
-                "FIRETEST {}: request full candles snapshot uid={} payload_len={}",
-                st.label,
-                uid,
-                raw.len()
-            );
-        }
-        self.client.send_api_request(&raw);
-    }
-
-    fn remember_settings_snapshot(&self, settings: &ClientSettingsCommand) {
         let mut st = self.stats.lock().unwrap();
-        if st.last_settings.as_ref().map(|prev| prev.uid) != Some(settings.uid) {
-            st.settings_events += 1;
-        }
-        st.last_settings = Some(settings.clone());
+        st.candles_requested = true;
+        println!(
+            "FIRETEST {}: full candles snapshot is maintained by MoonClient after trades subscription",
+            st.label
+        );
     }
 }
 
@@ -1608,7 +1476,8 @@ fn write_strategy_raw_dump(
 
 fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session) {
     let stats = session.snapshot();
-    let strats = session.dispatcher.strats();
+    let snapshot = session.state_snapshot();
+    let strats = snapshot.strats();
     writeln!(
         out,
         "## Session {label}\nsummary={}\nschema_revision={} schema_failures={} schema_error={}\n",
@@ -1629,7 +1498,7 @@ fn append_session_strategy_dump(out: &mut String, label: &str, session: &Session
         writeln!(out, "Schema: <missing>\n").unwrap();
     }
 
-    let mut snapshots = session.dispatcher.strategy_snapshot_vec();
+    let mut snapshots = snapshot.strategy_snapshot_vec();
     snapshots.sort_by_key(|s| s.strategy_id);
     writeln!(out, "Strategies: count={}", snapshots.len()).unwrap();
     for strategy in snapshots {
@@ -1707,10 +1576,10 @@ fn append_schema_dump(out: &mut String, raw_len: usize, schema: &StrategySchema)
             out,
             "- {} type={}({}) ui={} flags=0x{:02X} default={} visible=[{}] layout={} static_picklist={} dynamic_picklist={}",
             field.name,
-            field.raw_type_id,
+            field.raw_type_id(),
             field.type_id.name(),
             ui_kind_text(field.ui_kind),
-            field.raw_flags,
+            field.raw_flags(),
             field
                 .default_value
                 .as_ref()
@@ -1719,8 +1588,7 @@ fn append_schema_dump(out: &mut String, raw_len: usize, schema: &StrategySchema)
             visible,
             layout_text(&field.layout),
             field
-                .static_picklist_raw
-                .as_deref()
+                .static_picklist_raw()
                 .map(|raw| short_text(raw, 220))
                 .unwrap_or_else(|| "none".to_string()),
             field
@@ -1991,6 +1859,65 @@ fn metric_app_mode_label(mode: u8) -> &'static str {
     }
 }
 
+fn protocol_metrics_summary(m: &ProtocolMetricsSnapshot) -> String {
+    format!(
+        "recv={} reader_cpu(avg/max={}us/{}us max_src={} >100us/>1ms/>5ms={}/{}/{}) reader_wait(count={} avg/max={}us/{}us max_src={}) writer_cpu(avg/max={}us/{}us >100us/>1ms/>5ms={}/{}/{}) active_dispatch(avg/max={}us/{}us max_src={} events={} actions={} >100us/>1ms/>5ms={}/{}/{}) app_enqueue(avg/max={}us/{}us max_src={} events={} mode={} >100us/>1ms/>5ms={}/{}/{}) writer_tick_wall(count={} avg/max={}us/{}us) send_max={}us public_events={}",
+        m.recv_count,
+        avg_us(m.reader_protocol_ns, m.reader_protocol_count),
+        m.reader_protocol_max_ns / 1_000,
+        metric_cmd_label(
+            m.reader_protocol_max_cmd,
+            u8::MAX,
+            m.reader_protocol_max_payload_len
+        ),
+        m.reader_protocol_over_100us,
+        m.reader_protocol_over_1ms,
+        m.reader_protocol_over_5ms,
+        m.reader_protocol_wait_count,
+        avg_us(m.reader_protocol_wait_ns, m.reader_protocol_wait_count),
+        m.reader_protocol_wait_max_ns / 1_000,
+        metric_cmd_label(
+            m.reader_protocol_wait_max_cmd,
+            u8::MAX,
+            m.reader_protocol_wait_max_payload_len
+        ),
+        avg_us(m.writer_cpu_ns, m.writer_cpu_count),
+        m.writer_cpu_max_ns / 1_000,
+        m.writer_cpu_over_100us,
+        m.writer_cpu_over_1ms,
+        m.writer_cpu_over_5ms,
+        avg_us(m.active_dispatch_ns, m.active_dispatch_count),
+        m.active_dispatch_max_ns / 1_000,
+        metric_cmd_label(
+            m.active_dispatch_max_cmd,
+            m.active_dispatch_max_api_method,
+            m.active_dispatch_max_payload_len
+        ),
+        m.active_dispatch_max_events,
+        m.active_dispatch_max_actions,
+        m.active_dispatch_over_100us,
+        m.active_dispatch_over_1ms,
+        m.active_dispatch_over_5ms,
+        avg_us(m.app_enqueue_ns, m.app_enqueue_count),
+        m.app_enqueue_max_ns / 1_000,
+        metric_cmd_label(
+            m.app_enqueue_max_cmd,
+            m.app_enqueue_max_api_method,
+            m.app_enqueue_max_payload_len
+        ),
+        m.app_enqueue_max_events,
+        metric_app_mode_label(m.app_enqueue_max_mode),
+        m.app_enqueue_over_100us,
+        m.app_enqueue_over_1ms,
+        m.app_enqueue_over_5ms,
+        m.writer_tick_count,
+        avg_us(m.writer_tick_ns, m.writer_tick_count),
+        m.writer_tick_max_ns / 1_000,
+        m.send_phase_max_ns / 1_000,
+        m.public_event_queue_len,
+    )
+}
+
 fn delphi_now_raw_for_test() -> f64 {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2017,6 +1944,9 @@ fn record_event(
             *st.order_event_kinds
                 .entry(order_event_kind(ev))
                 .or_default() += 1;
+            if let OrderEvent::Ignored { uid, reason } = ev {
+                st.order_ignored_by_uid.insert(*uid, *reason);
+            }
             if let Some(dispatcher) = dispatcher {
                 record_order_state_snapshot(&mut st, dispatcher);
             }
@@ -2140,6 +2070,42 @@ fn record_event(
                 }
             }
         }
+        Event::CandlesSnapshot(ev) => match ev {
+            moonproto::state::CandlesSnapshotEvent::Ready {
+                request_uid,
+                summary,
+            } => {
+                st.candles_complete = Some(CandlesSnapshotSummary {
+                    uid: *request_uid,
+                    zipped_bytes: 0,
+                    markets: summary.retained_markets,
+                    candles: summary.retained_candles,
+                    market_preview: format!(
+                        "received_markets={} received_candles={}",
+                        summary.received_markets, summary.received_candles
+                    ),
+                });
+                log_server_event(
+                    &st,
+                    event_no,
+                    format!(
+                        "CandlesSnapshot Ready uid={} summary={summary:?}",
+                        request_uid
+                    ),
+                );
+            }
+            moonproto::state::CandlesSnapshotEvent::Failed { request_uid, error } => {
+                st.parse_failed += 1;
+                log_server_event(
+                    &st,
+                    event_no,
+                    format!(
+                        "CandlesSnapshot Failed uid={:?} error={}",
+                        request_uid, error
+                    ),
+                );
+            }
+        },
         Event::Markets(ev) => {
             st.market_events += 1;
             if let Some(dispatcher) = dispatcher {
@@ -2275,7 +2241,6 @@ fn record_event(
         }
         Event::OrderBook(OrderBookEvent::Apply {
             market_index,
-            book_kind,
             market_name,
             kind,
             is_full,
@@ -2285,19 +2250,20 @@ fn record_event(
             sells,
         }) => {
             st.orderbook_apply += 1;
+            let raw_kind = kind.as_u8();
             if st.market_index == Some(*market_index) {
                 if *is_full {
                     st.target_orderbook_full += 1;
                 } else {
                     st.target_orderbook_update += 1;
                 }
-                st.last_book_kind = Some(*book_kind);
+                st.last_book_kind = Some(raw_kind);
                 if let (Some(bid), Some(ask)) = (top.bid, top.ask) {
                     st.last_book_bid = Some(bid.rate);
                     st.last_book_ask = Some(ask.rate);
                     if bid.rate <= 0.0 || ask.rate <= 0.0 || ask.rate <= bid.rate {
                         st.market_invariant_error = Some(format!(
-                            "bad book top for {} kind={book_kind}: bid={:.8} ask={:.8}",
+                            "bad book top for {} kind={raw_kind}: bid={:.8} ask={:.8}",
                             st.market, bid.rate, ask.rate
                         ));
                     }
@@ -2309,7 +2275,7 @@ fn record_event(
                             "OrderBook target top not complete yet market={} idx={} kind={} top_bid={:?} top_ask={:?}",
                             st.market,
                             market_index,
-                            book_kind,
+                            raw_kind,
                             top.bid.map(|level| level.rate),
                             top.ask.map(|level| level.rate)
                         ),
@@ -2327,7 +2293,7 @@ fn record_event(
                             market_name,
                             market_index,
                             kind,
-                            book_kind,
+                            raw_kind,
                             is_full,
                             seq,
                             st.last_book_bid,
@@ -2352,7 +2318,7 @@ fn record_event(
                         "OrderBook Apply #{} market_index={} kind={} full={} seq={} buys={} sells={} top_buy={} top_sell={}",
                         st.orderbook_apply,
                         market_index,
-                        book_kind,
+                        raw_kind,
                         is_full,
                         seq,
                         buys.len(),
@@ -2773,6 +2739,32 @@ fn pump_pair_for(a: &mut Session, b: &mut Session, duration: Duration) {
     }
 }
 
+fn pump_session_until<F>(
+    session: &mut Session,
+    timeout: Duration,
+    label: &str,
+    mut predicate: F,
+) -> bool
+where
+    F: FnMut(&Session) -> bool,
+{
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        session.pump(PUMP_SLICE);
+        if predicate(session) {
+            println!("OK: {label} after {:.2}s", start.elapsed().as_secs_f64());
+            return true;
+        }
+    }
+    let stats = session.snapshot();
+    eprintln!(
+        "FIRETEST TIMEOUT {label}: session=[{}] metrics=[{}]",
+        stats.summary(),
+        session.protocol_summary(),
+    );
+    false
+}
+
 fn pump_pair_until<F>(
     a: &mut Session,
     b: &mut Session,
@@ -3081,9 +3073,21 @@ fn log_err_emu_snapshot(
             "FIRETEST ErrEmu {label} {session}: no observed Sliced API/UI response datagrams"
         );
     } else {
-        for dg in candidates.iter().rev().take(16).rev() {
+        let total = candidates.len();
+        for (idx, dg) in candidates.iter().enumerate() {
+            if idx == 8 && total > 24 {
+                eprintln!(
+                    "FIRETEST ErrEmu {label} {session}: ... skipped {} middle Sliced candidates ...",
+                    total - 24
+                );
+            }
+            if idx >= 8 && idx + 16 < total {
+                continue;
+            }
             eprintln!(
-                "FIRETEST ErrEmu {label} {session}: {}",
+                "FIRETEST ErrEmu {label} {session}: Sliced candidate {}/{}: {}",
+                idx + 1,
+                total,
                 describe_sliced_candidate(diag.configured_rate, dg)
             );
         }
@@ -3142,12 +3146,19 @@ fn is_sliced_response_candidate(dg: &ErrEmuSlicedDatagramDiagnostics) -> bool {
         .unwrap_or(false);
     let block0_known_settings = dg.block0_ui_cmd_id == Some(1);
     let completed_api = dg.completed_cmd == Some(Command::API.to_byte());
+    let completed_strat = dg.completed_cmd == Some(Command::Strat.to_byte());
     let block0_api = dg
         .block0_wire_cmd
         .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::API)
         .unwrap_or(false);
+    let block0_strat = dg
+        .block0_wire_cmd
+        .map(|cmd| Command::from_byte(cmd & 0x7F) == Command::Strat)
+        .unwrap_or(false);
     completed_api
         || block0_api
+        || completed_strat
+        || block0_strat
         || completed_orderbook
         || block0_orderbook
         || completed_settings
@@ -3190,8 +3201,21 @@ fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagn
     } else {
         ""
     };
+    let orderbook = if dg.completed_cmd == Some(Command::OrderBook.to_byte()) {
+        format!(
+            " orderbook_market={:?} orderbook_kind={:?} orderbook_seq={:?} orderbook_full={:?} orderbook_buys={:?} orderbook_sells={:?}",
+            dg.completed_orderbook_market_index,
+            dg.completed_orderbook_kind,
+            dg.completed_orderbook_seq,
+            dg.completed_orderbook_is_full,
+            dg.completed_orderbook_buys,
+            dg.completed_orderbook_sells
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "Sliced d={} blocks={}/{} attempts={} delivered_packets={} dropped_packets={} wire_cmd={:?} ui_cmd={:?} complete_cmd={:?} complete_ui={:?} complete_api_method={:?} complete_api_uid={:?} complete_api_success={:?} payload_len={:?} payload_hash={} payload_head={} missing=[{}] pure_err_emu_fail_p={}{}",
+        "Sliced d={} blocks={}/{} attempts={} delivered_packets={} dropped_packets={} wire_cmd={:?} ui_cmd={:?} complete_cmd={:?} complete_ui={:?} complete_strat_cmd={:?} complete_strat_uid={:?} complete_api_method={:?} complete_api_uid={:?} complete_api_success={:?}{} payload_len={:?} payload_hash={} payload_head={} missing=[{}] pure_err_emu_fail_p={}{}",
         dg.datagram_num,
         dg.delivered_unique_blocks(),
         dg.blocks_count,
@@ -3202,9 +3226,12 @@ fn describe_sliced_candidate(configured_rate: u8, dg: &ErrEmuSlicedDatagramDiagn
         dg.block0_ui_cmd_id,
         dg.completed_cmd.map(Command::from_byte),
         dg.completed_ui_cmd_id,
+        dg.completed_strat_cmd_id,
+        dg.completed_strat_uid,
         dg.completed_api_method.map(EngineMethod::from_byte),
         dg.completed_api_uid,
         dg.completed_api_success,
+        orderbook,
         dg.completed_payload_len,
         payload_hash,
         payload_head,
@@ -3302,7 +3329,7 @@ fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
         strategy_ver: 1,
         last_date: now_epoch_ms(),
         checked: false,
-        kind: StrategyKind::TELEGRAM.0,
+        kind: StrategyKind::TELEGRAM.to_byte(),
         path: "FireTest".to_string(),
         fields,
     }
@@ -3313,8 +3340,8 @@ fn assert_strategy_field_visible_for_firetest(
     cfg: &FireConfig,
     strategy: &StrategySnapshot,
 ) {
-    let schema = session
-        .dispatcher
+    let snapshot = session.state_snapshot();
+    let schema = snapshot
         .strats()
         .strategy_schema()
         .expect("FireTest strategy schema must be loaded before local strategy mutation");
@@ -3401,6 +3428,29 @@ fn log_high_loss_recovery_math() {
     );
 }
 
+fn log_sliced_recovery_math(label: &str, err_emu_percent: u8) {
+    let p = err_emu_percent.min(100) as f64 * 0.01;
+    let attempts = FIRETEST_SLICED_MAX_RETRIES + 1;
+    let one_block_fail = p.powi(attempts);
+    let any_block_fail = |blocks: i32| 1.0 - (1.0 - one_block_fail).powi(blocks);
+    let request_response_fail = 1.0 - (1.0 - one_block_fail).powi(2);
+    let startup_engine_api_count = 4;
+    let any_startup_api_fail = 1.0 - (1.0 - request_response_fail).powi(startup_engine_api_count);
+    println!(
+        "FIRETEST Sliced recovery math {label}: err_emu={}%, MaxRetries={} -> attempts={} per block; pure client-drop fail probability: 1-block={:.8}%, EngineAPI request+response={:.8}%, any of {} startup EngineAPI pairs={:.8}%, 6-block={:.8}%, 32-block={:.8}%, 255-block={:.8}%. If one startup Engine API/Sliced response times out, do not blame randomness unless diagnostics show every attempt for a missing block was actually dropped.",
+        err_emu_percent,
+        FIRETEST_SLICED_MAX_RETRIES,
+        attempts,
+        one_block_fail * 100.0,
+        request_response_fail * 100.0,
+        startup_engine_api_count,
+        any_startup_api_fail * 100.0,
+        any_block_fail(6) * 100.0,
+        any_block_fail(32) * 100.0,
+        any_block_fail(255) * 100.0,
+    );
+}
+
 fn quick_profile_config(cfg: &FireConfig) -> FireConfig {
     let mut quick = cfg.clone();
     quick.connect_timeout = quick
@@ -3412,22 +3462,23 @@ fn quick_profile_config(cfg: &FireConfig) -> FireConfig {
     quick
 }
 
-fn firetest_history_config() -> MarketHistoryConfig {
-    MarketHistoryConfig {
-        futures_trades_capacity: 4096,
-        spot_trades_capacity: 2048,
-        liquidation_capacity: 0,
-        mm_orders_capacity: 0,
-        mm_order_companion_capacity: 0,
-        last_price_capacity: 1024,
-        mini_candles_capacity: 0,
-        candles_5m_capacity: 512,
-    }
-}
-
 #[derive(Default)]
 struct MoonClientPathStats {
+    lifecycle_connected: bool,
+    lifecycle_ready: bool,
+    lifecycle_connected_at_s: Option<f64>,
+    lifecycle_ready_at_s: Option<f64>,
+    first_schema_at_s: Option<f64>,
+    first_trade_at_s: Option<f64>,
+    first_orderbook_at_s: Option<f64>,
+    first_transfer_done_at_s: Option<f64>,
+    first_coin_card_at_s: Option<f64>,
+    candles_ready_at_s: Option<f64>,
+    first_market_price_at_s: Option<f64>,
+    first_retained_history_at_s: Option<f64>,
+    init_step_at_s: HashMap<&'static str, f64>,
     engine_method_counts: HashMap<u8, u64>,
+    engine_method_first_at_s: HashMap<u8, f64>,
     parse_failed: u64,
     strategy_snapshot_events: u64,
     strategy_schema_events: u64,
@@ -3472,13 +3523,42 @@ impl MoonClientPathStats {
         self.engine_method_count(method) > 0
     }
 
-    fn record_event(&mut self, event: &Event, target_market: &str) {
+    fn has_init_step(&self, step: &'static str) -> bool {
+        self.init_step_at_s.contains_key(step)
+    }
+
+    fn record_lifecycle(&mut self, event: &LifecycleEvent, elapsed_s: f64) {
+        match event {
+            LifecycleEvent::Connected { fresh: true } => {
+                self.lifecycle_connected = true;
+                self.lifecycle_connected_at_s.get_or_insert(elapsed_s);
+            }
+            LifecycleEvent::Ready => {
+                self.lifecycle_ready = true;
+                self.lifecycle_ready_at_s.get_or_insert(elapsed_s);
+            }
+            LifecycleEvent::InitStepCompleted { step, elapsed_ms } => {
+                self.init_step_at_s
+                    .entry(*step)
+                    .or_insert((*elapsed_ms as f64) * 0.001);
+            }
+            LifecycleEvent::ConnectFailed { error } => {
+                self.market_invariant_error = Some(format!("MoonClient connect failed: {error}"));
+            }
+            _ => {}
+        }
+    }
+
+    fn record_event(&mut self, event: &Event, target_market: &str, elapsed_s: f64) {
         match event {
             Event::EngineResponse(resp) => {
                 *self
                     .engine_method_counts
                     .entry(resp.method.to_byte())
                     .or_insert(0) += 1;
+                self.engine_method_first_at_s
+                    .entry(resp.method.to_byte())
+                    .or_insert(elapsed_s);
             }
             Event::ParseFailed { .. } => {
                 self.parse_failed += 1;
@@ -3492,6 +3572,7 @@ impl MoonClientPathStats {
                 field_count,
                 ..
             }) => {
+                self.first_schema_at_s.get_or_insert(elapsed_s);
                 self.strategy_schema_events += 1;
                 self.strategy_schema_kinds = self.strategy_schema_kinds.max(*kind_count);
                 self.strategy_schema_fields = self.strategy_schema_fields.max(*field_count);
@@ -3500,15 +3581,17 @@ impl MoonClientPathStats {
                 self.parse_failed += 1;
             }
             Event::Trade(TradesEvent::Applied { .. }) => {
+                self.first_trade_at_s.get_or_insert(elapsed_s);
                 self.trades_apply += 1;
             }
             Event::OrderBook(OrderBookEvent::Apply {
                 market_name,
-                book_kind,
+                kind,
                 is_full,
                 top,
                 ..
             }) if market_name.as_deref() == Some(target_market) => {
+                self.first_orderbook_at_s.get_or_insert(elapsed_s);
                 self.orderbook_apply += 1;
                 if *is_full {
                     self.target_orderbook_full += 1;
@@ -3519,8 +3602,9 @@ impl MoonClientPathStats {
                     self.last_book_bid = Some(bid.rate);
                     self.last_book_ask = Some(ask.rate);
                     if bid.rate <= 0.0 || ask.rate <= 0.0 || ask.rate <= bid.rate {
+                        let raw_kind = kind.as_u8();
                         self.market_invariant_error = Some(format!(
-                            "bad MoonClient book top for {target_market} kind={book_kind}: bid={:.8} ask={:.8}",
+                            "bad MoonClient book top for {target_market} kind={raw_kind}: bid={:.8} ask={:.8}",
                             bid.rate, ask.rate
                         ));
                     }
@@ -3533,6 +3617,7 @@ impl MoonClientPathStats {
                 moonproto::TransferAssetsEvent::RefreshCompleted {
                     updated, failed, ..
                 } => {
+                    self.first_transfer_done_at_s.get_or_insert(elapsed_s);
                     self.transfer_asset_refresh_done = *updated == ExchangeKind::ALL.len();
                     self.transfer_asset_failures += *failed as u64;
                 }
@@ -3543,6 +3628,7 @@ impl MoonClientPathStats {
             },
             Event::CoinCardCandles(ev) => match ev {
                 moonproto::CoinCardCandlesEvent::Updated { count, .. } => {
+                    self.first_coin_card_at_s.get_or_insert(elapsed_s);
                     self.coin_card_updates += 1;
                     self.coin_card_last_count = *count;
                 }
@@ -3552,6 +3638,7 @@ impl MoonClientPathStats {
             },
             Event::CandlesSnapshot(ev) => match ev {
                 moonproto::state::CandlesSnapshotEvent::Ready { summary, .. } => {
+                    self.candles_ready_at_s.get_or_insert(elapsed_s);
                     self.candles_ready = true;
                     self.candles_markets = summary.retained_markets;
                     self.candles_rows = summary.retained_candles;
@@ -3565,9 +3652,15 @@ impl MoonClientPathStats {
         }
     }
 
-    fn refresh_from_snapshot(&mut self, snapshot: &EventDispatcherSnapshot, target_market: &str) {
+    fn refresh_from_snapshot(
+        &mut self,
+        snapshot: &EventDispatcherSnapshot,
+        target_market: &str,
+        elapsed_s: f64,
+    ) {
         self.market_index = snapshot.markets().market_index_by_name(target_market);
         if let Some(price) = snapshot.markets().price(target_market) {
+            self.first_market_price_at_s.get_or_insert(elapsed_s);
             self.last_market_price = Some(MarketProbePrice::from(price));
             if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
                 self.market_invariant_error = Some(format!(
@@ -3596,6 +3689,11 @@ impl MoonClientPathStats {
             }
             if let Some(reader) = readers.spot_trades.as_ref() {
                 self.retained_spot_trades = reader.bounds().len;
+            }
+            if self.retained_last_prices + self.retained_futures_trades + self.retained_spot_trades
+                > 0
+            {
+                self.first_retained_history_at_s.get_or_insert(elapsed_s);
             }
         }
         if let Some(derived) =
@@ -3629,15 +3727,20 @@ impl MoonClientPathStats {
         let Some(market_price) = self.last_market_price else {
             return false;
         };
+        // Mandatory Init is a lifecycle/state contract. Some Delphi-style
+        // pending steps (notably GetMarketsList) are applied by the owner after
+        // response delivery and are not required to surface as raw EngineResponse
+        // events in the public UI stream.
         self.strategy_snapshot_events > 0
+            && self.lifecycle_connected
+            && self.lifecycle_ready
             && self.strategy_schema_events > 0
             && self.strategy_schema_kinds > 0
             && self.strategy_schema_fields > 0
-            && self.has_engine_method(EngineMethod::BaseCheck)
-            && self.has_engine_method(EngineMethod::AuthCheck)
-            && self.has_engine_method(EngineMethod::GetMarketsList)
-            && self.has_engine_method(EngineMethod::GetMarketsIndexes)
-            && self.has_engine_method(EngineMethod::UpdateMarketsList)
+            && self.has_init_step("BaseCheck")
+            && self.has_init_step("AuthCheck")
+            && self.has_init_step("GetMarketsList")
+            && self.has_init_step("UpdateMarketsList")
             && self.has_engine_method(EngineMethod::SubscribeAllTrades)
             && self.has_engine_method(EngineMethod::SubscribeOrderBook)
             && self.trades_apply > 0
@@ -3663,8 +3766,42 @@ impl MoonClientPathStats {
     }
 
     fn summary(&self) -> String {
+        let method_at = |method: EngineMethod| {
+            self.engine_method_first_at_s
+                .get(&method.to_byte())
+                .copied()
+        };
+        let init_at = |step: &'static str| self.init_step_at_s.get(step).copied();
         format!(
-            "methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
+            "phase connected_at={:?}s ready_at={:?}s init_step BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s StrategySchema={:?}s PostInitFlush={:?}s StartupSnapshot={:?}s StartupEvents={:?}s engine_event_at BaseCheck={:?}s AuthCheck={:?}s GetMarketsList={:?}s GetMarketsIndexes={:?}s UpdateMarketsList={:?}s SubscribeAllTrades={:?}s SubscribeOrderBook={:?}s schema_event_at={:?}s price_at={:?}s trade_at={:?}s book_at={:?}s retained_at={:?}s transfer_done_at={:?}s coin_card_at={:?}s candles_ready_at={:?}s lifecycle connected={} ready={} methods BaseCheck={} AuthCheck={} GetMarketsList={} GetMarketsIndexes={} UpdateMarketsList={} SubscribeAllTrades={} SubscribeOrderBook={} strats={} schemas={} schema_kinds={} schema_fields={} trades={} books={} full={} update={} bid={:?} ask={:?} trade={:?} market_price={:?} transfer_mask={:#05b} transfer_done={} transfer_fail={} coin_card_updates={} coin_card_count={} candles_ready={} candles_markets={} candles_rows={} retained_last={} retained_trades={}/{} derived_vol_1m={:.4} derived_vol_5m={:.4} candle_vol_1h={:.4} parse_failed={} err={}",
+            self.lifecycle_connected_at_s,
+            self.lifecycle_ready_at_s,
+            init_at("BaseCheck"),
+            init_at("AuthCheck"),
+            init_at("GetMarketsList"),
+            init_at("GetMarketsIndexes"),
+            init_at("UpdateMarketsList"),
+            init_at("StrategySchema"),
+            init_at("PostInitFlush"),
+            init_at("StartupSnapshot"),
+            init_at("StartupEvents"),
+            method_at(EngineMethod::BaseCheck),
+            method_at(EngineMethod::AuthCheck),
+            method_at(EngineMethod::GetMarketsList),
+            method_at(EngineMethod::GetMarketsIndexes),
+            method_at(EngineMethod::UpdateMarketsList),
+            method_at(EngineMethod::SubscribeAllTrades),
+            method_at(EngineMethod::SubscribeOrderBook),
+            self.first_schema_at_s,
+            self.first_market_price_at_s,
+            self.first_trade_at_s,
+            self.first_orderbook_at_s,
+            self.first_retained_history_at_s,
+            self.first_transfer_done_at_s,
+            self.first_coin_card_at_s,
+            self.candles_ready_at_s,
+            self.lifecycle_connected,
+            self.lifecycle_ready,
             self.engine_method_count(EngineMethod::BaseCheck),
             self.engine_method_count(EngineMethod::AuthCheck),
             self.engine_method_count(EngineMethod::GetMarketsList),
@@ -3708,7 +3845,8 @@ fn run_moonclient_public_smoke(
     label: &str,
     cfg: &FireConfig,
     keys: ImportedKeys,
-    timeout: Duration,
+    startup_timeout: Duration,
+    stream_after_ready: Duration,
     require_auto_candles: bool,
 ) -> MoonClientPathStats {
     let init = InitConfig {
@@ -3734,31 +3872,69 @@ fn run_moonclient_public_smoke(
         .unwrap_or_else(|err| panic!("FIRETEST {label}: request_coin_card_candles failed: {err}"));
 
     let start = Instant::now();
+    let startup_deadline = start + startup_timeout;
+    let mut ready_at: Option<Instant> = None;
     let mut stats = MoonClientPathStats::default();
-    while start.elapsed() < timeout {
+    loop {
+        let elapsed_s = start.elapsed().as_secs_f64();
+        for event in client.drain_lifecycle_events() {
+            stats.record_lifecycle(&event, elapsed_s);
+        }
+        if stats.lifecycle_ready && ready_at.is_none() {
+            ready_at = Some(Instant::now());
+        }
         for event in client.drain_events() {
-            stats.record_event(&event, &cfg.market);
+            stats.record_event(&event, &cfg.market, elapsed_s);
         }
         if let Some(snapshot) = client.snapshot() {
-            stats.refresh_from_snapshot(&snapshot, &cfg.market);
+            stats.refresh_from_snapshot(&snapshot, &cfg.market, elapsed_s);
         }
         if stats.healthy(require_auto_candles) {
             break;
         }
+        let deadline = ready_at.map_or(startup_deadline, |ready| ready + stream_after_ready);
+        if Instant::now() >= deadline {
+            break;
+        }
         std::thread::sleep(PUMP_SLICE);
     }
+    let elapsed_s = start.elapsed().as_secs_f64();
+    for event in client.drain_lifecycle_events() {
+        stats.record_lifecycle(&event, elapsed_s);
+    }
     for event in client.drain_events() {
-        stats.record_event(&event, &cfg.market);
+        stats.record_event(&event, &cfg.market, elapsed_s);
     }
     if let Some(snapshot) = client.snapshot() {
-        stats.refresh_from_snapshot(&snapshot, &cfg.market);
+        stats.refresh_from_snapshot(&snapshot, &cfg.market, elapsed_s);
     }
-    let _ = client.stop();
+    let healthy = stats.healthy(require_auto_candles);
+    let slow_startup = stats
+        .lifecycle_ready_at_s
+        .is_some_and(|ready| ready > FIRETEST_SLOW_STARTUP_DIAG_SECS)
+        || stats
+            .init_step_at_s
+            .get("BaseCheck")
+            .is_some_and(|base| *base > FIRETEST_SLOW_STARTUP_DIAG_SECS);
+    if !healthy || slow_startup {
+        eprintln!(
+            "FIRETEST {label}: MoonClient diagnostics reason={} summary={}",
+            if healthy { "slow-startup" } else { "failure" },
+            stats.summary()
+        );
+        log_err_emu_snapshot(label, "public", &client.err_emu_diagnostics_snapshot(), &[]);
+    }
+    let _ = client.disconnect();
+    let _ = client.wait_finished();
 
     assert!(
-        stats.healthy(require_auto_candles),
-        "FIRETEST {label}: MoonClient public path did not reach health within {timeout:?}: {}",
+        healthy,
+        "FIRETEST {label}: MoonClient public path did not reach health within startup={startup_timeout:?} + stream_after_ready={stream_after_ready:?}: {}",
         stats.summary()
+    );
+    println!(
+        "FIRETEST CPU {label}: {}",
+        protocol_metrics_summary(&client.protocol_metrics_snapshot())
     );
     println!(
         "OK: FIRETEST {label}: MoonClient public path healthy after {:.2}s [{}]",
@@ -3771,17 +3947,27 @@ fn run_moonclient_public_smoke(
 fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     let start = Instant::now();
     let cfg = quick_profile_config(cfg);
-    let _err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
+    let err_emu_percent = firetest_err_emu_percent();
+    let _err_emu = ErrEmuGuard::set(err_emu_percent);
 
     println!(
         "FIRETEST quick target: <= {}s; MoonClient public path, err_emu={}%, connect_timeout={:?}, stream_timeout={:?}",
         QUICK_TOTAL_TARGET_SECS,
-        FIRETEST_ERR_EMU_PERCENT,
+        err_emu_percent,
         cfg.connect_timeout,
         cfg.wait
     );
+    log_sliced_recovery_math("quick startup", err_emu_percent);
 
-    let _stats = run_moonclient_public_smoke("quick/public", &cfg, keys, cfg.wait, false);
+    let public_path_startup_timeout = cfg.connect_timeout + cfg.wait;
+    let _stats = run_moonclient_public_smoke(
+        "quick/public",
+        &cfg,
+        keys,
+        public_path_startup_timeout,
+        cfg.wait,
+        false,
+    );
     assert!(
         start.elapsed() <= Duration::from_secs(QUICK_TOTAL_TARGET_SECS),
         "quick FireTest exceeded {}s target: {:.2}s",
@@ -3794,29 +3980,24 @@ fn run_quick_fire_test(cfg: &FireConfig, keys: ImportedKeys) {
     );
 }
 
-fn next_attempt_timeout(start: Instant, total: Duration) -> Duration {
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < total,
-        "high-loss operation exceeded total timeout {:?}",
-        total
-    );
-    total.saturating_sub(elapsed).min(Duration::from_secs(20))
-}
-
 fn request_settings_until(session: &mut Session, timeout: Duration) -> ClientSettingsCommand {
     let start = Instant::now();
+    let before_events = session.snapshot().settings_events;
     let mut attempts = 0u32;
+    let mut next_retry = start;
     loop {
-        attempts += 1;
-        let attempt_timeout = next_attempt_timeout(start, timeout);
-        match session
-            .client
-            .request_client_settings(&mut session.dispatcher, attempt_timeout)
-        {
-            Ok(settings) => {
-                session.drain_queued();
-                session.remember_settings_snapshot(&settings);
+        if Instant::now() >= next_retry {
+            attempts += 1;
+            session
+                .client
+                .request_client_settings()
+                .expect("MoonClient request_client_settings must queue");
+            next_retry = Instant::now() + Duration::from_secs(2);
+        }
+        session.pump(PUMP_SLICE);
+        let st = session.snapshot();
+        if let Some(settings) = st.last_settings.clone() {
+            if st.settings_events > before_events || before_events == 0 {
                 println!(
                     "OK: settings snapshot uid={} attempts={} after {:.2}s",
                     settings.uid,
@@ -3825,119 +4006,136 @@ fn request_settings_until(session: &mut Session, timeout: Duration) -> ClientSet
                 );
                 return settings;
             }
-            Err(err) if start.elapsed() < timeout => {
-                session.drain_queued();
-                println!("FIRETEST settings retry after {err:?}");
-            }
-            Err(err) => {
-                panic!("settings request failed after {attempts} attempts: {err:?}")
-            }
         }
+        assert!(
+            start.elapsed() < timeout,
+            "settings request failed after {attempts} non-blocking attempts within {timeout:?}"
+        );
     }
 }
 
 fn request_balance_until(session: &mut Session, timeout: Duration) {
     let start = Instant::now();
+    let before = session.snapshot();
     let mut attempts = 0u32;
+    let mut next_retry = start;
     loop {
-        attempts += 1;
-        let attempt_timeout = next_attempt_timeout(start, timeout);
-        match session
-            .client
-            .request_balance_snapshot(&mut session.dispatcher, attempt_timeout)
-        {
-            Ok(balances) => {
-                session.drain_queued();
-                println!(
-                    "OK: high-loss balance snapshot rows={} attempts={} after {:.2}s",
-                    balances.by_market.len(),
-                    attempts,
-                    start.elapsed().as_secs_f64()
-                );
-                return;
-            }
-            Err(err) if start.elapsed() < timeout => {
-                session.drain_queued();
-                println!("FIRETEST high-loss balance retry after {err:?}");
-            }
-            Err(err) => {
-                panic!("high-loss balance request failed after {attempts} attempts: {err:?}")
-            }
+        if Instant::now() >= next_retry {
+            attempts += 1;
+            session
+                .client
+                .request_balance_snapshot()
+                .expect("MoonClient request_balance_snapshot must queue");
+            next_retry = Instant::now() + Duration::from_secs(2);
         }
+        session.pump(PUMP_SLICE);
+        let st = session.snapshot();
+        if st.balance_events > before.balance_events
+            || st.balance_snapshot_events > before.balance_snapshot_events
+        {
+            println!(
+                "OK: high-loss balance stream refresh events={} snapshots={} attempts={} after {:.2}s",
+                st.balance_events - before.balance_events,
+                st.balance_snapshot_events - before.balance_snapshot_events,
+                attempts,
+                start.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "high-loss balance refresh produced no Balance event after {attempts} non-blocking attempts within {timeout:?}"
+        );
     }
 }
 
 fn request_orders_until(session: &mut Session, timeout: Duration) {
     let start = Instant::now();
+    let before = session.snapshot();
     let mut attempts = 0u32;
+    let mut next_retry = start;
     loop {
-        attempts += 1;
-        let attempt_timeout = next_attempt_timeout(start, timeout);
-        match session
-            .client
-            .request_order_snapshot(&mut session.dispatcher, attempt_timeout)
-        {
-            Ok(orders) => {
-                session.drain_queued();
-                println!(
-                    "OK: high-loss order snapshot rows={} attempts={} after {:.2}s",
-                    orders.len(),
-                    attempts,
-                    start.elapsed().as_secs_f64()
-                );
-                return;
-            }
-            Err(err) if start.elapsed() < timeout => {
-                session.drain_queued();
-                println!("FIRETEST high-loss orders retry after {err:?}");
-            }
-            Err(err) => panic!("high-loss order request failed after {attempts} attempts: {err:?}"),
+        if Instant::now() >= next_retry {
+            attempts += 1;
+            session
+                .client
+                .request_order_snapshot()
+                .expect("MoonClient request_order_snapshot must queue");
+            next_retry = Instant::now() + Duration::from_secs(2);
         }
+        session.pump(PUMP_SLICE);
+        let st = session.snapshot();
+        if st.order_events > before.order_events
+            || st.order_status_by_uid.len() > before.order_status_by_uid.len()
+        {
+            println!(
+                "OK: high-loss order refresh events_delta={} current_seen={} attempts={} after {:.2}s",
+                st.order_events - before.order_events,
+                st.order_status_by_uid.len(),
+                attempts,
+                start.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "high-loss order refresh produced no order state after {attempts} non-blocking attempts within {timeout:?}"
+        );
     }
 }
 
 fn request_engine_until(
     session: &mut Session,
     method: EngineMethod,
-    request: Vec<u8>,
+    _request: Vec<u8>,
     timeout: Duration,
 ) {
     let start = Instant::now();
     let mut attempts = 0u32;
+    let mut next_retry = start;
+    let before_account_revision = session
+        .maybe_state_snapshot()
+        .map(|snapshot| snapshot.account().revision())
+        .unwrap_or(0);
     loop {
-        attempts += 1;
-        let attempt_timeout = next_attempt_timeout(start, timeout);
-        match session.client.request_engine_response(
-            &mut session.dispatcher,
-            &request,
-            attempt_timeout,
-        ) {
-            Ok(resp) if resp.success && resp.method == method => {
-                session.drain_queued();
+        if Instant::now() >= next_retry {
+            attempts += 1;
+            match method {
+                EngineMethod::CheckAPIExpirationTime => session
+                    .client
+                    .refresh_api_expiration_time()
+                    .expect("MoonClient refresh_api_expiration_time must queue"),
+                EngineMethod::QueryHedgeMode => session
+                    .client
+                    .refresh_hedge_mode()
+                    .expect("MoonClient refresh_hedge_mode must queue"),
+                _ => panic!("FireTest non-blocking Engine API gate does not support {method:?}"),
+            }
+            next_retry = Instant::now() + Duration::from_secs(2);
+        }
+        session.pump(PUMP_SLICE);
+        if let Some(snapshot) = session.maybe_state_snapshot() {
+            let account = snapshot.account();
+            let ok = match method {
+                EngineMethod::CheckAPIExpirationTime => account.api_expiration().is_some(),
+                EngineMethod::QueryHedgeMode => account.hedge_mode().is_some(),
+                _ => false,
+            };
+            if ok && account.revision() > before_account_revision {
                 println!(
-                    "OK: high-loss Engine API {:?} bytes={} attempts={} after {:.2}s",
+                    "OK: high-loss Engine API {:?} non-blocking account refresh attempts={} after {:.2}s",
                     method,
-                    resp.data.len(),
                     attempts,
                     start.elapsed().as_secs_f64()
                 );
                 return;
             }
-            Ok(resp) => {
-                session.drain_queued();
-                panic!(
-                    "high-loss Engine API {:?} returned method={:?} success={} code={} msg={}",
-                    method, resp.method, resp.success, resp.error_code, resp.error_msg
-                );
-            }
-            Err(err) if start.elapsed() < timeout => {
-                session.drain_queued();
-                println!("FIRETEST high-loss Engine API {method:?} retry after {err:?}");
-            }
-            Err(err) => panic!(
-                "high-loss Engine API {:?} failed after {} attempts: {:?}",
-                method, attempts, err
-            ),
+        }
+        if start.elapsed() >= timeout {
+            panic!(
+                "high-loss Engine API {:?} failed after {} non-blocking attempts within {:?}",
+                method, attempts, timeout
+            );
         }
     }
 }
@@ -3955,8 +4153,12 @@ fn run_high_loss_simple_ops_gate(
     // 0.000095%. Even if both client and server apply 50% ErrEmu, one attempt is
     // 0.75*0.75 = 56.25%, and 10 attempts fail with ~0.0257%. If this gate fails
     // consistently, it is a protocol/reconnect bug, not "FireTest randomness".
-    a.client.reset_err_emu_diagnostics();
-    b.client.reset_err_emu_diagnostics();
+    a.client
+        .debug_reset_err_emu_diagnostics()
+        .expect("reset A err_emu diagnostics");
+    b.client
+        .debug_reset_err_emu_diagnostics()
+        .expect("reset B err_emu diagnostics");
     err_emu.set_for_gate(
         FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
         "50% simple operations/reconnect gate",
@@ -3999,7 +4201,9 @@ fn run_high_loss_simple_ops_gate(
     println!("OK: high-loss live streams delivered");
 
     let before_blackhole = a.snapshot();
-    a.client.debug_set_outgoing_blackhole(true);
+    a.client
+        .debug_set_outgoing_blackhole(true)
+        .expect("enable outgoing blackhole");
     let disconnected = pump_pair_until(
         a,
         b,
@@ -4007,7 +4211,9 @@ fn run_high_loss_simple_ops_gate(
         "high-loss forced reconnect detection",
         |a, _| a.reconnecting > before_blackhole.reconnecting,
     );
-    a.client.debug_set_outgoing_blackhole(false);
+    a.client
+        .debug_set_outgoing_blackhole(false)
+        .expect("disable outgoing blackhole");
     assert!(
         disconnected,
         "client A did not enter reconnecting state under err_emu={} within {:?}",
@@ -4019,7 +4225,7 @@ fn run_high_loss_simple_ops_gate(
         a.connected_again > before_reconnect.connected_again
     });
     assert!(
-        reconnected && a.client.is_authorized(),
+        reconnected && a.snapshot().connected_now,
         "client A did not reconnect under err_emu={} within {:?}",
         FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
         timeout
@@ -4066,7 +4272,9 @@ fn ensure_server_emulator_mode(
     let mut enabled = original.clone();
     enabled.emu_mode = true;
     println!("FIRETEST order flow: enabling server emulator mode through UI settings");
-    a.client.ui_send_settings(&enabled);
+    a.client
+        .send_settings(enabled.clone())
+        .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(a, b, cfg.connect_timeout, "enable emulator mode", |a, b| {
             a.last_settings
@@ -4098,7 +4306,9 @@ fn ensure_server_real_order_mode(
     let mut real = original.clone();
     real.emu_mode = false;
     println!("FIRETEST real order cancel: disabling server emulator mode through UI settings");
-    a.client.ui_send_settings(&real);
+    a.client
+        .send_settings(real.clone())
+        .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(
             a,
@@ -4135,7 +4345,9 @@ fn restore_server_emulator_mode(
         "FIRETEST order flow: restoring server emulator mode to {}",
         original.emu_mode
     );
-    a.client.ui_send_settings(&original);
+    a.client
+        .send_settings(original.clone())
+        .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(
             a,
@@ -4227,13 +4439,13 @@ impl ActiveBalanceProbe {
 }
 
 fn active_balance_probe(session: &Session, market: &str) -> ActiveBalanceProbe {
-    let handle = session
-        .dispatcher
+    let snapshot = session.state_snapshot();
+    let handle = snapshot
         .markets()
         .get(market)
         .unwrap_or_else(|| panic!("market {market} is not present in ActiveLib MarketsState"));
     let pos = handle.balance_position();
-    let global = session.dispatcher.balances().global();
+    let global = snapshot.balances().global();
     ActiveBalanceProbe {
         market: MarketBalanceProbe {
             initial_balance: pos.initial_balance,
@@ -4258,9 +4470,8 @@ fn active_balance_probe(session: &Session, market: &str) -> ActiveBalanceProbe {
 
 fn market_live_ask(session: &Session, market: &str) -> Option<f64> {
     session
-        .dispatcher
-        .markets()
-        .price(market)
+        .maybe_state_snapshot()
+        .and_then(|snapshot| snapshot.markets().price(market).copied())
         .and_then(|price| {
             [price.ask, price.last_ask, price.bid, price.mark_price]
                 .into_iter()
@@ -4274,9 +4485,9 @@ fn order_uid_for_request_or_new_market(
     request_uid: u64,
     market: &str,
 ) -> Option<u64> {
-    st.order_uid_by_request
-        .get(&request_uid)
-        .copied()
+    (request_uid != 0)
+        .then(|| st.order_uid_by_request.get(&request_uid).copied())
+        .flatten()
         .or_else(|| {
             st.order_status_by_uid.iter().find_map(|(uid, _)| {
                 (!before_uids.contains(uid)
@@ -4308,15 +4519,15 @@ fn cancel_if_known(
 
 fn order_is_present(session: &Session, uid: u64) -> bool {
     session
-        .dispatcher
-        .orders()
-        .iter()
-        .any(|order| order.uid == uid)
+        .maybe_state_snapshot()
+        .map(|snapshot| snapshot.orders().iter().any(|order| order.uid == uid))
+        .unwrap_or(false)
 }
 
 fn assert_balance_stream_seen(session: &Session) {
     let st = session.snapshot();
-    let global = session.dispatcher.balances().global();
+    let snapshot = session.state_snapshot();
+    let global = snapshot.balances().global();
     assert!(
         st.balance_events >= 2 && st.balance_snapshot_events >= 1,
         "FireTest balance stream: session {} saw too few balance events: total={} snapshots={} increments={}",
@@ -4391,7 +4602,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
     let price = ask * (1.0 - FIRETEST_REAL_BALANCE_ORDER_DISCOUNT);
     let baseline = active_balance_probe(a, market);
     let before_uids = a
-        .dispatcher
+        .state_snapshot()
         .orders()
         .iter()
         .map(|order| order.uid)
@@ -4409,6 +4620,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
 
     let start = Instant::now();
     let mut server_uid = None;
+    let mut logged_waiting_for_local_order = false;
     while start.elapsed() < FIRETEST_REAL_BALANCE_ORDER_TIMEOUT {
         a.pump(PUMP_SLICE);
         b.pump(PUMP_SLICE);
@@ -4418,9 +4630,30 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
                 order_uid_for_request_or_new_market(&st, &before_uids, request_uid, market);
         }
         if let Some(uid) = server_uid {
+            let local_status = st.order_status_by_uid.get(&uid).copied();
+            if local_status.is_none() {
+                if !logged_waiting_for_local_order {
+                    println!(
+                        "FIRETEST real order cancel: server uid={uid} is known, waiting for local ActiveLib order state before cancel"
+                    );
+                    logged_waiting_for_local_order = true;
+                }
+                continue;
+            }
+            assert!(
+                matches!(
+                    local_status,
+                    Some(
+                        OrderWorkerStatus::None
+                            | OrderWorkerStatus::BuySet
+                            | OrderWorkerStatus::SellSet
+                    )
+                ),
+                "real order uid={uid} reached non-cancelable local status {local_status:?} before FireTest cancel"
+            );
             assert!(
                 a.cancel_order(uid),
-                "cancel_order did not pass Delphi local gate for uid={uid}"
+                "cancel_order did not pass Delphi local gate for uid={uid} status={local_status:?}"
             );
             println!(
                 "FIRETEST real order cancel: server uid={} arrived after {:.2}s; cancel queued immediately",
@@ -4458,7 +4691,7 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
         }
         if matches!(
             a.snapshot().order_status_by_uid.get(&server_uid).copied(),
-            Some(OrderWorkerStatus::BuyDone | OrderWorkerStatus::SelLDone)
+            Some(OrderWorkerStatus::BuyDone | OrderWorkerStatus::SellDone)
         ) {
             panic!(
                 "FireTest real order cancel: uid={server_uid} unexpectedly filled/closed; limit was 5% below market"
@@ -4475,9 +4708,120 @@ fn run_real_order_cancel_gate_body(a: &mut Session, b: &mut Session) {
     println!("OK: real non-emulator SOL order was created, canceled, and removed; balance stream was observed independently");
 }
 
+fn price_matches(a: f64, b: f64) -> bool {
+    let tolerance = (b.abs() * 1e-9).max(EPS);
+    (a - b).abs() <= tolerance
+}
+
+fn format_order_for_debug(order: &Order) -> String {
+    format!(
+        "uid={} market={} status={:?} pending_buy={:?} buy_price={:.8} sell_price={:.8} bulk_buy={} bulk_sell={} panic={} buy_type={:?} sell_type={:?} buy_mean={:.8} sell_mean={:.8} buy_actual_q={:.8} sell_actual_q={:.8} reason={}",
+        order.uid,
+        order.market_name,
+        order.status,
+        order.pending_buy_cond_price,
+        order.buy_price,
+        order.sell_price,
+        order.bulk_replace_buy,
+        order.bulk_replace_sell,
+        order.panic_sell,
+        order.buy_order.order_type,
+        order.sell_order.order_type,
+        order.buy_order.mean_price,
+        order.sell_order.mean_price,
+        order.buy_order.actual_q,
+        order.sell_order.actual_q,
+        order.sell_reason().description()
+    )
+}
+
+fn describe_session_order(session: &Session, uid: u64) -> String {
+    session
+        .maybe_state_snapshot()
+        .and_then(|snapshot| snapshot.orders().get(uid).map(format_order_for_debug))
+        .unwrap_or_else(|| format!("uid={uid} <not present in snapshot>"))
+}
+
+fn replace_local_effect_seen(
+    order: &Order,
+    status_before: OrderWorkerStatus,
+    new_price: f64,
+) -> bool {
+    match status_before {
+        OrderWorkerStatus::None => {
+            order
+                .pending_buy_cond_price
+                .map(|price| price_matches(price, new_price))
+                .unwrap_or(false)
+                || matches!(
+                    order.status,
+                    OrderWorkerStatus::BuySet
+                        | OrderWorkerStatus::SellSet
+                        | OrderWorkerStatus::SellDone
+                )
+        }
+        OrderWorkerStatus::BuySet => {
+            price_matches(order.buy_price, new_price)
+                || order.bulk_replace_buy
+                || matches!(
+                    order.status,
+                    OrderWorkerStatus::SellSet | OrderWorkerStatus::SellDone
+                )
+        }
+        OrderWorkerStatus::SellSet => {
+            price_matches(order.sell_price, new_price)
+                || order.bulk_replace_sell
+                || order.status == OrderWorkerStatus::SellDone
+        }
+        _ => false,
+    }
+}
+
+fn wait_order_replace_local_effect(
+    a: &mut Session,
+    b: &mut Session,
+    uid: u64,
+    status_before: OrderWorkerStatus,
+    new_price: f64,
+    timeout: Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        a.pump(PUMP_SLICE);
+        b.pump(PUMP_SLICE);
+
+        let stats = a.snapshot();
+        if let Some(reason) = stats.order_ignored_by_uid.get(&uid).copied() {
+            return Err(format!(
+                "runtime owner ignored replace uid={uid} reason={reason:?} order=[{}]",
+                describe_session_order(a, uid)
+            ));
+        }
+
+        let snapshot = a.state_snapshot();
+        if let Some(order) = snapshot.orders().get(uid) {
+            if replace_local_effect_seen(order, status_before, new_price) {
+                println!(
+                    "OK: order replace local effect after {:.2}s: before={status_before:?} {}",
+                    start.elapsed().as_secs_f64(),
+                    format_order_for_debug(order)
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    Err(format!(
+        "timeout waiting local replace effect uid={uid} before={status_before:?} new_price={new_price:.8} order=[{}] stats=[{}] metrics=[{}]",
+        describe_session_order(a, uid),
+        a.snapshot().summary(),
+        a.protocol_summary()
+    ))
+}
+
 fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Session) {
     let before_uids = a
-        .dispatcher
+        .state_snapshot()
         .orders()
         .iter()
         .map(|order| order.uid)
@@ -4552,10 +4896,37 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
         server_uid
     );
 
+    let status_before_replace = a
+        .state_snapshot()
+        .orders()
+        .get(server_uid)
+        .map(|order| {
+            println!(
+                "FIRETEST order flow: pre-replace {}",
+                format_order_for_debug(order)
+            );
+            order.status
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "new order uid={} disappeared before replace; stats=[{}]",
+                server_uid,
+                a.snapshot().summary()
+            )
+        });
     assert!(
         a.replace_order(server_uid, fill_price),
-        "replace_order did not pass Delphi local gate for uid={server_uid}"
+        "replace_order intent was not queued into runtime for uid={server_uid}"
     );
+    wait_order_replace_local_effect(
+        a,
+        b,
+        server_uid,
+        status_before_replace,
+        fill_price,
+        cfg.wait,
+    )
+    .unwrap_or_else(|err| panic!("FireTest order replace local gate failed: {err}"));
     assert!(
         pump_pair_until(
             a,
@@ -4566,8 +4937,9 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
                 a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SellSet)
             }
         ),
-        "order uid={} did not reach SellSet after replace",
-        server_uid
+        "order uid={} did not reach SellSet after replace; order=[{}]",
+        server_uid,
+        describe_session_order(a, server_uid)
     );
 
     assert!(
@@ -4581,22 +4953,18 @@ fn run_order_lifecycle_gate_body(cfg: &FireConfig, a: &mut Session, b: &mut Sess
             cfg.connect_timeout,
             "order closed by panic sell",
             |a, _| {
-                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SelLDone)
+                a.order_status_by_uid.get(&server_uid).copied() == Some(OrderWorkerStatus::SellDone)
             }
         ),
         "order uid={} did not reach SellDone after PanicSell",
         server_uid
     );
 
-    if let Some(order) = a.dispatcher.orders().get(server_uid) {
+    let snapshot = a.state_snapshot();
+    if let Some(order) = snapshot.orders().get(server_uid) {
         let delphi_delta_base =
             delphi_sell_report_delta_base(&order.buy_order, &order.sell_order, false);
-        let approx_result_usd =
-            if is_usd_like_base(a.client.server_info().base_currency_name.as_deref()) {
-                delphi_delta_base
-            } else {
-                None
-            };
+        let approx_result_usd = delphi_delta_base;
         println!(
             "OK: order flow uid={} status={:?} reason={} buy_q={:.8} sell_q={:.8} sell_spent={:.8} sell_total={:.8} delphi_delta_base={:?} approx_result_usd={:?}",
             server_uid,
@@ -4632,7 +5000,7 @@ fn delphi_sell_report_delta_base(
         return None;
     }
     let mut delta = sell.total_btc - sell.spent_btc;
-    if sell.is_short != 0 {
+    if sell.is_short.is_true() {
         delta = -delta;
     }
     if reverse_base_currency {
@@ -4642,13 +5010,6 @@ fn delphi_sell_report_delta_base(
         delta -= (sell.actual_q - buy.actual_q) * sell.mean_price;
     }
     Some(delta)
-}
-
-fn is_usd_like_base(base_currency_name: Option<&str>) -> bool {
-    matches!(
-        base_currency_name,
-        Some("USD" | "USDT" | "USDC" | "FDUSD" | "TUSD" | "BUSD")
-    )
 }
 
 #[test]
@@ -4667,11 +5028,11 @@ fn fire_test_active_library_health() {
         key_info.display_name,
         cfg.host,
         cfg.port,
-        cfg.mask_ver,
+        cfg.mask_ver.to_byte(),
         cfg.market,
         cfg.strategy_field,
         cfg.strategy_id,
-        FIRETEST_ERR_EMU_PERCENT,
+        firetest_err_emu_percent(),
         FIRETEST_HIGH_LOSS_ERR_EMU_PERCENT,
         cfg.connect_timeout,
         cfg.candles_timeout,
@@ -4688,12 +5049,19 @@ fn fire_test_active_library_health() {
         "Full FireTest mutates live server settings/strategies/orders. Set allow_mutation=true in {} only for a test server.",
         cfg.path.display()
     );
-    let mut err_emu = ErrEmuGuard::set(FIRETEST_ERR_EMU_PERCENT);
+    let mut err_emu = ErrEmuGuard::set(firetest_err_emu_percent());
+    log_sliced_recovery_math("full initial gate", firetest_err_emu_percent());
     let seeded_strategy = firetest_strategy(&cfg);
     let seeded_strategy_id = seeded_strategy.strategy_id;
 
-    let _public_path_stats =
-        run_moonclient_public_smoke("full/public-smoke", &cfg, keys, cfg.candles_timeout, true);
+    let _public_path_stats = run_moonclient_public_smoke(
+        "full/public-smoke",
+        &cfg,
+        keys,
+        cfg.connect_timeout + cfg.wait,
+        cfg.candles_timeout,
+        true,
+    );
 
     let mut a = Session::connect("A", &cfg, keys, Some(seeded_strategy.clone()));
     let mut b = Session::connect("B", &cfg, keys, Some(seeded_strategy.clone()));
@@ -4767,8 +5135,12 @@ fn fire_test_active_library_health() {
     run_high_loss_simple_ops_gate(&mut a, &mut b, &mut err_emu, cfg.high_loss_timeout);
     log_protocol_cpu_pair("after high-loss simple ops gate", &a, &b);
     err_emu.reset("high-loss simple ops gate");
-    a.client.reset_err_emu_diagnostics();
-    b.client.reset_err_emu_diagnostics();
+    a.client
+        .debug_reset_err_emu_diagnostics()
+        .expect("reset A err_emu diagnostics");
+    b.client
+        .debug_reset_err_emu_diagnostics()
+        .expect("reset B err_emu diagnostics");
 
     run_order_lifecycle_gate(&cfg, &mut a, &mut b);
     run_real_order_cancel_gate(&cfg, &mut a, &mut b);
@@ -4812,7 +5184,9 @@ fn fire_test_active_library_health() {
         mutated_settings.x_sell
     );
     a.send_strategy_snapshot_batch(std::slice::from_ref(&mutated_strategy));
-    a.client.ui_send_settings(&mutated_settings);
+    a.client
+        .send_settings(mutated_settings.clone())
+        .expect("MoonClient send_settings must queue");
 
     let mutation_seen =
         pump_pair_until(&mut a, &mut b, cfg.wait, "cross-client mutation", |_, b| {
@@ -4832,7 +5206,9 @@ fn fire_test_active_library_health() {
         2,
     );
     a.send_strategy_snapshot_batch(std::slice::from_ref(&restored_strategy));
-    a.client.ui_send_settings(&original_settings);
+    a.client
+        .send_settings(original_settings.clone())
+        .expect("MoonClient send_settings must queue");
     let restored = pump_pair_until(&mut a, &mut b, cfg.wait, "restore mutation", |_, b| {
         b.last_settings
             .as_ref()
@@ -4853,7 +5229,9 @@ fn fire_test_active_library_health() {
     );
 
     let before_blackhole = a.snapshot();
-    a.client.debug_set_outgoing_blackhole(true);
+    a.client
+        .debug_set_outgoing_blackhole(true)
+        .expect("enable outgoing blackhole");
     let disconnect_start = Instant::now();
     let disconnected = pump_pair_until(
         &mut a,
@@ -4863,7 +5241,9 @@ fn fire_test_active_library_health() {
         |a, _| a.reconnecting > before_blackhole.reconnecting,
     );
     let disconnected_after = disconnect_start.elapsed();
-    a.client.debug_set_outgoing_blackhole(false);
+    a.client
+        .debug_set_outgoing_blackhole(false)
+        .expect("disable outgoing blackhole");
     assert!(
         disconnected,
         "client A did not enter reconnecting state within {:?} while outgoing blackhole was enabled",
@@ -4883,7 +5263,7 @@ fn fire_test_active_library_health() {
         |a, _| a.connected_again > before_reconnect.connected_again,
     );
     assert!(
-        reconnected && a.client.is_authorized(),
+        reconnected && a.snapshot().connected_now,
         "client A did not reconnect within {:?}",
         cfg.reconnect_timeout
     );

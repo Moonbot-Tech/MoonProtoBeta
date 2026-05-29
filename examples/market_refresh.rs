@@ -4,7 +4,6 @@
 //!   cargo run --example market_refresh --release -- "<key_base64>" [host:port] [market] [watch_seconds]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::MarketsEvent;
@@ -69,22 +68,23 @@ fn main() {
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Markets(MarketsEvent::PricesUpdated { count, .. })) => {
-                prices += 1;
-                println!("[event] prices updated: {count}");
-                print_market(&client, market);
+        for event in client.drain_events() {
+            match event {
+                Event::Markets(MarketsEvent::PricesUpdated { count, .. }) => {
+                    prices += 1;
+                    println!("[event] prices updated: {count}");
+                    print_market(&client, market);
+                }
+                Event::Markets(MarketsEvent::TokenTagsUpdated { count }) => {
+                    tags += 1;
+                    println!("[event] token tags updated: {count}");
+                    print_market(&client, market);
+                }
+                Event::Markets(other) => println!("[event] markets: {other:?}"),
+                _ => {}
             }
-            Ok(Event::Markets(MarketsEvent::TokenTagsUpdated { count })) => {
-                tags += 1;
-                println!("[event] token tags updated: {count}");
-                print_market(&client, market);
-            }
-            Ok(Event::Markets(other)) => println!("[event] markets: {other:?}"),
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     println!("[done] price updates={prices} tag updates={tags}");

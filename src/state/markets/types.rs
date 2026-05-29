@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::commands::market::{Market, MarketArbNowEntry, MarketArbSlot};
+use crate::commands::market::{
+    ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, PositionType,
+};
+use crate::commands::trade::OrderType;
 use crate::time::DelphiTime;
 
 /// Stable Delphi-like handle to one `TMarket` object.
@@ -15,12 +18,15 @@ use crate::time::DelphiTime;
 /// read the same live market object later.
 #[derive(Debug, Clone)]
 pub struct MarketHandle {
+    pub(super) name: Arc<str>,
     pub(super) inner: Arc<RwLock<Market>>,
 }
 
 impl MarketHandle {
     pub(super) fn new(market: Market) -> Self {
+        let name = Arc::<str>::from(market.bn_market_name.as_str());
         Self {
+            name,
             inner: Arc::new(RwLock::new(market)),
         }
     }
@@ -46,18 +52,26 @@ impl MarketHandle {
     }
 
     /// Copy one arbitrage slot by platform code.
-    pub fn arb_slot(&self, platform_code: u8) -> Option<MarketArbSlot> {
+    pub fn arb_slot(&self, platform_code: ArbPlatformCode) -> Option<MarketArbSlot> {
         self.with(|market| market.arb_slots.get(&platform_code).cloned())
     }
 
     /// Copy the latest arbitrage price entry by platform code.
-    pub fn arb_now(&self, platform_code: u8) -> Option<MarketArbNowEntry> {
+    pub fn arb_now(&self, platform_code: ArbPlatformCode) -> Option<MarketArbNowEntry> {
         self.with(|market| market.arb_slots.get(&platform_code).map(|slot| slot.now))
     }
 
     /// True when two handles point at the same live market object.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn name_arc(&self) -> Arc<str> {
+        Arc::clone(&self.name)
+    }
+
+    pub(super) fn name_str(&self) -> &str {
+        &self.name
     }
 
     pub(super) fn with_mut<R>(&self, f: impl FnOnce(&mut Market) -> R) -> R {
@@ -77,22 +91,23 @@ pub struct MarketBalancePosition {
     pub pos_size: f64,
     pub pos_price: f64,
     pub liq_price: f64,
-    pub pos_dir: u8,
+    pub pos_dir: OrderType,
     pub long_pos_size: f64,
     pub long_pos_price: f64,
     pub long_liq_price: f64,
-    pub long_position_type: u8,
+    pub long_position_type: PositionType,
     pub short_pos_size: f64,
     pub short_pos_price: f64,
     pub short_liq_price: f64,
-    pub short_position_type: u8,
+    pub short_position_type: PositionType,
     pub asset_balance: f64,
     pub asset_balance_full: f64,
     pub total_profit_b: f64,
     pub total_profit_l: f64,
     pub total_profit_s: f64,
+    pub max_value: f64,
     pub leverage_x: i32,
-    pub position_type: u8,
+    pub position_type: PositionType,
     pub balance_hash: u64,
     pub last_balance_epoch: u16,
 }
@@ -123,6 +138,7 @@ impl MarketBalancePosition {
             total_profit_b: market.total_profit_b,
             total_profit_l: market.total_profit_l,
             total_profit_s: market.total_profit_s,
+            max_value: market.max_value(),
             leverage_x: market.leverage_x,
             position_type: market.position_type,
             balance_hash: market.balance_hash,
@@ -186,7 +202,7 @@ impl MarketPrice {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MarketLastPriceHistoryInput {
-    pub market_name: String,
+    pub market_name: Arc<str>,
     pub current: f64,
     pub bid: f64,
     pub ask: f64,

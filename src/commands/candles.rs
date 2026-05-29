@@ -1,34 +1,13 @@
-//! Candles channel — TDeepPrice records (28-byte packed) for CoinCard and
-//! packed market candles stream for `RequestCandlesData`.
+//! Candle rows and low-level candle request helpers.
 //!
-//! Delphi sources: `MarketsU.pas:701-705 TDeepPrice`,
-//! `MoonProtoEngineServer.pas:382-395` (`emk_GetCoinCardCandles`), and
-//! `MoonProtoClient.pas:795-876` (chunked candles aggregation for
-//! `emk_RequestCandlesData`).
+//! Regular applications normally use `MoonClient`: retained 5m candles are
+//! loaded after trades storage is enabled and then read through market-history
+//! readers; demand-driven CoinCard candles are requested with
+//! `MoonClient::candles().request_coin_card(...)` and read from the snapshot.
 //!
-//! ## Wire format
-//!
-//! `TDeepPrice` (28 bytes packed):
-//! ```text
-//! OpenP:  f32 (4)
-//! CloseP: f32 (4)
-//! MaxP:   f32 (4)
-//! MinP:   f32 (4)
-//! Vol:    f32 (4)
-//! Time:   f64 (8)  // TDateTime
-//! ```
-//!
-//! ## Requests
-//!
-//! - **`emk_GetCoinCardCandles`** — simple response:
-//!   `count:i32 + N × TDeepPrice`.
-//! - **`emk_RequestCandlesData`** — chunked: each response starts with
-//!   `ChunkIndex:u16 + ChunkTotal:u16` + chunk_data. After all chunks are merged,
-//!   the resulting bytes are the zlib stream produced by Delphi
-//!   `TMarkets.StoreCandlesToZip`. Parsed `TDeepPricePack.Time` values are adjusted
-//!   with the same local-timezone correction as Delphi `TMarkets.ApplyRecvdStream`.
-//!
-//! Use [`CandlesAggregator`] to merge chunked responses in low-level tools.
+//! The raw packed Delphi records and chunked `RequestCandlesData` parser remain
+//! in this module for protocol tests and custom tools, but they are hidden from
+//! the normal rustdoc surface.
 
 use zerocopy::byteorder::little_endian::{F32 as LeF32, F64 as LeF64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -40,8 +19,10 @@ use crate::time::DelphiTime;
 mod aggregator;
 mod request_parser;
 
+#[doc(hidden)]
 pub use self::aggregator::CandlesAggregator;
 pub(crate) use self::aggregator::CandlesChunkResult;
+#[doc(hidden)]
 pub use self::request_parser::parse_request_candles_data_response;
 pub(crate) use self::request_parser::parse_request_candles_data_response_partial_like_delphi;
 #[cfg(test)]
@@ -51,19 +32,23 @@ pub(crate) use self::request_parser::{
     read_deep_price_pack_old,
 };
 
-/// Packed `TDeepPrice` (28 bytes), matching Delphi `MarketsU.pas:701-705`.
+/// Candle row used by CoinCard history and candle snapshots.
+///
+/// Use `open()`, `high()`, `low()`, `close()`, `volume()`, and time helpers in
+/// application code. The raw fields are hidden to keep callers on the stable
+/// helper API and away from Delphi `TDateTime` representation details.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeepPrice {
     #[doc(hidden)]
-    pub open_p: f32,
+    pub open: f32,
     #[doc(hidden)]
-    pub close_p: f32,
+    pub close: f32,
     #[doc(hidden)]
-    pub max_p: f32,
+    pub high: f32,
     #[doc(hidden)]
-    pub min_p: f32,
+    pub low: f32,
     #[doc(hidden)]
-    pub vol: f32,
+    pub volume: f32,
     /// `TDateTime` (Delphi double, days since 1899-12-30).
     #[doc(hidden)]
     pub time: f64,
@@ -72,14 +57,15 @@ pub struct DeepPrice {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireDeepPrice {
-    open_p: LeF32,
-    close_p: LeF32,
-    max_p: LeF32,
-    min_p: LeF32,
-    vol: LeF32,
+    open: LeF32,
+    close: LeF32,
+    high: LeF32,
+    low: LeF32,
+    volume: LeF32,
     time: LeF64,
 }
 
+#[doc(hidden)]
 pub const DEEP_PRICE_SIZE: usize = std::mem::size_of::<WireDeepPrice>();
 const _: [(); 28] = [(); DEEP_PRICE_SIZE];
 const MINS_IN_DAY: f64 = 1440.0;
@@ -87,27 +73,27 @@ const MINS_IN_DAY: f64 = 1440.0;
 impl DeepPrice {
     #[inline]
     pub fn open(self) -> f32 {
-        self.open_p
+        self.open
     }
 
     #[inline]
     pub fn close(self) -> f32 {
-        self.close_p
+        self.close
     }
 
     #[inline]
     pub fn high(self) -> f32 {
-        self.max_p
+        self.high
     }
 
     #[inline]
     pub fn low(self) -> f32 {
-        self.min_p
+        self.low
     }
 
     #[inline]
     pub fn volume(self) -> f32 {
-        self.vol
+        self.volume
     }
 
     #[inline]
@@ -122,27 +108,28 @@ impl DeepPrice {
 
     fn from_wire(wire: WireDeepPrice) -> Self {
         Self {
-            open_p: wire.open_p.get(),
-            close_p: wire.close_p.get(),
-            max_p: wire.max_p.get(),
-            min_p: wire.min_p.get(),
-            vol: wire.vol.get(),
+            open: wire.open.get(),
+            close: wire.close.get(),
+            high: wire.high.get(),
+            low: wire.low.get(),
+            volume: wire.volume.get(),
             time: wire.time.get(),
         }
     }
 
     fn to_wire(self) -> WireDeepPrice {
         WireDeepPrice {
-            open_p: LeF32::new(self.open_p),
-            close_p: LeF32::new(self.close_p),
-            max_p: LeF32::new(self.max_p),
-            min_p: LeF32::new(self.min_p),
-            vol: LeF32::new(self.vol),
+            open: LeF32::new(self.open),
+            close: LeF32::new(self.close),
+            high: LeF32::new(self.high),
+            low: LeF32::new(self.low),
+            volume: LeF32::new(self.volume),
             time: LeF64::new(self.time),
         }
     }
 
     /// Read one packed candle record from `data`.
+    #[doc(hidden)]
     pub fn read_from(data: &[u8], pos: &mut usize) -> Option<Self> {
         if *pos + DEEP_PRICE_SIZE > data.len() {
             return None;
@@ -163,6 +150,7 @@ impl DeepPrice {
         Some(Self::from_wire(wire))
     }
 
+    #[doc(hidden)]
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.to_wire().as_bytes());
     }
@@ -175,36 +163,40 @@ impl DeepPrice {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 struct WireDeepPricePack {
-    max_p: LeF32,
-    min_p: LeF32,
-    vol: LeF32,
+    high: LeF32,
+    low: LeF32,
+    volume: LeF32,
     time: LeF64,
 }
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 struct WireDeepPricePackOld {
-    max_p: LeF64,
-    min_p: LeF64,
-    vol: LeF64,
+    high: LeF64,
+    low: LeF64,
+    volume: LeF64,
     time: LeF64,
 }
 
+#[doc(hidden)]
 pub const DEEP_PRICE_PACK_SIZE: usize = std::mem::size_of::<WireDeepPricePack>();
 const _: [(); 20] = [(); DEEP_PRICE_PACK_SIZE];
+#[doc(hidden)]
 pub const DEEP_PRICE_PACK_OLD_SIZE: usize = std::mem::size_of::<WireDeepPricePackOld>();
 const _: [(); 32] = [(); DEEP_PRICE_PACK_OLD_SIZE];
 const WALL_ITEM_SIZE: usize = 8;
 const REQUEST_CANDLES_MARKET_MIN_SIZE: usize = 2 + 4 + WALL_ITEM_SIZE * 8;
 
-/// Delphi `TWallItem = record vol: Single; count: Integer end`.
+/// Delphi `TWallItem = record volume: Single; count: Integer end`.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WallItem {
-    pub vol: f32,
+    pub volume: f32,
     pub count: i32,
 }
 
 /// One market entry from Delphi `TMarkets.StoreCandlesToZip`.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestCandlesMarket {
     pub market_name: String,

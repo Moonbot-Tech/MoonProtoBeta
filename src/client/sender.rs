@@ -21,8 +21,8 @@ pub enum SubscribeError {
     /// can no longer enqueue work.
     Disconnected,
     /// Domain gate is still closed. Only the mandatory init Engine API methods
-    /// (`BaseCheck`, `AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`,
-    /// `UpdateMarketsList`) are allowed before Init.
+    /// (`BaseCheck`, `AuthCheck`, `GetMarketsList`, `UpdateMarketsList`) are
+    /// allowed before Init.
     DomainNotReady,
 }
 
@@ -39,9 +39,9 @@ impl std::error::Error for SubscribeError {}
 
 /// Thread-safe handle for UI and worker threads.
 ///
-/// `MoonClient` is the normal application handle. Obtain `ClientSender` with
-/// [`Client::sender`] only for custom low-level runtimes, clone it freely, and
-/// send work while the owning `Client` is running on another thread.
+/// `MoonClient` is the normal application handle. This sender is kept for
+/// internal protocol tests and legacy diagnostic tools that already own a
+/// running `Client`.
 /// Subscription helpers update the
 /// active-library registry. Raw command helpers append already-serialized
 /// command payloads directly into the Delphi-style send queues used by `Client`
@@ -50,13 +50,8 @@ impl std::error::Error for SubscribeError {}
 /// rebuilding wire priorities, retry counts, or UKey values by hand.
 ///
 /// ```ignore
-/// let mut client = Client::new(cfg);
 /// let sender = client.sender();
-/// // Move the sender into a UI thread:
-/// thread::spawn(move || {
-///     sender.subscribe_orderbook("DOGEUSDT");
-/// });
-/// // Main thread owns a custom low-level active pump.
+/// sender.subscribe_orderbook("DOGEUSDT");
 /// ```
 ///
 /// Fire-and-forget methods log if the client is gone. `try_*` methods return
@@ -221,64 +216,6 @@ impl ClientSender {
             }
         }
         result
-    }
-
-    pub(crate) fn apply_active_actions<I>(&self, actions: I)
-    where
-        I: IntoIterator<Item = crate::events::ActiveAction>,
-    {
-        if !self.domain_ready_for_typed_send() {
-            return;
-        }
-        for action in actions {
-            match action {
-                crate::events::ActiveAction::RequestMarketsList => {
-                    self.send_api_request(crate::commands::engine_request::get_markets_list());
-                }
-                crate::events::ActiveAction::RequestUpdateMarketsList => {
-                    self.send_api_request(crate::commands::engine_request::update_markets_list());
-                }
-                crate::events::ActiveAction::RequestOrderSnapshot => {
-                    self.request_all_statuses(rand::random());
-                }
-                crate::events::ActiveAction::RequestStrategySchema => {
-                    self.strat_schema_request();
-                }
-                crate::events::ActiveAction::RequestOrderBookFull {
-                    market_index,
-                    book_kind,
-                } => {
-                    self.send_api_request(
-                        crate::commands::engine_request::request_order_book_full(
-                            market_index,
-                            book_kind,
-                        ),
-                    );
-                }
-                crate::events::ActiveAction::SendStrategySnapshot {
-                    server_epoch,
-                    client_max_last_date,
-                    full,
-                    data,
-                } => {
-                    self.strat_send_snapshot_payload(
-                        server_epoch,
-                        client_max_last_date,
-                        full,
-                        &data,
-                    );
-                }
-                crate::events::ActiveAction::RequestOrderStatus { ctx, market_name } => {
-                    self.request_order_status(ctx, &market_name);
-                }
-                crate::events::ActiveAction::OrderCancel { request } => {
-                    self.send_order_cancel_request(request);
-                }
-                crate::events::ActiveAction::TradesResend { payload } => {
-                    self.send_api_request(payload);
-                }
-            }
-        }
     }
 
     fn send_domain_cmd(

@@ -13,16 +13,16 @@ use crate::state::{OrderBookKind, OrderBookSnapshot, TopOfBook};
 /// blocking protocol ACK/retry/send progress.
 #[derive(Debug, Clone)]
 pub struct EventDispatcherSnapshot {
-    orders: Orders,
-    order_books: OrderBooks,
-    trades: TradesState,
-    account: AccountState,
-    balances: BalancesState,
-    transfer_assets: TransferAssetsState,
-    coin_card_candles: crate::state::CoinCardCandlesState,
-    strats: StratsState,
-    settings: SettingsState,
-    markets: MarketsState,
+    orders: CowState<Orders>,
+    order_books: CowState<OrderBooks>,
+    trades: CowState<TradesState>,
+    account: CowState<AccountState>,
+    balances: CowState<BalancesState>,
+    transfer_assets: CowState<TransferAssetsState>,
+    coin_card_candles: CowState<crate::state::CoinCardCandlesState>,
+    strats: CowState<StratsState>,
+    settings: CowState<SettingsState>,
+    markets: CowState<MarketsState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
 }
@@ -122,7 +122,7 @@ impl EventDispatcherSnapshot {
 
     /// Retained history readers for one market, if trades storage is active.
     pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
-        self.market_history.as_ref()?.readers(market_name)
+        self.market_history.as_ref()?.try_readers(market_name)
     }
 
     /// Current rolling volume snapshot for one market, if retained storage is active.
@@ -133,7 +133,7 @@ impl EventDispatcherSnapshot {
     ) -> Option<RollingTradeVolumeSnapshot> {
         self.market_history
             .as_ref()?
-            .rolling_volumes(market_name, now_time)
+            .try_rolling_volumes(market_name, now_time)
     }
 
     /// Current rolling volume snapshot at a typed Delphi time.
@@ -161,7 +161,7 @@ impl EventDispatcherSnapshot {
     ) -> Option<MarketDerivedSnapshot> {
         self.market_history
             .as_ref()?
-            .derived_snapshot(market_name, now_time)
+            .try_derived_snapshot(market_name, now_time)
     }
 
     /// Current derived analytics snapshot at a typed Delphi time.

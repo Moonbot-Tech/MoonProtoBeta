@@ -32,82 +32,19 @@ pub(super) enum RuntimeCommand {
     },
     Ui(UiRuntimeCommand),
     Strat(StratRuntimeCommand),
+    StrategySnapshotBatch(Vec<crate::commands::strategy_serializer::StrategySnapshot>),
     StrategySetChecked {
         strategy_id: u64,
         checked: bool,
-        reply: mpsc::Sender<bool>,
     },
     StrategySendCheckedDelta,
     StrategyStartStop {
         is_start: bool,
     },
-    WithUsizeReply {
-        cmd: Box<RuntimeCommand>,
-        reply: mpsc::Sender<usize>,
-    },
-    Request {
-        request: RuntimeCommandRequest,
-        reply: mpsc::Sender<RuntimeReply>,
-    },
-    OrderAction {
-        kind: RuntimeCommandKind,
-        reply: mpsc::Sender<bool>,
-    },
-    TradeAction {
-        kind: RuntimeTradeCommandKind,
-        reply: mpsc::Sender<Result<bool, TradeContextError>>,
-    },
-}
-
-pub(super) enum RuntimeCommandRequest {
-    OrderSnapshot {
-        timeout: Duration,
-    },
-    BalanceSnapshot {
-        timeout: Duration,
-    },
-    Balance {
-        asset: String,
-        timeout: Duration,
-    },
-    HedgeMode {
-        timeout: Duration,
-    },
-    ApiExpirationTime {
-        timeout: Duration,
-    },
-    TransferAssets {
-        kind: crate::state::ExchangeKind,
-        timeout: Duration,
-    },
-    CandlesData {
-        timeout: Duration,
-    },
-    CoinCardCandles {
-        market: String,
-        ticks: crate::commands::candles::DeepHistoryKind,
-        timeout: Duration,
-    },
-    ClientSettings {
-        timeout: Duration,
-    },
-    EngineRaw {
-        payload: Vec<u8>,
-        timeout: Duration,
-    },
-}
-
-pub(super) enum RuntimeReply {
-    OrderSnapshot(Result<Vec<crate::state::Order>, mpsc::RecvTimeoutError>),
-    BalanceSnapshot(Result<crate::state::BalancesState, mpsc::RecvTimeoutError>),
-    Balance(Result<f64, EngineRequestError>),
-    HedgeMode(Result<bool, EngineRequestError>),
-    ApiExpirationTime(Result<crate::commands::engine_api::ApiExpirationTime, EngineRequestError>),
-    TransferAssets(Result<Vec<crate::commands::engine_api::TransferAsset>, EngineRequestError>),
-    CandlesData(Result<MergedCandles, mpsc::RecvTimeoutError>),
-    CoinCardCandles(Result<Vec<crate::commands::candles::DeepPrice>, EngineRequestError>),
-    ClientSettings(Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError>),
-    EngineRaw(Result<EngineResponse, mpsc::RecvTimeoutError>),
+    DebugOutgoingBlackhole(bool),
+    DebugResetErrEmuDiagnostics,
+    OrderAction(RuntimeCommandKind),
+    TradeAction(RuntimeTradeCommandKind),
 }
 
 pub(super) enum UiRuntimeCommand {
@@ -119,7 +56,7 @@ pub(super) enum UiRuntimeCommand {
         is_release: bool,
     },
     SwitchDex(String),
-    SwitchSpot(u8),
+    SwitchSpot(crate::commands::ui::SpotMarketKind),
 }
 
 pub(super) enum StratRuntimeCommand {
@@ -147,10 +84,7 @@ pub(super) enum RuntimeCommandKind {
     },
     UpdateVStop {
         uid: u64,
-        on: bool,
-        fixed: bool,
-        level: f64,
-        vol: f64,
+        params: super::VStopParams,
     },
     SetImmune {
         items: Vec<crate::commands::trade::ImmuneItem>,
@@ -169,7 +103,10 @@ pub(super) enum RuntimeCommandKind {
 }
 
 pub(super) enum RuntimeTradeCommandKind {
-    NewOrder(NewOrderParams),
+    NewOrder {
+        params: NewOrderParams,
+        request_uid: u64,
+    },
     JoinOrders {
         market_name: String,
         side: OrderSide,

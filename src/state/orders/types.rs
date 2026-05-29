@@ -7,67 +7,64 @@ use crate::commands::trade::{OrderType, OrderWorkerStatus, TradeCtx};
 ///
 /// The server may set this byte in `OrderStatusUpdate.sell_reason_code`.
 /// Delphi updates the local sell reason only when the code is non-zero and
-/// differs from the previous value. Use
-/// `SellReason::from_u8(order.sell_reason_code)` or `Order::sell_reason()`.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SellReason {
-    /// Unknown or unset.
-    Unknown = 0,
-    /// Sell at configured price.
-    SellPrice = 1,
-    /// Auto Price Down.
-    AutoPriceDown = 2,
-    /// Sell Level.
-    SellLevel = 3,
-    /// SellSpread.
-    SellSpread = 4,
-    /// SellShot.
-    SellShot = 5,
-    /// Global / Manual PanicSell.
-    PanicSell = 6,
-    /// StopLoss activated.
-    StopLoss = 7,
-    /// Trailing Stop fired.
-    Trailing = 8,
-    /// Market Stop.
-    MarketStop = 9,
-    /// Manual Sell (price < 95% of expected).
-    ManualSell = 10,
-    /// JoinedSell.
-    JoinedSell = 11,
-    /// SellFromAssets.
-    SellFromAssets = 12,
-    /// BV/SV Stop.
-    BvSvStop = 13,
-    /// TakeProfit reached.
-    TakeProfit = 14,
-}
+/// differs from the previous value. Unknown bytes are preserved like Delphi
+/// enum storage and display as `Unknown`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SellReason(u8);
 
+#[allow(non_upper_case_globals)]
 impl SellReason {
-    /// Convert a raw byte code to enum. Unknown codes map to `Unknown`.
-    pub fn from_u8(b: u8) -> Self {
-        match b {
-            1 => Self::SellPrice,
-            2 => Self::AutoPriceDown,
-            3 => Self::SellLevel,
-            4 => Self::SellSpread,
-            5 => Self::SellShot,
-            6 => Self::PanicSell,
-            7 => Self::StopLoss,
-            8 => Self::Trailing,
-            9 => Self::MarketStop,
-            10 => Self::ManualSell,
-            11 => Self::JoinedSell,
-            12 => Self::SellFromAssets,
-            13 => Self::BvSvStop,
-            14 => Self::TakeProfit,
-            _ => Self::Unknown,
-        }
+    /// Unknown or unset.
+    pub const Unknown: Self = Self(0);
+    /// Sell at configured price.
+    pub const SellPrice: Self = Self(1);
+    /// Auto Price Down.
+    pub const AutoPriceDown: Self = Self(2);
+    /// Sell Level.
+    pub const SellLevel: Self = Self(3);
+    /// SellSpread.
+    pub const SellSpread: Self = Self(4);
+    /// SellShot.
+    pub const SellShot: Self = Self(5);
+    /// Global / Manual PanicSell.
+    pub const PanicSell: Self = Self(6);
+    /// StopLoss activated.
+    pub const StopLoss: Self = Self(7);
+    /// Trailing Stop fired.
+    pub const Trailing: Self = Self(8);
+    /// Market Stop.
+    pub const MarketStop: Self = Self(9);
+    /// Manual Sell (price < 95% of expected).
+    pub const ManualSell: Self = Self(10);
+    /// JoinedSell.
+    pub const JoinedSell: Self = Self(11);
+    /// SellFromAssets.
+    pub const SellFromAssets: Self = Self(12);
+    /// BV/SV Stop.
+    pub const BvSvStop: Self = Self(13);
+    /// TakeProfit reached.
+    pub const TakeProfit: Self = Self(14);
+
+    /// Preserve a raw Delphi reason byte.
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    /// Backward-compatible alias for callers that parse raw command bytes.
+    pub const fn from_u8(b: u8) -> Self {
+        Self::from_byte(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::TakeProfit.0
     }
 
     /// Human-readable UI label.
-    pub fn description(&self) -> &'static str {
+    pub const fn description(self) -> &'static str {
         match self {
             Self::Unknown => "Unknown",
             Self::SellPrice => "Sell Price",
@@ -84,6 +81,23 @@ impl SellReason {
             Self::SellFromAssets => "SellFromAssets",
             Self::BvSvStop => "BV/SV Stop",
             Self::TakeProfit => "TakeProfit",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl Default for SellReason {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl std::fmt::Debug for SellReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.description())
+        } else {
+            write!(f, "Unknown({})", self.0)
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Client -> server `MPC_Order` builders.
 
 use super::*;
+use crate::commands::market::{BaseCurrency, ExchangeCode};
 
 pub(super) fn write_base_command_header(out: &mut Vec<u8>, cmd_id: u8, uid: u64) {
     out.push(cmd_id);
@@ -35,8 +36,8 @@ pub(super) fn write_trade_epoch_header(
         cmd_id,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.extend_from_slice(&epoch.to_le_bytes());
     out.push(status.to_byte());
@@ -47,26 +48,40 @@ pub(super) fn write_trade_epoch_header(
 /// Regular applications should obtain this from [`crate::Client::trade_ctx`],
 /// [`crate::Client::random_trade_ctx`], or from tracked order state via
 /// [`crate::state::Order::trade_ctx`]. Low-level protocol tools can use
-/// [`TradeCtx::with_route`] when they intentionally provide raw Delphi enum
-/// ordinals themselves.
+/// [`TradeCtx::with_route_bytes`] when they intentionally provide raw Delphi
+/// enum ordinals themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradeCtx {
     pub uid: u64,
-    pub currency: u8,
-    pub platform: u8,
+    pub currency: BaseCurrency,
+    pub platform: ExchangeCode,
 }
 
 impl TradeCtx {
-    /// Build a context with explicit Delphi route ordinals.
+    /// Build a context with explicit typed Delphi route values.
     ///
-    /// `currency` is `Ord(cfg.BaseCurrency)` and `platform` is
-    /// `Ord(cfg.Header.Current)` on the server. Prefer the higher-level helpers
-    /// on [`crate::Client`] unless you are writing a protocol tool.
-    pub fn with_route(uid: u64, currency: u8, platform: u8) -> Self {
+    /// `currency` is `cfg.BaseCurrency` and `platform` is
+    /// `cfg.Header.Current` on the server. Prefer the higher-level helpers on
+    /// [`crate::Client`] unless you are writing a protocol tool.
+    pub fn with_route(uid: u64, currency: BaseCurrency, platform: ExchangeCode) -> Self {
         Self {
             uid,
             currency,
             platform,
+        }
+    }
+
+    /// Build a context from raw Delphi route bytes.
+    ///
+    /// This is for protocol tests/replay tools that intentionally start from
+    /// wire bytes. Application code should use [`Self::with_route`] or
+    /// [`crate::Client::trade_ctx`].
+    #[doc(hidden)]
+    pub fn with_route_bytes(uid: u64, currency: u8, platform: u8) -> Self {
+        Self {
+            uid,
+            currency: BaseCurrency::from_byte(currency),
+            platform: ExchangeCode::from_byte(platform),
         }
     }
 }
@@ -115,8 +130,8 @@ pub fn build_join_orders(ctx: TradeCtx, market_name: &str, is_short: bool) -> Ve
         11,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(is_short as u8);
     out
@@ -136,8 +151,8 @@ pub fn build_split_order(
         12,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.extend_from_slice(&split_parts.to_le_bytes());
     out.push(split_small as u8);
@@ -157,8 +172,8 @@ pub fn build_move_all_sells(
         13,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(params.cmd_type.to_byte());
     out.push(params.move_kind.to_byte());
@@ -176,8 +191,8 @@ pub fn build_do_close_position(ctx: TradeCtx, market_name: &str, market_sell: bo
         14,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(market_sell as u8);
     out
@@ -191,8 +206,8 @@ pub fn build_do_limit_close_position(ctx: TradeCtx, market_name: &str, is_short:
         15,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(is_short as u8);
     out
@@ -206,8 +221,8 @@ pub fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool)
         16,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(is_short as u8);
     out
@@ -221,8 +236,8 @@ pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f
         17,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.extend_from_slice(&price.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
@@ -283,8 +298,8 @@ pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, params: MoveAllBuys
         27,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(params.cmd_type.to_byte());
     out.push(params.move_kind.to_byte());
@@ -317,8 +332,8 @@ pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short
         30,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(is_short as u8);
     out
@@ -334,8 +349,8 @@ pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
         23,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out
 }
@@ -355,8 +370,8 @@ pub fn build_new_order(
         3,
         ctx.uid,
         market_name,
-        ctx.currency,
-        ctx.platform,
+        ctx.currency.to_byte(),
+        ctx.platform.to_byte(),
     );
     out.push(is_short as u8);
     out.extend_from_slice(&price.to_le_bytes());

@@ -5,15 +5,17 @@ use crate::commands::registry::decode_utf8_delphi;
 use zerocopy::byteorder::little_endian::U16 as LeU16;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
-/// Hyperliquid DEX info — wire-layout соответствует Delphi `THLDexInfo` (Vars.pas:43-46):
-///   `Name: string[15]` (Pascal shortstring: 1 byte length + 15 bytes data = 16 байт)
-///   + `CollateralToken: word` (u16 LE = 2 байт) = **18 байт packed**.
+/// Hyperliquid DEX info.
+///
+/// Wire layout matches Delphi `THLDexInfo`: `Name: string[15]` as a Pascal
+/// short string (1 length byte + 15 data bytes) followed by a little-endian
+/// `CollateralToken: Word`. The packed size is 18 bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexInfo {
-    /// Имя DEX (например `"BTCUSD-USDC"`); пустая строка для default validator (USDC).
+    /// DEX name. Empty string means the default USDC validator.
     pub name: String,
-    /// Token используемый как collateral. Известные значения:
-    /// `0` = USDC, `360` = USDH, `235` = USDE, `268` = USDT0.
+    /// Collateral token id. Known values include `0` = USDC, `360` = USDH,
+    /// `235` = USDE, and `268` = USDT0.
     pub collateral_token: u16,
 }
 
@@ -40,59 +42,68 @@ impl From<WireDexInfo> for DexInfo {
     }
 }
 
-/// Распакованный ответ на `emk_AuthCheck` (Engine method 2).
+/// Index into `AuthCheckResponse::known_dexes`.
 ///
-/// Содержит данные привязки клиента к биржевому аккаунту + информацию о доступных
-/// Hyperliquid DEX (опционально, появилось в Phase 2 — поля `recvd_max_payload`,
-/// `known_dexes`, `hl_dex_market`, `hl_spot_market` могут отсутствовать в старых
-/// серверах — это `Option`).
+/// Delphi stores current Hyperliquid futures/spot DEX selection as a byte
+/// index (`cfg.HLDexMarket` / `cfg.HLSpotDexMarket`). The wrapper keeps the
+/// wire value exact while public code does not have to pass around a naked
+/// magic `u8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct HyperDexIndex(u8);
+
+impl HyperDexIndex {
+    pub const DEFAULT: Self = Self(0);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Decoded `EngineMethod::AuthCheck` response.
 ///
-/// Используется потребителем после `Client::api_auth_check()`:
-/// ```ignore
-/// let rx = client.api_auth_check();
-/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-/// if let Some(auth) = parse_auth_check_response(&resp.data) {
-///     println!("Account: {}, BTC addr: {}", auth.account_id, auth.btc_address);
-///     for dex in &auth.known_dexes {
-///         println!("  DEX: {} (collateral={})", dex.name, dex.collateral_token);
-///     }
-/// }
-/// ```
+/// This is per-account data: exchange account id, wallet/address strings,
+/// sub-account flag, and optional Hyperliquid DEX metadata. Older servers may
+/// omit the optional tail fields.
 ///
 /// Source: `MoonProtoEngine.pas:605-639`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthCheckResponse {
-    /// ID аккаунта на Binance (если используется Binance API; иначе 0).
+    /// Binance account id when the connected server uses Binance; otherwise 0.
     pub binance_account_id: i64,
-    /// Bitcoin адрес привязанный к аккаунту (для рефералов / wallet binding).
+    /// BTC address attached to the account.
     pub btc_address: String,
-    /// Spot referral config (исторический параметр; обычно 0).
+    /// Spot referral config. Usually zero.
     pub spot_ref: i32,
-    /// True если это sub-аккаунт головного.
+    /// `true` for sub-accounts.
     pub is_sub_account: bool,
-    /// ID аккаунта (Hyperliquid wallet address / Binance account string).
+    /// Account id string, for example a Hyperliquid wallet address.
     pub account_id: String,
-    /// Максимальный поддерживаемый payload (от сервера). None если старый сервер.
+    /// Server-advertised maximum payload size, if provided.
     pub recvd_max_payload: Option<i32>,
-    /// Список известных Hyperliquid DEX (Phase 2; для UI меню переключения DEX).
-    /// Пустой Vec если старый сервер.
+    /// Known Hyperliquid DEX entries for UI switching.
     pub known_dexes: Vec<DexInfo>,
-    /// Индекс текущего активного HL DEX (futures). None если старый сервер.
-    pub hl_dex_market: Option<u8>,
-    /// Индекс текущего активного HL DEX (spot). None если старый сервер.
-    pub hl_spot_market: Option<u8>,
+    /// Current active Hyperliquid futures DEX index.
+    pub hl_dex_market: Option<HyperDexIndex>,
+    /// Current active Hyperliquid spot DEX index.
+    pub hl_spot_market: Option<HyperDexIndex>,
 }
 
-/// Распарсить `EngineResponse.data` для `emk_AuthCheck` (`EngineMethod::AuthCheck`).
+/// Parse `EngineResponse.data` for `EngineMethod::AuthCheck`.
 ///
-/// Returns `None` если payload corrupt или короче минимального размера для обязательных полей.
-/// Опциональные поля (Phase 2 расширения) парсятся `if !EOF`; их отсутствие = старый сервер,
-/// `parse_auth_check_response` всё равно возвращает `Some` с заполненными обязательными.
+/// Returns `None` when the payload is corrupt or shorter than the mandatory
+/// field prefix. Optional tail fields are parsed only while bytes remain; their
+/// absence means an older server and still returns `Some` with mandatory data.
 /// DEX tail follows Delphi's soft stream-read shape: the declared `cnt` is read,
 /// `SetLength(KnownDexes, cnt)` creates zero-filled records, and each
 /// `TMemoryStream.Read` partially overwrites one 18-byte `THLDexInfo` slot.
-///
-/// Byte-exact с Delphi: `MoonProtoEngine.pas:610-633`.
 pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     let mut pos = 0usize;
 
@@ -127,8 +138,8 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
     };
 
     let mut known_dexes: Vec<DexInfo> = Vec::new();
-    let mut hl_dex_market: Option<u8> = None;
-    let mut hl_spot_market: Option<u8> = None;
+    let mut hl_dex_market: Option<HyperDexIndex> = None;
+    let mut hl_spot_market: Option<HyperDexIndex> = None;
 
     if recvd_max_payload.is_some() && pos < data.len() {
         let cnt = data[pos] as usize;
@@ -147,10 +158,10 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
         }
         // hl_dex_market и hl_spot_market следуют сразу после массива.
         if pos < data.len() {
-            hl_dex_market = Some(data[pos]);
+            hl_dex_market = Some(HyperDexIndex::from_byte(data[pos]));
             pos += 1;
             if pos < data.len() {
-                hl_spot_market = Some(data[pos]);
+                hl_spot_market = Some(HyperDexIndex::from_byte(data[pos]));
                 // pos += 1;  // больше не используется
             }
         }

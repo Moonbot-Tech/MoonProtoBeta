@@ -6,6 +6,8 @@
 //! and related fields from that live object.
 
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
+use crate::commands::market::PositionType;
+use crate::commands::trade::OrderType;
 use crate::state::balances::BalanceEvent;
 use crate::state::epoch::epoch_is_ok;
 
@@ -126,20 +128,20 @@ fn reset_missing_balance_like_delphi(market: &mut Market) {
     market.pos_size = 0.0;
     market.pos_price = 0.0;
     market.liq_price = 0.0;
-    market.pos_dir = 0;
+    market.pos_dir = OrderType::Sell;
     market.long_pos_size = 0.0;
     market.long_pos_price = 0.0;
     market.long_liq_price = 0.0;
-    market.long_position_type = 0;
+    market.long_position_type = PositionType::Cross;
     market.short_pos_size = 0.0;
     market.short_pos_price = 0.0;
     market.short_liq_price = 0.0;
-    market.short_position_type = 0;
+    market.short_position_type = PositionType::Cross;
     market.asset_balance = 0.0;
     market.asset_balance_full = 0.0;
     market.total_profit_b = 0.0;
     market.total_profit_l = 0.0;
     market.total_profit_s = 0.0;
     market.leverage_x = 1;
-    market.position_type = 0;
+    market.position_type = PositionType::Cross;
 }

@@ -27,6 +27,8 @@ impl MarketHistoryStore {
         self.derived.last_price_deltas = last_price_deltas;
         self.derived.deltas =
             combine_deltas(trade_deltas, self.derived.candle_deltas, last_price_deltas);
+        self.read_handle
+            .publish(&self.rolling_volumes, self.derived);
     }
 
     pub(super) fn update_current_candle_from_trade(&mut self, row: TradeHistoryRow) {
@@ -38,22 +40,22 @@ impl MarketHistoryStore {
         let mut candle = self.current_candle.unwrap_or_else(|| {
             self.current_candle_seq = None;
             Candle5mRow {
-                open_p: row.price,
-                close_p: row.price,
-                max_p: row.price,
-                min_p: row.price,
-                vol: 0.0,
+                open: row.price,
+                close: row.price,
+                high: row.price,
+                low: row.price,
+                volume: 0.0,
                 time: row.time,
             }
         });
-        candle.close_p = row.price;
-        candle.max_p = candle.max_p.max(row.price);
-        candle.min_p = if candle.min_p <= 0.0 {
+        candle.close = row.price;
+        candle.high = candle.high.max(row.price);
+        candle.low = if candle.low <= 0.0 {
             row.price
         } else {
-            candle.min_p.min(row.price)
+            candle.low.min(row.price)
         };
-        candle.vol += traded_value;
+        candle.volume += traded_value;
         self.current_candle = Some(candle);
         self.candle_deltas_dirty = true;
         self.publish_current_candle();
@@ -218,14 +220,14 @@ impl CandleWindow {
         if candle.time <= now_time - self.window_days || candle.time > now_time {
             return;
         }
-        if candle.min_p > 0.0 && (self.min_price <= 0.0 || candle.min_p < self.min_price) {
-            self.min_price = candle.min_p;
+        if candle.low > 0.0 && (self.min_price <= 0.0 || candle.low < self.min_price) {
+            self.min_price = candle.low;
         }
-        if candle.max_p > self.max_price {
-            self.max_price = candle.max_p;
+        if candle.high > self.max_price {
+            self.max_price = candle.high;
         }
-        if candle.vol > 0.0 {
-            self.volume += f64::from(candle.vol);
+        if candle.volume > 0.0 {
+            self.volume += f64::from(candle.volume);
         }
     }
 

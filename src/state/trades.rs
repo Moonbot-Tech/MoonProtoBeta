@@ -1,42 +1,41 @@
 //! TradesStream sync state — gap detection + resend protocol + batch response parser.
 //!
-//! Источник Delphi: `MoonProtoEngine.pas:21-36, 1364-1549, 1553-1921` (TGapBucket + ResetGapBuckets
-//! + CreateGapBucket + FindBucketForPacket + CheckMissingTradesPackets + ProcessTradesStream
-//! + ProcessTradesResendBatch).
+//! Delphi source:
+//! `MoonProtoEngine.pas:21-36, 1364-1549, 1553-1921` (`TGapBucket`,
+//! `ResetGapBuckets`, `CreateGapBucket`, `FindBucketForPacket`,
+//! `CheckMissingTradesPackets`, `ProcessTradesStream`,
+//! `ProcessTradesResendBatch`).
 //!
-//! ## Что делает этот модуль
+//! The server sends `MPC_TradesStream` packets with wrapping `packet_num: u16`.
+//! The client tracks sequence gaps. A missing range creates a `GapBucket`; the
+//! tail check sends `TradesResend` requests for missing packet numbers, with up
+//! to three retries and exponential backoff. The server answers with
+//! `MPC_TradesResendResponse`, a batch of raw inner TradesStream packets.
 //!
-//! Сервер шлёт `MPC_TradesStream` пакеты с `packet_num:u16` (wrapping). Клиент следит за
-//! последовательностью. При gap (потерянный пакет) — создаётся **GapBucket**, который
-//! запрашивает resend через `emk_TradesResend` (батч до 200 номеров) до 3 retry с
-//! exponential backoff. Сервер отвечает `MPC_TradesResendResponse` (batch формата:
-//! `Byte(count) + [Word(sz) + raw_packet] × count`), который active dispatcher
-//! проходит без копирования через `iter_trades_resend_response`.
-//!
-//! ## Использование
+//! Low-level usage:
 //!
 //! ```ignore
 //! let mut trades = TradesState::new();
 //!
-//! // 1. Поступление обычного MPC_TradesStream пакета:
+//! // 1. Normal MPC_TradesStream packet:
 //! let events = trades.on_packet(parsed_trades_packet, now_ms);
 //! for ev in events {
 //!     match ev {
 //!         TradesEvent::Applied { packet_num, .. } => /* read new rows from SeqRing */,
-//!         TradesEvent::GapDetected { start, end } => /* лог только */,
+//!         TradesEvent::GapDetected { start, end } => /* log only */,
 //!     }
 //! }
 //!
-//! // 2. Поступление MPC_TradesResendResponse — пройти каждый inner packet + apply:
+//! // 2. MPC_TradesResendResponse: iterate inner packets and apply them:
 //! for raw_pkt in iter_trades_resend_response(payload) {
 //!     if let Some(tp) = commands::trades_stream::parse_trades_packet(raw_pkt) {
-//!         let _evts = trades.on_packet_resend(tp);  // НЕ tracks (resend пакеты не должны двигать last_packet_num)
+//!         let _evts = trades.on_packet_resend(tp); // resend does not advance last_packet_num
 //!     }
 //! }
 //!
 //! // 3. Delphi-equivalent tail check after a successfully parsed trades packet:
 //! for resend_payload in trades.tick(rtt_ms, now_ms) {
-//!     client.send_api_request(&resend_payload);  // отправит emk_TradesResend
+//!     client.send_api_request(&resend_payload);
 //! }
 //! ```
 
@@ -57,8 +56,9 @@ const MAX_GAP_BUCKETS: usize = 50;
 const DEFAULT_RECVD_SIZE: usize = 100;
 const MAX_RECVD_SIZE: usize = 3000;
 const MAX_RETRY_COUNT: u8 = 3;
-/// Пауза, после которой клиент сбрасывает gap-state и начинает заново (мс).
-/// Delphi: `TRADES_PAUSE_TIMEOUT = 30 / 86400` (30 сек).
+/// Pause after which the client resets gap state and starts tracking anew.
+///
+/// Delphi: `TRADES_PAUSE_TIMEOUT = 30 / 86400` (30 seconds).
 const TRADES_PAUSE_TIMEOUT_MS: i64 = 30_000;
 
 fn materialize_packet_effects(
@@ -73,7 +73,7 @@ fn materialize_packet_effects(
         .collect()
 }
 
-/// Главный sync state для TradesStream.
+/// TradesStream sequence/gap recovery state.
 #[derive(Debug, Clone)]
 pub struct TradesState {
     buckets: [GapBucket; MAX_GAP_BUCKETS],
@@ -102,7 +102,9 @@ impl TradesState {
         }
     }
 
-    /// Сбросить все buckets (Delphi `ResetGapBuckets` MoonProtoEngine.pas:1364-1378).
+    /// Reset all gap buckets.
+    ///
+    /// Delphi source: `ResetGapBuckets`, `MoonProtoEngine.pas:1364-1378`.
     pub fn reset_buckets(&mut self) {
         self.reset_gap_buckets(self.last_packet_time_ms);
     }
@@ -116,7 +118,7 @@ impl TradesState {
         self.trades_started = false;
     }
 
-    /// Полный reset state (например при ServerToken change / reconnect).
+    /// Full reset, for example after server token change or reconnect.
     pub fn full_reset(&mut self) {
         self.full_reset_at(0);
     }
@@ -126,7 +128,7 @@ impl TradesState {
         self.last_packet_num = 0;
     }
 
-    /// Количество активных buckets.
+    /// Number of active gap buckets.
     pub fn used_buckets(&self) -> usize {
         self.used_buckets
     }

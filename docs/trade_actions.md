@@ -5,13 +5,23 @@ order snapshots and sends user actions back to the runtime by passing either the
 visible `&Order` or its UID:
 
 ```rust
+use moonproto::VStopParams;
+
 let Some(snapshot) = client.snapshot() else { return; };
 let Some(order) = snapshot.orders().get(order_uid) else { return; };
 
 client.orders().move_order(order, new_price)?;
 client.orders().cancel(order.uid)?;
 client.orders().update_stops(order, stops)?;
-client.orders().update_vstop(order.uid, true, false, 50000.0, 12.0)?;
+client.orders().update_vstop(
+    order.uid,
+    VStopParams {
+        enabled: true,
+        fixed: false,
+        level: 50000.0,
+        volume: 12.0,
+    },
+)?;
 client.orders().set_immune(items)?;
 client.orders().turn_panic_sell(order, true)?;
 client.orders().request_status(order.uid)?;
@@ -54,10 +64,11 @@ BaseCheck:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
-client.trade().new_order(
+let ticket = client.trade().new_order(
     NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001)
         .with_strategy_id(strategy_id),
 )?;
+println!("queued new-order request uid={}", ticket.request_uid);
 
 client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
 client.trade().limit_close_position("BTCUSDT", OrderSide::Long)?;
@@ -83,12 +94,21 @@ If Init/BaseCheck route fields are unavailable, these methods return
 `MoonClientError::TradeContext` instead of exposing `TradeCtx` to application
 code.
 
+`new_order` returns a client-side ticket. Its `request_uid` is the UID written
+into the outgoing command and can be used to correlate the user click with the
+server-created order when the order appears in `snapshot().orders()`.
+
 ## Init Gate
 
-Trade actions are gated by Init. Before the one-time Init opens `domain_ready`,
-typed order actions return `false` and queue no server command. After Init,
-actions append to the Delphi-style unbounded send queues and reconnect keeps the
-session state alive automatically.
+`MoonClient::connect` starts the runtime immediately, while the one-time
+connect/init sequence finishes in that runtime thread. UI code may enqueue order
+intents during startup; the runtime handles them only after the retained state is
+ready. If the live order no longer exists or its current state does not allow the
+requested action, the action is ignored and an `OrderEvent::Ignored` diagnostic
+event may be published for that UID.
+
+After Init, actions append to the Delphi-style unbounded send queues and
+reconnect keeps the session state alive automatically.
 
 ## Command Semantics
 
@@ -109,19 +129,6 @@ session state alive automatically.
 
 Epoch/status/route fields are intentionally not caller-supplied in the normal
 API. They come from BaseCheck and the tracked order state.
-
-## Advanced Tools
-
-Low-level `Client`, `ClientSender`, `commands::trade::*`, `TradeCtx`, and
-`&mut Orders` helpers remain available for custom runtimes, protocol tests, and
-wire-format tools. They are not the regular UI integration model. If a tool owns
-`Client + EventDispatcher` directly, it is also responsible for keeping the
-protocol pump alive and for applying stateful order actions to the live
-dispatcher state.
-
-One-shot helpers that wait for an applied state change, such as the low-level
-order snapshot request, still live on `Client` because they intentionally pump a
-caller-owned runtime while waiting.
 
 ## Retry Counts
 

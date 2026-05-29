@@ -1,7 +1,6 @@
 use super::*;
 
 impl Client {
-    #[cfg(test)]
     pub(crate) fn apply_active_actions<I>(&self, actions: I)
     where
         I: IntoIterator<Item = crate::events::ActiveAction>,

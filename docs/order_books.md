@@ -8,11 +8,11 @@ current-book state.
 ## Subscribe
 
 ```rust
-client.subscribe_orderbook("BTCUSDT")?;
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
-client.unsubscribe_orderbook("ETHUSDT")?;
-client.unsubscribe_orderbooks(["SOLUSDT"])?;
-client.unsubscribe_all_orderbooks()?;
+client.streams().subscribe_orderbook("BTCUSDT")?;
+client.streams().subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.streams().unsubscribe_orderbook("ETHUSDT")?;
+client.streams().unsubscribe_orderbooks(["SOLUSDT"])?;
+client.streams().unsubscribe_all_orderbooks()?;
 ```
 
 Subscriptions are stored in the reconnect registry. Before Init, these calls
@@ -58,6 +58,8 @@ not the full applied book.
 
 `RequestFullNeeded` is a low-level recovery signal. `MoonClient` consumes it
 internally and requests a fresh full book automatically.
+Diagnostic `Ignored` events are also kept out of the high-level `MoonClient`
+event sink; they remain visible only to low-level `EventDispatcher` tools.
 
 ## Reading Current Book
 
@@ -87,7 +89,6 @@ pub struct OrderBookLevel {
 }
 
 pub struct OrderBookSnapshot {
-    // raw index fields are retained for diagnostics
     pub seq: u16,
     pub buys: Vec<OrderBookLevel>,
     pub sells: Vec<OrderBookLevel>,
@@ -119,9 +120,9 @@ After reconnect, orderbook packets are ignored until fresh market indexes are
 synchronized for the current server session. This prevents a new server
 `market_index` map from racing old local indexes.
 
-## Low-Level Tools
+## Protocol Data
 
 `commands::order_book::parse_order_book_packet`, `OrderBookUpdate`, raw
-`market_index`, and raw `book_kind` are for protocol tests, replay tools, and
-custom runtimes. Regular applications should subscribe by name, react to
+`market_index`, and raw orderbook kind bytes are for protocol tests and replay
+tools. Regular applications should subscribe by name, react to
 `OrderBookEvent::Apply`, and read current books from `MoonClient` snapshots.

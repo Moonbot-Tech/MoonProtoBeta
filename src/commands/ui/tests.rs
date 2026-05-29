@@ -312,7 +312,7 @@ fn ui_fixed_scalar_commands_use_zero_tail_like_delphi_stream_read() {
     }
 
     match UICommand::parse(&header_bytes(CMD_SWITCH_SPOT, 9)).unwrap() {
-        UICommand::SwitchSpot(s) => assert_eq!(s.spot_index, 0),
+        UICommand::SwitchSpot(s) => assert_eq!(s.spot_index, SpotMarketKind::Crypto),
         _ => panic!("wrong variant"),
     }
 }
@@ -423,7 +423,7 @@ fn switch_dex_invalid_utf8_uses_delphi_question_mark_fallback() {
 fn switch_spot_roundtrip() {
     let raw = build_switch_spot(15, 1);
     match UICommand::parse(&raw).unwrap() {
-        UICommand::SwitchSpot(s) => assert_eq!(s.spot_index, 1),
+        UICommand::SwitchSpot(s) => assert_eq!(s.spot_index, SpotMarketKind::Predict),
         _ => panic!("wrong variant"),
     }
 }

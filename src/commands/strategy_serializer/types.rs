@@ -237,7 +237,7 @@ where
 
 /// Raw Delphi `TStrategyKind` ordinal (`Strategies.pas`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StrategyKind(pub u8);
+pub struct StrategyKind(u8);
 
 impl StrategyKind {
     pub const UNKNOWN: Self = Self(0);
@@ -264,6 +264,14 @@ impl StrategyKind {
     pub const ACTIVITY: Self = Self(21);
     pub const ALERTS: Self = Self(22);
     pub const WATCHER: Self = Self(23);
+
+    pub const fn from_byte(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
 }
 
 /// Delphi strategy active-state mode from `TStratForm.CheckActive`.

@@ -8,7 +8,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -37,6 +37,84 @@ fn connect_and_init_installs_initial_strategies_before_waiting_for_auth() {
     assert!(matches!(result, Err(ConnectError::ConnectTimedOut { .. })));
     assert_eq!(dispatcher.local_strategy_epoch(), 42);
     assert_eq!(dispatcher.strategy_snapshot_vec().len(), 0);
+}
+
+#[test]
+fn connect_and_init_stops_waiting_as_soon_as_auth_done() {
+    let mut client = Client::new(dummy_cfg().without_ntp());
+    let mut dispatcher = crate::events::EventDispatcher::new();
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+
+    let started = Instant::now();
+    let result = connect_and_init(
+        &mut client,
+        &mut dispatcher,
+        ConnectConfig::new(InitConfig {
+            step_timeout: Some(Duration::ZERO),
+            ..Default::default()
+        })
+        .with_connect_timeout(Duration::from_secs(30)),
+    );
+    assert!(result.is_err(), "init should fail without server responses");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "connect_and_init waited for connect_timeout despite already authorized: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn only_strategy_handshake_commands_are_allowed_before_domain_ready() {
+    let client = Client::new(dummy_cfg());
+
+    assert!(engine_method_allowed_before_domain_ready(
+        EngineMethod::BaseCheck
+    ));
+    assert!(engine_method_allowed_before_domain_ready(
+        EngineMethod::AuthCheck
+    ));
+    assert!(engine_method_allowed_before_domain_ready(
+        EngineMethod::GetMarketsList
+    ));
+    assert!(engine_method_allowed_before_domain_ready(
+        EngineMethod::UpdateMarketsList
+    ));
+    assert!(
+        !engine_method_allowed_before_domain_ready(EngineMethod::GetMarketsIndexes),
+        "Delphi cold InitInt does not send GetMarketsIndexes; it is post-init stale-token repair"
+    );
+
+    assert!(incoming_allowed_before_domain_ready(
+        Command::Strat,
+        &crate::commands::strat::build_snapshot_request(7)
+    ));
+    assert!(!incoming_allowed_before_domain_ready(
+        Command::Strat,
+        &crate::commands::strat::build_delete(7, 42, "")
+    ));
+
+    client.strat_schema_request();
+    let (_, high, _) = client.take_send_queues_for_test();
+    assert_eq!(high.len(), 1);
+    assert_eq!(high[0].cmd, Command::Strat.to_byte());
+    assert!(crate::commands::strat::is_schema_request_payload(
+        &high[0].data
+    ));
+
+    client.strat_send_snapshot_payload(1, 0, true, &[]);
+    let (sliced, _, _) = client.take_send_queues_for_test();
+    assert!(
+        sliced.is_empty(),
+        "snapshot replies are latched before domain_ready and sent by post-init resync"
+    );
+
+    client.strat_delete(42, "");
+    let (_, high, _) = client.take_send_queues_for_test();
+    assert!(
+        high.is_empty(),
+        "regular Strat commands must stay gated until domain_ready"
+    );
 }
 
 #[test]

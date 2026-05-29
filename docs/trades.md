@@ -10,12 +10,12 @@ the live stream moving when old gaps cannot be recovered.
 ```rust
 use moonproto::TradesStreamMode;
 
-client.subscribe_all_trades(TradesStreamMode::TradesOnly);
-client.subscribe_trades_for(
+client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly);
+client.streams().subscribe_trades_for(
     TradesStreamMode::TradesOnly,
     ["BTCUSDT", "ETHUSDT"],
 );
-client.unsubscribe_all_trades();
+client.streams().unsubscribe_all_trades();
 ```
 
 `subscribe_all_trades(mode)` is the full Active Lib mode. Once the market list
@@ -162,8 +162,13 @@ impl TradeHistoryRow {
 
 pub struct MMOrderHistoryRow {
     pub time: f64,
-    pub vol: f64,
+    pub volume: f64,
     pub q: f64,
+}
+
+impl MMOrderHistoryRow {
+    pub fn time_delphi(self) -> DelphiTime;
+    pub fn unix_millis(self) -> Option<i64>;
 }
 
 pub struct MiniCandle {
@@ -173,6 +178,15 @@ pub struct MiniCandle {
     pub max_price: f32,
     pub buy_vol: f32,
     pub sell_vol: f32,
+}
+
+impl MiniCandle {
+    pub fn time_delphi(self) -> DelphiTime;
+    pub fn unix_millis(self) -> Option<i64>;
+    pub fn low(self) -> f32;
+    pub fn high(self) -> f32;
+    pub fn buy_volume(self) -> f32;
+    pub fn sell_volume(self) -> f32;
 }
 ```
 
@@ -273,10 +287,10 @@ channel forever for old trade packets.
 packets and throttles it to roughly 100 ms. Applications should not send resend
 requests manually.
 
-## Low-Level Tools
+## Protocol Data
 
 `commands::trades_stream::parse_trades_packet`, raw `TradesPacket` /
 `TradeSection`, `TradesState`, and `iter_trades_resend_response` remain public
-for protocol tests, loss diagnostics, and custom runtimes. Normal applications
-should subscribe through `MoonClient`, react to `TradesEvent::Applied`, and read
-retained rows from `MarketHistoryReaders`.
+for protocol tests and loss diagnostics. Normal applications should subscribe
+through `MoonClient`, react to `TradesEvent::Applied`, and read retained rows
+from `MarketHistoryReaders`.

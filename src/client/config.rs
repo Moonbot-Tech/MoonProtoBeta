@@ -1,6 +1,5 @@
-use crate::commands::engine_api::{EngineMethod, ServerInfo};
+use crate::commands::engine_api::ServerInfo;
 use crate::MoonKey;
-use std::sync::mpsc;
 use std::time::Duration;
 /// Transport authorization state for one [`crate::client::Client`].
 ///
@@ -19,78 +18,13 @@ pub enum AuthStatus {
     Offline,
 }
 
-/// Error returned by one-shot Engine API helpers such as
-/// [`crate::MoonClient::blocking_request_balance`] and
-/// [`crate::MoonClient::blocking_request_coin_card_candles`].
-#[derive(Debug, Clone, PartialEq)]
-pub enum EngineRequestError {
-    /// No response was delivered before the caller's timeout.
-    Timeout,
-    /// The pending response channel was closed, usually because the client loop
-    /// cleared in-flight requests during reconnect or shutdown.
-    Disconnected,
-    /// The server returned an Engine API failure response.
-    Server {
-        /// Engine method that failed.
-        method: EngineMethod,
-        /// Server error code.
-        code: i32,
-        /// Server error message.
-        message: String,
-    },
-    /// The server reported success, but the method-specific payload parser
-    /// could not decode `EngineResponse::data`.
-    MalformedPayload {
-        /// Engine method whose successful payload was malformed.
-        method: EngineMethod,
-        /// Payload length in bytes.
-        len: usize,
-    },
-}
-
-impl From<mpsc::RecvTimeoutError> for EngineRequestError {
-    fn from(value: mpsc::RecvTimeoutError) -> Self {
-        match value {
-            mpsc::RecvTimeoutError::Timeout => Self::Timeout,
-            mpsc::RecvTimeoutError::Disconnected => Self::Disconnected,
-        }
-    }
-}
-
-impl std::fmt::Display for EngineRequestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout => write!(f, "engine request timed out"),
-            Self::Disconnected => write!(f, "engine request channel disconnected"),
-            Self::Server {
-                method,
-                code,
-                message,
-            } => {
-                write!(
-                    f,
-                    "engine request {method:?} failed with code {code}: {message}"
-                )
-            }
-            Self::MalformedPayload { method, len } => {
-                write!(
-                    f,
-                    "engine request {method:?} returned malformed payload ({len} bytes)"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for EngineRequestError {}
-
 /// Error returned when a session-derived [`crate::commands::trade::TradeCtx`]
 /// cannot be built yet.
 ///
 /// Trade command wire headers carry two Delphi enum ordinals from the active
 /// server session: `cfg.BaseCurrency` and `cfg.Header.Current`. They are learned
-/// from `emk_BaseCheck`, so applications that skipped BaseCheck must either run
-/// it or use the explicit low-level [`crate::commands::trade::TradeCtx::with_route`].
+/// from `emk_BaseCheck`, so applications that skipped BaseCheck must run it
+/// before sending market-level trade commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TradeContextError {
     /// `ServerInfo::exchange_code` is missing.
@@ -156,14 +90,15 @@ impl std::error::Error for TradeContextError {}
 ///
 /// Session invariant: init is a one-time operation for a `Client` session.
 /// Before init, transport `Fine` does not start Engine API traffic. After init,
-/// reconnect in the same session restores fresh indexes, `UpdateMarketsList`,
-/// and registry subscriptions automatically. The initial post-init resync
+/// reconnect in the same session restores fresh indexes only after a changed
+/// `PeerAppToken`, refreshes `UpdateMarketsList`, and restores registry
+/// subscriptions automatically. The initial post-init resync
 /// (orders, settings, balance, client strategy snapshot) is not repeated on
 /// reconnect.
 ///
 /// Applications should treat lifecycle events as UI/observability signals; they
 /// do not need to run init again to keep requested streams alive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LifecycleEvent {
     /// Handshake started (`Hello` sent), but `Fine` has not arrived yet.
     ///
@@ -173,16 +108,37 @@ pub enum LifecycleEvent {
     /// `Fine` received: the transport channel is authorized and can send or
     /// receive commands.
     ///
-    /// `fresh = true` means this is the first connection since `Client::new`.
-    /// The application can run `run_init_sequence` or use `connect_and_init`.
+    /// `fresh = true` means this is the first connection since the runtime
+    /// started. `MoonClient` runs the one-time init sequence automatically.
     ///
     /// `fresh = false` is a reconnect after link loss or server restart. If init
-    /// already succeeded, the library restores indexes, `UpdateMarketsList`, and
-    /// requested subscriptions; the application does not repeat init.
+    /// already succeeded, the library refreshes indexes only when the
+    /// `PeerAppToken` changed, restores `UpdateMarketsList`, and requested
+    /// subscriptions; the application does not repeat init.
     Connected {
         /// `true` only for the first successful connection after `Client::new`;
         /// reconnects in the same client session use `false`.
         fresh: bool,
+    },
+    /// The one-time Init sequence completed and Active Lib state is ready.
+    Ready,
+    /// One mandatory Init step completed inside `MoonClient`.
+    ///
+    /// This is progress/diagnostic information for UI status bars and FireTest
+    /// timing. It is not a recovery hook and does not change the final `Ready`
+    /// contract.
+    InitStepCompleted {
+        /// Stable step name: `BaseCheck`, `AuthCheck`, `GetMarketsList`,
+        /// `UpdateMarketsList`, `StrategySchema`, `PostInitFlush`,
+        /// `StartupSnapshot`, or `StartupEvents`.
+        step: &'static str,
+        /// Wall-clock time since the init sequence started.
+        elapsed_ms: u64,
+    },
+    /// Initial connect/init failed in the background runtime.
+    ConnectFailed {
+        /// Human-readable error text.
+        error: String,
     },
     /// The application explicitly called `client.disconnect()`.
     ///
@@ -235,9 +191,9 @@ pub type LifecycleFn = Box<dyn FnMut(LifecycleEvent) + Send>;
 /// Set a field to `None` when the application intentionally owns that Engine API
 /// refresh manually.
 ///
-/// Refresh ticks start after domain init completes (`connect_and_init` /
-/// `run_init_sequence`). This keeps fresh BaseCheck/AuthCheck requests from
-/// being queued behind background `UpdateMarketsList` traffic on cold connect.
+/// Refresh ticks start after domain init completes. This keeps fresh
+/// BaseCheck/AuthCheck requests from being queued behind background
+/// `UpdateMarketsList` traffic on cold connect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefreshConfig {
     /// Periodically send `emk_UpdateMarketsList` for fresh prices and funding.
@@ -263,6 +219,47 @@ impl Default for RefreshConfig {
     }
 }
 
+/// MoonProto transport mode selected on both client and server.
+///
+/// This is the public form of the Delphi `mask_ver` byte. Wire helpers still
+/// take raw bytes internally; application code should use `TransportMode::V0`,
+/// `TransportMode::V1`, or `TransportMode::V2`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TransportMode(u8);
+
+#[allow(non_upper_case_globals)]
+impl TransportMode {
+    pub const V0: Self = Self(0);
+    pub const V1: Self = Self(1);
+    pub const V2: Self = Self(2);
+
+    pub const fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::V1,
+            2 => Self::V2,
+            _ => Self::V0,
+        }
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::V1 => "V1",
+            Self::V2 => "V2",
+            _ => "V0",
+        }
+    }
+}
+
+impl std::fmt::Debug for TransportMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Configuration for one MoonProto UDP session.
 ///
 /// Use [`ClientConfig::new`] for normal clients. It selects the open base
@@ -280,12 +277,9 @@ pub struct ClientConfig {
     pub master_key: MoonKey,
     /// Transport MAC/obfuscation key imported from MoonBot.
     pub mac_key: MoonKey,
-    /// Transport mode: `0` for V0/base transport, `1`/`2` for V1/V2.
-    ///
-    /// [`Self::with_transport_mode`] normalizes unsupported mode values back to
-    /// `0`. Direct struct literals can still set this field for low-level
-    /// tests/tools, but normal application code should go through the builder.
-    pub mask_ver: u8,
+    /// Transport mode (`V0`, `V1`, or `V2`). It must match the server-side
+    /// connection setting.
+    pub mask_ver: TransportMode,
     /// Client id sent in transport headers. `ClientConfig::new` generates it
     /// randomly; override only for deterministic tools/tests.
     pub client_id: u64,
@@ -309,7 +303,7 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     /// Create config with production defaults for V0/base transport:
-    /// - `mask_ver = 0`;
+    /// - `transport mode = V0`;
     /// - `client_id = rand::random()`;
     /// - `ntp_host = Some("pool.ntp.org")` (shared process-level syncer);
     /// - `refresh = RefreshConfig::default()` (Delphi-worker refresh after Init).
@@ -328,7 +322,7 @@ impl ClientConfig {
             server_port,
             master_key,
             mac_key,
-            mask_ver: 0,
+            mask_ver: TransportMode::V0,
             client_id: rand::random(),
             ntp_host: Some("pool.ntp.org".to_string()),
             refresh: RefreshConfig::default(),
@@ -337,14 +331,19 @@ impl ClientConfig {
 
     /// Override transport mode.
     ///
-    /// `0` selects V0/base transport. Modes `1` and `2` select V1/V2.
-    /// Unsupported values fall back to `0`.
-    pub fn with_transport_mode(mut self, mask_ver: u8) -> Self {
-        self.mask_ver = match mask_ver {
-            0 => 0,
-            1 | 2 => mask_ver,
-            _ => 0,
-        };
+    /// Override transport mode.
+    pub fn with_transport_mode(mut self, mode: TransportMode) -> Self {
+        self.mask_ver = mode;
+        self
+    }
+
+    /// Override transport mode from a raw Delphi `mask_ver` byte.
+    ///
+    /// This is for config importers and protocol tests. Application code should
+    /// call [`Self::with_transport_mode`] with a named [`TransportMode`].
+    #[doc(hidden)]
+    pub fn with_transport_mode_byte(mut self, mask_ver: u8) -> Self {
+        self.mask_ver = TransportMode::from_byte(mask_ver);
         self
     }
 

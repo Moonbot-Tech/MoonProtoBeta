@@ -1,28 +1,41 @@
 //! Runtime-owner loop and command handlers for `MoonClient`.
 
 use super::commands::{
-    RuntimeCommand, RuntimeCommandKind, RuntimeCommandRequest, RuntimeReply,
-    RuntimeTradeCommandKind, StratRuntimeCommand, UiRuntimeCommand,
+    RuntimeCommand, RuntimeCommandKind, RuntimeTradeCommandKind, StratRuntimeCommand,
+    UiRuntimeCommand,
 };
 use super::*;
+use crate::client::init::{RuntimeInitMachine, RuntimeInitPoll};
+use std::collections::VecDeque;
 use std::sync::RwLock;
-
-const ACTIVE_RUNTIME_TICK: Duration = Duration::from_millis(20);
 
 pub(super) fn runtime_loop(
     mut client: Client,
     mut dispatcher: crate::events::EventDispatcher,
     rx: mpsc::Receiver<RuntimeCommand>,
-    events_tx: mpsc::Sender<crate::events::Event>,
-    snapshot: Arc<RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>>,
+    event_sink: MoonEventSink,
+    snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
+    connect: ConnectConfig,
+    ready_tx: Option<mpsc::Sender<Result<(), ConnectError>>>,
 ) {
+    let api_pending = Arc::clone(&client.api_pending);
     let mut pending = RuntimePending::default();
-    if client.trades_storage_scope_intent().is_some() {
-        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
-        schedule_auto_candles_snapshot(&mut client, &mut pending);
-    }
+    let mut startup = Some(RuntimeInitMachine::new(connect, &mut dispatcher));
+    let startup_started_at = Instant::now();
+    let mut deferred_commands = VecDeque::new();
+    let mut dispatch_buffers = InlineDispatchBuffers::default();
     loop {
-        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut pending);
+        let (stop, changed) = if startup.is_some() {
+            drain_commands_during_startup(&rx, &mut deferred_commands)
+        } else {
+            drain_deferred_and_live_commands(
+                &mut client,
+                &mut dispatcher,
+                &rx,
+                &mut pending,
+                &mut deferred_commands,
+            )
+        };
         if changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
@@ -30,24 +43,86 @@ pub(super) fn runtime_loop(
             break;
         }
 
-        client.run_with_dispatcher_worker_queued(ACTIVE_RUNTIME_TICK, &mut dispatcher);
+        if !run_protocol_step_inline(&mut client, &mut dispatcher, &mut dispatch_buffers) {
+            break;
+        }
 
-        let candles_changed = poll_auto_candles(&mut pending, &mut dispatcher);
-        let coin_card_changed =
-            poll_coin_card_candles(&mut pending.coin_card_candles, &mut dispatcher);
-        let transfer_assets_changed = poll_transfer_assets(&mut pending, &mut dispatcher);
-        let account_changed =
-            poll_account_refreshes(&mut pending.account_refreshes, &mut dispatcher);
-        poll_engine_actions(&mut pending.engine_actions, &mut dispatcher);
-        if candles_changed || coin_card_changed || transfer_assets_changed || account_changed {
+        let state_changed = if let Some(startup_machine) = startup.as_mut() {
+            match startup_machine.poll(&mut client, &mut dispatcher) {
+                RuntimeInitPoll::Pending { changed } => changed,
+                RuntimeInitPoll::Ready(_result) => {
+                    if client.trades_storage_scope_intent().is_some() {
+                        sync_runtime_trade_storage_scope(&client, &mut dispatcher);
+                        schedule_auto_candles_snapshot(&mut client, &mut pending);
+                    }
+                    publish_snapshot(&dispatcher, &snapshot);
+                    client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
+                        step: "StartupSnapshot",
+                        elapsed_ms: startup_started_at.elapsed().as_millis() as u64,
+                    });
+                    publish_queued_events(&mut dispatcher, &event_sink);
+                    client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
+                        step: "StartupEvents",
+                        elapsed_ms: startup_started_at.elapsed().as_millis() as u64,
+                    });
+                    client.fire_lifecycle(LifecycleEvent::Ready);
+                    if let Some(tx) = ready_tx.as_ref() {
+                        let _ = tx.send(Ok(()));
+                    }
+                    startup = None;
+                    true
+                }
+                RuntimeInitPoll::Failed(err) => {
+                    client.fire_lifecycle(LifecycleEvent::ConnectFailed {
+                        error: err.to_string(),
+                    });
+                    if let Some(tx) = ready_tx.as_ref() {
+                        let _ = tx.send(Err(err));
+                    }
+                    break;
+                }
+            }
+        } else {
+            let candles_changed = poll_auto_candles(&mut pending, &mut dispatcher);
+            let coin_card_changed = poll_coin_card_candles(
+                &mut pending.coin_card_candles,
+                &mut dispatcher,
+                &api_pending,
+            );
+            let transfer_assets_changed =
+                poll_transfer_assets(&mut pending, &mut dispatcher, &api_pending);
+            let account_changed = poll_account_refreshes(
+                &mut pending.account_refreshes,
+                &mut dispatcher,
+                &api_pending,
+            );
+            poll_engine_actions(&mut pending.engine_actions, &mut dispatcher, &api_pending);
+            candles_changed || coin_card_changed || transfer_assets_changed || account_changed
+        };
+        if state_changed && startup.is_none() {
             publish_snapshot(&dispatcher, &snapshot);
         }
 
-        if publish_queued_events(&mut dispatcher, &events_tx) {
-            publish_snapshot(&dispatcher, &snapshot);
+        if startup.is_none() {
+            let events = take_queued_events_and_publish_snapshot(&mut dispatcher, &snapshot);
+            // Snapshot was published before events were emitted, while the
+            // runtime still held the state that produced those events. Event
+            // delivery itself runs after state apply and snapshot publish, not
+            // inline inside user callbacks.
+            emit_domain_events(events, &event_sink);
         }
 
-        let (stop, changed) = drain_commands(&mut client, &mut dispatcher, &rx, &mut pending);
+        let (stop, changed) = if startup.is_some() {
+            drain_commands_during_startup(&rx, &mut deferred_commands)
+        } else {
+            drain_deferred_and_live_commands(
+                &mut client,
+                &mut dispatcher,
+                &rx,
+                &mut pending,
+                &mut deferred_commands,
+            )
+        };
         if changed {
             publish_snapshot(&dispatcher, &snapshot);
         }
@@ -71,6 +146,41 @@ struct RuntimePending {
     engine_actions: Vec<PendingEngineAction>,
 }
 
+#[derive(Default)]
+struct InlineDispatchBuffers {
+    event_buf: Vec<crate::events::Event>,
+    payload_buf: Vec<(Command, Vec<u8>)>,
+    active_actions_buf: Vec<crate::events::ActiveAction>,
+}
+
+fn run_protocol_step_inline(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    buffers: &mut InlineDispatchBuffers,
+) -> bool {
+    let mut mode = RunMode::Dispatcher {
+        dispatcher,
+        on_event: DispatcherEventFn::Queue,
+        event_buf: std::mem::take(&mut buffers.event_buf),
+        payload_buf: std::mem::take(&mut buffers.payload_buf),
+        active_actions_buf: std::mem::take(&mut buffers.active_actions_buf),
+    };
+    let keep_running = (ProtocolCore { client }).run_step(&mut mode);
+    let RunMode::Dispatcher {
+        event_buf,
+        payload_buf,
+        active_actions_buf,
+        ..
+    } = mode
+    else {
+        unreachable!("inline runtime must use RunMode::Dispatcher");
+    };
+    buffers.event_buf = event_buf;
+    buffers.payload_buf = payload_buf;
+    buffers.active_actions_buf = active_actions_buf;
+    keep_running
+}
+
 struct PendingAutoCandles {
     uid: u64,
     rx: mpsc::Receiver<crate::client::MergedCandles>,
@@ -85,6 +195,8 @@ struct PendingAutoCandlesApply {
 struct PendingTransferAssets {
     kind: crate::state::ExchangeKind,
     batch_id: Option<u64>,
+    request_uid: Option<u64>,
+    deadline: Instant,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
 }
 
@@ -97,12 +209,14 @@ struct PendingTransferAssetsBatch {
 
 struct PendingCoinCardCandles {
     ticket: super::CoinCardCandlesTicket,
+    deadline: Instant,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
 }
 
 struct PendingAccountRefresh {
     kind: PendingAccountRefreshKind,
-    request_uid: u64,
+    request_uid: Option<u64>,
+    deadline: Instant,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
 }
 
@@ -115,7 +229,18 @@ enum PendingAccountRefreshKind {
 struct PendingEngineAction {
     kind: crate::events::EngineActionKind,
     ticket: super::EngineActionTicket,
+    deadline: Instant,
     rx: mpsc::Receiver<crate::commands::engine_api::EngineResponse>,
+}
+
+fn engine_pending_deadline() -> Instant {
+    Instant::now() + Duration::from_millis(crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64)
+}
+
+fn remove_api_pending(api_pending: &ApiPending, request_uid: Option<u64>) {
+    if let Some(uid) = request_uid {
+        api_pending.remove(uid);
+    }
 }
 
 fn drain_commands(
@@ -136,6 +261,39 @@ fn drain_commands(
             Err(mpsc::TryRecvError::Empty) => return (false, changed),
         }
     }
+}
+
+fn drain_commands_during_startup(
+    rx: &mpsc::Receiver<RuntimeCommand>,
+    deferred: &mut VecDeque<RuntimeCommand>,
+) -> (bool, bool) {
+    loop {
+        match rx.try_recv() {
+            Ok(RuntimeCommand::Stop) | Err(mpsc::TryRecvError::Disconnected) => {
+                return (true, false);
+            }
+            Ok(cmd) => deferred.push_back(cmd),
+            Err(mpsc::TryRecvError::Empty) => return (false, false),
+        }
+    }
+}
+
+fn drain_deferred_and_live_commands(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    rx: &mpsc::Receiver<RuntimeCommand>,
+    pending: &mut RuntimePending,
+    deferred: &mut VecDeque<RuntimeCommand>,
+) -> (bool, bool) {
+    let mut changed = false;
+    while let Some(cmd) = deferred.pop_front() {
+        match cmd {
+            RuntimeCommand::Stop => return (true, changed),
+            cmd => changed |= handle_command(client, dispatcher, cmd, pending),
+        }
+    }
+    let (stop, live_changed) = drain_commands(client, dispatcher, rx, pending);
+    (stop, changed || live_changed)
 }
 
 fn handle_command(
@@ -241,13 +399,14 @@ fn handle_command(
             handle_strat_command(client, cmd);
             false
         }
+        RuntimeCommand::StrategySnapshotBatch(strategies) => {
+            handle_strategy_snapshot_batch(client, dispatcher, strategies)
+        }
         RuntimeCommand::StrategySetChecked {
             strategy_id,
             checked,
-            reply,
         } => {
             let changed = dispatcher.set_strategy_checked(strategy_id, checked);
-            let _ = reply.send(changed);
             changed
         }
         RuntimeCommand::StrategySendCheckedDelta => {
@@ -258,100 +417,26 @@ fn handle_command(
             dispatcher.ui_strat_start_stop_v2(client, is_start);
             false
         }
-        RuntimeCommand::WithUsizeReply { cmd, reply } => {
-            let result = handle_usize_command(client, dispatcher, *cmd);
-            let _ = reply.send(result);
+        RuntimeCommand::DebugOutgoingBlackhole(enabled) => {
+            client.debug_set_outgoing_blackhole(enabled);
             false
         }
-        RuntimeCommand::Request { request, reply } => {
-            let (response, changed) = handle_request_command(client, dispatcher, request);
-            let _ = reply.send(response);
-            changed
+        RuntimeCommand::DebugResetErrEmuDiagnostics => {
+            client.reset_err_emu_diagnostics();
+            false
         }
-        RuntimeCommand::OrderAction { kind, reply } => {
-            let result = handle_order_action(client, dispatcher, kind);
-            let _ = reply.send(result);
+        RuntimeCommand::OrderAction(kind) => {
+            let result = handle_order_action(client, dispatcher, &kind);
+            if !result {
+                queue_order_action_rejected(dispatcher, &kind);
+            }
             result
         }
-        RuntimeCommand::TradeAction { kind, reply } => {
-            let result = handle_trade_action(client, dispatcher, kind);
-            let _ = reply.send(result);
+        RuntimeCommand::TradeAction(kind) => {
+            if let Err(err) = handle_trade_action(client, dispatcher, kind) {
+                log::warn!(target: "moonproto::active_runtime", "trade intent rejected: {err}");
+            }
             false
-        }
-    }
-}
-
-fn handle_request_command(
-    client: &mut Client,
-    dispatcher: &mut crate::events::EventDispatcher,
-    request: RuntimeCommandRequest,
-) -> (RuntimeReply, bool) {
-    match request {
-        RuntimeCommandRequest::OrderSnapshot { timeout } => (
-            RuntimeReply::OrderSnapshot(client.request_order_snapshot(dispatcher, timeout)),
-            true,
-        ),
-        RuntimeCommandRequest::BalanceSnapshot { timeout } => (
-            RuntimeReply::BalanceSnapshot(client.request_balance_snapshot(dispatcher, timeout)),
-            true,
-        ),
-        RuntimeCommandRequest::Balance { asset, timeout } => (
-            RuntimeReply::Balance(client.request_balance(dispatcher, &asset, timeout)),
-            false,
-        ),
-        RuntimeCommandRequest::HedgeMode { timeout } => (
-            RuntimeReply::HedgeMode(client.request_hedge_mode(dispatcher, timeout)),
-            false,
-        ),
-        RuntimeCommandRequest::ApiExpirationTime { timeout } => (
-            RuntimeReply::ApiExpirationTime(
-                client.request_api_expiration_time(dispatcher, timeout),
-            ),
-            false,
-        ),
-        RuntimeCommandRequest::TransferAssets { kind, timeout } => (
-            RuntimeReply::TransferAssets(client.request_transfer_assets(dispatcher, kind, timeout)),
-            false,
-        ),
-        RuntimeCommandRequest::CandlesData { timeout } => (
-            RuntimeReply::CandlesData(client.request_candles_data(dispatcher, timeout)),
-            true,
-        ),
-        RuntimeCommandRequest::CoinCardCandles {
-            market,
-            ticks,
-            timeout,
-        } => (
-            RuntimeReply::CoinCardCandles(
-                client.request_coin_card_candles(dispatcher, &market, ticks, timeout),
-            ),
-            false,
-        ),
-        RuntimeCommandRequest::ClientSettings { timeout } => (
-            RuntimeReply::ClientSettings(client.request_client_settings(dispatcher, timeout)),
-            true,
-        ),
-        RuntimeCommandRequest::EngineRaw { payload, timeout } => (
-            RuntimeReply::EngineRaw(client.request_engine_response(dispatcher, &payload, timeout)),
-            false,
-        ),
-    }
-}
-
-fn handle_usize_command(
-    client: &mut Client,
-    dispatcher: &mut crate::events::EventDispatcher,
-    cmd: RuntimeCommand,
-) -> usize {
-    match cmd {
-        RuntimeCommand::StrategySendCheckedDelta => dispatcher.send_strategy_checked_delta(client),
-        RuntimeCommand::StrategyStartStop { is_start } => {
-            dispatcher.ui_strat_start_stop_v2(client, is_start)
-        }
-        _ => {
-            let mut pending = RuntimePending::default();
-            handle_command(client, dispatcher, cmd, &mut pending);
-            0
         }
     }
 }
@@ -402,8 +487,16 @@ fn schedule_transfer_assets_refresh_kind(
     kind: crate::state::ExchangeKind,
     batch_id: Option<u64>,
 ) {
-    let rx = client.api_update_transfer_assets(kind);
-    pending.push(PendingTransferAssets { kind, batch_id, rx });
+    let payload = crate::commands::engine_request::update_transfer_assets(kind.to_byte());
+    let request_uid = engine_request_uid(&payload);
+    let rx = client.send_api_request_async(&payload);
+    pending.push(PendingTransferAssets {
+        kind,
+        batch_id,
+        request_uid,
+        deadline: engine_pending_deadline(),
+        rx,
+    });
 }
 
 fn schedule_engine_action(
@@ -414,7 +507,12 @@ fn schedule_engine_action(
     payload: Vec<u8>,
 ) {
     let rx = client.send_api_request_async(&payload);
-    pending.push(PendingEngineAction { kind, ticket, rx });
+    pending.push(PendingEngineAction {
+        kind,
+        ticket,
+        deadline: engine_pending_deadline(),
+        rx,
+    });
 }
 
 fn schedule_coin_card_candles(
@@ -424,7 +522,11 @@ fn schedule_coin_card_candles(
     payload: Vec<u8>,
 ) {
     let rx = client.send_api_request_async(&payload);
-    pending.push(PendingCoinCardCandles { ticket, rx });
+    pending.push(PendingCoinCardCandles {
+        ticket,
+        deadline: engine_pending_deadline(),
+        rx,
+    });
 }
 
 fn schedule_account_refresh(
@@ -433,11 +535,12 @@ fn schedule_account_refresh(
     kind: PendingAccountRefreshKind,
     payload: Vec<u8>,
 ) {
-    let request_uid = engine_request_uid(&payload).unwrap_or(0);
+    let request_uid = engine_request_uid(&payload);
     let rx = client.send_api_request_async(&payload);
     pending.push(PendingAccountRefresh {
         kind,
         request_uid,
+        deadline: engine_pending_deadline(),
         rx,
     });
 }
@@ -545,9 +648,11 @@ fn poll_auto_candles(
 fn poll_coin_card_candles(
     pending: &mut Vec<PendingCoinCardCandles>,
     dispatcher: &mut crate::events::EventDispatcher,
+    api_pending: &ApiPending,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.len() {
         match pending[i].rx.try_recv() {
             Ok(resp) => {
@@ -565,7 +670,19 @@ fn poll_coin_card_candles(
                 );
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending[i].deadline <= now {
+                    let ticket = pending.swap_remove(i).ticket;
+                    remove_api_pending(api_pending, ticket.request_uid);
+                    dispatcher.coin_card_candles_request_failed(
+                        ticket.market,
+                        ticket.kind,
+                        ticket.request_uid,
+                        "pending CoinCard candles request timed out",
+                    );
+                    changed = true;
+                } else {
+                    i += 1;
+                }
             }
         }
     }
@@ -575,9 +692,11 @@ fn poll_coin_card_candles(
 fn poll_transfer_assets(
     pending: &mut RuntimePending,
     dispatcher: &mut crate::events::EventDispatcher,
+    api_pending: &ApiPending,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.transfer_assets.len() {
         match pending.transfer_assets[i].rx.try_recv() {
             Ok(resp) => {
@@ -596,7 +715,18 @@ fn poll_transfer_assets(
                 finish_transfer_assets_batch_item(pending, dispatcher, item.batch_id, false);
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending.transfer_assets[i].deadline <= now {
+                    let item = pending.transfer_assets.swap_remove(i);
+                    remove_api_pending(api_pending, item.request_uid);
+                    dispatcher.transfer_assets_request_failed(
+                        item.kind,
+                        "pending transfer-assets request timed out",
+                    );
+                    changed = true;
+                    finish_transfer_assets_batch_item(pending, dispatcher, item.batch_id, false);
+                } else {
+                    i += 1;
+                }
             }
         }
     }
@@ -606,9 +736,11 @@ fn poll_transfer_assets(
 fn poll_account_refreshes(
     pending: &mut Vec<PendingAccountRefresh>,
     dispatcher: &mut crate::events::EventDispatcher,
+    api_pending: &ApiPending,
 ) -> bool {
     let mut changed = false;
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.len() {
         match pending[i].rx.try_recv() {
             Ok(resp) => {
@@ -626,18 +758,35 @@ fn poll_account_refreshes(
                 let item = pending.swap_remove(i);
                 match item.kind {
                     PendingAccountRefreshKind::HedgeMode => dispatcher.hedge_mode_request_failed(
-                        Some(item.request_uid),
+                        item.request_uid,
                         "pending hedge-mode receiver closed before response",
                     ),
                     PendingAccountRefreshKind::ApiExpiration => dispatcher
                         .api_expiration_request_failed(
-                            Some(item.request_uid),
+                            item.request_uid,
                             "pending API-expiration receiver closed before response",
                         ),
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending[i].deadline <= now {
+                    let item = pending.swap_remove(i);
+                    remove_api_pending(api_pending, item.request_uid);
+                    match item.kind {
+                        PendingAccountRefreshKind::HedgeMode => dispatcher
+                            .hedge_mode_request_failed(
+                                item.request_uid,
+                                "pending hedge-mode request timed out",
+                            ),
+                        PendingAccountRefreshKind::ApiExpiration => dispatcher
+                            .api_expiration_request_failed(
+                                item.request_uid,
+                                "pending API-expiration request timed out",
+                            ),
+                    }
+                } else {
+                    i += 1;
+                }
             }
         }
     }
@@ -685,8 +834,10 @@ fn finish_transfer_assets_batch_item(
 fn poll_engine_actions(
     pending: &mut Vec<PendingEngineAction>,
     dispatcher: &mut crate::events::EventDispatcher,
+    api_pending: &ApiPending,
 ) {
     let mut i = 0;
+    let now = Instant::now();
     while i < pending.len() {
         match pending[i].rx.try_recv() {
             Ok(resp) => {
@@ -704,7 +855,18 @@ fn poll_engine_actions(
                 );
             }
             Err(mpsc::TryRecvError::Empty) => {
-                i += 1;
+                if pending[i].deadline <= now {
+                    let action = pending.swap_remove(i);
+                    remove_api_pending(api_pending, action.ticket.request_uid);
+                    dispatcher.queue_engine_action_disconnected(
+                        action.kind,
+                        action.ticket.request_uid,
+                        action.ticket.method,
+                        "pending Engine API action timed out",
+                    );
+                } else {
+                    i += 1;
+                }
             }
         }
     }
@@ -720,7 +882,7 @@ fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {
             is_release,
         } => client.ui_update_version(&version_name, is_release),
         UiRuntimeCommand::SwitchDex(dex_name) => client.ui_switch_dex(&dex_name),
-        UiRuntimeCommand::SwitchSpot(spot_index) => client.ui_switch_spot(spot_index),
+        UiRuntimeCommand::SwitchSpot(spot) => client.ui_switch_spot(spot.to_byte()),
     }
 }
 
@@ -737,36 +899,59 @@ fn handle_strat_command(client: &mut Client, cmd: StratRuntimeCommand) {
     }
 }
 
+fn handle_strategy_snapshot_batch(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
+) -> bool {
+    let Some(schema) = dispatcher.strats().strategy_schema().cloned() else {
+        log::warn!(
+            target: "moonproto::active_runtime",
+            "strategy snapshot batch ignored: live strategy schema is not available"
+        );
+        return false;
+    };
+    dispatcher.set_local_strategies(&strategies);
+    client.strat_send_snapshot_batch(
+        dispatcher.local_strategy_epoch(),
+        false,
+        &schema,
+        &strategies,
+    );
+    true
+}
+
 fn handle_order_action(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
-    kind: RuntimeCommandKind,
+    kind: &RuntimeCommandKind,
 ) -> bool {
     match kind {
         RuntimeCommandKind::MoveOrder { uid, new_price } => {
-            client.replace_tracked_order(dispatcher.orders_mut(), uid, new_price)
+            client.replace_tracked_order(dispatcher.orders_mut(), *uid, *new_price)
         }
         RuntimeCommandKind::CancelOrder { uid } => {
-            client.cancel_tracked_order(dispatcher.orders_mut(), uid)
+            client.cancel_tracked_order(dispatcher.orders_mut(), *uid)
         }
         RuntimeCommandKind::UpdateStops { uid, stops } => {
-            client.update_tracked_order_stops(dispatcher.orders_mut(), uid, &stops)
+            client.update_tracked_order_stops(dispatcher.orders_mut(), *uid, stops)
         }
-        RuntimeCommandKind::UpdateVStop {
-            uid,
-            on,
-            fixed,
-            level,
-            vol,
-        } => client.update_tracked_order_vstop(dispatcher.orders_mut(), uid, on, fixed, level, vol),
+        RuntimeCommandKind::UpdateVStop { uid, params } => client.update_tracked_order_vstop(
+            dispatcher.orders_mut(),
+            *uid,
+            params.enabled,
+            params.fixed,
+            params.level,
+            params.volume,
+        ),
         RuntimeCommandKind::SetImmune { items } => {
-            client.set_immune(dispatcher.orders_mut(), &items)
+            client.set_immune(dispatcher.orders_mut(), items)
         }
         RuntimeCommandKind::TurnOrderPanicSell { uid, turn_on } => {
-            client.turn_tracked_order_panic_sell(dispatcher.orders_mut(), uid, turn_on)
+            client.turn_tracked_order_panic_sell(dispatcher.orders_mut(), *uid, *turn_on)
         }
         RuntimeCommandKind::RequestOrderStatus { uid } => {
-            let Some(order) = dispatcher.orders().get(uid).cloned() else {
+            let Some(order) = dispatcher.orders().get(*uid).cloned() else {
                 return false;
             };
             client.request_tracked_order_status(&order)
@@ -774,7 +959,31 @@ fn handle_order_action(
         RuntimeCommandKind::SwitchPanicSellByMarket {
             market_name,
             turn_on,
-        } => client.switch_panic_sell_by_market(dispatcher.orders_mut(), &market_name, turn_on),
+        } => client.switch_panic_sell_by_market(dispatcher.orders_mut(), market_name, *turn_on),
+    }
+}
+
+fn queue_order_action_rejected(
+    dispatcher: &mut crate::events::EventDispatcher,
+    kind: &RuntimeCommandKind,
+) {
+    let uid = match kind {
+        RuntimeCommandKind::MoveOrder { uid, .. }
+        | RuntimeCommandKind::CancelOrder { uid }
+        | RuntimeCommandKind::UpdateStops { uid, .. }
+        | RuntimeCommandKind::UpdateVStop { uid, .. }
+        | RuntimeCommandKind::TurnOrderPanicSell { uid, .. }
+        | RuntimeCommandKind::RequestOrderStatus { uid } => Some(*uid),
+        RuntimeCommandKind::SetImmune { .. }
+        | RuntimeCommandKind::SwitchPanicSellByMarket { .. } => None,
+    };
+    if let Some(uid) = uid {
+        dispatcher.queue_events([crate::events::Event::Order(
+            crate::state::OrderEvent::Ignored {
+                uid,
+                reason: crate::state::ApplyResult::NotApplicable,
+            },
+        )]);
     }
 }
 
@@ -784,8 +993,11 @@ fn handle_trade_action(
     kind: RuntimeTradeCommandKind,
 ) -> Result<bool, TradeContextError> {
     match kind {
-        RuntimeTradeCommandKind::NewOrder(params) => {
-            let ctx = client.random_trade_ctx()?;
+        RuntimeTradeCommandKind::NewOrder {
+            params,
+            request_uid,
+        } => {
+            let ctx = client.trade_ctx(request_uid)?;
             Ok(client.new_order(
                 ctx,
                 &params.market,
@@ -852,27 +1064,49 @@ fn handle_trade_action(
 
 pub(super) fn publish_queued_events(
     dispatcher: &mut crate::events::EventDispatcher,
-    events_tx: &mpsc::Sender<crate::events::Event>,
+    event_sink: &MoonEventSink,
 ) -> bool {
     let events = dispatcher.take_queued_events();
     let changed = !events.is_empty();
-    for event in events {
-        let _ = events_tx.send(event);
-    }
+    emit_domain_events(events, event_sink);
     changed
+}
+
+pub(super) fn take_queued_events_and_publish_snapshot(
+    dispatcher: &mut crate::events::EventDispatcher,
+    snapshot: &RwLock<Option<MoonClientSnapshot>>,
+) -> Vec<crate::events::Event> {
+    let events = dispatcher.take_queued_events();
+    if !events.is_empty() {
+        publish_snapshot(dispatcher, snapshot);
+    }
+    events
+}
+
+pub(super) fn emit_domain_events(events: Vec<crate::events::Event>, event_sink: &MoonEventSink) {
+    for event in events {
+        event_sink.emit_domain(event);
+    }
 }
 
 pub(super) fn publish_snapshot(
     dispatcher: &crate::events::EventDispatcher,
-    snapshot: &RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>,
+    snapshot: &RwLock<Option<MoonClientSnapshot>>,
 ) {
-    *snapshot.write().unwrap() = Some(Arc::new(dispatcher.snapshot()));
+    let next = Arc::new(dispatcher.snapshot());
+    let mut guard = snapshot.write().unwrap();
+    let revision = guard
+        .as_ref()
+        .map(|snapshot| snapshot.revision().saturating_add(1))
+        .unwrap_or(1);
+    *guard = Some(MoonClientSnapshot::new(revision, next));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::engine_api::ServerInfo;
+    use crate::commands::market::{BaseCurrency, ExchangeCode};
     use crate::commands::trade::TradeCommand;
 
     fn dummy_cfg() -> ClientConfig {
@@ -881,7 +1115,7 @@ mod tests {
             server_port: 3000,
             master_key: [0; 16],
             mac_key: [0; 16],
-            mask_ver: 0,
+            mask_ver: TransportMode::V0,
             client_id: 0,
             ntp_host: None,
             refresh: RefreshConfig {
@@ -895,8 +1129,8 @@ mod tests {
         let mut client = Client::new(dummy_cfg());
         client.testing_set_domain_ready(true);
         client.set_server_info(ServerInfo {
-            exchange_code: Some(9),
-            base_currency_code: Some(17),
+            exchange_code: Some(ExchangeCode::FGate),
+            base_currency_code: Some(BaseCurrency::IDR),
             ..Default::default()
         });
         client
@@ -910,9 +1144,11 @@ mod tests {
         let queued = handle_trade_action(
             &mut client,
             &mut dispatcher,
-            RuntimeTradeCommandKind::NewOrder(
-                NewOrderParams::new("DOGEUSDT", OrderSide::Short, 12.5, 0.25).with_strategy_id(42),
-            ),
+            RuntimeTradeCommandKind::NewOrder {
+                params: NewOrderParams::new("DOGEUSDT", OrderSide::Short, 12.5, 0.25)
+                    .with_strategy_id(42),
+                request_uid: 0xCAFE_BABE,
+            },
         )
         .expect("BaseCheck route is present");
 
@@ -922,6 +1158,7 @@ mod tests {
         match TradeCommand::parse(&high[0].data).expect("valid new order") {
             TradeCommand::NewOrder(cmd) => {
                 assert_eq!(cmd.market.market_name, "DOGEUSDT");
+                assert_eq!(cmd.market.base.uid, 0xCAFE_BABE);
                 assert_eq!(cmd.market.currency, 17);
                 assert_eq!(cmd.market.platform, 9);
                 assert!(cmd.is_short);
@@ -1039,5 +1276,20 @@ mod tests {
             )]
         ));
         assert!(pending.transfer_assets_batches.is_empty());
+    }
+
+    #[test]
+    fn published_snapshots_have_monotonic_revisions() {
+        let dispatcher = crate::events::EventDispatcher::new();
+        let snapshot = RwLock::new(None);
+
+        publish_snapshot(&dispatcher, &snapshot);
+        let first = snapshot.read().unwrap().clone().expect("first snapshot");
+        assert_eq!(first.revision(), 1);
+
+        publish_snapshot(&dispatcher, &snapshot);
+        let second = snapshot.read().unwrap().clone().expect("second snapshot");
+        assert_eq!(second.revision(), 2);
+        assert_eq!(second.orders().len(), first.orders().len());
     }
 }

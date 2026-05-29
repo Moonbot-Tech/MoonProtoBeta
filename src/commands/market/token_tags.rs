@@ -6,7 +6,7 @@ use super::{write_str, EngineStreamReader};
 /// `(tag_none, tag_Monitoring, tag_Fan, tag_seed, tag_launch, tag_gaming,
 ///   tag_New, tag_OLD, tag_BNB, tag_Alpha, tag_OICapped, tag_TradFi)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TokenTags(pub u32);
+pub struct TokenTags(u32);
 
 impl TokenTags {
     pub const NONE: Self = Self(1 << 0);
@@ -54,6 +54,7 @@ impl core::ops::BitAnd for TokenTags {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
 pub struct MarketTokenTags {
     pub market_name: String,
     pub tags: TokenTags,
@@ -62,6 +63,7 @@ pub struct MarketTokenTags {
 /// Ответ `emk_CheckBinanceTags`: список (market_name, tags).
 /// Wire-form (MoonProtoEngineServer.pas:324-333):
 ///   `count:i32 + (market_name:string + tags:i32)[count]`.
+#[doc(hidden)]
 pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
     // MarketTokenTags: market_name (string u16+chars) + tags (i32) = минимум 6 байт.
@@ -78,6 +80,7 @@ pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     Some(out)
 }
 
+#[doc(hidden)]
 pub fn build_token_tags_response(items: &[MarketTokenTags]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + items.len() * 16);
     out.extend_from_slice(&(items.len() as i32).to_le_bytes());

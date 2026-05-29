@@ -1,6 +1,7 @@
 use super::*;
 use crate::state::history::DELPHI_MSECS_PER_DAY;
 use crate::state::MarketHistoryConfig;
+use std::sync::Arc;
 
 #[test]
 fn worker_stores_enabled_futures_trades_after_flush() {
@@ -22,14 +23,18 @@ fn worker_stores_enabled_futures_trades_after_flush() {
     worker.handle().send_stream_batch(MarketHistoryStreamBatch {
         base_time: 45_000.0,
         now_time,
-        sections: vec![MarketHistoryStreamSection::FuturesTrades {
+        sections: vec![MarketHistoryStreamSection {
             market_index: 0,
-            rows: vec![MarketHistoryTradeInput {
-                time_delta_ms: 250,
-                price: 100.0,
-                qty: 2.0,
-            }],
+            kind: MarketHistoryStreamSectionKind::FuturesTrades,
+            start: 0,
+            len: 1,
         }],
+        trade_rows: vec![MarketHistoryTradeInput {
+            time_delta_ms: 250,
+            price: 100.0,
+            qty: 2.0,
+        }],
+        mm_order_rows: Vec::new(),
     });
     assert!(worker.flush(now_time));
 
@@ -62,14 +67,18 @@ fn worker_does_not_create_market_from_stream_batch() {
     worker.handle().send_stream_batch(MarketHistoryStreamBatch {
         base_time: 45_000.0,
         now_time: 45_000.0,
-        sections: vec![MarketHistoryStreamSection::SpotTrades {
+        sections: vec![MarketHistoryStreamSection {
             market_index: 0,
-            rows: vec![MarketHistoryTradeInput {
-                time_delta_ms: 0,
-                price: 10.0,
-                qty: 1.0,
-            }],
+            kind: MarketHistoryStreamSectionKind::SpotTrades,
+            start: 0,
+            len: 1,
         }],
+        trade_rows: vec![MarketHistoryTradeInput {
+            time_delta_ms: 0,
+            price: 10.0,
+            qty: 1.0,
+        }],
+        mm_order_rows: Vec::new(),
     });
     assert!(worker.flush(45_000.0));
 
@@ -100,7 +109,7 @@ fn worker_stores_last_price_batch_for_enabled_market() {
         .send_last_price_batch(MarketHistoryLastPriceBatch {
             now_time: 45_000.25,
             rows: vec![MarketHistoryLastPriceInput {
-                market_name: "BTCUSDT".to_string(),
+                market_name: Arc::<str>::from("BTCUSDT"),
                 current: 100.5,
                 bid: 100.0,
                 ask: 101.0,
@@ -147,26 +156,30 @@ fn worker_flush_compacts_evicted_futures_to_mini_candles() {
     worker.handle().send_stream_batch(MarketHistoryStreamBatch {
         base_time: 45_000.0,
         now_time,
-        sections: vec![MarketHistoryStreamSection::FuturesTrades {
+        sections: vec![MarketHistoryStreamSection {
             market_index: 0,
-            rows: vec![
-                MarketHistoryTradeInput {
-                    time_delta_ms: 0,
-                    price: 100.0,
-                    qty: 2.0,
-                },
-                MarketHistoryTradeInput {
-                    time_delta_ms: 100,
-                    price: 101.0,
-                    qty: -3.0,
-                },
-                MarketHistoryTradeInput {
-                    time_delta_ms: 200,
-                    price: 102.0,
-                    qty: 4.0,
-                },
-            ],
+            kind: MarketHistoryStreamSectionKind::FuturesTrades,
+            start: 0,
+            len: 3,
         }],
+        trade_rows: vec![
+            MarketHistoryTradeInput {
+                time_delta_ms: 0,
+                price: 100.0,
+                qty: 2.0,
+            },
+            MarketHistoryTradeInput {
+                time_delta_ms: 100,
+                price: 101.0,
+                qty: -3.0,
+            },
+            MarketHistoryTradeInput {
+                time_delta_ms: 200,
+                price: 102.0,
+                qty: 4.0,
+            },
+        ],
+        mm_order_rows: Vec::new(),
     });
     assert!(worker.flush(now_time));
 
@@ -206,22 +219,22 @@ fn worker_applies_candles_snapshot_only_for_configured_scope() {
         MarketHistoryCandlesSnapshot {
             market_name: "BTCUSDT".to_string(),
             candles_5m: vec![Candle5mRow {
-                open_p: 100.0,
-                close_p: 101.0,
-                max_p: 102.0,
-                min_p: 99.0,
-                vol: 10.0,
+                open: 100.0,
+                close: 101.0,
+                high: 102.0,
+                low: 99.0,
+                volume: 10.0,
                 time: 45_000.0,
             }],
         },
         MarketHistoryCandlesSnapshot {
             market_name: "ETHUSDT".to_string(),
             candles_5m: vec![Candle5mRow {
-                open_p: 10.0,
-                close_p: 11.0,
-                max_p: 12.0,
-                min_p: 9.0,
-                vol: 1.0,
+                open: 10.0,
+                close: 11.0,
+                high: 12.0,
+                low: 9.0,
+                volume: 1.0,
                 time: 45_000.0,
             }],
         },
@@ -232,6 +245,6 @@ fn worker_applies_candles_snapshot_only_for_configured_scope() {
     let mut out = Vec::new();
     btc.copy_last(4, &mut out);
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].close_p, 101.0);
+    assert_eq!(out[0].close, 101.0);
     assert!(worker.readers("ETHUSDT").is_none());
 }

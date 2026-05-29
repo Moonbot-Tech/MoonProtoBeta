@@ -6,7 +6,9 @@
 //! handles.
 
 use crate::commands::arb::{ArbPayload, ArbPriceItem};
-use crate::commands::market::{Market, MarketArbPricePoint, ARB_PRICE_RING_LEN};
+use crate::commands::market::{
+    ArbIsolationFlags, ArbPlatformCode, Market, MarketArbPricePoint, ARB_PRICE_RING_LEN,
+};
 
 use super::MarketsState;
 
@@ -69,9 +71,9 @@ impl MarketsState {
                         }
                         market
                             .arb_slots
-                            .entry(entry.platform_code)
+                            .entry(ArbPlatformCode::from_byte(entry.platform_code))
                             .or_default()
-                            .isolated_flags_tmp = entry.flags;
+                            .isolated_flags_tmp = ArbIsolationFlags::from_byte(entry.flags);
                         summary.applied_isolation_entries += 1;
                     });
                 }
@@ -86,7 +88,7 @@ impl MarketsState {
             handle.with_mut(|market| {
                 for slot in market.arb_slots.values_mut() {
                     slot.isolated_flags = slot.isolated_flags_tmp;
-                    slot.isolated_flags_tmp = 0;
+                    slot.isolated_flags_tmp = ArbIsolationFlags::None;
                 }
             });
         }
@@ -104,7 +106,10 @@ fn apply_arb_price_like_delphi(
         return false;
     }
 
-    let slot = market.arb_slots.entry(item.platform_code).or_default();
+    let slot = market
+        .arb_slots
+        .entry(ArbPlatformCode::from_byte(item.platform_code))
+        .or_default();
     slot.enabled = true;
     let head = ((slot.head as usize + 1) % ARB_PRICE_RING_LEN) as u8;
     slot.ring[head as usize] = MarketArbPricePoint {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::commands::order_book::OrderLevel;
+use std::sync::Arc;
 
 fn level(rate: f32, quantity: f32) -> OrderLevel {
     OrderLevel { rate, quantity }
@@ -88,6 +89,31 @@ fn full_then_inorder_diffs() {
             ..
         }
     ));
+}
+
+#[test]
+fn snapshot_cow_mutating_one_book_does_not_deep_clone_other_books() {
+    let mut ob = OrderBooks::new();
+    let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000);
+    let _ = ob.on_packet(make_pkt(2, 0, 10, true), 1000);
+
+    let snapshot = ob.clone();
+    let other_before = ob.books.get(&(2, 0)).unwrap().clone();
+
+    let _ = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
+
+    assert!(
+        !Arc::ptr_eq(
+            snapshot.books.get(&(1, 0)).unwrap(),
+            ob.books.get(&(1, 0)).unwrap()
+        ),
+        "mutated book must detach from the held snapshot"
+    );
+    assert!(
+        Arc::ptr_eq(snapshot.books.get(&(2, 0)).unwrap(), &other_before)
+            && Arc::ptr_eq(&other_before, ob.books.get(&(2, 0)).unwrap()),
+        "unmodified books must stay shared; otherwise snapshot COW still clones all book levels"
+    );
 }
 
 #[test]
@@ -287,7 +313,7 @@ fn separate_pairs_independent() {
         OrderBookEvent::Apply {
             is_full: false,
             seq: 21,
-            book_kind: 1,
+            kind: OrderBookKind::Spot,
             ..
         }
     )));
@@ -298,7 +324,7 @@ fn separate_pairs_independent() {
         OrderBookEvent::Apply {
             is_full: false,
             seq: 11,
-            book_kind: 0,
+            kind: OrderBookKind::Futures,
             ..
         }
     )));

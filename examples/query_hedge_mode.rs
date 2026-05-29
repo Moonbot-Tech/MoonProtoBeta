@@ -1,4 +1,4 @@
-﻿//! Diagnostic one-shot hedge-mode read through the high-level runtime.
+//! Hedge-mode refresh through the public `MoonClient` event/snapshot path.
 //!
 //! Regular UI code should call `refresh_hedge_mode()` and read
 //! `snapshot().account().hedge_mode()` after `Event::Account`.
@@ -8,6 +8,9 @@
 
 use std::env;
 use std::time::Duration;
+
+use moonproto::state::AccountEvent;
+use moonproto::Event;
 
 mod common;
 
@@ -26,11 +29,24 @@ fn main() {
         }
     };
 
-    match client.blocking_request_hedge_mode(Duration::from_secs(15)) {
-        Ok(value) => println!("[response] hedge_mode={value}"),
-        Err(err) => {
-            eprintln!("[request] failed: {err}");
-            std::process::exit(3);
-        }
+    if let Err(err) = client.account().refresh_hedge_mode() {
+        eprintln!("[request] failed: {err}");
+        std::process::exit(3);
     }
+    let ready = common::wait_until(Duration::from_secs(15), || {
+        client
+            .drain_events()
+            .into_iter()
+            .any(|event| matches!(event, Event::Account(AccountEvent::HedgeModeUpdated { .. })))
+    });
+    if !ready {
+        eprintln!("[request] timed out waiting for Event::Account(HedgeModeUpdated)");
+        std::process::exit(3);
+    }
+
+    let hedge_mode = client
+        .snapshot()
+        .and_then(|snapshot| snapshot.account().hedge_mode())
+        .expect("hedge-mode event must publish account snapshot");
+    println!("[response] hedge_mode={hedge_mode}");
 }

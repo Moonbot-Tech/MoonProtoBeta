@@ -50,20 +50,14 @@ snapshots from different servers.
 client's `server_time_delta_handle`. That keeps order timestamps correct when
 two servers have different clock drift.
 
-Custom low-level loops that own `Client + EventDispatcher` directly must call:
-
-```rust
-dispatcher.set_server_time_delta_source(client.server_time_delta_handle());
-```
-
 ## UI Subscriptions
 
 Send intents to the matching session handle:
 
 ```rust
-session.client.subscribe_orderbook("BTCUSDT")?;
-session.client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
-session.client.refresh_balances()?;
+session.client.streams().subscribe_orderbook("BTCUSDT")?;
+session.client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly)?;
+session.client.balances().refresh()?;
 ```
 
 These subscriptions are per-client. Init flushes each registry once, and
@@ -71,7 +65,7 @@ reconnect restores each session independently.
 
 ## Exchange Type Flags
 
-If UI code needs server identity/exchange flags, read them from the BaseCheck
-metadata exposed by the low-level custom API, or keep a user-selected label for
-each `MoonClient` session. Extended exchange-specific UI should be enabled only
-after the corresponding server metadata is known.
+If UI code needs server identity/exchange flags, read them from the `MoonClient`
+snapshot/lifecycle state for that session, or keep a user-selected label for
+each session. Extended exchange-specific UI should be enabled only after the
+corresponding server metadata is known.

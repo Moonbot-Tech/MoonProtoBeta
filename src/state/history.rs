@@ -123,7 +123,7 @@ impl SeqRingTimedRow for TradeHistoryRow {
 
 /// Delphi `TMMOrder`: main market-maker history row.
 ///
-/// Delphi layout is `Time: TDateTime; vol: Double; Q: Double`. Optional taker
+/// Delphi layout is `Time: TDateTime; volume: Double; Q: Double`. Optional taker
 /// address and color are companion data in Delphi
 /// `TStreamableRingBuffer<TMMOrder, TMMOrderData>` and must be ported as a
 /// separate companion layer, not silently folded into this base row.
@@ -131,7 +131,7 @@ impl SeqRingTimedRow for TradeHistoryRow {
 #[repr(C)]
 pub struct MMOrderHistoryRow {
     pub time: f64,
-    pub vol: f64,
+    pub volume: f64,
     pub q: f64,
 }
 
@@ -139,6 +139,11 @@ impl MMOrderHistoryRow {
     #[inline]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
     }
 }
 
@@ -189,14 +194,26 @@ pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct LastPricePoint {
+    #[doc(hidden)]
     pub current: f32,
+    #[doc(hidden)]
     pub real_time: f64,
 }
 
 impl LastPricePoint {
     #[inline]
+    pub fn price(self) -> f32 {
+        self.current
+    }
+
+    #[inline]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.real_time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
     }
 }
 
@@ -214,14 +231,26 @@ impl SeqRingTimedRow for LastPricePoint {
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct MarkPricePoint {
+    #[doc(hidden)]
     pub current: f32,
+    #[doc(hidden)]
     pub real_time: f64,
 }
 
 impl MarkPricePoint {
     #[inline]
+    pub fn price(self) -> f32 {
+        self.current
+    }
+
+    #[inline]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.real_time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
     }
 }
 
@@ -242,15 +271,15 @@ impl SeqRingTimedRow for MarkPricePoint {
 #[repr(C)]
 pub struct Candle5mRow {
     #[doc(hidden)]
-    pub open_p: f32,
+    pub open: f32,
     #[doc(hidden)]
-    pub close_p: f32,
+    pub close: f32,
     #[doc(hidden)]
-    pub max_p: f32,
+    pub high: f32,
     #[doc(hidden)]
-    pub min_p: f32,
+    pub low: f32,
     #[doc(hidden)]
-    pub vol: f32,
+    pub volume: f32,
     #[doc(hidden)]
     pub time: f64,
 }
@@ -258,38 +287,38 @@ pub struct Candle5mRow {
 impl Candle5mRow {
     pub fn from_deep_price(row: crate::commands::candles::DeepPrice) -> Self {
         Self {
-            open_p: row.open_p,
-            close_p: row.close_p,
-            max_p: row.max_p,
-            min_p: row.min_p,
-            vol: row.vol,
+            open: row.open,
+            close: row.close,
+            high: row.high,
+            low: row.low,
+            volume: row.volume,
             time: row.time,
         }
     }
 
     #[inline]
     pub fn open(self) -> f32 {
-        self.open_p
+        self.open
     }
 
     #[inline]
     pub fn close(self) -> f32 {
-        self.close_p
+        self.close
     }
 
     #[inline]
     pub fn high(self) -> f32 {
-        self.max_p
+        self.high
     }
 
     #[inline]
     pub fn low(self) -> f32 {
-        self.min_p
+        self.low
     }
 
     #[inline]
     pub fn volume(self) -> f32 {
-        self.vol
+        self.volume
     }
 
     #[inline]
@@ -328,6 +357,31 @@ impl MiniCandle {
     #[inline]
     pub fn time_delphi(self) -> DelphiTime {
         DelphiTime::from_days(self.time)
+    }
+
+    #[inline]
+    pub fn unix_millis(self) -> Option<i64> {
+        self.time_delphi().unix_millis()
+    }
+
+    #[inline]
+    pub fn low(self) -> f32 {
+        self.min_price
+    }
+
+    #[inline]
+    pub fn high(self) -> f32 {
+        self.max_price
+    }
+
+    #[inline]
+    pub fn buy_volume(self) -> f32 {
+        self.buy_vol
+    }
+
+    #[inline]
+    pub fn sell_volume(self) -> f32 {
+        self.sell_vol
     }
 }
 

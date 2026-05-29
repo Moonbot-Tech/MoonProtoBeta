@@ -9,7 +9,7 @@
 //! - `LevManage` (CmdId=9): leverage-management settings snapshot.
 //! - `MMOrdersSubscribe` (CmdId=5): market-maker detection subscription flag.
 //! - `SwitchDex` (CmdId=13): current DEX selector.
-//! - `SwitchSpot` (CmdId=14): current spot selector (`0=Crypto`, `1=Predict`).
+//! - `SwitchSpot` (CmdId=14): current spot selector (`SpotMarketKind`).
 //! - `ArbActivateNotify` (CmdId=12): Delphi `TDateTime` expiration value.
 //!
 //! Action commands (`StratStartStop`, `ResetProfit`, `TriggerManage`,
@@ -20,8 +20,9 @@
 //! actually inserts new markets.
 
 use crate::commands::ui::{
-    ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, StratStartStop,
-    StratStartStopV2, SwitchDex, SwitchSpot, TriggerManage, UICommand, UpdateVersion,
+    ArbActivateNotify, ClientSettingsCommand, EmuTrades, LevManage, ResetProfit, SpotMarketKind,
+    StratStartStop, StratStartStopV2, SwitchDex, SwitchSpot, TriggerManage, UICommand,
+    UpdateVersion,
 };
 use crate::time::DelphiTime;
 
@@ -47,8 +48,8 @@ pub struct SettingsState {
     pub mm_orders_subscribed: bool,
     /// Current DEX selector.
     pub current_dex: Option<String>,
-    /// Current spot selector. Concrete values are exchange-specific.
-    pub current_spot: Option<u8>,
+    /// Current spot selector.
+    pub current_spot: Option<SpotMarketKind>,
     /// `TDateTime` (Delphi double): arbitrage license expiration time.
     pub arb_valid_until: Option<f64>,
 }
@@ -83,7 +84,7 @@ pub enum SettingsEvent {
     ArbActivated(ArbActivateNotify),
     /// Current DEX changed.
     DexSwitched(SwitchDex),
-    /// Current spot changed (`0=Crypto`, `1=Predict`).
+    /// Current spot changed.
     SpotSwitched(SwitchSpot),
     /// Command from a future protocol version. Low-level state API can surface it, while
     /// `EventDispatcher` skips it like Delphi registry `FSkipped`.
@@ -255,9 +256,9 @@ mod tests {
         let mut st = SettingsState::new();
         let _ = st.apply(UICommand::SwitchSpot(SwitchSpot {
             uid: 1,
-            spot_index: 1,
+            spot_index: SpotMarketKind::Predict,
         }));
-        assert_eq!(st.current_spot, Some(1));
+        assert_eq!(st.current_spot, Some(SpotMarketKind::Predict));
     }
 
     #[test]

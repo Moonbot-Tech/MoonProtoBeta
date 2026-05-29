@@ -91,9 +91,7 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     let result = DECOMPRESS_OFFSETS.with(|cell| {
         match cell.try_borrow_mut() {
             Ok(mut guard) => {
-                for v in guard.iter_mut() {
-                    *v = 0;
-                }
+                guard.fill(0);
                 synlz_decompress_inner(src, &mut dst, &mut guard, pos, out_size)
             }
             Err(_) => {
@@ -293,18 +291,14 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
             let off_ref: &mut [usize; 4096] = match offset.as_mut() {
                 Some(g) => {
                     // Reset thread-local к начальному состоянию.
-                    for v in g.iter_mut() {
-                        *v = usize::MAX;
-                    }
+                    g.fill(usize::MAX);
                     g
                 }
                 None => &mut fallback_off,
             };
             let cache_ref: &mut [u32; 4096] = match cache.as_mut() {
                 Some(g) => {
-                    for v in g.iter_mut() {
-                        *v = 0;
-                    }
+                    g.fill(0);
                     g
                 }
                 None => &mut fallback_cache,

@@ -5,23 +5,31 @@ impl ProtocolCore<'_> {
     pub(crate) fn on_err_emu_drop_inline(raw_cmd: u8, payload: &[u8]) {
         if trace_io_enabled() {
             eprintln!(
-                "[mp-io-drop-err-emu] cmd={:?} raw={} payload_len={}",
+                "[mp-io-drop-err-emu] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} payload_head={}",
+                trace_elapsed_ms(),
                 Command::from_byte(raw_cmd),
                 raw_cmd,
-                payload.len()
+                payload.len(),
+                fnv1a64(payload),
+                trace_head(payload, 16)
             );
         }
         if slicing::trace_enabled() && Command::from_byte(raw_cmd) == Command::Sliced {
             if let Some(sh) = slicing::SliceHeader::from_bytes(payload) {
                 eprintln!(
-                    "[slice-rx-drop-err-emu] d={} b={}/{} len={}",
+                    "[slice-rx-drop-err-emu] t={} d={} b={}/{} len={}",
+                    trace_elapsed_ms(),
                     sh.datagram_num,
                     sh.block_num,
                     sh.max_block_num,
                     payload.len()
                 );
             } else {
-                eprintln!("[slice-rx-drop-err-emu] malformed len={}", payload.len());
+                eprintln!(
+                    "[slice-rx-drop-err-emu] t={} malformed len={}",
+                    trace_elapsed_ms(),
+                    payload.len()
+                );
             }
         }
     }
@@ -29,6 +37,9 @@ impl ProtocolCore<'_> {
     pub(crate) fn on_new_size_test_inline(&mut self, payload: &[u8]) {
         if let Some(ack) = Client::build_size_ack_payload(&mut self.client.data_read_state, payload)
         {
+            // Delphi `SendSizeAck`: pad the ack to the tested size and send it
+            // with DontFragment. If the OS rejects it as too large, that is the
+            // negative PMTU signal; this service packet must not be sliced.
             if let Some(sock) = self.client.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, true);
             }
@@ -41,6 +52,8 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn on_new_probe_mtu_inline(&mut self, payload: &[u8]) {
         if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
+            // Same PMTU rule as SizeAck: ProbeMTUAck is intentionally padded to
+            // the tested size and sent with DF. EMSGSIZE means "probe failed".
             if let Some(sock) = self.client.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, true);
             }
@@ -57,8 +70,12 @@ impl ProtocolCore<'_> {
         recv_bytes: u64,
         timestamp_ms: i64,
     ) {
+        if cmd == Command::WantNewHello && !self.client.should_accept_want_new_hello() {
+            let _ = (recv_bytes, timestamp_ms);
+            return;
+        }
         if matches!(cmd, Command::WrongHello | Command::WantNewHello) {
-            self.client.waiting_hello = false;
+            self.client.clear_hello_wait_state();
         }
         if cmd == Command::WantNewHello {
             self.client.data_read_state.reset();
@@ -84,24 +101,40 @@ impl ProtocolCore<'_> {
         payload: &[u8],
         recv_bytes: u64,
         timestamp_ms: i64,
-    ) {
-        self.client.waiting_hello = false;
+    ) -> Duration {
+        if !self.client.hello_wait_state.allows_who_are_you() {
+            let _ = (payload, recv_bytes, timestamp_ms);
+            return Duration::ZERO;
+        }
         if let Some(hello) = Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,
             payload,
         ) {
             let encrypted = self.apply_who_are_you_hello_and_build_imfriend(hello);
+            self.client
+                .start_hello_wait(HelloWaitState::PrimaryImFriendSent, timestamp_ms);
             self.send_command(Command::ImFriend, &encrypted);
+            // Delphi blocks inside the WhoAreYou reader handler here. Besides
+            // duplicate-loss protection, this prevents post-Fine Engine API
+            // traffic from overtaking the server-side FClients insertion that
+            // happens after sending MPC_Fine.
+            let protocol_wait = Duration::from_millis(DELPHI_IMFRIEND_RESEND_PAUSE_MS);
+            thread::sleep(protocol_wait);
             self.send_command(Command::ImFriend, &encrypted);
             let _ = recv_bytes;
+            protocol_wait
         } else {
             let _ = (recv_bytes, timestamp_ms);
+            Duration::ZERO
         }
     }
 
     pub(crate) fn on_fine_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
-        self.client.waiting_hello = false;
+        if !self.client.hello_wait_state.allows_fine() {
+            let _ = (payload, recv_bytes, timestamp_ms);
+            return;
+        }
         if Client::decode_handshake_hello(
             &self.client.cfg.master_key,
             self.client.cfg.client_id,

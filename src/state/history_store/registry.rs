@@ -145,6 +145,19 @@ impl MarketHistoryRegistry {
             .map(MarketHistoryStore::readers)
     }
 
+    pub(crate) fn read_handle(&self, market_name: &str) -> Option<MarketHistoryReadHandle> {
+        self.stores
+            .get(market_name)
+            .map(MarketHistoryStore::read_handle)
+    }
+
+    pub(crate) fn read_handles(&self) -> Vec<(Arc<str>, MarketHistoryReadHandle)> {
+        self.stores
+            .iter()
+            .map(|(name, store)| (Arc::clone(name), store.read_handle()))
+            .collect()
+    }
+
     pub(crate) fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
         self.stores
             .values_mut()

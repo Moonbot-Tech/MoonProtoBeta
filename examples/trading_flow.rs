@@ -1,4 +1,4 @@
-﻿//! Compact end-to-end Active Lib flow for application developers.
+//! Compact end-to-end Active Lib flow for application developers.
 //!
 //! It uses only `MoonClient`: connect/init, subscriptions, async refreshes,
 //! snapshots/events, and order intents.
@@ -7,7 +7,6 @@
 //!   cargo run --example trading_flow --release -- "<key_base64>" [host:port] [market]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::{Event, TradesStreamMode};
@@ -51,7 +50,7 @@ fn main() {
         );
     }
 
-    if let Err(err) = client.request_balance_snapshot() {
+    if let Err(err) = client.balances().refresh() {
         println!("[balance] request queue failed: {err}");
     }
 
@@ -60,62 +59,68 @@ fn main() {
     //     moonproto::NewOrderParams::new(market, moonproto::OrderSide::Long, 50_000.0, 0.001),
     // )?;
 
-    if let Err(err) = client.request_client_settings() {
+    if let Err(err) = client.settings().refresh() {
         println!("[settings] request queue failed: {err}");
     }
 
-    if let Err(err) = client.request_order_snapshot() {
+    if let Err(err) = client.orders().request_snapshot() {
         println!("[orders] request queue failed: {err}");
     }
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Order(moonproto::state::OrderEvent::Snapshot)) => {
-                if let Some(snapshot) = client.snapshot() {
-                    println!("[orders] count={}", snapshot.orders().len());
-                    if let Some(order) = snapshot.orders().iter().next() {
+        for event in client.drain_events() {
+            match event {
+                Event::Order(moonproto::state::OrderEvent::Snapshot) => {
+                    if let Some(snapshot) = client.snapshot() {
+                        println!("[orders] count={}", snapshot.orders().len());
+                        if let Some(order) = snapshot.orders().iter().next() {
+                            println!(
+                                "[orders] first uid={} market={} status={:?}; order intents use client.orders()",
+                                order.uid, order.market_name, order.status
+                            );
+                        }
+                    }
+                }
+                Event::Order(event) => println!("[event] order: {event:?}"),
+                Event::Balance(event) => {
+                    println!("[event] balance: {event:?}");
+                    if let Some(snapshot) = client.snapshot() {
+                        let global = snapshot.balances().global();
                         println!(
-                            "[orders] first uid={} market={} status={:?}; order intents use client.orders()",
-                            order.uid, order.market_name, order.status
+                            "[balance] btc_total={:.8} btc_full={:.8} special_coin={:.8}",
+                            global.btc_balance_total,
+                            global.btc_balance_full,
+                            global.special_coin_balance
                         );
                     }
                 }
-            }
-            Ok(Event::Order(event)) => println!("[event] order: {event:?}"),
-            Ok(Event::Balance(event)) => {
-                println!("[event] balance: {event:?}");
-                if let Some(snapshot) = client.snapshot() {
-                    let global = snapshot.balances().global();
-                    println!(
-                        "[balance] btc_total={:.8} btc_full={:.8} special_coin={:.8}",
-                        global.btc_balance_total,
-                        global.btc_balance_full,
-                        global.special_coin_balance
-                    );
-                }
-            }
-            Ok(Event::OrderBook(event)) => println!("[event] orderbook: {event:?}"),
-            Ok(Event::Trade(event)) => println!("[event] trade: {event:?}"),
-            Ok(Event::Markets(event)) => println!("[event] markets: {event:?}"),
-            Ok(Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated)) => {
-                if let Some(snapshot) = client.snapshot() {
-                    if let Some(settings) = &snapshot.settings().client_settings {
-                        println!(
-                            "[settings] uid={} manual_strategy={} stop_market={}",
-                            settings.uid, settings.use_manual_strategy, settings.use_stop_market
-                        );
+                Event::OrderBook(event) => println!("[event] orderbook: {event:?}"),
+                Event::Trade(event) => println!("[event] trade: {event:?}"),
+                Event::Markets(event) => println!("[event] markets: {event:?}"),
+                Event::Settings(moonproto::state::SettingsEvent::ClientSettingsUpdated) => {
+                    if let Some(snapshot) = client.snapshot() {
+                        if let Some(settings) = &snapshot.settings().client_settings {
+                            println!(
+                                "[settings] uid={} manual_strategy={} stop_market={}",
+                                settings.uid,
+                                settings.use_manual_strategy,
+                                settings.use_stop_market
+                            );
+                        }
                     }
                 }
+                _ => {}
             }
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     client
         .unsubscribe_orderbook(market)
         .expect("runtime stopped");
-    client.unsubscribe_all_trades().expect("runtime stopped");
+    client
+        .streams()
+        .unsubscribe_all_trades()
+        .expect("runtime stopped");
 }

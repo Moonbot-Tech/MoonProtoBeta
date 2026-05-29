@@ -70,40 +70,6 @@ impl Client {
         self.send_trade(raw, 3)
     }
 
-    /// Request the current order snapshot and wait until it is applied to
-    /// `EventDispatcher::orders()`.
-    ///
-    /// This is the high-level consumer helper for `TAllStatusesReq`. It hides the
-    /// protocol UID, pumps the UDP loop while waiting, and also waits for the
-    /// active dispatcher to finish Delphi `CleanupMissingWorkers` follow-up
-    /// requests for orders absent from the snapshot.
-    pub fn request_order_snapshot(
-        &mut self,
-        dispatcher: &mut crate::events::EventDispatcher,
-        timeout: Duration,
-    ) -> Result<Vec<crate::state::Order>, mpsc::RecvTimeoutError> {
-        const TICK: Duration = Duration::from_millis(50);
-
-        let previous_snapshot_flag = dispatcher.orders().current_snapshot_flag();
-        let start = Instant::now();
-        self.request_all_statuses(rand::random());
-
-        loop {
-            let snapshot_seen =
-                dispatcher.orders().current_snapshot_flag() != previous_snapshot_flag;
-            if snapshot_seen && dispatcher.orders().missing_after_snapshot().is_empty() {
-                return Ok(dispatcher.orders().iter().cloned().collect());
-            }
-
-            let Some(remaining) = timeout_remaining(start, timeout) else {
-                return Err(mpsc::RecvTimeoutError::Timeout);
-            };
-
-            let tick = remaining.min(TICK);
-            self.run_with_dispatcher_worker_queued(tick, dispatcher);
-        }
-    }
-
     /// Delphi local cancel request + `TOrderCancelCommand` (CmdId=10,
     /// `UK_OrderMove`) for one order.
     ///

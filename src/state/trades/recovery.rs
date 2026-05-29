@@ -4,9 +4,11 @@ use super::*;
 use crate::commands::engine_request;
 
 impl TradesState {
-    /// Аналог `tick` но возвращает дополнительно `BucketClosed`-события (recovered/lost).
-    /// Используется для прикладного слоя который хочет логировать закрытие bucket'ов.
-    /// Стандартный `tick` остаётся обратно-совместимым (возвращает только resend payload'ы).
+    /// Like `tick`, but also returns `BucketClosed` events for recovered/lost
+    /// gap buckets.
+    ///
+    /// The standard `tick` stays compatibility-oriented and returns only resend
+    /// payloads.
     pub fn tick_with_events(
         &mut self,
         rtt_ms: i64,
@@ -17,14 +19,16 @@ impl TradesState {
         (payloads, events)
     }
 
-    /// Tail tick — проверка просроченных bucket'ов + сборка resend payload.
+    /// Tail tick: check expired buckets and build a resend payload when needed.
     ///
-    /// Delphi вызывает `CheckMissingTradesPackets` только в хвосте успешного
-    /// `ProcessTradesStream`, под внешним `LastCheckMissingTime` throttle 100мс.
-    /// Поэтому active library вызывает этот метод после valid live/resend
-    /// trades-пакета, а не по независимому таймеру в тишине канала.
-    /// Возвращает `Some(payload)` если нужно отправить `emk_TradesResend` (через `client.send_api_request`).
-    /// `rtt_ms` — текущий RoundTripDelay в миллисекундах.
+    /// Delphi calls `CheckMissingTradesPackets` only at the tail of a
+    /// successfully processed trades packet, behind the external
+    /// `LastCheckMissingTime` 100ms throttle. The active library mirrors that:
+    /// it calls this after valid live/resend trades packets, not from an
+    /// independent timer while the channel is silent.
+    ///
+    /// Returns `Some(payload)` when the caller should send `TradesResend`.
+    /// `rtt_ms` is the current round-trip delay in milliseconds.
     /// Delphi `CheckMissingTradesPackets` MoonProtoEngine.pas:1483-1549.
     pub fn tick(&mut self, rtt_ms: i64, now_ms: i64) -> Vec<Vec<u8>> {
         let mut events: Vec<TradesEvent> = Vec::new();

@@ -4,14 +4,14 @@ impl Client {
     // ====================================================================
     //  Active library: subscription API (по market_name + registry)
     //
-    //  F4: thread-safe API через [`ClientSender`]. Эти методы — **главный
-    //  публичный API** для подписок. В отличие от `api_subscribe_order_book`
-    //  (low-level) они:
+    //  F4: thread-safe API через [`ClientSender`]. В public Active Lib
+    //  пользователи вызывают одноименные методы на `MoonClient`; эти low-level
+    //  методы нужны runtime-owner'у. В отличие от raw `api_subscribe_order_book`
+    //  они:
     //   1. Запоминают подписку в `subscription_registry`.
     //   2. После единственного Init восстанавливаются самой либой при reconnect.
     //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
-    //   4. Работают на `&self` — доступны через `MoonClient` или через
-    //      `client.sender()` clone в custom low-level runtime.
+    //   4. Работают на `&self` внутри runtime-owner'а.
     //
     //  Аналог Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` с
     //  `BookSubbed: TSet<TMarket>` и `NeedResubscribeOrderBooks`.
@@ -21,8 +21,7 @@ impl Client {
     /// thread.
     ///
     /// `MoonClient` is the normal subscription API. This lower-level sender is
-    /// cloneable and can live in a UI thread, worker thread, or any other owner
-    /// when the caller intentionally owns a custom `Client` runtime.
+    /// retained for internal runtime/tests.
     ///
     /// ```ignore
     /// let mut client = Client::new(cfg);
@@ -211,13 +210,14 @@ impl Client {
             return;
         }
 
-        let orderbooks_need_fresh_indexes = self.subscription_summary.has_orderbook_subs()
-            && !self.market_indexes_current_for_peer();
+        let indexes_stale = self.peer_app_token != 0 && !self.market_indexes_current_for_peer();
+        let orderbooks_need_fresh_indexes =
+            self.subscription_summary.has_orderbook_subs() && indexes_stale;
         if orderbooks_need_fresh_indexes {
             self.restore_orderbooks_after_indexes = true;
         }
 
-        if self.domain_restore_needs_indexes() {
+        if indexes_stale && self.domain_restore_needs_indexes() {
             self.send_markets_indexes_restore_request(self.now_ms());
         }
 

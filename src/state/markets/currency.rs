@@ -4,7 +4,7 @@ use crate::commands::market::BaseCurrency;
 
 use super::{
     text::{replace_text_ascii_case_insensitive, same_text_ascii},
-    BaseCurrencyPrice, CorrMarket, MarketsState,
+    BaseCurrencyPrice, CorrMarket, MarketHandle, MarketsState,
 };
 
 impl MarketsState {
@@ -31,7 +31,11 @@ impl MarketsState {
         );
     }
 
-    pub(crate) fn set_server_base_currency(&mut self, name: Option<&str>, code: Option<u8>) {
+    pub(crate) fn set_server_base_currency(
+        &mut self,
+        name: Option<&str>,
+        code: Option<BaseCurrency>,
+    ) {
         let next_name = name.map(ToOwned::to_owned);
         if self.server_base_currency_name == next_name && self.server_base_currency_code == code {
             return;
@@ -54,20 +58,16 @@ impl MarketsState {
             return;
         }
         for handle in self.markets.iter() {
-            let (market_name, corr_name) = handle.with(|market| {
-                (
-                    market.bn_market_name.clone(),
-                    replace_text_ascii_case_insensitive(&market.bn_market_name, currency, "BTC"),
-                )
-            });
+            let market_name = handle.name_str();
             if market_name.is_empty() {
                 continue;
             }
+            let corr_name = replace_text_ascii_case_insensitive(market_name, currency, "BTC");
             if self.corr_markets.contains_key(&corr_name) {
                 self.ref_btc_corr_markets
-                    .insert(market_name.clone(), corr_name);
+                    .insert(market_name.to_string(), corr_name);
             } else {
-                self.ref_btc_corr_markets.remove(&market_name);
+                self.ref_btc_corr_markets.remove(market_name);
             }
         }
     }
@@ -78,24 +78,20 @@ impl MarketsState {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
+        let market_refs = collect_market_currency_refs_like_delphi(&self.markets);
         for key in keys {
             let mut usdt_market = None;
             let mut usdt_rev_market = None;
-            for handle in self.markets.iter() {
-                let matches = handle.with(|market| {
-                    let direct = same_text_ascii(&market.base_currency, "USDT")
-                        && same_text_ascii(&market.bn_market_currency, &key);
-                    let reverse = same_text_ascii(&market.bn_market_currency, "USDT")
-                        && same_text_ascii(&market.base_currency, &key);
-                    (direct || reverse).then(|| (direct, reverse, market.bn_market_name.clone()))
-                });
-                if let Some((direct, reverse, name)) = matches {
-                    if direct {
-                        usdt_market = Some(name.clone());
-                    }
-                    if reverse {
-                        usdt_rev_market = Some(name);
-                    }
+            for market in &market_refs {
+                let direct = same_text_ascii(&market.base_currency, "USDT")
+                    && same_text_ascii(&market.bn_market_currency, &key);
+                let reverse = same_text_ascii(&market.bn_market_currency, "USDT")
+                    && same_text_ascii(&market.base_currency, &key);
+                if direct {
+                    usdt_market = Some(market.name.clone());
+                }
+                if reverse {
+                    usdt_rev_market = Some(market.name.clone());
                 }
             }
 
@@ -195,10 +191,36 @@ impl MarketsState {
     }
 
     fn server_base_is_btc_like_delphi(&self) -> bool {
-        self.server_base_currency_code == Some(BaseCurrency::BTC.to_byte())
+        self.server_base_currency_code == Some(BaseCurrency::BTC)
             || self
                 .server_base_currency_name
                 .as_deref()
                 .is_some_and(|name| same_text_ascii(name, "BTC"))
     }
+}
+
+struct MarketCurrencyRef {
+    name: String,
+    bn_market_currency: String,
+    base_currency: String,
+}
+
+fn collect_market_currency_refs_like_delphi(markets: &[MarketHandle]) -> Vec<MarketCurrencyRef> {
+    markets
+        .iter()
+        .map(|handle| {
+            let name = handle.name_str().to_string();
+            let (bn_market_currency, base_currency) = handle.with(|market| {
+                (
+                    market.bn_market_currency.clone(),
+                    market.base_currency.clone(),
+                )
+            });
+            MarketCurrencyRef {
+                name,
+                bn_market_currency,
+                base_currency,
+            }
+        })
+        .collect()
 }

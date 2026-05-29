@@ -112,7 +112,7 @@ fn strategy_with_fields(
         strategy_ver: 1,
         last_date: 1,
         checked,
-        kind: kind.0,
+        kind: kind.to_byte(),
         path: String::new(),
         fields: fields
             .iter()

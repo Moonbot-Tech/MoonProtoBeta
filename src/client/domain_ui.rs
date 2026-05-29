@@ -36,52 +36,6 @@ impl Client {
         self.send_domain_cmd(raw, Command::UI, SendPriority::High, true, 3);
     }
 
-    /// Request the current UI settings snapshot and wait for the next
-    /// `TClientSettingsCommand` while pumping the UDP loop.
-    ///
-    /// This is the UI-channel counterpart to [`Self::run_until_response`] for
-    /// Engine API calls. `TSettingsRequest` does not carry a request/response
-    /// UID pair on the wire: Delphi answers by sending a fresh
-    /// `TClientSettingsCommand`. The helper therefore waits until
-    /// `EventDispatcher` observes the next applied settings snapshot; the
-    /// snapshot UID is not required to change because the server may resend the
-    /// current settings object unchanged. The low-level Delphi command is
-    /// fire-and-forget, so this helper reissues `TSettingsRequest` every few
-    /// seconds while waiting.
-    pub fn request_client_settings(
-        &mut self,
-        dispatcher: &mut crate::events::EventDispatcher,
-        timeout: Duration,
-    ) -> Result<crate::commands::ui::ClientSettingsCommand, mpsc::RecvTimeoutError> {
-        const TICK: Duration = Duration::from_millis(50);
-
-        let first_new_event = dispatcher.queued_event_count();
-        let start = Instant::now();
-        let mut next_request_at = start + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
-        self.ui_settings_request();
-
-        loop {
-            if queued_client_settings_updated_since(dispatcher, first_new_event) {
-                if let Some(settings) = dispatcher.settings().client_settings.as_ref() {
-                    return Ok(settings.clone());
-                }
-            }
-
-            let Some(remaining) = timeout_remaining(start, timeout) else {
-                return Err(mpsc::RecvTimeoutError::Timeout);
-            };
-
-            let now = Instant::now();
-            if now >= next_request_at {
-                self.ui_settings_request();
-                next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
-            }
-
-            let tick = remaining.min(TICK);
-            self.run_with_dispatcher_worker_queued(tick, dispatcher);
-        }
-    }
-
     #[doc(hidden)]
     /// Send `TStratStartStopCommand` (UI CmdId=3, High) to start or stop all
     /// strategies.

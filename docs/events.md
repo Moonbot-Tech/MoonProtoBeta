@@ -3,19 +3,70 @@
 `MoonClient` publishes typed events and immutable snapshots. Events tell the
 application what changed; snapshots let UI code read the current retained state.
 
-Connection lifecycle is a separate stream. Use `drain_lifecycle_events`,
-`try_recv_lifecycle_event`, or `recv_lifecycle_event_timeout` for connection
-status. Use `drain_events`, `try_recv_event`, or `recv_event_timeout` for domain
-events. The `recv_*_timeout` helpers block only the caller while waiting on the
-already-running event queue; they do not pause the runtime thread and are not
-Engine API request/response waits.
+The single public delivery model is `MoonEventSink`: the runtime publishes
+`MoonClientEvent::Lifecycle` and `MoonClientEvent::Domain` into a sink and never
+blocks on UI work. Queue draining is only one adapter for that sink, not a
+separate runtime mode.
 
-## Recommended Loop
+## Event Sink
+
+Frameworks with a native event system normally use a callback sink and post into
+their own main loop:
+
+```rust
+use moonproto::{ConnectConfig, MoonClient, MoonClientEvent, MoonEventSink};
+
+let sink = MoonEventSink::callback(move |event| {
+    // For Tauri/Qt/winit/Delphi-like hosts: post/emit into the framework loop.
+    // Keep this callback quick; do not render or wait here.
+    post_to_ui(event);
+});
+
+let client = MoonClient::connect_with_sink(cfg, ConnectConfig::new(init), sink)?;
+```
+
+`MoonEventSink::callback` has its own delivery worker: the protocol/runtime
+thread only queues the event and returns. Keep the callback quick anyway, or the
+delivery worker can build a backlog.
+
+Immediate-mode UIs and CLI/tools can use the standard queue adapter. In egui,
+use `queue_with_waker` and call `request_repaint()` from the waker:
+
+```rust
+let (sink, events) = moonproto::MoonEventSink::queue_with_waker({
+    let ctx = egui_ctx.clone();
+    move || ctx.request_repaint()
+});
+
+let client = moonproto::MoonClient::connect_with_sink(cfg, connect, sink)?;
+
+let mut lifecycle_buf = Vec::new();
+let mut event_buf = Vec::new();
+
+events.drain_lifecycle_events_into(&mut lifecycle_buf);
+for lifecycle in lifecycle_buf.drain(..) {
+    handle_lifecycle(lifecycle);
+}
+
+events.drain_events_into(&mut event_buf);
+for event in event_buf.drain(..) {
+    handle_event(event);
+}
+```
+
+`MoonClient::connect(...)` is the convenience constructor that installs this
+queue adapter internally and exposes `client.drain_lifecycle_events()` /
+`client.drain_events()` for simple apps and tests. Hot UI loops can use
+`drain_lifecycle_events_into` / `drain_events_into` to reuse buffers.
+
+Timeout waits exist only as hidden diagnostic/script helpers.
+
+## Domain Events
 
 ```rust
 use moonproto::Event;
 
-for event in client.drain_events() {
+fn handle_event(event: Event) {
     match event {
         Event::Order(order_event) => handle_order_event(order_event),
         Event::OrderBook(book_event) => handle_orderbook_event(book_event),
@@ -36,8 +87,11 @@ for event in client.drain_events() {
 }
 ```
 
-`MoonClient` owns the protocol loop and runs until explicit `stop()` or drop.
-Applications do not choose a protocol-loop duration.
+`MoonClient` owns the protocol loop and runs until explicit `disconnect()`/drop.
+Applications do not choose a protocol-loop duration. `MoonClient::connect`
+starts the runtime and returns immediately; wait for `LifecycleEvent::Ready`
+through the same non-blocking event path before treating snapshots as fully
+initialized.
 
 ## Snapshots
 
@@ -61,6 +115,21 @@ if let Some(book) = state.order_book("BTCUSDT", OrderBookKind::Futures) {
 dispatcher and cannot mutate protocol state. UI code can keep snapshots for
 rendering, while stateful commands go back through `MoonClient` handles such as
 `client.orders()` and `client.trade()`.
+
+For hot UI loops that prepare larger draw buffers, use
+`snapshot_versioned()` and keep the last seen revision:
+
+```rust
+if let Some(state) = client.snapshot_versioned() {
+    if Some(state.revision()) != last_revision {
+        rebuild_cached_draw_data(&state);
+        last_revision = Some(state.revision());
+    }
+}
+```
+
+The revision is local to one `MoonClient` runtime and increases whenever the
+runtime publishes a fresh immutable snapshot.
 
 ## Event Shape
 
@@ -99,7 +168,8 @@ snapshot has been processed by the history worker. At that point
 
 `ArbEvent` is only a change signal/summary. Delphi writes incoming arb data into
 `TMarket.ArbSlots` / `TMarket.ArbNow`; Active Lib does the same, so UI code reads
-`MarketHandle::arb_slot(platform_code)` / `arb_now(platform_code)` from the
+`MarketHandle::arb_slot(ArbPlatformCode::...)` /
+`arb_now(ArbPlatformCode::...)` from the
 selected market instead of handling raw server `market_index` blocks.
 
 `WatcherFillsEvent` contains `market_name`, HyperDex user address, decoded fill
@@ -120,25 +190,24 @@ trades/orderbook sync state before applying new indexed stream packets.
 
 ## One-Shot Requests
 
-Normal UI code queues refresh intents and drains events. Any unrelated packets
-received while the runtime is active are still applied and remain available
-through the normal event receiver:
+Normal UI code queues refresh intents and consumes the resulting EventSink
+events. Any unrelated packets received while the runtime is active are still
+applied and remain available through the same event path. With the default queue
+adapter that looks like this:
 
 ```rust
-client.request_balance_snapshot()?;
+client.balances().refresh()?;
 
 for event in client.drain_events() {
     handle_event(event);
 }
 ```
 
-Regular UI refreshes such as `request_client_settings()`, `refresh_hedge_mode()`,
-and `refresh_api_expiration_time()` return immediately and publish completion
+Regular UI refreshes such as `settings().refresh()`,
+`account().refresh_hedge_mode()`, and
+`account().refresh_api_expiration_time()` return immediately and publish completion
 through domain events plus snapshots. Account refresh results are readable from
 `snapshot().account()`.
-
-Explicit script/diagnostic helpers keep the runtime pumping while they wait.
-They are named with a `blocking_` prefix and are not the normal UI event path.
 
 ## Retained History
 
@@ -158,12 +227,11 @@ if let Some(readers) = client
 }
 ```
 
-`subscribe_all_trades` creates retained stores for all known markets.
-`subscribe_trades_for` creates them only for the requested market names.
+`streams().subscribe_all_trades` creates retained stores for all known markets.
+`streams().subscribe_trades_for` creates them only for the requested market names.
 
-## Low-Level Dispatcher
+## Dispatcher Ownership
 
-`EventDispatcher`, `dispatch`, and `dispatch_into` remain public for protocol
-tests and custom runtimes. Direct dispatcher calls do not get `Client`-backed
-auto-actions such as Init gating, orderbook full requests, strategy snapshot
-answers, or trades resend sends. Regular applications should use `MoonClient`.
+`MoonClient` owns the dispatcher in the normal Active Lib path. Applications
+read immutable snapshots and receive events; they do not drive dispatcher ticks
+or protocol pumps themselves.

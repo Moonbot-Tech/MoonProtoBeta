@@ -1,29 +1,17 @@
-//! MoonBot-compatible domain init sequence helpers.
+//! MoonBot-compatible domain init sequence owned by `MoonClient`.
 
 use super::active_runtime::TradesStreamMode;
 use super::*;
 
 // =============================================================================
-//  Init sequence helper — free function (НЕ метод Client)
+// Internal one-time init spine:
 //
-//  Логически единственный init-проход после `Connected{fresh:true}`:
-//  `BaseCheck → AuthCheck → GetMarketsList → GetMarketsIndexes → UpdateMarketsList
-//   → Delphi post-init resync → optional subscriptions`.
-//  Аналог Delphi `TCryptoPumpTool.InitInt` (`Unit1.pas:4987-5150`).
+// `BaseCheck -> AuthCheck -> GetMarketsList -> UpdateMarketsList
+//  -> Delphi post-init resync -> optional subscriptions`.
 //
-//  Почему free function, а не `Client::run_init_sequence`:
-//   - low-level finite pumps занимают `&mut Client` на всё
-//     время выполнения (main loop крутится). Метод-helper не мог бы быть вызван
-//     ВО ВРЕМЯ работы run().
-//   - Free function принимает `&mut Client` явно — компилятор уровнем доказывает
-//     что run() не запущен (иначе borrow checker не пустит). Helper вызывается
-//     между run-сессиями: после `Connected{fresh:true}` короткий run завершается,
-//     app зовёт `run_init_sequence(&mut client, cfg)`, затем входит в main run.
-//   - Pattern в trading_flow.rs — Phase 1 (15s short run) → run_init_sequence →
-//     Phase 5 (long run). Эта free function — упаковка этого pattern'а в один
-//     вызов с retry/timeout/error handling.
-//
-//  См. audit_responsibility F1, audit_responsibility_hints Q13.
+// This mirrors Delphi `TCryptoPumpTool.InitInt`, but it is not a public
+// application runtime model. `MoonClient::connect` owns this sequence inside its
+// runtime thread and reports completion through lifecycle events.
 // =============================================================================
 
 /// Application-owned strategy state that must be installed before Init.
@@ -50,20 +38,19 @@ impl InitialStrategies {
     }
 }
 
-/// Configuration for [`run_init_sequence`].
+/// Configuration for the one-time Init sequence run by [`MoonClient`].
 ///
 /// Delphi-critical init steps are not configurable: BaseCheck, AuthCheck,
-/// GetMarketsList, GetMarketsIndexes, UpdateMarketsList, balance refresh,
+/// GetMarketsList, UpdateMarketsList, balance refresh,
 /// orders, strategy snapshot sync, and settings sync are the init contract
 /// itself. This config only carries optional stream subscriptions and timing.
 #[derive(Debug, Clone, Default)]
 pub struct InitConfig {
     /// Local strategies to install into the active library before Init starts.
     ///
-    /// `None` preserves any strategy state already configured on the
-    /// `EventDispatcher`, which is useful for custom low-level runtimes.
-    /// `MoonClient` creates the dispatcher internally, so applications that
-    /// have local strategies should pass `Some(InitialStrategies::new(...))`.
+    /// `None` preserves any strategy state already configured on the internal
+    /// dispatcher. Applications that have local strategies should pass
+    /// `Some(InitialStrategies::new(...))`.
     /// An explicit empty list is valid and means "client has no local
     /// strategies".
     pub initial_strategies: Option<InitialStrategies>,
@@ -91,9 +78,9 @@ pub struct InitConfig {
     pub step_timeout: Option<Duration>,
 }
 
-/// Result of [`run_init_sequence`].
+/// Result of the internal one-time Init sequence.
 #[derive(Debug, Default)]
-pub struct InitResult {
+pub(crate) struct InitResult {
     /// `BaseCheck` succeeded and `Client::server_info()` was updated.
     pub base_check_ok: bool,
     /// `AuthCheck` succeeded.
@@ -106,8 +93,6 @@ pub struct InitResult {
     /// Payload size in bytes for the `GetMarketsList` response. The actual
     /// market count is parsed into `EventDispatcher::markets()`.
     pub markets_response_bytes: usize,
-    /// Payload size in bytes for the `GetMarketsIndexes` response.
-    pub indexes_response_bytes: usize,
     /// Payload size in bytes for the `UpdateMarketsList` response.
     pub update_markets_response_bytes: usize,
     /// Raw `TStratSchema.Data` size from the mandatory Init schema request.
@@ -128,10 +113,10 @@ pub struct InitResult {
     pub errors: Vec<String>,
 }
 
-/// Errors returned by [`run_init_sequence`].
+/// Errors reported by the one-time Init sequence.
 ///
 /// These are returned only when continuing would be meaningless. Non-fatal
-/// notes are accumulated in `InitResult::errors`.
+/// notes are accumulated internally while Init runs.
 #[derive(Debug, Clone)]
 pub enum InitError {
     /// The command channel is closed because the client loop is no longer alive.
@@ -148,7 +133,7 @@ pub enum InitError {
     /// The transport is not authorized yet.
     ///
     /// Run the client until `LifecycleEvent::Connected { fresh: true }` or use
-    /// [`connect_and_init`] to combine connection and init.
+    /// [`MoonClient::connect`](crate::MoonClient::connect) to combine connection and init.
     NotAuthenticated,
 }
 
@@ -160,14 +145,17 @@ impl std::fmt::Display for InitError {
             Self::CriticalStepFailed { step, message } => {
                 write!(f, "critical init step '{step}' failed: {message}")
             }
-            Self::NotAuthenticated => write!(f, "client not authenticated (wait for authorization or use MoonClient/connect_and_init)"),
+            Self::NotAuthenticated => write!(
+                f,
+                "client not authenticated (wait for authorization or use MoonClient::connect)"
+            ),
         }
     }
 }
 
 impl std::error::Error for InitError {}
 
-/// Configuration for [`connect_and_init`].
+/// Configuration for [`MoonClient::connect`](crate::MoonClient::connect).
 ///
 /// This is the common consumer entry point when an application wants a ready
 /// connection before it starts issuing one-shot requests or subscriptions.
@@ -205,9 +193,11 @@ impl ConnectConfig {
     }
 }
 
-/// Errors returned by [`connect_and_init`].
+/// Errors reported by the connection/init startup sequence.
 #[derive(Debug, Clone)]
 pub enum ConnectError {
+    /// Non-blocking runtime startup was canceled by `MoonClient::disconnect`.
+    Canceled,
     /// The client did not reach the connected/authenticated state before the
     /// configured timeout expired.
     ConnectTimedOut {
@@ -221,6 +211,7 @@ pub enum ConnectError {
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Canceled => write!(f, "connection was canceled"),
             Self::ConnectTimedOut { timeout } => {
                 write!(f, "connection did not become ready within {:?}", timeout)
             }
@@ -232,6 +223,7 @@ impl std::fmt::Display for ConnectError {
 impl std::error::Error for ConnectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Canceled => None,
             Self::Init(err) => Some(err),
             Self::ConnectTimedOut { .. } => None,
         }
@@ -244,13 +236,32 @@ impl From<InitError> for ConnectError {
     }
 }
 
-/// Connect the client and run the configured init sequence.
-///
-/// This helper is the low-level ready-session setup used by `MoonClient` and
-/// protocol tools. Regular applications should normally call
-/// [`MoonClient::connect`](crate::MoonClient::connect), which owns the runtime
-/// thread after this setup succeeds.
-pub fn connect_and_init(
+#[cfg(test)]
+fn wait_until_authorized(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    timeout: Duration,
+) -> Result<(), ConnectError> {
+    let started = Instant::now();
+    client.with_owned_runtime_stepper(dispatcher, |client, stepper, _dispatcher| {
+        while !client.is_authorized() {
+            if client.shutdown_requested() {
+                return Err(ConnectError::Canceled);
+            }
+            if timeout_remaining(started, timeout).is_none() {
+                return Err(ConnectError::ConnectTimedOut { timeout });
+            }
+            if !stepper.step(client, _dispatcher) {
+                return Err(ConnectError::Canceled);
+            }
+            stepper.barrier();
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn connect_and_init(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     cfg: ConnectConfig,
@@ -261,20 +272,714 @@ pub fn connect_and_init(
     }
 
     if !client.is_authorized() {
-        client.run_with_dispatcher_worker_queued(cfg.connect_timeout, dispatcher);
+        wait_until_authorized(client, dispatcher, cfg.connect_timeout)?;
     }
 
-    if !client.is_authorized() {
-        return Err(ConnectError::ConnectTimedOut {
-            timeout: cfg.connect_timeout,
-        });
+    match run_init_sequence(client, dispatcher, cfg.init) {
+        Ok(result) => Ok(result),
+        Err(_) if client.shutdown_requested() => Err(ConnectError::Canceled),
+        Err(err) => Err(ConnectError::from(err)),
+    }
+}
+
+pub(crate) enum RuntimeInitPoll {
+    Pending { changed: bool },
+    Ready(InitResult),
+    Failed(ConnectError),
+}
+
+pub(crate) struct RuntimeInitMachine {
+    cfg: InitConfig,
+    started: Instant,
+    init_started_at: Instant,
+    connect_timeout: Duration,
+    step_timeout: Duration,
+    phase: RuntimeInitPhase,
+    result: InitResult,
+    waiting_update: bool,
+    base_errors_before: usize,
+    auth_block_errors_before: usize,
+    base_status: CriticalInitStatus,
+    auth_status: CriticalInitStatus,
+    strategy_schema: Option<PendingStrategySchemaStep>,
+}
+
+enum RuntimeInitPhase {
+    WaitAuthorized,
+    ServerUpdateAuthWait {
+        waits_done: u8,
+        next_at: Instant,
+    },
+    SendBaseCheck {
+        attempt: BaseAttempt,
+    },
+    WaitBaseCheck {
+        attempt: BaseAttempt,
+        pending: PendingEngineInit,
+    },
+    BaseUpdateRetryPause {
+        next_retry: u8,
+        next_at: Instant,
+    },
+    SendAuthCheck {
+        attempt: AuthAttempt,
+    },
+    WaitAuthCheck {
+        attempt: AuthAttempt,
+        pending: PendingEngineInit,
+    },
+    InitAuthRetryPause {
+        next_at: Instant,
+    },
+    SendGetMarketsList,
+    WaitGetMarketsList {
+        pending: PendingEngineInit,
+    },
+    SendUpdateMarketsList,
+    WaitUpdateMarketsList {
+        pending: PendingEngineInit,
+    },
+    WaitStrategySchema,
+    PostInit,
+    PostInitFlush {
+        until: Instant,
+    },
+    Done,
+}
+
+#[derive(Clone, Copy)]
+enum BaseAttempt {
+    First,
+    UpdateRetry { retry_no: u8 },
+    InitRetry,
+}
+
+#[derive(Clone, Copy)]
+enum AuthAttempt {
+    First,
+    InitRetry,
+}
+
+struct PendingEngineInit {
+    request_uid: Option<u64>,
+    rx: mpsc::Receiver<EngineResponse>,
+    deadline: Instant,
+}
+
+enum PendingEnginePoll {
+    Pending,
+    Response(EngineResponse),
+    Timeout,
+    Disconnected,
+}
+
+enum StrategySchemaPoll {
+    Pending,
+    Ready,
+    Failed(InitError),
+}
+
+impl RuntimeInitMachine {
+    pub(crate) fn new(cfg: ConnectConfig, dispatcher: &mut crate::events::EventDispatcher) -> Self {
+        if let Some(initial) = cfg.init.initial_strategies.as_ref() {
+            dispatcher.set_local_strategy_epoch(initial.epoch);
+            dispatcher.set_local_strategies(&initial.strategies);
+        }
+        let now = Instant::now();
+        let step_timeout = cfg.init.step_timeout.unwrap_or(Duration::from_millis(
+            crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64,
+        ));
+        Self {
+            connect_timeout: cfg.connect_timeout,
+            step_timeout,
+            cfg: cfg.init,
+            started: now,
+            init_started_at: now,
+            phase: RuntimeInitPhase::WaitAuthorized,
+            result: InitResult::default(),
+            waiting_update: false,
+            base_errors_before: 0,
+            auth_block_errors_before: 0,
+            base_status: CriticalInitStatus::Skipped,
+            auth_status: CriticalInitStatus::Skipped,
+            strategy_schema: None,
+        }
     }
 
-    run_init_sequence(client, dispatcher, cfg.init).map_err(ConnectError::from)
+    pub(crate) fn poll(
+        &mut self,
+        client: &mut Client,
+        dispatcher: &mut crate::events::EventDispatcher,
+    ) -> RuntimeInitPoll {
+        if client.shutdown_requested() {
+            client.disconnect();
+            return RuntimeInitPoll::Failed(ConnectError::Canceled);
+        }
+
+        let mut changed = false;
+        loop {
+            let phase = std::mem::replace(&mut self.phase, RuntimeInitPhase::Done);
+            match phase {
+                RuntimeInitPhase::WaitAuthorized => {
+                    if client.is_authorized() {
+                        self.init_started_at = Instant::now();
+                        self.waiting_update = client.take_server_update_sent();
+                        self.auth_block_errors_before = self.result.errors.len();
+                        self.base_errors_before = self.result.errors.len();
+                        self.phase = if self.waiting_update {
+                            RuntimeInitPhase::ServerUpdateAuthWait {
+                                waits_done: 0,
+                                next_at: Instant::now(),
+                            }
+                        } else {
+                            RuntimeInitPhase::SendBaseCheck {
+                                attempt: BaseAttempt::First,
+                            }
+                        };
+                        continue;
+                    }
+                    if timeout_remaining(self.started, self.connect_timeout).is_none() {
+                        self.phase = RuntimeInitPhase::Done;
+                        return RuntimeInitPoll::Failed(ConnectError::ConnectTimedOut {
+                            timeout: self.connect_timeout,
+                        });
+                    }
+                    self.phase = RuntimeInitPhase::WaitAuthorized;
+                    return RuntimeInitPoll::Pending { changed };
+                }
+                RuntimeInitPhase::ServerUpdateAuthWait {
+                    mut waits_done,
+                    mut next_at,
+                } => {
+                    if client.is_authorized()
+                        || waits_done >= DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS as u8
+                    {
+                        self.phase = RuntimeInitPhase::SendBaseCheck {
+                            attempt: BaseAttempt::First,
+                        };
+                        continue;
+                    }
+                    let now = Instant::now();
+                    if now >= next_at {
+                        waits_done = waits_done.saturating_add(1);
+                        next_at =
+                            now + Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS);
+                    }
+                    self.phase = RuntimeInitPhase::ServerUpdateAuthWait {
+                        waits_done,
+                        next_at,
+                    };
+                    return RuntimeInitPoll::Pending { changed };
+                }
+                RuntimeInitPhase::SendBaseCheck { attempt } => {
+                    let pending = begin_engine_init_step(
+                        client,
+                        crate::commands::engine_request::base_check(),
+                        self.step_timeout,
+                    );
+                    self.phase = RuntimeInitPhase::WaitBaseCheck { attempt, pending };
+                    continue;
+                }
+                RuntimeInitPhase::WaitBaseCheck {
+                    attempt,
+                    mut pending,
+                } => match poll_engine_init_step(client, &mut pending) {
+                    PendingEnginePoll::Pending => {
+                        self.phase = RuntimeInitPhase::WaitBaseCheck { attempt, pending };
+                        return RuntimeInitPoll::Pending { changed };
+                    }
+                    PendingEnginePoll::Response(resp) => {
+                        let status = self.apply_base_check_response(client, resp);
+                        if status.is_ok() {
+                            fire_init_step(client, "BaseCheck", self.init_started_at);
+                            self.ensure_strategy_schema_started(client, dispatcher);
+                        }
+                        match attempt {
+                            BaseAttempt::First => {
+                                self.base_status = status;
+                                if self.waiting_update && !self.base_status.is_ok() {
+                                    self.phase = RuntimeInitPhase::BaseUpdateRetryPause {
+                                        next_retry: 1,
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                } else if self.base_status.is_ok() {
+                                    self.phase = RuntimeInitPhase::SendAuthCheck {
+                                        attempt: AuthAttempt::First,
+                                    };
+                                } else {
+                                    self.auth_status = CriticalInitStatus::Skipped;
+                                    self.phase = RuntimeInitPhase::InitAuthRetryPause {
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_INIT_AUTH_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                }
+                                continue;
+                            }
+                            BaseAttempt::UpdateRetry { retry_no } => {
+                                self.base_status = status;
+                                if self.base_status.is_ok() {
+                                    self.result.errors.truncate(self.base_errors_before);
+                                    self.phase = RuntimeInitPhase::SendAuthCheck {
+                                        attempt: AuthAttempt::First,
+                                    };
+                                } else if retry_no < DELPHI_BASE_CHECK_UPDATE_RETRIES as u8 {
+                                    self.phase = RuntimeInitPhase::BaseUpdateRetryPause {
+                                        next_retry: retry_no + 1,
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                } else {
+                                    self.auth_status = CriticalInitStatus::Skipped;
+                                    self.phase = RuntimeInitPhase::InitAuthRetryPause {
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_INIT_AUTH_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                }
+                                continue;
+                            }
+                            BaseAttempt::InitRetry => {
+                                self.base_status = status;
+                                self.phase = RuntimeInitPhase::SendAuthCheck {
+                                    attempt: AuthAttempt::InitRetry,
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    PendingEnginePoll::Timeout => {
+                        self.result.errors.push("BaseCheck timeout".to_string());
+                        let status = CriticalInitStatus::TimedOut;
+                        match attempt {
+                            BaseAttempt::First => {
+                                self.base_status = status;
+                                if self.waiting_update {
+                                    self.phase = RuntimeInitPhase::BaseUpdateRetryPause {
+                                        next_retry: 1,
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                } else {
+                                    self.auth_status = CriticalInitStatus::Skipped;
+                                    self.phase = RuntimeInitPhase::InitAuthRetryPause {
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_INIT_AUTH_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                }
+                                continue;
+                            }
+                            BaseAttempt::UpdateRetry { retry_no } => {
+                                self.base_status = status;
+                                if retry_no < DELPHI_BASE_CHECK_UPDATE_RETRIES as u8 {
+                                    self.phase = RuntimeInitPhase::BaseUpdateRetryPause {
+                                        next_retry: retry_no + 1,
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                } else {
+                                    self.auth_status = CriticalInitStatus::Skipped;
+                                    self.phase = RuntimeInitPhase::InitAuthRetryPause {
+                                        next_at: Instant::now()
+                                            + Duration::from_millis(
+                                                DELPHI_INIT_AUTH_RETRY_PAUSE_MS,
+                                            ),
+                                    };
+                                }
+                                continue;
+                            }
+                            BaseAttempt::InitRetry => {
+                                self.base_status = status;
+                                self.phase = RuntimeInitPhase::SendAuthCheck {
+                                    attempt: AuthAttempt::InitRetry,
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    PendingEnginePoll::Disconnected => {
+                        self.phase = RuntimeInitPhase::Done;
+                        return RuntimeInitPoll::Failed(ConnectError::from(
+                            InitError::SendChannelClosed,
+                        ));
+                    }
+                },
+                RuntimeInitPhase::BaseUpdateRetryPause {
+                    next_retry,
+                    next_at,
+                } => {
+                    if Instant::now() >= next_at {
+                        self.phase = RuntimeInitPhase::SendBaseCheck {
+                            attempt: BaseAttempt::UpdateRetry {
+                                retry_no: next_retry,
+                            },
+                        };
+                        continue;
+                    }
+                    self.phase = RuntimeInitPhase::BaseUpdateRetryPause {
+                        next_retry,
+                        next_at,
+                    };
+                    return RuntimeInitPoll::Pending { changed };
+                }
+                RuntimeInitPhase::SendAuthCheck { attempt } => {
+                    let pending = begin_engine_init_step(
+                        client,
+                        crate::commands::engine_request::auth_check(),
+                        self.step_timeout,
+                    );
+                    self.phase = RuntimeInitPhase::WaitAuthCheck { attempt, pending };
+                    continue;
+                }
+                RuntimeInitPhase::WaitAuthCheck {
+                    attempt,
+                    mut pending,
+                } => {
+                    let status = match poll_engine_init_step(client, &mut pending) {
+                        PendingEnginePoll::Pending => {
+                            self.phase = RuntimeInitPhase::WaitAuthCheck { attempt, pending };
+                            return RuntimeInitPoll::Pending { changed };
+                        }
+                        PendingEnginePoll::Response(resp) => {
+                            self.apply_auth_check_response(client, resp)
+                        }
+                        PendingEnginePoll::Timeout => {
+                            self.result.errors.push("AuthCheck timeout".to_string());
+                            CriticalInitStatus::TimedOut
+                        }
+                        PendingEnginePoll::Disconnected => {
+                            self.phase = RuntimeInitPhase::Done;
+                            return RuntimeInitPoll::Failed(ConnectError::from(
+                                InitError::SendChannelClosed,
+                            ));
+                        }
+                    };
+                    if status.is_ok() {
+                        fire_init_step(client, "AuthCheck", self.init_started_at);
+                    }
+                    match attempt {
+                        AuthAttempt::First => {
+                            self.auth_status = status;
+                            if !self.base_status.is_ok() || !self.auth_status.is_ok() {
+                                self.phase = RuntimeInitPhase::InitAuthRetryPause {
+                                    next_at: Instant::now()
+                                        + Duration::from_millis(DELPHI_INIT_AUTH_RETRY_PAUSE_MS),
+                                };
+                            } else {
+                                self.phase = RuntimeInitPhase::SendGetMarketsList;
+                            }
+                            continue;
+                        }
+                        AuthAttempt::InitRetry => {
+                            self.auth_status = status;
+                            if self.auth_status.is_ok() {
+                                self.result.errors.truncate(self.auth_block_errors_before);
+                                if self.strategy_schema.is_none() {
+                                    self.ensure_strategy_schema_started(client, dispatcher);
+                                }
+                                self.phase = RuntimeInitPhase::SendGetMarketsList;
+                                continue;
+                            }
+                            self.phase = RuntimeInitPhase::Done;
+                            return RuntimeInitPoll::Failed(ConnectError::from(
+                                self.auth_status
+                                    .final_error("AuthCheck")
+                                    .unwrap_or(InitError::CriticalStepTimedOut("AuthCheck")),
+                            ));
+                        }
+                    }
+                }
+                RuntimeInitPhase::InitAuthRetryPause { next_at } => {
+                    if Instant::now() >= next_at {
+                        self.phase = RuntimeInitPhase::SendBaseCheck {
+                            attempt: BaseAttempt::InitRetry,
+                        };
+                        continue;
+                    }
+                    self.phase = RuntimeInitPhase::InitAuthRetryPause { next_at };
+                    return RuntimeInitPoll::Pending { changed };
+                }
+                RuntimeInitPhase::SendGetMarketsList => {
+                    if self.strategy_schema.is_none() {
+                        self.ensure_strategy_schema_started(client, dispatcher);
+                    }
+                    let pending = begin_engine_init_step(
+                        client,
+                        crate::commands::engine_request::get_markets_list(),
+                        self.step_timeout,
+                    );
+                    self.phase = RuntimeInitPhase::WaitGetMarketsList { pending };
+                    continue;
+                }
+                RuntimeInitPhase::WaitGetMarketsList { mut pending } => {
+                    let resp = match self.poll_required_engine_response(
+                        client,
+                        &mut pending,
+                        "GetMarketsList",
+                    ) {
+                        Ok(Some(resp)) => resp,
+                        Ok(None) => {
+                            self.phase = RuntimeInitPhase::WaitGetMarketsList { pending };
+                            return RuntimeInitPoll::Pending { changed };
+                        }
+                        Err(err) => {
+                            self.phase = RuntimeInitPhase::Done;
+                            return RuntimeInitPoll::Failed(ConnectError::from(err));
+                        }
+                    };
+                    if let Err(err) = apply_required_get_markets_list_response(
+                        dispatcher,
+                        &resp,
+                        &mut self.result,
+                    ) {
+                        self.phase = RuntimeInitPhase::Done;
+                        return RuntimeInitPoll::Failed(ConnectError::from(err));
+                    }
+                    self.result.markets_response_bytes = resp.data.len();
+                    fire_init_step(client, "GetMarketsList", self.init_started_at);
+                    client.tracked_indexes_peer_app_token = client.peer_app_token;
+                    self.phase = RuntimeInitPhase::SendUpdateMarketsList;
+                    changed = true;
+                    continue;
+                }
+                RuntimeInitPhase::SendUpdateMarketsList => {
+                    let pending = begin_engine_init_step(
+                        client,
+                        crate::commands::engine_request::update_markets_list(),
+                        self.step_timeout,
+                    );
+                    self.phase = RuntimeInitPhase::WaitUpdateMarketsList { pending };
+                    continue;
+                }
+                RuntimeInitPhase::WaitUpdateMarketsList { mut pending } => {
+                    let resp = match self.poll_required_engine_response(
+                        client,
+                        &mut pending,
+                        "UpdateMarketsList",
+                    ) {
+                        Ok(Some(resp)) => resp,
+                        Ok(None) => {
+                            self.phase = RuntimeInitPhase::WaitUpdateMarketsList { pending };
+                            return RuntimeInitPoll::Pending { changed };
+                        }
+                        Err(err) => {
+                            self.phase = RuntimeInitPhase::Done;
+                            return RuntimeInitPoll::Failed(ConnectError::from(err));
+                        }
+                    };
+                    if let Err(err) = apply_required_update_markets_list_response(
+                        dispatcher,
+                        &resp,
+                        &mut self.result,
+                    ) {
+                        self.phase = RuntimeInitPhase::Done;
+                        return RuntimeInitPoll::Failed(ConnectError::from(err));
+                    }
+                    self.result.update_markets_response_bytes = resp.data.len();
+                    fire_init_step(client, "UpdateMarketsList", self.init_started_at);
+                    client.domain_restore = DomainRestoreIntent {
+                        fetch_indexes: true,
+                    };
+                    client.set_domain_ready(true);
+                    self.phase = RuntimeInitPhase::WaitStrategySchema;
+                    changed = true;
+                    continue;
+                }
+                RuntimeInitPhase::WaitStrategySchema => {
+                    let timeout = self.step_timeout;
+                    let Some(pending) = self.strategy_schema.as_mut() else {
+                        self.ensure_strategy_schema_started(client, dispatcher);
+                        self.phase = RuntimeInitPhase::WaitStrategySchema;
+                        continue;
+                    };
+                    match poll_required_strategy_schema_step(
+                        client,
+                        dispatcher,
+                        &mut self.result,
+                        pending,
+                        timeout,
+                    ) {
+                        StrategySchemaPoll::Ready => {
+                            fire_init_step(client, "StrategySchema", self.init_started_at);
+                            self.phase = RuntimeInitPhase::PostInit;
+                            changed = true;
+                            continue;
+                        }
+                        StrategySchemaPoll::Pending => {
+                            self.phase = RuntimeInitPhase::WaitStrategySchema;
+                            return RuntimeInitPoll::Pending { changed };
+                        }
+                        StrategySchemaPoll::Failed(err) => {
+                            client.set_domain_ready(false);
+                            self.phase = RuntimeInitPhase::Done;
+                            return RuntimeInitPoll::Failed(ConnectError::from(err));
+                        }
+                    }
+                }
+                RuntimeInitPhase::PostInit => {
+                    send_post_init_resync(client, dispatcher, &self.cfg, &mut self.result);
+                    client.send_registry_subscriptions_after_init();
+                    if let Some(mode) = self.cfg.subscribe_trades {
+                        client.subscribe_all_trades(mode.want_market_makers());
+                        self.result.trades_subscribed = true;
+                    }
+                    for name in &self.cfg.subscribe_orderbooks {
+                        client.subscribe_orderbook(name);
+                        self.result.orderbooks_subscribed += 1;
+                    }
+                    self.phase = RuntimeInitPhase::PostInitFlush {
+                        until: Instant::now() + Duration::from_millis(100),
+                    };
+                    changed = true;
+                    continue;
+                }
+                RuntimeInitPhase::PostInitFlush { until } => {
+                    if Instant::now() >= until {
+                        fire_init_step(client, "PostInitFlush", self.init_started_at);
+                        self.phase = RuntimeInitPhase::Done;
+                        return RuntimeInitPoll::Ready(std::mem::take(&mut self.result));
+                    }
+                    self.phase = RuntimeInitPhase::PostInitFlush { until };
+                    return RuntimeInitPoll::Pending { changed };
+                }
+                RuntimeInitPhase::Done => {
+                    self.phase = RuntimeInitPhase::Done;
+                    return RuntimeInitPoll::Pending { changed };
+                }
+            }
+        }
+    }
+
+    fn ensure_strategy_schema_started(
+        &mut self,
+        client: &mut Client,
+        dispatcher: &crate::events::EventDispatcher,
+    ) {
+        if self.strategy_schema.is_none() {
+            self.strategy_schema = Some(begin_required_strategy_schema_step(client, dispatcher));
+        }
+    }
+
+    fn apply_base_check_response(
+        &mut self,
+        client: &mut Client,
+        resp: EngineResponse,
+    ) -> CriticalInitStatus {
+        if resp.success {
+            self.result.base_check_ok = true;
+            let info = parse_base_check_response(&resp.data);
+            client.set_server_info(info);
+            CriticalInitStatus::Ok
+        } else {
+            let message = response_error_message(&resp);
+            self.result
+                .errors
+                .push(format!("BaseCheck error: {message}"));
+            CriticalInitStatus::Failed(message)
+        }
+    }
+
+    fn apply_auth_check_response(
+        &mut self,
+        client: &mut Client,
+        resp: EngineResponse,
+    ) -> CriticalInitStatus {
+        if resp.success {
+            let len = resp.data.len();
+            match parse_auth_check_response(&resp.data) {
+                Some(auth) => {
+                    client.set_auth_info(auth.clone());
+                    self.result.auth_info = Some(auth);
+                }
+                None => {
+                    self.result
+                        .errors
+                        .push(format!("AuthCheck parse: malformed payload ({len} bytes)"));
+                }
+            }
+            self.result.auth_check_ok = true;
+            CriticalInitStatus::Ok
+        } else {
+            let message = response_error_message(&resp);
+            self.result
+                .errors
+                .push(format!("AuthCheck error: {message}"));
+            CriticalInitStatus::Failed(message)
+        }
+    }
+
+    fn poll_required_engine_response(
+        &mut self,
+        client: &mut Client,
+        pending: &mut PendingEngineInit,
+        step: &'static str,
+    ) -> Result<Option<EngineResponse>, InitError> {
+        match poll_engine_init_step(client, pending) {
+            PendingEnginePoll::Pending => Ok(None),
+            PendingEnginePoll::Response(resp) if resp.success => Ok(Some(resp)),
+            PendingEnginePoll::Response(resp) => {
+                let message = response_error_message(&resp);
+                self.result.errors.push(format!("{step} error: {message}"));
+                Err(InitError::CriticalStepFailed { step, message })
+            }
+            PendingEnginePoll::Timeout => {
+                self.result.errors.push(format!("{step}: timeout"));
+                Err(InitError::CriticalStepTimedOut(step))
+            }
+            PendingEnginePoll::Disconnected => Err(InitError::SendChannelClosed),
+        }
+    }
+}
+
+fn begin_engine_init_step(
+    client: &Client,
+    request_payload: Vec<u8>,
+    timeout: Duration,
+) -> PendingEngineInit {
+    let request_uid = engine_request_uid(&request_payload);
+    let rx = client.send_api_request_async(&request_payload);
+    PendingEngineInit {
+        request_uid,
+        rx,
+        deadline: Instant::now() + timeout,
+    }
+}
+
+fn poll_engine_init_step(
+    client: &mut Client,
+    pending: &mut PendingEngineInit,
+) -> PendingEnginePoll {
+    match pending.rx.try_recv() {
+        Ok(resp) => PendingEnginePoll::Response(resp),
+        Err(mpsc::TryRecvError::Disconnected) => PendingEnginePoll::Disconnected,
+        Err(mpsc::TryRecvError::Empty) => {
+            if Instant::now() >= pending.deadline {
+                if let Some(uid) = pending.request_uid {
+                    client.api_pending.remove(uid);
+                }
+                PendingEnginePoll::Timeout
+            } else {
+                PendingEnginePoll::Pending
+            }
+        }
+    }
 }
 
 /// Run the full init sequence: BaseCheck → AuthCheck → GetMarketsList →
-/// GetMarketsIndexes → UpdateMarketsList →
+/// UpdateMarketsList →
 /// Delphi post-init resync → optional subscriptions.
 ///
 /// Until this function completes successfully,
@@ -286,30 +991,17 @@ pub fn connect_and_init(
 /// `TRequestBalanceRefresh`. The dispatcher also answers later server
 /// `TStratSnapshotRequest` commands from the same library-owned strategy list.
 ///
-/// The mutable `EventDispatcher` is required because the helper keeps pumping
-/// the client loop while it waits. Engine API responses are also applied to
-/// market state through that dispatcher (`indexes_synchronized`, market list,
-/// prices); without it, TradesStream and OrderBook packets remain blocked by
-/// active-library gating.
-///
-/// Call this after the transport has reached `Connected { fresh: true }`, or
-/// use [`connect_and_init`] to perform both phases. If the client is not
-/// authorized, the function returns `InitError::NotAuthenticated`.
-///
 /// On successful BaseCheck, the helper parses [`ServerInfo`] and stores it in
 /// `client.server_info()` for multi-server identification.
 ///
 /// Critical step timing follows the Delphi reference: `TMoonProtoEngine.FTimeout`
 /// is 12000 ms for each `SendAndWait` request. Rust keeps pumping the client
 /// loop while it waits for each Engine API response. If a UI command marked
-/// `ServerUpdateSent`, `run_init_sequence` also mirrors Delphi `BaseCheck`:
+/// `ServerUpdateSent`, the Init spine also mirrors Delphi `BaseCheck`:
 /// wait up to 34 * 300 ms for `AuthDone`, clear the marker, send BaseCheck once,
 /// and if it still fails retry it 10 times with 2000 ms pauses. All init steps
 /// above are mandatory: a timeout/error means Init failed and `domain_ready`
 /// stays closed.
-///
-/// `MoonClient::connect` is the public happy path; call this function directly
-/// only when writing a custom runtime or protocol test.
 ///
 /// [`ServerInfo`]: crate::commands::engine_api::ServerInfo
 #[derive(Debug, Clone)]
@@ -341,6 +1033,33 @@ fn response_error_message(resp: &EngineResponse) -> String {
     format!("code={} msg={}", resp.error_code, resp.error_msg)
 }
 
+fn check_init_shutdown(client: &Client) -> Result<(), InitError> {
+    if client.shutdown_requested() {
+        Err(InitError::SendChannelClosed)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn pump_client_for(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    duration: Duration,
+) {
+    client.with_owned_runtime_stepper(dispatcher, |client, stepper, _dispatcher| {
+        stepper.step_for(client, _dispatcher, duration);
+    });
+}
+
+fn fire_init_step(client: &mut Client, step: &'static str, start: Instant) {
+    client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
+        step,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    });
+}
+
+#[cfg(test)]
 fn run_base_check_once(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -348,7 +1067,7 @@ fn run_base_check_once(
     timeout: Duration,
 ) -> Result<CriticalInitStatus, InitError> {
     let req = crate::commands::engine_request::base_check();
-    match client.request_engine_response(dispatcher, &req, timeout) {
+    match client.request_engine_response_for_init(dispatcher, &req, timeout) {
         Ok(resp) if resp.success => {
             result.base_check_ok = true;
             let info = parse_base_check_response(&resp.data);
@@ -368,21 +1087,27 @@ fn run_base_check_once(
     }
 }
 
+#[cfg(test)]
 fn wait_auth_done_after_server_update(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
 ) {
     for _ in 0..DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS {
+        if client.shutdown_requested() {
+            break;
+        }
         if client.is_authorized() {
             break;
         }
-        client.run_with_dispatcher_worker_queued(
-            Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS),
+        pump_client_for(
+            client,
             dispatcher,
+            Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS),
         );
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_base_check_delphi(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -395,7 +1120,9 @@ pub(crate) fn run_base_check_delphi(
     let mut status = run_base_check_once(client, dispatcher, result, timeout)?;
     if waiting_update && !status.is_ok() {
         for _ in 0..DELPHI_BASE_CHECK_UPDATE_RETRIES {
-            client.run_with_dispatcher_worker_queued(retry_pause, dispatcher);
+            check_init_shutdown(client)?;
+            pump_client_for(client, dispatcher, retry_pause);
+            check_init_shutdown(client)?;
             status = run_base_check_once(client, dispatcher, result, timeout)?;
             if status.is_ok() {
                 break;
@@ -408,6 +1135,7 @@ pub(crate) fn run_base_check_delphi(
     Ok(status)
 }
 
+#[cfg(test)]
 fn run_auth_check_once(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -415,7 +1143,7 @@ fn run_auth_check_once(
     timeout: Duration,
 ) -> Result<CriticalInitStatus, InitError> {
     let req = crate::commands::engine_request::auth_check();
-    match client.request_engine_response(dispatcher, &req, timeout) {
+    match client.request_engine_response_for_init(dispatcher, &req, timeout) {
         Ok(resp) if resp.success => {
             let len = resp.data.len();
             match parse_auth_check_response(&resp.data) {
@@ -445,6 +1173,7 @@ fn run_auth_check_once(
     }
 }
 
+#[cfg(test)]
 fn run_required_engine_step(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
@@ -453,7 +1182,7 @@ fn run_required_engine_step(
     req: Vec<u8>,
     timeout: Duration,
 ) -> Result<EngineResponse, InitError> {
-    match client.request_engine_response(dispatcher, &req, timeout) {
+    match client.request_engine_response_for_init(dispatcher, &req, timeout) {
         Ok(resp) if resp.success => Ok(resp),
         Ok(resp) => {
             let message = response_error_message(&resp);
@@ -478,23 +1207,132 @@ fn malformed_required_engine_step(
     InitError::CriticalStepFailed { step, message }
 }
 
-fn run_required_strategy_schema_step(
+fn apply_required_get_markets_list_response(
+    dispatcher: &mut crate::events::EventDispatcher,
+    resp: &EngineResponse,
+    result: &mut InitResult,
+) -> Result<(), InitError> {
+    let mut events = Vec::new();
+    if !dispatcher.apply_get_markets_list_response_like_delphi(resp, &mut events) {
+        return Err(malformed_required_engine_step(
+            result,
+            "GetMarketsList",
+            resp.data.len(),
+        ));
+    }
+    dispatcher.queue_events(events);
+    Ok(())
+}
+
+fn apply_required_update_markets_list_response(
+    dispatcher: &mut crate::events::EventDispatcher,
+    resp: &EngineResponse,
+    result: &mut InitResult,
+) -> Result<(), InitError> {
+    let mut events = Vec::new();
+    if !dispatcher.apply_update_markets_list_response_like_delphi(resp, None, &mut events) {
+        return Err(malformed_required_engine_step(
+            result,
+            "UpdateMarketsList",
+            resp.data.len(),
+        ));
+    }
+    dispatcher.queue_events(events);
+    Ok(())
+}
+
+struct PendingStrategySchemaStep {
+    schema_revision_before: u64,
+    schema_failures_before: u64,
+    start: Instant,
+    next_request_at: Instant,
+}
+
+fn begin_required_strategy_schema_step(
+    client: &mut Client,
+    dispatcher: &crate::events::EventDispatcher,
+) -> PendingStrategySchemaStep {
+    let start = Instant::now();
+    let pending = PendingStrategySchemaStep {
+        schema_revision_before: dispatcher.strats().strategy_schema_revision(),
+        schema_failures_before: dispatcher.strats().strategy_schema_failures(),
+        start,
+        next_request_at: start + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS),
+    };
+    client.strat_schema_request();
+    pending
+}
+
+fn poll_required_strategy_schema_step(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     result: &mut InitResult,
+    pending: &mut PendingStrategySchemaStep,
+    timeout: Duration,
+) -> StrategySchemaPoll {
+    const STEP: &str = "TStratSchemaRequest";
+
+    if let Err(err) = check_init_shutdown(client) {
+        return StrategySchemaPoll::Failed(err);
+    }
+    if dispatcher.strats().strategy_schema_revision() != pending.schema_revision_before {
+        let Some(schema) = dispatcher.strats().strategy_schema() else {
+            let message = "schema revision advanced but schema state is empty".to_string();
+            result.errors.push(format!("{STEP}: {message}"));
+            return StrategySchemaPoll::Failed(InitError::CriticalStepFailed {
+                step: STEP,
+                message,
+            });
+        };
+        result.strategy_schema_raw_bytes = dispatcher
+            .strats()
+            .strategy_schema_raw()
+            .map_or(0, |raw| raw.len());
+        result.strategy_schema_kind_count = schema.kinds.len();
+        result.strategy_schema_field_count = schema.fields.len();
+        return StrategySchemaPoll::Ready;
+    }
+
+    if dispatcher.strats().strategy_schema_failures() != pending.schema_failures_before {
+        let message = dispatcher
+            .strats()
+            .strategy_schema_last_error()
+            .unwrap_or("strategy schema parse failed")
+            .to_string();
+        result.errors.push(format!("{STEP}: {message}"));
+        return StrategySchemaPoll::Failed(InitError::CriticalStepFailed {
+            step: STEP,
+            message,
+        });
+    }
+
+    if timeout_remaining(pending.start, timeout).is_none() {
+        result.errors.push(format!("{STEP}: timeout"));
+        return StrategySchemaPoll::Failed(InitError::CriticalStepTimedOut(STEP));
+    }
+
+    let now = Instant::now();
+    if now >= pending.next_request_at {
+        client.strat_schema_request();
+        pending.next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
+    }
+
+    StrategySchemaPoll::Pending
+}
+
+#[cfg(test)]
+fn finish_required_strategy_schema_step(
+    client: &mut Client,
+    dispatcher: &mut crate::events::EventDispatcher,
+    result: &mut InitResult,
+    pending: &mut PendingStrategySchemaStep,
     timeout: Duration,
 ) -> Result<(), InitError> {
     const STEP: &str = "TStratSchemaRequest";
-    const TICK: Duration = Duration::from_millis(50);
 
-    let schema_revision_before = dispatcher.strats().strategy_schema_revision();
-    let schema_failures_before = dispatcher.strats().strategy_schema_failures();
-    let start = Instant::now();
-    let mut next_request_at = start + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
-    client.strat_schema_request();
-
-    loop {
-        if dispatcher.strats().strategy_schema_revision() != schema_revision_before {
+    client.with_owned_runtime_stepper(dispatcher, |client, stepper, dispatcher| loop {
+        check_init_shutdown(client)?;
+        if dispatcher.strats().strategy_schema_revision() != pending.schema_revision_before {
             let Some(schema) = dispatcher.strats().strategy_schema() else {
                 let message = "schema revision advanced but schema state is empty".to_string();
                 result.errors.push(format!("{STEP}: {message}"));
@@ -512,7 +1350,7 @@ fn run_required_strategy_schema_step(
             return Ok(());
         }
 
-        if dispatcher.strats().strategy_schema_failures() != schema_failures_before {
+        if dispatcher.strats().strategy_schema_failures() != pending.schema_failures_before {
             let message = dispatcher
                 .strats()
                 .strategy_schema_last_error()
@@ -525,25 +1363,28 @@ fn run_required_strategy_schema_step(
             });
         }
 
-        let Some(remaining) = timeout_remaining(start, timeout) else {
+        if timeout_remaining(pending.start, timeout).is_none() {
             result.errors.push(format!("{STEP}: timeout"));
             return Err(InitError::CriticalStepTimedOut(STEP));
-        };
-
-        let now = Instant::now();
-        if now >= next_request_at {
-            client.strat_schema_request();
-            next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
         }
 
-        client.run_with_dispatcher_worker_queued(remaining.min(TICK), dispatcher);
-    }
+        let now = Instant::now();
+        if now >= pending.next_request_at {
+            client.strat_schema_request();
+            pending.next_request_at = now + Duration::from_millis(SETTINGS_HELPER_RETRY_PAUSE_MS);
+        }
+
+        if !stepper.step(client, dispatcher) {
+            return Err(InitError::SendChannelClosed);
+        }
+        stepper.barrier();
+    })
 }
 
 /// Run the MoonBot-compatible one-time domain initialization sequence.
 ///
-/// Call this after transport authorization, or use [`connect_and_init`] to wait
-/// for authorization and init in one helper. A successful run opens the
+/// Internal one-time domain initialization sequence after transport
+/// authorization. A successful run opens the
 /// dispatcher domain gate and sends the Delphi post-init refresh set:
 /// strategy schema request, order snapshot, client strategy snapshot, settings
 /// request, MM-orders subscription flag, balance refresh, and optional stream
@@ -553,15 +1394,18 @@ fn run_required_strategy_schema_step(
 ///
 /// Do not call this again after a reconnect in the same [`Client`] session.
 /// Reconnect restore is owned by the library once init has succeeded.
-pub fn run_init_sequence(
+#[cfg(test)]
+pub(crate) fn run_init_sequence(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     cfg: InitConfig,
 ) -> Result<InitResult, InitError> {
+    let init_started_at = Instant::now();
     let waiting_update = client.take_server_update_sent();
     if waiting_update {
         wait_auth_done_after_server_update(client, dispatcher);
     }
+    check_init_shutdown(client)?;
 
     if !client.is_authorized() {
         return Err(InitError::NotAuthenticated);
@@ -571,6 +1415,7 @@ pub fn run_init_sequence(
         crate::api_pending::DEFAULT_PENDING_TIMEOUT_MS as u64,
     ));
     let mut result = InitResult::default();
+    let mut strategy_schema: Option<PendingStrategySchemaStep> = None;
 
     // === 1. BaseCheck/AuthCheck === Delphi InitInt first auth block.
     // При успехе — парсим server identity и сохраняем в Client.server_info
@@ -584,6 +1429,10 @@ pub fn run_init_sequence(
         waiting_update,
         Duration::from_millis(DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS),
     )?;
+    if base_status.is_ok() {
+        fire_init_step(client, "BaseCheck", init_started_at);
+        strategy_schema = Some(begin_required_strategy_schema_step(client, dispatcher));
+    }
 
     // === 2. AuthCheck ===
     let mut auth_status = if base_status.is_ok() {
@@ -591,6 +1440,9 @@ pub fn run_init_sequence(
     } else {
         CriticalInitStatus::Skipped
     };
+    if auth_status.is_ok() {
+        fire_init_step(client, "AuthCheck", init_started_at);
+    }
 
     // Delphi `TCryptoPumpTool.InitInt`: if either BaseCheck or AuthCheck failed,
     // sleep 200ms, call BaseCheck once more, then assign Result from AuthCheck.
@@ -598,12 +1450,24 @@ pub fn run_init_sequence(
     // the retry branch's final gate is the second AuthCheck.
     let used_init_auth_retry = !base_status.is_ok() || !auth_status.is_ok();
     if used_init_auth_retry {
-        client.run_with_dispatcher_worker_queued(
-            Duration::from_millis(DELPHI_INIT_AUTH_RETRY_PAUSE_MS),
+        check_init_shutdown(client)?;
+        pump_client_for(
+            client,
             dispatcher,
+            Duration::from_millis(DELPHI_INIT_AUTH_RETRY_PAUSE_MS),
         );
+        check_init_shutdown(client)?;
         base_status = run_base_check_once(client, dispatcher, &mut result, timeout)?;
+        if base_status.is_ok() {
+            fire_init_step(client, "BaseCheck", init_started_at);
+            if strategy_schema.is_none() {
+                strategy_schema = Some(begin_required_strategy_schema_step(client, dispatcher));
+            }
+        }
         auth_status = run_auth_check_once(client, dispatcher, &mut result, timeout)?;
+        if auth_status.is_ok() {
+            fire_init_step(client, "AuthCheck", init_started_at);
+        }
     }
 
     if !used_init_auth_retry {
@@ -617,9 +1481,27 @@ pub fn run_init_sequence(
         return Err(err);
     }
 
+    // Agreed active-library behavior: unlike the Delphi UI client, the Rust
+    // library asks the server for the live strategy schema during Init so API
+    // consumers get field types, picklists, visibility and chapters without
+    // hardcoded Rust copies of TStrategy metadata.
+    //
+    // The schema does not depend on AuthCheck/markets/indexes/prices, only on a
+    // live authorized transport. Start it after the first successful BaseCheck
+    // (or the fallback successful auth path) and let the normal Engine API waits
+    // pump its Sliced response in parallel with AuthCheck and the critical
+    // market init steps. Only TStratSchemaRequest/TStratSchema are allowed
+    // through the pre-domain gate.
+    // A pre-init TStratSnapshotRequest is only latched by EventDispatcher; the
+    // actual TStratSnapshot reply is sent by post-init resync after schema/state
+    // are ready. The rest of MPC_Strat remains gated until domain_ready.
+    if strategy_schema.is_none() {
+        strategy_schema = Some(begin_required_strategy_schema_step(client, dispatcher));
+    }
+
     // === 3. GetMarketsList === критический Delphi init step.
-    // Markets state в dispatcher обновляется автоматически через
-    // `EventDispatcher::dispatch_into` ветка Command::API → GetMarketsList.
+    // Delphi `ProcessApiCommand` only parks the response in PendingRequests;
+    // `TMoonProtoEngine.GetMarketsList` applies markets after SendAndWait.
     let resp = run_required_engine_step(
         client,
         dispatcher,
@@ -628,37 +1510,19 @@ pub fn run_init_sequence(
         crate::commands::engine_request::get_markets_list(),
         timeout,
     )?;
-    if crate::commands::market::parse_markets_list_response(&resp.data, 2).is_none() {
-        return Err(malformed_required_engine_step(
-            &mut result,
-            "GetMarketsList",
-            resp.data.len(),
-        ));
-    }
+    apply_required_get_markets_list_response(dispatcher, &resp, &mut result)?;
     result.markets_response_bytes = resp.data.len();
+    fire_init_step(client, "GetMarketsList", init_started_at);
 
-    // === 4. GetMarketsIndexes === критический: indexed streams stay gated
-    // until this map is current for the active PeerAppToken.
-    let resp = run_required_engine_step(
-        client,
-        dispatcher,
-        &mut result,
-        "GetMarketsIndexes",
-        crate::commands::engine_request::get_markets_indexes(),
-        timeout,
-    )?;
-    if crate::commands::market::parse_markets_indexes_response(&resp.data).is_none() {
-        return Err(malformed_required_engine_step(
-            &mut result,
-            "GetMarketsIndexes",
-            resp.data.len(),
-        ));
-    }
-    result.indexes_response_bytes = resp.data.len();
+    // Delphi `GetMarketsList` rebuilds `SrvMarkets` during cold init and stores
+    // `FLastServerAppToken := PeerAppToken`. A separate `GetMarketsIndexes`
+    // request is not part of `TCryptoPumpTool.InitInt`; it is only the stale
+    // token/reconnect repair path inside `TMoonProtoEngine.UpdateMarketsList`.
+    client.tracked_indexes_peer_app_token = client.peer_app_token;
 
-    // === 5. UpdateMarketsList === критический: Delphi InitInt does
-    // `GetMarketsList and UpdateMarketsList`, and UpdateMarketsList also owns the
-    // PeerAppToken/index synchronization path in TMoonProtoEngine.
+    // === 4. UpdateMarketsList === критический: Delphi InitInt does exactly
+    // `GetMarketsList and UpdateMarketsList`; if the token later becomes stale,
+    // reconnect/periodic restore must run `GetMarketsIndexes` before prices.
     let resp = run_required_engine_step(
         client,
         dispatcher,
@@ -667,28 +1531,28 @@ pub fn run_init_sequence(
         crate::commands::engine_request::update_markets_list(),
         timeout,
     )?;
-    if crate::commands::market::parse_markets_prices_response(&resp.data).is_none() {
-        return Err(malformed_required_engine_step(
-            &mut result,
-            "UpdateMarketsList",
-            resp.data.len(),
-        ));
-    }
+    apply_required_update_markets_list_response(dispatcher, &resp, &mut result)?;
     result.update_markets_response_bytes = resp.data.len();
+    fire_init_step(client, "UpdateMarketsList", init_started_at);
 
     client.domain_restore = DomainRestoreIntent {
         fetch_indexes: true,
     };
     client.set_domain_ready(true);
 
-    // Agreed active-library behavior: unlike the Delphi UI client, the Rust
-    // library asks the server for the live strategy schema during Init so API
-    // consumers get field types, picklists, visibility and chapters without
-    // hardcoded Rust copies of TStrategy metadata.
-    if let Err(err) = run_required_strategy_schema_step(client, dispatcher, &mut result, timeout) {
+    if let Err(err) = finish_required_strategy_schema_step(
+        client,
+        dispatcher,
+        &mut result,
+        strategy_schema
+            .as_mut()
+            .expect("strategy schema step must be started before finish"),
+        timeout,
+    ) {
         client.set_domain_ready(false);
         return Err(err);
     }
+    fire_init_step(client, "StrategySchema", init_started_at);
 
     send_post_init_resync(client, dispatcher, &cfg, &mut result);
     client.send_registry_subscriptions_after_init();
@@ -713,7 +1577,9 @@ pub fn run_init_sequence(
         || cfg.subscribe_trades.is_some()
         || !cfg.subscribe_orderbooks.is_empty()
     {
-        client.run_with_dispatcher_worker_queued(Duration::from_millis(100), dispatcher);
+        pump_client_for(client, dispatcher, Duration::from_millis(100));
+        check_init_shutdown(client)?;
+        fire_init_step(client, "PostInitFlush", init_started_at);
     }
 
     Ok(result)
@@ -726,7 +1592,7 @@ pub(crate) fn send_post_init_resync(
     result: &mut InitResult,
 ) {
     client.request_all_statuses(rand::random());
-    if let Some(snapshot) = dispatcher.local_strategy_snapshot_reply() {
+    if let Some(snapshot) = dispatcher.pending_or_local_strategy_snapshot_reply() {
         client.strat_send_snapshot_payload(
             snapshot.server_epoch,
             snapshot.client_max_last_date,

@@ -38,7 +38,7 @@ impl Client {
             cmd,
             self.cfg.client_id,
             payload,
-            self.cfg.mask_ver,
+            self.cfg.mask_ver.to_byte(),
             &mut self.transport_mode_state,
         );
         // Извлекаем packet чтобы borrow checker не ругался на двойной &mut self
@@ -64,7 +64,7 @@ impl Client {
             cmd.to_byte(),
             self.cfg.client_id,
             payload,
-            self.cfg.mask_ver,
+            self.cfg.mask_ver.to_byte(),
             &mut self.transport_mode_state,
         );
         let packet = std::mem::take(&mut self.send_buf);
@@ -92,11 +92,14 @@ impl Client {
                 .record_outgoing(cmd, true);
             if trace_io_enabled() {
                 eprintln!(
-                    "[mp-io-tx-blackhole] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
+                    "[mp-io-tx-blackhole] t={} cmd={:?} raw={} packet_len={} extra_len={} packet_hash={:016X} packet_head={} addr={}",
+                    trace_elapsed_ms(),
                     Command::from_byte(cmd),
                     cmd,
                     packet.len(),
                     extra.map(|p| p.len()).unwrap_or(0),
+                    fnv1a64(packet),
+                    trace_head(packet, 16),
                     addr
                 );
             }
@@ -105,11 +108,14 @@ impl Client {
 
         if trace_io_enabled() {
             eprintln!(
-                "[mp-io-tx-attempt] cmd={:?} raw={} packet_len={} extra_len={} addr={}",
+                "[mp-io-tx-attempt] t={} cmd={:?} raw={} packet_len={} extra_len={} packet_hash={:016X} packet_head={} addr={}",
+                trace_elapsed_ms(),
                 Command::from_byte(cmd),
                 cmd,
                 packet.len(),
                 extra.map(|p| p.len()).unwrap_or(0),
+                fnv1a64(packet),
+                trace_head(packet, 16),
                 addr
             );
         }
@@ -142,10 +148,12 @@ impl Client {
                 self.track_sent(packet.len() as u64, self.now_ms());
                 if trace_io_enabled() {
                     eprintln!(
-                        "[mp-io-tx-ok] cmd={:?} raw={} packet_len={} total_sent={}",
+                        "[mp-io-tx-ok] t={} cmd={:?} raw={} packet_len={} packet_hash={:016X} total_sent={}",
+                        trace_elapsed_ms(),
                         Command::from_byte(cmd),
                         cmd,
                         packet.len(),
+                        fnv1a64(packet),
                         total_sent
                     );
                 }
@@ -153,10 +161,12 @@ impl Client {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if trace_io_enabled() {
                     eprintln!(
-                        "[mp-io-tx-wouldblock] cmd={:?} raw={} packet_len={} err={}",
+                        "[mp-io-tx-wouldblock] t={} cmd={:?} raw={} packet_len={} packet_hash={:016X} err={}",
+                        trace_elapsed_ms(),
                         Command::from_byte(cmd),
                         cmd,
                         packet.len(),
+                        fnv1a64(packet),
                         e
                     );
                 }
@@ -165,26 +175,43 @@ impl Client {
                 }
             }
             Err(e) if is_datagram_too_large_error(&e) => {
+                let cmd_name = Command::from_byte(cmd);
                 if trace_io_enabled() {
                     eprintln!(
-                        "[mp-io-tx-too-large] cmd={:?} raw={} packet_len={} err={}",
-                        Command::from_byte(cmd),
+                        "[mp-io-tx-too-large] t={} cmd={:?} raw={} packet_len={} packet_hash={:016X} err={}",
+                        trace_elapsed_ms(),
+                        cmd_name,
                         cmd,
                         packet.len(),
+                        fnv1a64(packet),
                         e
                     );
                 }
-                if self.should_log("send_too_large", 1000) {
-                    warn!("send_to(cmd={cmd}) packet too large for current path MTU: {e}");
+                if is_pmtu_probe_ack_command(cmd) {
+                    if self.should_log("send_too_large_pmtu_probe", 10_000) {
+                        debug!(
+                            "PMTU probe ack {:?} len={} exceeded current path MTU; expected negative probe feedback: {e}",
+                            cmd_name,
+                            packet.len()
+                        );
+                    }
+                } else if self.should_log("send_too_large", 1000) {
+                    warn!(
+                        "send_to(cmd={:?}/raw={cmd}, len={}) packet too large for current path MTU: {e}",
+                        cmd_name,
+                        packet.len()
+                    );
                 }
             }
             Err(e) => {
                 if trace_io_enabled() {
                     eprintln!(
-                        "[mp-io-tx-error] cmd={:?} raw={} packet_len={} err={}",
+                        "[mp-io-tx-error] t={} cmd={:?} raw={} packet_len={} packet_hash={:016X} err={}",
+                        trace_elapsed_ms(),
                         Command::from_byte(cmd),
                         cmd,
                         packet.len(),
+                        fnv1a64(packet),
                         e
                     );
                 }

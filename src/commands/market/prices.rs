@@ -7,6 +7,7 @@ use crate::time::DelphiTime;
 
 /// Обновление цены одного маркета (byte-exact с `WriteMarketPricesToStream`
 /// MoonProtoSerialization.pas:195-209).
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarketPriceUpdate {
     pub m_index: u16,
@@ -28,6 +29,7 @@ impl MarketPriceUpdate {
 }
 
 /// Обновление цены `CorrMarket`.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorrMarketPriceUpdate {
     pub bn_market_name: String,
@@ -38,6 +40,7 @@ pub struct CorrMarketPriceUpdate {
 /// Wire-form (MoonProtoEngineServer.pas:84-111):
 ///   `send_funding:bool + count:i32 + prices[count] + send_corr_markets:bool +
 ///    (if send_corr_markets) corr_count:i32 + corr_prices[corr_count]`.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MarketsPricesResponse {
     pub send_funding: bool,
@@ -46,6 +49,7 @@ pub struct MarketsPricesResponse {
     pub corr_prices: Vec<CorrMarketPriceUpdate>,
 }
 
+#[doc(hidden)]
 pub fn parse_markets_prices_response(data: &[u8]) -> Option<MarketsPricesResponse> {
     parse_markets_prices_response_with_local_shift(data, current_local_time_shift_minutes())
 }
@@ -107,6 +111,7 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
     })
 }
 
+#[doc(hidden)]
 pub fn build_markets_prices_response(resp: &MarketsPricesResponse) -> Vec<u8> {
     build_markets_prices_response_with_local_shift(resp, current_local_time_shift_minutes())
 }

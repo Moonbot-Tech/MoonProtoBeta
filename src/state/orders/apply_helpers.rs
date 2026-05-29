@@ -1,6 +1,8 @@
 //! Low-level `ProcessCommandOrder` apply helpers.
 
 use super::*;
+use crate::commands::market::{BaseCurrency, ExchangeCode};
+use crate::commands::trade::DelphiBool;
 
 impl Orders {
     pub(super) fn accept_epoch_and_phase(
@@ -42,8 +44,8 @@ impl Orders {
         entry.status = st.epoch_header.status;
         if new_order {
             entry.market_name = st.epoch_header.market.market_name.clone();
-            entry.currency = st.epoch_header.market.currency;
-            entry.platform = st.epoch_header.market.platform;
+            entry.currency = BaseCurrency::from_byte(st.epoch_header.market.currency);
+            entry.platform = ExchangeCode::from_byte(st.epoch_header.market.platform);
             entry.strat_id = st.strat_id;
             entry.is_short = st.is_short;
             entry.db_id = st.db_id;
@@ -86,21 +88,21 @@ impl Orders {
             }
         }
 
-        if st.epoch_header.status == OrderWorkerStatus::SelLDone {
+        if st.epoch_header.status == OrderWorkerStatus::SellDone {
             Self::apply_sell_done_flags(entry);
         }
     }
 
     pub(super) fn apply_sell_done_flags(entry: &mut Order) {
         // Delphi `BOrderWorker.SetDoneFlags` branch for `Status = OS_SelLDone`.
-        entry.sell_order.is_closed = 1;
-        entry.sell_order.is_opened = 0;
+        entry.sell_order.is_closed = DelphiBool::TRUE;
+        entry.sell_order.is_opened = DelphiBool::FALSE;
         entry.bulk_replace_sell = false;
 
-        entry.buy_order.is_opened = 0;
+        entry.buy_order.is_opened = DelphiBool::FALSE;
         entry.bulk_replace_buy = false;
-        if entry.buy_order.is_closed == 0 {
-            entry.buy_order.canceled = 1;
+        if entry.buy_order.is_closed.is_false() {
+            entry.buy_order.canceled = DelphiBool::TRUE;
         }
     }
 

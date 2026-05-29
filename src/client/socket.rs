@@ -67,9 +67,18 @@ pub(crate) fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
     {
         use std::os::fd::AsRawFd;
         let fd = sock.as_raw_fd();
-        // IPv4: IPPROTO_IP=0, IP_MTU_DISCOVER=10, IP_PMTUDISC_DO=2 / DONT=0
-        // IPv6: IPPROTO_IPV6=41, IPV6_MTU_DISCOVER=23, same PMTUDISC values
-        let val: i32 = if enable { 2 } else { 0 };
+        // IPv4: IPPROTO_IP=0, IP_MTU_DISCOVER=10.
+        // IPv6: IPPROTO_IPV6=41, IPV6_MTU_DISCOVER=23.
+        //
+        // Linux `IP_PMTUDISC_DO` (2) sets DF, but also rejects datagrams above
+        // the already cached route PMTU before they leave the host. MoonProto's
+        // SizeAck/ProbeMTUAck packets are the PMTU probe itself: they must be
+        // sent with DF while bypassing the cached path-MTU estimate, otherwise
+        // the server never sees candidate sizes above Linux's stale/fallback
+        // cache. `IP_PMTUDISC_PROBE` (3) is the Linux mode for that exact
+        // packetization model; disabling returns to `IP_PMTUDISC_DONT` (0),
+        // matching Delphi's "DF only around probe ack" behavior.
+        let val: i32 = if enable { 3 } else { 0 };
         let (level, optname) = if is_v6 { (41, 23) } else { (0, 10) };
         let rc = unsafe {
             extern "C" {

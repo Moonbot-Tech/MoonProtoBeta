@@ -162,8 +162,12 @@ impl Client {
                     }
                     if trace_io_enabled() {
                         eprintln!(
-                            "[mp-sliced-ack] d={} acked={}/{} complete=true sent_count={}",
-                            s.datagram_num, s.blocks_count, s.blocks_count, s.sent_count
+                            "[mp-sliced-ack] t={} d={} acked={}/{} complete=true sent_count={}",
+                            trace_elapsed_ms(),
+                            s.datagram_num,
+                            s.blocks_count,
+                            s.blocks_count,
+                            s.sent_count
                         );
                     }
                     completed_idx = Some(idx);
@@ -178,12 +182,22 @@ impl Client {
                             .filter(|&block| s.is_block_acked(block))
                             .count();
                         eprintln!(
-                            "[mp-sliced-ack] d={} acked={}/{} complete=false last_checked={}",
-                            s.datagram_num, acked, s.blocks_count, s.last_checked
+                            "[mp-sliced-ack] t={} d={} acked={}/{} complete=false last_checked={}",
+                            trace_elapsed_ms(),
+                            s.datagram_num,
+                            acked,
+                            s.blocks_count,
+                            s.last_checked
                         );
                     }
                 }
             }
+        } else if trace_io_enabled() {
+            eprintln!(
+                "[mp-sliced-ack-miss] t={} d={} no_matching_sending=true",
+                trace_elapsed_ms(),
+                ack.datagram_num
+            );
         }
 
         if let Some(idx) = completed_idx {

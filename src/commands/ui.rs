@@ -373,12 +373,55 @@ pub struct SwitchDex {
     pub dex_name: String,
 }
 
+/// Delphi `TSwitchSpotCommand.SpotIndex`.
+///
+/// Server accepts `0=Crypto` and `1=Predict`; raw future values are preserved
+/// for forward compatibility, but normal application code should use the named
+/// constants.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SpotMarketKind(u8);
+
+#[allow(non_upper_case_globals)]
+impl SpotMarketKind {
+    pub const Crypto: Self = Self(0);
+    pub const Predict: Self = Self(1);
+
+    pub const fn from_byte(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Predict.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Crypto => "Crypto",
+            Self::Predict => "Predict",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Debug for SpotMarketKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
+    }
+}
+
 /// CmdId=14 `TSwitchSpotCommand` (High, UK_SpotSwitch).
 #[derive(Debug, Clone, Copy)]
 pub struct SwitchSpot {
     pub uid: u64,
-    /// 0=Crypto, 1=Predict.
-    pub spot_index: u8,
+    pub spot_index: SpotMarketKind,
 }
 
 // =============================================================================

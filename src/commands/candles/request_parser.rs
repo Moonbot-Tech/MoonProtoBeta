@@ -289,14 +289,14 @@ pub(crate) fn read_deep_price_pack(data: &[u8], pos: &mut usize) -> Option<DeepP
     }
     let wire = WireDeepPricePack::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_PACK_SIZE]).ok()?;
     *pos += DEEP_PRICE_PACK_SIZE;
-    let max_p = wire.max_p.get();
-    let min_p = wire.min_p.get();
+    let high = wire.high.get();
+    let low = wire.low.get();
     Some(DeepPrice {
-        open_p: max_p,
-        close_p: min_p,
-        max_p,
-        min_p,
-        vol: wire.vol.get(),
+        open: high,
+        close: low,
+        high,
+        low,
+        volume: wire.volume.get(),
         time: wire.time.get(),
     })
 }
@@ -308,14 +308,14 @@ pub(crate) fn read_deep_price_pack_old(data: &[u8], pos: &mut usize) -> Option<D
     let wire =
         WireDeepPricePackOld::read_from_bytes(&data[*pos..*pos + DEEP_PRICE_PACK_OLD_SIZE]).ok()?;
     *pos += DEEP_PRICE_PACK_OLD_SIZE;
-    let max_p = wire.max_p.get() as f32;
-    let min_p = wire.min_p.get() as f32;
+    let high = wire.high.get() as f32;
+    let low = wire.low.get() as f32;
     Some(DeepPrice {
-        open_p: max_p,
-        close_p: min_p,
-        max_p,
-        min_p,
-        vol: wire.vol.get() as f32,
+        open: high,
+        close: low,
+        high,
+        low,
+        volume: wire.volume.get() as f32,
         time: wire.time.get(),
     })
 }
@@ -323,7 +323,7 @@ pub(crate) fn read_deep_price_pack_old(data: &[u8], pos: &mut usize) -> Option<D
 fn read_wall_data(data: &[u8], pos: &mut usize) -> Option<[WallItem; 4]> {
     let mut out = [WallItem::default(); 4];
     for item in &mut out {
-        item.vol = read_f32(data, pos)?;
+        item.volume = read_f32(data, pos)?;
         item.count = read_i32(data, pos)?;
     }
     Some(out)
@@ -332,7 +332,7 @@ fn read_wall_data(data: &[u8], pos: &mut usize) -> Option<[WallItem; 4]> {
 fn read_wall_data_zero_tail(data: &[u8], pos: &mut usize) -> [WallItem; 4] {
     let mut out = [WallItem::default(); 4];
     for item in &mut out {
-        item.vol = f32::from_le_bytes(read_zero_tail::<4>(data, pos));
+        item.volume = f32::from_le_bytes(read_zero_tail::<4>(data, pos));
         item.count = i32::from_le_bytes(read_zero_tail::<4>(data, pos));
     }
     out

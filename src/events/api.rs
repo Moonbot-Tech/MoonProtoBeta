@@ -1,7 +1,9 @@
 //! Active `MPC_API` response dispatch.
 //!
-//! Mirrors Delphi `ProcessApiCommand`: apply market/index/tag/base-check side
-//! effects first, then emit the original `EngineResponse`.
+//! Mirrors Delphi `ProcessApiCommand`: unmatched/fire-and-forget responses apply
+//! active side effects first, then emit the original `EngineResponse`. Responses
+//! consumed by a Delphi-style pending caller are applied by that caller after
+//! `SendAndWait`/receiver completion.
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
 use crate::commands::engine_api::{
@@ -35,45 +37,15 @@ impl EventDispatcher {
     ) {
         if resp.success {
             match resp.method {
-                EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList => {
-                    if resp.method == EngineMethod::GetMarketsList {
-                        if let Some(ev) = self
-                            .markets
-                            .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
-                        {
-                            out.push(Event::Markets(ev));
-                            let new_markets = self.markets.take_new_markets_added();
-                            if !new_markets.is_empty() {
-                                out.push(Event::Markets(MarketsEvent::NewMarketsAdded {
-                                    names: new_markets,
-                                }));
-                            }
-                        }
-                    } else {
-                        let wants_history = self.market_history.is_some()
-                            && history_now_time_days.is_some()
-                            && self.trade_storage_scope.is_some();
-                        let mut last_price_rows = Vec::new();
-                        let ev = if wants_history {
-                            self.markets
-                                .apply_markets_prices_payload_collecting_last_price_like_delphi(
-                                    &resp.data,
-                                    Some(&mut last_price_rows),
-                                )
-                        } else {
-                            self.markets
-                                .apply_markets_prices_payload_like_delphi(&resp.data)
-                        };
-                        if let Some(ev) = ev {
-                            if wants_history {
-                                self.queue_last_price_history_like_delphi(
-                                    history_now_time_days,
-                                    last_price_rows,
-                                );
-                            }
-                            out.push(Event::Markets(ev));
-                        }
-                    }
+                EngineMethod::GetMarketsList => {
+                    self.apply_get_markets_list_response_like_delphi(&resp, out);
+                }
+                EngineMethod::UpdateMarketsList => {
+                    self.apply_update_markets_list_response_like_delphi(
+                        &resp,
+                        history_now_time_days,
+                        out,
+                    );
                 }
                 EngineMethod::GetMarketsIndexes => {
                     if let Some(names) = parse_markets_indexes_response(&resp.data) {
@@ -106,6 +78,63 @@ impl EventDispatcher {
         out.push(Event::EngineResponse(resp));
     }
 
+    pub(crate) fn apply_get_markets_list_response_like_delphi(
+        &mut self,
+        resp: &EngineResponse,
+        out: &mut Vec<Event>,
+    ) -> bool {
+        if !resp.success {
+            return false;
+        }
+        let Some(ev) = self
+            .markets
+            .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
+        else {
+            return false;
+        };
+        out.push(Event::Markets(ev));
+        let new_markets = self.markets.take_new_markets_added();
+        if !new_markets.is_empty() {
+            out.push(Event::Markets(MarketsEvent::NewMarketsAdded {
+                names: new_markets,
+            }));
+        }
+        true
+    }
+
+    pub(crate) fn apply_update_markets_list_response_like_delphi(
+        &mut self,
+        resp: &EngineResponse,
+        history_now_time_days: Option<f64>,
+        out: &mut Vec<Event>,
+    ) -> bool {
+        if !resp.success {
+            return false;
+        }
+        let wants_history = self.market_history.is_some()
+            && history_now_time_days.is_some()
+            && self.trade_storage_scope.is_some();
+        let mut last_price_rows = Vec::new();
+        let ev = if wants_history {
+            self.markets
+                .apply_markets_prices_payload_collecting_last_price_like_delphi(
+                    &resp.data,
+                    Some(&mut last_price_rows),
+                )
+        } else {
+            self.markets
+                .apply_markets_prices_payload_like_delphi(&resp.data)
+        };
+        let Some(ev) = ev else {
+            return false;
+        };
+        if wants_history {
+            self.queue_last_price_history_like_delphi(history_now_time_days, last_price_rows);
+        }
+        out.push(Event::Markets(ev));
+        true
+    }
+
     fn queue_last_price_history_like_delphi(
         &self,
         history_now_time_days: Option<f64>,
@@ -119,7 +148,7 @@ impl EventDispatcher {
         }
         let rows: Vec<MarketHistoryLastPriceInput> = rows
             .into_iter()
-            .filter(|row| self.active_trade_storage_allows_market(&row.market_name))
+            .filter(|row| self.active_trade_storage_allows_market(row.market_name.as_ref()))
             .map(|row| MarketHistoryLastPriceInput {
                 market_name: row.market_name,
                 current: row.current,

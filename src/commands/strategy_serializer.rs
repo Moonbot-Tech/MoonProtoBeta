@@ -57,16 +57,27 @@ use std::sync::Arc;
 //  TypeID constants
 // =============================================================================
 
+#[doc(hidden)]
 pub const TID_BOOL: u8 = 1;
+#[doc(hidden)]
 pub const TID_INT32: u8 = 2;
+#[doc(hidden)]
 pub const TID_INT64: u8 = 3;
+#[doc(hidden)]
 pub const TID_DOUBLE: u8 = 4;
+#[doc(hidden)]
 pub const TID_STRING: u8 = 5;
+#[doc(hidden)]
 pub const TID_BYTE: u8 = 6;
+#[doc(hidden)]
 pub const TID_WORD: u8 = 7;
+#[doc(hidden)]
 pub const TID_UINT32: u8 = 8;
+#[doc(hidden)]
 pub const TID_UINT64: u8 = 9;
+#[doc(hidden)]
 pub const TID_SINGLE: u8 = 10;
+#[doc(hidden)]
 pub const TID_ZERO_FLAG: u8 = 0x80;
 
 mod reader;
@@ -75,6 +86,7 @@ mod writer;
 
 #[cfg(test)]
 pub(crate) use self::reader::try_read_field_value;
+#[doc(hidden)]
 pub use self::reader::{
     parse_strategy_batch, parse_strategy_batch_plain, parse_strategy_batch_plain_with_schema,
     parse_strategy_batch_with_schema,
@@ -87,6 +99,7 @@ pub use self::types::field_names;
 pub use self::types::{
     FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };
+#[doc(hidden)]
 pub use self::writer::StrategyBatchBuilder;
 #[cfg(test)]
 pub(crate) use self::writer::{write_field, write_u8_len_bytes};
@@ -94,6 +107,7 @@ pub(crate) use self::writer::{write_field, write_u8_len_bytes};
 pub(crate) use super::strict_read::read_u8;
 
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct StrategyBatch {
     pub names: Vec<String>,
     pub paths: Vec<String>,

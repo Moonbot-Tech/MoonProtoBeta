@@ -219,7 +219,10 @@ fn full_snapshot_creates_default_for_known_market_without_previous_balance_like_
         .expect("Delphi resets every known market missing from full snapshot");
     assert_eq!(eth.initial_balance, 0.0);
     assert_eq!(eth.leverage_x, 1);
-    assert_eq!(eth.position_type, 0);
+    assert_eq!(
+        eth.position_type,
+        crate::commands::market::PositionType::Cross
+    );
 
     let stale = s.apply_with_known_markets(
         upd(4, 0, vec![make_item("ETHUSDT", 55.0)]),
@@ -367,4 +370,35 @@ fn full_snapshot_missing_market_preserves_hash_max_and_epoch_like_delphi() {
     let eth_after_incremental = s.get("ETHUSDT").unwrap();
     assert_eq!(eth_after_incremental.initial_balance, 90.0);
     assert_eq!(eth_after_incremental.max_value, 500.0);
+}
+
+#[test]
+fn snapshot_cow_incremental_balance_does_not_deep_clone_other_rows() {
+    let mut s = BalancesState::new();
+    s.apply(upd(
+        3,
+        1,
+        vec![make_item("BTCUSDT", 100.0), make_item("ETHUSDT", 50.0)],
+    ));
+
+    let snapshot = s.clone();
+    assert!(std::sync::Arc::ptr_eq(
+        s.by_market.get("BTCUSDT").unwrap(),
+        snapshot.by_market.get("BTCUSDT").unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        s.by_market.get("ETHUSDT").unwrap(),
+        snapshot.by_market.get("ETHUSDT").unwrap()
+    ));
+
+    s.apply(upd(4, 2, vec![make_item("BTCUSDT", 200.0)]));
+
+    assert!(!std::sync::Arc::ptr_eq(
+        s.by_market.get("BTCUSDT").unwrap(),
+        snapshot.by_market.get("BTCUSDT").unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        s.by_market.get("ETHUSDT").unwrap(),
+        snapshot.by_market.get("ETHUSDT").unwrap()
+    ));
 }

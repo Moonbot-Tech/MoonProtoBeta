@@ -1,4 +1,5 @@
 use super::engine_api::EngineMethod;
+use super::market::PositionType;
 /// Engine API request builders for server RPC calls.
 ///
 /// Byte-exact port of Delphi `TEngineRequest.StoreToStream`
@@ -225,9 +226,13 @@ pub fn query_hedge_mode() -> Vec<u8> {
 /// `emk_ChangePositionType(Market, NewType, NewMarket)`.
 /// Wire: market_name + WriteByte(Ord(NewType)) + WriteBool(NewMarket).
 /// Delphi MoonProtoEngine.pas:1067-1080.
-pub fn change_position_type(market_name: &str, new_type: u8, new_market: bool) -> Vec<u8> {
+pub fn change_position_type(
+    market_name: &str,
+    new_type: PositionType,
+    new_market: bool,
+) -> Vec<u8> {
     let mut params = Vec::with_capacity(2);
-    params::write_byte(&mut params, new_type);
+    params::write_byte(&mut params, new_type.to_byte());
     params::write_bool(&mut params, new_market);
     build_engine_request_full(EngineMethod::ChangePositionType, market_name, &[], &params)
 }

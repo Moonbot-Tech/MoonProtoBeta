@@ -6,21 +6,27 @@
 //! [`MarketHistoryStore`](crate::state::history_store::MarketHistoryStore)
 //! instances.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use parking_lot::RwLock;
 
 use crate::state::eps::EpsProfile;
 use crate::state::history::{
     Candle5mRow, MarketDerivedSnapshot, RollingTradeVolumeSnapshot, TradesPacketTimeShift,
 };
 use crate::state::history_store::{
-    MarketHistoryConfig, MarketHistoryReaders, MarketHistoryRegistry, TradeStorageScope,
+    MarketHistoryConfig, MarketHistoryReadHandle, MarketHistoryReaders, MarketHistoryRegistry,
+    TradeStorageScope,
 };
 
 const STORE_WORKER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
 const STORE_WORKER_RECV_TIMEOUT: Duration = Duration::from_millis(50);
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarketHistoryTradeInput {
     pub time_delta_ms: i16,
@@ -28,17 +34,19 @@ pub struct MarketHistoryTradeInput {
     pub qty: f32,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarketHistoryMMOrderInput {
     pub time_delta_ms: i16,
-    pub vol: f32,
+    pub volume: f32,
     pub q: f32,
     pub taker: Option<[u8; 20]>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketHistoryLastPriceInput {
-    pub market_name: String,
+    pub market_name: Arc<str>,
     pub current: f64,
     pub bid: f64,
     pub ask: f64,
@@ -48,6 +56,7 @@ pub struct MarketHistoryLastPriceInput {
     pub is_base_usdt_market: bool,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketHistoryLastPriceBatch {
     /// Delphi `NowTimeX := Now` captured in `UpdateMarketsList`.
@@ -55,43 +64,57 @@ pub struct MarketHistoryLastPriceBatch {
     pub rows: Vec<MarketHistoryLastPriceInput>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum MarketHistoryStreamSection {
-    FuturesTrades {
-        market_index: u16,
-        rows: Vec<MarketHistoryTradeInput>,
-    },
-    SpotTrades {
-        market_index: u16,
-        rows: Vec<MarketHistoryTradeInput>,
-    },
-    Liquidations {
-        market_index: u16,
-        rows: Vec<MarketHistoryTradeInput>,
-    },
-    MMOrders {
-        market_index: u16,
-        rows: Vec<MarketHistoryMMOrderInput>,
-    },
+pub struct MarketHistoryStreamSection {
+    pub market_index: u16,
+    pub kind: MarketHistoryStreamSectionKind,
+    pub start: usize,
+    pub len: usize,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketHistoryStreamSectionKind {
+    FuturesTrades,
+    SpotTrades,
+    Liquidations,
+    MMOrders,
+}
+
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketHistoryStreamBatch {
     pub base_time: f64,
     /// Delphi `NowTimeX := Now` captured at the packet-processing boundary.
     pub now_time: f64,
+    /// Section order from the original `TradesStream` packet. Trade sections
+    /// index `trade_rows`; MM sections index `mm_order_rows`.
     pub sections: Vec<MarketHistoryStreamSection>,
+    pub trade_rows: Vec<MarketHistoryTradeInput>,
+    pub mm_order_rows: Vec<MarketHistoryMMOrderInput>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketHistoryCandlesSnapshot {
     pub market_name: String,
     pub candles_5m: Vec<Candle5mRow>,
 }
 
-#[derive(Clone, Debug)]
+type MarketHistoryReadIndex = Arc<RwLock<HashMap<Arc<str>, MarketHistoryReadHandle>>>;
+
+#[derive(Clone)]
 pub struct MarketHistoryHandle {
     tx: mpsc::Sender<MarketHistoryCommand>,
+    read_index: MarketHistoryReadIndex,
+}
+
+impl fmt::Debug for MarketHistoryHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MarketHistoryHandle")
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct MarketHistoryWorker {
@@ -135,9 +158,11 @@ enum MarketHistoryCommand {
 impl MarketHistoryWorker {
     pub fn spawn(default_config: MarketHistoryConfig) -> Self {
         let (tx, rx) = mpsc::channel::<MarketHistoryCommand>();
-        let join = thread::spawn(move || worker_loop(default_config, rx));
+        let read_index = Arc::new(RwLock::new(HashMap::new()));
+        let worker_read_index = Arc::clone(&read_index);
+        let join = thread::spawn(move || worker_loop(default_config, rx, worker_read_index));
         Self {
-            handle: MarketHistoryHandle { tx },
+            handle: MarketHistoryHandle { tx, read_index },
             join: Some(join),
         }
     }
@@ -249,6 +274,10 @@ impl MarketHistoryHandle {
     }
 
     pub fn readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+        if let Some(read_handle) = self.read_handle(market_name) {
+            return Some(read_handle.readers());
+        }
+
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.tx
             .send(MarketHistoryCommand::Readers {
@@ -259,11 +288,24 @@ impl MarketHistoryHandle {
         reply_rx.recv().ok().flatten()
     }
 
+    pub fn try_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
+        self.read_handle(market_name)
+            .map(|read_handle| read_handle.readers())
+    }
+
+    fn read_handle(&self, market_name: &str) -> Option<MarketHistoryReadHandle> {
+        self.read_index.read().get(market_name).cloned()
+    }
+
     pub fn rolling_volumes(
         &self,
         market_name: &str,
         now_time: f64,
     ) -> Option<RollingTradeVolumeSnapshot> {
+        if let Some(read_handle) = self.read_handle(market_name) {
+            return Some(read_handle.rolling_volumes(now_time));
+        }
+
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.tx
             .send(MarketHistoryCommand::RollingVolumes {
@@ -273,6 +315,15 @@ impl MarketHistoryHandle {
             })
             .ok()?;
         reply_rx.recv().ok().flatten()
+    }
+
+    pub fn try_rolling_volumes(
+        &self,
+        market_name: &str,
+        now_time: f64,
+    ) -> Option<RollingTradeVolumeSnapshot> {
+        self.read_handle(market_name)
+            .map(|read_handle| read_handle.rolling_volumes(now_time))
     }
 
     pub fn rolling_volumes_at(
@@ -292,6 +343,11 @@ impl MarketHistoryHandle {
         market_name: &str,
         now_time: f64,
     ) -> Option<MarketDerivedSnapshot> {
+        if let Some(read_handle) = self.read_handle(market_name) {
+            let _ = now_time;
+            return Some(read_handle.derived_snapshot());
+        }
+
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.tx
             .send(MarketHistoryCommand::DerivedSnapshot {
@@ -301,6 +357,15 @@ impl MarketHistoryHandle {
             })
             .ok()?;
         reply_rx.recv().ok().flatten()
+    }
+
+    pub fn try_derived_snapshot(
+        &self,
+        market_name: &str,
+        _now_time: f64,
+    ) -> Option<MarketDerivedSnapshot> {
+        self.read_handle(market_name)
+            .map(|read_handle| read_handle.derived_snapshot())
     }
 
     pub fn derived_snapshot_at(
@@ -370,7 +435,11 @@ impl MarketHistoryHandle {
     }
 }
 
-fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHistoryCommand>) {
+fn worker_loop(
+    default_config: MarketHistoryConfig,
+    rx: mpsc::Receiver<MarketHistoryCommand>,
+    read_index: MarketHistoryReadIndex,
+) {
     let mut registry = MarketHistoryRegistry::new(default_config);
     let mut last_maintenance = Instant::now();
     let mut last_now_time = 0.0;
@@ -385,9 +454,13 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
                 scope,
             }) => {
                 registry.configure_market_index_slots(&market_slots, scope.as_ref());
+                publish_read_index(&read_index, &registry);
             }
             Ok(MarketHistoryCommand::Readers { market_name, reply }) => {
-                let _ = reply.send(registry.readers(&market_name));
+                let reply_value = registry
+                    .read_handle(&market_name)
+                    .map(|handle| handle.readers());
+                let _ = reply.send(reply_value);
             }
             Ok(MarketHistoryCommand::RollingVolumes {
                 market_name,
@@ -433,6 +506,7 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
                 let _ = reply.send(());
             }
             Ok(MarketHistoryCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                read_index.write().clear();
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -445,12 +519,20 @@ fn worker_loop(default_config: MarketHistoryConfig, rx: mpsc::Receiver<MarketHis
     }
 }
 
+fn publish_read_index(read_index: &MarketHistoryReadIndex, registry: &MarketHistoryRegistry) {
+    let handles = registry.read_handles();
+    let mut index = read_index.write();
+    index.clear();
+    index.reserve(handles.len());
+    index.extend(handles);
+}
+
 fn process_last_price_batch(
     registry: &mut MarketHistoryRegistry,
     batch: MarketHistoryLastPriceBatch,
 ) {
     for row in batch.rows {
-        let Some(store) = registry.get_mut(&row.market_name) else {
+        let Some(store) = registry.get_mut(row.market_name.as_ref()) else {
             continue;
         };
         store.append_last_price_like_delphi(
@@ -469,12 +551,13 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
     let mut time_shift = TradesPacketTimeShift::new();
 
     for section in batch.sections {
-        match section {
-            MarketHistoryStreamSection::FuturesTrades { market_index, rows } => {
-                let Some(store) = registry.get_mut_by_server_index(market_index) else {
+        match section.kind {
+            MarketHistoryStreamSectionKind::FuturesTrades => {
+                let Some(store) = registry.get_mut_by_server_index(section.market_index) else {
                     continue;
                 };
-                for row in rows {
+                let end = section.start.saturating_add(section.len);
+                for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
                     store.append_futures_stream_trade_like_delphi(
                         batch.base_time,
                         row.time_delta_ms,
@@ -485,11 +568,12 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::SpotTrades { market_index, rows } => {
-                let Some(store) = registry.get_mut_by_server_index(market_index) else {
+            MarketHistoryStreamSectionKind::SpotTrades => {
+                let Some(store) = registry.get_mut_by_server_index(section.market_index) else {
                     continue;
                 };
-                for row in rows {
+                let end = section.start.saturating_add(section.len);
+                for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
                     store.append_spot_stream_trade_like_delphi(
                         batch.base_time,
                         row.time_delta_ms,
@@ -500,11 +584,12 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::Liquidations { market_index, rows } => {
-                let Some(store) = registry.get_mut_by_server_index(market_index) else {
+            MarketHistoryStreamSectionKind::Liquidations => {
+                let Some(store) = registry.get_mut_by_server_index(section.market_index) else {
                     continue;
                 };
-                for row in rows {
+                let end = section.start.saturating_add(section.len);
+                for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
                     store.append_liquidation_stream_like_delphi(
                         batch.base_time,
                         row.time_delta_ms,
@@ -515,16 +600,21 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     );
                 }
             }
-            MarketHistoryStreamSection::MMOrders { market_index, rows } => {
-                let Some(store) = registry.get_mut_by_server_index(market_index) else {
+            MarketHistoryStreamSectionKind::MMOrders => {
+                let Some(store) = registry.get_mut_by_server_index(section.market_index) else {
                     continue;
                 };
-                for row in rows {
+                let end = section.start.saturating_add(section.len);
+                for &row in batch
+                    .mm_order_rows
+                    .get(section.start..end)
+                    .unwrap_or_default()
+                {
                     store.append_mm_stream_order_like_delphi(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
-                        row.vol,
+                        row.volume,
                         row.q,
                         row.taker,
                         &mut time_shift,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::market::{BaseCurrency, ExchangeCode};
 
 fn make_base(uid: u64, ver: u16) -> BaseCommandHeader {
     BaseCommandHeader {
@@ -108,7 +109,7 @@ fn terminal_status_marks_done_then_deferred_removal() {
     assert!(matches!(ev, OrderEvent::Created(42)));
     assert!(orders.get(42).is_some());
 
-    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLDone, 1);
+    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellDone, 1);
     let (_, ev) = orders.apply(order_status_cmd(s2));
     assert!(matches!(ev, OrderEvent::Updated(42)));
     assert!(orders.get(42).unwrap().job_is_done);
@@ -171,8 +172,8 @@ fn existing_full_status_keeps_worker_identity_fields_like_delphi() {
     assert!(matches!(ev, OrderEvent::Updated(42)));
     let order = orders.get(42).unwrap();
     assert_eq!(order.market_name, "BTCUSDT");
-    assert_eq!(order.currency, 1);
-    assert_eq!(order.platform, 4);
+    assert_eq!(order.currency, BaseCurrency::USDT);
+    assert_eq!(order.platform, ExchangeCode::FBinance);
     assert_eq!(order.strat_id, 11);
     assert!(!order.is_short);
     assert_eq!(order.db_id, 101);
@@ -225,7 +226,7 @@ fn outgoing_set_immune_clicks_mutates_only_found_active_orders_like_delphi() {
     orders.apply(order_status_cmd(make_status(
         43,
         "BTCUSDT",
-        OrderWorkerStatus::SelLDone,
+        OrderWorkerStatus::SellDone,
         1,
     )));
 
@@ -275,9 +276,9 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
     );
 
     let stops = StopSettings {
-        stop_loss_on: 1,
+        stop_loss_on: DelphiBool::TRUE,
         sl_level: 12.5,
-        trailing_on: 1,
+        trailing_on: DelphiBool::TRUE,
         trailing_level: -0.0,
         ..StopSettings::default()
     };
@@ -291,8 +292,8 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
         .expect("changed stops should be sent");
 
     assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, 1);
-    assert_eq!(ctx.platform, 4);
+    assert_eq!(ctx.currency, BaseCurrency::USDT);
+    assert_eq!(ctx.platform, ExchangeCode::FBinance);
     assert_eq!(market, "BTCUSDT");
     assert_eq!(status, OrderWorkerStatus::BuySet);
     assert_eq!(sent_stops, stops);
@@ -373,8 +374,8 @@ fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
         .expect("changed VStop should be sent");
 
     assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, 1);
-    assert_eq!(ctx.platform, 4);
+    assert_eq!(ctx.currency, BaseCurrency::USDT);
+    assert_eq!(ctx.platform, ExchangeCode::FBinance);
     assert_eq!(market, "BTCUSDT");
     assert_eq!(params.status, OrderWorkerStatus::SellSet);
     assert!(params.vstop_on);
@@ -395,7 +396,7 @@ fn outgoing_send_vstop_if_changed_matches_delphi_change_gate() {
 fn outgoing_send_replace_if_requested_matches_delphi_gate() {
     let mut orders = Orders::new();
     let mut buy_status = make_status(42, "BTCUSDT", OrderWorkerStatus::BuySet, 1);
-    buy_status.buy_order.order_type = OrderType::Buy.to_byte();
+    buy_status.buy_order.order_type = OrderType::Buy;
     orders.apply(order_status_cmd(buy_status));
 
     assert!(
@@ -407,8 +408,8 @@ fn outgoing_send_replace_if_requested_matches_delphi_gate() {
         .send_replace_if_requested(42, 10.5, 1000)
         .expect("first replace should be sent");
     assert_eq!(ctx.uid, 42);
-    assert_eq!(ctx.currency, 1);
-    assert_eq!(ctx.platform, 4);
+    assert_eq!(ctx.currency, BaseCurrency::USDT);
+    assert_eq!(ctx.platform, ExchangeCode::FBinance);
     assert_eq!(market, "BTCUSDT");
     assert_eq!(order_type, OrderType::Buy);
     assert_eq!(price, 10.5);
@@ -450,7 +451,7 @@ fn outgoing_send_cancel_if_requested_matches_delphi_gate() {
     orders.apply(order_status_cmd(make_status(
         43,
         "BTCUSDT",
-        OrderWorkerStatus::SelLDone,
+        OrderWorkerStatus::SellDone,
         1,
     )));
 
@@ -780,7 +781,7 @@ fn sell_almost_done_is_terminal() {
         1,
     )));
 
-    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SelLAlmostDone, 2);
+    let s2 = make_status(42, "BTCUSDT", OrderWorkerStatus::SellAlmostDone, 2);
     let (res, ev) = orders.apply(order_status_cmd(s2));
     assert_eq!(res, ApplyResult::Applied);
     assert!(matches!(ev, OrderEvent::Updated(42)));
@@ -802,7 +803,7 @@ fn visual_trace_after_terminal_status_is_accepted_before_deferred_removal_like_d
     orders.apply(order_status_cmd(make_status(
         42,
         "BTCUSDT",
-        OrderWorkerStatus::SelLDone,
+        OrderWorkerStatus::SellDone,
         2,
     )));
 
@@ -999,14 +1000,14 @@ fn order_not_found_marks_server_forced_then_deferred_removal_like_delphi() {
         1,
     )));
     {
-        let order = orders.map.get_mut(&42).unwrap();
-        order.buy_order.is_opened = 1;
-        order.buy_order.canceled = 0;
-        order.buy_order.is_closed = 0;
+        let order = std::sync::Arc::make_mut(orders.map.get_mut(&42).unwrap());
+        order.buy_order.is_opened = DelphiBool::TRUE;
+        order.buy_order.canceled = DelphiBool::FALSE;
+        order.buy_order.is_closed = DelphiBool::FALSE;
         order.buy_order.close_time = 11.0;
-        order.sell_order.is_opened = 1;
-        order.sell_order.canceled = 0;
-        order.sell_order.is_closed = 0;
+        order.sell_order.is_opened = DelphiBool::TRUE;
+        order.sell_order.canceled = DelphiBool::FALSE;
+        order.sell_order.is_closed = DelphiBool::FALSE;
         order.sell_order.close_time = 12.0;
         order.bulk_replace_buy = true;
         order.bulk_replace_sell = true;
@@ -1029,8 +1030,14 @@ fn order_not_found_marks_server_forced_then_deferred_removal_like_delphi() {
     let sell_canceled = order.sell_order.canceled;
     let sell_is_closed = order.sell_order.is_closed;
     let sell_close_time = order.sell_order.close_time;
-    assert_eq!((buy_is_opened, buy_canceled, buy_is_closed), (1, 0, 0));
-    assert_eq!((sell_is_opened, sell_canceled, sell_is_closed), (1, 0, 0));
+    assert_eq!(
+        (buy_is_opened, buy_canceled, buy_is_closed),
+        (DelphiBool::TRUE, DelphiBool::FALSE, DelphiBool::FALSE)
+    );
+    assert_eq!(
+        (sell_is_opened, sell_canceled, sell_is_closed),
+        (DelphiBool::TRUE, DelphiBool::FALSE, DelphiBool::FALSE)
+    );
     assert_eq!(buy_close_time, 11.0);
     assert_eq!(sell_close_time, 12.0);
     assert!(order.bulk_replace_buy);
@@ -1230,7 +1237,7 @@ fn stops_update_uses_epoch_guard() {
     assert_eq!(res, ApplyResult::Applied);
 
     let stops = StopSettings {
-        stop_loss_on: 1,
+        stop_loss_on: DelphiBool::TRUE,
         ..Default::default()
     };
     let stale = OrderStopsUpdate {
@@ -1240,7 +1247,7 @@ fn stops_update_uses_epoch_guard() {
 
     let (res, _) = orders.apply(TradeCommand::OrderStopsUpdate(stale));
     assert_eq!(res, ApplyResult::OutOfOrder);
-    assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, 0);
+    assert_eq!(orders.get(1).unwrap().stops.stop_loss_on, DelphiBool::FALSE);
 }
 
 #[test]
@@ -1274,7 +1281,7 @@ fn terminal_status_update_does_not_apply_update_data_like_delphi() {
     orders.apply(order_status_cmd(status));
 
     let terminal_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SelLDone),
+        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellDone),
         update_data: OrderUpdateData {
             actual_price: 999.0,
             mean_price: 999.0,
@@ -1292,7 +1299,7 @@ fn terminal_status_update_does_not_apply_update_data_like_delphi() {
     let sell_mean = order.sell_order.mean_price;
     assert_eq!(sell_actual, 10.0);
     assert_eq!(sell_mean, 0.0);
-    assert_eq!(order.sell_reason_code, 14);
+    assert_eq!(order.sell_reason, SellReason::TakeProfit);
     assert!(order.job_is_done);
 }
 
@@ -1300,22 +1307,22 @@ fn terminal_status_update_does_not_apply_update_data_like_delphi() {
 fn sell_done_status_update_applies_set_done_flags_like_delphi() {
     let mut orders = Orders::new();
     let mut status = make_status(1, "X", OrderWorkerStatus::SellSet, 10);
-    status.buy_order.is_opened = 1;
-    status.buy_order.is_closed = 0;
-    status.buy_order.canceled = 0;
-    status.sell_order.is_opened = 1;
-    status.sell_order.is_closed = 0;
-    status.sell_order.canceled = 0;
+    status.buy_order.is_opened = DelphiBool::TRUE;
+    status.buy_order.is_closed = DelphiBool::FALSE;
+    status.buy_order.canceled = DelphiBool::FALSE;
+    status.sell_order.is_opened = DelphiBool::TRUE;
+    status.sell_order.is_closed = DelphiBool::FALSE;
+    status.sell_order.canceled = DelphiBool::FALSE;
     orders.apply(order_status_cmd(status));
 
     {
-        let order = orders.map.get_mut(&1).unwrap();
+        let order = std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap());
         order.bulk_replace_buy = true;
         order.bulk_replace_sell = true;
     }
 
     let terminal_update = OrderStatusUpdate {
-        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SelLDone),
+        epoch_header: make_epoch(1, 3, "X", 11, OrderWorkerStatus::SellDone),
         update_data: Default::default(),
         sell_reason_code: 0,
     };
@@ -1323,16 +1330,18 @@ fn sell_done_status_update_applies_set_done_flags_like_delphi() {
 
     assert_eq!(res, ApplyResult::Applied);
     let order = orders.get(1).unwrap();
-    assert_eq!(order.sell_order.is_opened, 0);
-    assert_eq!(order.sell_order.is_closed, 1);
+    assert_eq!(order.sell_order.is_opened, DelphiBool::FALSE);
+    assert_eq!(order.sell_order.is_closed, DelphiBool::TRUE);
     assert_eq!(
-        order.sell_order.canceled, 0,
+        order.sell_order.canceled,
+        DelphiBool::FALSE,
         "SetDoneFlags does not mark sell side canceled"
     );
-    assert_eq!(order.buy_order.is_opened, 0);
-    assert_eq!(order.buy_order.is_closed, 0);
+    assert_eq!(order.buy_order.is_opened, DelphiBool::FALSE);
+    assert_eq!(order.buy_order.is_closed, DelphiBool::FALSE);
     assert_eq!(
-        order.buy_order.canceled, 1,
+        order.buy_order.canceled,
+        DelphiBool::TRUE,
         "SetDoneFlags cancels buy side only when it was not already closed"
     );
     assert!(!order.bulk_replace_buy);
@@ -1350,28 +1359,29 @@ fn sell_done_full_status_applies_set_done_flags_like_delphi() {
     )));
 
     {
-        let order = orders.map.get_mut(&1).unwrap();
+        let order = std::sync::Arc::make_mut(orders.map.get_mut(&1).unwrap());
         order.bulk_replace_buy = true;
         order.bulk_replace_sell = true;
     }
 
-    let mut done = make_status(1, "X", OrderWorkerStatus::SelLDone, 11);
-    done.buy_order.is_opened = 1;
-    done.buy_order.is_closed = 1;
-    done.buy_order.canceled = 0;
-    done.sell_order.is_opened = 1;
-    done.sell_order.is_closed = 0;
-    done.sell_order.canceled = 0;
+    let mut done = make_status(1, "X", OrderWorkerStatus::SellDone, 11);
+    done.buy_order.is_opened = DelphiBool::TRUE;
+    done.buy_order.is_closed = DelphiBool::TRUE;
+    done.buy_order.canceled = DelphiBool::FALSE;
+    done.sell_order.is_opened = DelphiBool::TRUE;
+    done.sell_order.is_closed = DelphiBool::FALSE;
+    done.sell_order.canceled = DelphiBool::FALSE;
     let (res, _) = orders.apply(order_status_cmd(done));
 
     assert_eq!(res, ApplyResult::Applied);
     let order = orders.get(1).unwrap();
-    assert_eq!(order.sell_order.is_opened, 0);
-    assert_eq!(order.sell_order.is_closed, 1);
-    assert_eq!(order.sell_order.canceled, 0);
-    assert_eq!(order.buy_order.is_opened, 0);
+    assert_eq!(order.sell_order.is_opened, DelphiBool::FALSE);
+    assert_eq!(order.sell_order.is_closed, DelphiBool::TRUE);
+    assert_eq!(order.sell_order.canceled, DelphiBool::FALSE);
+    assert_eq!(order.buy_order.is_opened, DelphiBool::FALSE);
     assert_eq!(
-        order.buy_order.canceled, 0,
+        order.buy_order.canceled,
+        DelphiBool::FALSE,
         "already closed buy side is not marked canceled by SetDoneFlags"
     );
     assert!(!order.bulk_replace_buy);
@@ -1394,7 +1404,7 @@ fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
         sell_reason_code: 14,
     };
     orders.apply(TradeCommand::OrderStatusUpdate(first_reason));
-    assert_eq!(orders.get(1).unwrap().sell_reason_code, 14);
+    assert_eq!(orders.get(1).unwrap().sell_reason, SellReason::TakeProfit);
 
     let zero_reason = OrderStatusUpdate {
         epoch_header: make_epoch(1, 3, "X", 12, OrderWorkerStatus::SellSet),
@@ -1403,8 +1413,8 @@ fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
     };
     orders.apply(TradeCommand::OrderStatusUpdate(zero_reason));
     assert_eq!(
-        orders.get(1).unwrap().sell_reason_code,
-        14,
+        orders.get(1).unwrap().sell_reason,
+        SellReason::TakeProfit,
         "Delphi ignores SellReasonCode=0 and keeps FPrevSellReasonCode/SellReason"
     );
 
@@ -1414,7 +1424,7 @@ fn zero_sell_reason_update_keeps_previous_reason_like_delphi() {
         sell_reason_code: 9,
     };
     orders.apply(TradeCommand::OrderStatusUpdate(changed_reason));
-    assert_eq!(orders.get(1).unwrap().sell_reason_code, 9);
+    assert_eq!(orders.get(1).unwrap().sell_reason, SellReason::MarketStop);
 }
 
 #[test]
@@ -2006,7 +2016,7 @@ fn missing_after_snapshot_keeps_terminal_entry_until_deferred_removal_like_delph
         1000,
     );
     orders.apply_at(
-        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SelLDone, 2)),
+        order_status_cmd(make_status(1, "X", OrderWorkerStatus::SellDone, 2)),
         1001,
     );
     assert!(orders.get(1).unwrap().job_is_done);
@@ -2061,4 +2071,42 @@ fn accepts_more_than_former_rust_order_cap() {
 
     assert_eq!(orders.len(), (FORMER_MAX_ORDERS + 1) as usize);
     assert!(orders.get(FORMER_MAX_ORDERS + 1).is_some());
+}
+
+#[test]
+fn snapshot_cow_mutating_one_order_does_not_deep_clone_other_orders() {
+    let mut orders = Orders::new();
+    orders.apply(order_status_cmd(make_status(
+        1,
+        "BTCUSDT",
+        OrderWorkerStatus::BuySet,
+        1,
+    )));
+    orders.apply(order_status_cmd(make_status(
+        2,
+        "ETHUSDT",
+        OrderWorkerStatus::SellSet,
+        1,
+    )));
+
+    let snapshot = orders.clone();
+    assert!(std::sync::Arc::ptr_eq(
+        orders.map.get(&1).unwrap(),
+        snapshot.map.get(&1).unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        orders.map.get(&2).unwrap(),
+        snapshot.map.get(&2).unwrap()
+    ));
+
+    assert!(orders.mark_local_visual_order(1));
+
+    assert!(!std::sync::Arc::ptr_eq(
+        orders.map.get(&1).unwrap(),
+        snapshot.map.get(&1).unwrap()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        orders.map.get(&2).unwrap(),
+        snapshot.map.get(&2).unwrap()
+    ));
 }

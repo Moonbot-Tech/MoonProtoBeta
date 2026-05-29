@@ -82,7 +82,7 @@ pub(crate) fn refresh_subscription_summary(
 
 /// Что единственный пользовательский Init заказал у доменного слоя.
 ///
-/// Инвариант: `run_init_sequence` вызывается один раз за жизнь `Client`-сессии.
+/// Инвариант: Init вызывается один раз за жизнь `Client`-сессии.
 /// После этого reconnect не требует повторного Init: transport после нового
 /// `Fine` восстанавливает только эти сохранённые intent'ы и registry-подписки.
 #[derive(Debug, Clone, Copy, Default)]

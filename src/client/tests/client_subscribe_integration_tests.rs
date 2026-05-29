@@ -7,7 +7,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -142,7 +142,7 @@ fn pre_init_subscription_intents_update_registry_without_wire() {
 
 #[test]
 fn pre_init_stateful_order_actions_do_not_mutate_or_send() {
-    use crate::commands::trade::{OrderWorkerStatus, StopSettings};
+    use crate::commands::trade::{DelphiBool, OrderWorkerStatus, StopSettings};
 
     let client = Client::new(dummy_cfg());
     let uid = 0x5151;
@@ -161,7 +161,7 @@ fn pre_init_stateful_order_actions_do_not_mutate_or_send() {
         &mut orders,
         uid,
         &StopSettings {
-            stop_loss_on: 1,
+            stop_loss_on: DelphiBool::TRUE,
             sl_level: 12.5,
             ..StopSettings::default()
         }
@@ -492,7 +492,7 @@ fn client_move_all_sells_uses_delphi_pre_send_gate() {
         },
         side: FixedPosition::Long,
     };
-    let ctx = TradeCtx::with_route(0xCAFE, 17, 9);
+    let ctx = TradeCtx::with_route_bytes(0xCAFE, 17, 9);
     let client = ready_client();
     let empty_orders = crate::state::Orders::new();
 
@@ -536,7 +536,7 @@ fn client_move_all_buys_uses_buy_only_cmd_type_and_delphi_gate() {
         TradeCommand, TradeCtx,
     };
 
-    let ctx = TradeCtx::with_route(0xBEEF, 17, 9);
+    let ctx = TradeCtx::with_route_bytes(0xBEEF, 17, 9);
     let client = ready_client();
     let immune_orders =
         tracked_orders(8, 17, 9, "DOGEUSDT", OrderWorkerStatus::BuySet, false, true);
@@ -639,7 +639,7 @@ fn client_set_immune_applies_local_side_effect_before_wire_send() {
 
 #[test]
 fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
-    use crate::commands::trade::{OrderWorkerStatus, StopSettings, TradeCommand};
+    use crate::commands::trade::{DelphiBool, OrderWorkerStatus, StopSettings, TradeCommand};
 
     let uid = 0x4444;
     let mut orders = tracked_orders(
@@ -661,9 +661,9 @@ fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
     assert!(high.is_empty());
 
     let stops = StopSettings {
-        stop_loss_on: 1,
+        stop_loss_on: DelphiBool::TRUE,
         sl_level: 12.5,
-        use_take_profit: 1,
+        use_take_profit: DelphiBool::TRUE,
         take_profit: 15.0,
         ..StopSettings::default()
     };

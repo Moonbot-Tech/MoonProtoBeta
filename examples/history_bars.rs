@@ -1,12 +1,19 @@
-//! Fetch one batch of historical candles through `MoonClient`.
+//! Fetch one batch of demand-driven CoinCard candles through `MoonClient`.
+//!
+//! The request itself is non-blocking: the example waits from the CLI loop by
+//! draining events and reading the maintained snapshot, which is the same shape
+//! a UI integration uses.
 //!
 //! Run:
 //!   cargo run --example history_bars --release -- "<key_base64>" [host:port] [market] [1m|5m|30m|1h|4h|1d]
 
 use std::env;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use moonproto::commands::candles::{DeepHistoryKind, DeepPrice};
+use moonproto::state::CoinCardCandlesEvent;
+use moonproto::Event;
 
 mod common;
 
@@ -33,7 +40,7 @@ fn print_candle(label: &str, candle: &DeepPrice) {
         candle.high(),
         candle.low(),
         candle.close(),
-        candle.vol
+        candle.volume()
     );
 }
 
@@ -54,15 +61,59 @@ fn main() {
         }
     };
 
-    println!("[request] candles market={market} kind={kind:?}");
-    let candles =
-        match client.blocking_request_coin_card_candles(market, kind, Duration::from_secs(15)) {
-            Ok(candles) => candles,
-            Err(err) => {
-                eprintln!("[request] failed: {err}");
-                std::process::exit(3);
+    let ticket = match client.candles().request_coin_card(market, kind) {
+        Ok(ticket) => ticket,
+        Err(err) => {
+            eprintln!("[request] failed: {err}");
+            std::process::exit(3);
+        }
+    };
+
+    println!(
+        "[request] candles market={} kind={:?} uid={:?}",
+        ticket.market, ticket.kind, ticket.request_uid
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let candles = loop {
+        for event in client.drain_events() {
+            match event {
+                Event::CoinCardCandles(CoinCardCandlesEvent::Updated {
+                    market: ev_market,
+                    kind: ev_kind,
+                    count,
+                    ..
+                }) if ev_market == ticket.market && ev_kind == ticket.kind => {
+                    println!("[event] candles updated count={count}");
+                }
+                Event::CoinCardCandles(CoinCardCandlesEvent::UpdateFailed {
+                    market: ev_market,
+                    kind: ev_kind,
+                    error,
+                    ..
+                }) if ev_market == ticket.market && ev_kind == ticket.kind => {
+                    eprintln!("[event] candles failed: {error}");
+                    std::process::exit(3);
+                }
+                _ => {}
             }
-        };
+        }
+
+        if let Some(rows) = client.snapshot().and_then(|snapshot| {
+            snapshot
+                .coin_card_candles()
+                .get(&ticket.market, ticket.kind)
+                .map(|rows| rows.to_vec())
+        }) {
+            break rows;
+        }
+
+        if Instant::now() >= deadline {
+            eprintln!("[request] timeout waiting for CoinCard candles");
+            std::process::exit(3);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+
     println!("[response] {} candles", candles.len());
     if let Some(first) = candles.first() {
         print_candle("first", first);

@@ -15,11 +15,11 @@ fn deep_price_size_is_28() {
 #[test]
 fn deep_price_roundtrip() {
     let dp = DeepPrice {
-        open_p: 100.0,
-        close_p: 101.5,
-        max_p: 102.0,
-        min_p: 99.5,
-        vol: 1234.5,
+        open: 100.0,
+        close: 101.5,
+        high: 102.0,
+        low: 99.5,
+        volume: 1234.5,
         time: 45123.5,
     };
     let mut buf = Vec::new();
@@ -46,11 +46,11 @@ fn deep_price_pack_uses_private_wire_struct() {
     let mut pos = 0;
     let parsed = read_deep_price_pack(&bytes, &mut pos).expect("valid TDeepPricePack");
     assert_eq!(pos, DEEP_PRICE_PACK_SIZE);
-    assert_eq!(parsed.open_p, 101.0);
-    assert_eq!(parsed.close_p.to_bits(), (-0.0f32).to_bits());
-    assert_eq!(parsed.max_p, 101.0);
-    assert_eq!(parsed.min_p.to_bits(), (-0.0f32).to_bits());
-    assert_eq!(parsed.vol, 12.5);
+    assert_eq!(parsed.open, 101.0);
+    assert_eq!(parsed.close.to_bits(), (-0.0f32).to_bits());
+    assert_eq!(parsed.high, 101.0);
+    assert_eq!(parsed.low.to_bits(), (-0.0f32).to_bits());
+    assert_eq!(parsed.volume, 12.5);
     assert_eq!(parsed.time, 45_000.25);
 }
 
@@ -65,11 +65,11 @@ fn deep_price_pack_old_uses_private_wire_struct() {
     let mut pos = 0;
     let parsed = read_deep_price_pack_old(&bytes, &mut pos).expect("valid TDeepPricePackOLD");
     assert_eq!(pos, DEEP_PRICE_PACK_OLD_SIZE);
-    assert_eq!(parsed.open_p, 101.0);
-    assert_eq!(parsed.close_p, 99.5);
-    assert_eq!(parsed.max_p, 101.0);
-    assert_eq!(parsed.min_p, 99.5);
-    assert_eq!(parsed.vol, 12.5);
+    assert_eq!(parsed.open, 101.0);
+    assert_eq!(parsed.close, 99.5);
+    assert_eq!(parsed.high, 101.0);
+    assert_eq!(parsed.low, 99.5);
+    assert_eq!(parsed.volume, 12.5);
     assert_eq!(parsed.time, 45_000.25);
 }
 
@@ -77,27 +77,27 @@ fn deep_price_pack_old_uses_private_wire_struct() {
 fn coin_card_candles_response_roundtrip() {
     let candles = vec![
         DeepPrice {
-            open_p: 100.0,
-            close_p: 105.0,
-            max_p: 110.0,
-            min_p: 95.0,
-            vol: 500.0,
+            open: 100.0,
+            close: 105.0,
+            high: 110.0,
+            low: 95.0,
+            volume: 500.0,
             time: 45000.0,
         },
         DeepPrice {
-            open_p: 105.0,
-            close_p: 102.0,
-            max_p: 107.0,
-            min_p: 100.0,
-            vol: 750.0,
+            open: 105.0,
+            close: 102.0,
+            high: 107.0,
+            low: 100.0,
+            volume: 750.0,
             time: 45000.04,
         },
         DeepPrice {
-            open_p: 102.0,
-            close_p: 108.0,
-            max_p: 109.0,
-            min_p: 101.0,
-            vol: 1200.0,
+            open: 102.0,
+            close: 108.0,
+            high: 109.0,
+            low: 101.0,
+            volume: 1200.0,
             time: 45000.08,
         },
     ];
@@ -126,22 +126,22 @@ fn coin_card_candles_response_matches_delphi_read_tails() {
 
     let parsed = parse_coin_card_candles_response(&partial).unwrap();
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].open_p, 101.5);
-    assert_eq!(parsed[0].close_p, 0.0);
-    assert_eq!(parsed[0].max_p, 0.0);
-    assert_eq!(parsed[0].min_p, 0.0);
-    assert_eq!(parsed[0].vol, 0.0);
+    assert_eq!(parsed[0].open, 101.5);
+    assert_eq!(parsed[0].close, 0.0);
+    assert_eq!(parsed[0].high, 0.0);
+    assert_eq!(parsed[0].low, 0.0);
+    assert_eq!(parsed[0].volume, 0.0);
     assert_eq!(parsed[0].time, 0.0);
 }
 
 #[test]
 fn coin_card_candles_response_zero_fills_missing_records_like_delphi_array_read() {
     let first = DeepPrice {
-        open_p: 100.0,
-        close_p: 105.0,
-        max_p: 110.0,
-        min_p: 95.0,
-        vol: 500.0,
+        open: 100.0,
+        close: 105.0,
+        high: 110.0,
+        low: 95.0,
+        volume: 500.0,
         time: 45000.0,
     };
     let mut bytes = Vec::new();
@@ -154,11 +154,11 @@ fn coin_card_candles_response_zero_fills_missing_records_like_delphi_array_read(
     assert_eq!(
         parsed[1],
         DeepPrice {
-            open_p: 0.0,
-            close_p: 0.0,
-            max_p: 0.0,
-            min_p: 0.0,
-            vol: 0.0,
+            open: 0.0,
+            close: 0.0,
+            high: 0.0,
+            low: 0.0,
+            volume: 0.0,
             time: 0.0,
         }
     );
@@ -272,10 +272,10 @@ fn request_candles_data_parser_reads_delphi_zlib_stream() {
     assert_eq!(markets.len(), 1);
     assert_eq!(markets[0].market_name, "BTCUSDT");
     assert_eq!(markets[0].candles_5m.len(), 2);
-    assert_eq!(markets[0].candles_5m[0].open_p, 101.0);
-    assert_eq!(markets[0].candles_5m[0].close_p, 99.0);
-    assert_eq!(markets[0].candles_5m[0].vol, 12.5);
-    assert_eq!(markets[0].buy_wall[3].vol, 13.0);
+    assert_eq!(markets[0].candles_5m[0].open, 101.0);
+    assert_eq!(markets[0].candles_5m[0].close, 99.0);
+    assert_eq!(markets[0].candles_5m[0].volume, 12.5);
+    assert_eq!(markets[0].buy_wall[3].volume, 13.0);
     assert_eq!(markets[0].sell_wall[3].count, 13);
 }
 
@@ -336,7 +336,7 @@ fn request_candles_data_partial_parser_keeps_complete_prior_markets() {
     assert_eq!(markets[0].market_name, "BTCUSDT");
     assert_eq!(markets[0].candles_5m.len(), 1);
     assert_eq!(markets[0].candles_5m[0].time, 45_000.0);
-    assert_eq!(markets[0].buy_wall[0].vol, 10.0);
+    assert_eq!(markets[0].buy_wall[0].volume, 10.0);
     assert_eq!(markets[0].sell_wall[3].count, 13);
 }
 
@@ -363,7 +363,7 @@ fn request_candles_data_partial_parser_keeps_current_market_when_wall_tail_is_sh
     assert_eq!(markets[0].market_name, "BTCUSDT");
     assert_eq!(markets[0].candles_5m.len(), 1);
     assert_eq!(markets[0].candles_5m[0].time, 45_000.0);
-    assert_eq!(markets[0].candles_5m[0].vol, 12.5);
+    assert_eq!(markets[0].candles_5m[0].volume, 12.5);
     assert_eq!(markets[0].buy_wall[0].count, 0);
     assert_eq!(markets[0].sell_wall[3], WallItem::default());
 }
@@ -415,11 +415,11 @@ fn write_candles_market(out: &mut Vec<u8>, market: &str, time: f64) {
     }
 }
 
-fn write_deep_price_pack(out: &mut Vec<u8>, max_p: f32, min_p: f32, vol: f32, time: f64) {
+fn write_deep_price_pack(out: &mut Vec<u8>, high: f32, low: f32, volume: f32, time: f64) {
     let wire = WireDeepPricePack {
-        max_p: LeF32::new(max_p),
-        min_p: LeF32::new(min_p),
-        vol: LeF32::new(vol),
+        high: LeF32::new(high),
+        low: LeF32::new(low),
+        volume: LeF32::new(volume),
         time: LeF64::new(time),
     };
     out.extend_from_slice(wire.as_bytes());

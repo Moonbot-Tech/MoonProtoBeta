@@ -1,6 +1,7 @@
 //! Order read-model storage.
 
 use super::{OrderTraceLine, SellReason};
+use crate::commands::market::{BaseCurrency, ExchangeCode};
 use crate::commands::trade::*;
 use std::collections::VecDeque;
 
@@ -16,10 +17,10 @@ pub struct Order {
     pub uid: u64,
     /// Market name, for example `BTCUSDT`.
     pub market_name: String,
-    /// Base currency byte copied from the order command market header.
-    pub currency: u8,
-    /// Exchange/platform byte copied from the order command market header.
-    pub platform: u8,
+    /// Base currency copied from the order command market header.
+    pub currency: BaseCurrency,
+    /// Exchange/platform copied from the order command market header.
+    pub platform: ExchangeCode,
     /// Current worker lifecycle status.
     pub status: OrderWorkerStatus,
     /// Exchange buy-side order.
@@ -77,15 +78,15 @@ pub struct Order {
     ///
     /// This is the raw inbound packet log. For Delphi-equivalent chart state,
     /// use `buy_trace_line` / `sell_trace_line`.
-    pub trace_points: VecDeque<OrderTracePoint>,
+    pub(crate) trace_points: VecDeque<OrderTracePoint>,
     /// True when the order is terminal and awaits deferred removal.
     pub job_is_done: bool,
     /// Delphi `CancellRequest`: server requested worker cancellation.
     pub cancel_request: bool,
     /// Server-forced removal (`TOrderNotFound` arrived).
     pub server_forced_remove: bool,
-    /// Last sell reason byte code.
-    pub sell_reason_code: u8,
+    /// Last sell reason.
+    pub sell_reason: SellReason,
 
     // --- Internal sync state ---
     /// Per-status monotonic epoch used for anti out-of-order checks.
@@ -112,7 +113,16 @@ impl Order {
 
     /// Close reason as an enum for UI code.
     pub fn sell_reason(&self) -> SellReason {
-        SellReason::from_u8(self.sell_reason_code)
+        self.sell_reason
+    }
+
+    /// Raw inbound trace packet log retained for diagnostics.
+    ///
+    /// Normal chart code should use [`Self::buy_trace_line`] /
+    /// [`Self::sell_trace_line`], which mirror Delphi order-line state.
+    #[doc(hidden)]
+    pub fn trace_points(&self) -> &VecDeque<OrderTracePoint> {
+        &self.trace_points
     }
 
     /// Create a new `Order` from `TOrderStatus`.
@@ -120,8 +130,8 @@ impl Order {
         Self {
             uid: status_cmd.epoch_header.market.base.uid,
             market_name: status_cmd.epoch_header.market.market_name.clone(),
-            currency: status_cmd.epoch_header.market.currency,
-            platform: status_cmd.epoch_header.market.platform,
+            currency: BaseCurrency::from_byte(status_cmd.epoch_header.market.currency),
+            platform: ExchangeCode::from_byte(status_cmd.epoch_header.market.platform),
             status: OrderWorkerStatus::None,
             buy_order: status_cmd.buy_order,
             sell_order: status_cmd.sell_order,
@@ -153,7 +163,7 @@ impl Order {
             job_is_done: status_cmd.epoch_header.status.is_terminal(),
             cancel_request: false,
             server_forced_remove: false,
-            sell_reason_code: 0,
+            sell_reason: SellReason::Unknown,
             server_latest_epoch: [0; 10],
             snapshot_flag: 0,
             replace_sent_time_ms: 0,

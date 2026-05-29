@@ -9,7 +9,8 @@ fn watcher_fill_bytes() -> Vec<u8> {
     data.extend_from_slice(&4.5f32.to_le_bytes());
     data.push(7);
     data.push(
-        watcher_fill_flags::IS_SHORT | watcher_fill_flags::IS_OPEN | watcher_fill_flags::IS_TAKER,
+        (watcher_fill_flags::IS_SHORT | watcher_fill_flags::IS_OPEN | watcher_fill_flags::IS_TAKER)
+            .bits(),
     );
     data
 }
@@ -60,7 +61,13 @@ fn parse_watcher_fills_decodes_delphi_records() {
     assert_eq!(fill.qty, -0.25);
     assert_eq!(fill.z_btc, 0.03125);
     assert_eq!(fill.position, 4.5);
-    assert_eq!(fill.order_type, 7);
+    assert_eq!(fill.order_type.to_byte(), 7);
+    assert!(!fill.order_type.is_known());
+    assert_eq!(
+        fill.flags.bits(),
+        (watcher_fill_flags::IS_SHORT | watcher_fill_flags::IS_OPEN | watcher_fill_flags::IS_TAKER)
+            .bits()
+    );
     assert!(fill.is_short());
     assert!(fill.is_open());
     assert!(fill.is_taker());
@@ -102,7 +109,7 @@ fn trades_packet_exposes_typed_watcher_fill_helper() {
     let records = packet.sections[0]
         .watcher_fill_records()
         .expect("typed watcher fills");
-    assert_eq!(records[0].order_type, 7);
+    assert_eq!(records[0].order_type.to_byte(), 7);
 }
 
 #[test]

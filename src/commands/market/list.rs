@@ -7,6 +7,7 @@ use crate::commands::candles::current_local_time_shift_minutes;
 /// Ответ на `emk_GetMarketsList`: полный список маркетов + CorrMarkets.
 /// Wire-form (MoonProtoEngineServer.pas:60-82 `WriteMarketsToStream`):
 ///   `count:i32 + markets[count] + corr_count:i32 + corr_markets[corr_count]`.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MarketsListResponse {
     pub markets: Vec<Market>,
@@ -14,6 +15,7 @@ pub struct MarketsListResponse {
 }
 
 /// Parse `EngineResponse.data` для `emk_GetMarketsList`.
+#[doc(hidden)]
 pub fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
     parse_markets_list_response_with_local_shift(data, ver, current_local_time_shift_minutes())
 }
@@ -48,6 +50,7 @@ pub(super) fn parse_markets_list_response_with_local_shift(
 }
 
 /// Опциональный билдер для тестов.
+#[doc(hidden)]
 pub fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
     build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())
 }

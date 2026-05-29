@@ -5,14 +5,14 @@
 //! append, watcher fills, and signal events.
 
 use super::{Event, EventDispatcher, WatcherFillEvent, WatcherFillsEvent};
-use crate::commands::trade::OrderType;
 use crate::commands::trades_stream::{
     decode_trades_packet, parse_watcher_fills, DecodedTradesPacket, TradeSectionRef,
 };
 use crate::protocol::Command;
 use crate::state::{
     iter_trades_resend_response, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
-    MarketHistoryStreamSection, MarketHistoryTradeInput, TradesPacketEffect, DELPHI_MSECS_PER_DAY,
+    MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
+    TradesPacketEffect, DELPHI_MSECS_PER_DAY,
 };
 
 impl EventDispatcher {
@@ -110,6 +110,8 @@ impl EventDispatcher {
         let collect_history =
             history_now_time_days.is_some() && self.market_history.is_some() && now_ms.is_some();
         let mut history_sections = Vec::new();
+        let mut history_trade_rows = Vec::new();
+        let mut history_mm_order_rows = Vec::new();
         let mut packet_time_shift: Option<f64> = None;
         for section in decoded.sections() {
             match section {
@@ -131,11 +133,10 @@ impl EventDispatcher {
                         let collect_market_history = market_name.is_some_and(|name| {
                             collect_history && self.active_trade_storage_allows_market(name)
                         });
-                        let mut history_rows = if collect_market_history {
-                            Vec::with_capacity(row_count)
-                        } else {
-                            Vec::new()
-                        };
+                        let history_start = history_trade_rows.len();
+                        if collect_market_history {
+                            history_trade_rows.reserve(row_count);
+                        }
                         for trade in rows {
                             Self::ensure_trades_packet_time_shift_like_delphi(
                                 decoded.base_time,
@@ -153,25 +154,25 @@ impl EventDispatcher {
                                 );
                             }
                             if collect_market_history {
-                                history_rows.push(MarketHistoryTradeInput {
+                                history_trade_rows.push(MarketHistoryTradeInput {
                                     time_delta_ms: trade.time_delta_ms,
                                     price: trade.price,
                                     qty: trade.qty,
                                 });
                             }
                         }
-                        if collect_market_history && !history_rows.is_empty() {
-                            if is_spot {
-                                history_sections.push(MarketHistoryStreamSection::SpotTrades {
-                                    market_index,
-                                    rows: history_rows,
-                                });
-                            } else {
-                                history_sections.push(MarketHistoryStreamSection::FuturesTrades {
-                                    market_index,
-                                    rows: history_rows,
-                                });
-                            }
+                        let history_len = history_trade_rows.len() - history_start;
+                        if collect_market_history && history_len > 0 {
+                            history_sections.push(MarketHistoryStreamSection {
+                                market_index,
+                                kind: if is_spot {
+                                    MarketHistoryStreamSectionKind::SpotTrades
+                                } else {
+                                    MarketHistoryStreamSectionKind::FuturesTrades
+                                },
+                                start: history_start,
+                                len: history_len,
+                            });
                         }
                     }
                 }
@@ -192,11 +193,10 @@ impl EventDispatcher {
                         let collect_market_history = market_name.is_some_and(|name| {
                             collect_history && self.active_trade_storage_allows_market(name)
                         });
-                        let mut history_rows = if collect_market_history {
-                            Vec::with_capacity(row_count)
-                        } else {
-                            Vec::new()
-                        };
+                        let history_start = history_mm_order_rows.len();
+                        if collect_market_history {
+                            history_mm_order_rows.reserve(row_count);
+                        }
                         for row in rows {
                             Self::ensure_trades_packet_time_shift_like_delphi(
                                 decoded.base_time,
@@ -205,18 +205,21 @@ impl EventDispatcher {
                                 &mut packet_time_shift,
                             );
                             if collect_market_history {
-                                history_rows.push(MarketHistoryMMOrderInput {
+                                history_mm_order_rows.push(MarketHistoryMMOrderInput {
                                     time_delta_ms: row.time_delta_ms,
-                                    vol: row.vol,
+                                    volume: row.vol,
                                     q: row.q,
                                     taker: row.taker,
                                 });
                             }
                         }
-                        if collect_market_history && !history_rows.is_empty() {
-                            history_sections.push(MarketHistoryStreamSection::MMOrders {
+                        let history_len = history_mm_order_rows.len() - history_start;
+                        if collect_market_history && history_len > 0 {
+                            history_sections.push(MarketHistoryStreamSection {
                                 market_index,
-                                rows: history_rows,
+                                kind: MarketHistoryStreamSectionKind::MMOrders,
+                                start: history_start,
+                                len: history_len,
                             });
                         }
                     }
@@ -238,11 +241,10 @@ impl EventDispatcher {
                         let collect_market_history = market_name.is_some_and(|name| {
                             collect_history && self.active_trade_storage_allows_market(name)
                         });
-                        let mut history_rows = if collect_market_history {
-                            Vec::with_capacity(row_count)
-                        } else {
-                            Vec::new()
-                        };
+                        let history_start = history_trade_rows.len();
+                        if collect_market_history {
+                            history_trade_rows.reserve(row_count);
+                        }
                         for trade in rows {
                             Self::ensure_trades_packet_time_shift_like_delphi(
                                 decoded.base_time,
@@ -251,17 +253,20 @@ impl EventDispatcher {
                                 &mut packet_time_shift,
                             );
                             if collect_market_history {
-                                history_rows.push(MarketHistoryTradeInput {
+                                history_trade_rows.push(MarketHistoryTradeInput {
                                     time_delta_ms: trade.time_delta_ms,
                                     price: trade.price,
                                     qty: trade.qty,
                                 });
                             }
                         }
-                        if collect_market_history && !history_rows.is_empty() {
-                            history_sections.push(MarketHistoryStreamSection::Liquidations {
+                        let history_len = history_trade_rows.len() - history_start;
+                        if collect_market_history && history_len > 0 {
+                            history_sections.push(MarketHistoryStreamSection {
                                 market_index,
-                                rows: history_rows,
+                                kind: MarketHistoryStreamSectionKind::Liquidations,
+                                start: history_start,
+                                len: history_len,
                             });
                         }
                     }
@@ -297,7 +302,7 @@ impl EventDispatcher {
                                 qty: fill.qty,
                                 z_btc: fill.z_btc,
                                 position: fill.position,
-                                order_type: OrderType::from_byte(fill.order_type),
+                                order_type: fill.order_type,
                                 is_short: fill.is_short(),
                                 is_open: fill.is_open(),
                                 is_taker: fill.is_taker(),
@@ -321,6 +326,8 @@ impl EventDispatcher {
                     base_time: decoded.base_time,
                     now_time,
                     sections: history_sections,
+                    trade_rows: history_trade_rows,
+                    mm_order_rows: history_mm_order_rows,
                 });
             }
         }

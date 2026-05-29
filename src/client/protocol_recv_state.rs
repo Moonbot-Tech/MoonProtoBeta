@@ -22,15 +22,27 @@ impl ProtocolCore<'_> {
         self.client.authorized = false;
         self.client.need_connect = true;
         self.client.soft_reconnect = false;
+        self.client.mark_next_primary_hello_new_session();
     }
 
     pub(crate) fn apply_need_hello_again(&mut self, timestamp_ms: i64) {
         if (timestamp_ms - self.client.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS {
             self.client.last_need_hello_again = timestamp_ms;
-            if !self.client.waiting_hello {
-                self.client.waiting_hello_start = timestamp_ms;
+            if self.client.server_token == 0
+                || (!self.client.authorized && !self.client.was_ever_connected)
+            {
+                self.client.auth_status = AuthStatus::Connected;
+                self.client.authorized = false;
+                self.client.need_connect = true;
+                self.client.soft_reconnect = false;
+                self.client.mark_next_primary_hello_new_session();
+            } else {
+                if !self.client.hello_wait_state.allows_hello_again_retry() {
+                    self.client.waiting_hello_start = timestamp_ms;
+                }
+                self.client
+                    .set_hello_wait_state(HelloWaitState::RebindHelloAgain);
             }
-            self.client.waiting_hello = true;
             self.client.last_sent_hello = NEVER_SENT_MS;
         }
     }
@@ -73,6 +85,7 @@ impl ProtocolCore<'_> {
         self.client.need_connect = false;
         self.client.auth_status = AuthStatus::AuthDone;
         self.client.authorized = true;
+        self.client.clear_hello_wait_state();
         if restore_after_reconnect {
             self.client.restore_domain_after_reconnect();
         }

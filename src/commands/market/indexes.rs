@@ -4,6 +4,7 @@ use super::{write_str, EngineStreamReader};
 /// `index` = позиция в массиве (соответствует `mIndex` в Delphi).
 /// Wire-form (MoonProtoEngineServer.pas:278-284):
 ///   `count:i32 + names[count] (UTF-8 strings)`.
+#[doc(hidden)]
 pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
     let mut r = EngineStreamReader::new(data);
     // Каждое имя — UTF-8 string с u16-prefix. Минимум 2 байта (пустая строка).
@@ -15,6 +16,7 @@ pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
     Some(names)
 }
 
+#[doc(hidden)]
 pub fn build_markets_indexes_response(names: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + names.iter().map(|s| 2 + s.len()).sum::<usize>());
     out.extend_from_slice(&(names.len() as i32).to_le_bytes());

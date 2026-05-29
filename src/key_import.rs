@@ -17,6 +17,7 @@
 //! MAC key, and checksum.
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::client::TransportMode;
 use crate::MoonKey;
 
 const OLD_PWD_HEAD: &str = "F$xC";
@@ -58,8 +59,8 @@ pub struct ImportedNetworkConfig {
     pub address: Option<IpAddr>,
     /// Exported server UDP port.
     pub port: u16,
-    /// Exported MoonProto transport mode (`0`, `1`, or `2`).
-    pub mask_ver: u8,
+    /// Exported MoonProto transport mode (`V0`, `V1`, or `V2`).
+    pub mask_ver: TransportMode,
 }
 
 /// Full parsed MoonBot key export for UI/config screens.
@@ -95,10 +96,25 @@ pub struct ImportedKeys {
     pub master_key: MoonKey,
     /// Transport MAC/obfuscation key.
     pub mac_key: MoonKey,
+    filled: bool,
+    container_version: u8,
+}
+
+impl ImportedKeys {
     /// Whether the exported MoonBot key container was marked as filled.
-    pub filled: bool,
-    /// Key container format version from the MoonBot export.
-    pub ver: u8,
+    ///
+    /// Normal applications do not need this: a successfully imported key has
+    /// already passed the Delphi container checks.
+    #[doc(hidden)]
+    pub fn filled(&self) -> bool {
+        self.filled
+    }
+
+    /// Raw `TMoonProtoKeyContainer.ver` value retained for diagnostics.
+    #[doc(hidden)]
+    pub fn container_version(&self) -> u8 {
+        self.container_version
+    }
 }
 
 /// Import MoonBot key from base64 export string.
@@ -174,7 +190,7 @@ fn imported_key_info(
         master_key: container.master_key,
         mac_key: container.mac_key,
         filled: container.filled,
-        ver: container.ver,
+        container_version: container.ver,
     };
     ImportedKeyInfo {
         keys,
@@ -231,7 +247,7 @@ fn parse_v1_plain(plain: &[u8]) -> Option<ImportedKeyInfo> {
             ip_version,
             address,
             port,
-            mask_ver,
+            mask_ver: TransportMode::from_byte(mask_ver),
         }),
     ))
 }
@@ -567,8 +583,8 @@ mod tests {
         ];
         let key_b64 = build_legacy_test_export(master_key, mac_key);
         let keys = import_key(&key_b64).expect("Failed to import key");
-        assert!(keys.filled);
-        assert_eq!(keys.ver, 1);
+        assert!(keys.filled());
+        assert_eq!(keys.container_version(), 1);
         assert_eq!(keys.master_key, master_key);
         assert_eq!(keys.mac_key, mac_key);
 
@@ -595,7 +611,7 @@ mod tests {
                 ip_version: ImportedIpVersion::V4,
                 address: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
                 port: 3000,
-                mask_ver: 2,
+                mask_ver: TransportMode::V2,
             })
         );
 
@@ -610,7 +626,7 @@ mod tests {
         .with_transport_mode(network.mask_ver);
         assert_eq!(cfg.server_ip, "127.0.0.1");
         assert_eq!(cfg.server_port, 3000);
-        assert_eq!(cfg.mask_ver, 2);
+        assert_eq!(cfg.mask_ver, TransportMode::V2);
     }
 
     #[test]
@@ -626,7 +642,7 @@ mod tests {
                 ip_version: ImportedIpVersion::V4,
                 address: None,
                 port: 4000,
-                mask_ver: 0,
+                mask_ver: TransportMode::V0,
             })
         );
         let network = info.network.expect("V1 network metadata expected");
@@ -642,7 +658,7 @@ mod tests {
         .with_transport_mode(network.mask_ver);
         assert_eq!(cfg.server_ip, "example.com");
         assert_eq!(cfg.server_port, 4000);
-        assert_eq!(cfg.mask_ver, 0);
+        assert_eq!(cfg.mask_ver, TransportMode::V0);
     }
 
     #[test]
@@ -664,7 +680,11 @@ mod tests {
         let info = parse_key_info(&key).expect("invalid MoonBot key");
         eprintln!(
             "KEY_INFO format={:?} display_name={:?} network={:?} filled={} key_ver={}",
-            info.format, info.display_name, info.network, info.keys.filled, info.keys.ver
+            info.format,
+            info.display_name,
+            info.network,
+            info.keys.filled(),
+            info.keys.container_version()
         );
     }
 }

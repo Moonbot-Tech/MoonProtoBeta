@@ -1,27 +1,21 @@
-//! Market канал — парсеры ответов Engine API связанных с маркетами.
+//! Market Active Lib types and low-level Engine API response parsers.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoSerialization.pas` + `MoonProto/MoonProtoEngineServer.pas`.
+//! Delphi sources: `MoonProto/MoonProtoSerialization.pas` and
+//! `MoonProto/MoonProtoEngineServer.pas`.
 //!
-//! ## Что покрыто
-//! - `parse_markets_list_response` — для `emk_GetMarketsList` (полный список маркетов + CorrMarkets).
-//! - `parse_markets_prices_response` — для `emk_UpdateMarketsList` (обновление Bid/Ask/Funding/MarkPrice).
-//! - `parse_markets_indexes_response` — для `emk_GetMarketsIndexes` (список названий маркетов).
-//! - `parse_token_tags_response` — для `emk_CheckBinanceTags` (теги монет).
+//! Regular applications should access markets through retained `MarketHandle`
+//! values and `MarketsState` readers. The packet-shaped parsers/builders here
+//! are protocol tools; they accept `EngineResponse.data` after optional DEFLATE
+//! decompression and are hidden from normal rustdoc where they are not a useful
+//! user-facing abstraction.
 //!
-//! Все парсеры принимают `data: &[u8]` (содержимое `EngineResponse.data` после Deflate-декомпрессии).
-//!
-//! ## Wire-form примитивов TEngineResponse (Engine RPC stream)
-//! - `WriteDouble`: 8 байт LE
-//! - `WriteInt`: 4 байта LE i32
-//! - `WriteWord`: 2 байта LE u16
-//! - `WriteByte`: 1 байт u8
-//! - `WriteInt64`: 8 байт LE i64
-//! - `WriteBool`: 1 байт (0=false, иначе true)
-//! - `WriteStr`: u16 LE prefix + UTF-8 bytes (как `registry::write_string`)
+//! Engine stream primitive layout follows Delphi: little-endian numeric fields,
+//! one-byte booleans, and u16-length UTF-8 strings.
 
 use std::collections::HashMap;
 
 use super::candles::current_local_time_shift_minutes;
+use super::trade::OrderType;
 use crate::time::DelphiTime;
 const MINS_IN_DAY: f64 = 1440.0;
 
@@ -30,12 +24,15 @@ mod list;
 mod prices;
 mod reader;
 mod token_tags;
+#[doc(hidden)]
 pub use self::indexes::{build_markets_indexes_response, parse_markets_indexes_response};
 #[cfg(test)]
 use self::list::build_markets_list_response_with_local_shift;
+#[doc(hidden)]
 pub use self::list::{
     build_markets_list_response, parse_markets_list_response, MarketsListResponse,
 };
+#[doc(hidden)]
 pub use self::prices::{
     build_markets_prices_response, parse_markets_prices_response, CorrMarketPriceUpdate,
     MarketPriceUpdate, MarketsPricesResponse,
@@ -44,10 +41,87 @@ pub use self::prices::{
 use self::prices::{
     build_markets_prices_response_with_local_shift, parse_markets_prices_response_with_local_shift,
 };
+#[doc(hidden)]
 pub use self::reader::EngineStreamReader;
-pub use self::token_tags::{
-    build_token_tags_response, parse_token_tags_response, MarketTokenTags, TokenTags,
-};
+pub use self::token_tags::TokenTags;
+#[doc(hidden)]
+pub use self::token_tags::{build_token_tags_response, parse_token_tags_response, MarketTokenTags};
+
+// =============================================================================
+//  TBotPlatform ordinal (Vars.pas:24)
+// =============================================================================
+
+/// Delphi `TBotPlatform` raw ordinal from `Vars.pas`.
+///
+/// Server identity and trade route headers carry this as one byte. The wrapper
+/// keeps unknown future ordinals byte-exact while the public API avoids naked
+/// magic `u8` values.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ExchangeCode(u8);
+
+#[allow(non_upper_case_globals)]
+impl ExchangeCode {
+    pub const None: Self = Self(0);
+    pub const WasBittrex: Self = Self(1);
+    pub const FBybit: Self = Self(2);
+    pub const Binance: Self = Self(3);
+    pub const FBinance: Self = Self(4);
+    pub const Huobi: Self = Self(5);
+    pub const QBinance: Self = Self(6);
+    pub const ByBit: Self = Self(7);
+    pub const Gate: Self = Self(8);
+    pub const FGate: Self = Self(9);
+    pub const BitGet: Self = Self(10);
+    pub const FBitGet: Self = Self(11);
+    pub const Hyper: Self = Self(12);
+    pub const FHyper: Self = Self(13);
+    pub const Next5: Self = Self(14);
+    pub const Next6: Self = Self(15);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Next6.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::WasBittrex => "WasBittrex",
+            Self::FBybit => "FBybit",
+            Self::Binance => "Binance",
+            Self::FBinance => "FBinance",
+            Self::Huobi => "Huobi",
+            Self::QBinance => "QBinance",
+            Self::ByBit => "ByBit",
+            Self::Gate => "Gate",
+            Self::FGate => "FGate",
+            Self::BitGet => "BitGet",
+            Self::FBitGet => "FBitGet",
+            Self::Hyper => "Hyper",
+            Self::FHyper => "FHyper",
+            Self::Next5 => "Next5",
+            Self::Next6 => "Next6",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Debug for ExchangeCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
+    }
+}
 
 // =============================================================================
 //  TBaseCurrency ordinal (Vars.pas:40)
@@ -60,7 +134,7 @@ pub use self::token_tags::{
 /// future ordinals to `BC_Unknown`, so parse + write preserves the exact wire
 /// value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BaseCurrency(pub u8);
+pub struct BaseCurrency(u8);
 
 impl BaseCurrency {
     pub const BTC: Self = Self(0);
@@ -120,7 +194,7 @@ impl BaseCurrency {
 /// This value is not sent in `WriteMarketToStream`. Delphi derives
 /// `TMarket.ListedType` after `GetMarketsList` from `FuturesType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ListedType(pub u8);
+pub struct ListedType(u8);
 
 impl ListedType {
     pub const UNKNOWN: Self = Self(0);
@@ -139,55 +213,260 @@ impl ListedType {
 }
 
 // =============================================================================
+//  TPositionType ordinal (MarketsU.pas:31)
+// =============================================================================
+
+/// Delphi `TPositionType` (`PT_Cross=0`, `PT_Isolated=1`).
+///
+/// Balance/market packets carry this as one raw byte. The Active Lib API exposes
+/// the typed value so user code does not pass magic `0/1`, while raw parsers
+/// still preserve unknown future ordinals.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PositionType(u8);
+
+#[allow(non_upper_case_globals)]
+impl PositionType {
+    pub const Cross: Self = Self(0);
+    pub const Isolated: Self = Self(1);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Isolated.0
+    }
+
+    pub const fn is_cross(self) -> bool {
+        self.0 == Self::Cross.0
+    }
+
+    pub const fn is_isolated(self) -> bool {
+        self.0 == Self::Isolated.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cross => "Cross",
+            Self::Isolated => "Isolated",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Debug for PositionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
+    }
+}
+
+// =============================================================================
+//  Arbitrage platform codes (ArbTypes.pas)
+// =============================================================================
+
+/// Arbitrage platform code used by Delphi `ArbSlotPlatforms`.
+///
+/// Regular exchange codes reuse `TBotPlatform` ordinals; arbitrage also has
+/// special codes for Hyperliquid deployers and extra feeds. This is why the
+/// type is separate from [`ExchangeCode`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ArbPlatformCode(u8);
+
+#[allow(non_upper_case_globals)]
+impl ArbPlatformCode {
+    pub const None: Self = Self(0);
+    pub const WasBittrex: Self = Self(1);
+    pub const FBybit: Self = Self(2);
+    pub const Binance: Self = Self(3);
+    pub const FBinance: Self = Self(4);
+    pub const Huobi: Self = Self(5);
+    pub const QBinance: Self = Self(6);
+    pub const ByBit: Self = Self(7);
+    pub const Gate: Self = Self(8);
+    pub const FGate: Self = Self(9);
+    pub const BitGet: Self = Self(10);
+    pub const FBitGet: Self = Self(11);
+    pub const HyperSpot: Self = Self(12);
+    pub const HyperFutures: Self = Self(13);
+    pub const Forex: Self = Self(100);
+    pub const UpBit: Self = Self(101);
+    pub const Okx: Self = Self(102);
+    pub const BinAlpha: Self = Self(103);
+    pub const HL_DEX_BASE: u8 = 50;
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn from_exchange(code: ExchangeCode) -> Self {
+        Self(code.to_byte())
+    }
+
+    pub const fn hyper_deployer(index: u8) -> Self {
+        Self(Self::HL_DEX_BASE.wrapping_add(index))
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_hyper_deployer(self) -> bool {
+        self.0 >= Self::HL_DEX_BASE && self.0 < Self::Forex.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::WasBittrex => "WasBittrex",
+            Self::FBybit => "FBybit",
+            Self::Binance => "Binance",
+            Self::FBinance => "FBinance",
+            Self::Huobi => "Huobi",
+            Self::QBinance => "QBinance",
+            Self::ByBit => "ByBit",
+            Self::Gate => "Gate",
+            Self::FGate => "FGate",
+            Self::BitGet => "BitGet",
+            Self::FBitGet => "FBitGet",
+            Self::HyperSpot => "HyperSpot",
+            Self::HyperFutures => "HyperFutures",
+            Self::Forex => "Forex",
+            Self::UpBit => "UpBit",
+            Self::Okx => "OKX",
+            Self::BinAlpha => "BinAlpha",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Debug for ArbPlatformCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.name() != "Unknown" {
+            f.write_str(self.name())
+        } else if self.is_hyper_deployer() {
+            write!(f, "HyperDeployer({})", self.0 - Self::HL_DEX_BASE)
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
+    }
+}
+
+/// Delphi `TArbSlot.IsolatedFlags`: bit0 deposit blocked, bit1 withdraw blocked.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ArbIsolationFlags(u8);
+
+#[allow(non_upper_case_globals)]
+impl ArbIsolationFlags {
+    pub const None: Self = Self(0);
+    pub const DepositBlocked: Self = Self(0b0000_0001);
+    pub const WithdrawBlocked: Self = Self(0b0000_0010);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    pub const fn deposit_blocked(self) -> bool {
+        self.contains(Self::DepositBlocked)
+    }
+
+    pub const fn withdraw_blocked(self) -> bool {
+        self.contains(Self::WithdrawBlocked)
+    }
+}
+
+impl std::fmt::Debug for ArbIsolationFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ArbIsolationFlags({:#04x})", self.0)
+    }
+}
+
+// =============================================================================
 //  Market struct
 // =============================================================================
 
-/// Живой market object Active Lib.
+/// Live Active Lib market object.
 ///
-/// Первые wire-поля byte-exact с `WriteMarketToStream`
+/// The first fields are byte-exact with `WriteMarketToStream`
 /// (MoonProtoSerialization.pas:42-98): 10 strings + 6 ints + 1 int64 +
-/// 20 doubles + 5 bools + 1 byte (v2 FuturesType). Следующие поля зеркалят
-/// Delphi `TMarket` live state, который обновляется другими protocol commands
-/// и не сериализуется через `WriteMarketToStream`.
+/// 20 doubles + 5 bools + 1 byte for v2 `FuturesType`. The remaining fields
+/// mirror Delphi `TMarket` live state maintained by other protocol commands and
+/// are not serialized by `WriteMarketToStream`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Market {
     // --- Strings (10) ---
+    #[doc(hidden)]
     pub bn_market_name: String,
     pub market_currency: String,
+    #[doc(hidden)]
     pub bn_market_currency: String,
     pub base_currency: String,
     pub market_currency_long: String,
     pub market_currency_canonic: String,
     pub market_name: String,
     pub market_name_mb_classic: String,
+    #[doc(hidden)]
     pub bn_status: String,
     pub leading1000: String,
     // --- Integers (6) ---
+    #[doc(hidden)]
     pub bn_price_precision: i32,
+    #[doc(hidden)]
     pub bn_quantity_precision: i32,
     pub max_leverage: i32,
     pub k1000: i32,
+    #[doc(hidden)]
     pub bn_iceberg_parts: i32,
+    #[doc(hidden)]
     pub bn_margin_table_id: i32,
     // --- Int64 (1) ---
+    #[doc(hidden)]
     pub bn_delivery_time: i64,
     // --- Doubles (20) ---
+    #[doc(hidden)]
     pub bn_tick_size: f64,
+    #[doc(hidden)]
     pub bn_step_size: f64,
+    #[doc(hidden)]
     pub bn_min_qty: f64,
+    #[doc(hidden)]
     pub bn_max_qty: f64,
+    #[doc(hidden)]
     pub bn_min_notional: f64,
+    #[doc(hidden)]
     pub bn_max_notional: f64,
+    #[doc(hidden)]
     pub bn_contract_size: f64,
+    #[doc(hidden)]
     pub bn_min_price: f64,
+    #[doc(hidden)]
     pub bn_max_price: f64,
+    #[doc(hidden)]
     pub bn_max_value: f64,
+    #[doc(hidden)]
     pub bn_multiplier_up: f64,
+    #[doc(hidden)]
     pub bn_multiplier_down: f64,
     pub bid_multiplier_up: f64,
     pub bid_multiplier_down: f64,
     pub ask_multiplier_up: f64,
     pub ask_multiplier_down: f64,
+    #[doc(hidden)]
     pub int_bn_max_qty: f64,
     pub funding_rate: f64,
     pub funding_time: f64,
@@ -195,8 +474,10 @@ pub struct Market {
     // --- Booleans (5) ---
     pub is_btc_market: bool,
     pub status_trading: bool,
-    pub bn_is_fucking_shib: bool,
+    pub has_1000_prefix_alias: bool,
+    #[doc(hidden)]
     pub bn_iceberg: bool,
+    #[doc(hidden)]
     pub bn_only_isolated: bool,
     // --- v2: FuturesType ---
     pub futures_type: BaseCurrency,
@@ -206,29 +487,125 @@ pub struct Market {
     pub pos_size: f64,
     pub pos_price: f64,
     pub liq_price: f64,
-    pub pos_dir: u8,
+    pub pos_dir: OrderType,
     pub long_pos_size: f64,
     pub long_pos_price: f64,
     pub long_liq_price: f64,
-    pub long_position_type: u8,
+    pub long_position_type: PositionType,
     pub short_pos_size: f64,
     pub short_pos_price: f64,
     pub short_liq_price: f64,
-    pub short_position_type: u8,
+    pub short_position_type: PositionType,
     pub asset_balance: f64,
     pub asset_balance_full: f64,
     pub total_profit_b: f64,
     pub total_profit_l: f64,
     pub total_profit_s: f64,
     pub leverage_x: i32,
-    pub position_type: u8,
+    pub position_type: PositionType,
     pub balance_hash: u64,
     pub last_balance_epoch: u16,
     // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
-    pub arb_slots: HashMap<u8, MarketArbSlot>,
+    #[doc(hidden)]
+    pub arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
 }
 
 impl Market {
+    /// Exchange symbol used by MoonBot/MoonProto, for example `BTCUSDT`.
+    pub fn symbol(&self) -> &str {
+        &self.bn_market_name
+    }
+
+    /// Exchange-side market currency/symbol component.
+    pub fn exchange_market_currency(&self) -> &str {
+        &self.bn_market_currency
+    }
+
+    /// Exchange status string from the market-list payload.
+    pub fn exchange_status(&self) -> &str {
+        &self.bn_status
+    }
+
+    pub fn price_precision(&self) -> i32 {
+        self.bn_price_precision
+    }
+
+    pub fn quantity_precision(&self) -> i32 {
+        self.bn_quantity_precision
+    }
+
+    pub fn iceberg_parts(&self) -> i32 {
+        self.bn_iceberg_parts
+    }
+
+    pub fn margin_table_id(&self) -> i32 {
+        self.bn_margin_table_id
+    }
+
+    pub fn delivery_time_ms(&self) -> i64 {
+        self.bn_delivery_time
+    }
+
+    pub fn tick_size(&self) -> f64 {
+        self.bn_tick_size
+    }
+
+    pub fn step_size(&self) -> f64 {
+        self.bn_step_size
+    }
+
+    pub fn min_qty(&self) -> f64 {
+        self.bn_min_qty
+    }
+
+    pub fn max_qty(&self) -> f64 {
+        self.bn_max_qty
+    }
+
+    pub fn min_notional(&self) -> f64 {
+        self.bn_min_notional
+    }
+
+    pub fn max_notional(&self) -> f64 {
+        self.bn_max_notional
+    }
+
+    pub fn contract_size(&self) -> f64 {
+        self.bn_contract_size
+    }
+
+    pub fn min_price(&self) -> f64 {
+        self.bn_min_price
+    }
+
+    pub fn max_price(&self) -> f64 {
+        self.bn_max_price
+    }
+
+    pub fn max_value(&self) -> f64 {
+        self.bn_max_value
+    }
+
+    pub fn multiplier_up(&self) -> f64 {
+        self.bn_multiplier_up
+    }
+
+    pub fn multiplier_down(&self) -> f64 {
+        self.bn_multiplier_down
+    }
+
+    pub fn internal_max_qty(&self) -> f64 {
+        self.int_bn_max_qty
+    }
+
+    pub fn iceberg_enabled(&self) -> bool {
+        self.bn_iceberg
+    }
+
+    pub fn only_isolated(&self) -> bool {
+        self.bn_only_isolated
+    }
+
     /// Listed-on-exchange kind derived from `futures_type`.
     pub fn listed_type(&self) -> ListedType {
         if self.futures_type == BaseCurrency::EMPTY {
@@ -284,11 +661,11 @@ impl MarketArbNowEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarketArbSlot {
-    pub ring: [MarketArbPricePoint; ARB_PRICE_RING_LEN],
+    pub(crate) ring: [MarketArbPricePoint; ARB_PRICE_RING_LEN],
     pub enabled: bool,
-    pub head: u8,
-    pub isolated_flags: u8,
-    pub isolated_flags_tmp: u8,
+    pub(crate) head: u8,
+    pub isolated_flags: ArbIsolationFlags,
+    pub(crate) isolated_flags_tmp: ArbIsolationFlags,
     pub now: MarketArbNowEntry,
 }
 
@@ -298,15 +675,42 @@ impl Default for MarketArbSlot {
             ring: [MarketArbPricePoint::default(); ARB_PRICE_RING_LEN],
             enabled: false,
             head: 0,
-            isolated_flags: 0,
-            isolated_flags_tmp: 0,
+            isolated_flags: ArbIsolationFlags::None,
+            isolated_flags_tmp: ArbIsolationFlags::None,
             now: MarketArbNowEntry::default(),
         }
     }
 }
 
-/// Прочитать `TMarket` из EngineStreamReader (byte-exact с `ReadMarketFromStream`).
-/// `ver` — версия команды `TEngineResponse` (если >= 2 — есть FuturesType byte).
+impl MarketArbSlot {
+    /// Current write head inside the fixed Delphi 10-point arb ring.
+    #[doc(hidden)]
+    pub fn head_index(&self) -> usize {
+        self.head as usize
+    }
+
+    /// Latest point written to the fixed Delphi ring.
+    pub fn latest_point(&self) -> MarketArbPricePoint {
+        self.ring[self.head_index()]
+    }
+
+    /// Return ring points in chronological order without exposing the raw
+    /// ring cursor as public mutable state.
+    pub fn points_oldest_first(&self) -> [MarketArbPricePoint; ARB_PRICE_RING_LEN] {
+        let mut out = [MarketArbPricePoint::default(); ARB_PRICE_RING_LEN];
+        let start = (self.head_index() + 1) % ARB_PRICE_RING_LEN;
+        for (dst, src) in out.iter_mut().enumerate() {
+            *src = self.ring[(start + dst) % ARB_PRICE_RING_LEN];
+        }
+        out
+    }
+}
+
+/// Read `TMarket` from `EngineStreamReader`, byte-exact with Delphi
+/// `ReadMarketFromStream`.
+///
+/// `ver >= 2` means the payload contains the trailing `FuturesType` byte.
+#[doc(hidden)]
 pub fn read_market(r: &mut EngineStreamReader, ver: u16) -> Option<Market> {
     read_market_with_local_shift(r, ver, current_local_time_shift_minutes())
 }
@@ -359,7 +763,7 @@ pub(crate) fn read_market_with_local_shift(
 
     let is_btc_market = r.read_bool()?;
     let status_trading = r.read_bool()?;
-    let bn_is_fucking_shib = r.read_bool()?;
+    let has_1000_prefix_alias = r.read_bool()?;
     let bn_iceberg = r.read_bool()?;
     let bn_only_isolated = r.read_bool()?;
 
@@ -416,7 +820,7 @@ pub(crate) fn read_market_with_local_shift(
         volume,
         is_btc_market,
         status_trading,
-        bn_is_fucking_shib,
+        has_1000_prefix_alias,
         bn_iceberg,
         bn_only_isolated,
         futures_type,
@@ -425,22 +829,22 @@ pub(crate) fn read_market_with_local_shift(
         pos_size: 0.0,
         pos_price: 0.0,
         liq_price: 0.0,
-        pos_dir: 0,
+        pos_dir: OrderType::Sell,
         long_pos_size: 0.0,
         long_pos_price: 0.0,
         long_liq_price: 0.0,
-        long_position_type: 0,
+        long_position_type: PositionType::Cross,
         short_pos_size: 0.0,
         short_pos_price: 0.0,
         short_liq_price: 0.0,
-        short_position_type: 0,
+        short_position_type: PositionType::Cross,
         asset_balance: 0.0,
         asset_balance_full: 0.0,
         total_profit_b: 0.0,
         total_profit_l: 0.0,
         total_profit_s: 0.0,
         leverage_x: 1,
-        position_type: 0,
+        position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
         arb_slots: HashMap::new(),
@@ -458,13 +862,12 @@ pub(crate) fn apply_delphi_local_funding_shift(
     }
 }
 
-/// Сериализовать `Market` в `EngineStreamReader`-совместимый byte stream
-/// (зеркально `WriteMarketToStream`). Используется для тестов и для опционального
-/// клиентского ответа на pseudo-request от сервера.
+/// Serialize `Market` into an `EngineStreamReader`-compatible byte stream.
 ///
-/// **NB:** byte-exact с Delphi `WriteMarketToStream` (MoonProtoSerialization.pas:97):
-/// FuturesType пишется **всегда** (без gate ver), как в оригинале. `ver` оставлен
-/// в сигнатуре для зеркальности с `read_market`, но в writer'е не используется.
+/// This mirrors Delphi `WriteMarketToStream`. `FuturesType` is always written,
+/// as in the reference implementation; `ver` is kept only for symmetry with
+/// `read_market`.
+#[doc(hidden)]
 pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
 }
@@ -519,7 +922,7 @@ pub(super) fn write_market_with_local_shift(
 
     out.push(m.is_btc_market as u8);
     out.push(m.status_trading as u8);
-    out.push(m.bn_is_fucking_shib as u8);
+    out.push(m.has_1000_prefix_alias as u8);
     out.push(m.bn_iceberg as u8);
     out.push(m.bn_only_isolated as u8);
 
@@ -550,17 +953,21 @@ pub(super) fn write_str(out: &mut Vec<u8>, s: &str) {
 //  CorrMarket struct
 // =============================================================================
 
-/// `TCorrMarket` (correlation market) — упрощённый вид маркета для расчётов.
-/// Byte-exact с `WriteCorrMarketToStream` (MoonProtoSerialization.pas:169-178).
+/// Delphi `TCorrMarket` correlation-market row.
+///
+/// Byte-exact with `WriteCorrMarketToStream`
+/// (`MoonProtoSerialization.pas:169-178`).
 #[derive(Debug, Clone, PartialEq)]
+#[doc(hidden)]
 pub struct CorrMarket {
     pub bn_market_name: String,
     pub bn_market_currency: String,
     pub bn_tick_size: f64,
-    /// `BaseCurrency.BaseCurrency` (имя базовой валюты, '' если nil).
+    /// Base-currency name; empty string when Delphi had `nil`.
     pub base_currency_name: String,
 }
 
+#[doc(hidden)]
 pub fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket> {
     let bn_market_name = r.read_str()?;
     let bn_market_currency = r.read_str()?;
@@ -574,6 +981,7 @@ pub fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket> {
     })
 }
 
+#[doc(hidden)]
 pub fn write_corr_market(out: &mut Vec<u8>, c: &CorrMarket) {
     write_str(out, &c.bn_market_name);
     write_str(out, &c.bn_market_currency);

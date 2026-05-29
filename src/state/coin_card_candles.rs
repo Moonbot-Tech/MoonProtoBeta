@@ -6,6 +6,7 @@
 //! `Engine.getDeepHistory(hk_4h, ...)`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::commands::candles::{DeepHistoryKind, DeepPrice};
 
@@ -34,7 +35,7 @@ pub struct CoinCardCandlesState {
 
 #[derive(Debug, Clone, Default)]
 struct CoinCardCandlesEntry {
-    candles: Vec<DeepPrice>,
+    candles: Arc<Vec<DeepPrice>>,
     revision: u64,
 }
 
@@ -77,7 +78,7 @@ impl CoinCardCandlesState {
         self.by_market.entry(market.clone()).or_default().insert(
             kind,
             CoinCardCandlesEntry {
-                candles,
+                candles: Arc::new(candles),
                 revision: self.revision,
             },
         );
@@ -97,11 +98,11 @@ mod tests {
 
     fn candle(close: f32) -> DeepPrice {
         DeepPrice {
-            open_p: close,
-            close_p: close,
-            max_p: close,
-            min_p: close,
-            vol: 1.0,
+            open: close,
+            close: close,
+            high: close,
+            low: close,
+            volume: 1.0,
             time: 45_000.0,
         }
     }
@@ -132,5 +133,41 @@ mod tests {
         );
         assert_eq!(state.entry_revision("BTCUSDT", DeepHistoryKind::Hour4), 1);
         assert_eq!(state.entry_revision("BTCUSDT", DeepHistoryKind::Day1), 2);
+    }
+
+    #[test]
+    fn snapshot_cow_updating_one_coin_card_history_keeps_other_candle_vec_shared() {
+        let mut state = CoinCardCandlesState::new();
+        state.apply_update(
+            "BTCUSDT".to_string(),
+            DeepHistoryKind::Hour4,
+            10,
+            vec![candle(1.0)],
+        );
+        state.apply_update(
+            "BTCUSDT".to_string(),
+            DeepHistoryKind::Day1,
+            11,
+            vec![candle(2.0)],
+        );
+
+        let snapshot = state.clone();
+        let live_day = &state.by_market["BTCUSDT"][&DeepHistoryKind::Day1].candles;
+        let snap_day = &snapshot.by_market["BTCUSDT"][&DeepHistoryKind::Day1].candles;
+        assert!(Arc::ptr_eq(live_day, snap_day));
+
+        state.apply_update(
+            "BTCUSDT".to_string(),
+            DeepHistoryKind::Hour4,
+            12,
+            vec![candle(3.0), candle(4.0)],
+        );
+
+        let live_hour = &state.by_market["BTCUSDT"][&DeepHistoryKind::Hour4].candles;
+        let snap_hour = &snapshot.by_market["BTCUSDT"][&DeepHistoryKind::Hour4].candles;
+        let live_day = &state.by_market["BTCUSDT"][&DeepHistoryKind::Day1].candles;
+        let snap_day = &snapshot.by_market["BTCUSDT"][&DeepHistoryKind::Day1].candles;
+        assert!(!Arc::ptr_eq(live_hour, snap_hour));
+        assert!(Arc::ptr_eq(live_day, snap_day));
     }
 }

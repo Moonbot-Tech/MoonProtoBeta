@@ -5,7 +5,7 @@
 
 /// TOrderType (Vars.pas:57): O_SELL=0, O_BUY=1, O_BuyStop=2, O_BuyLimit=3.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OrderType(pub u8);
+pub struct OrderType(u8);
 
 #[allow(non_upper_case_globals)]
 impl OrderType {
@@ -38,7 +38,68 @@ impl OrderType {
     }
 }
 
+impl Default for OrderType {
+    fn default() -> Self {
+        Self::Sell
+    }
+}
+
 impl std::fmt::Debug for OrderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_known() {
+            f.write_str(self.name())
+        } else {
+            write!(f, "Unknown({})", self.0)
+        }
+    }
+}
+
+/// TOrderSubType (MarketsU.pas:26): order execution subtype retained in
+/// `TOrderCompact`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OrderSubType(u8);
+
+#[allow(non_upper_case_globals)]
+impl OrderSubType {
+    pub const Limit: Self = Self(0);
+    pub const Trailing: Self = Self(1);
+    pub const Stop: Self = Self(2);
+    pub const StopMarket: Self = Self(3);
+    pub const ReduceOnly: Self = Self(4);
+    pub const Market: Self = Self(5);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn is_known(self) -> bool {
+        self.0 <= Self::Market.0
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Limit => "Limit",
+            Self::Trailing => "Trailing",
+            Self::Stop => "Stop",
+            Self::StopMarket => "StopMarket",
+            Self::ReduceOnly => "ReduceOnly",
+            Self::Market => "Market",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl Default for OrderSubType {
+    fn default() -> Self {
+        Self::Limit
+    }
+}
+
+impl std::fmt::Debug for OrderSubType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_known() {
             f.write_str(self.name())
@@ -52,21 +113,21 @@ impl std::fmt::Debug for OrderType {
 ///
 /// Standard flow for a long position:
 /// ```text
-///   None ──► BuySet ──► BuyDone ──► SellSet ──► SelLDone
+///   None ──► BuySet ──► BuyDone ──► SellSet ──► SellDone
 ///             │           │           │            │
 ///             ▼           ▼           ▼            ▼
 ///          BuyFail    BuyCancel   SellFail    SellCancel
 /// ```
 ///
 /// **Terminal states** (the order is closed and no further transition is expected):
-/// `SelLDone`, `SelLAlmostDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
+/// `SellDone`, `SellAlmostDone`, `BuyFail`, `BuyCancel`, `SellFail`, `SellCancel`.
 ///
 /// **Phase semantics** for UI grouping:
 /// - **Buy phase** (`BuySet`/`BuyDone`/`BuyFail`/`BuyCancel`) waits for or
 ///   completes position entry.
-/// - **Sell phase** (`SellSet`/`SelLAlmostDone`/`SelLDone`/`SellFail`/`SellCancel`) —
+/// - **Sell phase** (`SellSet`/`SellAlmostDone`/`SellDone`/`SellFail`/`SellCancel`) —
 ///   exits the position (take-profit, stop-loss, or manual close).
-/// - `SelLAlmostDone` means the sell completed through a replace/market-stop
+/// - `SellAlmostDone` means the sell completed through a replace/market-stop
 ///   path; Delphi leaves the worker loop like it does for final sell statuses.
 ///
 /// **Server constraints**:
@@ -74,7 +135,7 @@ impl std::fmt::Debug for OrderType {
 /// - Transitions inside the same phase are valid, e.g. `BuySet -> BuyDone`.
 /// - Terminal state does not change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OrderWorkerStatus(pub u8);
+pub struct OrderWorkerStatus(u8);
 
 #[allow(non_upper_case_globals)]
 impl OrderWorkerStatus {
@@ -95,9 +156,15 @@ impl OrderWorkerStatus {
     /// Sell order was cancelled.
     pub const SellCancel: Self = Self(7);
     /// Sell order fully filled, position is closed.
-    pub const SelLDone: Self = Self(8);
+    pub const SellDone: Self = Self(8);
+    /// Delphi wire/source spelling kept for protocol parity tests.
+    #[doc(hidden)]
+    pub const SelLDone: Self = Self::SellDone;
     /// Sell completed through an intermediate path; terminal for worker/state.
-    pub const SelLAlmostDone: Self = Self(9);
+    pub const SellAlmostDone: Self = Self(9);
+    /// Delphi wire/source spelling kept for protocol parity tests.
+    #[doc(hidden)]
+    pub const SelLAlmostDone: Self = Self::SellAlmostDone;
 
     /// Preserve a raw Delphi ordinal byte.
     pub const fn from_byte(b: u8) -> Self {
@@ -109,7 +176,7 @@ impl OrderWorkerStatus {
     }
 
     pub const fn is_known(self) -> bool {
-        self.0 <= Self::SelLAlmostDone.0
+        self.0 <= Self::SellAlmostDone.0
     }
 
     pub const fn name(self) -> &'static str {
@@ -122,8 +189,8 @@ impl OrderWorkerStatus {
             Self::SellFail => "SellFail",
             Self::SellSet => "SellSet",
             Self::SellCancel => "SellCancel",
-            Self::SelLDone => "SellDone",
-            Self::SelLAlmostDone => "SellAlmostDone",
+            Self::SellDone => "SellDone",
+            Self::SellAlmostDone => "SellAlmostDone",
             _ => "Unknown",
         }
     }
@@ -132,8 +199,8 @@ impl OrderWorkerStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::SelLDone
-                | Self::SelLAlmostDone
+            Self::SellDone
+                | Self::SellAlmostDone
                 | Self::BuyCancel
                 | Self::BuyFail
                 | Self::SellFail
@@ -154,7 +221,7 @@ impl std::fmt::Debug for OrderWorkerStatus {
 
 /// TFixedPosition (Vars.pas:52): FP_Both=0, FP_Long=1, FP_Short=2.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FixedPosition(pub u8);
+pub struct FixedPosition(u8);
 
 #[allow(non_upper_case_globals)]
 impl FixedPosition {
@@ -197,7 +264,7 @@ impl std::fmt::Debug for FixedPosition {
 /// Sell-side `TMoveAllCmdType` (MoonProtoTradeStruct.pas:148 inline comment).
 /// Describes how `TMoveAllSellsCommand` interprets `Price` / `PriceZone`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MoveAllCmdType(pub u8);
+pub struct MoveAllCmdType(u8);
 
 #[allow(non_upper_case_globals)]
 impl MoveAllCmdType {
@@ -246,7 +313,7 @@ impl std::fmt::Debug for MoveAllCmdType {
 /// there is no buy-side `PriceZone` mode and the server buy branch ignores
 /// `CmdType=1`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MoveAllBuysCmdType(pub u8);
+pub struct MoveAllBuysCmdType(u8);
 
 #[allow(non_upper_case_globals)]
 impl MoveAllBuysCmdType {
@@ -286,7 +353,7 @@ impl std::fmt::Debug for MoveAllBuysCmdType {
 
 /// TReplaceMultiKind (Vars.pas:37).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReplaceMultiKind(pub u8);
+pub struct ReplaceMultiKind(u8);
 
 #[allow(non_upper_case_globals)]
 impl ReplaceMultiKind {

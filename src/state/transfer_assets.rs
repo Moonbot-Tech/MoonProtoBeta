@@ -5,6 +5,7 @@
 //! wallets independently through `emk_UpdateTransferAssets`.
 
 use crate::commands::engine_api::TransferAsset;
+use std::sync::Arc;
 
 /// Delphi `TExchangeKind = (EX_Spot, EX_Futures, EX_QFutures)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,7 +88,7 @@ pub enum TransferAssetsEvent {
 /// Current transferable asset lists by exchange wallet kind.
 #[derive(Debug, Clone, Default)]
 pub struct TransferAssetsState {
-    by_kind: [Vec<TransferAsset>; 3],
+    by_kind: [Arc<Vec<TransferAsset>>; 3],
     revision: u64,
     revision_by_kind: [u64; 3],
 }
@@ -99,7 +100,7 @@ impl TransferAssetsState {
 
     /// Read the current asset list for one wallet kind.
     pub fn get(&self, kind: ExchangeKind) -> &[TransferAsset] {
-        &self.by_kind[kind.as_index()]
+        self.by_kind[kind.as_index()].as_slice()
     }
 
     /// Iterate all wallet lists in Delphi enum order.
@@ -132,7 +133,7 @@ impl TransferAssetsState {
             .filter(|asset| asset.amount != 0.0 || asset.total != 0.0)
             .count();
         let count = assets.len();
-        self.by_kind[kind.as_index()] = assets;
+        self.by_kind[kind.as_index()] = Arc::new(assets);
         TransferAssetsEvent::Updated {
             kind,
             request_uid,
@@ -154,7 +155,7 @@ impl TransferAssetsState {
         self.revision_by_kind[from.as_index()] = self.revision;
         self.revision_by_kind[to.as_index()] = self.revision;
 
-        let to_assets = &mut self.by_kind[to.as_index()];
+        let to_assets = Arc::make_mut(&mut self.by_kind[to.as_index()]);
         if let Some(row) = to_assets
             .iter_mut()
             .find(|row| row.currency.eq_ignore_ascii_case(asset))
@@ -169,7 +170,8 @@ impl TransferAssetsState {
             });
         }
 
-        if let Some(row) = self.by_kind[from.as_index()]
+        let from_assets = Arc::make_mut(&mut self.by_kind[from.as_index()]);
+        if let Some(row) = from_assets
             .iter_mut()
             .find(|row| row.currency.eq_ignore_ascii_case(asset))
         {
@@ -250,5 +252,33 @@ mod tests {
         assert_eq!(state.get(ExchangeKind::Spot)[0].total, 9.0);
         assert_eq!(state.get(ExchangeKind::Futures)[0].amount, 4.0);
         assert_eq!(state.get(ExchangeKind::Futures)[0].total, 5.0);
+    }
+
+    #[test]
+    fn snapshot_cow_updating_one_kind_does_not_deep_clone_other_asset_lists() {
+        let mut state = TransferAssetsState::new();
+        state.apply_update(ExchangeKind::Spot, 10, vec![asset("USDT", 1.0, 2.0)]);
+        state.apply_update(ExchangeKind::Futures, 11, vec![asset("BTC", 0.0, 0.5)]);
+
+        let snapshot = state.clone();
+        assert!(Arc::ptr_eq(
+            &state.by_kind[ExchangeKind::Spot.as_index()],
+            &snapshot.by_kind[ExchangeKind::Spot.as_index()]
+        ));
+        assert!(Arc::ptr_eq(
+            &state.by_kind[ExchangeKind::Futures.as_index()],
+            &snapshot.by_kind[ExchangeKind::Futures.as_index()]
+        ));
+
+        state.apply_update(ExchangeKind::Spot, 12, vec![asset("USDT", 3.0, 4.0)]);
+
+        assert!(!Arc::ptr_eq(
+            &state.by_kind[ExchangeKind::Spot.as_index()],
+            &snapshot.by_kind[ExchangeKind::Spot.as_index()]
+        ));
+        assert!(Arc::ptr_eq(
+            &state.by_kind[ExchangeKind::Futures.as_index()],
+            &snapshot.by_kind[ExchangeKind::Futures.as_index()]
+        ));
     }
 }

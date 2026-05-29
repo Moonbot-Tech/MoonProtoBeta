@@ -1,9 +1,9 @@
 //! Byte-level builders and parsers for MoonProto command channels.
 //!
-//! Regular applications should prefer the high-level `Client` wrappers and
-//! typed `EventDispatcher` events. These modules are public for advanced tools,
-//! tests, custom protocol integrations, and consumers that need direct access to
-//! the wire payloads.
+//! Regular applications should use `MoonClient` intents, typed events, and
+//! read-only snapshots. These modules are public for advanced tools, tests,
+//! custom protocol integrations, and consumers that need direct access to the
+//! wire payloads.
 //!
 //! The builders and parsers preserve the Delphi wire formats: base command
 //! header, command id, version, UID, per-command priority/retry semantics, and
@@ -26,23 +26,30 @@ pub mod trades_stream;
 pub mod ui;
 
 // Re-exports
-pub use balance::{BalanceItem, BalanceUpdate};
+pub use balance::BalanceItem;
+#[doc(hidden)]
+pub use balance::BalanceUpdate;
 pub use engine_api::{
     parse_auth_check_response, parse_get_balance_response, parse_query_hedge_mode_response,
     AuthCheckResponse, DexInfo, EngineMethod, EngineResponse,
 };
+pub use market::{ArbIsolationFlags, ArbPlatformCode, ExchangeCode, PositionType, TokenTags};
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
     StrategySchema, StrategySchemaField, StrategySchemaKind,
 };
+pub use strategy_serializer::{
+    field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
+};
 pub use trade::{
-    AllStatuses, BulkReplaceNotify, CorridorUpdate, DoClosePositionCommand, DoSellOrderCommand,
-    FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCmdType, MoveAllBuysCommand,
-    MoveAllCmdType, MoveAllSellsCommand, NewOrderCommand, OrderCancelCommand, OrderCompact,
-    OrderReplaceCommand, OrderReplaceResponse, OrderStatus, OrderStatusUpdate, OrderStopsUpdate,
-    OrderTracePoint, OrderType, OrderUpdateData, OrderWorkerStatus, PriceZone, ReplaceMultiKind,
-    SetImmuneCommand, SplitOrderCommand, StopSettings, TradeCommand, TradeCtx,
-    TurnPanicSellCommand, VStopUpdate,
+    AllStatuses, BulkReplaceNotify, CorridorUpdate, DelphiBool, DoClosePositionCommand,
+    DoSellOrderCommand, FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCmdType,
+    MoveAllBuysCommand, MoveAllCmdType, MoveAllSellsCommand, NewOrderCommand, OrderCancelCommand,
+    OrderCompact, OrderReplaceCommand, OrderReplaceResponse, OrderStatus, OrderStatusUpdate,
+    OrderStopsUpdate, OrderSubType, OrderTracePoint, OrderType, OrderUpdateData, OrderWorkerStatus,
+    PriceZone, ReplaceMultiKind, SetImmuneCommand, SplitOrderCommand, StopSettings, TradeCommand,
+    TradeCtx, TurnPanicSellCommand, VStopUpdate,
 };
 pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};
+pub use ui::{ArbConfigCompact, ClientSettingsCommand, SpotMarketKind};

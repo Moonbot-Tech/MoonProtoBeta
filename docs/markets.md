@@ -2,9 +2,10 @@
 
 Markets state is maintained from Engine API responses:
 
-- `GetMarketsList` gives the full market list and correlation markets.
+- `GetMarketsList` gives the full market list, correlation markets, and the
+  initial `mIndex -> market name` order.
 - `UpdateMarketsList` updates prices, funding, mark price, and correlation prices.
-- `GetMarketsIndexes` gives the canonical `mIndex -> market name` mapping.
+- `GetMarketsIndexes` refreshes that mapping after reconnect/server restart.
 - `CheckBinanceTags` updates token tags.
 
 When using `MoonClient`, relevant responses are applied to the active markets
@@ -38,14 +39,14 @@ the first list and on a `NewMarketFound` refresh. A plain later
 For existing markets, `max_leverage` is updated from `GetMarketsList` only when
 the Delphi support flag `ES_MaxLevInGetMarkets` is active. In the active
 library path this is inferred from `BaseCheck`: currently only
-`Platform_FGate` (`exchange_code = 9`) enables it. New markets keep the value
+`ExchangeCode::FGate` enables it. New markets keep the value
 from the incoming list because Delphi inserts the whole `TMarket`.
 
 Correlation market definitions from `GetMarketsList` are inserted only when
 their `base_currency_name` is non-empty, matching Delphi's `If not
 BaseCur.IsEmpty then AddOrSetCorrMarket`. Repeated definitions for an existing
-correlation market update `bn_tick_size` and `base_currency_name`, but keep the
-original `bn_market_currency`, matching Delphi `AddOrSetCorrMarket`.
+correlation market update tick size and `base_currency_name`, but keep the
+original exchange market currency, matching Delphi `AddOrSetCorrMarket`.
 After a successful list, the active state also rebuilds Delphi
 `TMarket.refBTCMarket` equivalents and `BaseCurDict` references. `refBTCMarket`
 uses the current server base currency from `BaseCheck`: for a non-BTC base,
@@ -63,7 +64,7 @@ then `USDT = 1`.
 For every applied market price row, `MarketPrice` also mirrors the Delphi
 post-assign fields from `TMoonProtoEngine.UpdateMarketsList`:
 `last_bid = bid`, `last_ask = ask`, `p_last = (bid + ask) / 2`, and
-`min_lot_size = max(max(bn_step_size, bn_min_qty) * p_last, bn_min_notional)`.
+`min_lot_size = max(max(step_size, min_qty) * p_last, min_notional)`.
 `chart_price_step` mirrors Delphi `TMarket.ChartPriceStep` from
 `AddNewAksPrice(Ask)`: both `UpdateMarketsList` and applied orderbook updates
 can refresh it from the current ask; when `Ask > 0`, it becomes
@@ -125,13 +126,15 @@ objects stay alive and are mutated in place. UI code may keep the handle after a
 search and read it later without re-searching by name.
 
 ```rust
+use moonproto::TokenTags;
+
 let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
 if let Some(market) = markets.get("BTCUSDT") {
     let pos = market.balance_position();
     market.with(|market| {
-        println!("tick={} max_lev={}", market.bn_tick_size, market.max_leverage);
+        println!("tick={} max_lev={}", market.tick_size(), market.max_leverage);
     });
     println!("liq={}", pos.liq_price);
 }
@@ -146,10 +149,6 @@ if let Some(price) = markets.price("BTCUSDT") {
     );
 }
 
-if let Some(name) = markets.market_name_by_index(0) {
-    println!("mIndex 0 is {name}");
-}
-
 let tags = markets.tags("BTCUSDT");
 if tags.contains(TokenTags::ALPHA) {
     println!("BTCUSDT has ALPHA tag");
@@ -159,14 +158,15 @@ if tags.contains(TokenTags::ALPHA) {
 Balance and position packets update these same live `Market` objects. For chart
 UI this is the normal path: keep the selected `MarketHandle` and read fields
 such as `pos_size`, `pos_price`, `liq_price`, `leverage_x`, `asset_balance`,
-`total_profit_*`, and `bn_max_value` from it. `BalancesState` is the account
+`total_profit_*`, and `max_value` from `balance_position()`. `BalancesState` is the account
 totals / low-level row view, not the primary per-market UI object.
 
 For chart overlays that only need position fields, `MarketHandle::balance_position`
 returns a small copy without cloning the whole market object.
 
 Arbitrage relay packets also apply to the live market. Use
-`MarketHandle::arb_slot(platform_code)` or `arb_now(platform_code)` from the
+`MarketHandle::arb_slot(ArbPlatformCode::...)` or
+`arb_now(ArbPlatformCode::...)` from the
 selected handle; raw arb `market_index` blocks are diagnostic protocol details.
 
 ## Init and Refresh
@@ -204,11 +204,13 @@ pub enum MarketsEvent {
 ```
 
 `MarketsState::indexes_synchronized()` is a critical invariant.
-The one-time Init always fetches the initial map. After server restart the
-runtime can mark it stale. If the one-time Init already completed, reconnect
-restore sends `GetMarketsIndexes` again automatically and then refreshes prices
-with `UpdateMarketsList`. Until the fresh response arrives, the active runtime
-drops orderbook/trades packets that depend on server indexes.
+Cold Init builds the initial map from `GetMarketsList`, exactly like Delphi
+`SrvMarkets.Rebuild(IndexMap)` inside `TMoonProtoEngine.GetMarketsList`. After
+server restart the runtime can mark it stale. If the one-time Init already
+completed, reconnect restore sends `GetMarketsIndexes` automatically and only
+then refreshes prices with `UpdateMarketsList`. Until the fresh response
+arrives, the active runtime drops orderbook/trades packets that depend on server
+indexes.
 Price updates keyed by server `mIndex` are also skipped while a previously known
 mapping is stale.
 
@@ -262,14 +264,14 @@ pub struct MarketTradeState {
 The retained LastPrice line row is:
 
 ```rust
-pub struct LastPricePoint {
-    pub current: f32,
-    pub real_time: f64, // Delphi TDateTime
-}
+let price = point.price();
+let unix_ms = point.unix_millis();
+let delphi_time = point.time_delphi();
 ```
 
-Use `LastPricePoint::time_delphi()` for conversion to Unix milliseconds or
-`SystemTime`.
+The row keeps Delphi-compatible dense storage internally; UI code should use
+`price()`, `time_delphi()`, or `unix_millis()` instead of treating the raw time
+field as Unix time.
 
 This row mirrors Delphi `THistoricalPrices`. It is not the last trade price.
 Delphi fills it from `UpdateMarketsList`: the server sends `Bid/Ask`, the
@@ -283,10 +285,8 @@ present, and the market is a BTC market or a base-USDT market.
 The retained MarkPrice line row has the same shape:
 
 ```rust
-pub struct MarkPricePoint {
-    pub current: f32,
-    pub real_time: f64, // Delphi TDateTime
-}
+let mark_price = point.price();
+let mark_time = point.time_delphi();
 ```
 
 It is filled from `UpdateMarketsList -> MarketPrice.mark_price` when the server
@@ -294,17 +294,18 @@ marks the value as present. UI code can compare the MarkPrice line with the
 LastPrice line for the same market; both are retained by the same
 `MarketHistoryWorker`.
 
-When trades retained storage is active, `EventDispatcher` queues these rows into
-its `MarketHistoryWorker` immediately. The default worker is lazy-created from
-the all-trades subscription scope; `set_market_history_handle` is only needed
-for custom capacities or externally owned storage. The UDP/protocol loop does
-not write the retained ring directly.
+When trades retained storage is active, `MoonClient` queues these rows into its
+retained-history worker immediately after applying market prices. The default
+worker is lazy-created from the all-trades subscription scope; low-level
+`EventDispatcher::set_market_history_handle` is only for custom runtimes that
+own storage themselves. The UDP/protocol loop does not write the retained ring
+directly.
 
 `Market::futures_type` uses `BaseCurrency`, a small public wrapper that
 preserves unknown future server values:
 
 ```rust
-pub struct BaseCurrency(pub u8);
+pub struct BaseCurrency;
 
 BaseCurrency::BTC;
 BaseCurrency::USDT;
@@ -334,20 +335,13 @@ let markets = state.markets();
 
 for handle in markets.iter() {
     handle.with(|market| {
-        println!("{} {}", market.bn_market_name, market.status_trading);
+        println!("{} {}", market.symbol(), market.status_trading);
     });
 }
 
 let btc = markets.get("BTCUSDT"); // Option<MarketHandle>
 let btc_snapshot = markets.market_snapshot("BTCUSDT");
-markets.market_name_by_index(0);
-markets.market_by_index(0);
-markets.market_snapshot_by_index(0);
-markets.market_index_by_name("BTCUSDT");
-markets.market_index_names();
-markets.indexes_synchronized();
 markets.price("BTCUSDT");
-markets.price_by_index(0);
 markets.ref_btc_corr_market("DOGEUSDT");
 markets.base_currency_price("BTC");
 markets.trade_state("BTCUSDT");
@@ -356,15 +350,17 @@ markets.market_count();
 markets.corr_count();
 ```
 
-The index helpers return `None` while the mapping is stale after a server
-restart. In the normal `MoonClient` path, trades and orderbook events are gated
-until fresh indexes are received through init or an explicit `GetMarketsIndexes`
-request.
+Server-index helpers such as `market_index_by_name`, `market_name_by_index`, and
+`price_by_index` are diagnostic protocol tools. Normal UI code keeps a
+`MarketHandle` or reads by market name. In the normal `MoonClient` path, trades
+and orderbook events are gated until fresh indexes are rebuilt by cold-init
+`GetMarketsList` or refreshed through `GetMarketsIndexes` after reconnect/server
+restart.
 
 ## TokenTags
 
 ```rust
-pub struct TokenTags(pub u32);
+pub struct TokenTags;
 
 TokenTags::MONITORING;
 TokenTags::FAN;

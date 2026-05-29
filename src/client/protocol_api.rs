@@ -92,45 +92,6 @@ impl Client {
         }
     }
 
-    pub(crate) fn apply_engine_response_meta_bookkeeping(&mut self, meta: EngineResponseMeta) {
-        if meta.method == EngineMethod::SubscribeOrderBook {
-            let is_reconnect_batch =
-                self.pending_orderbook_resubscribe_uid == Some(meta.request_uid);
-            if meta.success && (self.subscribed_book_server_token == 0 || is_reconnect_batch) {
-                self.subscribed_book_server_token = self.server_token;
-            }
-            self.close_orderbook_subscribe_wait_if_matches(meta.request_uid);
-            if is_reconnect_batch {
-                self.pending_orderbook_resubscribe_uid = None;
-            }
-        }
-
-        if meta.method == EngineMethod::SubscribeAllTrades && meta.success {
-            let now_ms = self.now_ms();
-            self.last_trades_reconnect_check_ms = now_ms;
-        }
-        if meta.method == EngineMethod::SubscribeAllTrades {
-            self.last_trades_subscribe_request_ms
-                .store(NEVER_TIME_MS, Ordering::Relaxed);
-        }
-        if meta.method == EngineMethod::UnsubscribeAllTrades {
-            self.close_trades_unsubscribe_wait_if_matches(meta.request_uid);
-        }
-    }
-
-    pub(crate) fn process_api_bookkeeping_light(&mut self, payload: &[u8]) {
-        let Some(meta) = Self::engine_response_meta_from_payload(payload) else {
-            return;
-        };
-        if meta.method == EngineMethod::GetMarketsIndexes {
-            if let Some(resp) = parse_engine_response(payload) {
-                self.apply_engine_response_client_bookkeeping(&resp);
-            }
-        } else {
-            self.apply_engine_response_meta_bookkeeping(meta);
-        }
-    }
-
     pub(crate) fn dispatch_api_pending_inline(
         api_pending: &ApiPending,
         cmd: u8,
@@ -142,13 +103,7 @@ impl Client {
         let Some(uid) = Self::engine_response_request_uid_from_payload(payload) else {
             return false;
         };
-        if !api_pending.contains(uid) {
-            return false;
-        }
-        let Some(resp) = parse_engine_response(payload) else {
-            return false;
-        };
-        api_pending.dispatch(resp).is_none()
+        api_pending.dispatch_registered_with(uid, || parse_engine_response(payload))
     }
 
     pub(crate) fn dispatch_candles_chunk_inline(
@@ -218,23 +173,42 @@ impl Client {
         if candles_chunk_consumed_by_reader {
             return Ok(());
         }
-        if let Some(resp) = parse_engine_response(&payload) {
+        if let Some(meta) = Self::engine_response_meta_from_payload(&payload) {
             // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
             // несколько response пакетов с одинаковым UID. До завершения сборки
             // не дропаем slot.
             let now_ms = self.now_ms();
-            if resp.method == EngineMethod::RequestCandlesData
-                && Self::handle_candles_chunk_in_map(&mut self.pending_candles, &resp, now_ms)
-            {
-                // Чанк потреблён aggregator'ом. Передаём в on_data только
-                // если потребитель НЕ использует async API (тогда тут merged
-                // ещё не готов — пусть приложение видит сырые chunks).
-                // Однако: чтобы не путать — пропускаем on_data callback.
-                // Async-потребитель получит результат через Receiver<MergedCandles>.
-                return Ok(());
+            if meta.method == EngineMethod::RequestCandlesData {
+                if let Some(resp) = parse_engine_response(&payload) {
+                    if Self::handle_candles_chunk_in_map(&mut self.pending_candles, &resp, now_ms) {
+                        // Чанк потреблён aggregator'ом. Передаём в on_data только
+                        // если потребитель НЕ использует async API (тогда тут merged
+                        // ещё не готов — пусть приложение видит сырые chunks).
+                        // Однако: чтобы не путать — пропускаем on_data callback.
+                        // Async-потребитель получит результат через Receiver<MergedCandles>.
+                        return Ok(());
+                    }
+                }
             }
             // Если slot не зарегистрирован — fallback на pending registry /
             // on_data для fire-and-forget API users.
+
+            let pending_side_effect_owner = api_pending_consumed_by_reader
+                && sink.is_buffer()
+                && method_applies_after_pending(meta.method);
+            if pending_side_effect_owner {
+                // Delphi `ProcessApiCommand` only stores the response into
+                // `PendingRequests`; `TMoonProtoEngine.GetMarketsList` /
+                // `UpdateMarketsList` applies heavy market state after
+                // `SendAndWait` returns. Keep Rust's protocol dispatch path
+                // equally thin: the runtime/init owner applies these payloads
+                // from the pending receiver instead of doing a second parse here.
+                return Ok(());
+            }
+
+            let Some(resp) = parse_engine_response(&payload) else {
+                return Err(payload);
+            };
 
             self.apply_engine_response_client_bookkeeping(&resp);
 
@@ -298,24 +272,51 @@ impl Client {
             chunk_result
         };
         if let CandlesChunkResult::Complete(zipped_data) = chunk_result {
-            let markets = parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
-                log::warn!(target: "moonproto::client",
-                    "candles aggregator merged but strict parse failed for uid={} ({} bytes); trying Delphi partial apply",
-                    uid,
-                    zipped_data.len()
-                );
-                parse_request_candles_data_response_partial_like_delphi(&zipped_data)
-                    .unwrap_or_default()
-            });
             if let Some(partial) = pending_candles.remove(&uid) {
-                let _ = partial.sender.send(MergedCandles {
-                    uid,
-                    zipped_data,
-                    markets,
-                });
-                // Sender дропается → receiver получает Ok(...) / уже получил.
+                Self::spawn_candles_parse_result(uid, zipped_data, partial.sender);
             }
         }
         true
     }
+
+    fn spawn_candles_parse_result(
+        uid: u64,
+        zipped_data: Vec<u8>,
+        sender: mpsc::Sender<MergedCandles>,
+    ) {
+        // Full candles parse is deliberately outside the protocol reader. The
+        // reader has already ACKed all slices and only has to hand off the
+        // completed Delphi StoreCandlesToZip stream; zlib parse/apply can take
+        // milliseconds on a large market set and belongs to background work.
+        let spawn = thread::Builder::new()
+            .name("moonproto-candles-parse".to_string())
+            .spawn(move || {
+                let markets =
+                    parse_request_candles_data_response(&zipped_data).unwrap_or_else(|| {
+                        log::warn!(target: "moonproto::client",
+                            "candles aggregator merged but strict parse failed for uid={} ({} bytes); trying Delphi partial apply",
+                            uid,
+                            zipped_data.len()
+                        );
+                        parse_request_candles_data_response_partial_like_delphi(&zipped_data)
+                            .unwrap_or_default()
+                    });
+                let _ = sender.send(MergedCandles {
+                    uid,
+                    markets,
+                });
+            });
+        if let Err(err) = spawn {
+            log::warn!(target: "moonproto::client",
+                "failed to spawn candles parse worker for uid={uid}: {err}");
+        }
+    }
+}
+
+#[inline]
+fn method_applies_after_pending(method: EngineMethod) -> bool {
+    matches!(
+        method,
+        EngineMethod::GetMarketsList | EngineMethod::UpdateMarketsList
+    )
 }

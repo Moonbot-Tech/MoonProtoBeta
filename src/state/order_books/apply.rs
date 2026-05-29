@@ -1,13 +1,14 @@
 //! Apply full/diff orderbook packets into the read model.
 
-use super::{BookKey, OrderBookLevel, OrderBookSnapshot};
+use super::{BookKey, OrderBookKind, OrderBookLevel, OrderBookSnapshot};
 use crate::commands::order_book::{OrderBookUpdate, OrderLevel};
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
 use std::mem;
+use std::sync::Arc;
 
 pub(super) fn apply_cached_packet(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
+    books: &mut HashMap<BookKey, Arc<OrderBookSnapshot>>,
     scratch: &mut Vec<OrderBookLevel>,
     key: BookKey,
     pkt: &OrderBookUpdate,
@@ -21,19 +22,13 @@ pub(super) fn apply_cached_packet(
 }
 
 pub(super) fn apply_full_book(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
+    books: &mut HashMap<BookKey, Arc<OrderBookSnapshot>>,
     key: BookKey,
     seq: u16,
     buys: &[OrderLevel],
     sells: &[OrderLevel],
 ) {
-    let book = books.entry(key).or_insert_with(|| OrderBookSnapshot {
-        market_index: key.0,
-        book_kind: key.1,
-        seq: 0,
-        buys: Vec::new(),
-        sells: Vec::new(),
-    });
+    let book = order_book_entry_mut(books, key);
     book.seq = seq;
     book.buys.clear();
     book.buys
@@ -44,7 +39,7 @@ pub(super) fn apply_full_book(
 }
 
 pub(super) fn apply_diff_book(
-    books: &mut HashMap<BookKey, OrderBookSnapshot>,
+    books: &mut HashMap<BookKey, Arc<OrderBookSnapshot>>,
     scratch: &mut Vec<OrderBookLevel>,
     key: BookKey,
     seq: u16,
@@ -52,13 +47,7 @@ pub(super) fn apply_diff_book(
     sell_diff: &[OrderLevel],
     eps: EpsProfile,
 ) {
-    let book = books.entry(key).or_insert_with(|| OrderBookSnapshot {
-        market_index: key.0,
-        book_kind: key.1,
-        seq: 0,
-        buys: Vec::new(),
-        sells: Vec::new(),
-    });
+    let book = order_book_entry_mut(books, key);
     apply_order_book_diff_keep_zero_with_eps(
         &mut book.buys,
         scratch,
@@ -76,6 +65,22 @@ pub(super) fn apply_diff_book(
         eps,
     );
     book.seq = seq;
+}
+
+fn order_book_entry_mut(
+    books: &mut HashMap<BookKey, Arc<OrderBookSnapshot>>,
+    key: BookKey,
+) -> &mut OrderBookSnapshot {
+    let entry = books.entry(key).or_insert_with(|| {
+        Arc::new(OrderBookSnapshot {
+            market_index: key.0,
+            kind: OrderBookKind::from_u8(key.1).unwrap_or(OrderBookKind::Futures),
+            seq: 0,
+            buys: Vec::new(),
+            sells: Vec::new(),
+        })
+    });
+    Arc::make_mut(entry)
 }
 
 #[cfg(test)]

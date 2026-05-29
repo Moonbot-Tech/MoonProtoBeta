@@ -29,6 +29,7 @@
 use crate::commands::trade::*;
 use crate::state::eps::EpsProfile;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 mod accessors;
 mod actions;
@@ -64,8 +65,7 @@ use super::epoch::epoch_is_ok;
 ///   OS_BuySet              → 1
 ///   OS_BuyDone             → 2
 ///   OS_SellSet             → 3
-///   OS_SelLAlmostDone /
-///   OS_SelLDone            → 4
+///   OS_SelLAlmostDone / OS_SelLDone (`SellAlmostDone` / `SellDone`) → 4
 ///   all other statuses (None, BuyFail, BuyCancel, SellFail, SellCancel) -> 0
 ///
 /// Phase rollback is checked only when both `new_phase > 0` and
@@ -75,7 +75,7 @@ fn status_phase(s: OrderWorkerStatus) -> u8 {
         OrderWorkerStatus::BuySet => 1,
         OrderWorkerStatus::BuyDone => 2,
         OrderWorkerStatus::SellSet => 3,
-        OrderWorkerStatus::SelLAlmostDone | OrderWorkerStatus::SelLDone => 4,
+        OrderWorkerStatus::SellAlmostDone | OrderWorkerStatus::SellDone => 4,
         _ => 0,
     }
 }
@@ -85,7 +85,7 @@ fn order_type_uses_buy_side(order_type: OrderType) -> bool {
 }
 
 fn terminal_removal_delay_ms(status: OrderWorkerStatus) -> i64 {
-    if status == OrderWorkerStatus::SelLDone {
+    if status == OrderWorkerStatus::SellDone {
         SELL_DONE_REMOVAL_GRACE_MS
     } else {
         0
@@ -136,7 +136,7 @@ struct PendingRemoval {
 /// reads it through `iter()` / `get()` or through `MoonClient` snapshots.
 #[derive(Debug, Clone, Default)]
 pub struct Orders {
-    map: HashMap<u64, Order>,
+    map: HashMap<u64, Arc<Order>>,
     /// Local/UI visual-order markers registered before the first server
     /// `TOrderStatus` creates the read-model entry.
     pending_local_visual_orders: HashSet<u64>,
@@ -167,6 +167,16 @@ impl Orders {
         self.eps_profile = eps_profile;
     }
 
+    fn order_mut(&mut self, uid: u64) -> Option<&mut Order> {
+        self.map.get_mut(&uid).map(Arc::make_mut)
+    }
+
+    fn remove_order(&mut self, uid: u64) -> Option<Order> {
+        self.map
+            .remove(&uid)
+            .map(|order| Arc::try_unwrap(order).unwrap_or_else(|order| (*order).clone()))
+    }
+
     /// Delphi `Inc(CurrentSnapshotFlag)` before `TAllStatuses` item loop.
     pub(crate) fn begin_snapshot(&mut self) -> u8 {
         self.current_snapshot_flag = self.current_snapshot_flag.wrapping_add(1);
@@ -194,9 +204,11 @@ impl Orders {
 
     pub(crate) fn apply_at(&mut self, cmd: TradeCommand, now_ms: i64) -> (ApplyResult, OrderEvent) {
         let uid = cmd.uid();
+        let current_snapshot_flag = self.current_snapshot_flag;
+        let server_time_delta = self.server_time_delta;
         if command_marks_existing_worker_snapshot_flag(&cmd) {
-            if let Some(entry) = self.map.get_mut(&uid) {
-                entry.snapshot_flag = self.current_snapshot_flag;
+            if let Some(entry) = self.order_mut(uid) {
+                entry.snapshot_flag = current_snapshot_flag;
             }
         }
         match cmd {
@@ -214,11 +226,12 @@ impl Orders {
                     );
                 }
                 let pending_local_visual_order = self.pending_local_visual_orders.remove(&uid);
+                let eps_m = self.eps_profile.eps_m;
                 let is_done = {
-                    let entry = self
-                        .map
-                        .entry(uid)
-                        .or_insert_with(|| Order::from_status(&st));
+                    if new_order {
+                        self.map.insert(uid, Arc::new(Order::from_status(&st)));
+                    }
+                    let entry = self.order_mut(uid).expect("order inserted or existed");
 
                     // Delphi new-order path goes ProcessCommandOrder ->
                     // OnMServerOrder -> HandleServerCommand(Cmd), bypassing
@@ -233,12 +246,12 @@ impl Orders {
                     Self::apply_status_inner(
                         entry,
                         &st,
-                        self.server_time_delta,
+                        server_time_delta,
                         new_order,
                         pending_local_visual_order,
-                        self.eps_profile.eps_m,
+                        eps_m,
                     );
-                    entry.snapshot_flag = self.current_snapshot_flag;
+                    entry.snapshot_flag = current_snapshot_flag;
                     entry.job_is_done
                 };
                 if is_done {
@@ -259,7 +272,7 @@ impl Orders {
                 let status = up.epoch_header.status;
                 let is_terminal = status.is_terminal();
                 {
-                    let Some(entry) = self.map.get_mut(&uid) else {
+                    let Some(entry) = self.order_mut(uid) else {
                         return (
                             ApplyResult::OrderNotFound,
                             OrderEvent::Ignored {
@@ -282,7 +295,7 @@ impl Orders {
                         // move Status/SellReason and do not overwrite order
                         // compact fields.
                         let mut data = up.update_data;
-                        data.adjust_time(self.server_time_delta);
+                        data.adjust_time(server_time_delta);
 
                         let target = if up.epoch_header.status == OrderWorkerStatus::SellSet {
                             &mut entry.sell_order
@@ -314,14 +327,15 @@ impl Orders {
                         entry.pending_cancel = false;
                     }
                     entry.status = up.epoch_header.status;
-                    if up.sell_reason_code != 0 && up.sell_reason_code != entry.sell_reason_code {
-                        entry.sell_reason_code = up.sell_reason_code;
+                    let sell_reason = SellReason::from_byte(up.sell_reason_code);
+                    if up.sell_reason_code != 0 && sell_reason != entry.sell_reason {
+                        entry.sell_reason = sell_reason;
                     }
 
                     if is_terminal {
                         entry.job_is_done = true;
                     }
-                    if status == OrderWorkerStatus::SelLDone {
+                    if status == OrderWorkerStatus::SellDone {
                         Self::apply_sell_done_flags(entry);
                     }
                 }
@@ -337,7 +351,7 @@ impl Orders {
             // --- Replace response ---
             TradeCommand::OrderReplaceResponse(rr) => {
                 let rr = *rr;
-                let Some(entry) = self.map.get_mut(&uid) else {
+                let Some(entry) = self.order_mut(uid) else {
                     return (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
@@ -352,7 +366,7 @@ impl Orders {
                 }
 
                 let mut data = rr.update_data;
-                data.adjust_time(self.server_time_delta);
+                data.adjust_time(server_time_delta);
 
                 let target = if order_type_uses_buy_side(rr.order_type) {
                     &mut entry.buy_order
@@ -388,7 +402,7 @@ impl Orders {
 
             // --- Stops update ---
             TradeCommand::OrderStopsUpdate(su) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
+                let Some(entry) = self.order_mut(uid) else {
                     return (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
@@ -406,7 +420,7 @@ impl Orders {
 
             // --- VStop update ---
             TradeCommand::VStopUpdate(vs) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
+                let Some(entry) = self.order_mut(uid) else {
                     return (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
@@ -427,7 +441,7 @@ impl Orders {
 
             // --- Corridor update ---
             TradeCommand::CorridorUpdate(cu) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
+                let Some(entry) = self.order_mut(uid) else {
                     return (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
@@ -444,7 +458,7 @@ impl Orders {
 
             // --- Trace point ---
             TradeCommand::OrderTracePoint(mut tp) => {
-                let Some(entry) = self.map.get_mut(&uid) else {
+                let Some(entry) = self.order_mut(uid) else {
                     return (
                         ApplyResult::OrderNotFound,
                         OrderEvent::Ignored {
@@ -453,7 +467,7 @@ impl Orders {
                         },
                     );
                 };
-                tp.adjust_time(self.server_time_delta);
+                tp.adjust_time(server_time_delta);
                 Self::apply_trace_line(entry, &tp);
                 entry.trace_points.push_back(tp);
                 (ApplyResult::Applied, OrderEvent::TracePoint { uid })
@@ -463,7 +477,7 @@ impl Orders {
             TradeCommand::BulkReplaceNotify(brn) => {
                 let mut affected = Vec::new();
                 for &uid_replaced in &brn.uids {
-                    if let Some(entry) = self.map.get_mut(&uid_replaced) {
+                    if let Some(entry) = self.order_mut(uid_replaced) {
                         if order_type_uses_buy_side(brn.order_type) {
                             entry.bulk_replace_buy = true;
                         } else {
@@ -494,7 +508,7 @@ impl Orders {
             // --- Order not found (server forced remove) ---
             TradeCommand::OrderNotFound(h) => {
                 let uid = h.market.base.uid;
-                let found = if let Some(entry) = self.map.get_mut(&uid) {
+                let found = if let Some(entry) = self.order_mut(uid) {
                     entry.server_forced_remove = true;
                     entry.cancel_request = true;
                     true
@@ -576,7 +590,7 @@ impl Orders {
         uid: u64,
         header: &TradeEpochHeader,
     ) -> (ApplyResult, OrderEvent) {
-        let Some(entry) = self.map.get_mut(&uid) else {
+        let Some(entry) = self.order_mut(uid) else {
             return (
                 ApplyResult::OrderNotFound,
                 OrderEvent::Ignored {

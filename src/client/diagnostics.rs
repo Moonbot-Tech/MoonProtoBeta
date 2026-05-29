@@ -2,11 +2,14 @@
 
 use super::COMPRESSED_FLAG;
 use crate::commands::engine_api::parse_engine_response;
+use crate::commands::order_book::parse_order_book_packet;
 use crate::protocol::{slicing, Command};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "diagnostic-trace")]
 use std::sync::OnceLock;
+#[cfg(feature = "diagnostic-trace")]
+use std::time::Instant;
 
 // =============================================================================
 //  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
@@ -29,10 +32,8 @@ use std::sync::OnceLock;
 //
 // Использование (пример: 75% loss):
 //   moonproto::client::set_err_emu(75);
-//   let mut client = Client::new(cfg);
-//   client.run(...);
-//
-// Используется в `examples/loss_logger.rs` — runtime-логгер потерь и восстановлений.
+//   let client = MoonClient::connect(cfg, connect)?;
+//   // дальше обычный MoonClient/EventSink pipeline.
 /// Process-wide incoming packet-loss emulator rate, in percent.
 ///
 /// This is a test hook for stress and FireTest-style scenarios. Prefer
@@ -74,9 +75,17 @@ pub struct ErrEmuSlicedDatagramDiagnostics {
     pub block0_ui_cmd_id: Option<u8>,
     pub completed_cmd: Option<u8>,
     pub completed_ui_cmd_id: Option<u8>,
+    pub completed_strat_cmd_id: Option<u8>,
+    pub completed_strat_uid: Option<u64>,
     pub completed_api_method: Option<u8>,
     pub completed_api_uid: Option<u64>,
     pub completed_api_success: Option<bool>,
+    pub completed_orderbook_market_index: Option<u16>,
+    pub completed_orderbook_kind: Option<u8>,
+    pub completed_orderbook_seq: Option<u16>,
+    pub completed_orderbook_is_full: Option<bool>,
+    pub completed_orderbook_buys: Option<usize>,
+    pub completed_orderbook_sells: Option<usize>,
     pub completed_payload_len: Option<usize>,
     pub completed_payload_head: Option<[u8; 8]>,
     pub completed_payload_head_len: usize,
@@ -170,9 +179,17 @@ struct ErrEmuSlicedDatagramState {
     block0_ui_cmd_id: Option<u8>,
     completed_cmd: Option<u8>,
     completed_ui_cmd_id: Option<u8>,
+    completed_strat_cmd_id: Option<u8>,
+    completed_strat_uid: Option<u64>,
     completed_api_method: Option<u8>,
     completed_api_uid: Option<u64>,
     completed_api_success: Option<bool>,
+    completed_orderbook_market_index: Option<u16>,
+    completed_orderbook_kind: Option<u8>,
+    completed_orderbook_seq: Option<u16>,
+    completed_orderbook_is_full: Option<bool>,
+    completed_orderbook_buys: Option<usize>,
+    completed_orderbook_sells: Option<usize>,
     completed_payload_len: Option<usize>,
     completed_payload_head: Option<[u8; 8]>,
     completed_payload_head_len: usize,
@@ -280,11 +297,28 @@ impl ErrEmuDiagnosticsState {
         if Command::from_byte(cmd) == Command::UI {
             dg.completed_ui_cmd_id = payload.first().copied();
         }
+        if Command::from_byte(cmd) == Command::Strat {
+            dg.completed_strat_cmd_id = payload.first().copied();
+            dg.completed_strat_uid = payload
+                .get(3..11)
+                .and_then(|uid| uid.try_into().ok())
+                .map(u64::from_le_bytes);
+        }
         if Command::from_byte(cmd) == Command::API {
             if let Some(resp) = parse_engine_response(payload) {
                 dg.completed_api_method = Some(resp.method.to_byte());
                 dg.completed_api_uid = Some(resp.request_uid);
                 dg.completed_api_success = Some(resp.success);
+            }
+        }
+        if Command::from_byte(cmd) == Command::OrderBook {
+            if let Some(pkt) = parse_order_book_packet(payload) {
+                dg.completed_orderbook_market_index = Some(pkt.market_index);
+                dg.completed_orderbook_kind = Some(pkt.book_kind);
+                dg.completed_orderbook_seq = Some(pkt.seq);
+                dg.completed_orderbook_is_full = Some(pkt.is_full);
+                dg.completed_orderbook_buys = Some(pkt.buys.len());
+                dg.completed_orderbook_sells = Some(pkt.sells.len());
             }
         }
     }
@@ -357,9 +391,17 @@ impl ErrEmuDiagnosticsState {
                     block0_ui_cmd_id: dg.block0_ui_cmd_id,
                     completed_cmd: dg.completed_cmd,
                     completed_ui_cmd_id: dg.completed_ui_cmd_id,
+                    completed_strat_cmd_id: dg.completed_strat_cmd_id,
+                    completed_strat_uid: dg.completed_strat_uid,
                     completed_api_method: dg.completed_api_method,
                     completed_api_uid: dg.completed_api_uid,
                     completed_api_success: dg.completed_api_success,
+                    completed_orderbook_market_index: dg.completed_orderbook_market_index,
+                    completed_orderbook_kind: dg.completed_orderbook_kind,
+                    completed_orderbook_seq: dg.completed_orderbook_seq,
+                    completed_orderbook_is_full: dg.completed_orderbook_is_full,
+                    completed_orderbook_buys: dg.completed_orderbook_buys,
+                    completed_orderbook_sells: dg.completed_orderbook_sells,
                     completed_payload_len: dg.completed_payload_len,
                     completed_payload_head: dg.completed_payload_head,
                     completed_payload_head_len: dg.completed_payload_head_len,
@@ -405,6 +447,25 @@ pub(crate) fn trace_io_enabled() -> bool {
 }
 
 #[cfg(feature = "diagnostic-trace")]
+pub(crate) fn trace_elapsed_ms() -> u128 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
+}
+
+#[cfg(feature = "diagnostic-trace")]
+pub(crate) fn trace_head(bytes: &[u8], max_len: usize) -> String {
+    let mut s = String::new();
+    for (idx, byte) in bytes.iter().take(max_len).enumerate() {
+        if idx > 0 {
+            s.push(' ');
+        }
+        use std::fmt::Write;
+        let _ = write!(s, "{byte:02X}");
+    }
+    s
+}
+
+#[cfg(feature = "diagnostic-trace")]
 pub(crate) fn diagnostic_duplicate_sliced_acks() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
@@ -426,6 +487,18 @@ pub(crate) fn diagnostic_duplicate_sliced_acks() -> usize {
 #[inline(always)]
 pub(crate) fn trace_io_enabled() -> bool {
     false
+}
+
+#[cfg(not(feature = "diagnostic-trace"))]
+#[inline(always)]
+pub(crate) fn trace_elapsed_ms() -> u128 {
+    0
+}
+
+#[cfg(not(feature = "diagnostic-trace"))]
+#[inline(always)]
+pub(crate) fn trace_head(_: &[u8], _: usize) -> String {
+    String::new()
 }
 
 /// Команды, для которых dropRate делится пополам (служебные).

@@ -38,14 +38,14 @@ and arb validity time.
 
 ## Requesting Current Settings
 
-For UI code, use `request_client_settings`. It queues a settings refresh request
-and returns immediately. The server answers by sending a
+For UI code, use `client.settings().refresh()`. It queues a settings refresh
+request and returns immediately. The server answers by sending a
 `TClientSettingsCommand`; Active Lib applies it, emits
 `Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and stores the latest
 value in `snapshot().settings().client_settings`.
 
 ```rust
-client.request_client_settings()?;
+client.settings().refresh()?;
 
 for event in client.drain_events() {
     if matches!(
@@ -62,24 +62,20 @@ for event in client.drain_events() {
 }
 ```
 
-`blocking_request_client_settings(timeout)` exists for scripts and diagnostics
-that deliberately need to wait for the next applied snapshot. The returned
-snapshot may have the same internal command UID as the previous snapshot; the
-guarantee is a newly received/applied settings packet, not UID monotonicity.
-
 ## Sending UI Commands
 
 Regular applications send UI commands through `MoonClient`:
 
 ```rust
-client.refresh_settings()?;
-client.request_client_settings()?;
-client.send_settings(settings)?;
-client.set_mm_orders_subscription(true)?;
-client.request_version_update("", true)?;            // release update button
-client.request_version_update("MoonBot-7", false)?;  // test/beta version name
-client.switch_dex("Main")?;
-client.switch_spot(0)?;
+use moonproto::{ClientSettingsCommand, SpotMarketKind};
+
+client.settings().refresh()?;
+client.settings().send(ClientSettingsCommand::default())?;
+client.settings().set_mm_orders_subscription(true)?;
+client.settings().request_version_update("", true)?;            // release update button
+client.settings().request_version_update("MoonBot-7", false)?;  // test/beta version name
+client.settings().switch_dex("Main")?;
+client.settings().switch_spot(SpotMarketKind::Crypto)?;
 ```
 
 Low-level protocol tools can still build the same wire payloads through
@@ -91,8 +87,8 @@ uses `MoonClient`. The runtime owns strategy checked-state and sends only items
 whose checked value changed:
 
 ```rust
-client.set_strategy_checked(strategy_id, true)?;
-client.strategy_start_stop(true)?;
+client.strategies().set_checked(strategy_id, true)?;
+client.strategies().start()?;
 ```
 
 `set_mm_orders_subscription` is registry-aware: it records the latest MM-orders
@@ -136,15 +132,9 @@ market list actually inserts new markets:
 `Event::Markets(MarketsEvent::NewMarketsAdded { names })`.
 
 Low-level `UICommand::ClientSettings` stores the settings snapshot as
-`Box<ClientSettingsCommand>`. This keeps the common `UICommand` envelope small
-when events move through queues; application code can still use normal deref
-access in matches:
-
-```rust
-if let moonproto::commands::ui::UICommand::ClientSettings(settings) = cmd {
-    println!("xSell={}", settings.x_sell);
-}
-```
+`Box<ClientSettingsCommand>` to keep the internal command envelope small.
+Normal application code does not parse `UICommand` directly; it reads the
+applied `SettingsState`.
 
 ## ClientSettings
 
@@ -178,14 +168,10 @@ sequence.
 
 ## Low-Level Parsing
 
-```rust
-use moonproto::commands::ui::UICommand;
-
-let command = UICommand::parse(payload).expect("bad UI payload");
-```
-
-`EventDispatcher` performs this parsing and applies `SettingsState`
-automatically for known, supported UI commands.
+Inside the owned `MoonClient` runtime, the low-level dispatcher parses UI
+payloads and applies `SettingsState` automatically for known, supported UI
+commands. Applications normally read the resulting snapshot/events and do not
+instantiate the dispatcher themselves.
 
 `UICommand::Skipped { .. }` and `UICommand::Unknown { .. }` are diagnostic
 variants for forward compatibility. The active dispatcher ignores them: they do

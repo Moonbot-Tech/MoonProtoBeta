@@ -14,6 +14,10 @@ impl Client {
             .snapshot(configured_rate)
     }
 
+    pub(super) fn err_emu_diagnostics_handle(&self) -> Arc<Mutex<ErrEmuDiagnosticsState>> {
+        Arc::clone(&self.err_emu_diagnostics)
+    }
+
     /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
     pub fn reset_err_emu_diagnostics(&self) {
         *self.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
@@ -42,8 +46,8 @@ impl Client {
     /// Returns true after the transport handshake has reached `AuthDone`.
     ///
     /// This is transport readiness, not full domain readiness. Use
-    /// [`Self::is_domain_ready`] after `connect_and_init` / `run_init_sequence`
-    /// when the application needs markets, indexes, settings, balances, and
+    /// [`Self::is_domain_ready`] after the one-time init sequence when the
+    /// application needs markets, indexes, settings, balances, and
     /// subscriptions initialized.
     pub fn is_authorized(&self) -> bool {
         self.authorized

@@ -4,7 +4,7 @@ use super::*;
 
 impl Client {
     /// Identity сервера (`bot_id`, `exchange_name`, `base_currency_name`, версии и т.д.).
-    /// Заполняется автоматически в [`run_init_sequence`] после успешного `emk_BaseCheck`.
+    /// Заполняется автоматически во время Init после успешного `emk_BaseCheck`.
     ///
     /// До первого успешного BaseCheck возвращает дефолт со всеми `None`. Используется
     /// для UI ("подключён к Binance Futures, USDT") и для multi-server идентификации.
@@ -16,16 +16,15 @@ impl Client {
 
     /// Per-account metadata from the last successful `emk_AuthCheck`.
     ///
-    /// Filled automatically by [`run_init_sequence`] and [`Self::request_auth_check`].
+    /// Filled automatically by the one-time Init sequence.
     /// Returns `None` before a successful AuthCheck, or if a successful response
     /// had a malformed mandatory AuthCheck payload.
     pub fn auth_info(&self) -> Option<&crate::commands::engine_api::AuthCheckResponse> {
         self.auth_info.as_ref()
     }
 
-    /// Установить `ServerInfo` вручную. Обычно не нужно — `run_init_sequence` делает
-    /// это автоматически. Полезно если приложение использует свой init pattern
-    /// (минуя `run_init_sequence`) и хочет вручную распарсить ответ `api_base_check`.
+    /// Установить `ServerInfo` вручную. Обычно не нужно — Init делает это
+    /// автоматически. Полезно только для внутренних протокольных тестов.
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
         self.server_info = info;
     }
@@ -40,8 +39,7 @@ impl Client {
     /// This is the recommended path for market-level trade commands such as
     /// [`Self::new_order`], [`Self::move_all_sells`], or position close/split
     /// commands. It uses `ServerInfo::base_currency_code` and
-    /// `ServerInfo::exchange_code`, which are filled by `connect_and_init` /
-    /// `run_init_sequence`, or by [`Self::request_base_check`].
+    /// `ServerInfo::exchange_code`, which are filled during Init.
     ///
     /// Existing-order actions should usually use the `*_tracked_order` wrappers
     /// instead, because they derive the route and current status from

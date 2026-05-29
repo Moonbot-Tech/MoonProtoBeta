@@ -1,6 +1,14 @@
 use super::*;
 
 impl Client {
+    pub(crate) fn set_runtime_shutdown_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.runtime_shutdown = flag;
+    }
+
+    pub(crate) fn shutdown_requested(&self) -> bool {
+        self.runtime_shutdown.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn start_inline_reader_session(&mut self) {
         self.recv_slicer = slicing::SlicingReceiver::new();
         self.register_recv_poller();
@@ -90,12 +98,12 @@ impl Client {
         }
     }
 
-    /// Low-level finite protocol pump for tests and custom protocol tools.
+    /// Low-level finite protocol pump for crate tests.
     ///
     /// Regular applications should use [`MoonClient`](crate::MoonClient): it
     /// owns the runtime thread and has no user-selected loop duration.
-    #[doc(hidden)]
-    pub fn run(&mut self, duration: Duration, on_data: OnDataFn) {
+    #[cfg(test)]
+    pub(crate) fn run(&mut self, duration: Duration, on_data: OnDataFn) {
         // Low-level raw API for consumers that intentionally do not use
         // active-library auto-actions such as RequestOrderBookFull or trades
         // resend tail-check. The user callback runs through the app queue, not
@@ -155,10 +163,13 @@ impl Client {
     /// Send LogOff and close socket. Call when done.
     /// Matches TMoonProtoBaseClient.Disconnect (Common.pas:290-298)
     pub fn disconnect(&mut self) {
+        self.runtime_shutdown.store(true, Ordering::Relaxed);
         self.need_connect = false;
         self.force_disconnect = true;
         self.authorized = false;
         self.auth_status = AuthStatus::Base;
+        self.next_primary_hello_new_session = false;
+        self.clear_hello_wait_state();
         self.set_domain_ready(false);
     }
 }

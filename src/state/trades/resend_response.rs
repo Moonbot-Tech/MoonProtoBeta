@@ -34,11 +34,12 @@ impl<'a> Iterator for TradesResendResponsePackets<'a> {
     }
 }
 
-/// Пройти `MPC_TradesResendResponse` payload без копирования inner TradesStream packets.
+/// Iterate `MPC_TradesResendResponse` without copying inner TradesStream packets.
 /// Wire format (MoonProtoEngine.pas:1897-1921 + MoonProtoCommon.pas:1066-1110):
 /// `Byte(count) + [Word(sz_le) + raw_packet_bytes(sz)] × count`.
-/// Каждый `raw_packet_bytes` — это полный TradesStream payload (с compressed-flag в конце),
-/// который потом можно передать в `commands::trades_stream::parse_trades_packet`.
+/// Each `raw_packet_bytes` item is a full TradesStream payload, including the
+/// trailing compressed flag, suitable for
+/// `commands::trades_stream::parse_trades_packet`.
 pub fn iter_trades_resend_response(payload: &[u8]) -> TradesResendResponsePackets<'_> {
     if payload.is_empty() {
         TradesResendResponsePackets {

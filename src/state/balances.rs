@@ -1,12 +1,12 @@
-//! Balance read model maintained by `EventDispatcher`.
+//! Balance read model maintained by the active `MoonClient` runtime.
 //!
 //! Source parity: `MoonProtoEngine.pas:1210-1340 ProcessBalanceCommand +
 //! OnBalanceSnapshot + OnBalanceIncrement + ApplyBalanceItem`.
 //!
-//! Public applications normally read this state through
-//! `EventDispatcher::balances()` or use `Client::request_balance_snapshot`.
-//! Low-level packet parsing happens in `commands::balance`; this module applies
-//! already-decoded full snapshots and incremental updates to the local model.
+//! Public applications normally read this state through `MoonClient` snapshots
+//! and request refreshes with the high-level Active Lib methods. Low-level
+//! packet parsing happens in `commands::balance`; this module applies already
+//! decoded full snapshots and incremental updates to the local model.
 //!
 //! Incremental epoch protection is per market, matching Delphi
 //! `m.LastBalanceEpoch`. Full snapshots are authoritative for known markets and
@@ -15,6 +15,7 @@
 use crate::commands::balance::{BalanceItem, BalanceUpdate};
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Global account balance totals in BTC-equivalent units.
 #[derive(Debug, Clone, Default)]
@@ -32,7 +33,7 @@ pub struct GlobalBalance {
     pub total_pnl: f64,
 }
 
-/// Client balance sync state maintained by [`crate::events::EventDispatcher`].
+/// Client balance sync state published through active-session snapshots.
 ///
 /// Snapshot vs incremental semantics:
 /// - `cmd_id=2` (plain `TBalanceCommand`) is recognized but not applied, like Delphi.
@@ -43,7 +44,7 @@ pub struct BalancesState {
     /// Global totals (BTC, special coin, locked).
     pub global: GlobalBalance,
     /// Per-market balance rows keyed by `market_name`, for example `"BTCUSDT"`.
-    pub by_market: HashMap<String, BalanceItem>,
+    by_market: HashMap<String, Arc<BalanceItem>>,
     /// Last applied epoch for any accepted balance packet.
     ///
     /// This field is diagnostic. Stale incremental rows are filtered through
@@ -101,7 +102,7 @@ impl BalancesState {
     fn insert_balance_mark_epoch(&mut self, item: BalanceItem, epoch: u16) -> bool {
         let item = self.prepare_item_for_apply(item);
         let market_name = item.market_name.clone();
-        self.by_market.insert(market_name.clone(), item);
+        self.by_market.insert(market_name.clone(), Arc::new(item));
         self.last_epoch_by_market.insert(market_name, epoch);
         true
     }
@@ -231,7 +232,7 @@ impl BalancesState {
         // Delphi does not touch BalanceHash/bnMaxValue/LastBalanceEpoch in that
         // reset branch.
         let previous_map = std::mem::take(&mut self.by_market);
-        let mut new_map: HashMap<String, BalanceItem> = HashMap::new();
+        let mut new_map: HashMap<String, Arc<BalanceItem>> = HashMap::new();
         let mut count = 0;
         for it in upd.items {
             if !is_known_market(&it.market_name) {
@@ -244,7 +245,7 @@ impl BalancesState {
             let it = Self::preserve_max_value(it, previous_max_value, self.eps_profile.eps);
             self.last_epoch_by_market
                 .insert(it.market_name.clone(), upd.epoch);
-            new_map.insert(it.market_name.clone(), it);
+            new_map.insert(it.market_name.clone(), Arc::new(it));
             count += 1;
         }
 
@@ -256,12 +257,12 @@ impl BalancesState {
                 if let Some(previous) = previous_map.get(market_name) {
                     new_map.insert(
                         market_name.clone(),
-                        Self::reset_missing_snapshot_item(previous.clone()),
+                        Arc::new(Self::reset_missing_snapshot_item(previous.as_ref().clone())),
                     );
                 } else {
                     new_map.insert(
                         market_name.clone(),
-                        Self::default_missing_snapshot_item(market_name),
+                        Arc::new(Self::default_missing_snapshot_item(market_name)),
                     );
                     self.last_epoch_by_market
                         .entry(market_name.clone())
@@ -275,7 +276,7 @@ impl BalancesState {
                 }
                 new_map.insert(
                     market_name.clone(),
-                    Self::reset_missing_snapshot_item(previous.clone()),
+                    Arc::new(Self::reset_missing_snapshot_item(previous.as_ref().clone())),
                 );
             }
         }
@@ -321,7 +322,7 @@ impl BalancesState {
     }
 
     pub fn get(&self, market_name: &str) -> Option<&BalanceItem> {
-        self.by_market.get(market_name)
+        self.by_market.get(market_name).map(AsRef::as_ref)
     }
 
     pub fn global(&self) -> &GlobalBalance {
@@ -329,7 +330,9 @@ impl BalancesState {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &BalanceItem)> {
-        self.by_market.iter()
+        self.by_market
+            .iter()
+            .map(|(market_name, item)| (market_name, item.as_ref()))
     }
 
     pub fn len(&self) -> usize {
@@ -351,6 +354,7 @@ impl BalancesState {
         self.global.total_pnl = self
             .by_market
             .values()
+            .map(AsRef::as_ref)
             .filter(|item| is_btc_market(&item.market_name))
             .map(BalanceItem::total_profit)
             .sum();

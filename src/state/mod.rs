@@ -48,7 +48,8 @@ pub use history_store::{
 pub use history_worker::{
     MarketHistoryCandlesSnapshot, MarketHistoryHandle, MarketHistoryLastPriceBatch,
     MarketHistoryLastPriceInput, MarketHistoryMMOrderInput, MarketHistoryStreamBatch,
-    MarketHistoryStreamSection, MarketHistoryTradeInput, MarketHistoryWorker,
+    MarketHistoryStreamSection, MarketHistoryStreamSectionKind, MarketHistoryTradeInput,
+    MarketHistoryWorker,
 };
 pub use markets::{
     MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState, MarketsEvent,

@@ -43,19 +43,20 @@ fn run_client(label: &'static str, key: String, endpoint: Option<String>) -> Cli
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Trade(_)) => {
-                stats.events += 1;
-                stats.trade_events += 1;
+        for event in client.drain_events() {
+            match event {
+                Event::Trade(_) => {
+                    stats.events += 1;
+                    stats.trade_events += 1;
+                }
+                Event::OrderBook(_) => {
+                    stats.events += 1;
+                    stats.orderbook_events += 1;
+                }
+                _ => stats.events += 1,
             }
-            Ok(Event::OrderBook(_)) => {
-                stats.events += 1;
-                stats.orderbook_events += 1;
-            }
-            Ok(_) => stats.events += 1,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     if let Some(snapshot) = client.snapshot() {

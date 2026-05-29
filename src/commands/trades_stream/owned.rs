@@ -1,6 +1,7 @@
 use super::decoder::{decode_trades_packet, TradeSectionRef};
-use super::types::{TradeSection, TradesPacket, WatcherFill};
+use super::types::{TradeSection, TradesPacket, WatcherFill, WatcherFillFlags};
 use super::wire::{WireWatcherFill, WATCHER_FILL_RECORD_SIZE};
+use crate::commands::trade::OrderType;
 use zerocopy::FromBytes;
 
 impl TradeSection {
@@ -52,8 +53,8 @@ pub fn parse_watcher_fills(data: &[u8]) -> Option<Vec<WatcherFill>> {
             qty: wire.qty.get(),
             z_btc: wire.z_btc.get(),
             position: wire.position.get(),
-            order_type: wire.order_type,
-            flags: wire.flags,
+            order_type: OrderType::from_byte(wire.order_type),
+            flags: WatcherFillFlags::from_bits(wire.flags),
         });
     }
     Some(fills)

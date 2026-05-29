@@ -15,6 +15,7 @@ impl Client {
         *self.lifecycle_app_tx.lock().unwrap() = tx;
     }
 
+    #[cfg(test)]
     pub(super) fn lifecycle_event_sender_installed(&self) -> bool {
         self.lifecycle_app_tx.lock().unwrap().is_some()
     }
@@ -24,7 +25,7 @@ impl Client {
     /// UI wrappers that can trigger a server-side restart/routing update
     /// (`ui_update_version`, `ui_switch_dex`, `ui_switch_spot`) call this
     /// automatically. Use it only when sending the same raw UI commands through
-    /// lower-level APIs: the next `run_init_sequence` consumes the flag and runs
+    /// lower-level APIs: the next Init pass consumes the flag and runs
     /// the Delphi BaseCheck retry path.
     pub fn mark_server_update_sent(&self) {
         self.server_update_sent.store(true, Ordering::Relaxed);

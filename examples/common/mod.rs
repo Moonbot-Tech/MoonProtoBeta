@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
-use std::time::Duration;
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, ImportedKeyInfo, InitConfig, InitialStrategies,
-    MoonClient, MoonClientError, RefreshConfig,
+    LifecycleEvent, MoonClient, MoonClientError, RefreshConfig, TransportMode,
 };
 
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -15,7 +18,10 @@ pub fn client_config(
 ) -> Result<(ClientConfig, ImportedKeyInfo), String> {
     let info = parse_key_info(key_b64).ok_or_else(|| "invalid MoonBot key".to_string())?;
     let (host, port) = endpoint(endpoint_arg, &info);
-    let mask_ver = info.network.map(|network| network.mask_ver).unwrap_or(0);
+    let mask_ver = info
+        .network
+        .map(|network| network.mask_ver)
+        .unwrap_or(TransportMode::V0);
     let cfg = ClientConfig::new(host, port, info.keys.master_key, info.keys.mac_key)
         .with_transport_mode(mask_ver);
     Ok((cfg, info))
@@ -27,10 +33,7 @@ pub fn connect(
     init: InitConfig,
 ) -> Result<MoonClient, MoonClientError> {
     let (cfg, _) = client_config(key_b64, endpoint_arg).expect("invalid MoonBot key");
-    MoonClient::connect(
-        cfg,
-        ConnectConfig::new(init).with_connect_timeout(DEFAULT_CONNECT_TIMEOUT),
-    )
+    connect_and_wait_ready(cfg, init, DEFAULT_CONNECT_TIMEOUT)
 }
 
 pub fn connect_with_refresh(
@@ -40,10 +43,33 @@ pub fn connect_with_refresh(
     refresh: RefreshConfig,
 ) -> Result<MoonClient, MoonClientError> {
     let (cfg, _) = client_config(key_b64, endpoint_arg).expect("invalid MoonBot key");
-    MoonClient::connect(
-        cfg.with_refresh(refresh),
-        ConnectConfig::new(init).with_connect_timeout(DEFAULT_CONNECT_TIMEOUT),
-    )
+    connect_and_wait_ready(cfg.with_refresh(refresh), init, DEFAULT_CONNECT_TIMEOUT)
+}
+
+fn connect_and_wait_ready(
+    cfg: ClientConfig,
+    init: InitConfig,
+    timeout: Duration,
+) -> Result<MoonClient, MoonClientError> {
+    let client = MoonClient::connect(cfg, ConnectConfig::new(init).with_connect_timeout(timeout))?;
+    let deadline = Instant::now() + timeout + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        for event in client.drain_lifecycle_events() {
+            match event {
+                LifecycleEvent::Ready => return Ok(client),
+                LifecycleEvent::ConnectFailed { error } => {
+                    let _ = client.disconnect();
+                    let _ = client.wait_finished();
+                    return Err(MoonClientError::ConnectFailed(error));
+                }
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = client.disconnect();
+    let _ = client.wait_finished();
+    Err(MoonClientError::RequestTimeout)
 }
 
 pub fn init_config() -> InitConfig {
@@ -52,6 +78,17 @@ pub fn init_config() -> InitConfig {
         step_timeout: None,
         ..Default::default()
     }
+}
+
+pub fn wait_until(timeout: Duration, mut tick: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if tick() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 fn endpoint(endpoint_arg: Option<&String>, info: &ImportedKeyInfo) -> (String, u16) {

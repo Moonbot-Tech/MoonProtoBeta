@@ -12,7 +12,7 @@ fn dummy_client() -> Client {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -63,7 +63,7 @@ fn test_market(name: &str) -> Market {
         volume: 0.0,
         is_btc_market: false,
         status_trading: true,
-        bn_is_fucking_shib: false,
+        has_1000_prefix_alias: false,
         bn_iceberg: false,
         bn_only_isolated: false,
         futures_type: BaseCurrency::USDT,
@@ -72,22 +72,22 @@ fn test_market(name: &str) -> Market {
         pos_size: 0.0,
         pos_price: 0.0,
         liq_price: 0.0,
-        pos_dir: 0,
+        pos_dir: crate::commands::trade::OrderType::Sell,
         long_pos_size: 0.0,
         long_pos_price: 0.0,
         long_liq_price: 0.0,
-        long_position_type: 0,
+        long_position_type: crate::commands::market::PositionType::Cross,
         short_pos_size: 0.0,
         short_pos_price: 0.0,
         short_liq_price: 0.0,
-        short_position_type: 0,
+        short_position_type: crate::commands::market::PositionType::Cross,
         asset_balance: 0.0,
         asset_balance_full: 0.0,
         total_profit_b: 0.0,
         total_profit_l: 0.0,
         total_profit_s: 0.0,
         leverage_x: 1,
-        position_type: 0,
+        position_type: crate::commands::market::PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
         arb_slots: std::collections::HashMap::new(),
@@ -195,6 +195,76 @@ fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
         "Delphi LastSentHello=0 означает немедленный retry; Rust Instant clock не должен ждать 2с",
     );
     assert!(client.waiting_hello);
+}
+
+#[test]
+fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
+    let mut client = dummy_client();
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.was_ever_connected = true;
+    client.server_token = 0x1111;
+    client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .on_handshake_control_inline(Command::WantNewHello, 0, 0);
+
+    let fine = encrypted_hello(&client, 0x2222, 0x3333);
+    ProtocolCore {
+        client: &mut client,
+    }
+    .on_fine_inline(&fine, 0, 10);
+
+    assert!(!client.authorized);
+    assert_eq!(client.auth_status, AuthStatus::Connected);
+    assert!(client.need_connect);
+    assert!(
+        client.next_primary_hello_new_session,
+        "after WantNewHello the next valid path is a new hard Hello, not old Fine",
+    );
+}
+
+#[test]
+fn late_want_new_hello_does_not_reset_fresh_authorized_session() {
+    let mut client = dummy_client();
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.need_connect = false;
+    client.server_token = 0x1111;
+    client.clear_hello_wait_state();
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .on_handshake_control_inline(Command::WantNewHello, 0, 10);
+
+    assert!(client.authorized);
+    assert_eq!(client.auth_status, AuthStatus::AuthDone);
+    assert!(!client.need_connect);
+    assert_eq!(client.server_token, 0x1111);
+    assert!(!client.next_primary_hello_new_session);
+}
+
+#[test]
+fn want_new_hello_is_accepted_during_rebind_hello_again() {
+    let mut client = dummy_client();
+    client.authorized = true;
+    client.auth_status = AuthStatus::Offline;
+    client.need_connect = false;
+    client.server_token = 0x1111;
+    client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .on_handshake_control_inline(Command::WantNewHello, 0, 10);
+
+    assert!(!client.authorized);
+    assert_eq!(client.auth_status, AuthStatus::Connected);
+    assert!(client.need_connect);
+    assert!(client.next_primary_hello_new_session);
 }
 
 #[test]
@@ -519,6 +589,52 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
             )),
             "after SubscribeOrderBook success confirms current ServerToken, OrderBook packets reach parser"
         );
+}
+
+#[test]
+fn post_init_reconnect_same_peer_app_token_does_not_refetch_indexes() {
+    let mut client = dummy_client();
+
+    client.set_domain_ready(true);
+    client.was_ever_connected = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.prev_auth_status = AuthStatus::AuthDone;
+    client.authorized = true;
+    client.peer_app_token = 0x1000;
+    client.tracked_indexes_peer_app_token = 0x1000;
+    client.domain_restore = DomainRestoreIntent {
+        fetch_indexes: true,
+    };
+    client.with_subscription_registry_mut(|registry| {
+        registry.orderbook_subs.insert("BTCUSDT".to_string());
+    });
+
+    let who = encrypted_hello(&client, 0x2222, 0x1000);
+    assert!(apply_reader_handshake_payload(
+        &mut client,
+        Command::WhoAreYou,
+        &who,
+    ));
+    let fine = encrypted_hello(&client, 0x2222, 0x1000);
+    assert!(apply_reader_handshake_payload(
+        &mut client,
+        Command::Fine,
+        &fine,
+    ));
+
+    let methods = api_methods(&drain_send_items(&client));
+    assert!(
+        !methods.contains(&(EngineMethod::GetMarketsIndexes.to_byte())),
+        "Delphi GetMarketsIndexes repair is only for changed PeerAppToken"
+    );
+    assert!(
+        methods.contains(&(EngineMethod::SubscribeOrderBook.to_byte())),
+        "same-token reconnect can replay orderbook subscription immediately"
+    );
+    assert!(
+        !methods.contains(&(EngineMethod::UpdateMarketsList.to_byte())),
+        "do not synthesize an indexes->update chain when indexes are already current"
+    );
 }
 
 #[test]
@@ -1165,7 +1281,7 @@ fn queued_subscribe_all_trades_request_blocks_pre_response_reconnect_like_delphi
 }
 
 #[test]
-fn waiting_hello_retries_hello_again_like_delphi_even_before_fine() {
+fn primary_hello_wait_does_not_retry_hello_again_before_session_exists() {
     let mut client = dummy_client();
     let token_before = client.client_token;
 
@@ -1181,13 +1297,16 @@ fn waiting_hello_retries_hello_again_like_delphi_even_before_fine() {
     }
     .check_offline_reconnect(350);
 
-    assert_eq!(client.auth_status, AuthStatus::Offline);
-    assert_eq!(client.last_sent_hello, 350);
+    assert_eq!(
+        client.last_sent_hello, 100,
+        "primary handshake wait must not produce session HelloAgain",
+    );
     assert_eq!(
         client.client_token,
-        token_before + 2,
-        "Delphi retries HelloAgain while FWaitingHello; a dropped Fine must not stall auth",
+        token_before + 1,
+        "only the original hard Hello is sent before WhoAreYou/session state exists",
     );
+    assert_ne!(client.auth_status, AuthStatus::Offline);
 }
 
 #[test]
@@ -1225,6 +1344,7 @@ fn soft_reconnect_waiting_hello_still_retries_hello_again() {
 fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
     let mut client = dummy_client();
     install_session_key(&mut client);
+    client.was_ever_connected = true;
 
     ProtocolCore {
         client: &mut client,
@@ -1245,11 +1365,55 @@ fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
 }
 
 #[test]
+fn primary_handshake_timeout_does_not_turn_into_soft_hello_again() {
+    let mut client = dummy_client();
+    client.server_token = 0x1234;
+    client.need_connect = true;
+    client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .check_reconnect_timeout(RECONNECT_WAITING_MS + 1);
+
+    assert!(client.force_disconnect);
+    assert!(client.need_connect);
+    assert!(
+        !client.soft_reconnect,
+        "primary/ImFriend timeout must retry hard Hello, not HelloAgain",
+    );
+    assert!(client.next_primary_hello_new_session);
+    assert!(!client.waiting_hello);
+}
+
+#[test]
+fn rebind_handshake_timeout_keeps_soft_hello_again_path() {
+    let mut client = dummy_client();
+    install_session_key(&mut client);
+    client.server_token = 0x1234;
+    client.need_connect = true;
+    client.start_hello_wait(HelloWaitState::RebindHelloAgain, 0);
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .check_reconnect_timeout(RECONNECT_WAITING_MS + 1);
+
+    assert!(client.force_disconnect);
+    assert!(client.need_connect);
+    assert!(
+        client.soft_reconnect,
+        "rebind timeout preserves Delphi soft reconnect / HelloAgain path",
+    );
+    assert!(!client.waiting_hello);
+}
+
+#[test]
 fn ping_before_fine_does_not_stop_connect_retry_after_lost_fine() {
     let mut client = dummy_client();
     client.auth_status = AuthStatus::Connected;
     client.need_connect = true;
-    client.waiting_hello = false;
+    client.clear_hello_wait_state();
 
     let ping_payload = vec![0u8; control::PING_SIZE];
     client

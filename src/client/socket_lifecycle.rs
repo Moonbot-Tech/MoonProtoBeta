@@ -17,6 +17,7 @@ impl Client {
         self.recv_slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
+        self.clear_hello_wait_state();
     }
 
     pub(crate) fn bind_socket(&mut self, cur_tm: i64) {

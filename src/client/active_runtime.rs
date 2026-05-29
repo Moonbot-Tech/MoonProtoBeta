@@ -1,8 +1,7 @@
 //! High-level Active Lib runtime handle.
 //!
 //! This is the public happy-path layer: applications start one MoonProto runtime
-//! and stop/drop it explicitly. The finite-duration pump remains an internal
-//! implementation detail for tests and protocol tools.
+//! and stop/drop it explicitly.
 
 use super::*;
 use std::sync::RwLock;
@@ -12,14 +11,18 @@ mod handles;
 mod runtime_loop;
 mod types;
 
-use commands::{
-    RuntimeCommand, RuntimeCommandRequest, RuntimeReply, StratRuntimeCommand, UiRuntimeCommand,
+use crate::commands::market::PositionType;
+use crate::commands::ui::SpotMarketKind;
+use commands::{RuntimeCommand, StratRuntimeCommand, UiRuntimeCommand};
+pub use handles::{
+    MoonAccount, MoonBalances, MoonCandles, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
+    MoonTrade, OrderTarget,
 };
-pub use handles::{MoonOrders, MoonTrade, OrderTarget};
-use runtime_loop::{publish_queued_events, publish_snapshot, runtime_loop};
+use runtime_loop::runtime_loop;
 pub use types::{
     ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonClientError,
-    NewOrderParams, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode,
+    MoonClientEvent, MoonClientSnapshot, MoonEventQueue, MoonEventSink, NewOrderParams,
+    NewOrderTicket, OrderSide, SellOrderParams, SplitOrderParams, TradesStreamMode, VStopParams,
 };
 
 /// High-level Active Lib client for regular applications.
@@ -30,119 +33,201 @@ pub use types::{
 /// a protocol-loop duration.
 pub struct MoonClient {
     tx: mpsc::Sender<RuntimeCommand>,
-    events_rx: Mutex<mpsc::Receiver<crate::events::Event>>,
-    lifecycle_rx: Mutex<mpsc::Receiver<LifecycleEvent>>,
-    snapshot: Arc<RwLock<Option<Arc<crate::events::EventDispatcherSnapshot>>>>,
+    shutdown: Arc<AtomicBool>,
+    event_queue: Option<Arc<MoonEventQueue>>,
+    snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
+    err_emu_diagnostics: Arc<Mutex<super::diagnostics::ErrEmuDiagnosticsState>>,
+    protocol_metrics: Arc<ProtocolMetrics>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
+    lifecycle_join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl MoonClient {
-    /// Connect, run the one-time Init sequence, then start the Active Lib
-    /// runtime thread.
+    /// Start the Active Lib runtime and return immediately.
+    ///
+    /// The one-time connect/init sequence runs inside the owned runtime thread.
+    /// Readiness arrives as [`LifecycleEvent::Ready`]; startup failure arrives
+    /// as [`LifecycleEvent::ConnectFailed`]. Events are delivered through the
+    /// default queue adapter and can be drained with [`Self::drain_events`] and
+    /// [`Self::drain_lifecycle_events`].
     pub fn connect(cfg: ClientConfig, connect: ConnectConfig) -> Result<Self, MoonClientError> {
+        let (sink, queue) = MoonEventSink::queue();
+        Self::start_inner(cfg, connect, sink, Some(queue), None)
+    }
+
+    /// Start the Active Lib runtime with a custom event sink and return immediately.
+    pub fn connect_with_sink(
+        cfg: ClientConfig,
+        connect: ConnectConfig,
+        sink: MoonEventSink,
+    ) -> Result<Self, MoonClientError> {
+        Self::start_inner(cfg, connect, sink, None, None)
+    }
+
+    fn start_inner(
+        cfg: ClientConfig,
+        connect: ConnectConfig,
+        event_sink: MoonEventSink,
+        event_queue: Option<Arc<MoonEventQueue>>,
+        ready_tx: Option<mpsc::Sender<Result<(), ConnectError>>>,
+    ) -> Result<Self, MoonClientError> {
         let (tx, rx) = mpsc::channel();
-        let (events_tx, events_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runtime_shutdown = Arc::clone(&shutdown);
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
-        let (init_tx, init_rx) = mpsc::channel();
         let snapshot = Arc::new(RwLock::new(None));
         let runtime_snapshot = Arc::clone(&snapshot);
+        let (diagnostics_tx, diagnostics_rx) = mpsc::channel();
+        let lifecycle_sink = event_sink.clone();
+        let lifecycle_join = thread::spawn(move || {
+            while let Ok(event) = lifecycle_rx.recv() {
+                lifecycle_sink.emit_lifecycle(event);
+            }
+        });
 
         let join = thread::spawn(move || {
             let mut client = Client::new(cfg);
+            let _ = diagnostics_tx.send((
+                client.err_emu_diagnostics_handle(),
+                Arc::clone(&client.protocol_metrics),
+            ));
+            client.set_runtime_shutdown_flag(runtime_shutdown);
             client.set_lifecycle_event_sender(Some(lifecycle_tx));
-            let mut dispatcher = crate::events::EventDispatcher::new();
+            let dispatcher = crate::events::EventDispatcher::new();
 
-            let init_result = connect_and_init(&mut client, &mut dispatcher, connect);
-            match init_result {
-                Ok(result) => {
-                    publish_snapshot(&dispatcher, &runtime_snapshot);
-                    publish_queued_events(&mut dispatcher, &events_tx);
-                    let _ = init_tx.send(Ok(result));
-                }
-                Err(err) => {
-                    let _ = init_tx.send(Err(err));
-                    return;
-                }
-            }
-
-            runtime_loop(client, dispatcher, rx, events_tx, runtime_snapshot);
+            runtime_loop(
+                client,
+                dispatcher,
+                rx,
+                event_sink,
+                runtime_snapshot,
+                connect,
+                ready_tx,
+            );
         });
+        let (err_emu_diagnostics, protocol_metrics) = diagnostics_rx
+            .recv()
+            .map_err(|_| MoonClientError::RuntimeStopped)?;
 
-        match init_rx.recv() {
-            Ok(Ok(_)) => Ok(Self {
-                tx,
-                events_rx: Mutex::new(events_rx),
-                lifecycle_rx: Mutex::new(lifecycle_rx),
-                snapshot,
-                join: Mutex::new(Some(join)),
-            }),
-            Ok(Err(err)) => {
-                let _ = join.join();
-                Err(MoonClientError::Connect(err))
-            }
-            Err(_) => {
-                let _ = join.join();
-                Err(MoonClientError::RuntimeStopped)
-            }
-        }
+        Ok(Self {
+            tx,
+            shutdown,
+            event_queue,
+            snapshot,
+            err_emu_diagnostics,
+            protocol_metrics,
+            join: Mutex::new(Some(join)),
+            lifecycle_join: Mutex::new(Some(lifecycle_join)),
+        })
     }
 
     /// Latest immutable read-model snapshot, cheap to clone and safe to keep in
     /// UI state.
     pub fn snapshot(&self) -> Option<Arc<crate::events::EventDispatcherSnapshot>> {
+        self.snapshot
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(MoonClientSnapshot::state_arc)
+    }
+
+    /// Latest immutable read-model snapshot with a monotonic runtime-local
+    /// revision.
+    ///
+    /// This is the UI-friendly variant of [`Self::snapshot`]: keep the last
+    /// revision in your view model and skip expensive redraw preparation when
+    /// it has not changed.
+    pub fn snapshot_versioned(&self) -> Option<MoonClientSnapshot> {
         self.snapshot.read().unwrap().clone()
+    }
+
+    /// Revision of the latest published snapshot.
+    pub fn snapshot_revision(&self) -> Option<u64> {
+        self.snapshot
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(MoonClientSnapshot::revision)
+    }
+
+    /// Snapshot client-side ErrEmu counters for FireTest/stress diagnostics.
+    ///
+    /// This is not part of the normal application API; regular applications
+    /// should not enable ErrEmu at all.
+    #[doc(hidden)]
+    pub fn err_emu_diagnostics_snapshot(&self) -> crate::client::ErrEmuDiagnostics {
+        let configured_rate = ERR_EMU_RATE.load(Ordering::Relaxed);
+        self.err_emu_diagnostics
+            .lock()
+            .unwrap()
+            .snapshot(configured_rate)
+    }
+
+    /// Snapshot protocol/runtime CPU counters for tests and diagnostics.
+    #[doc(hidden)]
+    pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
+        self.protocol_metrics.snapshot(0)
+    }
+
+    /// Hidden FireTest hook: drop outgoing datagrams inside the runtime owner.
+    ///
+    /// Normal applications must not use this. FireTest uses it to emulate a NAT
+    /// blackhole and verify reconnect/subscription recovery on the public
+    /// `MoonClient` path.
+    #[doc(hidden)]
+    pub fn debug_set_outgoing_blackhole(&self, enabled: bool) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::DebugOutgoingBlackhole(enabled))
+    }
+
+    /// Hidden FireTest hook: reset client-side ErrEmu counters inside the
+    /// runtime owner.
+    #[doc(hidden)]
+    pub fn debug_reset_err_emu_diagnostics(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::DebugResetErrEmuDiagnostics)
+    }
+
+    /// Drain typed events produced by the Active Lib runtime.
+    pub fn drain_events_into(&self, out: &mut Vec<crate::events::Event>) {
+        if let Some(queue) = &self.event_queue {
+            queue.drain_events_into(out);
+        }
     }
 
     /// Drain typed events produced by the Active Lib runtime.
     pub fn drain_events(&self) -> Vec<crate::events::Event> {
-        let rx = self.events_rx.lock().unwrap();
-        let mut out = Vec::new();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => out.push(event),
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-        out
+        self.event_queue
+            .as_ref()
+            .map(|queue| queue.drain_events())
+            .unwrap_or_default()
     }
 
     /// Try to receive one event without blocking.
     pub fn try_recv_event(&self) -> Option<crate::events::Event> {
-        self.events_rx.lock().unwrap().try_recv().ok()
+        self.event_queue
+            .as_ref()
+            .and_then(|queue| queue.try_recv_event())
     }
 
-    /// Receive one event with an application-selected timeout.
-    pub fn recv_event_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<crate::events::Event, mpsc::RecvTimeoutError> {
-        self.events_rx.lock().unwrap().recv_timeout(timeout)
+    /// Drain lifecycle events observed by the runtime.
+    pub fn drain_lifecycle_events_into(&self, out: &mut Vec<LifecycleEvent>) {
+        if let Some(queue) = &self.event_queue {
+            queue.drain_lifecycle_events_into(out);
+        }
     }
 
     /// Drain lifecycle events observed by the runtime.
     pub fn drain_lifecycle_events(&self) -> Vec<LifecycleEvent> {
-        let rx = self.lifecycle_rx.lock().unwrap();
-        let mut out = Vec::new();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => out.push(event),
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-        out
+        self.event_queue
+            .as_ref()
+            .map(|queue| queue.drain_lifecycle_events())
+            .unwrap_or_default()
     }
 
     /// Try to receive one lifecycle event without blocking.
     pub fn try_recv_lifecycle_event(&self) -> Option<LifecycleEvent> {
-        self.lifecycle_rx.lock().unwrap().try_recv().ok()
-    }
-
-    /// Receive one lifecycle event with an application-selected timeout.
-    pub fn recv_lifecycle_event_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<LifecycleEvent, mpsc::RecvTimeoutError> {
-        self.lifecycle_rx.lock().unwrap().recv_timeout(timeout)
+        self.event_queue
+            .as_ref()
+            .and_then(|queue| queue.try_recv_lifecycle_event())
     }
 
     /// Order intent API. The live `Orders` state remains owned by the runtime.
@@ -160,7 +245,38 @@ impl MoonClient {
         }
     }
 
+    /// Stream subscription API for orderbooks and trades.
+    pub fn streams(&self) -> MoonStreams<'_> {
+        MoonStreams { client: self }
+    }
+
+    /// Balance, position, and transferable-assets refresh API.
+    pub fn balances(&self) -> MoonBalances<'_> {
+        MoonBalances { client: self }
+    }
+
+    /// Account-level Engine API actions and account metadata refreshes.
+    pub fn account(&self) -> MoonAccount<'_> {
+        MoonAccount { client: self }
+    }
+
+    /// UI/settings command API.
+    pub fn settings(&self) -> MoonSettings<'_> {
+        MoonSettings { client: self }
+    }
+
+    /// Demand-driven candle request API.
+    pub fn candles(&self) -> MoonCandles<'_> {
+        MoonCandles { client: self }
+    }
+
+    /// Strategy-state command API.
+    pub fn strategies(&self) -> MoonStrategies<'_> {
+        MoonStrategies { client: self }
+    }
+
     /// Subscribe to one orderbook by market name.
+    #[doc(hidden)]
     pub fn subscribe_orderbook(
         &self,
         market_name: impl Into<String>,
@@ -169,6 +285,7 @@ impl MoonClient {
     }
 
     /// Subscribe to several orderbooks by market name.
+    #[doc(hidden)]
     pub fn subscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = S>,
@@ -180,6 +297,7 @@ impl MoonClient {
     }
 
     /// Unsubscribe from one orderbook by market name.
+    #[doc(hidden)]
     pub fn unsubscribe_orderbook(
         &self,
         market_name: impl Into<String>,
@@ -188,6 +306,7 @@ impl MoonClient {
     }
 
     /// Unsubscribe from several orderbooks by market name.
+    #[doc(hidden)]
     pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = S>,
@@ -199,11 +318,13 @@ impl MoonClient {
     }
 
     /// Unsubscribe from all orderbooks remembered in the reconnect registry.
+    #[doc(hidden)]
     pub fn unsubscribe_all_orderbooks(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllOrderBooks)
     }
 
     /// Subscribe to all trades and retain Active Lib data for all markets.
+    #[doc(hidden)]
     pub fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::SubscribeAllTrades(
             mode.want_market_makers(),
@@ -212,6 +333,7 @@ impl MoonClient {
 
     /// Subscribe to all trades on the wire while retaining Active Lib data for
     /// all markets when `market_names` is empty, or for the given markets.
+    #[doc(hidden)]
     pub fn subscribe_trades_for<I, S>(
         &self,
         mode: TradesStreamMode,
@@ -228,11 +350,13 @@ impl MoonClient {
     }
 
     /// Unsubscribe from all trades and clear the reconnect registry intent.
+    #[doc(hidden)]
     pub fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllTrades)
     }
 
     /// Request a fresh balance snapshot through the active runtime.
+    #[doc(hidden)]
     pub fn refresh_balances(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
     }
@@ -241,6 +365,7 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Account`; read the current value from
     /// `snapshot().account().hedge_mode()`.
+    #[doc(hidden)]
     pub fn refresh_hedge_mode(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::AccountHedgeModeRefresh)
     }
@@ -249,6 +374,7 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Account`; read the current value from
     /// `snapshot().account().api_expiration()`.
+    #[doc(hidden)]
     pub fn refresh_api_expiration_time(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::AccountApiExpirationRefresh)
     }
@@ -259,11 +385,13 @@ impl MoonClient {
     /// response to `snapshot().transfer_assets()`, emits per-wallet
     /// `Event::TransferAssets`, and emits `TransferAssetsEvent::RefreshCompleted`
     /// after all wallet kinds have answered.
+    #[doc(hidden)]
     pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefresh)
     }
 
     /// Request transferable asset refresh for one wallet kind.
+    #[doc(hidden)]
     pub fn refresh_transfer_assets_kind(
         &self,
         kind: crate::state::ExchangeKind,
@@ -275,100 +403,24 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Balance`; read the current read model
     /// through `snapshot().balances()`.
+    #[doc(hidden)]
     pub fn request_balance_snapshot(&self) -> Result<(), MoonClientError> {
         self.refresh_balances()
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::request_balance_snapshot`].
-    pub fn blocking_request_balance_snapshot(
-        &self,
-        timeout: Duration,
-    ) -> Result<crate::state::BalancesState, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::BalanceSnapshot { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::BalanceSnapshot(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
     }
 
     /// Request a fresh order snapshot and return immediately.
     ///
     /// Completion arrives through order events, including `OrderEvent::Snapshot`;
     /// read the current read model through `snapshot().orders()`.
+    #[doc(hidden)]
     pub fn request_order_snapshot(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::OrderSnapshotRefresh)
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::request_order_snapshot`].
-    pub fn blocking_request_order_snapshot(
-        &self,
-        timeout: Duration,
-    ) -> Result<Vec<crate::state::Order>, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::OrderSnapshot { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::OrderSnapshot(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
-    }
-
-    /// Blocking diagnostic request for one asset balance through Engine API.
-    pub fn blocking_request_balance(
-        &self,
-        asset: impl Into<String>,
-        timeout: Duration,
-    ) -> Result<f64, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::Balance {
-            asset: asset.into(),
-            timeout,
-        })
-        .and_then(|reply| match reply {
-            RuntimeReply::Balance(result) => result.map_err(MoonClientError::from),
-            _ => Err(MoonClientError::RuntimeStopped),
-        })
-    }
-
-    /// Blocking diagnostic request for hedge-mode state through Engine API.
-    pub fn blocking_request_hedge_mode(&self, timeout: Duration) -> Result<bool, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::HedgeMode { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::HedgeMode(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
-    }
-
-    /// Blocking diagnostic request for API-key expiration metadata through Engine API.
-    pub fn blocking_request_api_expiration_time(
-        &self,
-        timeout: Duration,
-    ) -> Result<crate::commands::engine_api::ApiExpirationTime, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::ApiExpirationTime { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::ApiExpirationTime(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
-    }
-
-    /// Blocking diagnostic request for transferable assets through Engine API.
-    ///
-    /// This is a direct blocking request/response helper. Regular UI code
-    /// should prefer `refresh_transfer_assets()` plus
-    /// `snapshot().transfer_assets()` so the runtime remains the owner of
-    /// Active Lib state.
-    pub fn blocking_request_transfer_assets(
-        &self,
-        kind: crate::state::ExchangeKind,
-        timeout: Duration,
-    ) -> Result<Vec<crate::commands::engine_api::TransferAsset>, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::TransferAssets { kind, timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::TransferAssets(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
     }
 
     /// Request server-side full balance refresh and return immediately.
     ///
     /// The balance state arrives through the normal balance channel.
+    #[doc(hidden)]
     pub fn refresh_markets_balance_full(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::MarketsBalanceFullRefresh,
@@ -377,6 +429,7 @@ impl MoonClient {
     }
 
     /// Cancel all exchange orders through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::CancelAllOrders,
@@ -385,6 +438,7 @@ impl MoonClient {
     }
 
     /// Set leverage for a market through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn set_leverage(
         &self,
         market: impl AsRef<str>,
@@ -401,6 +455,7 @@ impl MoonClient {
     }
 
     /// Set account hedge mode through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::SetHedgeMode { hedge_mode },
@@ -409,10 +464,11 @@ impl MoonClient {
     }
 
     /// Change position type for a market through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn change_position_type(
         &self,
         market: impl AsRef<str>,
-        position_type: u8,
+        position_type: PositionType,
         new_market: bool,
     ) -> Result<EngineActionTicket, MoonClientError> {
         let market = market.as_ref();
@@ -431,6 +487,7 @@ impl MoonClient {
     }
 
     /// Convert dust to BNB through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn convert_dust_bnb(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::ConvertDustBnb,
@@ -439,6 +496,7 @@ impl MoonClient {
     }
 
     /// Confirm risk limit for a market through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn confirm_risk_limit(
         &self,
         market: impl AsRef<str>,
@@ -453,6 +511,7 @@ impl MoonClient {
     }
 
     /// Set MA mode through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn set_ma_mode(&self, ma_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::SetMaMode { ma_mode },
@@ -461,6 +520,7 @@ impl MoonClient {
     }
 
     /// Transfer an asset between exchange wallets through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn transfer_asset(
         &self,
         asset: impl AsRef<str>,
@@ -486,6 +546,7 @@ impl MoonClient {
     }
 
     /// Delphi-name alias for [`Self::transfer_asset`].
+    #[doc(hidden)]
     pub fn do_transfer_asset(
         &self,
         asset: impl AsRef<str>,
@@ -497,39 +558,12 @@ impl MoonClient {
     }
 
     /// Reload orderbook data through Engine API and return immediately.
+    #[doc(hidden)]
     pub fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::ReloadOrderBook,
             crate::commands::engine_request::reload_order_book(),
         )
-    }
-
-    /// Request chunked candles and return the merged response.
-    #[doc(hidden)]
-    pub fn request_candles_data(
-        &self,
-        timeout: Duration,
-    ) -> Result<MergedCandles, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::CandlesData { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::CandlesData(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
-    }
-
-    /// Blocking diagnostic full 5m candles refresh.
-    ///
-    /// Normal applications do not call this. Active Lib requests the initial
-    /// full 5m snapshot automatically after the first trades subscription, emits
-    /// `Event::CandlesSnapshot` after the history-worker barrier, and then keeps
-    /// retained candles current from trades.
-    #[doc(hidden)]
-    pub fn blocking_refresh_candles_for_diagnostics(
-        &self,
-        timeout: Duration,
-    ) -> Result<usize, MoonClientError> {
-        self.request_candles_data(timeout)
-            .map(|merged| merged.markets.len())
     }
 
     /// Request CoinCard deep-history candles and return immediately.
@@ -538,6 +572,7 @@ impl MoonClient {
     /// They are separate from the retained 5m candles that Active Lib loads and
     /// maintains from trades. Completion arrives as `Event::CoinCardCandles`;
     /// read the latest rows through `snapshot().coin_card_candles()`.
+    #[doc(hidden)]
     pub fn request_coin_card_candles(
         &self,
         market: impl Into<String>,
@@ -555,24 +590,6 @@ impl MoonClient {
             payload,
         })?;
         Ok(ticket)
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::request_coin_card_candles`].
-    pub fn blocking_request_coin_card_candles(
-        &self,
-        market: impl Into<String>,
-        ticks: crate::commands::candles::DeepHistoryKind,
-        timeout: Duration,
-    ) -> Result<Vec<crate::commands::candles::DeepPrice>, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::CoinCardCandles {
-            market: market.into(),
-            ticks,
-            timeout,
-        })
-        .and_then(|reply| match reply {
-            RuntimeReply::CoinCardCandles(result) => result.map_err(MoonClientError::from),
-            _ => Err(MoonClientError::RuntimeStopped),
-        })
     }
 
     fn queue_engine_action(
@@ -593,179 +610,30 @@ impl MoonClient {
         Ok(ticket)
     }
 
-    fn request_engine_success(
-        &self,
-        payload: Vec<u8>,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        let response = self
-            .send_request(RuntimeCommandRequest::EngineRaw { payload, timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::EngineRaw(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })?;
-        if response.success {
-            Ok(())
-        } else {
-            Err(MoonClientError::EngineRequest(EngineRequestError::Server {
-                method: response.method,
-                code: response.error_code,
-                message: response.error_msg,
-            }))
-        }
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::refresh_markets_balance_full`].
-    pub fn blocking_request_markets_balance_full(
-        &self,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::get_markets_balance_full(),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::cancel_all_orders`].
-    pub fn blocking_cancel_all_orders(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::cancel_all_orders(),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::set_leverage`].
-    pub fn blocking_set_leverage(
-        &self,
-        market: impl AsRef<str>,
-        new_leverage: i32,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::set_hedge_mode`].
-    pub fn blocking_set_hedge_mode(
-        &self,
-        hedge_mode: bool,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::set_hedge_mode(hedge_mode),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::change_position_type`].
-    pub fn blocking_change_position_type(
-        &self,
-        market: impl AsRef<str>,
-        position_type: u8,
-        new_market: bool,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::change_position_type(
-                market.as_ref(),
-                position_type,
-                new_market,
-            ),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::convert_dust_bnb`].
-    pub fn blocking_convert_dust_bnb(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(crate::commands::engine_request::convert_dust_bnb(), timeout)
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::confirm_risk_limit`].
-    pub fn blocking_confirm_risk_limit(
-        &self,
-        market: impl AsRef<str>,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::set_ma_mode`].
-    pub fn blocking_set_ma_mode(
-        &self,
-        ma_mode: bool,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::set_ma_mode(ma_mode),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::transfer_asset`].
-    pub fn blocking_do_transfer_asset(
-        &self,
-        asset: impl AsRef<str>,
-        qty: f64,
-        from: crate::state::ExchangeKind,
-        to: crate::state::ExchangeKind,
-        timeout: Duration,
-    ) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::do_transfer_asset(
-                asset.as_ref(),
-                qty,
-                from.to_byte(),
-                to.to_byte(),
-            ),
-            timeout,
-        )
-    }
-
-    /// Blocking diagnostic counterpart of [`Self::reload_order_book`].
-    pub fn blocking_reload_order_book(&self, timeout: Duration) -> Result<(), MoonClientError> {
-        self.request_engine_success(
-            crate::commands::engine_request::reload_order_book(),
-            timeout,
-        )
-    }
-
     /// Request a fresh UI/settings snapshot through the active runtime.
     ///
     /// The command returns after being queued. Completion arrives as
     /// `Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and the latest
     /// value is readable through `snapshot().settings().client_settings`.
+    #[doc(hidden)]
     pub fn request_client_settings(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
     }
 
     /// Alias for [`Self::request_client_settings`].
+    #[doc(hidden)]
     pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
         self.request_client_settings()
     }
 
-    /// Blocking diagnostic counterpart of [`Self::request_client_settings`].
-    pub fn blocking_request_client_settings(
-        &self,
-        timeout: Duration,
-    ) -> Result<crate::commands::ui::ClientSettingsCommand, MoonClientError> {
-        self.send_request(RuntimeCommandRequest::ClientSettings { timeout })
-            .and_then(|reply| match reply {
-                RuntimeReply::ClientSettings(result) => result.map_err(MoonClientError::from),
-                _ => Err(MoonClientError::RuntimeStopped),
-            })
-    }
-
     /// Set the market-maker orders subscription flag.
+    #[doc(hidden)]
     pub fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
     }
 
     /// Send a full client-settings snapshot.
+    #[doc(hidden)]
     pub fn send_settings(
         &self,
         settings: crate::commands::ui::ClientSettingsCommand,
@@ -774,6 +642,7 @@ impl MoonClient {
     }
 
     /// Request a MoonBot version update.
+    #[doc(hidden)]
     pub fn request_version_update(
         &self,
         version_name: impl Into<String>,
@@ -786,6 +655,7 @@ impl MoonClient {
     }
 
     /// Switch DEX mode.
+    #[doc(hidden)]
     pub fn switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchDex(
             dex_name.into(),
@@ -793,8 +663,9 @@ impl MoonClient {
     }
 
     /// Switch spot mode.
-    pub fn switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
-        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot_index)))
+    #[doc(hidden)]
+    pub fn switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot)))
     }
 
     #[doc(hidden)]
@@ -825,11 +696,12 @@ impl MoonClient {
     }
 
     #[doc(hidden)]
-    pub fn ui_switch_spot(&self, spot_index: u8) -> Result<(), MoonClientError> {
-        self.switch_spot(spot_index)
+    pub fn ui_switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
+        self.switch_spot(spot)
     }
 
     /// Send a strategy sell-price update.
+    #[doc(hidden)]
     pub fn strat_sell_price_update(
         &self,
         strategy_id: u64,
@@ -844,6 +716,7 @@ impl MoonClient {
     }
 
     /// Delete one strategy or folder.
+    #[doc(hidden)]
     pub fn strat_delete(
         &self,
         strategy_id: u64,
@@ -855,37 +728,65 @@ impl MoonClient {
         }))
     }
 
+    /// Replace the Active Lib local strategy list and send a Delphi
+    /// `TStratSnapshot` batch to the server.
+    ///
+    /// The runtime uses the live strategy schema fetched during Init, so callers
+    /// do not carry serializer field hardcode. The call only queues the intent;
+    /// server echo/update arrives later through `Event::Strat`.
+    #[doc(hidden)]
+    pub fn send_strategy_snapshot_batch(
+        &self,
+        strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::StrategySnapshotBatch(strategies))
+    }
+
     /// Change a local strategy checked flag in the active runtime state.
+    #[doc(hidden)]
     pub fn set_strategy_checked(
         &self,
         strategy_id: u64,
         checked: bool,
-    ) -> Result<bool, MoonClientError> {
-        let (tx, rx) = mpsc::channel();
+    ) -> Result<(), MoonClientError> {
         self.tx
             .send(RuntimeCommand::StrategySetChecked {
                 strategy_id,
                 checked,
-                reply: tx,
             })
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
-        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
+            .map_err(|_| MoonClientError::RuntimeStopped)
     }
 
     /// Send Delphi checked-state delta if any local strategy changed.
-    pub fn send_strategy_checked_delta(&self) -> Result<usize, MoonClientError> {
-        self.send_usize(RuntimeCommand::StrategySendCheckedDelta)
+    #[doc(hidden)]
+    pub fn send_strategy_checked_delta(&self) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::StrategySendCheckedDelta)
     }
 
     /// Start or stop strategies with Delphi V2 checked-delta semantics.
-    pub fn strategy_start_stop(&self, is_start: bool) -> Result<usize, MoonClientError> {
-        self.send_usize(RuntimeCommand::StrategyStartStop { is_start })
+    #[doc(hidden)]
+    pub fn strategy_start_stop(&self, is_start: bool) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::StrategyStartStop { is_start })
     }
 
-    /// Stop the runtime thread and wait until it exits.
-    pub fn stop(&self) -> Result<(), MoonClientError> {
+    /// Request runtime shutdown and return immediately.
+    pub fn disconnect(&self) -> Result<(), MoonClientError> {
+        self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(RuntimeCommand::Stop);
+        Ok(())
+    }
+
+    /// Alias for [`Self::disconnect`].
+    pub fn stop(&self) -> Result<(), MoonClientError> {
+        self.disconnect()
+    }
+
+    /// Wait until the runtime thread exits.
+    pub fn wait_finished(&self) -> Result<(), MoonClientError> {
         if let Some(join) = self.join.lock().unwrap().take() {
+            join.join().map_err(|_| MoonClientError::RuntimeStopped)?;
+        }
+        if let Some(join) = self.lifecycle_join.lock().unwrap().take() {
             join.join().map_err(|_| MoonClientError::RuntimeStopped)?;
         }
         Ok(())
@@ -896,35 +797,87 @@ impl MoonClient {
             .send(cmd)
             .map_err(|_| MoonClientError::RuntimeStopped)
     }
-
-    fn send_usize(&self, cmd: RuntimeCommand) -> Result<usize, MoonClientError> {
-        let (tx, rx) = mpsc::channel();
-        self.tx
-            .send(RuntimeCommand::WithUsizeReply {
-                cmd: Box::new(cmd),
-                reply: tx,
-            })
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
-        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
-    }
-
-    fn send_request(
-        &self,
-        request: RuntimeCommandRequest,
-    ) -> Result<RuntimeReply, MoonClientError> {
-        let (tx, rx) = mpsc::channel();
-        self.tx
-            .send(RuntimeCommand::Request { request, reply: tx })
-            .map_err(|_| MoonClientError::RuntimeStopped)?;
-        rx.recv().map_err(|_| MoonClientError::RuntimeStopped)
-    }
 }
 
 impl Drop for MoonClient {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(RuntimeCommand::Stop);
         if let Some(join) = self.join.get_mut().unwrap().take() {
             let _ = join.join();
         }
+        if let Some(join) = self.lifecycle_join.get_mut().unwrap().take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_wait_finished_interrupts_startup_wait() {
+        let cfg = ClientConfig::new("127.0.0.1", 9, [0; 16], [0; 16]).without_ntp();
+        let client = MoonClient::connect(
+            cfg,
+            ConnectConfig::new(InitConfig::default()).with_connect_timeout(Duration::from_secs(30)),
+        )
+        .expect("runtime should start");
+
+        let started = Instant::now();
+        client.disconnect().expect("shutdown should be queued");
+        client.wait_finished().expect("runtime should exit");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown waited for startup timeout instead of interrupting it: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn connect_with_sink_delivers_lifecycle_without_default_queue() {
+        let cfg = ClientConfig::new("127.0.0.1", 9, [0; 16], [0; 16]).without_ntp();
+        let (tx, rx) = mpsc::channel();
+        let tx = Arc::new(Mutex::new(tx));
+        let sink = MoonEventSink::callback(move |event| {
+            if let MoonClientEvent::Lifecycle(event) = event {
+                let _ = tx.lock().unwrap().send(event);
+            }
+        });
+
+        let client = MoonClient::connect_with_sink(
+            cfg,
+            ConnectConfig::new(InitConfig::default())
+                .with_connect_timeout(Duration::from_millis(50)),
+            sink,
+        )
+        .expect("runtime should start");
+
+        assert!(
+            client.drain_lifecycle_events().is_empty(),
+            "connect_with_sink must not secretly install the default queue adapter"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_connect_failed = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(LifecycleEvent::ConnectFailed { .. }) => {
+                    saw_connect_failed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            saw_connect_failed,
+            "callback sink should receive ConnectFailed from unreachable test endpoint"
+        );
+
+        client.disconnect().expect("shutdown should be queued");
+        client.wait_finished().expect("runtime should exit");
     }
 }

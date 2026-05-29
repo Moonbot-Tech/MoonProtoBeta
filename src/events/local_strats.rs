@@ -131,6 +131,21 @@ impl EventDispatcher {
             .or_else(|| self.local_strategy_snapshot_reply())
     }
 
+    pub(crate) fn pending_or_local_strategy_snapshot_reply(
+        &mut self,
+    ) -> Option<StrategySnapshotReply> {
+        let Some(uid) = self.pending_strategy_snapshot_request_uid.take() else {
+            return self.local_strategy_snapshot_reply();
+        };
+        match self.strategy_snapshot_reply(uid) {
+            Some(reply) => Some(reply),
+            None => {
+                self.pending_strategy_snapshot_request_uid = Some(uid);
+                None
+            }
+        }
+    }
+
     pub(crate) fn local_strategy_snapshot_reply(&mut self) -> Option<StrategySnapshotReply> {
         let cache = self.strats.snapshot_payload_cache()?;
         Some(StrategySnapshotReply::from_payload(

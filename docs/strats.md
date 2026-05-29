@@ -18,6 +18,9 @@ the runtime answers server `TStratSnapshotRequest` automatically, and it
 applies strategy snapshots/deletes/checked updates received from the server. If
 user code provides an explicit empty list, the client has no local strategies;
 the current server snapshot is still available through the same read API.
+When the server asks for a client snapshot before Init is complete, the request
+is remembered and answered during post-init resync after the strategy schema and
+owned strategy state are ready.
 
 Init also requests the live strategy schema with
 `TStratSchemaRequest` and stores the decoded `TStratSchema` in
@@ -111,7 +114,7 @@ let Some(state) = client.snapshot() else { return; };
 let schema = state
     .strats()
     .strategy_schema()
-    .expect("MoonClient::connect completed, so schema is available");
+    .expect("schema is available after LifecycleEvent::Ready");
 
 for kind in &schema.kinds {
     println!("kind {} {}", kind.ordinal, kind.name);
@@ -132,14 +135,17 @@ for field in &schema.fields {
 
 - `format_version`;
 - `kinds`: strategy kind ordinal and server UI name;
-- `fields`: field name, Delphi TypeID, typed field kind, raw flags, UI kind,
-  default value when Delphi marked it non-zero, and visibility bitset decoded
-  to strategy-kind ordinals;
+- `fields`: field name, typed field kind, UI kind, default value when Delphi
+  marked it non-zero, and visibility decoded to strategy-kind ordinals;
 - `StrategyFieldLayout`: no layout marker, comment, filter class, or chapter
   class with its chapter name;
-- `static_picklist_raw` and `static_picklist`;
+- `static_picklist`;
 - `dynamic_picklist`: `UseHookStrategy` means local MoonHook strategies with an
   empty first item; `ComboStart` / `ComboEnd` mean all local strategies.
+
+Use `field.visible_for_kind(raw_ordinal)` or
+`field.visible_for_strategy_kind(kind)` for visibility checks. The internal
+bitmask used by the serializer is not part of the public UI schema surface.
 
 Schema TypeIDs use the same value model as strategy snapshots:
 
@@ -204,9 +210,7 @@ only when it cannot auto-buy and does not run detection on the kernel; in
 just checked.
 
 ```rust
-use moonproto::commands::strategy_serializer::{
-    StrategyActiveMode, StrategyKind, StrategySnapshot,
-};
+use moonproto::{StrategyActiveMode, StrategyKind};
 
 let is_local = strategy.is_active(StrategyActiveMode::ActiveClient);
 let kind = strategy.kind();
@@ -232,7 +236,7 @@ These are read helpers only. They do not make the active library send listing
 automation requests by themselves.
 
 ```rust
-use moonproto::commands::strategy_serializer::StrategySnapshot;
+use moonproto::StrategySnapshot;
 
 let strategies: Vec<StrategySnapshot> = load_current_strategies();
 let init = InitConfig {
@@ -250,22 +254,24 @@ let all: Vec<StrategySnapshot> = client
     .unwrap_or_default();
 ```
 
-`set_local_strategy_epoch` is Delphi `cfg.ServerStratEpoch` for this local
-client's strategy list. It is the value written into outgoing
-`TStratSnapshot.ServerEpoch` for both post-init strategy snapshot send and
-answers to `TStratSnapshotRequest`; it is not the remote server epoch learned
-from incoming snapshots. When user code edits local strategies, call
-`mark_local_strategies_changed()` to mirror Delphi `Inc(cfg.ServerStratEpoch)`.
+The epoch passed to `InitialStrategies::new` is Delphi
+`cfg.ServerStratEpoch` for this local client's strategy list. It is the value
+written into outgoing `TStratSnapshot.ServerEpoch` for both post-init strategy
+snapshot send and answers to `TStratSnapshotRequest`; it is not the remote
+server epoch learned from incoming snapshots. If the application reloads its
+whole local strategy list after `MoonClient::connect`, use
+`client.strategies().send_snapshot_batch(strategies)`. The runtime updates the
+library-owned local list and sends the Delphi `TStratSnapshot` batch from the
+same schema that Init fetched from the server. The call queues intent and
+returns immediately; server echo/update arrives later through `Event::Strat`.
 
-## Snapshot Decoder
+## Strategy Fields
 
 ```rust
-use moonproto::commands::strategy_serializer::{
-    field_names, parse_strategy_batch, FieldValue, StrategyFields,
-};
+use moonproto::{field_names, FieldValue, StrategyFields};
 
-let batch = parse_strategy_batch(raw_data).expect("bad strategy snapshot");
-for strategy in &batch.strategies {
+let Some(state) = client.snapshot() else { return; };
+for strategy in state.strategy_snapshots() {
     if let Some(name) = strategy.fields.get_string(field_names::STRATEGY_NAME) {
         println!("{}: {}", strategy.strategy_id, name);
     }
@@ -308,13 +314,17 @@ UInt64(u64)
 Single(f32)
 ```
 
+Raw serializer parsers remain available for diagnostics and custom protocol
+tools, but they are hidden from the normal API surface. Applications should use
+decoded `StratsState` from `MoonClient::snapshot()`.
+
 ## Sending Strategy Commands
 
-Regular applications use `MoonClient`:
+Regular applications use `client.strategies()`:
 
 ```rust
-client.strat_sell_price_update(strategy_id, sell_price)?;
-client.strat_delete(strategy_id, folder_path)?;
+client.strategies().sell_price_update(strategy_id, sell_price)?;
+client.strategies().delete(strategy_id, folder_path)?;
 ```
 
 Do not send `TStratSnapshotRequest` from client code. It is a server-to-client
@@ -327,12 +337,12 @@ list as `TStratSnapshot`, and later the server may send
 applies it to its local strategy if the strategy exists; the active client does
 not treat the same command as a server-to-client state update.
 
-Use `MoonClient` for regular UI integration:
+Use the same handle for regular UI integration:
 
 ```rust
-client.strat_sell_price_update(strategy_id, sell_price)?;
-client.set_strategy_checked(strategy_id, true)?;
-client.send_strategy_checked_delta()?;
+client.strategies().sell_price_update(strategy_id, sell_price)?;
+client.strategies().set_checked(strategy_id, true)?;
+client.strategies().send_checked_delta()?;
 ```
 
 For normal active-library flow, pass the local list before init and let the
@@ -356,36 +366,34 @@ matches Delphi `TStrategies.GetCheckedDelta`: local UI changes update
 items where `checked != prev_checked`.
 
 ```rust
-client.set_strategy_checked(strategy_id, true)?;
-client.send_strategy_checked_delta()?;
-client.strategy_start_stop(true)?;
+client.strategies().set_checked(strategy_id, true)?;
+client.strategies().send_checked_delta()?;
+client.strategies().start()?;
 ```
 
-`send_strategy_checked_delta` sends a checked-state delta only when the delta is
-non-empty. `strategy_start_stop` always sends the start/stop command after the
+`send_checked_delta` sends a checked-state delta only when the delta is
+non-empty. `strategies().start()` always sends the start command after the
 client's Init gate is open; the checked delta may be empty because the same
 command also carries the start/stop action. Both helpers keep `prev_checked`
 unchanged until the server confirms the checked-state change.
 
-Low-level compatibility tools may still call the raw checked-sync/start-stop
-helpers when they already have the exact checked-item array. Regular
+Low-level compatibility tools may still use raw checked-sync/start-stop and
+snapshot helpers, but those helpers are hidden diagnostics. Regular
 applications should prefer `MoonClient` helpers so the library-owned strategy
 state stays authoritative. Checked-state echo messages are inbound only; client
 code must not send them.
 
-The lower-level typed batch API remains available for explicit strategy sends.
-It serializes the `StrategySnapshot` values, computes `ClientMaxLastDate`, and
-sends the full strategy snapshot body. Pass the live schema that
-`run_init_sequence` stored in `dispatcher.strats().strategy_schema()`:
+To replace the whole local strategy list after startup, use the same
+active-library strategy handle:
 
 ```rust
-let schema = dispatcher
-    .strats()
-    .strategy_schema()
-    .expect("Init fetched TStratSchema");
-
-client.strat_send_snapshot_batch(server_epoch, true, schema, &strategies);
+client
+    .strategies()
+    .send_snapshot_batch(load_current_strategies())?;
 ```
+
+This is still an Active Lib intent, not a raw protocol call: the runtime owns
+the local list used for future `TStratSnapshotRequest` replies.
 
 Strategy snapshot serialization mirrors Delphi `TStrategySerializer` lengths:
 field-name and folder-path dictionary entries use a `Byte` length and write
@@ -400,27 +408,18 @@ It writes only schema-known public `TStrategy` fields visible for the strategy
 kind, only when the value has the schema TypeID, and skips values equal to the
 schema default. Defaults come from Delphi `TStrategy.Create` through
 `StrategySchemaBuilder`; runtime color defaults such as `SellOrderColor` and
-`BuyOrderColor` are therefore not hardcoded in Rust. If a caller already has the
-exact compressed Delphi serializer bytes, prefer `strat_send_snapshot_payload(...)`.
+`BuyOrderColor` are therefore not hardcoded in Rust.
 
 When decoding a snapshot after schema is available, known Delphi strategy fields
 also keep type checks through the same schema: if the incoming TypeID does not
 match the schema/RTTI field type, the value is skipped instead of being exposed
-as a wrongly typed field. Generic `parse_strategy_batch(...)` remains available
-for diagnostics when no schema is available.
-
-If the application already has a compressed `TStrategySerializer` payload, use
-`strat_send_snapshot_payload(server_epoch, client_max_last_date, full, data)`.
-Passing an empty `data` slice means an empty strategy list; the library encodes
-it as a valid non-empty `TStrategySerializer` payload instead of sending
-an empty snapshot body.
+as a wrongly typed field.
 
 For advanced override replies, register a fresh snapshot provider on the
 dispatcher:
 
 ```rust
-use moonproto::StrategySnapshotReply;
-use moonproto::commands::strategy_serializer::StrategySnapshot;
+use moonproto::{StrategySnapshot, StrategySnapshotReply};
 
 let schema = dispatcher
     .strats()
@@ -447,4 +446,4 @@ requests a non-empty local snapshot before schema has arrived, the dispatcher
 requests `TStratSchema` and sends the pending snapshot after `SchemaApplied`;
 it does not use a stale Rust field table. A provider that returns
 `StrategySnapshotReply::from_payload(..., Vec::new())` gets the same empty-list
-normalization as `strat_send_snapshot_payload`.
+normalization as the normal owned empty-strategy snapshot path.

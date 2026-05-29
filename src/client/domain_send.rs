@@ -9,7 +9,9 @@ impl Client {
         encrypted: bool,
         max_retries: i32,
     ) -> bool {
-        if !self.domain_ready_for_typed_send() {
+        if !self.domain_ready_for_typed_send()
+            && !outgoing_allowed_before_domain_ready(cmd.to_byte(), &data)
+        {
             return false;
         }
         self.send_cmd(data, cmd, priority, encrypted, max_retries);
@@ -25,7 +27,9 @@ impl Client {
         max_retries: i32,
         u_key: UniqueKey,
     ) -> bool {
-        if !self.domain_ready_for_typed_send() {
+        if !self.domain_ready_for_typed_send()
+            && !outgoing_allowed_before_domain_ready(cmd.to_byte(), &data)
+        {
             return false;
         }
         self.send_cmd_keyed(data, cmd, priority, encrypted, max_retries, u_key);

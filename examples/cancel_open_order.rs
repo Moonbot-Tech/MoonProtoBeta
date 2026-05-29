@@ -7,7 +7,6 @@
 //!   cargo run --example cancel_open_order --release -- "<key_base64>" [host:port] [order_uid] [--send]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::OrderEvent;
@@ -48,13 +47,25 @@ fn main() {
         }
     };
 
-    let mut orders = match client.blocking_request_order_snapshot(Duration::from_secs(15)) {
-        Ok(orders) => orders,
-        Err(err) => {
-            eprintln!("[orders] snapshot failed: {err}");
-            std::process::exit(3);
-        }
-    };
+    if let Err(err) = client.orders().request_snapshot() {
+        eprintln!("[orders] snapshot request failed: {err}");
+        std::process::exit(3);
+    }
+    let ready = common::wait_until(Duration::from_secs(15), || {
+        client
+            .drain_events()
+            .into_iter()
+            .any(|event| matches!(event, Event::Order(OrderEvent::Snapshot)))
+    });
+    if !ready {
+        eprintln!("[orders] timed out waiting for OrderEvent::Snapshot");
+        std::process::exit(3);
+    }
+
+    let mut orders: Vec<_> = client
+        .snapshot()
+        .map(|snapshot| snapshot.orders().iter().cloned().collect())
+        .unwrap_or_default();
     orders.retain(|order| !order.status.is_terminal());
     orders.sort_by_key(|order| order.uid);
 
@@ -82,11 +93,7 @@ fn main() {
     }
 
     match client.orders().cancel(order.uid) {
-        Ok(true) => println!("[send] cancel queued; listening briefly for order updates..."),
-        Ok(false) => {
-            println!("[send] cancel was not queued; live order state is no longer cancellable");
-            return;
-        }
+        Ok(()) => println!("[send] cancel intent queued; listening briefly for order updates..."),
         Err(err) => {
             eprintln!("[send] failed: {err}");
             std::process::exit(4);
@@ -95,15 +102,16 @@ fn main() {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Order(OrderEvent::Updated(uid))) => println!("[order] updated uid={uid}"),
-            Ok(Event::Order(OrderEvent::Removed(uid))) => println!("[order] removed uid={uid}"),
-            Ok(Event::Order(OrderEvent::Ignored { uid, reason })) => {
-                println!("[order] ignored uid={uid} reason={reason:?}");
+        for event in client.drain_events() {
+            match event {
+                Event::Order(OrderEvent::Updated(uid)) => println!("[order] updated uid={uid}"),
+                Event::Order(OrderEvent::Removed(uid)) => println!("[order] removed uid={uid}"),
+                Event::Order(OrderEvent::Ignored { uid, reason }) => {
+                    println!("[order] ignored uid={uid} reason={reason:?}");
+                }
+                _ => {}
             }
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

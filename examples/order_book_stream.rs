@@ -4,7 +4,6 @@
 //!   cargo run --example order_book_stream --release -- "<key_base64>" [host:port] [market] [watch_seconds]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::OrderBookEvent;
@@ -49,32 +48,33 @@ fn main() {
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::OrderBook(event)) => match event {
-                OrderBookEvent::Apply {
-                    market_name,
-                    kind,
-                    is_full,
-                    seq,
-                    top,
-                    buys,
-                    sells,
-                    ..
-                } => {
-                    applies += 1;
-                    if is_full {
-                        fulls += 1;
-                    }
-                    let name = market_name.as_deref().unwrap_or("<unknown>");
-                    let bid = top
-                        .bid
-                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                        .unwrap_or_else(|| "none".to_string());
-                    let ask = top
-                        .ask
-                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                        .unwrap_or_else(|| "none".to_string());
-                    println!(
+        for event in client.drain_events() {
+            match event {
+                Event::OrderBook(event) => match event {
+                    OrderBookEvent::Apply {
+                        market_name,
+                        kind,
+                        is_full,
+                        seq,
+                        top,
+                        buys,
+                        sells,
+                        ..
+                    } => {
+                        applies += 1;
+                        if is_full {
+                            fulls += 1;
+                        }
+                        let name = market_name.as_deref().unwrap_or("<unknown>");
+                        let bid = top
+                            .bid
+                            .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                            .unwrap_or_else(|| "none".to_string());
+                        let ask = top
+                            .ask
+                            .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                            .unwrap_or_else(|| "none".to_string());
+                        println!(
                         "[book] market={} kind={} full={} seq={} bids={} asks={} top_bid={} top_ask={}",
                         name,
                         book_kind_name(kind.as_u8()),
@@ -85,26 +85,26 @@ fn main() {
                         bid,
                         ask
                     );
-                }
-                OrderBookEvent::Ignored {
-                    market_index,
-                    book_kind,
-                    seq,
-                    reason,
-                } => {
-                    println!(
-                        "[book] ignored idx={} kind={} seq={} reason={reason:?}",
+                    }
+                    OrderBookEvent::Ignored {
                         market_index,
-                        book_kind_name(book_kind),
-                        seq
-                    );
-                }
-                OrderBookEvent::RequestFullNeeded { .. } => {}
-            },
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        kind,
+                        seq,
+                        reason,
+                    } => {
+                        println!(
+                            "[book] ignored idx={} kind={} seq={} reason={reason:?}",
+                            market_index,
+                            book_kind_name(kind.as_u8()),
+                            seq
+                        );
+                    }
+                    OrderBookEvent::RequestFullNeeded { .. } => {}
+                },
+                _ => {}
+            }
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     println!("[done] applies={applies} fulls={fulls}");

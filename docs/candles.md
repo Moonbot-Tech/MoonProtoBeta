@@ -4,7 +4,7 @@ For normal Active Lib usage, candles are retained market history, not a raw
 chunked response object.
 
 When an application subscribes to trades through `InitConfig.subscribe_trades`,
-`subscribe_all_trades`, or `subscribe_trades_for`, the runtime requests the
+`streams().subscribe_all_trades`, or `streams().subscribe_trades_for`, the runtime requests the
 initial full 5m candles snapshot exactly once for the active storage scope. After
 the chunked response is merged and parsed, Active Lib applies it to retained
 per-market history and emits `Event::CandlesSnapshot` only after the history
@@ -14,7 +14,7 @@ candle and derived candle/volume state.
 ```rust
 use moonproto::TradesStreamMode;
 
-client.subscribe_trades_for(TradesStreamMode::TradesOnly, ["BTCUSDT"])?;
+client.streams().subscribe_trades_for(TradesStreamMode::TradesOnly, ["BTCUSDT"])?;
 
 // Later, after events/snapshot refresh:
 let Some(state) = client.snapshot() else { return; };
@@ -27,6 +27,10 @@ if let Some(readers) = state.market_history_readers("BTCUSDT") {
     }
 }
 ```
+
+Snapshot history reads are non-blocking. They return `None` until the retained
+history worker has published the market's read handle; the UI should try again
+on the next event/tick instead of waiting.
 
 If the subscription scope is limited, candles are retained only for that scope.
 If trades storage is disabled, chunked candles are not kept in market history.
@@ -56,7 +60,7 @@ diagnostic/protocol detail.
 
 ## CoinCard History
 
-`request_coin_card_candles(market, kind)` is a demand-driven, non-blocking UI
+`candles().request_coin_card(market, kind)` is a demand-driven, non-blocking UI
 request. It mirrors Delphi's CoinCard path: UI marks the market as needing deep
 history, a background owner calls blocking `Engine.getDeepHistory`, then
 `TMarket.CoinCardCandles` is updated.
@@ -67,7 +71,7 @@ These rows are separate from retained 5m history. Typical UI usage:
 use moonproto::commands::candles::DeepHistoryKind;
 use moonproto::Event;
 
-let ticket = client.request_coin_card_candles("BTCUSDT", DeepHistoryKind::Hour4)?;
+let ticket = client.candles().request_coin_card("BTCUSDT", DeepHistoryKind::Hour4)?;
 
 for event in client.drain_events() {
     if let Event::CoinCardCandles(ev) = event {
@@ -88,6 +92,4 @@ if let Some(snapshot) = client.snapshot() {
 `DeepPrice` has the same `open()`, `high()`, `low()`, `close()`, and
 `volume()` / `time_delphi()` helpers.
 
-`blocking_request_coin_card_candles(market, kind, timeout)` exists for scripts,
-tests, and diagnostics that deliberately need a synchronous `Vec<DeepPrice>`.
 Desktop UI code should use the non-blocking request plus event/snapshot state.

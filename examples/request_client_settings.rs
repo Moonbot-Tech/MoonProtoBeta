@@ -1,10 +1,14 @@
-//! Request the current UI/settings snapshot through `MoonClient`.
+//! Request the current UI/settings snapshot through the public `MoonClient`
+//! event/snapshot path.
 //!
 //! Run:
 //!   cargo run --example request_client_settings --release -- "<key_base64>" [host:port]
 
 use std::env;
 use std::time::Duration;
+
+use moonproto::state::SettingsEvent;
+use moonproto::Event;
 
 mod common;
 
@@ -23,13 +27,29 @@ fn main() {
         }
     };
 
-    let settings = match client.blocking_request_client_settings(Duration::from_secs(15)) {
-        Ok(settings) => settings,
-        Err(err) => {
-            eprintln!("[request] failed: {err}");
-            std::process::exit(3);
-        }
-    };
+    if let Err(err) = client.settings().refresh() {
+        eprintln!("[request] failed: {err}");
+        std::process::exit(3);
+    }
+    let ready = common::wait_until(Duration::from_secs(15), || {
+        client
+            .drain_events()
+            .into_iter()
+            .any(|event| matches!(event, Event::Settings(SettingsEvent::ClientSettingsUpdated)))
+    });
+    if !ready {
+        eprintln!("[request] timed out waiting for SettingsEvent::ClientSettingsUpdated");
+        std::process::exit(3);
+    }
+
+    let snapshot = client
+        .snapshot()
+        .expect("settings event must publish dispatcher snapshot");
+    let settings = snapshot
+        .settings()
+        .client_settings
+        .as_ref()
+        .expect("settings event must store ClientSettingsCommand");
 
     println!(
         "[settings] uid={} x_sell={} x_sell_scalp={} stop_loss={} use_take_profit={} take_profit={}",

@@ -32,8 +32,8 @@ impl EventDispatcher {
                 let book_kind = pkt.book_kind;
                 let market_name = self
                     .markets
-                    .market_name_by_index(market_index)
-                    .map(str::to_owned);
+                    .market_by_index(market_index)
+                    .map(|handle| handle.name_arc());
                 self.order_book_events.clear();
                 self.order_books
                     .on_packet_into(pkt, now_ms, &mut self.order_book_events);

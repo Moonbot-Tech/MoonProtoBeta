@@ -4,22 +4,16 @@
 //! queues, slicing, pending Engine API responses, lifecycle events, and the
 //! active read-model work performed by [`crate::events::EventDispatcher`].
 //! Regular applications should use [`MoonClient`], which owns the runtime thread
-//! and keeps the session alive until `stop()` or drop.
-//!
-//! This module also exposes low-level command queue primitives for protocol
-//! tools and custom runtimes.
+//! and keeps the session alive until `disconnect()` or drop.
 
 use crate::api_pending::ApiPending;
 use crate::commands::candles::{
-    parse_coin_card_candles_response, parse_request_candles_data_response,
-    parse_request_candles_data_response_partial_like_delphi, CandlesAggregator, CandlesChunkResult,
-    DeepPrice,
+    parse_request_candles_data_response, parse_request_candles_data_response_partial_like_delphi,
+    CandlesAggregator, CandlesChunkResult,
 };
 use crate::commands::engine_api::{
-    parse_api_expiration_time_response, parse_auth_check_response, parse_base_check_response,
-    parse_engine_response, parse_get_balance_response, parse_query_hedge_mode_response,
-    parse_update_transfer_assets_response, ApiExpirationTime, AuthCheckResponse, EngineMethod,
-    EngineResponse, ServerInfo, TransferAsset,
+    parse_auth_check_response, parse_base_check_response, parse_engine_response, AuthCheckResponse,
+    EngineMethod, EngineResponse,
 };
 use crate::compression;
 use crate::crypto;
@@ -84,18 +78,18 @@ mod subscriptions;
 mod transport_state;
 
 pub use active_runtime::{
-    ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonClient, MoonClientError,
-    MoonOrders, MoonTrade, NewOrderParams, OrderSide, OrderTarget, SellOrderParams,
-    SplitOrderParams, TradesStreamMode,
+    ClosePositionParams, CoinCardCandlesTicket, EngineActionTicket, MoonAccount, MoonBalances,
+    MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot, MoonEventQueue,
+    MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams, MoonTrade,
+    NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, SellOrderParams, SplitOrderParams,
+    TradesStreamMode, VStopParams,
 };
-pub use app_dispatch::{EventFn, EventWithStateFn, OnDataFn};
 pub use bps::BpsCounter;
-#[doc(hidden)]
-pub use candles::MergedCandles;
+pub(crate) use candles::MergedCandles;
 pub use clock::set_ntp_offset;
 pub use config::{
-    AuthStatus, ClientConfig, EngineRequestError, LifecycleEvent, LifecycleFn, RefreshConfig,
-    TradeContextError,
+    AuthStatus, ClientConfig, LifecycleEvent, LifecycleFn, RefreshConfig, TradeContextError,
+    TransportMode,
 };
 #[doc(hidden)]
 pub use diagnostics::ERR_EMU_RATE;
@@ -103,10 +97,9 @@ pub use diagnostics::{
     set_err_emu, ErrEmuCommandDiagnostics, ErrEmuDiagnostics, ErrEmuSlicedBlockDiagnostics,
     ErrEmuSlicedDatagramDiagnostics,
 };
-pub use init::{
-    connect_and_init, run_init_sequence, ConnectConfig, ConnectError, InitConfig, InitError,
-    InitResult, InitialStrategies,
-};
+#[cfg(test)]
+pub(crate) use init::{connect_and_init, run_init_sequence, InitResult};
+pub use init::{ConnectConfig, ConnectError, InitConfig, InitError, InitialStrategies};
 pub use metrics::ProtocolMetricsSnapshot;
 pub use send_queue::{
     SendPriority, UniqueKey, UK_ARB_PRICES, UK_BALANCE_FULL, UK_BASE_UI_SETTINGS, UK_DEX_SWITCH,
@@ -118,10 +111,11 @@ pub use send_queue::{
 pub use sender::{ClientSender, SubscribeError};
 pub use subscriptions::TradesSubscription;
 
-use app_dispatch::{
-    metric_api_method, run_dispatcher_worker, wait_dispatcher_worker_barrier, DispatchSink,
-    DispatcherEventFn, DispatcherWorkItem, RawAppEvent, RunMode, StateAppEvent,
-};
+#[cfg(test)]
+pub(crate) use app_dispatch::OnDataFn;
+#[cfg(test)]
+use app_dispatch::RawAppEvent;
+use app_dispatch::{metric_api_method, DispatchSink, DispatcherEventFn, RunMode};
 pub(crate) use candles::{EngineResponseMeta, PartialCandles};
 pub(crate) use clock::{
     current_utc_hour_slot, delphi_now, delphi_now_raw, get_server_time_delta_global,
@@ -130,8 +124,8 @@ pub(crate) use clock::{
 use config::{CHECK_TAGS_BURST_COUNT, CHECK_TAGS_BURST_SPACING_MS};
 use constants::*;
 use diagnostics::{
-    diagnostic_duplicate_sliced_acks, err_emu_drop_decision, trace_io_enabled,
-    ErrEmuDiagnosticsState,
+    diagnostic_duplicate_sliced_acks, err_emu_drop_decision, fnv1a64, trace_elapsed_ms, trace_head,
+    trace_io_enabled, ErrEmuDiagnosticsState,
 };
 #[cfg(test)]
 use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
@@ -151,11 +145,46 @@ pub(crate) use subscriptions::{
 };
 pub(crate) use transport_state::{DataReadState, ReaderSlicedStats, SentSliced, SlicedAck};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelloWaitState {
+    Idle,
+    PrimaryHelloCold,
+    PrimaryHelloNewSession,
+    PrimaryImFriendSent,
+    RebindHelloAgain,
+}
+
+impl HelloWaitState {
+    #[inline]
+    pub(crate) fn is_waiting(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    #[inline]
+    pub(crate) fn allows_hello_again_retry(self) -> bool {
+        matches!(self, Self::RebindHelloAgain)
+    }
+
+    #[inline]
+    pub(crate) fn allows_who_are_you(self) -> bool {
+        matches!(
+            self,
+            Self::PrimaryHelloCold | Self::PrimaryHelloNewSession | Self::PrimaryImFriendSent
+        )
+    }
+
+    #[inline]
+    pub(crate) fn allows_fine(self) -> bool {
+        matches!(self, Self::PrimaryImFriendSent | Self::RebindHelloAgain)
+    }
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
 
     app_queue_alive: Arc<AtomicBool>,
+    runtime_shutdown: Arc<AtomicBool>,
     // Delphi `SendLock`: raw send queues, SlicedACK queue, and TmpSlider are
     // copied as one short writer snapshot before CheckSeningData.
     send_lock: Arc<Mutex<SendLockState>>,
@@ -178,6 +207,8 @@ pub struct Client {
     need_connect: bool,
     force_disconnect: bool,
     soft_reconnect: bool,
+    hello_wait_state: HelloWaitState,
+    next_primary_hello_new_session: bool,
     waiting_hello: bool,
 
     client_token: u64,
@@ -253,7 +284,6 @@ pub struct Client {
     total_recv_shared: AtomicU64,
     err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
     protocol_metrics: Arc<ProtocolMetrics>,
-    dispatcher_trades_server_token: Arc<AtomicU64>,
     next_port: u16,
     ping_count: u32,
 
@@ -294,7 +324,7 @@ pub struct Client {
     domain_ready_flag: Arc<AtomicBool>,
 
     /// Сохранённый intent первого и единственного init-прохода. Нужен для
-    /// post-reconnect restore без повторного `run_init_sequence`.
+    /// post-reconnect restore без повторного Init.
     domain_restore: DomainRestoreIntent,
 
     /// Был ли когда-нибудь успешный Connected (`Fine` получен ≥1 раз).
@@ -302,12 +332,12 @@ pub struct Client {
     /// при ПЕРВОМ Connected; для всех последующих `fresh = false`.
     was_ever_connected: bool,
 
-    /// Pending candles aggregators по `request_uid`. Заполняется в
-    /// `api_request_candles_data_async`, очищается когда aggregator вернул merged
-    /// (отправили в Receiver) или истёк timeout.
+    /// Internal full-candles snapshot collectors by `request_uid`. Filled by
+    /// the automatic Active Lib snapshot request and cleared when the
+    /// aggregator completes or times out.
     ///
-    /// **Внутренняя работа** — потребитель API не знает об этом поле, видит только
-    /// `mpsc::Receiver<MergedCandles>`.
+    /// Application code does not see this packet-shaped layer; it gets retained
+    /// candles through snapshots/events.
     pending_candles: HashMap<u64, PartialCandles>,
 
     /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
@@ -419,9 +449,8 @@ pub struct Client {
     check_tags_burst_sent: u8,
     last_check_tags_burst_ms: i64,
 
-    /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется в
-    /// [`run_init_sequence`] (или может быть выставлена приложением вручную через
-    /// [`Client::set_server_info`] если init делается своим pattern'ом). До первого
+    /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется во
+    /// время Init (или внутренним тестом через [`Client::set_server_info`]). До первого
     /// успешного BaseCheck — `ServerInfo::default()` (все поля `None`,
     /// `has_identity()=false`).
     ///
@@ -478,6 +507,34 @@ pub struct Client {
 }
 
 impl Client {
+    #[inline]
+    pub(crate) fn set_hello_wait_state(&mut self, state: HelloWaitState) {
+        self.hello_wait_state = state;
+        self.waiting_hello = state.is_waiting();
+    }
+
+    #[inline]
+    pub(crate) fn start_hello_wait(&mut self, state: HelloWaitState, cur_tm: i64) {
+        self.waiting_hello_start = cur_tm;
+        self.set_hello_wait_state(state);
+    }
+
+    #[inline]
+    pub(crate) fn clear_hello_wait_state(&mut self) {
+        self.set_hello_wait_state(HelloWaitState::Idle);
+    }
+
+    #[inline]
+    pub(crate) fn mark_next_primary_hello_new_session(&mut self) {
+        self.next_primary_hello_new_session = true;
+        self.clear_hello_wait_state();
+    }
+
+    #[inline]
+    pub(crate) fn should_accept_want_new_hello(&self) -> bool {
+        !self.authorized || self.need_connect || self.hello_wait_state.allows_hello_again_retry()
+    }
+
     fn has_trades_subscription_intent(&self) -> bool {
         self.subscription_summary.trades_subscribed()
     }
@@ -508,12 +565,12 @@ impl Client {
         // Reader packets and raw send queues are separate so dense incoming
         // streams cannot keep user/API sends behind recv progress.
         let app_queue_alive = Arc::new(AtomicBool::new(true));
+        let runtime_shutdown = Arc::new(AtomicBool::new(false));
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
         let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
         let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
         let protocol_metrics = Arc::new(ProtocolMetrics::default());
-        let dispatcher_trades_server_token = Arc::new(AtomicU64::new(0));
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
         let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
         let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
@@ -536,6 +593,7 @@ impl Client {
         Self {
             cfg,
             app_queue_alive,
+            runtime_shutdown,
             send_lock,
             pending_h: Vec::new(),
             sending: Vec::new(),
@@ -551,6 +609,8 @@ impl Client {
             need_connect: true,
             force_disconnect: false,
             soft_reconnect: false,
+            hello_wait_state: HelloWaitState::Idle,
+            next_primary_hello_new_session: false,
             waiting_hello: false,
             client_token: rand::random::<u64>(),
             server_token: 0,
@@ -604,7 +664,6 @@ impl Client {
             total_recv_shared: AtomicU64::new(0),
             err_emu_diagnostics,
             protocol_metrics,
-            dispatcher_trades_server_token,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),

@@ -1,10 +1,9 @@
 //! Low-level MoonProto protocol primitives.
 //!
 //! This module exposes command ordinals plus helpers for crypted payloads,
-//! handshake packets, sliced datagrams, and ACK sliders. Most applications do
-//! not need these APIs directly; use `Client`, `EventDispatcher`, and
-//! `commands::*` builders unless you are writing protocol diagnostics or a
-//! custom transport tool.
+//! handshake packets, sliced datagrams, and ACK sliders. Applications should
+//! use `MoonClient`, events, and snapshots. Use these primitives only for
+//! protocol diagnostics or a custom transport/runtime tool.
 
 pub mod control;
 pub mod crypted;
@@ -14,7 +13,7 @@ pub mod slider;
 
 /// MoonProto command ordinal matching Delphi `TMoonProtoCommand`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Command(pub u8);
+pub struct Command(u8);
 
 #[allow(non_upper_case_globals)]
 impl Command {

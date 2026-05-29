@@ -8,7 +8,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -61,7 +61,7 @@ fn send_phase_runs_with_ready_send_queue() {
     );
 
     let total_sent_before = client.total_sent();
-    client.run_with_dispatcher_queued(Duration::from_millis(50), &mut dispatcher);
+    client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert!(
         client.send_lock.lock().unwrap().is_empty(),
@@ -188,109 +188,6 @@ fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
 }
 
 #[test]
-fn dispatcher_event_callback_block_does_not_extend_protocol_writer_tick() {
-    let mut client = Client::new(dummy_cfg());
-    client.testing_set_domain_ready(true);
-    client.authorized = true;
-    client.auth_status = AuthStatus::AuthDone;
-    client.prev_auth_status = AuthStatus::AuthDone;
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&0.0f64.to_le_bytes());
-    payload.extend_from_slice(b"queued app event");
-    send_server_packet_to_client_socket(&client, Command::LogMsg, &payload);
-
-    let mut dispatcher = EventDispatcher::new();
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        client.run_with_dispatcher(
-            Duration::from_millis(20),
-            &mut dispatcher,
-            Box::new(move |event| {
-                assert!(matches!(event, crate::events::Event::ServerLog { .. }));
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            }),
-        );
-        client
-    });
-
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("event callback started");
-    thread::sleep(Duration::from_millis(80));
-    release_tx.send(()).unwrap();
-
-    let client = handle.join().expect("client run thread");
-    let snapshot = client.protocol_metrics_snapshot();
-    assert!(
-        snapshot.writer_tick_max_ns < 50_000_000,
-        "blocking event app callback leaked into protocol tick: max={}ns",
-        snapshot.writer_tick_max_ns
-    );
-}
-
-#[test]
-fn dispatcher_state_callback_block_does_not_extend_protocol_writer_tick() {
-    let mut client = Client::new(dummy_cfg());
-    client.testing_set_domain_ready(true);
-    client.authorized = true;
-    client.auth_status = AuthStatus::AuthDone;
-    client.prev_auth_status = AuthStatus::AuthDone;
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    let settings = crate::commands::ui::ClientSettingsCommand {
-        uid: 0x5151,
-        x_sell: 3,
-        ..Default::default()
-    };
-    send_server_packet_to_client_socket(
-        &client,
-        Command::UI,
-        &crate::commands::ui::build_client_settings(&settings),
-    );
-
-    let mut dispatcher = EventDispatcher::new();
-    let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        client.run_with_dispatcher_state(
-            Duration::from_millis(20),
-            &mut dispatcher,
-            Box::new(move |event, state| {
-                assert!(matches!(
-                    event,
-                    crate::events::Event::Settings(
-                        crate::state::SettingsEvent::ClientSettingsUpdated
-                    )
-                ));
-                assert_eq!(
-                    state.settings().client_settings.as_ref().map(|s| s.uid),
-                    Some(0x5151)
-                );
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            }),
-        );
-        client
-    });
-
-    started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("state event callback started");
-    thread::sleep(Duration::from_millis(80));
-    release_tx.send(()).unwrap();
-
-    let client = handle.join().expect("client run thread");
-    let snapshot = client.protocol_metrics_snapshot();
-    assert!(
-        snapshot.writer_tick_max_ns < 50_000_000,
-        "blocking state app callback leaked into protocol tick: max={}ns",
-        snapshot.writer_tick_max_ns
-    );
-}
-
-#[test]
 fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
     let mut client = Client::new(dummy_cfg());
     client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
@@ -307,7 +204,7 @@ fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
 
     let handle = thread::spawn(move || {
         let mut dispatcher = EventDispatcher::new();
-        client.run_with_dispatcher_queued(Duration::from_millis(20), &mut dispatcher);
+        client.run_dispatcher_steps_for_test(1, &mut dispatcher);
         client
     });
 
@@ -342,12 +239,48 @@ fn app_send_queue_is_not_blocked_by_data_read_delivery() {
         0,
     );
 
-    client.run_with_dispatcher_queued(Duration::from_millis(5), &mut dispatcher);
+    client.run_dispatcher_steps_for_test(1, &mut dispatcher);
 
     assert!(
         !client.sending.is_empty(),
         "app/user sends must use the separate outgoing queue, not wait behind pending reader work"
     );
+}
+
+#[test]
+fn production_protocol_step_does_not_drain_udp_until_empty() {
+    let mut client = Client::new(dummy_cfg());
+    client.testing_set_domain_ready(true);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    client.prev_auth_status = AuthStatus::AuthDone;
+    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.register_recv_poller();
+
+    send_server_packet_to_client_socket(&client, Command::UI, &[0xAA]);
+    send_server_packet_to_client_socket(&client, Command::UI, &[0xBB]);
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_cb = Arc::clone(&events);
+    let mut mode = RunMode::Callback {
+        on_data: Box::new(move |cmd, payload| {
+            events_cb.lock().unwrap().push((cmd, payload.to_vec()));
+        }),
+    };
+
+    assert!((ProtocolCore {
+        client: &mut client
+    })
+    .run_step(&mut mode));
+    drop(mode);
+
+    let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "production run_step must process a bounded receive unit before returning to runtime publish/command work"
+    );
+    assert_eq!(events[0], (Command::UI, vec![0xAA]));
 }
 
 #[test]

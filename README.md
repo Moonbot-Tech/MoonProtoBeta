@@ -94,7 +94,7 @@ Basic application shape:
 ```rust
 use moonproto::{
     import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-    MoonClient, NewOrderParams, OrderSide, TradesStreamMode,
+    MoonClient, NewOrderParams, OrderSide, TradesStreamMode, TransportMode,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let keys = import_key(&key_b64).expect("invalid MoonBot key");
     let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
-        .with_transport_mode(0);
+        .with_transport_mode(TransportMode::V0);
 
     let client = MoonClient::connect(
         cfg,
@@ -122,7 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
-    client.subscribe_orderbook("ETHUSDT")?;
+    // GUI apps do this from their normal update/event callback.
+    for lifecycle in client.drain_lifecycle_events() {
+        if matches!(lifecycle, moonproto::LifecycleEvent::Ready) {
+            println!("MoonProto ready");
+        }
+    }
+
+    client.streams().subscribe_orderbook("ETHUSDT")?;
     // After the user chooses a market/order side:
     // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
     // After an order appears in events/snapshots:
@@ -136,24 +143,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("orders={}", snapshot.orders().len());
     }
 
-    client.stop()?;
+    client.disconnect()?;
+    client.wait_finished()?;
 
     Ok(())
 }
 ```
 
-`MoonClient` owns the runtime thread. Init is one-time per session. After Init,
+`MoonClient` owns the runtime thread and `connect` returns immediately. Init is
+one-time per session; readiness arrives as `LifecycleEvent::Ready`. After Init,
 reconnect restore, market refresh, saved subscriptions, orderbook full resync,
 trades gap recovery, and pending Engine API dispatch are owned by the library
-until `stop()` or drop.
+until `disconnect()` or drop.
 See `docs/active_lib.md` for the maintained-state contract.
 
 Engine API helpers that mutate server/exchange state also run through the owned
 runtime and return immediately after queuing the intent. Completion arrives as
 `Event::EngineAction` / `Event::EngineResponse`. Examples:
-`client.set_leverage(...)`, `client.set_hedge_mode(...)`,
-`client.cancel_all_orders(...)`, `client.confirm_risk_limit(...)`, and
-`client.transfer_asset(...)`.
+`client.account().set_leverage(...)`, `client.account().set_hedge_mode(...)`,
+`client.account().cancel_all_orders(...)`, `client.account().confirm_risk_limit(...)`,
+and `client.balances().transfer_asset(...)`.
 
 ## Tests
 
@@ -177,12 +186,15 @@ $env:MOONPROTO_FIRETEST_PROFILE = "quick"
 cargo test --release --test fire_test -- --ignored --nocapture
 ```
 
+For a baseline without client-side packet loss, set
+`MOONPROTO_FIRETEST_ERR_EMU=0`; the default is 10%.
+
 `tests/fire_test.rs` is the main live health test for the active library.
 
 Quick profile target is under 30 seconds and checks one client:
 
 - connect, AuthDone, InitDone;
-- BaseCheck, AuthCheck, markets, indexes, market update;
+- BaseCheck, AuthCheck, markets/server-index map, market update;
 - strategy schema receive/apply;
 - trades and orderbook subscriptions;
 - retained trades/LastPrice/derived history state;
@@ -221,15 +233,9 @@ Important ones:
 - `trades_stream.rs`: trades subscription and retained market tail.
 - `order_book_stream.rs` / `order_book_top.rs`: orderbook stream/read model.
 - `history_bars.rs`: retained candle/history read path.
-- `request_candles_data.rs`: diagnostic chunked-candles protocol tool.
 - `order_snapshot.rs`: fresh order snapshot through `MoonClient`.
 - `cancel_open_order.rs`: tracked cancel intent through `client.orders()`.
 - `multi_client_test.rs`: two independent `MoonClient` runtimes.
-
-Diagnostic / protocol-tool examples intentionally use lower-level APIs:
-
-- `loss_logger.rs`: live loss/gap diagnostics.
-- `stress_client.rs`: two-client stress and protocol-loss diagnostics.
 
 ## API Docs
 

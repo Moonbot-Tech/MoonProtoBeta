@@ -14,10 +14,11 @@ pub struct ProtocolMetricsSnapshot {
     /// acceptance.
     pub recv_count: u64,
     /// Total nanoseconds spent in the reader-side protocol packet path after
-    /// `recv_from` returned.
+    /// `recv_from` returned, excluding deliberate protocol waits.
     pub reader_protocol_count: u64,
     pub reader_protocol_ns: u64,
-    /// Maximum single reader-side protocol packet duration, in nanoseconds.
+    /// Maximum single reader-side protocol packet CPU-ish duration, in
+    /// nanoseconds.
     pub reader_protocol_max_ns: u64,
     /// Command and payload length that produced `reader_protocol_max_ns`.
     ///
@@ -29,6 +30,15 @@ pub struct ProtocolMetricsSnapshot {
     pub reader_protocol_over_100us: u64,
     pub reader_protocol_over_1ms: u64,
     pub reader_protocol_over_5ms: u64,
+    /// Deliberate Delphi-compatible waits inside reader-side protocol handlers.
+    ///
+    /// These are not CPU work. The known example is the 32 ms `WhoAreYou` ->
+    /// duplicate `ImFriend` barrier.
+    pub reader_protocol_wait_count: u64,
+    pub reader_protocol_wait_ns: u64,
+    pub reader_protocol_wait_max_ns: u64,
+    pub reader_protocol_wait_max_cmd: u8,
+    pub reader_protocol_wait_max_payload_len: u64,
     /// Writer/orchestrator loop iterations.
     pub writer_tick_count: u64,
     /// Total nanoseconds spent in writer/orchestrator loop iterations.
@@ -98,6 +108,11 @@ pub(crate) struct ProtocolMetrics {
     reader_protocol_over_100us: AtomicU64,
     reader_protocol_over_1ms: AtomicU64,
     reader_protocol_over_5ms: AtomicU64,
+    reader_protocol_wait_count: AtomicU64,
+    reader_protocol_wait_ns: AtomicU64,
+    reader_protocol_wait_max_ns: AtomicU64,
+    reader_protocol_wait_max_cmd: AtomicU64,
+    reader_protocol_wait_max_payload_len: AtomicU64,
     writer_tick_count: AtomicU64,
     writer_tick_ns: AtomicU64,
     writer_tick_max_ns: AtomicU64,
@@ -239,6 +254,14 @@ impl ProtocolMetrics {
             reader_protocol_over_100us: self.reader_protocol_over_100us.load(Ordering::Relaxed),
             reader_protocol_over_1ms: self.reader_protocol_over_1ms.load(Ordering::Relaxed),
             reader_protocol_over_5ms: self.reader_protocol_over_5ms.load(Ordering::Relaxed),
+            reader_protocol_wait_count: self.reader_protocol_wait_count.load(Ordering::Relaxed),
+            reader_protocol_wait_ns: self.reader_protocol_wait_ns.load(Ordering::Relaxed),
+            reader_protocol_wait_max_ns: self.reader_protocol_wait_max_ns.load(Ordering::Relaxed),
+            reader_protocol_wait_max_cmd: self.reader_protocol_wait_max_cmd.load(Ordering::Relaxed)
+                as u8,
+            reader_protocol_wait_max_payload_len: self
+                .reader_protocol_wait_max_payload_len
+                .load(Ordering::Relaxed),
             writer_tick_count: self.writer_tick_count.load(Ordering::Relaxed),
             writer_tick_ns: self.writer_tick_ns.load(Ordering::Relaxed),
             writer_tick_max_ns: self.writer_tick_max_ns.load(Ordering::Relaxed),
@@ -299,6 +322,25 @@ impl ProtocolMetrics {
             self.reader_protocol_max_cmd
                 .store(u64::from(source_cmd), Ordering::Relaxed);
             self.reader_protocol_max_payload_len
+                .store(payload_len as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn record_reader_protocol_wait_labeled(
+        &self,
+        duration: Duration,
+        source_cmd: u8,
+        payload_len: usize,
+    ) {
+        let ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        self.reader_protocol_wait_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.reader_protocol_wait_ns
+            .fetch_add(ns, Ordering::Relaxed);
+        if store_max(&self.reader_protocol_wait_max_ns, ns) {
+            self.reader_protocol_wait_max_cmd
+                .store(u64::from(source_cmd), Ordering::Relaxed);
+            self.reader_protocol_wait_max_payload_len
                 .store(payload_len as u64, Ordering::Relaxed);
         }
     }

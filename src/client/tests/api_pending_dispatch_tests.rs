@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::commands::engine_api::EngineMethod;
 use crate::commands::market::build_markets_indexes_response;
 use crate::commands::strategy_serializer::{FieldValue, StrategyFields, StrategySnapshot};
@@ -62,7 +62,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -121,6 +121,35 @@ fn build_engine_response_payload(request_uid: u64, method: EngineMethod, data: &
     buf.extend_from_slice(&(data.len() as i32).to_le_bytes());
     buf.extend_from_slice(data);
     buf
+}
+
+fn install_server_decode_session(client: &mut Client, server_token: u64) -> MoonKey {
+    let (encode_key, decode_key) = crypto::generate_sub_keys(&client.cfg.master_key, server_token);
+    client.server_token = server_token;
+    client.encode_key = encode_key;
+    client.decode_key = decode_key;
+    client.encode_cipher = Some(crypto::cipher_from_key(&encode_key));
+    client
+        .data_read_state
+        .set_decode_cipher(crypto::cipher_from_key(&decode_key));
+    decode_key
+}
+
+fn build_server_crypted_payload(
+    decode_key: &MoonKey,
+    msg_num: u64,
+    cmd: Command,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut plaintext =
+        Vec::with_capacity(crate::protocol::crypted::CRYPTO_HEADER_SIZE + payload.len());
+    plaintext.extend_from_slice(&0xCAFEu16.to_le_bytes());
+    plaintext.extend_from_slice(&msg_num.to_le_bytes());
+    plaintext.push(cmd.to_byte());
+    plaintext.push(0);
+    plaintext.extend_from_slice(payload);
+    let cipher = crypto::cipher_from_key(decode_key);
+    crypto::encrypt_with_cipher(&cipher, &plaintext, &[])
 }
 
 fn drain_base_check_sends(client: &mut Client) -> usize {
@@ -290,6 +319,35 @@ fn pending_api_response_still_reaches_dispatcher_state() {
 }
 
 #[test]
+fn pending_heavy_markets_response_is_applied_by_pending_owner_not_inline_dispatch() {
+    let mut client = Client::new(dummy_cfg());
+    let request_uid = 0x1020_3040_5060_7080;
+    let rx = client.api_pending.register(request_uid);
+    let payload = build_engine_response_payload(request_uid, EngineMethod::GetMarketsList, &[]);
+
+    let consumed = Client::dispatch_api_pending_inline(
+        client.api_pending.as_ref(),
+        Command::API.to_byte(),
+        &payload,
+    );
+    assert!(consumed);
+
+    let mut payloads = Vec::new();
+    {
+        let mut sink = DispatchSink::Buffer(&mut payloads);
+        client.client_new_data_decoded(Command::API.to_byte(), payload, true, false, &mut sink);
+    }
+
+    let resp = rx.try_recv().expect("pending receiver must own response");
+    assert_eq!(resp.request_uid, request_uid);
+    assert_eq!(resp.method, EngineMethod::GetMarketsList);
+    assert!(
+        payloads.is_empty(),
+        "Delphi ProcessApiCommand only parks pending GetMarketsList; the SendAndWait owner applies it"
+    );
+}
+
+#[test]
 fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
     let mut client = Client::new(dummy_cfg());
     let request_uid = 0x7766_5544_3322_1100;
@@ -316,6 +374,102 @@ fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
         .expect("receiver must be signalled by receive-side API dispatch");
     assert_eq!(resp.request_uid, request_uid);
     assert_eq!(resp.method, EngineMethod::AuthCheck);
+}
+
+#[test]
+fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
+    let mut client = Client::new(dummy_cfg());
+    let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
+    client.authorized = false;
+    client.auth_status = AuthStatus::Connected;
+
+    let stale_domain = build_server_crypted_payload(&decode_key, 5000, Command::UI, &[0, 0, 0]);
+    let request_uid = 0x1111_2222_3333_4444;
+    let rx = client.api_pending.register(request_uid);
+    let response_payload = build_engine_response_payload(request_uid, EngineMethod::BaseCheck, &[]);
+    let encrypted_response =
+        build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
+    let mut mode = RunMode::Callback {
+        on_data: Box::new(|_, _| panic!("pre-auth encrypted app data must be dropped")),
+    };
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .data_read_int_inline(
+        Command::Crypted.to_byte(),
+        &stale_domain,
+        128,
+        100,
+        true,
+        None,
+        &mut mode,
+    );
+    ProtocolCore {
+        client: &mut client,
+    }
+    .data_read_int_inline(
+        Command::Crypted.to_byte(),
+        &encrypted_response,
+        128,
+        101,
+        true,
+        None,
+        &mut mode,
+    );
+    assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
+    ProtocolCore {
+        client: &mut client,
+    }
+    .data_read_int_inline(
+        Command::Crypted.to_byte(),
+        &encrypted_response,
+        128,
+        102,
+        true,
+        None,
+        &mut mode,
+    );
+
+    let resp = rx
+        .try_recv()
+        .expect("same encrypted response must remain valid after AuthDone");
+    assert_eq!(resp.request_uid, request_uid);
+    assert_eq!(resp.method, EngineMethod::BaseCheck);
+}
+
+#[test]
+fn primary_hello_resets_transport_receive_state_before_new_session() {
+    let mut client = Client::new(dummy_cfg());
+    install_server_decode_session(&mut client, 0x2222_3333_4444_5555);
+    client.peer_app_token = 0x7777;
+    client.need_connect = true;
+    client.last_sent_hello = NEVER_SENT_MS;
+    client.data_read_state.slider.check_revd(5000);
+    assert!(
+        !client.data_read_state.slider.check_revd(1),
+        "test setup must prove the old receive slider would reject fresh low msg_num",
+    );
+
+    ProtocolCore {
+        client: &mut client,
+    }
+    .check_hello_send(100);
+
+    assert_eq!(client.server_token, 0);
+    assert_eq!(client.peer_app_token, 0);
+    assert!(!client.authorized);
+    assert!(
+        client.data_read_state.slider.check_revd(1),
+        "primary Hello starts a new transport session and clears the old replay window",
+    );
+    assert!(matches!(
+        client.hello_wait_state,
+        HelloWaitState::PrimaryHelloNewSession
+    ));
 }
 
 #[test]
@@ -518,7 +672,7 @@ fn decoded_batch_uses_receive_timestamp_for_active_timers() {
 }
 
 #[test]
-fn data_read_candles_chunks_complete_receiver_before_run_loop() {
+fn data_read_candles_chunks_complete_receiver_from_background_parse_worker() {
     let mut client = Client::new(dummy_cfg());
     let (uid, rx) = client.api_request_candles_data_async_registered();
     let chunk0 = [0u8, 0, 2, 0, 1, 2];
@@ -561,10 +715,9 @@ fn data_read_candles_chunks_complete_receiver_before_run_loop() {
     );
 
     let merged = rx
-        .try_recv()
-        .expect("second chunk should complete candles receiver in reader");
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second chunk should complete candles receiver after background parse");
     assert_eq!(merged.uid, uid);
-    assert_eq!(merged.zipped_data, vec![1, 2, 3, 4]);
     assert!(merged.markets.is_empty());
     assert!(client.pending_candles.is_empty());
 }
@@ -707,7 +860,7 @@ fn request_candles_data_timeout_removes_pending_slot() {
     let mut dispatcher = EventDispatcher::new();
 
     let err = client
-        .request_candles_data(&mut dispatcher, Duration::from_millis(0))
+        .request_candles_data_for_test(&mut dispatcher, Duration::from_millis(0))
         .expect_err("zero timeout should expire before any chunk arrives");
 
     assert!(matches!(err, mpsc::RecvTimeoutError::Timeout));
@@ -760,21 +913,21 @@ fn protocol_metrics_snapshot_reports_public_event_queue_without_control_effects(
 }
 
 #[test]
-fn run_until_response_does_not_overflow_huge_timeout_when_ready() {
+fn wait_for_receiver_in_owned_runtime_does_not_overflow_huge_timeout_when_ready() {
     let mut client = Client::new(dummy_cfg());
     let mut dispatcher = EventDispatcher::new();
     let (tx, rx) = mpsc::channel();
     tx.send(123u32).unwrap();
 
     let value = client
-        .run_until_response(&mut dispatcher, &rx, Duration::MAX)
+        .wait_for_receiver_in_owned_runtime(&mut dispatcher, &rx, Duration::MAX)
         .expect("ready response should be returned without touching timeout arithmetic");
 
     assert_eq!(value, 123);
 }
 
 #[test]
-fn run_until_response_queues_events_seen_while_waiting() {
+fn wait_for_receiver_in_owned_runtime_queues_events_seen_while_waiting() {
     let mut client = Client::new(dummy_cfg());
     client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
@@ -788,7 +941,7 @@ fn run_until_response_queues_events_seen_while_waiting() {
 
     let mut dispatcher = EventDispatcher::new();
     let resp = client
-        .run_until_response(&mut dispatcher, &rx, Duration::from_millis(200))
+        .wait_for_receiver_in_owned_runtime(&mut dispatcher, &rx, Duration::from_millis(200))
         .expect("pending response should be delivered while the loop is pumped");
 
     assert_eq!(resp.request_uid, request_uid);

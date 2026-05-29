@@ -6,13 +6,14 @@
 //! Update flow:
 //! - startup sends `emk_GetMarketsList` and receives the full markets plus CorrMarkets list;
 //! - periodic `emk_UpdateMarketsList` updates prices and funding;
-//! - `emk_GetMarketsIndexes` supplies names in current server `mIndex` order;
+//! - cold init derives server `mIndex` order from `emk_GetMarketsList`;
+//! - `emk_GetMarketsIndexes` refreshes that order after reconnect/server restart;
 //! - periodic `emk_CheckBinanceTags` updates token tags.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::commands::market::{CorrMarket, Market, MarketTokenTags, TokenTags};
+use crate::commands::market::{BaseCurrency, CorrMarket, Market, MarketTokenTags, TokenTags};
 use crate::state::eps::EpsProfile;
 
 mod accessors;
@@ -67,10 +68,13 @@ pub struct MarketsState {
     pub(crate) trade_states: HashMap<String, MarketTradeState>,
     /// Token tags keyed by `market_name`.
     pub(crate) token_tags: HashMap<String, TokenTags>,
-    /// Canonical `mIndex` -> market name mapping from `emk_GetMarketsIndexes`.
+    /// Canonical `mIndex` -> market name mapping.
+    ///
+    /// Cold init fills this from `emk_GetMarketsList`, matching Delphi
+    /// `TMoonProtoEngine.GetMarketsList -> SrvMarkets.Rebuild(IndexMap)`.
+    /// After reconnect/server restart it is refreshed by `emk_GetMarketsIndexes`.
     pub(crate) market_indexes: Arc<Vec<String>>,
-    /// True when the latest `emk_GetMarketsIndexes` response belongs to the
-    /// current `PeerAppToken`.
+    /// True when the server-index map belongs to the current `PeerAppToken`.
     ///
     /// After a server restart, market indexes may change. Until fresh indexes
     /// arrive, `EventDispatcher` drops `TradesStream` and `OrderBook` packets so
@@ -105,7 +109,7 @@ pub struct MarketsState {
     /// every packet. Price/tag updates do not change it.
     markets_version: u64,
     server_base_currency_name: Option<String>,
-    server_base_currency_code: Option<u8>,
+    server_base_currency_code: Option<BaseCurrency>,
     last_markets_list_timing: Option<MarketsListApplyTiming>,
     eps_profile: EpsProfile,
 }
@@ -130,13 +134,27 @@ impl MarketsState {
         qty: f32,
         now_ms: i64,
     ) {
-        let Some(name) = self.market_name_by_index(market_index).map(str::to_owned) else {
-            return;
-        };
-        if !self.by_name.contains_key(&name) {
+        if !self.indexes_synchronized {
             return;
         }
-        let state = self.trade_states.entry(name).or_default();
+        let Some(name) = self
+            .market_indexes
+            .get(market_index as usize)
+            .map(String::as_str)
+        else {
+            return;
+        };
+        if !self.by_name.contains_key(name) {
+            return;
+        }
+        if !self.trade_states.contains_key(name) {
+            self.trade_states
+                .insert(name.to_string(), MarketTradeState::default());
+        }
+        let state = self
+            .trade_states
+            .get_mut(name)
+            .expect("known trade state inserted above");
         if is_spot {
             state.apply_spot_trade_like_delphi(now_ms);
         } else {

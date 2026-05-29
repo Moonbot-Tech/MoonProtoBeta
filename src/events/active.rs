@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use super::{copy_max_leverage_from_markets_list, Event, EventDispatcher};
+use crate::commands::market::BaseCurrency;
 use crate::commands::trade::TradeCtx;
 use crate::protocol::Command;
 use crate::state::eps::EpsProfile;
@@ -27,7 +28,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) eps_profile: EpsProfile,
     pub(crate) server_base_currency_name: Option<String>,
-    pub(crate) server_base_currency_code: Option<u8>,
+    pub(crate) server_base_currency_code: Option<BaseCurrency>,
 }
 
 impl ActiveDispatchContext {
@@ -155,7 +156,10 @@ impl EventDispatcher {
         }
         self.last_known_server_token = current_token;
 
-        if is_pre_init_domain_command(cmd) && !ctx.domain_ready {
+        if is_pre_init_domain_command(cmd)
+            && !ctx.domain_ready
+            && !is_pre_init_strategy_handshake(cmd, payload)
+        {
             log::debug!(target: "moonproto::events",
                 "domain command {:?} skipped before init completion", cmd);
             return;
@@ -213,10 +217,12 @@ impl EventDispatcher {
         // RequestFullNeeded для одной и той же книги (corruption detection +
         // последующий update в одном datagram'е). Шлём один запрос на пару.
         let mut to_request_full: Vec<(u16, u8)> = Vec::new();
-        // Auto-action 2: StratEvent::SnapshotRequested -> шлём fresh snapshot
-        // из library-owned StratsState (или provider override). Delphi
-        // `MoonProtoClient.pas:ProcessStratCommand` пересобирает ответ через
-        // `TStratSnapshot.CreateFromStrats(Strats)`.
+        // Auto-action 2: StratEvent::SnapshotRequested -> remember/send fresh
+        // snapshot из library-owned StratsState (или provider override).
+        // Если request пришёл до `domain_ready`, не открываем весь MPC_Strat
+        // pre-init: только ставим latch и отвечаем post-init, когда schema/state
+        // уже готовы. Это сохраняет обязательство ответить без конкуренции с
+        // BaseCheck/AuthCheck и без Rust-only раннего Strat-domain flow.
         let mut snapshot_requested_uid: Option<u64> = None;
         let mut strategy_schema_applied = false;
         let mut new_markets_added = false;
@@ -228,14 +234,17 @@ impl EventDispatcher {
         let mut idx = start_len;
         while idx < out.len() {
             let remove_event = match &out[idx] {
-                Event::OrderBook(OrderBookEvent::RequestFullNeeded {
-                    market_index,
-                    book_kind,
-                }) => {
-                    let key = (*market_index, *book_kind);
+                Event::OrderBook(OrderBookEvent::RequestFullNeeded { market_index, kind }) => {
+                    let key = (*market_index, kind.as_u8());
                     if !to_request_full.contains(&key) {
                         to_request_full.push(key);
                     }
+                    true
+                }
+                Event::OrderBook(OrderBookEvent::Ignored { .. }) => {
+                    // Active Lib UI path only publishes applied state changes.
+                    // Ignored orderbook packets are protocol diagnostics; low-level
+                    // EventDispatcher users can still observe them directly.
                     true
                 }
                 Event::Order(OrderEvent::Snapshot) => {
@@ -277,20 +286,24 @@ impl EventDispatcher {
             });
         }
         if let Some(uid) = snapshot_requested_uid {
-            if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
-                actions.push(ActiveAction::SendStrategySnapshot {
-                    server_epoch: snapshot.server_epoch,
-                    client_max_last_date: snapshot.client_max_last_date,
-                    full: snapshot.full,
-                    data: snapshot.data,
-                });
+            if ctx.domain_ready {
+                if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
+                    actions.push(ActiveAction::SendStrategySnapshot {
+                        server_epoch: snapshot.server_epoch,
+                        client_max_last_date: snapshot.client_max_last_date,
+                        full: snapshot.full,
+                        data: snapshot.data,
+                    });
+                } else {
+                    self.pending_strategy_snapshot_request_uid = Some(uid);
+                    actions.push(ActiveAction::RequestStrategySchema);
+                }
             } else {
                 self.pending_strategy_snapshot_request_uid = Some(uid);
-                actions.push(ActiveAction::RequestStrategySchema);
             }
             // Событие всё равно эмиттится в `out` для UI/диагностики.
         }
-        if strategy_schema_applied {
+        if strategy_schema_applied && ctx.domain_ready {
             if let Some(uid) = self.pending_strategy_snapshot_request_uid.take() {
                 if let Some(snapshot) = self.strategy_snapshot_reply(uid) {
                     actions.push(ActiveAction::SendStrategySnapshot {
@@ -329,5 +342,14 @@ fn is_pre_init_domain_command(cmd: Command) -> bool {
             | Command::TradesResendResponse
             | Command::OrderBook
             | Command::UI
+    )
+}
+
+fn is_pre_init_strategy_handshake(cmd: Command, payload: &[u8]) -> bool {
+    matches!(
+        cmd,
+        Command::Strat
+            if crate::commands::strat::is_schema_payload(payload)
+                || crate::commands::strat::is_snapshot_request_payload(payload)
     )
 }

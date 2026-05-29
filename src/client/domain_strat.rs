@@ -13,6 +13,7 @@ impl Client {
     /// strategy schema from the server and stores the decoded result in
     /// `EventDispatcher::strats().strategy_schema()`. Public callers normally
     /// read that state instead of sending this manually.
+    #[doc(hidden)]
     pub fn strat_schema_request(&self) {
         let raw = crate::commands::strat::build_schema_request(rand::random());
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
@@ -36,6 +37,7 @@ impl Client {
     /// Delphi fields: `ServerEpoch`, `ClientMaxLastDate`, `Size`, and `Full`.
     /// Use [`Client::strat_send_snapshot_batch`] when the application has decoded
     /// `StrategySnapshot` values rather than a prebuilt serializer payload.
+    #[doc(hidden)]
     pub fn strat_send_snapshot_payload(
         &self,
         server_epoch: u64,
@@ -61,6 +63,7 @@ impl Client {
     /// `CreateFromList`: it serializes the batch, computes `ClientMaxLastDate`,
     /// and sends a valid CmdId=2 packet. `schema` must be the live
     /// `TStratSchema` fetched during Init.
+    #[doc(hidden)]
     pub fn strat_send_snapshot_batch(
         &self,
         server_epoch: u64,
@@ -80,6 +83,7 @@ impl Client {
     }
 
     /// Send `TStratDelete` (Strat CmdId=3, High) for one strategy or folder.
+    #[doc(hidden)]
     pub fn strat_delete(&self, strategy_id: u64, folder_path: &str) {
         let raw = crate::commands::strat::build_delete(rand::random(), strategy_id, folder_path);
         self.send_domain_cmd(raw, Command::Strat, SendPriority::High, true, 3);
@@ -89,6 +93,7 @@ impl Client {
     /// `UK_StratSellPriceUpdate`) for one strategy.
     ///
     /// The UKey includes `strategy_id`, so dedup is per strategy.
+    #[doc(hidden)]
     pub fn strat_sell_price_update(&self, strategy_id: u64, sell_price: f64) {
         let raw = crate::commands::strat::build_sell_price_update(
             rand::random(),
@@ -112,6 +117,7 @@ impl Client {
     /// Regular active-library callers should prefer
     /// `EventDispatcher::send_strategy_checked_delta`, which builds Delphi
     /// `TStrategies.GetCheckedDelta` from owned strategy state.
+    #[doc(hidden)]
     pub fn strat_checked_sync(
         &self,
         items: &[crate::commands::strat::StratCheckedItem],

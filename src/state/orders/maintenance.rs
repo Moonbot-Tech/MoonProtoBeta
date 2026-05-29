@@ -26,7 +26,7 @@ impl Orders {
         let pending = std::mem::take(&mut self.pending_removals);
         let mut removed = Vec::with_capacity(pending.len());
         for pending in pending {
-            if self.map.remove(&pending.uid).is_some() {
+            if self.remove_order(pending.uid).is_some() {
                 removed.push(pending.uid);
             }
         }
@@ -39,7 +39,7 @@ impl Orders {
         let mut removed = Vec::new();
         for pending in pending {
             if now_ms >= pending.due_ms {
-                if self.map.remove(&pending.uid).is_some() {
+                if self.remove_order(pending.uid).is_some() {
                     removed.push(pending.uid);
                 }
             } else {
@@ -55,6 +55,7 @@ impl Orders {
     pub(crate) fn tick_bulk_replace_timeouts(&mut self, now_ms: i64) -> Vec<OrderEvent> {
         let mut events = Vec::new();
         for entry in self.map.values_mut() {
+            let entry = std::sync::Arc::make_mut(entry);
             let Some(current_replace_flag) = (match entry.status {
                 OrderWorkerStatus::BuySet => Some(&mut entry.bulk_replace_buy),
                 OrderWorkerStatus::SellSet => Some(&mut entry.bulk_replace_sell),
@@ -109,7 +110,7 @@ impl Orders {
     /// Remove one order by UID.
     pub fn remove(&mut self, uid: u64) -> Option<Order> {
         self.pending_local_visual_orders.remove(&uid);
-        self.map.remove(&uid)
+        self.remove_order(uid)
     }
 
     /// Clear all order state on reconnect / `WantNewHello`.

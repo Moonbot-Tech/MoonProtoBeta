@@ -4,7 +4,6 @@
 //!   cargo run --example trades_stream --release -- "<key_base64>" [host:port] [market|all] [watch_seconds]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::TradesEvent;
@@ -52,51 +51,52 @@ fn main() {
     let deadline = Instant::now() + Duration::from_secs(watch_secs);
 
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Trade(TradesEvent::Applied { packet_num, .. })) => {
-                packets += 1;
-                if let Some(name) = market_filter.as_deref() {
-                    let Some(snapshot) = client.snapshot() else {
-                        continue;
-                    };
-                    let Some(tail) = snapshot.markets().trade_state(name) else {
-                        continue;
-                    };
-                    if tail.last_trade_price <= 0.0 {
-                        continue;
-                    }
-                    trades += 1;
-                    if printed < 25 {
-                        printed += 1;
-                        let side = if tail.last_trade_was_sell {
-                            "sell"
-                        } else {
-                            "buy"
+        for event in client.drain_events() {
+            match event {
+                Event::Trade(TradesEvent::Applied { packet_num, .. }) => {
+                    packets += 1;
+                    if let Some(name) = market_filter.as_deref() {
+                        let Some(snapshot) = client.snapshot() else {
+                            continue;
                         };
-                        println!(
-                            "[trade-tail] pkt={} {name} {} price={}",
-                            packet_num, side, tail.last_trade_price
-                        );
-                    }
-                } else {
-                    trades += 1;
-                    if printed < 25 {
-                        printed += 1;
-                        println!("[trade-signal] pkt={packet_num}");
+                        let Some(tail) = snapshot.markets().trade_state(name) else {
+                            continue;
+                        };
+                        if tail.last_trade_price <= 0.0 {
+                            continue;
+                        }
+                        trades += 1;
+                        if printed < 25 {
+                            printed += 1;
+                            let side = if tail.last_trade_was_sell {
+                                "sell"
+                            } else {
+                                "buy"
+                            };
+                            println!(
+                                "[trade-tail] pkt={} {name} {} price={}",
+                                packet_num, side, tail.last_trade_price
+                            );
+                        }
+                    } else {
+                        trades += 1;
+                        if printed < 25 {
+                            printed += 1;
+                            println!("[trade-signal] pkt={packet_num}");
+                        }
                     }
                 }
+                Event::Trade(TradesEvent::GapDetected { start, end }) => {
+                    gaps += 1;
+                    println!("[trade] gap detected {start}..{end}");
+                }
+                Event::Trade(TradesEvent::GapFilled { packet_num, .. }) => {
+                    println!("[trade] gap filled packet={packet_num}");
+                }
+                _ => {}
             }
-            Ok(Event::Trade(TradesEvent::GapDetected { start, end })) => {
-                gaps += 1;
-                println!("[trade] gap detected {start}..{end}");
-            }
-            Ok(Event::Trade(TradesEvent::GapFilled { packet_num, .. })) => {
-                println!("[trade] gap filled packet={packet_num}");
-            }
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     println!("[done] packets={packets} trades={trades} gaps={gaps}");

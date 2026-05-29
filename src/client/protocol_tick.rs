@@ -109,16 +109,16 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn tick_periodic_refresh_at(&mut self, cur_tm: i64, hour_slot: i64) {
-        if self.client.domain_ready
+        let market_indexes_stale = self.client.domain_ready
             && self.client.domain_restore_needs_indexes()
             && self.client.peer_app_token != 0
-            && !self.client.market_indexes_current_for_peer()
-            && !self.client.indexes_fetch_in_flight
-        {
-            self.client.send_markets_indexes_restore_request(cur_tm);
-        }
+            && !self.client.market_indexes_current_for_peer();
 
-        if let Some(interval) = self.client.cfg.refresh.update_markets_every {
+        if market_indexes_stale {
+            if !self.client.indexes_fetch_in_flight {
+                self.client.send_markets_indexes_restore_request(cur_tm);
+            }
+        } else if let Some(interval) = self.client.cfg.refresh.update_markets_every {
             let interval_ms = interval.as_millis() as i64;
             if (cur_tm - self.client.last_update_markets_ms) >= interval_ms {
                 self.client
@@ -126,6 +126,7 @@ impl ProtocolCore<'_> {
                 self.client.last_update_markets_ms = cur_tm;
             }
         }
+
         if let Some(interval) = self.client.cfg.refresh.check_tags_every {
             if self.client.check_tags_hour_slot == i64::MIN {
                 self.client.check_tags_hour_slot = hour_slot;
@@ -183,27 +184,14 @@ impl ProtocolCore<'_> {
         }
         self.client.last_trades_tick_ms = cur_tm;
         let trades_server_token = match mode {
-            #[cfg(test)]
             RunMode::Dispatcher { dispatcher, .. } => dispatcher.trades_server_token(),
-            RunMode::DispatcherWorker { .. } => self
-                .client
-                .dispatcher_trades_server_token
-                .load(Ordering::Relaxed),
             #[cfg(test)]
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => return,
-            #[cfg(not(test))]
-            RunMode::CallbackQueue { .. } => return,
             #[cfg(not(test))]
             RunMode::_Lifetime(_) => return,
         };
         self.client
             .tick_trades_reconnect_sequence(cur_tm, trades_server_token);
-    }
-
-    pub(crate) fn send_worker_item(mode: &RunMode<'_>, item: DispatcherWorkItem) {
-        if let RunMode::DispatcherWorker { tx, .. } = mode {
-            let _ = tx.send(item);
-        }
     }
 
     pub(crate) fn periodic_orderbook_reconnect_tick(
@@ -212,21 +200,13 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
     ) {
         match mode {
-            #[cfg(test)]
             RunMode::Dispatcher { dispatcher, .. } => {
                 if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
                     dispatcher.reset_orderbook_caches_keep_books();
                 }
             }
-            RunMode::DispatcherWorker { .. } => {
-                if self.client.tick_orderbook_reconnect_sequence(cur_tm) {
-                    Self::send_worker_item(mode, DispatcherWorkItem::ResetOrderbookCachesKeepBooks);
-                }
-            }
             #[cfg(test)]
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::_Lifetime(_) => {}
         }
@@ -234,7 +214,6 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn periodic_orders_tick(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
         match mode {
-            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -256,13 +235,8 @@ impl ProtocolCore<'_> {
                     0,
                 );
             }
-            RunMode::DispatcherWorker { tx, .. } => {
-                let _ = tx.send(DispatcherWorkItem::TickOrders { now_ms: cur_tm });
-            }
             #[cfg(test)]
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::_Lifetime(_) => {}
         }

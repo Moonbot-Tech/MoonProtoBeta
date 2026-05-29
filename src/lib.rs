@@ -1,4 +1,4 @@
-//! # moonproto
+//! # MoonProto
 //!
 //! Rust client for the MoonProto UDP protocol used by MoonBot servers.
 //! It ports the Delphi client behavior for the wire format, AES-128-GCM
@@ -34,8 +34,10 @@
 //!     ..Default::default()
 //! };
 //! let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
+//! // `connect` starts the runtime and returns immediately. Wait for
+//! // LifecycleEvent::Ready through the configured EventSink adapter.
 //!
-//! client.subscribe_orderbook("ETHUSDT")?;
+//! client.streams().subscribe_orderbook("ETHUSDT")?;
 //! // After the user chooses a market/order side:
 //! // client.trade().new_order(NewOrderParams::new("BTCUSDT", OrderSide::Long, 50100.0, 0.001))?;
 //! // After an order appears in events/snapshots:
@@ -46,41 +48,37 @@
 //! for event in client.drain_events() {
 //!     println!("event: {event:?}");
 //! }
-//! client.stop()?;
+//! client.disconnect()?;
+//! client.wait_finished()?;
 //! ```
 //!
-//! Account/UI refreshes are Active Lib intents: [`MoonClient::refresh_hedge_mode`]
-//! and [`MoonClient::refresh_api_expiration_time`] update
-//! [`EventDispatcherSnapshot::account`] and emit [`Event::Account`]. Explicit
-//! [`MoonClient`] `blocking_*` helpers remain for scripts and diagnostics.
+//! Account/UI refreshes are Active Lib intents:
+//! [`MoonClient::account`], [`MoonClient::settings`], and
+//! [`MoonClient::balances`] expose command handles that update
+//! [`EventDispatcherSnapshot::account`] and emit [`Event::Account`].
 //! Demand-driven CoinCard candles use non-blocking
-//! [`MoonClient::request_coin_card_candles`] and arrive as
+//! [`MoonClient::candles`] and arrive as
 //! [`Event::CoinCardCandles`]. The full 5m candles snapshot is requested
 //! automatically after trades storage is enabled and arrives as
 //! [`Event::CandlesSnapshot`]. Mutation helpers such as
-//! [`MoonClient::set_leverage`], [`MoonClient::set_hedge_mode`], and
-//! [`MoonClient::cancel_all_orders`] also run inside the owned runtime. The
+//! [`MoonAccount::set_leverage`], [`MoonAccount::set_hedge_mode`], and
+//! [`MoonAccount::cancel_all_orders`] also run inside the owned runtime. The
 //! runtime keeps MoonProto pumping, checks server status or channel completion,
-//! and parses or merges response payloads. Events remain available through
-//! [`MoonClient::drain_events`].
-//! Transfer UI should normally use [`MoonClient::refresh_transfer_assets`] and
+//! and parses or merges response payloads. Events are published through
+//! [`MoonEventSink`]; the default [`MoonClient::connect`] queue adapter exposes
+//! [`MoonClient::drain_events`] for immediate-mode UIs and tools.
+//! Transfer UI should normally use [`MoonBalances::refresh_transfer_assets`] and
 //! read [`EventDispatcherSnapshot::transfer_assets`] after
 //! [`Event::TransferAssets`].
 //!
-//! Regular applications should start with [`MoonClient`]. Lower-level
-//! [`Client`] and [`EventDispatcher`] APIs remain
-//! available for tests, protocol tools, and custom runtimes.
-//!
-//! Lower-level `Client::api_*` calls return receivers for custom async flows.
-//! Custom runtimes must keep the client loop pumping while they wait for those
-//! receivers; direct `rx.recv_timeout(...)` on the same thread stops protocol
-//! progress.
+//! Regular applications should start with [`MoonClient`]. Lower-level protocol
+//! machinery is intentionally not the application model.
 //!
 //! ## Transport Modes
 //!
-//! [`ClientConfig::new`] selects V0/base transport (`mask_ver = 0`). V1/V2
-//! (`mask_ver = 1` or `2`) are built-in transport modes that must match the
-//! server-side connection setting. Unsupported mode values fall back to V0.
+//! [`ClientConfig::new`] selects [`TransportMode::V0`]. [`TransportMode::V1`]
+//! and [`TransportMode::V2`] are built-in transport modes that must match the
+//! server-side connection setting.
 //!
 //! Working examples: `examples/trading_flow.rs`, `examples/history_bars.rs`,
 //! `examples/list_markets.rs`, `examples/get_balance.rs`, `examples/query_hedge_mode.rs`,
@@ -92,18 +90,19 @@
 //! `examples/trades_stream.rs`,
 //! `examples/order_book_stream.rs`,
 //! `examples/market_refresh.rs`,
-//! and `examples/multi_client_test.rs`. `examples/loss_logger.rs` and
-//! `examples/stress_client.rs` are diagnostic protocol tools, not normal
-//! application templates.
+//! and `examples/multi_client_test.rs`.
 //!
 //! ## Main Public Modules
 //!
-//! - [`client`] — [`Client`], `ClientConfig` builder, lifecycle, init sequence,
-//!   and high-level commands.
-//! - [`events`] — [`EventDispatcher`] and typed [`Event`] values.
-//! - [`commands`] — wire-format builders and parsers for protocol channels.
-//! - [`state`] — sync-state models: Orders / OrderBooks / Trades / Balances /
-//!   Strats / Settings / Markets.
+//! - [`client`] — [`MoonClient`], `ClientConfig` builder, lifecycle,
+//!   EventSink adapters, snapshots, and high-level intents.
+//! - [`events`] — typed [`Event`] values and the read-only
+//!   [`EventDispatcherSnapshot`]. The mutable [`EventDispatcher`] is for
+//!   custom runtimes and diagnostics.
+//! - [`commands`] — wire-format builders and parsers for protocol diagnostics
+//!   and custom low-level tools.
+//! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
+//!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
 //! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
 //! - [`compression`] — SynLZ/DEFLATE helpers for wire-format payloads.
@@ -125,15 +124,21 @@ pub mod time;
 pub mod transport;
 
 pub use client::{
-    connect_and_init, run_init_sequence, Client, ClientConfig, ClosePositionParams,
-    CoinCardCandlesTicket, ConnectConfig, ConnectError, EngineActionTicket, EngineRequestError,
-    EventFn, EventWithStateFn, InitConfig, InitError, InitResult, InitialStrategies,
-    LifecycleEvent, MoonClient, MoonClientError, MoonOrders, MoonTrade, NewOrderParams, OrderSide,
-    OrderTarget, ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams, SendPriority,
-    SplitOrderParams, TradeContextError, TradesStreamMode, UniqueKey,
+    Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig, ConnectError,
+    EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent, MoonAccount,
+    MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot,
+    MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
+    MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, ProtocolMetricsSnapshot,
+    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
+    TradesStreamMode, TransportMode, UniqueKey, VStopParams,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
+pub use commands::{
+    field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, ClientSettingsCommand,
+    ExchangeCode, FieldValue, OrderType, PositionType, SpotMarketKind, StrategyActiveMode,
+    StrategyFields, StrategyKind, StrategySnapshot, TokenTags,
+};
 pub use events::{
     ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,
     MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,

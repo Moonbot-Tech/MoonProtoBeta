@@ -17,8 +17,9 @@ impl MarketsState {
         for slot in &mut self.prices {
             slot.mark_price_found = false;
         }
+        let base_usdt_context = self.base_usdt_market_context_like_delphi();
         for p in &resp.prices {
-            self.apply_one_market_price_update(p, resp.send_funding);
+            self.apply_one_market_price_update(p, resp.send_funding, &base_usdt_context);
         }
         if resp.send_corr_markets {
             for c in &resp.corr_prices {
@@ -70,11 +71,14 @@ impl MarketsState {
         let mut r = EngineStreamReader::new(data);
         let send_funding = r.read_bool()?;
         let count = r.read_count()?;
+        let base_usdt_context = self.base_usdt_market_context_like_delphi();
 
         for _ in 0..count {
             let update =
                 read_market_price_update_like_delphi(&mut r, send_funding, local_shift_minutes)?;
-            if let Some(row) = self.apply_one_market_price_update(&update, send_funding) {
+            if let Some(row) =
+                self.apply_one_market_price_update(&update, send_funding, &base_usdt_context)
+            {
                 if let Some(rows) = last_price_rows.as_deref_mut() {
                     rows.push(row);
                 }
@@ -109,15 +113,16 @@ impl MarketsState {
         &self,
     ) -> Vec<MarketLastPriceHistoryInput> {
         let mut rows = Vec::new();
+        let base_usdt_context = self.base_usdt_market_context_like_delphi();
         for (idx, handle) in self.markets.iter().enumerate() {
             let Some(slot) = self.prices.get(idx) else {
                 continue;
             };
-            let (market_name, is_btc_market, is_base_usdt_market) = handle.with(|market| {
+            let market_name = handle.name_arc();
+            let (is_btc_market, is_base_usdt_market) = handle.with(|market| {
                 (
-                    market.bn_market_name.clone(),
                     market.is_btc_market,
-                    self.market_is_base_usdt_market_like_delphi(market),
+                    base_usdt_context.is_base_usdt_market_like_delphi(market),
                 )
             });
             rows.push(MarketLastPriceHistoryInput {
@@ -138,27 +143,25 @@ impl MarketsState {
         &mut self,
         p: &MarketPriceUpdate,
         send_funding: bool,
+        base_usdt_context: &BaseUsdtMarketContext,
     ) -> Option<MarketLastPriceHistoryInput> {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
             let handle = self.markets.get(idx).cloned()?;
-            let (market_name, is_btc_market, is_base_usdt_market) = handle.with(|market| {
-                (
-                    market.bn_market_name.clone(),
-                    market.is_btc_market,
-                    self.market_is_base_usdt_market_like_delphi(market),
-                )
-            });
-            let (bn_step_size, bn_min_qty, bn_min_notional) = handle.with_mut(|market| {
-                if send_funding {
-                    market.funding_rate = p.funding_rate;
-                    market.funding_time = p.funding_time;
-                }
-                (
-                    market.bn_step_size,
-                    market.bn_min_qty,
-                    market.bn_min_notional,
-                )
-            });
+            let market_name = handle.name_arc();
+            let (is_btc_market, is_base_usdt_market, bn_step_size, bn_min_qty, bn_min_notional) =
+                handle.with_mut(|market| {
+                    if send_funding {
+                        market.funding_rate = p.funding_rate;
+                        market.funding_time = p.funding_time;
+                    }
+                    (
+                        market.is_btc_market,
+                        base_usdt_context.is_base_usdt_market_like_delphi(market),
+                        market.bn_step_size,
+                        market.bn_min_qty,
+                        market.bn_min_notional,
+                    )
+                });
             let slot = &mut self.prices[idx];
             slot.bid = p.bid;
             slot.ask = p.ask;
@@ -193,21 +196,53 @@ impl MarketsState {
         }
     }
 
-    fn market_is_base_usdt_market_like_delphi(&self, market: &Market) -> bool {
+    fn base_usdt_market_context_like_delphi(&self) -> BaseUsdtMarketContext {
+        let server_base_currency = self.server_base_currency_name.clone();
+        let (usdt_market, usdt_rev_market) = server_base_currency
+            .as_deref()
+            .and_then(|base_currency| self.base_currency_price(base_currency))
+            .map(|base_price| {
+                (
+                    base_price.usdt_market.clone(),
+                    base_price.usdt_rev_market.clone(),
+                )
+            })
+            .unwrap_or_default();
+        BaseUsdtMarketContext {
+            server_base_currency,
+            usdt_market,
+            usdt_rev_market,
+        }
+    }
+
+    fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
+        if self.corr_markets.contains_key(&c.bn_market_name) {
+            self.corr_prices
+                .insert(c.bn_market_name.clone(), c.last_price);
+        }
+    }
+}
+
+struct BaseUsdtMarketContext {
+    server_base_currency: Option<String>,
+    usdt_market: Option<String>,
+    usdt_rev_market: Option<String>,
+}
+
+impl BaseUsdtMarketContext {
+    fn is_base_usdt_market_like_delphi(&self, market: &Market) -> bool {
         let market_name = market.bn_market_name.as_str();
-        if let Some(base_currency) = self.server_base_currency_name.as_deref() {
-            if let Some(base_price) = self.base_currency_price(base_currency) {
-                if base_price
-                    .usdt_market
+        if let Some(base_currency) = self.server_base_currency.as_deref() {
+            if self
+                .usdt_market
+                .as_deref()
+                .is_some_and(|name| same_text_ascii(name, market_name))
+                || self
+                    .usdt_rev_market
                     .as_deref()
                     .is_some_and(|name| same_text_ascii(name, market_name))
-                    || base_price
-                        .usdt_rev_market
-                        .as_deref()
-                        .is_some_and(|name| same_text_ascii(name, market_name))
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             if !same_text_ascii(base_currency, "USDT")
                 && same_text_ascii(&market.bn_market_currency, base_currency)
@@ -220,13 +255,6 @@ impl MarketsState {
         same_text_ascii(market_name, "BTCUSDT")
             || same_text_ascii(market_name, "BTC_USDT")
             || (market.is_btc_market && same_text_ascii(&market.base_currency, "USDT"))
-    }
-
-    fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
-        if self.corr_markets.contains_key(&c.bn_market_name) {
-            self.corr_prices
-                .insert(c.bn_market_name.clone(), c.last_price);
-        }
     }
 }
 

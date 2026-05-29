@@ -4,7 +4,6 @@
 //!   cargo run --example order_book_top --release -- "<key_base64>" [host:port] [market] [watch_seconds]
 
 use std::env;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use moonproto::state::{OrderBookEvent, OrderBookKind};
@@ -47,41 +46,42 @@ fn main() {
     let mut updates = 0u64;
 
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::OrderBook(OrderBookEvent::Apply {
-                market_name,
-                kind,
-                seq,
-                top,
-                ..
-            })) => {
-                let Some(name) = market_name.as_deref() else {
-                    continue;
-                };
-                if name != market {
-                    continue;
-                }
-                updates += 1;
-                let bid = top
-                    .bid
-                    .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                    .unwrap_or_else(|| "none".to_string());
-                let ask = top
-                    .ask
-                    .map(|level| format!("{} @ {}", level.quantity, level.rate))
-                    .unwrap_or_else(|| "none".to_string());
-                println!(
-                    "[top] {name} {} seq={} bid={} ask={}",
-                    kind_name(kind),
+        for event in client.drain_events() {
+            match event {
+                Event::OrderBook(OrderBookEvent::Apply {
+                    market_name,
+                    kind,
                     seq,
-                    bid,
-                    ask
-                );
+                    top,
+                    ..
+                }) => {
+                    let Some(name) = market_name.as_deref() else {
+                        continue;
+                    };
+                    if name != market {
+                        continue;
+                    }
+                    updates += 1;
+                    let bid = top
+                        .bid
+                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                        .unwrap_or_else(|| "none".to_string());
+                    let ask = top
+                        .ask
+                        .map(|level| format!("{} @ {}", level.quantity, level.rate))
+                        .unwrap_or_else(|| "none".to_string());
+                    println!(
+                        "[top] {name} {} seq={} bid={} ask={}",
+                        kind_name(kind),
+                        seq,
+                        bid,
+                        ask
+                    );
+                }
+                _ => {}
             }
-            Ok(_) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     println!("[done] top-updates={updates}");

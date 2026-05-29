@@ -22,7 +22,6 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
     ) {
         match mode {
-            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -40,13 +39,8 @@ impl ProtocolCore<'_> {
                     0,
                 );
             }
-            RunMode::DispatcherWorker { tx, .. } => {
-                let _ = tx.send(DispatcherWorkItem::DrainDeferredOrderRemovals { now_ms: cur_tm });
-            }
             #[cfg(test)]
             RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {}
-            #[cfg(not(test))]
-            RunMode::CallbackQueue { .. } => {}
             #[cfg(not(test))]
             RunMode::_Lifetime(_) => {}
         }
@@ -62,12 +56,59 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
     ) {
         let command = Command::from_byte(cmd);
-        if is_domain_push_command(command) && !self.client.domain_ready {
+        if is_domain_push_command(command)
+            && !self.client.domain_ready
+            && !incoming_allowed_before_domain_ready(command, &payload)
+        {
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-dispatch-drop] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} reason=domain_not_ready",
+                    trace_elapsed_ms(),
+                    command,
+                    cmd,
+                    payload.len(),
+                    fnv1a64(&payload)
+                );
+            }
             log::debug!(target: "moonproto::client",
                 "domain command {:?} skipped before InitDone/domain_ready", command);
             return;
         }
+        let pre_init_latched_domain = is_domain_push_command(command)
+            && !self.client.domain_ready
+            && incoming_allowed_before_domain_ready(command, &payload);
+        if pre_init_latched_domain {
+            match mode {
+                #[cfg(test)]
+                RunMode::Callback { .. } | RunMode::CallbackQueue { .. } => {
+                    if trace_io_enabled() {
+                        eprintln!(
+                            "[mp-dispatch-latch-skip] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} mode=callback",
+                            trace_elapsed_ms(),
+                            command,
+                            cmd,
+                            payload.len(),
+                            fnv1a64(&payload)
+                        );
+                    }
+                    return;
+                }
+                #[cfg(not(test))]
+                RunMode::_Lifetime(_) => {}
+                RunMode::Dispatcher { .. } => {}
+            }
+        }
         if is_trades_stream_command(command) && !self.client.has_trades_subscription_intent() {
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-dispatch-drop] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} reason=trades_without_subscription",
+                    trace_elapsed_ms(),
+                    command,
+                    cmd,
+                    payload.len(),
+                    fnv1a64(&payload)
+                );
+            }
             log::warn!(target: "moonproto::client",
                 "unexpected {:?} received without all-trades subscription; packet dropped", command);
             return;
@@ -85,6 +126,7 @@ impl ProtocolCore<'_> {
                     &mut sink,
                 );
             }
+            #[cfg(test)]
             RunMode::CallbackQueue { app_tx } => {
                 let mut sink = DispatchSink::CallbackQueue(app_tx);
                 self.client.client_new_data_decoded(
@@ -95,7 +137,6 @@ impl ProtocolCore<'_> {
                     &mut sink,
                 );
             }
-            #[cfg(test)]
             RunMode::Dispatcher {
                 dispatcher,
                 on_event,
@@ -151,49 +192,6 @@ impl ProtocolCore<'_> {
                         Some(c),
                         metric_api_method(c, &p),
                         p.len(),
-                    );
-                }
-            }
-            RunMode::DispatcherWorker { tx, payload_buf } => {
-                payload_buf.clear();
-                let authorized_before = self.client.authorized;
-                if command == Command::API {
-                    if !candles_chunk_consumed_by_reader {
-                        self.client.process_api_bookkeeping_light(&payload);
-                        payload_buf.push((Command::API, payload));
-                    }
-                } else {
-                    let mut sink = DispatchSink::Buffer(payload_buf);
-                    self.client.client_new_data_decoded(
-                        cmd,
-                        payload,
-                        api_pending_consumed_by_reader,
-                        candles_chunk_consumed_by_reader,
-                        &mut sink,
-                    );
-                }
-                if !authorized_before && !self.client.authorized {
-                    payload_buf.clear();
-                    return;
-                }
-                for (c, p) in payload_buf.drain(..) {
-                    let enqueue_start = Instant::now();
-                    let payload_len = p.len();
-                    let api_method = metric_api_method(c, &p);
-                    let work = DispatcherWorkItem::Data {
-                        cmd: c,
-                        payload: p,
-                        now_ms: cur_tm,
-                        ctx: crate::events::ActiveDispatchContext::from_client(self.client),
-                    };
-                    let _ = tx.send(work);
-                    self.client.protocol_metrics.record_app_enqueue_labeled(
-                        enqueue_start.elapsed(),
-                        c.to_byte(),
-                        api_method,
-                        payload_len,
-                        1,
-                        4,
                     );
                 }
             }

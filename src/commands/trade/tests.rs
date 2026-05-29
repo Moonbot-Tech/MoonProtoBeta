@@ -4,17 +4,17 @@ use super::*;
 #[test]
 fn stop_settings_wire_layout_matches_delphi_record() {
     let stops = StopSettings {
-        stop_loss_on: 1,
-        sl_fixed: 0,
+        stop_loss_on: DelphiBool::TRUE,
+        sl_fixed: DelphiBool::FALSE,
         sl_level: 1.25,
         sl_spread: 2.5,
-        trailing_on: 1,
-        trailing_fixed: 1,
+        trailing_on: DelphiBool::TRUE,
+        trailing_fixed: DelphiBool::TRUE,
         trailing_level: 3.75,
         ts_spread: 4.5,
-        use_take_profit: 0,
+        use_take_profit: DelphiBool::FALSE,
         take_profit: 5.125,
-        take_profit_changed: 1,
+        take_profit_changed: DelphiBool::TRUE,
     };
 
     let mut expected = Vec::new();
@@ -80,15 +80,15 @@ fn order_compact_uses_private_wire_struct() {
         tmp_btc: 8.25,
         create_time: 45_002.5,
         panic_sell_down: 9.5,
-        order_type: 1,
-        sub_type: 2,
+        order_type: OrderType::Buy,
+        sub_type: OrderSubType::Stop,
         stop_flag: 3,
         partial_done: 4,
         leverage: 5,
-        is_opened: 6,
-        is_closed: 7,
-        canceled: 8,
-        is_short: 9,
+        is_opened: DelphiBool::from_byte(6),
+        is_closed: DelphiBool::from_byte(7),
+        canceled: DelphiBool::from_byte(8),
+        is_short: DelphiBool::from_byte(9),
     };
 
     let mut expected = Vec::new();
@@ -279,7 +279,7 @@ fn order_status_zero_tails_partial_order_record_like_delphi_stream_read() {
             assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::BuySet);
             assert_eq!(cmd.buy_order.int_id, 0x7A);
             assert_eq!(cmd.sell_order.int_id, 0);
-            assert_eq!(cmd.stops.stop_loss_on, 0);
+            assert_eq!(cmd.stops.stop_loss_on, DelphiBool::FALSE);
             assert_eq!(cmd.strat_id, 0);
             assert!(!cmd.is_short);
             assert_eq!(cmd.db_id, 0);
@@ -560,7 +560,7 @@ fn set_immune_count_is_written_as_byte_without_clamp() {
 
 #[test]
 fn order_replace_builder_uses_delphi_client_epoch_header() {
-    let ctx = TradeCtx::with_route(0x0102_0304_0506_0708, 1, 4);
+    let ctx = TradeCtx::with_route_bytes(0x0102_0304_0506_0708, 1, 4);
     let payload = build_order_replace(ctx, "BTCUSDT", OrderType::Sell, 50100.25);
 
     match TradeCommand::parse(&payload).expect("valid OrderReplace") {
@@ -577,7 +577,7 @@ fn order_replace_builder_uses_delphi_client_epoch_header() {
 
 #[test]
 fn turn_panic_sell_builder_uses_delphi_client_epoch_header() {
-    let ctx = TradeCtx::with_route(0x1112_1314_1516_1718, 1, 4);
+    let ctx = TradeCtx::with_route_bytes(0x1112_1314_1516_1718, 1, 4);
     let payload = build_turn_panic_sell(ctx, "ETHUSDT", true);
 
     match TradeCommand::parse(&payload).expect("valid TurnPanicSell") {

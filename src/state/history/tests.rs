@@ -123,12 +123,12 @@ fn mm_order_history_row_roundtrips_through_seq_ring() {
     let (mut writer, reader) = SeqRingWriter::<MMOrderHistoryRow>::new(2).unwrap();
     writer.push(MMOrderHistoryRow {
         time: 45_000.0,
-        vol: 50_000.25,
+        volume: 50_000.25,
         q: 7.5,
     });
     writer.push(MMOrderHistoryRow {
         time: 45_000.5,
-        vol: 51_000.5,
+        volume: 51_000.5,
         q: 8.25,
     });
 
@@ -140,12 +140,12 @@ fn mm_order_history_row_roundtrips_through_seq_ring() {
         vec![
             MMOrderHistoryRow {
                 time: 45_000.0,
-                vol: 50_000.25,
+                volume: 50_000.25,
                 q: 7.5,
             },
             MMOrderHistoryRow {
                 time: 45_000.5,
-                vol: 51_000.5,
+                volume: 51_000.5,
                 q: 8.25,
             }
         ]

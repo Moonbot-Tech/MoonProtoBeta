@@ -4,7 +4,9 @@ use super::*;
 use crate::commands::trades_stream::TradesPacket;
 
 impl TradesState {
-    /// Создать новый gap bucket (Delphi `CreateGapBucket` MoonProtoEngine.pas:1380-1430).
+    /// Create a new gap bucket.
+    ///
+    /// Delphi source: `CreateGapBucket`, `MoonProtoEngine.pas:1380-1430`.
     fn create_bucket(&mut self, start_num: u16, end_num: u16, now_ms: i64) {
         let gap_size = end_num.wrapping_sub(start_num) as usize + 1;
         let gap_size = gap_size.min(MAX_RECVD_SIZE);
@@ -56,7 +58,7 @@ impl TradesState {
         // used_buckets не меняется (slot был занят, остался занят).
     }
 
-    /// Найти bucket для packet_num (Delphi `FindBucketForPacket`).
+    /// Find a bucket that contains `packet_num`.
     ///
     /// With `want_extend=true`, this also performs Delphi's adjacent-bucket
     /// extension and updates `last_packet_num` inside the method, matching the
@@ -113,8 +115,7 @@ impl TradesState {
         None
     }
 
-    /// Обработать MPC_TradesStream packet-number state (track packets = true).
-    /// Делает то же что Delphi `ProcessTradesStream(TrackPackets=True)` MoonProtoEngine.pas:1553+.
+    /// Process `MPC_TradesStream` packet-number state with packet tracking.
     ///
     /// Low-level callers that still parse owned [`TradesPacket`] get only a
     /// lightweight [`TradesEvent::Applied`] notification; row storage belongs
@@ -244,9 +245,11 @@ impl TradesState {
         events
     }
 
-    /// Обработать пакет из MPC_TradesResendResponse (track packets = false).
-    /// Не двигает last_packet_num, только помечает recvd в buckets.
-    /// Delphi `ProcessTradesStream(TrackPackets=False)` ветка (MoonProtoEngine.pas:1667-1675).
+    /// Process one packet from `MPC_TradesResendResponse`.
+    ///
+    /// Resend packets do not advance `last_packet_num`; they only mark received
+    /// bits in existing buckets. This mirrors Delphi
+    /// `ProcessTradesStream(TrackPackets=False)`.
     pub fn on_packet_resend(&mut self, pkt: TradesPacket) -> Vec<TradesEvent> {
         let effects = self.on_packet_resend_header(pkt.packet_num);
         materialize_packet_effects(effects, pkt)

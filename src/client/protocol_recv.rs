@@ -1,11 +1,49 @@
 use super::protocol_core::ProtocolCore;
 use super::*;
 
+struct RecvPhaseOutcome {
+    drained_any: bool,
+    #[cfg(test)]
+    deadline_reached: bool,
+}
+
 impl ProtocolCore<'_> {
-    pub(crate) fn recv_drain_phase(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
+    pub(crate) fn recv_one_phase(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) -> bool {
+        self.recv_phase_limited(cur_tm, None, 1, mode).drained_any
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recv_drain_phase(
+        &mut self,
+        cur_tm: i64,
+        run_deadline: Instant,
+        mode: &mut RunMode<'_>,
+    ) -> bool {
+        self.recv_phase_limited(cur_tm, Some(run_deadline), usize::MAX, mode)
+            .deadline_reached
+    }
+
+    fn recv_phase_limited(
+        &mut self,
+        cur_tm: i64,
+        run_deadline: Option<Instant>,
+        max_datagrams: usize,
+        mode: &mut RunMode<'_>,
+    ) -> RecvPhaseOutcome {
         let mut buf = [0u8; 65535];
         let mut drained_any = false;
+        let mut deadline_reached = false;
+        let mut datagrams = 0usize;
         loop {
+            if max_datagrams == 0 || datagrams >= max_datagrams {
+                break;
+            }
+            if run_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                || self.client.shutdown_requested()
+            {
+                deadline_reached = true;
+                break;
+            }
             let recv_result = {
                 let Some(sock) = self.client.socket.as_ref() else {
                     break;
@@ -16,9 +54,16 @@ impl ProtocolCore<'_> {
             match recv_result {
                 Ok((n, _)) => {
                     drained_any = true;
+                    datagrams += 1;
                     let continue_recv = self.process_datagram_inline(&buf[..n], n as u64, mode);
                     self.drain_post_receive_delivery(cur_tm, mode);
                     if !continue_recv {
+                        break;
+                    }
+                    if run_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                        || self.client.shutdown_requested()
+                    {
+                        deadline_reached = true;
                         break;
                     }
                 }
@@ -38,6 +83,18 @@ impl ProtocolCore<'_> {
 
         if drained_any {
             self.rearm_recv_poller();
+        }
+        if deadline_reached && trace_io_enabled() {
+            eprintln!(
+                "[mp-recv-yield] t={} reason=run_deadline drained_any={}",
+                trace_elapsed_ms(),
+                drained_any
+            );
+        }
+        RecvPhaseOutcome {
+            drained_any,
+            #[cfg(test)]
+            deadline_reached,
         }
     }
 
@@ -63,6 +120,7 @@ impl ProtocolCore<'_> {
         let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
         protocol_metrics.record_recv_packet();
         let protocol_start = Instant::now();
+        let mut protocol_wait = Duration::ZERO;
         let mut metric_cmd = u8::MAX;
         let mut metric_payload_len = datagram.len();
 
@@ -71,18 +129,23 @@ impl ProtocolCore<'_> {
                 &self.client.mac_ctx,
                 &self.client.cfg.mac_key,
                 datagram,
-                self.client.cfg.mask_ver,
+                self.client.cfg.mask_ver.to_byte(),
             ) {
             metric_cmd = Command::from_byte(hdr.cmd).to_byte();
             metric_payload_len = payload.len();
 
             if trace_io_enabled() {
                 eprintln!(
-                    "[mp-io-rx] cmd={:?} raw={} packet_len={} payload_len={}",
+                    "[mp-io-rx] t={} cmd={:?} raw={} packet_len={} payload_len={} packet_hash={:016X} packet_head={} payload_hash={:016X} payload_head={}",
+                    trace_elapsed_ms(),
                     Command::from_byte(hdr.cmd),
                     hdr.cmd,
                     datagram.len(),
-                    payload.len()
+                    payload.len(),
+                    fnv1a64(datagram),
+                    trace_head(datagram, 16),
+                    fnv1a64(&payload),
+                    trace_head(&payload, 16)
                 );
             }
 
@@ -111,6 +174,7 @@ impl ProtocolCore<'_> {
                         total_recv_after,
                         timestamp_ms,
                         mode,
+                        &mut protocol_wait,
                     )
                 }
             } else {
@@ -121,14 +185,31 @@ impl ProtocolCore<'_> {
                     total_recv_after,
                     timestamp_ms,
                     mode,
+                    &mut protocol_wait,
                 )
             }
         } else {
+            if trace_io_enabled() {
+                eprintln!(
+                    "[mp-io-rx-invalid] t={} packet_len={} packet_hash={:016X} packet_head={}",
+                    trace_elapsed_ms(),
+                    datagram.len(),
+                    fnv1a64(datagram),
+                    trace_head(datagram, 16)
+                );
+            }
             true
         };
 
+        if protocol_wait > Duration::ZERO {
+            protocol_metrics.record_reader_protocol_wait_labeled(
+                protocol_wait,
+                metric_cmd,
+                metric_payload_len,
+            );
+        }
         protocol_metrics.record_reader_protocol_labeled(
-            protocol_start.elapsed(),
+            protocol_start.elapsed().saturating_sub(protocol_wait),
             metric_cmd,
             metric_payload_len,
         );
@@ -143,6 +224,7 @@ impl ProtocolCore<'_> {
         total_recv_after: u64,
         timestamp_ms: i64,
         mode: &mut RunMode<'_>,
+        protocol_wait: &mut Duration,
     ) -> bool {
         self.client.recv_slicer.set_last_online(timestamp_ms);
         self.client.recv_slicer.do_cleanup();
@@ -159,7 +241,7 @@ impl ProtocolCore<'_> {
                 );
             }
             Command::WhoAreYou => {
-                self.on_who_are_you_inline(payload, recv_bytes, timestamp_ms);
+                *protocol_wait += self.on_who_are_you_inline(payload, recv_bytes, timestamp_ms);
             }
             Command::Fine => {
                 self.on_fine_inline(payload, recv_bytes, timestamp_ms);
@@ -249,6 +331,12 @@ impl ProtocolCore<'_> {
         if apply_recv_effects {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
+        if self.should_drop_crypted_before_auth(raw_cmd, payload.len()) {
+            if let Some(stats) = sliced_stats {
+                self.apply_reader_sliced_stats(stats);
+            }
+            return;
+        }
         let decoded = Client::decode_data_read_int_payload_shared(
             &mut self.client.data_read_state,
             raw_cmd,
@@ -276,6 +364,12 @@ impl ProtocolCore<'_> {
         if apply_recv_effects {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
         }
+        if self.should_drop_crypted_before_auth(raw_cmd, payload.len()) {
+            if let Some(stats) = sliced_stats {
+                self.apply_reader_sliced_stats(stats);
+            }
+            return;
+        }
         let Some((cmd, payload)) = Client::decode_data_read_int_payload_owned(
             &mut self.client.data_read_state,
             raw_cmd,
@@ -286,6 +380,21 @@ impl ProtocolCore<'_> {
         self.finish_data_read_int_decoded(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
+    fn should_drop_crypted_before_auth(&self, raw_cmd: u8, payload_len: usize) -> bool {
+        if self.client.authorized || Command::from_byte(raw_cmd) != Command::Crypted {
+            return false;
+        }
+        if trace_io_enabled() {
+            eprintln!(
+                "[mp-dispatch-drop] t={} cmd=Crypted raw={} payload_len={} reason=not_authorized_crypted",
+                trace_elapsed_ms(),
+                raw_cmd,
+                payload_len
+            );
+        }
+        true
+    }
+
     fn finish_data_read_int_decoded(
         &mut self,
         cmd: u8,
@@ -294,8 +403,8 @@ impl ProtocolCore<'_> {
         sliced_stats: Option<ReaderSlicedStats>,
         mode: &mut RunMode<'_>,
     ) {
-        let api_pending_consumed = !matches!(mode, RunMode::DispatcherWorker { .. })
-            && Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
+        let api_pending_consumed =
+            Client::dispatch_api_pending_inline(self.client.api_pending.as_ref(), cmd, &payload);
         let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(
             &mut self.client.pending_candles,
             cmd,
@@ -308,6 +417,60 @@ impl ProtocolCore<'_> {
                 .lock()
                 .unwrap()
                 .record_sliced_complete(stats.datagram_num, stats.blocks_count, cmd, &payload);
+        }
+        if trace_io_enabled() {
+            let cmd_kind = Command::from_byte(cmd);
+            let api = if cmd_kind == Command::API {
+                Client::engine_response_meta_from_payload(&payload)
+                    .map(|meta| {
+                        format!(
+                            " api_uid={} api_method={:?} api_success={}",
+                            meta.request_uid, meta.method, meta.success
+                        )
+                    })
+                    .unwrap_or_else(|| " api=malformed".to_string())
+            } else {
+                String::new()
+            };
+            let strat = if cmd_kind == Command::Strat {
+                let strat_cmd = payload.first().copied();
+                let strat_uid = payload
+                    .get(3..11)
+                    .and_then(|uid| uid.try_into().ok())
+                    .map(u64::from_le_bytes);
+                format!(" strat_cmd={strat_cmd:?} strat_uid={strat_uid:?}")
+            } else {
+                String::new()
+            };
+            let ui = if cmd_kind == Command::UI {
+                format!(" ui_cmd={:?}", payload.first().copied())
+            } else {
+                String::new()
+            };
+            let sliced = sliced_stats
+                .as_ref()
+                .map(|stats| {
+                    format!(
+                        " sliced_d={} sliced_blocks={}",
+                        stats.datagram_num, stats.blocks_count
+                    )
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "[mp-dataread] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} payload_head={} api_pending_consumed={} candles_chunk_consumed={}{}{}{}{}",
+                trace_elapsed_ms(),
+                cmd_kind,
+                cmd,
+                payload.len(),
+                fnv1a64(&payload),
+                trace_head(&payload, 16),
+                api_pending_consumed,
+                candles_chunk_consumed,
+                sliced,
+                api,
+                strat,
+                ui
+            );
         }
         if let Some(stats) = sliced_stats {
             self.apply_reader_sliced_stats(stats);

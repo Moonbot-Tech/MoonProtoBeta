@@ -1,14 +1,19 @@
 # Active Lib Contract
 
 `MoonClient` is the normal application API. It owns a runtime thread and keeps
-MoonProto alive until `stop()` or drop. Applications choose subscriptions and
-send commands; the library maintains protocol and trading state.
+MoonProto alive until `disconnect()` or drop. `connect` returns immediately;
+`LifecycleEvent::Ready` means the one-time Init finished. Applications choose
+subscriptions and send commands; the library maintains protocol and trading
+state.
 
 ## Session
 
 - Connects, authorizes, and runs Init once per session.
 - Keeps reconnect, re-handshake, Sliced ACK/retry, PMTU, and pending Engine API
   routing alive in the background.
+- Handles Path MTU probing internally. A too-large `SizeAck`/`ProbeMTUAck`
+  result is an expected failed probe; regular application payloads are sent
+  through the normal Sliced/retry machinery when they do not fit one datagram.
 - Does not ask applications to choose a protocol-loop duration.
 - Blocks indexed streams while market indexes are stale after reconnect.
 
@@ -30,7 +35,9 @@ send commands; the library maintains protocol and trading state.
   stops, vstop, panic, immune, and snapshot cleanup.
 - Strategy schema and strategy snapshots. Applications can provide local
   strategies before Init; the runtime answers server snapshot requests from its
-  owned strategy state.
+  owned strategy state. If the request arrives before Init opens the domain
+  gate, it is latched and answered during post-init resync after schema/state
+  are ready.
 - Settings, lifecycle events, Engine API responses, and server logs.
 
 ## Subscriptions
@@ -38,8 +45,9 @@ send commands; the library maintains protocol and trading state.
 - Orderbook subscription intent is registry-aware. Reconnect restores the latest
   requested set and requests full orderbooks when diff recovery needs it.
 - Trades subscription is explicit in the Rust API. `TradesStreamMode` chooses
-  trades-only vs trades plus market-maker sections. `subscribe_all_trades`
-  stores and calculates for all markets. `subscribe_trades_for` sends the same
+  trades-only vs trades plus market-maker sections.
+  `streams().subscribe_all_trades` stores and calculates for all markets.
+  `streams().subscribe_trades_for` sends the same
   server subscription but retains/calculates only the selected markets; an empty
   list means all markets.
 - When trades storage is enabled, the runtime requests the initial 5m candles
@@ -50,17 +58,17 @@ send commands; the library maintains protocol and trading state.
 ## UI Shape
 
 - UI reads immutable snapshots and stable handles.
-- UI sends intents through `MoonClient`, `client.orders()`, and
-  `client.trade()`.
+- UI sends intents through domain handles such as `client.streams()`,
+  `client.orders()`, `client.trade()`, `client.balances()`, and
+  `client.settings()`.
 - Stateful order actions are marshalled to the runtime owner; application code
   does not mutate `Orders`.
-- Asset-transfer UI calls `refresh_transfer_assets()` and then reads
+- Asset-transfer UI calls `client.balances().refresh_transfer_assets()` and then reads
   `snapshot().transfer_assets()`. The command returns after queuing all wallet
   refresh requests; `Event::TransferAssets` reports each completed wallet and a
   final `RefreshCompleted` event after all requested wallet kinds have answered.
 - Time fields inherited from Delphi are day values, not Unix timestamps. Use
   `DelphiTime` helpers such as `row.time_delphi().unix_millis()`.
 
-Low-level `Client`, `EventDispatcher`, `commands::*`, and `state::*` remain
-available for tests, diagnostics, and custom runtimes, but regular applications
-should start from `MoonClient`.
+Regular applications should start from `MoonClient`: it owns the protocol loop,
+dispatcher, event sink, and retained state.

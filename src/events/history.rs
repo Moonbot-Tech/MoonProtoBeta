@@ -38,7 +38,7 @@ impl EventDispatcher {
     }
 
     pub fn market_history_readers(&self, market_name: &str) -> Option<MarketHistoryReaders> {
-        self.market_history.as_ref()?.readers(market_name)
+        self.market_history.as_ref()?.try_readers(market_name)
     }
 
     pub fn market_history_rolling_volumes(
@@ -48,7 +48,7 @@ impl EventDispatcher {
     ) -> Option<RollingTradeVolumeSnapshot> {
         self.market_history
             .as_ref()?
-            .rolling_volumes(market_name, now_time)
+            .try_rolling_volumes(market_name, now_time)
     }
 
     pub fn market_history_rolling_volumes_at(
@@ -73,7 +73,7 @@ impl EventDispatcher {
     ) -> Option<MarketDerivedSnapshot> {
         self.market_history
             .as_ref()?
-            .derived_snapshot(market_name, now_time)
+            .try_derived_snapshot(market_name, now_time)
     }
 
     pub fn market_history_derived_snapshot_at(
@@ -202,18 +202,16 @@ impl EventDispatcher {
                 .iter()
                 .map(|name| {
                     self.markets
-                        .by_name
-                        .contains_key(name.as_str())
-                        .then(|| Arc::<str>::from(name.as_str()))
+                        .handles_by_name
+                        .get(name.as_str())
+                        .map(|handle| handle.name_arc())
                 })
                 .collect();
         }
         self.markets
             .markets
             .iter()
-            .map(|market| {
-                market.with(|market| Some(Arc::<str>::from(market.bn_market_name.as_str())))
-            })
+            .map(|market| Some(market.name_arc()))
             .collect()
     }
 

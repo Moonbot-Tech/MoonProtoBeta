@@ -10,8 +10,8 @@ use std::io::Read;
 use flate2::read::DeflateDecoder;
 
 use super::strategy_serializer::{
-    FieldValue, TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32, TID_INT64, TID_SINGLE, TID_STRING,
-    TID_UINT32, TID_UINT64, TID_WORD,
+    FieldValue, StrategyKind, TID_BOOL, TID_BYTE, TID_DOUBLE, TID_INT32, TID_INT64, TID_SINGLE,
+    TID_STRING, TID_UINT32, TID_UINT64, TID_WORD,
 };
 use super::strict_read::{
     read_f32, read_f64, read_i32, read_i64, read_str16, read_str8, read_u16, read_u32, read_u64,
@@ -53,9 +53,9 @@ pub struct StrategySchemaKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategySchemaField {
     pub name: String,
-    pub raw_type_id: u8,
+    pub(crate) raw_type_id: u8,
     pub type_id: StrategyFieldType,
-    pub raw_flags: u8,
+    pub(crate) raw_flags: u8,
     pub ui_kind: StrategyFieldUiKind,
     pub layout: StrategyFieldLayout,
     pub default_value: Option<FieldValue>,
@@ -63,11 +63,12 @@ pub struct StrategySchemaField {
     pub visible_kind_ordinals: Vec<u8>,
     /// Same visibility as a hot-path bitset by raw `TStrategyKind` ordinal.
     ///
-    /// Kept alongside `visible_kind_ordinals`: the vector is the API-readable
-    /// schema dump, the mask is the serializer fast path.
-    pub visible_kind_mask: u32,
+    /// Internal serializer fast path. Public code should use
+    /// `visible_kind_ordinals`, `visible_for_kind`, or
+    /// `visible_for_strategy_kind`.
+    pub(crate) visible_kind_mask: u32,
     /// Raw pipe string from Delphi `WriteStr16`, when `FLAG_HAS_STATIC` is set.
-    pub static_picklist_raw: Option<String>,
+    pub(crate) static_picklist_raw: Option<String>,
     /// Split view of `static_picklist_raw`.
     pub static_picklist: Vec<String>,
     /// Dynamic picklist source, when `FLAG_HAS_DYNAMIC` is set.
@@ -274,12 +275,31 @@ impl StrategySchema {
 }
 
 impl StrategySchemaField {
+    #[doc(hidden)]
+    pub fn raw_type_id(&self) -> u8 {
+        self.raw_type_id
+    }
+
+    #[doc(hidden)]
+    pub fn raw_flags(&self) -> u8 {
+        self.raw_flags
+    }
+
+    #[doc(hidden)]
+    pub fn static_picklist_raw(&self) -> Option<&str> {
+        self.static_picklist_raw.as_deref()
+    }
+
     pub fn visible_for_kind(&self, kind: u8) -> bool {
         if kind < 32 {
             self.visible_kind_mask & (1u32 << kind) != 0
         } else {
             self.visible_kind_ordinals.contains(&kind)
         }
+    }
+
+    pub fn visible_for_strategy_kind(&self, kind: StrategyKind) -> bool {
+        self.visible_for_kind(kind.to_byte())
     }
 }
 

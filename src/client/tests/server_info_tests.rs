@@ -1,5 +1,6 @@
 use super::*;
-use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
+use crate::commands::engine_api::{AuthCheckResponse, HyperDexIndex, ServerInfo};
+use crate::commands::market::{BaseCurrency, ExchangeCode};
 
 fn dummy_cfg() -> ClientConfig {
     ClientConfig {
@@ -7,7 +8,7 @@ fn dummy_cfg() -> ClientConfig {
         server_port: 3000,
         master_key: [0; 16],
         mac_key: [0; 16],
-        mask_ver: 0,
+        mask_ver: TransportMode::V0,
         client_id: 0,
         ntp_host: None,
         refresh: RefreshConfig {
@@ -31,10 +32,10 @@ fn set_server_info_updates_storage_and_is_retrievable_via_getter() {
     let info = ServerInfo {
         bot_id: Some(0x1234_5678),
         server_name: Some("Test Server".to_string()),
-        exchange_code: Some(1),
+        exchange_code: Some(ExchangeCode::from_byte(1)),
         exchange_name: Some("Binance Futures".to_string()),
         base_currency_name: Some("USDT".to_string()),
-        base_currency_code: Some(1),
+        base_currency_code: Some(BaseCurrency::USDT),
         ..Default::default()
     };
     client.set_server_info(info.clone());
@@ -90,8 +91,8 @@ fn trade_ctx_requires_base_check_route_fields() {
 fn trade_ctx_uses_server_info_route_fields() {
     let mut client = Client::new(dummy_cfg());
     client.set_server_info(ServerInfo {
-        exchange_code: Some(9),
-        base_currency_code: Some(17),
+        exchange_code: Some(ExchangeCode::FGate),
+        base_currency_code: Some(BaseCurrency::IDR),
         ..Default::default()
     });
 
@@ -100,8 +101,8 @@ fn trade_ctx_uses_server_info_route_fields() {
         .expect("route fields are present");
 
     assert_eq!(ctx.uid, 0x0102_0304_0506_0708);
-    assert_eq!(ctx.currency, 17);
-    assert_eq!(ctx.platform, 9);
+    assert_eq!(ctx.currency, BaseCurrency::IDR);
+    assert_eq!(ctx.platform, ExchangeCode::FGate);
 }
 
 #[test]
@@ -115,8 +116,8 @@ fn set_auth_info_updates_storage_and_is_retrievable_via_getter() {
         account_id: "acc".to_string(),
         recvd_max_payload: Some(4096),
         known_dexes: Vec::new(),
-        hl_dex_market: Some(1),
-        hl_spot_market: Some(0),
+        hl_dex_market: Some(HyperDexIndex::from_byte(1)),
+        hl_spot_market: Some(HyperDexIndex::DEFAULT),
     };
 
     client.set_auth_info(auth.clone());

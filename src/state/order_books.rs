@@ -20,10 +20,10 @@
 //! for ev in events {
 //!     match ev {
 //!         OrderBookEvent::Apply { top, .. } => /* redraw best bid/ask or read state.book(...) */,
-//!         OrderBookEvent::RequestFullNeeded { market_index, book_kind } => {
+//!         OrderBookEvent::RequestFullNeeded { market_index, kind } => {
 //!             // Low-level mode only: send emk_RequestOrderBookFull yourself.
 //!             // EventDispatcher::dispatch_into_active consumes this internally.
-//!             let req = commands::engine_request::request_order_book_full(market_index, book_kind);
+//!             let req = commands::engine_request::request_order_book_full(market_index, kind.as_u8());
 //!             client.send_api_request(&req);
 //!         }
 //!     }
@@ -31,6 +31,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::commands::order_book::{compare_seq, OrderBookUpdate};
 use crate::state::eps::EpsProfile;
@@ -63,7 +64,7 @@ const BOOK_CACHE_MAX_PACKETS: usize = 64;
 #[derive(Debug, Clone, Default)]
 pub struct OrderBooks {
     caches: HashMap<BookKey, OrderBookCache>,
-    books: HashMap<BookKey, OrderBookSnapshot>,
+    books: HashMap<BookKey, Arc<OrderBookSnapshot>>,
     diff_scratch: Vec<OrderBookLevel>,
     eps_profile: EpsProfile,
 }
@@ -98,6 +99,7 @@ impl OrderBooks {
         events: &mut Vec<OrderBookEvent>,
     ) {
         let key: BookKey = (pkt.market_index, pkt.book_kind);
+        let kind = OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures);
 
         let cache = self.caches.entry(key).or_default();
 
@@ -115,14 +117,13 @@ impl OrderBooks {
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 market_name: None,
-                book_kind: pkt.book_kind,
-                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
+                kind,
                 is_full: true,
                 seq: pkt.seq,
                 top: self
                     .books
                     .get(&key)
-                    .map(OrderBookSnapshot::top)
+                    .map(|book| book.top())
                     .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
@@ -152,14 +153,13 @@ impl OrderBooks {
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 market_name: None,
-                book_kind: pkt.book_kind,
-                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
+                kind,
                 is_full: false,
                 seq,
                 top: self
                     .books
                     .get(&key)
-                    .map(OrderBookSnapshot::top)
+                    .map(|book| book.top())
                     .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
@@ -171,7 +171,7 @@ impl OrderBooks {
             if cache.try_request_full(now_ms) {
                 events.push(OrderBookEvent::RequestFullNeeded {
                     market_index: key.0,
-                    book_kind: key.1,
+                    kind,
                 });
             }
             return;
@@ -198,14 +198,13 @@ impl OrderBooks {
             events.push(OrderBookEvent::Apply {
                 market_index: pkt.market_index,
                 market_name: None,
-                book_kind: pkt.book_kind,
-                kind: OrderBookKind::from_u8(pkt.book_kind).unwrap_or(OrderBookKind::Futures),
+                kind,
                 is_full: false,
                 seq: pkt.seq,
                 top: self
                     .books
                     .get(&key)
-                    .map(OrderBookSnapshot::top)
+                    .map(|book| book.top())
                     .unwrap_or_default(),
                 buys: pkt.buys,
                 sells: pkt.sells,
@@ -219,7 +218,7 @@ impl OrderBooks {
         if cmp < 0 {
             events.push(OrderBookEvent::Ignored {
                 market_index: pkt.market_index,
-                book_kind: pkt.book_kind,
+                kind,
                 seq: pkt.seq,
                 reason: ApplyResult::Stale,
             });
@@ -235,12 +234,12 @@ impl OrderBooks {
         if cache.try_request_full(now_ms) {
             events.push(OrderBookEvent::RequestFullNeeded {
                 market_index: key.0,
-                book_kind: key.1,
+                kind,
             });
         }
         events.push(OrderBookEvent::Ignored {
             market_index: pkt.market_index,
-            book_kind: pkt.book_kind,
+            kind,
             seq,
             reason: ApplyResult::Cached,
         });
@@ -279,14 +278,13 @@ impl OrderBooks {
             events.push(OrderBookEvent::Apply {
                 market_index: entry.pkt.market_index,
                 market_name: None,
-                book_kind: entry.pkt.book_kind,
                 kind: OrderBookKind::from_u8(entry.pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: entry.pkt.is_full,
                 seq: entry.seq,
                 top: self
                     .books
                     .get(&key)
-                    .map(OrderBookSnapshot::top)
+                    .map(|book| book.top())
                     .unwrap_or_default(),
                 buys: entry.pkt.buys,
                 sells: entry.pkt.sells,
@@ -333,8 +331,12 @@ impl OrderBooks {
     }
 
     /// Get the applied current book by raw wire kind (`0 = futures`, `1 = spot`).
-    pub fn book_by_kind(&self, market_index: u16, book_kind: u8) -> Option<&OrderBookSnapshot> {
-        self.books.get(&(market_index, book_kind))
+    pub(crate) fn book_by_kind(
+        &self,
+        market_index: u16,
+        book_kind: u8,
+    ) -> Option<&OrderBookSnapshot> {
+        self.books.get(&(market_index, book_kind)).map(Arc::as_ref)
     }
 
     /// Get the applied current book.
@@ -344,13 +346,12 @@ impl OrderBooks {
 
     /// Get best bid/ask from the applied current book.
     pub fn top_of_book(&self, market_index: u16, book_kind: OrderBookKind) -> Option<TopOfBook> {
-        self.book(market_index, book_kind)
-            .map(OrderBookSnapshot::top)
+        self.book(market_index, book_kind).map(|book| book.top())
     }
 
     /// Iterate over applied current books.
     pub fn iter_books(&self) -> impl Iterator<Item = &OrderBookSnapshot> {
-        self.books.values()
+        self.books.values().map(Arc::as_ref)
     }
 }
 

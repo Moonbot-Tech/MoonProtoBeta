@@ -1,124 +1,142 @@
 //! `emk_BaseCheck` response parser.
 
 use super::read_string;
+use crate::commands::market::{BaseCurrency, ExchangeCode};
+use std::ops::{BitOr, BitOrAssign};
 
-/// Bitmask flags для `ServerInfo::exchange_type_mask`. Несколько бит могут быть
-/// установлены одновременно (например Spot+Futures если сервер обслуживает оба).
-pub mod exchange_type_flags {
-    /// Spot trading доступен.
-    pub const SPOT: u8 = 0x01;
-    /// Futures (perpetual / dated) доступны.
-    pub const FUTURES: u8 = 0x02;
-    /// Сервер работает с DEX (Hyperliquid и подобные).
-    pub const DEX: u8 = 0x04;
-    /// Predict / outcome markets (HL Spot где `HLSpotMarket = 1`; Polymarket в будущем).
-    pub const PREDICT: u8 = 0x08;
+/// Bitmask for exchange capabilities returned by BaseCheck.
+///
+/// Several bits may be set at once, for example Spot + Futures when the server
+/// exposes both trading modes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ExchangeTypeMask(u8);
+
+impl ExchangeTypeMask {
+    /// Spot trading is available.
+    pub const SPOT: Self = Self(0x01);
+    /// Futures trading is available.
+    pub const FUTURES: Self = Self(0x02);
+    /// The server works with a DEX backend such as Hyperliquid.
+    pub const DEX: Self = Self(0x04);
+    /// Prediction / outcome markets.
+    pub const PREDICT: Self = Self(0x08);
+
+    pub const fn from_byte(b: u8) -> Self {
+        Self(b)
+    }
+
+    pub const fn to_byte(self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) != 0
+    }
 }
 
-/// Распакованная identity сервера, возвращаемая в ответе на `emk_BaseCheck`
-/// (`EngineMethod::BaseCheck`).
+impl BitOr for ExchangeTypeMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for ExchangeTypeMask {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl std::fmt::Debug for ExchangeTypeMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExchangeTypeMask(0x{:02X})", self.0)
+    }
+}
+
+/// Named flags for `ServerInfo::exchange_type_mask`.
+pub mod exchange_type_flags {
+    use super::ExchangeTypeMask;
+
+    /// Spot trading is available.
+    pub const SPOT: ExchangeTypeMask = ExchangeTypeMask::SPOT;
+    /// Futures trading is available.
+    pub const FUTURES: ExchangeTypeMask = ExchangeTypeMask::FUTURES;
+    /// The server works with a DEX backend such as Hyperliquid.
+    pub const DEX: ExchangeTypeMask = ExchangeTypeMask::DEX;
+    /// Prediction / outcome markets.
+    pub const PREDICT: ExchangeTypeMask = ExchangeTypeMask::PREDICT;
+}
+
+/// Server identity returned by `EngineMethod::BaseCheck`.
 ///
-/// **Назначение.** Когда клиент подключается к нескольким `MoonBot`-серверам
-/// одновременно, ему нужно различать их (показать в UI имя биржи, базовую валюту,
-/// версии для compat-проверок). `emk_BaseCheck` — первый Engine-вызов в init
-/// sequence, поэтому именно он несёт **server identity** (`emk_AuthCheck` идёт
-/// после и несёт **per-account** информацию — `binance_account_id`, `is_sub_account`,
-/// `account_id`).
+/// `BaseCheck` is the first Engine API request in Init, so it carries server
+/// identity used by multi-server applications: bot id, exchange name, base
+/// currency, and protocol/version fields. Per-account fields are returned by
+/// `AuthCheck` instead.
 ///
-/// **Forward-compat.** Все поля `Option`. Старые сервера (до multi-server расширения)
-/// шлют пустой response — все поля будут `None`. Новый сервер постепенно дополняется
-/// полями — клиент читает пока есть данные, остальные остаются `None`.
+/// Every field is optional for forward compatibility. Older servers may return
+/// an empty response; newer servers can append fields while older clients keep
+/// already-read fields and leave the rest as `None`.
 ///
-/// **Wire-format** (порядок в payload, все поля опциональные через `if !EOF`):
-/// 1. `bot_id`                  — i64 LE (`cfg.UniqueBotID`, уникальный идентификатор сервера)
-/// 2. `server_name`             — string LE u16 length + UTF-8 ("Binance Main", default `"Server"`)
-/// 3. `exchange_code`           — u8 (`Ord(cfg.Header.Current)` — `TBotPlatform` enum)
-/// 4. `exchange_name`           — string ("Binance Futures", "Hyper", ...)
-/// 5. `exchange_type_mask`      — u8 bitmask (см. [`exchange_type_flags`])
-/// 6. `dex_name`                — string (HIP-3 dex name для HL futures; `""` иначе)
-/// 7. `base_currency_name`      — string ("USDT", "BTC", ...)
-/// 8. `base_currency_code`      — u8 (`Ord(cfg.BaseCurrency)` — `TBaseCurrency` enum, BC_USDT=1)
-/// 9. `server_version`          — i32 LE (`Current_Version_Num_X`, например 763 = v7.63)
-/// 10. `moonproto_version`      — i32 LE (`IntMoonProtoTCPCurrentVer`)
+/// Wire payload order:
+/// 1. `bot_id` — i64 LE (`cfg.UniqueBotID`);
+/// 2. `server_name` — u16-length UTF-8 string;
+/// 3. `exchange_code` — Delphi `TBotPlatform` ordinal;
+/// 4. `exchange_name` — UI name such as "Binance Futures";
+/// 5. `exchange_type_mask` — bitmask, see [`exchange_type_flags`];
+/// 6. `dex_name` — HIP-3 DEX name for Hyperliquid futures, otherwise empty;
+/// 7. `base_currency_name` — "USDT", "BTC", etc.;
+/// 8. `base_currency_code` — Delphi `TBaseCurrency` ordinal;
+/// 9. `server_version` — MoonBot version number;
+/// 10. `moonproto_version` — MoonProto protocol version.
 ///
 /// Source: `MoonProtoEngineServer.pas:244-273`.
-///
-/// Пример использования:
-/// ```ignore
-/// use moonproto::commands::engine_api::{parse_base_check_response, exchange_type_flags};
-/// let rx = client.api_base_check();
-/// let resp = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-/// if resp.success {
-///     let info = parse_base_check_response(&resp.data);
-///     if let (Some(name), Some(mask)) = (&info.exchange_name, info.exchange_type_mask) {
-///         let futures = (mask & exchange_type_flags::FUTURES) != 0;
-///         println!("Connected to {} (futures: {}, base: {:?})",
-///             name, futures, info.base_currency_name);
-///     }
-/// }
-/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerInfo {
-    /// `cfg.UniqueBotID` — уникальный 64-битный идентификатор сервера, стабильный
-    /// через перезапуски. `None` если сервер не передал (старая версия). Это
-    /// основной ID для multi-server идентификации в UI.
+    /// Stable 64-bit server id (`cfg.UniqueBotID`), if the server sends it.
     pub bot_id: Option<i64>,
-    /// Human-readable имя сервера для UI ("Binance Main", "My Bybit Test"). Сервер
-    /// присылает `cfg.BotName`; если пустое — `"Server"`.
+    /// Human-readable server name for UI.
     pub server_name: Option<String>,
-    /// Числовой код биржи (`Ord(cfg.Header.Current)` — Delphi enum `TBotPlatform`).
-    /// Финальный список значений ведёт сервер.
-    pub exchange_code: Option<u8>,
-    /// Человеко-читаемое имя биржи для UI ("Binance Futures", "Hyper", ...).
+    /// Delphi `TBotPlatform` ordinal.
+    pub exchange_code: Option<ExchangeCode>,
+    /// Human-readable exchange name.
     pub exchange_name: Option<String>,
-    /// Bitmask что доступно на этом сервере. См. [`exchange_type_flags`].
-    pub exchange_type_mask: Option<u8>,
-    /// HIP-3 dex name для Hyperliquid futures (`GetHIP3DexName`). Пустая строка
-    /// для остальных бирж (`""`, не `None` — сервер всё равно пишет поле).
+    /// Available exchange capabilities. See [`exchange_type_flags`].
+    pub exchange_type_mask: Option<ExchangeTypeMask>,
+    /// HIP-3 DEX name for Hyperliquid futures. Other exchanges usually send an
+    /// empty string.
     pub dex_name: Option<String>,
-    /// Имя базовой валюты ("USDT" / "USD" / "BTC" / ...). В Delphi —
-    /// `cfg.Currency` (string), может меняться при переключении HL DEX.
+    /// Base currency name such as "USDT", "USD", or "BTC".
     pub base_currency_name: Option<String>,
-    /// Код базовой валюты (`Ord(cfg.BaseCurrency)` — Delphi enum `TBaseCurrency`,
-    /// BC_USDT=1). Дополняет `base_currency_name` для type-safe сравнений.
-    pub base_currency_code: Option<u8>,
-    /// Версия MoonBot (`Current_Version_Num_X`, например `763` для v7.63). Wire-тип
-    /// Delphi `Int` (i32); храним как `u32` для semantic clarity (версия беззнаковая).
+    /// Delphi `TBaseCurrency` ordinal.
+    pub base_currency_code: Option<BaseCurrency>,
+    /// MoonBot version number.
     pub server_version: Option<u32>,
-    /// Версия протокола MoonProto (`IntMoonProtoTCPCurrentVer`). Резерв на будущие
-    /// breaking changes wire-format'а.
+    /// MoonProto protocol version.
     pub moonproto_version: Option<u32>,
 }
 
 impl ServerInfo {
-    /// `true` если `bot_id` заполнено — сервер минимум сообщил свою identity.
-    /// Старые серверы вернут `false` (вся структура с `None`).
+    /// `true` when the server reported at least its stable identity id.
     pub fn has_identity(&self) -> bool {
         self.bot_id.is_some()
     }
 
-    /// Удобный helper: возвращает `true` если в `exchange_type_mask` установлен
-    /// соответствующий бит. При `None` (старый сервер не передал mask) —
-    /// возвращает `false`.
-    pub fn supports(&self, flag: u8) -> bool {
+    /// Check one `exchange_type_mask` bit. Missing masks return `false`.
+    pub fn supports(&self, flag: ExchangeTypeMask) -> bool {
         match self.exchange_type_mask {
-            Some(mask) => (mask & flag) != 0,
+            Some(mask) => mask.contains(flag),
             None => false,
         }
     }
 }
 
-/// Распарсить `EngineResponse.data` для `emk_BaseCheck` (`EngineMethod::BaseCheck`).
+/// Parse `EngineResponse.data` for `EngineMethod::BaseCheck`.
 ///
-/// Возвращает `ServerInfo` со всеми заполненными полями которые удалось прочитать.
-/// Никогда не возвращает `None` — пустой payload (старый сервер) валиден,
-/// результат = `ServerInfo::default()` (все поля `None`).
-///
-/// Парсинг **толерантен к truncate'у**: если payload обрывается посередине, поля
-/// до точки обрыва заполнены, остальные = `None`. Это соответствует Delphi-паттерну
-/// `If not resp.EOF then` для опциональных полей.
-///
-/// Byte-exact с серверной частью `MoonProtoEngineServer.pas:244-273`.
+/// Empty payload is valid for old servers and returns `ServerInfo::default()`.
+/// Truncated optional tails keep fields parsed before the truncation and leave
+/// the rest as `None`, matching Delphi's `if not EOF` optional-field pattern.
 pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     let mut info = ServerInfo::default();
     let mut pos = 0usize;
@@ -140,7 +158,7 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     if pos + 1 > data.len() {
         return info;
     }
-    info.exchange_code = Some(data[pos]);
+    info.exchange_code = Some(ExchangeCode::from_byte(data[pos]));
     pos += 1;
 
     // 4. exchange_name (string)
@@ -153,7 +171,7 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     if pos + 1 > data.len() {
         return info;
     }
-    info.exchange_type_mask = Some(data[pos]);
+    info.exchange_type_mask = Some(ExchangeTypeMask::from_byte(data[pos]));
     pos += 1;
 
     // 6. dex_name (string)
@@ -172,7 +190,7 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     if pos + 1 > data.len() {
         return info;
     }
-    info.base_currency_code = Some(data[pos]);
+    info.base_currency_code = Some(BaseCurrency::from_byte(data[pos]));
     pos += 1;
 
     // 9. server_version (i32 LE → u32) — Delphi WriteInt(Current_Version_Num_X).

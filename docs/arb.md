@@ -7,32 +7,40 @@ When the current client settings enable an arbitrage platform, incoming compact
 arb prices are applied to the live `Market` object:
 
 ```rust
+use moonproto::ArbPlatformCode;
+
 let Some(state) = client.snapshot() else { return; };
 
 if let Some(btc) = state.markets().get("BTCUSDT") {
-    if let Some(slot) = btc.arb_slot(7) {
-        println!("price={} isolated={}", slot.now.price, slot.isolated_flags);
+    if let Some(slot) = btc.arb_slot(ArbPlatformCode::ByBit) {
+        println!(
+            "price={} deposit_blocked={} withdraw_blocked={}",
+            slot.now.price,
+            slot.isolated_flags.deposit_blocked(),
+            slot.isolated_flags.withdraw_blocked()
+        );
     }
 }
 ```
 
-`Market::arb_slots` is keyed by platform code. Each slot mirrors the useful
-parts of Delphi `TMarket.ArbSlots` / `TMarket.ArbNow`:
+Arb slots are keyed by `ArbPlatformCode`. Each slot mirrors the useful parts of
+Delphi `TMarket.ArbSlots` / `TMarket.ArbNow`; the temporary mark-and-sweep
+staging byte is not public API:
 
 ```rust
 pub struct MarketArbSlot {
-    pub ring: [MarketArbPricePoint; 10],
     pub enabled: bool,
-    pub head: u8,
-    pub isolated_flags: u8,
+    pub isolated_flags: ArbIsolationFlags,
     pub now: MarketArbNowEntry,
 }
 ```
 
 Isolation snapshots are committed like Delphi: received temporary flags replace
 the current `isolated_flags`, then the temporary staging flags are cleared.
-Use `MarketHandle::arb_now(platform_code)` when the UI only needs the latest
-price/time and not the 10-point Delphi ring.
+Use `MarketHandle::arb_now(ArbPlatformCode::...)` when the UI only needs the
+latest price/time. If the UI needs the 10-point Delphi ring, use
+`MarketArbSlot::points_oldest_first()`; the raw storage ring and cursor are
+internal.
 
 ## Events
 

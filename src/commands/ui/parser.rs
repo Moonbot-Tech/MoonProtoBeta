@@ -8,6 +8,7 @@ impl UICommand {
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
     /// Version gate: ver > 3 -> [`UICommand::Skipped`], matching Delphi
     /// registry `FSkipped`.
+    #[doc(hidden)]
     pub fn parse(payload: &[u8]) -> Option<Self> {
         Self::parse_with_client_settings_fallback(payload, None)
     }
@@ -21,6 +22,7 @@ impl UICommand {
     /// keeps the current local `cfg` values. The active dispatcher passes its
     /// current settings snapshot here; low-level callers can pass the same value
     /// when decoding historical payloads.
+    #[doc(hidden)]
     pub fn parse_with_client_settings_fallback(
         payload: &[u8],
         client_settings_fallback: Option<&ClientSettingsCommand>,
@@ -180,7 +182,7 @@ impl UICommand {
             }
 
             CMD_SWITCH_SPOT => {
-                let spot_index = read_u8_zero_tail(payload, &mut pos);
+                let spot_index = SpotMarketKind::from_byte(read_u8_zero_tail(payload, &mut pos));
                 Some(UICommand::SwitchSpot(SwitchSpot { uid, spot_index }))
             }
 

@@ -102,12 +102,15 @@ impl ProtocolCore<'_> {
                 String::new()
             };
             eprintln!(
-                "[mp-sliced-queue] d={} inner_cmd={:?} raw={} encrypted={} payload_len={} blocks={} max_retries={}{}",
+                "[mp-sliced-queue] t={} d={} inner_cmd={:?} raw={} encrypted={} payload_len={} payload_hash={:016X} payload_head={} blocks={} max_retries={}{}",
+                trace_elapsed_ms(),
                 datagram_num,
                 Command::from_byte(item.cmd),
                 item.cmd,
                 item.encrypted,
                 item.data.len(),
+                fnv1a64(&item.data),
+                trace_head(&item.data, 16),
                 n_blocks,
                 item.max_retries,
                 api
@@ -179,8 +182,17 @@ impl ProtocolCore<'_> {
             return;
         }
 
+        let retry_round_trip_delay = if client.round_trip_delay <= 0 {
+            UNKNOWN_RTT_SLICED_FLOOR_MS
+        } else {
+            client.round_trip_delay
+        };
+
         // Outer gate: only check if enough time passed (matches Common.pas:970).
-        if (cur_tm - client.last_checked_slices).abs() <= client.round_trip_delay {
+        // Active-lib startup guard: before the first non-zero Ping RTT arrives,
+        // do not let `RoundTripDelay=0` collapse the Sliced retry clock to a
+        // 10ms local CPU loop.
+        if (cur_tm - client.last_checked_slices).abs() <= retry_round_trip_delay {
             return;
         }
 
@@ -197,7 +209,7 @@ impl ProtocolCore<'_> {
         }
 
         let path_delay =
-            (client.round_trip_delay as f64 * client.trip_delay_k + 10.0).round() as i64;
+            (retry_round_trip_delay as f64 * client.trip_delay_k + 10.0).round() as i64;
         let cycle_time_ms = 5.0f64.max(client.actual_sleep_time).min(15.0);
         // B-19: * 0.001 вместо / 1000.0 (FDIV → FMUL on hot retry path).
         // Delphi uses `round(Client.CanSendRate * CycleTimeMS / 1000.0)`,
@@ -242,14 +254,20 @@ impl ProtocolCore<'_> {
 
                 if trace_io_enabled() {
                     eprintln!(
-                        "[mp-sliced-tx] d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={}",
+                        "[mp-sliced-tx] t={} proto_t={} d={} block={}/{} retry_count={} sent_count={} bytes_this_tick={} client_limit={} path_delay={} rtt={} slice_hash={:016X} slice_head={}",
+                        trace_elapsed_ms(),
+                        cur_tm,
                         sliced.datagram_num,
                         block_num,
                         sliced.blocks_count.saturating_sub(1),
                         sliced.retry_count,
                         sliced.sent_count,
                         bytes_sent_at_once,
-                        client_limit
+                        client_limit,
+                        path_delay,
+                        client.round_trip_delay,
+                        fnv1a64(slice_data),
+                        trace_head(slice_data, 16)
                     );
                 }
                 if sliced.piece_last_checked[block_num] > 0 {
@@ -276,6 +294,19 @@ impl ProtocolCore<'_> {
             client.last_checked_slices = client.last_checked_slices.min(sliced.last_checked);
 
             if sliced.retry_count > sliced.max_retry_count {
+                if trace_io_enabled() {
+                    eprintln!(
+                        "[mp-sliced-drop] t={} proto_t={} d={} retry_count={} max_retry_count={} sent_count={} path_delay={} rtt={}",
+                        trace_elapsed_ms(),
+                        cur_tm,
+                        sliced.datagram_num,
+                        sliced.retry_count,
+                        sliced.max_retry_count,
+                        sliced.sent_count,
+                        path_delay,
+                        client.round_trip_delay
+                    );
+                }
                 to_remove.push(idx);
             }
         }
@@ -299,7 +330,7 @@ impl ProtocolCore<'_> {
                     Command::Sliced.to_byte(),
                     client.cfg.client_id,
                     slice,
-                    client.cfg.mask_ver,
+                    client.cfg.mask_ver.to_byte(),
                     &mut client.transport_mode_state,
                 )
             };

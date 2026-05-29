@@ -14,7 +14,7 @@ impl Orders {
     /// If the server order has not arrived yet, the marker is stored and applied
     /// to the first `TOrderStatus` with the same UID.
     pub fn mark_local_visual_order(&mut self, uid: u64) -> bool {
-        if let Some(order) = self.map.get_mut(&uid) {
+        if let Some(order) = self.order_mut(uid) {
             order.has_local_visual_order = true;
             true
         } else {
@@ -103,7 +103,7 @@ impl Orders {
     pub fn set_immune_clicks(&mut self, items: &[ImmuneItem]) -> Vec<ImmuneItem> {
         let mut applied = Vec::new();
         for item in items {
-            let Some(order) = self.map.get_mut(&item.uid) else {
+            let Some(order) = self.order_mut(item.uid) else {
                 continue;
             };
             if order.status.is_terminal() {
@@ -125,7 +125,7 @@ impl Orders {
         uid: u64,
         stops: &StopSettings,
     ) -> Option<(TradeCtx, String, OrderWorkerStatus, StopSettings)> {
-        let order = self.map.get_mut(&uid)?;
+        let order = self.order_mut(uid)?;
         if !order.has_local_visual_order {
             return None;
         }
@@ -154,7 +154,7 @@ impl Orders {
         vstop_level: f64,
         vstop_vol: f64,
     ) -> Option<(TradeCtx, String, VStopUpdateParams)> {
-        let order = self.map.get_mut(&uid)?;
+        let order = self.order_mut(uid)?;
         if !order.has_local_visual_order {
             return None;
         }
@@ -196,18 +196,19 @@ impl Orders {
         new_price: f64,
         now_ms: i64,
     ) -> Option<(TradeCtx, String, OrderType, f64)> {
-        let order = self.map.get_mut(&uid)?;
+        let eps_m = self.eps_profile.eps_m;
+        let order = self.order_mut(uid)?;
         let order_type = match order.status {
             OrderWorkerStatus::None => {
                 let prev = order.pending_buy_cond_price?;
-                if (prev - new_price).abs() <= self.eps_profile.eps_m {
+                if (prev - new_price).abs() <= eps_m {
                     return None;
                 }
                 order.pending_buy_cond_price = Some(new_price);
                 OrderType::Buy
             }
             OrderWorkerStatus::BuySet => {
-                let order_type = OrderType::from_byte(order.buy_order.order_type);
+                let order_type = order.buy_order.order_type;
                 if order.replace_sent_time_ms > 0 && !order.bulk_replace_buy {
                     order.replace_sent_time_ms = 0;
                 }
@@ -220,7 +221,7 @@ impl Orders {
                 order_type
             }
             OrderWorkerStatus::SellSet => {
-                let order_type = OrderType::from_byte(order.sell_order.order_type);
+                let order_type = order.sell_order.order_type;
                 if order.replace_sent_time_ms > 0 && !order.bulk_replace_sell {
                     order.replace_sent_time_ms = 0;
                 }
@@ -253,7 +254,7 @@ impl Orders {
         uid: u64,
         now_ms: i64,
     ) -> Option<OrderCancelSend> {
-        let order = self.map.get_mut(&uid)?;
+        let order = self.order_mut(uid)?;
         match order.status {
             OrderWorkerStatus::None => {
                 let price = order.pending_buy_cond_price?;
@@ -288,6 +289,7 @@ impl Orders {
     pub(crate) fn tick_pending_cancel_resends(&mut self, now_ms: i64) -> Vec<OrderCancelSend> {
         let mut sends = Vec::new();
         for order in self.map.values_mut() {
+            let order = std::sync::Arc::make_mut(order);
             if order.status != OrderWorkerStatus::None || !order.pending_cancel {
                 continue;
             }
@@ -318,7 +320,7 @@ impl Orders {
         uid: u64,
         turn_on: bool,
     ) -> Option<PanicSellSend> {
-        let order = self.map.get_mut(&uid)?;
+        let order = self.order_mut(uid)?;
         if order.status != OrderWorkerStatus::SellSet {
             return None;
         }

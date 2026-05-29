@@ -55,23 +55,27 @@ impl DelphiTime {
 
     #[inline]
     pub fn unix_seconds(self) -> Option<f64> {
-        self.0
-            .is_finite()
-            .then_some((self.0 - UNIX_EPOCH_AS_DELPHI_DAYS) * SECONDS_PER_DAY)
+        let seconds = (self.0 - UNIX_EPOCH_AS_DELPHI_DAYS) * SECONDS_PER_DAY;
+        seconds.is_finite().then_some(seconds)
     }
 
     #[inline]
     pub fn unix_millis(self) -> Option<i64> {
-        self.unix_seconds()
-            .map(|seconds| (seconds * 1000.0).round() as i64)
+        let millis = (self.unix_seconds()? * 1000.0).round();
+        (millis.is_finite() && millis >= i64::MIN as f64 && millis <= i64::MAX as f64)
+            .then_some(millis as i64)
     }
 
     pub fn system_time(self) -> Option<SystemTime> {
         let seconds = self.unix_seconds()?;
+        if !seconds.is_finite() || seconds.abs() > u64::MAX as f64 {
+            return None;
+        }
+        let duration = Duration::from_secs_f64(seconds.abs());
         if seconds >= 0.0 {
-            Some(UNIX_EPOCH + Duration::from_secs_f64(seconds))
+            UNIX_EPOCH.checked_add(duration)
         } else {
-            Some(UNIX_EPOCH - Duration::from_secs_f64(-seconds))
+            UNIX_EPOCH.checked_sub(duration)
         }
     }
 }
@@ -114,5 +118,21 @@ mod tests {
         let dt = DelphiTime::from_days(45_000.25);
         let expected = ((45_000.25 - UNIX_EPOCH_AS_DELPHI_DAYS) * MILLISECONDS_PER_DAY) as i64;
         assert_eq!(dt.unix_millis(), Some(expected));
+    }
+
+    #[test]
+    fn huge_or_nan_values_return_none_instead_of_panicking() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            -f64::MAX,
+        ] {
+            let dt = DelphiTime::from_days(value);
+            assert_eq!(dt.unix_seconds(), None);
+            assert_eq!(dt.unix_millis(), None);
+            assert_eq!(dt.system_time(), None);
+        }
     }
 }

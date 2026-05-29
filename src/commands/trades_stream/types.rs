@@ -1,11 +1,65 @@
+use crate::commands::trade::OrderType;
+
 /// Flags stored in a watcher-fill record.
-pub mod watcher_fill_flags {
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct WatcherFillFlags(u8);
+
+impl WatcherFillFlags {
     /// Fill belongs to a short position.
-    pub const IS_SHORT: u8 = 0x01;
+    pub const IS_SHORT: Self = Self(0x01);
     /// Fill opens position exposure rather than closing it.
-    pub const IS_OPEN: u8 = 0x02;
+    pub const IS_OPEN: Self = Self(0x02);
     /// Fill was taker-side.
-    pub const IS_TAKER: u8 = 0x04;
+    pub const IS_TAKER: Self = Self(0x04);
+
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+
+    pub const fn is_short(self) -> bool {
+        self.contains(Self::IS_SHORT)
+    }
+
+    pub const fn is_open(self) -> bool {
+        self.contains(Self::IS_OPEN)
+    }
+
+    pub const fn is_taker(self) -> bool {
+        self.contains(Self::IS_TAKER)
+    }
+}
+
+impl std::ops::BitOr for WatcherFillFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::fmt::Debug for WatcherFillFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WatcherFillFlags({:#04X})", self.0)
+    }
+}
+
+pub mod watcher_fill_flags {
+    use super::WatcherFillFlags;
+
+    /// Fill belongs to a short position.
+    pub const IS_SHORT: WatcherFillFlags = WatcherFillFlags::IS_SHORT;
+    /// Fill opens position exposure rather than closing it.
+    pub const IS_OPEN: WatcherFillFlags = WatcherFillFlags::IS_OPEN;
+    /// Fill was taker-side.
+    pub const IS_TAKER: WatcherFillFlags = WatcherFillFlags::IS_TAKER;
 }
 
 /// One exchange trade record from a futures or spot section.
@@ -68,26 +122,26 @@ pub struct WatcherFill {
     pub z_btc: f32,
     /// Position value encoded as Delphi `Single`.
     pub position: f32,
-    /// Delphi `TOrderType` ordinal.
-    pub order_type: u8,
-    /// Raw flags byte: bit0 short, bit1 open, bit2 taker.
-    pub flags: u8,
+    /// Delphi `TOrderType` ordinal, preserving unknown bytes like Delphi.
+    pub order_type: OrderType,
+    /// Watcher fill bitmask: short/open/taker.
+    pub flags: WatcherFillFlags,
 }
 
 impl WatcherFill {
     /// Return whether the fill belongs to a short position.
     pub fn is_short(&self) -> bool {
-        self.flags & watcher_fill_flags::IS_SHORT != 0
+        self.flags.is_short()
     }
 
     /// Return whether the fill opens exposure rather than closing it.
     pub fn is_open(&self) -> bool {
-        self.flags & watcher_fill_flags::IS_OPEN != 0
+        self.flags.is_open()
     }
 
     /// Return whether the fill was taker-side.
     pub fn is_taker(&self) -> bool {
-        self.flags & watcher_fill_flags::IS_TAKER != 0
+        self.flags.is_taker()
     }
 }
 

@@ -380,7 +380,7 @@ fn stream_append_helpers_share_delphi_packet_time_shift() {
         mm_orders,
         vec![MMOrderHistoryRow {
             time: mm_time,
-            vol: 5.0,
+            volume: 5.0,
             q: -2.0,
         }]
     );
@@ -447,19 +447,19 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
             time: now - 10.0 / 1440.0,
-            min_p: 90.0,
-            max_p: 110.0,
-            close_p: 100.0,
-            open_p: 95.0,
-            vol: 1_000.0,
+            low: 90.0,
+            high: 110.0,
+            close: 100.0,
+            open: 95.0,
+            volume: 1_000.0,
         },
         Candle5mRow {
             time: now,
-            min_p: 100.0,
-            max_p: 120.0,
-            close_p: 115.0,
-            open_p: 105.0,
-            vol: 2_000.0,
+            low: 100.0,
+            high: 120.0,
+            close: 115.0,
+            open: 105.0,
+            volume: 2_000.0,
         },
     ]);
 
@@ -479,9 +479,9 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .unwrap()
         .copy_last(8, &mut candles);
     assert_eq!(candles.len(), 2);
-    assert_eq!(candles[1].close_p, 125.0);
-    assert_eq!(candles[1].max_p, 125.0);
-    assert_eq!(candles[1].vol, 2_250.0);
+    assert_eq!(candles[1].close, 125.0);
+    assert_eq!(candles[1].high, 125.0);
+    assert_eq!(candles[1].volume, 2_250.0);
 
     store.refresh_derived_analytics(now);
     let derived = store.derived_snapshot();
@@ -507,11 +507,11 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
     let now = 45_000.0;
     store.replace_candles_5m_from_snapshot(&[Candle5mRow {
         time: now,
-        min_p: 100.0,
-        max_p: 110.0,
-        close_p: 105.0,
-        open_p: 101.0,
-        vol: 1_000.0,
+        low: 100.0,
+        high: 110.0,
+        close: 105.0,
+        open: 101.0,
+        volume: 1_000.0,
     }]);
 
     let next_time = now + 6.0 / 1440.0;
@@ -526,11 +526,11 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
 
     assert_eq!(candles.len(), 2);
     assert_eq!(candles[0].time, now);
-    assert_eq!(candles[0].close_p, 105.0);
+    assert_eq!(candles[0].close, 105.0);
     assert_eq!(candles[1].time, next_time);
-    assert_eq!(candles[1].open_p, 120.0);
-    assert_eq!(candles[1].close_p, 120.0);
-    assert_eq!(candles[1].vol, 240.0);
+    assert_eq!(candles[1].open, 120.0);
+    assert_eq!(candles[1].close, 120.0);
+    assert_eq!(candles[1].volume, 240.0);
 }
 
 #[test]
@@ -609,43 +609,43 @@ fn candle_long_delta_windows_match_delphi_trunc_hour_buckets() {
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
             time: now - 2.5 / 24.0,
-            min_p: 100.0,
-            max_p: 130.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 1.0,
+            low: 100.0,
+            high: 130.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 1.0,
         },
         Candle5mRow {
             time: now - 3.0 / 24.0,
-            min_p: 100.0,
-            max_p: 190.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 8.0,
+            low: 100.0,
+            high: 190.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 8.0,
         },
         Candle5mRow {
             time: now - 3.5 / 24.0,
-            min_p: 100.0,
-            max_p: 140.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 2.0,
+            low: 100.0,
+            high: 140.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 2.0,
         },
         Candle5mRow {
             time: now - 24.5 / 24.0,
-            min_p: 100.0,
-            max_p: 150.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 4.0,
+            low: 100.0,
+            high: 150.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 4.0,
         },
         Candle5mRow {
             time: now - 25.0 / 24.0,
-            min_p: 100.0,
-            max_p: 220.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 16.0,
+            low: 100.0,
+            high: 220.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 16.0,
         },
     ]);
 
@@ -677,19 +677,19 @@ fn candle_windows_exclude_exact_old_boundary_like_delphi() {
     store.replace_candles_5m_from_snapshot(&[
         Candle5mRow {
             time: now - 15.0 / 1440.0,
-            min_p: 100.0,
-            max_p: 200.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 5.0,
+            low: 100.0,
+            high: 200.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 5.0,
         },
         Candle5mRow {
             time: now - (15.0 * 60.0 - 1.0) / SECONDS_PER_DAY,
-            min_p: 100.0,
-            max_p: 150.0,
-            close_p: 100.0,
-            open_p: 100.0,
-            vol: 3.0,
+            low: 100.0,
+            high: 150.0,
+            close: 100.0,
+            open: 100.0,
+            volume: 3.0,
         },
     ]);
 

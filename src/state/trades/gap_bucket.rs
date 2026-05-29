@@ -2,7 +2,8 @@
 
 use super::DEFAULT_RECVD_SIZE;
 
-/// Один gap-bucket — диапазон [start_num, end_num] пропущенных packet_num.
+/// One gap bucket: inclusive range `[start_num, end_num]` of missing packet
+/// numbers.
 #[derive(Debug, Clone)]
 pub(super) struct GapBucket {
     pub(super) active: bool,
@@ -12,7 +13,7 @@ pub(super) struct GapBucket {
     pub(super) last_retry_ms: i64,
     pub(super) retry_count: u8,
     pub(super) refund_used: bool,
-    /// Битовая маска полученных packets внутри диапазона (recvd[i] = packet (start_num+i) получен).
+    /// Received-packet bitmap inside the bucket range.
     pub(super) recvd: Vec<bool>,
 }
 
@@ -38,7 +39,7 @@ impl GapBucket {
     }
 }
 
-/// Wrapping-safe проверка: packet попадает в диапазон [start, end] (включительно).
+/// Wrapping-safe check that `packet` is inside inclusive range `[start, end]`.
 pub(super) fn is_packet_in_range(packet: u16, start: u16, end: u16) -> bool {
     // wrap-safe: gap_size = end - start + 1 (wrapping)
     let offset = packet.wrapping_sub(start);

@@ -12,7 +12,7 @@ impl MarketsState {
         self.markets.iter()
     }
 
-    /// Current `GetMarketsIndexes` mapping is fresh for the active server token.
+    /// Current server-index mapping is fresh for the active server token.
     pub fn indexes_synchronized(&self) -> bool {
         self.indexes_synchronized
     }
@@ -39,8 +39,7 @@ impl MarketsState {
         self.get(market_name).map(|handle| handle.snapshot())
     }
 
-    /// Resolve a server `mIndex` into the canonical market name from
-    /// `emk_GetMarketsIndexes`.
+    /// Resolve a server `mIndex` into the canonical market name.
     ///
     /// Returns `None` while indexes are stale after a server restart. During
     /// that window `EventDispatcher` also gates market-index streams, so regular
@@ -68,9 +67,8 @@ impl MarketsState {
 
     /// Resolve a market name into the current server `mIndex`.
     ///
-    /// Uses the canonical `emk_GetMarketsIndexes` mapping rather than the
-    /// `markets` vector position, because this is the index carried by stream
-    /// packets.
+    /// Uses the canonical server-index mapping rather than the `markets` vector
+    /// position, because this is the index carried by stream packets.
     pub fn market_index_by_name(&self, market_name: &str) -> Option<u16> {
         if !self.indexes_synchronized {
             return None;

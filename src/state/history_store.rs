@@ -15,6 +15,7 @@ use crate::state::history::{
     TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
+use parking_lot::RwLock;
 
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const FIVE_MINUTES_DAYS: f64 = 5.0 / (24.0 * 60.0);
@@ -45,6 +46,57 @@ pub struct MarketHistoryReaders {
     pub candles_5m: Option<SeqRingReader<Candle5mRow>>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct MarketHistoryReadHandle {
+    inner: Arc<RwLock<MarketHistoryReadState>>,
+}
+
+#[derive(Clone)]
+struct MarketHistoryReadState {
+    readers: MarketHistoryReaders,
+    rolling_volumes: RollingTradeVolumes,
+    derived: MarketDerivedSnapshot,
+}
+
+impl Default for MarketHistoryReadState {
+    fn default() -> Self {
+        Self {
+            readers: MarketHistoryReaders::default(),
+            rolling_volumes: RollingTradeVolumes::default(),
+            derived: MarketDerivedSnapshot::default(),
+        }
+    }
+}
+
+impl MarketHistoryReadHandle {
+    fn new(readers: MarketHistoryReaders) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(MarketHistoryReadState {
+                readers,
+                ..MarketHistoryReadState::default()
+            })),
+        }
+    }
+
+    pub(crate) fn readers(&self) -> MarketHistoryReaders {
+        self.inner.read().readers.clone()
+    }
+
+    pub(crate) fn rolling_volumes(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
+        self.inner.read().rolling_volumes.snapshot(now_time)
+    }
+
+    pub(crate) fn derived_snapshot(&self) -> MarketDerivedSnapshot {
+        self.inner.read().derived
+    }
+
+    fn publish(&self, rolling_volumes: &RollingTradeVolumes, derived: MarketDerivedSnapshot) {
+        let mut state = self.inner.write();
+        state.rolling_volumes = rolling_volumes.clone();
+        state.derived = derived;
+    }
+}
+
 pub struct MarketHistoryStore {
     futures_trades: Option<SeqRingWriter<TradeHistoryRow>>,
     spot_trades: Option<SeqRingWriter<TradeHistoryRow>>,
@@ -56,6 +108,7 @@ pub struct MarketHistoryStore {
     mini_candles: Option<SeqRingWriter<MiniCandle>>,
     candles_5m: Option<SeqRingWriter<Candle5mRow>>,
     readers: MarketHistoryReaders,
+    read_handle: MarketHistoryReadHandle,
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
@@ -92,6 +145,19 @@ impl MarketHistoryStore {
         let (mini_candles, mini_reader) = optional_ring::<MiniCandle>(config.mini_candles_capacity);
         let (candles_5m, candles_reader) = optional_ring::<Candle5mRow>(config.candles_5m_capacity);
 
+        let readers = MarketHistoryReaders {
+            futures_trades: futures_reader,
+            spot_trades: spot_reader,
+            liquidations: liq_reader,
+            mm_orders: mm_reader,
+            mm_order_companion: mm_companion_reader,
+            last_prices: last_reader,
+            mark_prices: mark_reader,
+            mini_candles: mini_reader,
+            candles_5m: candles_reader,
+        };
+        let read_handle = MarketHistoryReadHandle::new(readers.clone());
+
         Self {
             futures_trades,
             spot_trades,
@@ -102,17 +168,8 @@ impl MarketHistoryStore {
             mark_prices,
             mini_candles,
             candles_5m,
-            readers: MarketHistoryReaders {
-                futures_trades: futures_reader,
-                spot_trades: spot_reader,
-                liquidations: liq_reader,
-                mm_orders: mm_reader,
-                mm_order_companion: mm_companion_reader,
-                last_prices: last_reader,
-                mark_prices: mark_reader,
-                mini_candles: mini_reader,
-                candles_5m: candles_reader,
-            },
+            readers,
+            read_handle,
             evicted_futures_for_compaction: Vec::new(),
             mini_scratch: Vec::new(),
             rolling_volumes: RollingTradeVolumes::default(),
@@ -131,6 +188,10 @@ impl MarketHistoryStore {
 
     pub fn readers(&self) -> MarketHistoryReaders {
         self.readers.clone()
+    }
+
+    pub(crate) fn read_handle(&self) -> MarketHistoryReadHandle {
+        self.read_handle.clone()
     }
 
     pub fn rolling_volumes_snapshot(&self, now_time: f64) -> RollingTradeVolumeSnapshot {
@@ -293,7 +354,7 @@ impl MarketHistoryStore {
         let seq = self.append_mm_order_with_companion_like_delphi(
             MMOrderHistoryRow {
                 time,
-                vol: f64::from(vol),
+                volume: f64::from(vol),
                 q: f64::from(q),
             },
             companion,

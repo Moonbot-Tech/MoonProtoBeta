@@ -10,7 +10,7 @@
 /// protocol module, for example `commands::market`, `commands::candles`, or
 /// `commands::engine_api` for small scalar responses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EngineMethod(pub u8);
+pub struct EngineMethod(u8);
 
 #[allow(non_upper_case_globals)]
 impl EngineMethod {

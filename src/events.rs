@@ -34,10 +34,11 @@ use crate::app_queue::AppQueue;
 use crate::commands::engine_api::{
     parse_update_transfer_assets_response, EngineMethod, EngineResponse, ServerInfo,
 };
+use crate::commands::market::ExchangeCode;
 use crate::commands::trade::{OrderType, TradeCtx};
 use crate::commands::ui::ClientSettingsCommand;
 use crate::protocol::Command;
-use crate::state::eps::{EpsProfile, DELPHI_PLATFORM_FGATE};
+use crate::state::eps::EpsProfile;
 use crate::state::{
     AccountEvent, AccountState, BalanceEvent, BalancesState, Candle5mRow, MarketDerivedSnapshot,
     MarketHistoryCandlesSnapshot, MarketHistoryConfig, MarketHistoryHandle, MarketHistoryReaders,
@@ -45,6 +46,7 @@ use crate::state::{
     Orders, RollingTradeVolumeSnapshot, SettingsEvent, SettingsState, StratEvent, StratsState,
     TradeStorageScope, TradesEvent, TradesState, TransferAssetsEvent, TransferAssetsState,
 };
+use std::ops::{Deref, DerefMut};
 
 mod active;
 mod api;
@@ -67,7 +69,42 @@ pub use types::{
 };
 
 fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
-    info.exchange_code == Some(DELPHI_PLATFORM_FGATE)
+    info.exchange_code == Some(ExchangeCode::FGate)
+}
+
+#[derive(Debug)]
+pub(crate) struct CowState<T: Clone>(Arc<T>);
+
+impl<T: Clone> CowState<T> {
+    fn new(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T: Clone> Clone for CowState<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T: Clone + Default> Default for CowState<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Clone> Deref for CowState<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Clone> DerefMut for CowState<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
 }
 
 /// State bundle + dispatch logic.
@@ -79,16 +116,16 @@ fn copy_max_leverage_from_markets_list(info: &ServerInfo) -> bool {
 /// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action
 /// outbox path used by `MoonClient` and low-level active runtimes.
 pub struct EventDispatcher {
-    pub(crate) orders: Orders,
-    pub(crate) order_books: OrderBooks,
-    pub(crate) trades: TradesState,
-    pub(crate) account: AccountState,
-    pub(crate) balances: BalancesState,
-    pub(crate) transfer_assets: TransferAssetsState,
-    pub(crate) coin_card_candles: crate::state::CoinCardCandlesState,
-    pub(crate) strats: StratsState,
-    pub(crate) settings: SettingsState,
-    pub(crate) markets: MarketsState,
+    pub(crate) orders: CowState<Orders>,
+    pub(crate) order_books: CowState<OrderBooks>,
+    pub(crate) trades: CowState<TradesState>,
+    pub(crate) account: CowState<AccountState>,
+    pub(crate) balances: CowState<BalancesState>,
+    pub(crate) transfer_assets: CowState<TransferAssetsState>,
+    pub(crate) coin_card_candles: CowState<crate::state::CoinCardCandlesState>,
+    pub(crate) strats: CowState<StratsState>,
+    pub(crate) settings: CowState<SettingsState>,
+    pub(crate) markets: CowState<MarketsState>,
     /// Delphi `cfg.ServerStratEpoch` for snapshots sent by this client.
     /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
     /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
@@ -133,11 +170,10 @@ pub struct EventDispatcher {
     /// available. Non-empty typed strategy serialization waits for schema so
     /// Rust does not carry a stale hardcoded `TStrategy` field table.
     pending_strategy_snapshot_request_uid: Option<u64>,
-    /// Events produced while a one-shot helper is pumping the client loop.
+    /// Events produced before publication through the runtime event sink.
     ///
-    /// One-shot helpers (`run_until_response`, `request_*`) have no callback
-    /// argument, so they store produced events here for the application to drain
-    /// after the helper returns.
+    /// Normal applications receive these through `MoonClient`'s `MoonEventSink`
+    /// and read state from published snapshots.
     queued_events: AppQueue<Event>,
     /// Reused hot-path buffer for `OrderBooks::on_packet_into`.
     order_book_events: Vec<OrderBookEvent>,
@@ -167,16 +203,16 @@ pub struct EventDispatcher {
 impl Default for EventDispatcher {
     fn default() -> Self {
         Self {
-            orders: Orders::default(),
-            order_books: OrderBooks::default(),
-            trades: TradesState::default(),
-            account: AccountState::default(),
-            balances: BalancesState::default(),
-            transfer_assets: TransferAssetsState::default(),
-            coin_card_candles: crate::state::CoinCardCandlesState::default(),
-            strats: StratsState::default(),
-            settings: SettingsState::default(),
-            markets: MarketsState::default(),
+            orders: CowState::default(),
+            order_books: CowState::default(),
+            trades: CowState::default(),
+            account: CowState::default(),
+            balances: CowState::default(),
+            transfer_assets: CowState::default(),
+            coin_card_candles: CowState::default(),
+            strats: CowState::default(),
+            settings: CowState::default(),
+            markets: CowState::default(),
             local_strategy_epoch: 0,
             last_known_server_token: 0,
             last_markets_list_refresh_ms: 0,
@@ -269,8 +305,8 @@ impl EventDispatcher {
     /// `ProcessCommandOrder` itself. The dispatcher mirrors that by letting
     /// terminal orders remain addressable until the caller explicitly flushes
     /// them, then emitting `OrderEvent::Removed` from this step. The active
-    /// client path uses `drain_deferred_order_removals_due` so `SelLDone` keeps
-    /// Delphi's extra 400 ms final-trace window.
+    /// client path uses `drain_deferred_order_removals_due` so `SellDone`
+    /// keeps Delphi's extra 400 ms final-trace window.
     pub fn drain_deferred_order_removals(&mut self, out: &mut Vec<Event>) {
         for uid in self.orders.drain_pending_removals() {
             out.push(Event::Order(OrderEvent::Removed(uid)));
@@ -421,8 +457,8 @@ impl EventDispatcher {
     /// CoinCard candle state.
     ///
     /// Regular applications should call
-    /// `MoonClient::request_coin_card_candles`; this method is for custom
-    /// low-level runtimes and diagnostics that own `Client + EventDispatcher`.
+    /// `MoonClient::request_coin_card_candles`; the runtime calls this method
+    /// after receiving the matching server response.
     pub fn apply_coin_card_candles_response(
         &mut self,
         market: String,
@@ -559,14 +595,10 @@ impl EventDispatcher {
         &self.markets
     }
 
-    /// Events produced by one-shot helpers and not yet drained by the
-    /// application.
+    /// Events produced by dispatcher state application and not yet published by
+    /// the runtime event sink.
     ///
-    /// Low-level custom runtimes may deliver events to their callback
-    /// immediately and skip this queue. The queue is only for helper-driven
-    /// waits such as `Client::run_until_response`,
-    /// `request_client_settings`, `request_order_snapshot`, and typed
-    /// `request_*` Engine API helpers.
+    /// Normal applications use `MoonClient` and never need this queue directly.
     pub fn queued_events(&self) -> &[Event] {
         self.queued_events.as_slice()
     }

@@ -22,11 +22,12 @@ impl MarketsState {
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
+        let rebuild_server_indexes = allow_new_markets || !self.indexes_synchronized;
         self.new_markets_pending_price_refresh = 0;
         self.new_markets_added.clear();
         let incoming_count = resp.markets.len();
         let corr_count = resp.corr_markets.len();
-        let incoming_server_names = if allow_new_markets {
+        let incoming_server_names = if rebuild_server_indexes {
             resp.markets
                 .iter()
                 .map(|m| m.bn_market_name.clone())
@@ -50,7 +51,7 @@ impl MarketsState {
         let mut lookup_entries = Vec::with_capacity(old_markets.len().max(incoming_count));
 
         for (old_idx, handle) in old_markets.iter().cloned().enumerate() {
-            let old_name = handle.with(|market| market.bn_market_name.clone());
+            let old_name = handle.name_str().to_string();
             let mut price = old_prices
                 .get(old_idx)
                 .copied()
@@ -105,7 +106,7 @@ impl MarketsState {
         }
         self.check_corr_markets_like_delphi();
         self.check_currency_ref_markets_like_delphi();
-        if allow_new_markets {
+        if rebuild_server_indexes {
             self.replace_market_indexes_like_delphi_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
@@ -144,11 +145,12 @@ impl MarketsState {
         let first_create_markets = self.markets.is_empty();
         let new_market_found = self.markets_list_refresh_needed;
         let allow_new_markets = first_create_markets || new_market_found;
+        let rebuild_server_indexes = allow_new_markets || !self.indexes_synchronized;
         self.new_markets_pending_price_refresh = 0;
         self.new_markets_added.clear();
         let mut r = EngineStreamReader::new(data);
         let count = r.read_count()?;
-        let mut incoming_server_names = if allow_new_markets {
+        let mut incoming_server_names = if rebuild_server_indexes {
             Vec::with_capacity(r.bounded_count_capacity(count, 16))
         } else {
             Vec::new()
@@ -159,7 +161,7 @@ impl MarketsState {
         let market_loop_start = Instant::now();
         for _ in 0..count {
             let market = read_market_with_local_shift(&mut r, ver, local_shift_minutes)?;
-            if allow_new_markets {
+            if rebuild_server_indexes {
                 incoming_server_names.push(market.bn_market_name.clone());
             }
             let market_name = if new_market_found {
@@ -195,7 +197,7 @@ impl MarketsState {
         let market_loop_ns = elapsed_ns_u64(market_loop_start);
 
         let index_rebuild_start = Instant::now();
-        if allow_new_markets {
+        if rebuild_server_indexes {
             self.replace_market_indexes_like_delphi_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
@@ -264,6 +266,7 @@ impl MarketsState {
             return false;
         }
 
+        let price = market_price_from_market(&market);
         let name = market.bn_market_name.clone();
         let handle = MarketHandle::new(market);
         let markets = pending_markets.get_or_insert_with(|| self.markets.iter().cloned().collect());
@@ -275,7 +278,7 @@ impl MarketsState {
         handles_by_name.insert(name.clone(), handle.clone());
         Arc::make_mut(&mut self.by_name).insert(name.clone(), idx);
         self.trade_states.entry(name).or_default();
-        self.prices.push(handle.with(market_price_from_market));
+        self.prices.push(price);
         true
     }
 

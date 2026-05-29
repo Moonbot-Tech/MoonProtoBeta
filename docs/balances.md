@@ -13,25 +13,27 @@ a separate balance row. This mirrors Delphi: balance packets mutate the live
 `Market`:
 
 - `initial_balance`, `locked_balance`;
-- `pos_size`, `pos_price`, `liq_price`, `pos_dir`;
+- `pos_size`, `pos_price`, `liq_price`, `pos_dir` (`OrderType::Sell` /
+  `OrderType::Buy`, matching Delphi `FPosDir`);
 - long/short hedge position fields;
 - `asset_balance`, `asset_balance_full`;
 - `total_profit_b`, `total_profit_l`, `total_profit_s`;
-- `bn_max_value`, `leverage_x`, `position_type`;
+- `max_value`, `leverage_x`, `position_type` (`PositionType::Cross` /
+  `PositionType::Isolated`);
 - `balance_hash`, `last_balance_epoch`.
 
 `BalancesState` remains the account-level/low-level balance view:
 
 - global account totals in BTC equivalent;
-- one `BalanceItem` per known market;
+- a secondary decoded per-market table for account/diagnostic panels;
 - per-market epoch tracking so stale incremental rows are ignored.
 
 Rows are keyed by market name, for example `"BTCUSDT"`.
 
-Transferable wallet assets are a different state model. They are not embedded
-in `BalanceItem` and they are not chart-position fields. Use
-`MoonClient::refresh_transfer_assets()` and `snapshot().transfer_assets()` for
-the Spot/Futures/Quarterly asset lists used by transfer UI.
+Transferable wallet assets are a different state model. They are not chart
+position fields. Use `client.balances().refresh_transfer_assets()` and
+`snapshot().transfer_assets()` for the Spot/Futures/Quarterly asset lists used
+by transfer UI.
 
 Incoming balance rows are applied only for markets already known to
 `MarketsState`. This matches the Delphi client: an unknown market name does not
@@ -40,7 +42,7 @@ create an orphan balance row.
 Full snapshots are authoritative for the current known market universe. If a
 known market is missing from a full snapshot, the library resets the live market
 balance/position fields to zero and `leverage_x = 1`, while preserving
-Delphi-preserved fields such as `balance_hash`, `bn_max_value`, and the
+Delphi-preserved fields such as `balance_hash`, max value, and the
 per-market last epoch.
 
 Incremental updates merge only the changed rows and optionally update global
@@ -49,11 +51,17 @@ totals. Stale incremental rows are skipped per market.
 ## Reading Current State
 
 ```rust
+use moonproto::{OrderType, PositionType};
+
 let Some(state) = client.snapshot() else { return; };
 let markets = state.markets();
 
 if let Some(eth) = markets.get("ETHUSDT") {
     let pos = eth.balance_position();
+    let side = if pos.pos_dir == OrderType::Buy { "long" } else { "short" };
+    if pos.position_type == PositionType::Isolated {
+        println!("isolated liquidation line at {}", pos.liq_price);
+    }
     println!(
         "pos={} entry={} liq={} lev={}x",
         pos.pos_size,
@@ -61,6 +69,7 @@ if let Some(eth) = markets.get("ETHUSDT") {
         pos.liq_price,
         pos.leverage_x
     );
+    println!("direction={side}");
 }
 
 let global = state.balances().global();
@@ -80,12 +89,12 @@ the UI only needs the live balance/position subset.
 
 ## Getting A Fresh Snapshot
 
-Regular UI code calls `MoonClient::request_balance_snapshot()` or
-`MoonClient::refresh_balances()` and reads `snapshot().balances()` after
+Regular UI code calls `client.balances().refresh()` and reads
+`snapshot().balances()` after
 `Event::Balance`:
 
 ```rust
-client.request_balance_snapshot()?;
+client.balances().refresh()?;
 
 for event in client.drain_events() {
     if matches!(event, moonproto::Event::Balance(_)) {
@@ -95,11 +104,6 @@ for event in client.drain_events() {
     }
 }
 ```
-
-`blocking_request_balance_snapshot(timeout)` exists for scripts and diagnostics.
-It sends the same library-level balance refresh request, keeps the runtime
-pumping MoonProto, waits for the next full snapshot event, and returns a cloned
-`BalancesState`.
 
 The next snapshot arrives through the normal `MoonClient` event/snapshot path.
 
@@ -141,7 +145,7 @@ Rust Active Lib exposes the same user effect without blocking the caller:
 ```rust
 use moonproto::{Event, ExchangeKind};
 
-client.refresh_transfer_assets()?;
+client.balances().refresh_transfer_assets()?;
 
 for event in client.drain_events() {
     if let Event::TransferAssets(ev) = event {
@@ -161,22 +165,23 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-`refresh_transfer_assets()` queues all three Engine API requests and returns
+`balances().refresh_transfer_assets()` queues all three Engine API requests and returns
 immediately. Each completed response updates the library-owned state and emits a
 per-wallet `Event::TransferAssets::Updated` or `UpdateFailed`. After all three
 requests have answered, Active Lib emits `TransferAssetsEvent::RefreshCompleted`;
 that is the UI-safe point equivalent to Delphi `WaitUpdCount = 0`. Use
-`refresh_transfer_assets_kind(kind)` if the UI only needs one wallet.
+`balances().refresh_transfer_assets_kind(kind)` if the UI only needs one wallet.
 
-## Low-Level Rows
+## Diagnostic Rows
 
-`BalanceItem` is the decoded packet row and the secondary balance-table view.
-It is useful for diagnostics and account tables. Market chart/order UI should
-normally read the same position/liquidation fields from `MarketHandle`, not from
-`BalanceItem`.
+The decoded per-market balance rows are still available for protocol tools and
+account tables through `snapshot().balances()`. They are not the chart/order UI
+surface. For selected-market UI, keep a `MarketHandle` and read
+`balance_position()`: it is the same state Delphi mutates on `TMarket`.
 
-`BalanceItem::max_value` follows Delphi behavior: a zero or near-zero incoming
-value does not erase a previously known non-zero value on the live market.
+Delphi behavior is preserved when applying `max_value`: a zero or near-zero
+incoming value does not erase a previously known non-zero value on the live
+market.
 
 ## GlobalBalance
 
@@ -192,17 +197,14 @@ pub struct GlobalBalance {
 All amounts are BTC equivalents. `special_coin_balance` is the server-selected
 special coin balance, for example USDT on futures servers.
 
-## API Surface
+## API Shape
 
-```rust
-impl BalancesState {
-    pub fn global(&self) -> &GlobalBalance;
-    pub fn get(&self, market_name: &str) -> Option<&BalanceItem>;
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &BalanceItem)>;
-    pub fn len(&self) -> usize;
-    pub fn is_empty(&self) -> bool;
-}
-```
+Normal UI state is:
 
-The public struct still keeps the decoded secondary table for compatibility and
-diagnostics, but chart UI should prefer `MarketHandle::balance_position()`.
+- `snapshot().markets().get("ETHUSDT") -> MarketHandle`;
+- `MarketHandle::balance_position()` for position, liquidation, leverage, PnL;
+- `snapshot().balances().global()` for account totals;
+- `snapshot().transfer_assets()` for transferable wallet assets.
+
+The decoded secondary balance table is intentionally exposed only through
+accessors and should stay out of chart/order hot paths.

@@ -2,13 +2,19 @@
 
 // === Constants matching Delphi exactly ===
 pub(super) const DEFAULT_SLEEP_MS: u64 = 5; // MoonProtoFunc.pas:19
-pub(super) const DELPHI_SEND_AND_WAIT_POLL_MS: u64 = 10; // MoonProtoEngine.pas:531
+pub(super) const DELPHI_IMFRIEND_RESEND_PAUSE_MS: u64 = 32; // MoonProtoUDPClient.pas:434
 pub(super) const SETTINGS_HELPER_RETRY_PAUSE_MS: u64 = 5_000;
 pub(super) const DELPHI_BASE_CHECK_UPDATE_AUTH_WAITS: usize = 34; // MoonProtoEngine.pas:574
 pub(super) const DELPHI_BASE_CHECK_UPDATE_AUTH_WAIT_MS: u64 = 300; // MoonProtoEngine.pas:575
 pub(super) const DELPHI_BASE_CHECK_UPDATE_RETRIES: usize = 10; // MoonProtoEngine.pas:586
 pub(super) const DELPHI_BASE_CHECK_UPDATE_RETRY_PAUSE_MS: u64 = 2_000; // MoonProtoEngine.pas:589
 pub(super) const DELPHI_INIT_AUTH_RETRY_PAUSE_MS: u64 = 200; // Unit1.pas:5064-5068
+                                                             // Rust active-lib can start domain Init immediately after `MPC_Fine`, before the
+                                                             // server has had one Ping roundtrip to publish a non-zero `RoundTripDelay`.
+                                                             // With RTT=0 the Delphi Sliced formula becomes a 10ms retry clock and can burn
+                                                             // the full retry budget before any real ACK can return. Until Ping provides the
+                                                             // real RTT, use the same 200ms floor that Delphi already applies to H retries.
+pub(super) const UNKNOWN_RTT_SLICED_FLOOR_MS: i64 = 200;
 pub(super) const RECONNECT_WAITING_MS: i64 = 7000; // MoonProtoUDPClient.pas:88
 pub(super) const RECONNECT_THROTTLE_MS: i64 = 15000; // MoonProtoUDPClient.pas:89
 pub(super) const OFFLINE_BASE_MS: i64 = 2300; // MoonProtoUDPClient.pas:772

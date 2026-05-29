@@ -1,9 +1,12 @@
-/// MPC_Balance unpacker — byte-exact port of MoonProtoBalanceStruct.pas.
-/// Source: MoonProtoBalanceStruct.pas:438-486 (TBalanceItem.ReadFromStream)
-///
-/// Uses bitmask optimization: each field has a bit in Flags (u32).
-/// Only fields with bit set are present in wire data.
+//! Balance rows and low-level balance command helpers.
+//!
+//! Regular applications read live position, liquidation, leverage, and wallet
+//! values from retained Active Lib state. The parser/builder functions in this
+//! module are byte-exact protocol tools, kept public for advanced diagnostics
+//! and tests but hidden from the normal API guide surface.
 use super::registry::read_string;
+use crate::commands::market::PositionType;
+use crate::commands::trade::OrderType;
 
 /// One market's decoded balance row.
 ///
@@ -20,17 +23,17 @@ pub struct BalanceItem {
     pub pos_size: f64,
     pub pos_price: f64,
     pub liq_price: f64,
-    pub pos_dir: u8,
+    pub pos_dir: OrderType,
 
     pub long_pos_size: f64,
     pub long_pos_price: f64,
     pub long_liq_price: f64,
-    pub long_position_type: u8,
+    pub long_position_type: PositionType,
 
     pub short_pos_size: f64,
     pub short_pos_price: f64,
     pub short_liq_price: f64,
-    pub short_position_type: u8,
+    pub short_position_type: PositionType,
 
     pub asset_balance: f64,
     pub asset_balance_full: f64,
@@ -42,7 +45,7 @@ pub struct BalanceItem {
     pub max_value: f64,
 
     pub leverage_x: i32,
-    pub position_type: u8,
+    pub position_type: PositionType,
 }
 
 impl BalanceItem {
@@ -56,6 +59,7 @@ impl BalanceItem {
 ///
 /// `cmd_id=2` has the same item layout as a full snapshot, but the Delphi
 /// client parses the object and then ignores it in `ProcessBalanceCommand`.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct BalanceUpdate {
     pub cmd_id: u8, // 002=base ignored by client, 003=full, 004=incremental
@@ -78,6 +82,7 @@ pub struct BalanceUpdate {
 /// empty; only the command envelope is sent (CmdId + ver + uid).
 ///
 /// Priority = `MPS_High`, encrypted = true, max_retries = 3.
+#[doc(hidden)]
 pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
     const CMD_REQUEST_BALANCE_REFRESH: u8 = 5;
     const CURRENT_PROTO_CMD_VER: u16 = 3;
@@ -95,6 +100,7 @@ pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
 /// Parse balance command payload (after command header CmdId+ver+UID stripped).
 /// cmd_id determines the wire format (002/003 vs 004); state application is
 /// only defined by Delphi for 003/004.
+#[doc(hidden)]
 pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     let mut pos = 0usize;
 
@@ -171,15 +177,17 @@ fn read_balance_item(data: &[u8], pos: &mut usize) -> Option<BalanceItem> {
     item.pos_size = read_flagged_f64(data, pos, flags, &mut bit);
     item.pos_price = read_flagged_f64(data, pos, flags, &mut bit);
     item.liq_price = read_flagged_f64(data, pos, flags, &mut bit);
-    item.pos_dir = read_flagged_u8(data, pos, flags, &mut bit, 0);
+    item.pos_dir = OrderType::from_byte(read_flagged_u8(data, pos, flags, &mut bit, 0));
     item.long_pos_size = read_flagged_f64(data, pos, flags, &mut bit);
     item.long_pos_price = read_flagged_f64(data, pos, flags, &mut bit);
     item.long_liq_price = read_flagged_f64(data, pos, flags, &mut bit);
-    item.long_position_type = read_flagged_u8(data, pos, flags, &mut bit, 0);
+    item.long_position_type =
+        PositionType::from_byte(read_flagged_u8(data, pos, flags, &mut bit, 0));
     item.short_pos_size = read_flagged_f64(data, pos, flags, &mut bit);
     item.short_pos_price = read_flagged_f64(data, pos, flags, &mut bit);
     item.short_liq_price = read_flagged_f64(data, pos, flags, &mut bit);
-    item.short_position_type = read_flagged_u8(data, pos, flags, &mut bit, 0);
+    item.short_position_type =
+        PositionType::from_byte(read_flagged_u8(data, pos, flags, &mut bit, 0));
     item.asset_balance = read_flagged_f64(data, pos, flags, &mut bit);
     item.asset_balance_full = read_flagged_f64(data, pos, flags, &mut bit);
     item.total_profit_b = read_flagged_f64(data, pos, flags, &mut bit);
@@ -187,7 +195,7 @@ fn read_balance_item(data: &[u8], pos: &mut usize) -> Option<BalanceItem> {
     item.total_profit_s = read_flagged_f64(data, pos, flags, &mut bit);
     item.max_value = read_flagged_f64(data, pos, flags, &mut bit);
     item.leverage_x = read_flagged_i32(data, pos, flags, &mut bit, 1);
-    item.position_type = read_flagged_u8(data, pos, flags, &mut bit, 0);
+    item.position_type = PositionType::from_byte(read_flagged_u8(data, pos, flags, &mut bit, 0));
 
     Some(item)
 }

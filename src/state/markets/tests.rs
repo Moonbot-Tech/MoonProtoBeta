@@ -1,8 +1,9 @@
 use super::*;
 use crate::commands::market::{
-    write_market, BaseCurrency, CorrMarketPriceUpdate, MarketArbNowEntry, MarketPriceUpdate,
-    MarketsListResponse, MarketsPricesResponse,
+    write_market, ArbIsolationFlags, ArbPlatformCode, BaseCurrency, CorrMarketPriceUpdate,
+    MarketArbNowEntry, MarketPriceUpdate, MarketsListResponse, MarketsPricesResponse, PositionType,
 };
+use crate::commands::trade::OrderType;
 
 fn mk_market(name: &str, idx: u16) -> Market {
     Market {
@@ -45,7 +46,7 @@ fn mk_market(name: &str, idx: u16) -> Market {
         volume: 0.0,
         is_btc_market: false,
         status_trading: true,
-        bn_is_fucking_shib: false,
+        has_1000_prefix_alias: false,
         bn_iceberg: false,
         bn_only_isolated: false,
         futures_type: BaseCurrency::USDT,
@@ -54,22 +55,22 @@ fn mk_market(name: &str, idx: u16) -> Market {
         pos_size: 0.0,
         pos_price: 0.0,
         liq_price: 0.0,
-        pos_dir: 0,
+        pos_dir: OrderType::Sell,
         long_pos_size: 0.0,
         long_pos_price: 0.0,
         long_liq_price: 0.0,
-        long_position_type: 0,
+        long_position_type: PositionType::Cross,
         short_pos_size: 0.0,
         short_pos_price: 0.0,
         short_liq_price: 0.0,
-        short_position_type: 0,
+        short_position_type: PositionType::Cross,
         asset_balance: 0.0,
         asset_balance_full: 0.0,
         total_profit_b: 0.0,
         total_profit_l: 0.0,
         total_profit_s: 0.0,
         leverage_x: 1,
-        position_type: 0,
+        position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
         arb_slots: std::collections::HashMap::new(),
@@ -164,19 +165,22 @@ fn market_handle_reads_arb_slot_without_raw_map_access() {
 
     let handle = st.get("BTCUSDT").unwrap();
     handle.with_mut(|market| {
-        let slot = market.arb_slots.entry(7).or_default();
-        slot.isolated_flags = 3;
+        let slot = market.arb_slots.entry(ArbPlatformCode::ByBit).or_default();
+        slot.isolated_flags = ArbIsolationFlags::from_byte(3);
         slot.now = MarketArbNowEntry {
             price: 42.5,
             time: 45_000.25,
         };
     });
 
-    let slot = handle.arb_slot(7).unwrap();
-    assert_eq!(slot.isolated_flags, 3);
+    let slot = handle.arb_slot(ArbPlatformCode::ByBit).unwrap();
+    assert_eq!(slot.isolated_flags, ArbIsolationFlags::from_byte(3));
     assert_eq!(slot.now.price, 42.5);
-    assert_eq!(handle.arb_now(7).unwrap().time, 45_000.25);
-    assert!(handle.arb_slot(8).is_none());
+    assert_eq!(
+        handle.arb_now(ArbPlatformCode::ByBit).unwrap().time,
+        45_000.25
+    );
+    assert!(handle.arb_slot(ArbPlatformCode::Gate).is_none());
 }
 
 #[test]
@@ -1037,7 +1041,7 @@ fn apply_markets_list_preserves_existing_corr_market_currency_like_delphi() {
 #[test]
 fn check_corr_markets_sets_ref_btc_market_like_delphi() {
     let mut st = MarketsState::new();
-    st.set_server_base_currency(Some("USDT"), Some(BaseCurrency::USDT.to_byte()));
+    st.set_server_base_currency(Some("USDT"), Some(BaseCurrency::USDT));
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_pair_market("DOGEUSDT", "DOGE", "USDT", 0)],
         corr_markets: vec![CorrMarket {
@@ -1058,7 +1062,7 @@ fn check_corr_markets_sets_ref_btc_market_like_delphi() {
 #[test]
 fn check_corr_markets_skips_btc_base_like_delphi() {
     let mut st = MarketsState::new();
-    st.set_server_base_currency(Some("BTC"), Some(BaseCurrency::BTC.to_byte()));
+    st.set_server_base_currency(Some("BTC"), Some(BaseCurrency::BTC));
     st.apply_markets_list(MarketsListResponse {
         markets: vec![mk_pair_market("DOGEUSDT", "DOGE", "USDT", 0)],
         corr_markets: vec![CorrMarket {
@@ -1345,4 +1349,41 @@ fn market_index_helpers_hide_stale_mapping() {
     assert_eq!(st.market_name_by_index(0), None);
     assert!(st.market_by_index(0).is_none());
     assert_eq!(st.market_index_by_name("BTCUSDT"), None);
+}
+
+#[test]
+fn get_markets_list_rebuilds_stale_server_indexes_like_delphi_token_change() {
+    let mut st = MarketsState::new();
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![mk_market("BTCUSDT", 0), mk_market("ETHUSDT", 1)],
+        corr_markets: vec![],
+    });
+    st.mark_indexes_stale();
+
+    st.apply_markets_list(MarketsListResponse {
+        markets: vec![
+            mk_market("ETHUSDT", 0),
+            mk_market("BTCUSDT", 1),
+            mk_market("NEWUSDT", 2),
+        ],
+        corr_markets: vec![],
+    });
+
+    assert!(
+        st.indexes_synchronized,
+        "Delphi GetMarketsList rebuilds SrvMarkets when PeerAppToken changed"
+    );
+    assert_eq!(st.market_name_by_index(0), Some("ETHUSDT"));
+    assert_eq!(
+        st.market_by_index(1).unwrap().snapshot().bn_market_name,
+        "BTCUSDT"
+    );
+    assert!(
+        st.get("NEWUSDT").is_none(),
+        "token-change rebuild does not by itself enable unknown market insertion"
+    );
+    assert!(
+        st.market_by_index(2).is_none(),
+        "SrvMarkets slot can point to a name that has no local TMarket yet"
+    );
 }

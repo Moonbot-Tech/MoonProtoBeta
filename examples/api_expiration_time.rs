@@ -1,4 +1,4 @@
-﻿//! Diagnostic one-shot API-key expiration read through `MoonClient`.
+//! API-key expiration refresh through the public `MoonClient` event/snapshot path.
 //!
 //! Regular UI code should call `refresh_api_expiration_time()` and read
 //! `snapshot().account().api_expiration()` after `Event::Account`.
@@ -8,6 +8,9 @@
 
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use moonproto::state::AccountEvent;
+use moonproto::Event;
 
 mod common;
 
@@ -32,13 +35,26 @@ fn main() {
         }
     };
 
-    let expiration = match client.blocking_request_api_expiration_time(Duration::from_secs(15)) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("[request] failed: {err}");
-            std::process::exit(3);
-        }
-    };
+    if let Err(err) = client.account().refresh_api_expiration_time() {
+        eprintln!("[request] failed: {err}");
+        std::process::exit(3);
+    }
+    let ready = common::wait_until(Duration::from_secs(15), || {
+        client.drain_events().into_iter().any(|event| {
+            matches!(
+                event,
+                Event::Account(AccountEvent::ApiExpirationUpdated { .. })
+            )
+        })
+    });
+    if !ready {
+        eprintln!("[request] timed out waiting for Event::Account(ApiExpirationUpdated)");
+        std::process::exit(3);
+    }
+    let expiration = client
+        .snapshot()
+        .and_then(|snapshot| snapshot.account().api_expiration())
+        .expect("expiration event must publish account snapshot");
 
     if let Some(time) = expiration.system_time() {
         let unix = unix_seconds(time).unwrap_or_default();

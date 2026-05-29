@@ -37,7 +37,7 @@ mod command;
 pub use command::TradeCommand;
 mod enums;
 pub use enums::{
-    FixedPosition, MoveAllBuysCmdType, MoveAllCmdType, OrderType, OrderWorkerStatus,
+    FixedPosition, MoveAllBuysCmdType, MoveAllCmdType, OrderSubType, OrderType, OrderWorkerStatus,
     ReplaceMultiKind,
 };
 mod headers;
@@ -48,8 +48,8 @@ use records::{
     read_u16_zero_tail, read_u64_zero_tail, read_u8_zero_tail,
 };
 pub use records::{
-    ImmuneItem, OrderCompact, OrderUpdateData, PriceZone, StopSettings, ORDER_COMPACT_SIZE,
-    ORDER_UPDATE_DATA_SIZE, STOP_SETTINGS_SIZE,
+    DelphiBool, ImmuneItem, OrderCompact, OrderUpdateData, PriceZone, StopSettings,
+    ORDER_COMPACT_SIZE, ORDER_UPDATE_DATA_SIZE, STOP_SETTINGS_SIZE,
 };
 mod trace;
 pub use trace::{trace_flags, BulkReplaceNotify, CorridorUpdate, OrderTracePoint};

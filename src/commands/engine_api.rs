@@ -13,8 +13,10 @@ mod base_check;
 mod method;
 mod response;
 
-pub use self::auth_check::{parse_auth_check_response, AuthCheckResponse, DexInfo};
-pub use self::base_check::{exchange_type_flags, parse_base_check_response, ServerInfo};
+pub use self::auth_check::{parse_auth_check_response, AuthCheckResponse, DexInfo, HyperDexIndex};
+pub use self::base_check::{
+    exchange_type_flags, parse_base_check_response, ExchangeTypeMask, ServerInfo,
+};
 pub use self::method::EngineMethod;
 pub use self::response::{parse_engine_response, EngineResponse};
 
@@ -107,7 +109,7 @@ impl ApiExpirationTime {
     /// Convert to `SystemTime` when the value is known and not before the Unix epoch.
     pub fn system_time(&self) -> Option<SystemTime> {
         let seconds = self.unix_seconds()?;
-        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds as u64))
+        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
     }
 
     /// Rounded signed number of days until expiration relative to `now`.

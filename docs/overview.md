@@ -13,10 +13,11 @@ Application
         v
 moonproto
   MoonClient          runtime thread + commands/events/snapshots
-  Client              low-level UDP, handshake, retry, reconnect, pending API
-  EventDispatcher     typed events + read-only state models owned by runtime
-  connect_and_init    low-level ready connection + init helper
-  run_init_sequence   BaseCheck/AuthCheck/markets/indexes/balances/post-init sync
+  MoonEventSink       event delivery adapter for UI frameworks/tools
+  Snapshot state      read-only orders/books/trades/balances/markets view
+  Client              internal/diagnostic UDP, handshake, retry, pending API
+  EventDispatcher     mutable low-level state owner inside the runtime
+  Init spine          BaseCheck/AuthCheck/markets/prices/balances/post-init sync
   commands::*         byte-level parsers/builders
   state::*            orders, orderbooks, trades, balances, strategies, markets
         |
@@ -48,6 +49,13 @@ let init = InitConfig {
 };
 let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 
+// In a GUI this is handled by the normal event/update callback.
+for lifecycle in client.drain_lifecycle_events() {
+    if matches!(lifecycle, moonproto::LifecycleEvent::Ready) {
+        println!("ready");
+    }
+}
+
 // Domain state is opened only after init succeeds. Initial server pushes that
 // arrive earlier are dropped; the helper then requests fresh orders, settings,
 // balance, and strategy state.
@@ -55,7 +63,7 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 // application expects trades-stream events.
 // Init is one-time for this Client session; reconnect restore is automatic.
 
-client.subscribe_orderbook("ETHUSDT")?;
+client.streams().subscribe_orderbook("ETHUSDT")?;
 // After an order appears in events/snapshots:
 // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 
@@ -71,26 +79,28 @@ for event in client.drain_events() {
 ## What the Library Does Automatically
 
 - Reconnects and re-handshakes.
-- Fetches markets, market indexes, prices, and balances during the mandatory
-  one-time init.
-- After init, restores market indexes, refreshes prices, and replays registry
-  subscriptions after reconnect without requiring a second Init.
+- Fetches markets, builds the initial server-index map from the market list,
+  then fetches prices and balances during the mandatory one-time init.
+- After init, refreshes stale market indexes only after a changed
+  `PeerAppToken`, refreshes prices, and replays registry subscriptions after
+  reconnect without requiring a second Init.
 - Blocks indexed streams while market indexes are stale.
 - Sends orderbook full-snapshot requests when diff recovery requires them.
 - Detects trades gaps and sends `TradesResend` requests from the
   Delphi-equivalent tail check after valid trades packets.
-- Routes Engine API responses into one-shot `request_*` helpers or the
-  `Receiver` returned by lower-level `api_*` calls.
+- Routes Engine API responses into runtime-owned pending actions and publishes
+  typed events/snapshots when the requested state is ready. Lower-level `api_*`
+  receivers exist only for diagnostics and custom runtimes.
 - Provides typed helpers for common Engine API reads including balances,
   hedge mode, API-key expiration, transferable assets, and candles.
 - Provides registry-aware single, batched, and all-clear helpers for orderbook
   subscriptions so reconnect restore follows the application's latest intent.
-- Runs the active session until explicit `stop()` or drop; applications do not
+- Runs the active session until explicit `disconnect()` or drop; applications do not
   choose a protocol-loop duration.
 - Publishes typed events and immutable snapshots for UI read models.
 - Keeps chart-visible market state on the selected market/history model:
   balance/position/liquidation fields live on `Market`, arb prices live in
-  `Market::arb_slots`, and retained trades/5m candles are available through
+  `MarketHandle::arb_slot`, and retained trades/5m candles are available through
   `snapshot.market_history_readers(market)` when trades storage is enabled.
 - Maintains per-client `ServerTimeDelta` for order timestamps.
 - Runs the Delphi-style process-level NTP syncer by default with

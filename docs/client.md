@@ -1,13 +1,11 @@
 ﻿# Client
 
 `MoonClient` is the recommended application handle for one MoonProto connection.
-It owns a runtime thread and keeps the active session alive until `stop()` or
-drop.
+It owns a runtime thread and keeps the active session alive until
+`disconnect()` or drop.
 
-`Client` is the lower-level session object used by `MoonClient`, tests, protocol
-tools, and custom runtimes. It owns the UDP socket, handshake state, retry
-queues, pending Engine API registry, subscriptions, a process-level NTP guard,
-per-client server-time delta, and server identity.
+`Client` is the internal session object behind `MoonClient`. Regular
+applications should not own it directly.
 
 Create one `MoonClient` per server in regular applications.
 
@@ -23,7 +21,7 @@ let cfg = moonproto::ClientConfig::new(
     keys.master_key,
     keys.mac_key,
 )
-.with_transport_mode(mask_ver);
+.with_transport_mode(transport_mode);
 let client = moonproto::MoonClient::connect(
     cfg,
     moonproto::ConnectConfig::new(moonproto::InitConfig::default()),
@@ -43,30 +41,36 @@ ui.key_label = info.display_name;
 if let Some(network) = info.network {
     ui.host = network.address.map(|ip| ip.to_string()).unwrap_or_default();
     ui.port = network.port;
-    ui.mask_ver = network.mask_ver;
+    ui.transport_mode = network.mask_ver;
 }
 ```
 
 `ClientConfig::new` sets:
 
-- `mask_ver = 0`;
+- `transport_mode = TransportMode::V0`;
 - random `client_id`;
 - `ntp_host = Some("pool.ntp.org")` and uses one shared NTP syncer per process;
 - `refresh = RefreshConfig::default()` (`UpdateMarketsList` every 2 seconds and
   `CheckBinanceTags` every 60 seconds after Init).
 
-`mask_ver = 0` is V0/base transport. Transport modes `1` and `2` select V1/V2.
-The selected mode must match the server-side connection setting. Unsupported
-mode values normalize to V0.
+`TransportMode::V0` is the base transport. `TransportMode::V1` and
+`TransportMode::V2` select the extended built-in transports. The selected mode
+must match the server-side connection setting.
+
+Path MTU discovery is automatic. If diagnostics mention a too-large
+`SizeAck`/`ProbeMTUAck` packet, that is the expected negative result of an
+internal PMTU probe, especially on Linux where the OS reports `EMSGSIZE`
+(`os error 90`). User data should not be handled by applications here: large
+Engine/API payloads are sliced and retried by the runtime.
 
 Override only what you need:
 
 ```rust
 use std::time::Duration;
-use moonproto::{ClientConfig, RefreshConfig};
+use moonproto::{ClientConfig, RefreshConfig, TransportMode};
 
 let cfg = ClientConfig::new(host, port, master_key, mac_key)
-    .with_transport_mode(0)
+    .with_transport_mode(TransportMode::V0)
     .with_client_id(12345)
     .without_ntp()
     .with_refresh(RefreshConfig {
@@ -99,7 +103,14 @@ let client = MoonClient::connect(cfg, ConnectConfig::new(InitConfig {
     ..Default::default()
 }))?;
 
-client.subscribe_orderbook("ETHUSDT")?;
+// In a GUI this check lives in the normal UI tick / event callback.
+for lifecycle in client.drain_lifecycle_events() {
+    if matches!(lifecycle, moonproto::LifecycleEvent::Ready) {
+        println!("MoonProto is ready");
+    }
+}
+
+client.streams().subscribe_orderbook("ETHUSDT")?;
 // After an order appears in events/snapshots:
 // client.orders().move_order(order_uid, 50100.0)?; // also accepts &Order
 
@@ -110,7 +121,8 @@ for lifecycle in client.drain_lifecycle_events() {
     println!("lifecycle: {lifecycle:?}");
 }
 
-client.stop()?;
+client.disconnect()?;
+client.wait_finished()?;
 ```
 
 This path performs active-library work: state dispatch, per-client
@@ -119,13 +131,22 @@ gating, reconnect restore, and Engine API pending routing. Before the first Init
 transport reconnects do not emit background Engine API. After Init, reconnect
 inside the same `Client` session maintains the user-requested active-lib state.
 
-`MoonClient::connect` is a startup barrier: it returns only after AuthDone and
-the one-time Init sequence succeeded, so the returned handle is ready for normal
-Active Lib work. Desktop apps should call it from their terminal/runtime startup
-task, not from a paint/input callback. After that, `MoonClient` owns the runtime
-thread. Applications do not choose a finite protocol-loop duration; the session
-runs until explicit `stop()` or drop. UI code reads typed events, lifecycle
+`MoonClient::connect` starts the owned runtime thread and returns immediately.
+The background runtime performs AuthDone and the one-time Init sequence, then
+emits `LifecycleEvent::Ready`. Startup failure arrives as
+`LifecycleEvent::ConnectFailed`. UI code does not create its own protocol thread
+and does not block a paint/input callback waiting for network readiness.
+Applications do not choose a finite protocol-loop duration; the session runs
+until explicit `disconnect()` or drop. UI code reads typed events, lifecycle
 events, and immutable snapshots:
+
+`Ready` covers the mandatory init spine: authorization, BaseCheck/AuthCheck,
+markets list/server-index map, initial price refresh, and strategy schema.
+Strategy schema is
+requested after AuthCheck and may be received while the market init requests are
+still running; `Ready` is emitted only after the schema is applied. It does not
+wait for retained 5m candles, CoinCard candles, transfer assets, or the first
+stream packet; those arrive as normal domain events and snapshot updates.
 
 ```rust
 if let Some(snapshot) = client.snapshot() {
@@ -142,9 +163,10 @@ active session:
 ```rust
 use moonproto::{NewOrderParams, OrderSide};
 
-client.trade().new_order(
+let ticket = client.trade().new_order(
     NewOrderParams::new("BTCUSDT", OrderSide::Long, 50_000.0, 0.001),
 )?;
+println!("queued new-order request uid={}", ticket.request_uid);
 client.trade().join_orders("BTCUSDT", OrderSide::Long)?;
 ```
 
@@ -167,24 +189,17 @@ if let Some(snapshot) = client.snapshot() {
 }
 ```
 
-Explicit `blocking_*` Engine API reads exist for scripts and diagnostics; they
-also run inside the owned runtime and parse their payloads while the protocol
-keeps pumping. Regular UI code reads maintained state and uses non-blocking
-Active Lib intents. Mutations return an `EngineActionTicket` after queuing the
-request, and completion arrives later as `Event::EngineAction` plus the
-underlying `Event::EngineResponse`.
+Regular UI code reads maintained state and uses non-blocking Active Lib intents.
+Mutations return an `EngineActionTicket` after queuing the request, and
+completion arrives later as `Event::EngineAction` plus the underlying
+`Event::EngineResponse`.
 
 ```rust
-client.refresh_hedge_mode()?;
-let ticket = client.set_leverage("BTCUSDT", 20)?;
-client.set_hedge_mode(true)?;
-client.cancel_all_orders()?;
+client.account().refresh_hedge_mode()?;
+let ticket = client.account().set_leverage("BTCUSDT", 20)?;
+client.account().set_hedge_mode(true)?;
+client.account().cancel_all_orders()?;
 ```
-
-Advanced protocol tools can still own `Client + EventDispatcher` directly, but
-that is not the regular desktop/UI application shape. Such tools must keep the
-protocol pump alive themselves; normal applications should not model the session
-as "run for N seconds".
 
 User/API sends append directly to the client's unbounded Delphi-style
 `DataToSend` / `DataToSendH` / `DataToSendL` queues, separate from accepted UDP
@@ -195,9 +210,9 @@ typed helpers append their Engine API/UI/domain commands to the send queues. The
 public guarantee is no local capacity cap: dense incoming streams do not drop
 queued user commands or Engine API requests.
 
-Low-level raw callbacks are for diagnostics/protocol tools that intentionally
-bypass the Active Lib. If an application does that, it also owns the recovery
-work that `MoonClient` normally performs automatically.
+The regular application model is `MoonClient`: one runtime owner, event sink,
+snapshots, and fire-and-forget user intents. Public code should not model the
+session as "run the protocol for N seconds".
 
 ## Packet Loss Test Hook
 
@@ -223,19 +238,9 @@ operations under this gate should be treated as a protocol bug until proven
 otherwise, not dismissed as random FireTest noise.
 
 For stress tests that target Engine API, candles, and sliced response recovery,
-enable `set_err_emu` after `connect_and_init` / `run_init_sequence`. Enabling it
-before connection intentionally tests handshake/reconnect loss and can prevent
-the client from reaching the API phase at all.
-
-The `stress_client` example exposes this distinction explicitly:
-
-```text
-stress_client <key_base64> [host:port] [market] [duration_secs] [err_emu_pct] [err_emu_phase]
-```
-
-`err_emu_phase=post_init` is the default and enables loss after both stress
-clients finish init. Use `pre_connect` only when the test target is
-authorization/reconnect behavior.
+enable `set_err_emu` after the runtime reaches `LifecycleEvent::Ready`. Enabling
+it before connection intentionally tests handshake/reconnect loss and can
+prevent the client from reaching the API phase at all.
 
 For live health tests, `Client::err_emu_diagnostics_snapshot()` returns
 loss counters collected while `set_err_emu` is enabled. Use
@@ -273,17 +278,16 @@ and send/maintenance nanoseconds. The old internal receive-decoded bridge is
 not part of the public metrics API because production decoded delivery is
 direct.
 
-`Client::protocol_metrics_snapshot_with_dispatcher(&dispatcher)` adds the
-current `EventDispatcher` public event queue length to the same snapshot.
-
 The snapshot also separates CPU-ish protocol work from wall-clock waits:
 `writer_cpu_*` excludes the fixed Delphi-style 5 ms sleep, `reader_protocol_*`
-is the protocol recv path, and `active_dispatch_*` / `app_enqueue_*` measure the
-typed active-library worker path before user callbacks. In
-`MoonClient`, `connect_and_init`, `run_init_sequence`, and the one-shot wait
-helpers keep heavy domain parsing/state apply on the worker side. It
-is still measured because millisecond samples are performance red flags, but it
-does not block ACK/retry/send progress in the protocol recv loop. The
+is the protocol recv path excluding deliberate Delphi-compatible protocol
+barriers, and `reader_protocol_wait_*` accounts for those barriers separately
+(currently the `WhoAreYou` -> duplicate `ImFriend` 32 ms wait).
+`active_dispatch_*` / `app_enqueue_*` measure typed Active Lib state apply and
+event enqueue before user callbacks. In `MoonClient`, the runtime owner applies
+protocol/domain payloads directly to Active Lib state, publishes a snapshot,
+then emits events through the configured sink. Millisecond samples are
+performance red flags. The
 `*_over_100us`, `*_over_1ms`, `*_over_5ms` counters are coarse red flags for
 unexpectedly heavy blocks. These are wall-clock durations of code sections, not
 OS CPU counters, but they intentionally exclude network waits and user callback
@@ -305,55 +309,37 @@ For regular applications, `MoonClient::connect` owns the setup path:
 let client = MoonClient::connect(cfg, ConnectConfig::new(init))?;
 ```
 
-The Delphi init contract is mandatory: BaseCheck, AuthCheck, markets list,
-market indexes, price refresh, balance refresh, order snapshot, client strategy
+It starts the runtime immediately and reports completion as
+`LifecycleEvent::Ready`; startup errors arrive as `LifecycleEvent::ConnectFailed`.
+
+The Delphi init contract is mandatory: BaseCheck, AuthCheck, markets list
+(which also builds the initial server-index map), price refresh, balance
+refresh, order snapshot, client strategy
 snapshot, and settings sync. `InitConfig` only adds local strategies, optional
 stream subscriptions, and timing.
 
-For custom low-level runtimes that deliberately own `Client + EventDispatcher`,
-the same setup is available as `connect_and_init`:
+The runtime keeps the client loop running while it waits for the connection and
+for each mandatory Engine API response. It applies state in the runtime owner,
+publishes snapshots, and fills `client.server_info()` after `BaseCheck` and
+`client.auth_info()` after a successful `AuthCheck`.
 
-```rust
-use std::time::Duration;
-use moonproto::{connect_and_init, ConnectConfig, InitConfig, TradesStreamMode};
+Init is a one-time step for a `MoonClient` session. After it succeeds, do not
+start a second init just because the UDP transport reconnected; the library
+maintains the user-requested active-lib state for that session.
 
-let init = InitConfig {
-    subscribe_trades: Some(TradesStreamMode::TradesOnly),
-    subscribe_orderbooks: vec!["BTCUSDT".to_string()],
-    ..Default::default()
-};
-
-let result = connect_and_init(
-    &mut client,
-    &mut dispatcher,
-    ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
-)?;
-println!("orderbooks subscribed: {}", result.orderbooks_subscribed);
-```
-
-The helper keeps the client loop running while it waits for the connection and
-for each Engine API response. Domain apply work is handed to the dispatcher
-worker; when a wait helper returns, a FIFO barrier has already confirmed that
-dispatcher state/events queued before the response were applied. It fills
-`client.server_info()` after `BaseCheck` and `client.auth_info()` after a
-successful `AuthCheck`.
-
-Init is a one-time step for a `Client` session. After it succeeds, do not call
-`run_init_sequence` again just because the UDP transport reconnected; the library
-maintains the user-requested active-lib state for that `Client` session.
-
-Init always sends `GetMarketsIndexes` and records the payload size in
-`InitResult::indexes_response_bytes`, because trades, orderbooks, and
-`UpdateMarketsList` price rows depend on the current server `mIndex` mapping.
-Init also sends `TStratSchemaRequest` and records
-`InitResult::strategy_schema_raw_bytes`,
-`InitResult::strategy_schema_kind_count`, and
-`InitResult::strategy_schema_field_count`. The decoded schema is stored in
-the active strategy state and contains strategy kinds, fields,
+Cold init does not send a separate `GetMarketsIndexes`: Delphi
+`GetMarketsList` builds `SrvMarkets` from the server list order and stores the
+current `PeerAppToken`. After reconnect/server-token changes, the library
+refreshes `GetMarketsIndexes` before any `UpdateMarketsList` price refresh that
+depends on server `mIndex` values. Init also sends `TStratSchemaRequest` after
+AuthCheck. The decoded schema is stored in the active strategy state and
+contains strategy kinds, fields,
 TypeIDs, UI kind, picklists, visibility, and chapter/layout markers. This is
 agreed active-library behavior: clients use the live server schema for strategy
 UI metadata and typed `TStrategySerializer` snapshot writes instead of a
-hardcoded Rust copy of Delphi `TStrategy` fields/defaults.
+hardcoded Rust copy of Delphi `TStrategy` fields/defaults. Only this schema
+request/response is allowed through the pre-Init Strat gate; regular Strat
+commands remain closed until `domain_ready`.
 Periodic market refresh starts only after init opens the domain gate, so
 BaseCheck/AuthCheck are not delayed by early background refresh traffic.
 Critical BaseCheck/AuthCheck waits use the same default as Delphi
@@ -362,11 +348,11 @@ step timeouts/errors fail init and leave the domain gate closed.
 
 `AuthCheck` follows Delphi's result ordering: a successful server response opens
 the next init step even if the optional account payload cannot be parsed. When
-the payload is valid, `InitResult::auth_info` and `client.auth_info()` contain
+the payload is valid, `client.auth_info()` contains
 the parsed account metadata (`account_id`, `btc_address`, sub-account flag,
 transfer payload limit, and Hyperliquid DEX tail). When a successful AuthCheck
 payload is malformed, `auth_check_ok` remains true, `auth_info` stays `None`,
-and `InitResult::errors` receives a non-fatal parse note, matching Delphi's
+and an internal non-fatal parse note is recorded, matching Delphi's
 `AuthCheck parse` log path.
 
 If the first BaseCheck/AuthCheck block fails, init follows Delphi `InitInt`:
@@ -375,12 +361,13 @@ branch's final gate is the second AuthCheck result; the second BaseCheck still
 updates `client.server_info()` if it succeeds.
 
 `BaseCheck` retry follows Delphi exactly. A normal init sends one BaseCheck
-request. If `client.mark_server_update_sent()` was called before init, the next
-`run_init_sequence` consumes that marker, waits up to `34 * 300ms` for
+request. If a version/switch action marked `ServerUpdateSent` before init, the
+init spine consumes that marker, waits up to `34 * 300ms` for
 `AuthDone`, sends BaseCheck once, and if it still fails retries it 10 times with
 `2000ms` pauses. The high-level UI wrappers that match Delphi
 `ServerUpdateSent` behavior call the marker automatically:
-`request_version_update`, `switch_dex`, and `switch_spot`.
+`settings().request_version_update`, `settings().switch_dex`, and
+`settings().switch_spot`.
 
 Domain pushes received before init completion are ignored in every client run
 mode, including the raw `Client::run` callback. This matches the Delphi
@@ -412,19 +399,14 @@ such as replace/cancel/stop/VStop/immune also do not mutate the local `Orders`
 cache before Init. Raw `send_cmd`, `send_cmd_keyed`, and raw `api_*` helpers do
 not bypass this gate: until Init opens the domain, the only Engine API requests
 accepted by the raw path are the mandatory init primitives `BaseCheck`,
-`AuthCheck`, `GetMarketsList`, `GetMarketsIndexes`, and `UpdateMarketsList`.
+`AuthCheck`, `GetMarketsList`, and `UpdateMarketsList`.
 Balance bootstrap uses the post-init `TRequestBalanceRefresh`, matching the
 MoonProto Delphi client where `GetMarketsBalanceFull` returns success without a
 serialized balance snapshot.
 
-Use lower-level `Client` plus `run_init_sequence` directly only when an
-application deliberately implements its own custom runtime/progress UI between
-connection readiness and the one-time init requests.
-
 ## Trade Context
 
-This is a low-level/custom-runtime topic. Regular UI actions should not build
-or pass `TradeCtx`:
+Regular UI actions do not build or pass `TradeCtx`:
 
 ```rust
 client.trade().new_order(NewOrderParams::new(
@@ -437,45 +419,33 @@ client.orders().move_order(order_uid, new_price)?; // or pass &Order from a snap
 ```
 
 The runtime derives `TradeCtx` from `base_currency_code` and `exchange_code`
-learned during Init/BaseCheck. If a custom low-level runtime calls raw
-`Client::new_order(ctx, ...)` directly, it must call `request_base_check` first
-or set `server_info` manually from a parsed BaseCheck response.
+learned during Init/BaseCheck. `new_order` also returns `NewOrderTicket`; keep
+`ticket.request_uid` if the UI wants to correlate a click with the later
+server-created order.
 
 ## Engine API Requests
 
-For direct one-shot diagnostic reads, use explicit `blocking_*` helpers. The
-runtime keeps the UDP loop alive while the caller waits for the request timeout.
-For user-facing UI refreshes and mutations, use non-blocking Active Lib intents:
+User-facing UI refreshes and mutations use non-blocking Active Lib intents:
 
 ```rust
-client.refresh_hedge_mode()?; // async; read Event::Account + snapshot().account()
-client.refresh_api_expiration_time()?; // async; read Event::Account + snapshot().account()
-client.refresh_transfer_assets()?; // async; read snapshot().transfer_assets()
-let coin_card_ticket = client.request_coin_card_candles(
+client.account().refresh_hedge_mode()?; // async; read Event::Account + snapshot().account()
+client.account().refresh_api_expiration_time()?; // async; read Event::Account + snapshot().account()
+client.balances().refresh_transfer_assets()?; // async; read snapshot().transfer_assets()
+let coin_card_ticket = client.candles().request_coin_card(
     "BTCUSDT",
     moonproto::commands::candles::DeepHistoryKind::Hour4,
 )?;
-client.request_client_settings()?; // async; read Event::Settings + snapshot().settings()
-client.set_leverage("BTCUSDT", 20)?;
-client.set_hedge_mode(true)?;
-client.confirm_risk_limit("BTCUSDT")?;
+client.settings().refresh()?; // async; read Event::Settings + snapshot().settings()
+client.account().set_leverage("BTCUSDT", 20)?;
+client.account().set_hedge_mode(true)?;
+client.account().confirm_risk_limit("BTCUSDT")?;
 ```
 
-Blocking helpers validate the server response and parse the payload. Blocking
-mutation counterparts also use the `blocking_` prefix for scripts, diagnostics,
-and custom tools that deliberately need a synchronous acknowledgement.
-Direct scalar helpers such as `blocking_request_balance`,
-`blocking_request_hedge_mode`, and `blocking_request_api_expiration_time` are
-diagnostic/script reads, not the normal UI balance/account-state model.
-`request_coin_card_candles` is intentionally non-blocking even though the
+`candles().request_coin_card` is intentionally non-blocking even though the
 underlying Delphi `Engine.getDeepHistory` call is blocking: Delphi UI sets a
 need flag and the background worker fills `TMarket.CoinCardCandles`. In Rust,
 completion arrives as `Event::CoinCardCandles` and the rows are readable through
 `snapshot().coin_card_candles()`.
-
-Low-level `Client::api_*` receivers remain only for custom runtimes and
-diagnostic tools. A normal application should not wait on raw receivers from the
-UI thread.
 
 Chunked candles use a dedicated aggregator rather than the normal one-response
 pending slot. Active Lib sends the full 5m snapshot request automatically after
@@ -489,7 +459,7 @@ pending `Receiver`. Regular UI code queues a refresh request and reacts to the
 settings event:
 
 ```rust
-client.request_client_settings()?;
+client.settings().refresh()?;
 
 for event in client.drain_events() {
     if matches!(
@@ -505,11 +475,6 @@ for event in client.drain_events() {
 }
 ```
 
-`blocking_request_client_settings(timeout)` is the explicit script/diagnostic
-counterpart. It waits for the next applied settings snapshot and does not require
-the command UID to change because the server may answer with the current
-settings object unchanged.
-
 If an application already has local UI settings before connecting, pass them to
 the dispatcher with `set_client_settings_fallback`. This preserves Delphi
 soft-read behavior for old settings snapshots: missing tail fields keep the
@@ -523,7 +488,7 @@ Regular UI code queues an order snapshot refresh and then reads the active order
 model after order events:
 
 ```rust
-client.request_order_snapshot()?;
+client.orders().request_snapshot()?;
 
 for event in client.drain_events() {
     if matches!(event, moonproto::Event::Order(moonproto::state::OrderEvent::Snapshot)) {
@@ -534,18 +499,13 @@ for event in client.drain_events() {
 }
 ```
 
-`blocking_request_order_snapshot(timeout)` is the explicit script/diagnostic
-counterpart. It requests the fresh snapshot, applies it to runtime `Orders`, and
-waits until the dispatcher has finished Delphi missing-worker follow-up requests
-for orders absent from the fresh snapshot.
-
 ## Balance Snapshot Request
 
 Regular UI code queues a full balance refresh and reads the balance model after
 balance events:
 
 ```rust
-client.request_balance_snapshot()?;
+client.balances().refresh()?;
 
 for event in client.drain_events() {
     if matches!(event, moonproto::Event::Balance(_)) {
@@ -557,10 +517,6 @@ for event in client.drain_events() {
 }
 ```
 
-`blocking_request_balance_snapshot(timeout)` is the explicit script/diagnostic
-counterpart. It sends `TRequestBalanceRefresh`, keeps the UDP loop running,
-waits for the next `TBalanceSnapshotFull`, and returns a cloned `BalancesState`.
-
 ## Subscriptions
 
 Use registry-aware methods:
@@ -568,17 +524,17 @@ Use registry-aware methods:
 ```rust
 use moonproto::TradesStreamMode;
 
-client.subscribe_all_trades(TradesStreamMode::TradesOnly)?;
-client.subscribe_trades_for(
+client.streams().subscribe_all_trades(TradesStreamMode::TradesOnly)?;
+client.streams().subscribe_trades_for(
     TradesStreamMode::TradesOnly,
     ["BTCUSDT", "ETHUSDT"],
 )?;
-client.subscribe_orderbook("BTCUSDT")?;
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
-client.unsubscribe_orderbook("BTCUSDT")?;
-client.unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
-client.unsubscribe_all_orderbooks()?;
-client.unsubscribe_all_trades()?;
+client.streams().subscribe_orderbook("BTCUSDT")?;
+client.streams().subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.streams().unsubscribe_orderbook("BTCUSDT")?;
+client.streams().unsubscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.streams().unsubscribe_all_orderbooks()?;
+client.streams().unsubscribe_all_trades()?;
 ```
 
 The registry records the latest subscription intent. Before Init, public
@@ -604,8 +560,8 @@ keeps the last visible snapshot levels, matching Delphi `ResetOrderBookCaches`.
 All-trades is opt-in in the Rust library. If the registry has no all-trades
 subscription intent, incoming `TradesStream` / `TradesResendResponse` packets
 are treated as unexpected and are dropped instead of becoming public events.
-Orderbook subscriptions are per market name; incoming events carry `book_kind`
-so the application can render futures and spot books separately.
+Orderbook subscriptions are per market name; incoming events carry typed
+`OrderBookKind` so the application can render futures and spot books separately.
 The batched orderbook helpers update the same registry and send one
 subscribe/unsubscribe request for the changed market names. Use
 `unsubscribe_all_orderbooks` instead of raw
@@ -617,10 +573,10 @@ remembered, it sends nothing.
 Regular applications call the `MoonClient` handle from their UI/runtime layer:
 
 ```rust
-client.subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
-client.set_mm_orders_subscription(true)?;
-client.refresh_balances()?;
-client.strat_sell_price_update(strategy_id, sell_price)?;
+client.streams().subscribe_orderbooks(["ETHUSDT", "SOLUSDT"])?;
+client.settings().set_mm_orders_subscription(true)?;
+client.balances().refresh()?;
+client.strategies().sell_price_update(strategy_id, sell_price)?;
 ```
 
 Typed command methods append into the same unbounded Delphi-style send queues
@@ -630,11 +586,6 @@ other domain commands queue nothing. Neither path has a local capacity cap.
 Order actions with Delphi-local side effects, such as replace/cancel/panic,
 stop/VStop, and immune clicks, are intents on `client.orders()`. The runtime
 owner applies them to live `Orders` before queueing protocol commands.
-
-`ClientSender` and raw `send_cmd` / `send_cmd_keyed` remain available only for
-custom low-level runtimes and protocol tools that already own
-`Client + EventDispatcher` directly. They are not the regular UI application
-model.
 
 `Command` is not a closed Rust enum; it preserves unknown raw channel
 identifiers. Use `Command::from_byte(raw)` and `cmd.to_byte()` when building
@@ -689,10 +640,14 @@ multiple independent server connections, create one `MoonClient` per server.
 ## Shutdown
 
 ```rust
-client.stop()?;
+client.disconnect()?;
+client.wait_finished()?;
 ```
 
-`stop` schedules `LogOff`, closes the socket path, and joins the runtime thread.
-It is a shutdown barrier, not an Engine API wait. Dropping `MoonClient` performs
-the same shutdown best-effort. To reconnect after final shutdown, create a new
-`MoonClient`.
+`disconnect` schedules final shutdown and returns immediately. `wait_finished`
+is the explicit shutdown barrier; use it during application exit or scripts when
+you need to wait until the runtime thread has actually exited. Disconnect also
+sets the internal shutdown flag that interrupts startup/protocol waits, so
+`wait_finished` is not supposed to sit through the full connect/init timeout.
+Dropping `MoonClient` performs the same shutdown best-effort. To reconnect after
+final shutdown, create a new `MoonClient`.

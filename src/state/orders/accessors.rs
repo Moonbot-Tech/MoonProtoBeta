@@ -5,12 +5,12 @@ use super::{Order, Orders};
 impl Orders {
     /// Get one order by UID.
     pub fn get(&self, uid: u64) -> Option<&Order> {
-        self.map.get(&uid)
+        self.map.get(&uid).map(AsRef::as_ref)
     }
 
     /// Iterate all retained orders.
     pub fn iter(&self) -> impl Iterator<Item = &Order> {
-        self.map.values()
+        self.map.values().map(AsRef::as_ref)
     }
 
     /// Number of retained orders.

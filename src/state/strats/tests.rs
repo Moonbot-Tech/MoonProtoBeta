@@ -196,7 +196,7 @@ fn snapshot_for_listing_checks(
         strategy_ver: 1,
         last_date: id,
         checked,
-        kind: kind.0,
+        kind: kind.to_byte(),
         path: String::new(),
         fields: fields
             .iter()

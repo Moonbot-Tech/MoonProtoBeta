@@ -43,13 +43,13 @@ fn main() {
         market.with(|market| {
             println!(
                 "[market] {} base={} status={} trading={} max_lev={} tick={} step={}",
-                market.bn_market_name,
+                market.symbol(),
                 market.base_currency,
-                market.bn_status,
+                market.exchange_status(),
                 market.status_trading,
                 market.max_leverage,
-                market.bn_tick_size,
-                market.bn_step_size
+                market.tick_size(),
+                market.step_size()
             );
         });
     }

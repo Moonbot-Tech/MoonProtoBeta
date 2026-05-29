@@ -1,4 +1,4 @@
-﻿//! Live-server integration smoke test for the public `MoonClient` happy path.
+//! Live-server integration smoke test for the public `MoonClient` happy path.
 //!
 //! Run:
 //! ```powershell
@@ -8,10 +8,10 @@
 //! ```
 //!
 //! This test intentionally uses the same API shape expected from desktop/UI
-//! apps: one `MoonClient`, no manual pump duration, no exposed
-//! `Client + EventDispatcher`.
+//! apps: one `MoonClient`, no manual pump duration, no low-level dispatcher.
 
 use std::env;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use moonproto::state::OrderBookEvent;
@@ -21,6 +21,25 @@ use moonproto::{
 };
 
 const STREAM_DURATION_SECS: u64 = 15;
+
+fn wait_ready(client: &MoonClient, timeout: Duration) -> Vec<LifecycleEvent> {
+    let deadline = Instant::now() + timeout;
+    let mut lifecycle = Vec::new();
+    while Instant::now() < deadline {
+        for event in client.drain_lifecycle_events() {
+            if let LifecycleEvent::ConnectFailed { error } = &event {
+                panic!("FAIL: MoonClient connect/init failed: {error}");
+            }
+            let ready = matches!(event, LifecycleEvent::Ready);
+            lifecycle.push(event);
+            if ready {
+                return lifecycle;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("FAIL: MoonClient did not emit Ready within {timeout:?}; lifecycle={lifecycle:?}");
+}
 
 fn load_env() -> Option<(String, u16, String)> {
     let server = env::var("MOONPROTO_LIVE_SERVER").ok()?;
@@ -57,10 +76,9 @@ fn runtime_smoke_full_happy_path() {
         cfg,
         ConnectConfig::new(init).with_connect_timeout(Duration::from_secs(15)),
     )
-    .expect("FAIL: MoonClient::connect/connect+init failed");
-    println!("OK: moonclient_connect_init");
+    .expect("FAIL: MoonClient::connect failed to start runtime");
 
-    let lifecycle = client.drain_lifecycle_events();
+    let lifecycle = wait_ready(&client, Duration::from_secs(20));
     assert!(
         lifecycle
             .iter()
@@ -94,20 +112,24 @@ fn runtime_smoke_full_happy_path() {
     let balance_deadline = Instant::now() + Duration::from_secs(15);
     let mut balance_events = 0u32;
     while Instant::now() < balance_deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Balance(_)) => {
-                balance_events += 1;
-                break;
-            }
-            Ok(Event::ParseFailed { cmd, len, .. }) => {
-                panic!("FAIL: ParseFailed while waiting balance snapshot cmd={cmd:?} len={len}");
-            }
-            Ok(_) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("FAIL: runtime stopped while waiting balance snapshot");
+        for event in client.drain_events() {
+            match event {
+                Event::Balance(_) => {
+                    balance_events += 1;
+                    break;
+                }
+                Event::ParseFailed { cmd, len, .. } => {
+                    panic!(
+                        "FAIL: ParseFailed while waiting balance snapshot cmd={cmd:?} len={len}"
+                    );
+                }
+                _ => {}
             }
         }
+        if balance_events > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
     assert!(
         balance_events > 0,
@@ -135,17 +157,18 @@ fn runtime_smoke_full_happy_path() {
     let deadline = Instant::now() + Duration::from_secs(STREAM_DURATION_SECS);
 
     while Instant::now() < deadline {
-        match client.recv_event_timeout(Duration::from_millis(500)) {
-            Ok(Event::Trade(_)) => trades_packets += 1,
-            Ok(Event::OrderBook(OrderBookEvent::Apply { .. })) => orderbook_applied += 1,
-            Ok(Event::ParseFailed { cmd, len, .. }) => {
-                parse_failures += 1;
-                eprintln!("WARN: ParseFailed cmd={cmd:?} len={len}");
+        for event in client.drain_events() {
+            match event {
+                Event::Trade(_) => trades_packets += 1,
+                Event::OrderBook(OrderBookEvent::Apply { .. }) => orderbook_applied += 1,
+                Event::ParseFailed { cmd, len, .. } => {
+                    parse_failures += 1;
+                    eprintln!("WARN: ParseFailed cmd={cmd:?} len={len}");
+                }
+                _ => {}
             }
-            Ok(_) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        thread::sleep(Duration::from_millis(50));
     }
 
     println!(
@@ -167,7 +190,12 @@ fn runtime_smoke_full_happy_path() {
     );
     println!("OK: no_parse_failures");
 
-    client.stop().expect("FAIL: MoonClient::stop failed");
+    client
+        .disconnect()
+        .expect("FAIL: MoonClient::disconnect failed");
+    client
+        .wait_finished()
+        .expect("FAIL: MoonClient::wait_finished failed");
     println!("OK: stop");
     println!("\nRUNTIME_SMOKE_PASS: MoonClient happy path passed against {ip}:{port}");
 }

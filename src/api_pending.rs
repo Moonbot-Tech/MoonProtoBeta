@@ -4,44 +4,51 @@
 //! `TEngineResponse` с тем же UID. `ApiPending` хранит маппинг
 //! `uid → mpsc::Sender<EngineResponse>`.
 //!
-//! Обычным приложениям лучше использовать one-shot helpers вроде
-//! [`crate::client::Client::request_balance`] или
-//! [`crate::client::Client::request_engine_response`]. Если нужен raw async
-//! receiver, используй `Client::api_*` wrappers совместно с
-//! [`crate::client::Client::run_until_response`] — тогда тот же thread продолжает
-//! прокачивать UDP main loop пока ждёт response:
-//! ```ignore
-//! let rx = client.api_get_markets_list();
-//! let response = client.run_until_response(&mut dispatcher, &rx, Duration::from_secs(12))?;
-//! ```
+//! Обычные приложения используют `MoonClient` intents/events/snapshots и не
+//! трогают этот registry напрямую. Внутренние runtime/test helpers могут
+//! зарегистрировать internal receiver, но ответы доставляются только пока живой runtime
+//! иначе ответ физически не будет decoded.
 //!
 //! Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже крутит
 //! main loop клиента. Как только `ProtocolCore` receive phase декодировал
-//! зарегистрированный `TEngineResponse`, он доставляет его в `ApiPending` сразу,
-//! до последующей active-dispatch доставки в `EventDispatcher`.
+//! зарегистрированный `TEngineResponse`, он доставляет его в `ApiPending` сразу.
+//! Тяжёлые Delphi-style callers вроде `GetMarketsList` / `UpdateMarketsList`
+//! применяют active state из pending receiver'а после `SendAndWait`; unmatched /
+//! fire-and-forget responses продолжают идти через active-dispatch.
 //!
-//! Pending slot lifetime follows Delphi `TMoonProtoEngine.SendAndWait`: the
-//! caller that waits owns the timeout and removes the slot on timeout. There is
-//! no independent fixed-age cleanup in the main loop; hard reconnect/full reset
-//! still clears all stale slots because their UIDs belong to the previous
-//! session.
+//! Pending slot lifetime follows Delphi `TMoonProtoEngine.SendAndWait`: normal
+//! one-shot callers remove their slot on timeout. Raw async users still get a
+//! defensive fixed deadline so a long-running runtime cannot accumulate stale
+//! `uid -> Sender` entries forever after dropped receivers or lost responses.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::commands::engine_api::EngineResponse;
 
 /// Default request/response timeout — 12 секунд. Совпадает с Delphi
 /// `TMoonProtoEngine.FTimeout = 12000` (MoonProtoEngine.pas) для `SendAndWait`.
 pub const DEFAULT_PENDING_TIMEOUT_MS: i64 = 12_000;
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+struct PendingEntry {
+    tx: mpsc::Sender<EngineResponse>,
+    deadline: Instant,
+}
+
+struct PendingState {
+    map: HashMap<u64, PendingEntry>,
+    last_sweep: Instant,
+}
 
 /// Реестр pending Engine API запросов.
 ///
 /// Thread-safe (внутри `Arc<Mutex>`). Можно клонировать `Arc<ApiPending>` и передавать в любые потоки.
 ///
 pub struct ApiPending {
-    map: Mutex<HashMap<u64, mpsc::Sender<EngineResponse>>>,
+    state: Mutex<PendingState>,
 }
 
 impl ApiPending {
@@ -58,8 +65,8 @@ impl ApiPending {
     /// pending registry продолжит работать (потеря части in-flight ответов терпима,
     /// падение всего клиента — нет).
     #[inline]
-    fn lock_map(&self) -> std::sync::MutexGuard<'_, HashMap<u64, mpsc::Sender<EngineResponse>>> {
-        match self.map.lock() {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, PendingState> {
+        match self.state.lock() {
             Ok(g) => g,
             Err(poisoned) => {
                 log::warn!(target: "moonproto::api_pending",
@@ -69,19 +76,54 @@ impl ApiPending {
         }
     }
 
+    #[inline]
+    fn default_timeout() -> Duration {
+        Duration::from_millis(DEFAULT_PENDING_TIMEOUT_MS as u64)
+    }
+
+    #[inline]
+    fn deadline_from(now: Instant, timeout: Duration) -> Instant {
+        now.checked_add(timeout)
+            .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60))
+    }
+
+    fn sweep_expired_locked(state: &mut PendingState, now: Instant, force: bool) -> usize {
+        if !force && now.duration_since(state.last_sweep) < SWEEP_INTERVAL {
+            return 0;
+        }
+        state.last_sweep = now;
+        let before = state.map.len();
+        state.map.retain(|_, entry| entry.deadline > now);
+        before - state.map.len()
+    }
+
     /// Зарегистрировать ожидание ответа по `uid`.
     ///
-    /// Для обычного однопоточного клиента передай возвращённый receiver в
-    /// [`crate::client::Client::run_until_response`]. Прямой `rx.recv_timeout(...)`
-    /// подходит только когда другой thread уже крутит main loop клиента; receive
-    /// phase доставит зарегистрированный response сразу после decode, но
-    /// writer/send progress всё ещё должен где-то выполняться.
+    /// Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже
+    /// крутит main loop клиента; receive phase доставит зарегистрированный
+    /// response сразу после decode, но writer/send progress всё ещё должен
+    /// где-то выполняться.
     ///
     /// Если на тот же `uid` уже была регистрация — старый sender дропается (старый
     /// receiver получит "channel closed").
     pub fn register(&self, uid: u64) -> mpsc::Receiver<EngineResponse> {
+        self.register_with_timeout(uid, Self::default_timeout())
+    }
+
+    /// Зарегистрировать ожидание с явным deadline. Внутренний runtime использует
+    /// это для non-blocking запросов, чтобы потерянный response не оставлял
+    /// sender в registry навсегда.
+    pub(crate) fn register_with_timeout(
+        &self,
+        uid: u64,
+        timeout: Duration,
+    ) -> mpsc::Receiver<EngineResponse> {
         let (tx, rx) = mpsc::channel();
-        self.lock_map().insert(uid, tx);
+        let now = Instant::now();
+        let deadline = Self::deadline_from(now, timeout);
+        let mut state = self.lock_state();
+        Self::sweep_expired_locked(&mut state, now, false);
+        state.map.insert(uid, PendingEntry { tx, deadline });
         rx
     }
 
@@ -91,49 +133,110 @@ impl ApiPending {
     /// без активного waitера — потребитель может обработать его через `on_data`).
     /// Возвращает `None` если UID найден и response отправлен в receiver.
     pub fn dispatch(&self, resp: EngineResponse) -> Option<EngineResponse> {
-        let mut map = self.lock_map();
-        if let Some(tx) = map.remove(&resp.request_uid) {
+        let mut state = self.lock_state();
+        let now = Instant::now();
+        let Some(entry) = state.map.remove(&resp.request_uid) else {
+            Self::sweep_expired_locked(&mut state, now, false);
+            return Some(resp);
+        };
+        if entry.deadline <= now {
+            return Some(resp);
+        }
+        {
             // Если receiver был дропнут — отправка fails, response теряется.
             // Это нормально: waiter уже не ждёт.
-            let _ = tx.send(resp);
+            let _ = entry.tx.send(resp);
             None
-        } else {
-            Some(resp)
         }
+    }
+
+    /// Remove the live waiter for `uid`, build the response outside the mutex,
+    /// then deliver it. If parsing fails, the waiter is reinserted until its
+    /// original deadline, matching the old `contains(uid); parse; dispatch`
+    /// behavior where malformed payloads did not drop the pending slot.
+    pub(crate) fn dispatch_registered_with<F>(&self, uid: u64, build: F) -> bool
+    where
+        F: FnOnce() -> Option<EngineResponse>,
+    {
+        let now = Instant::now();
+        let entry = {
+            let mut state = self.lock_state();
+            let Some(entry) = state.map.remove(&uid) else {
+                Self::sweep_expired_locked(&mut state, now, false);
+                return false;
+            };
+            if entry.deadline <= now {
+                return false;
+            }
+            entry
+        };
+
+        let Some(resp) = build().filter(|resp| resp.request_uid == uid) else {
+            let now = Instant::now();
+            if entry.deadline > now {
+                let mut state = self.lock_state();
+                state.map.entry(uid).or_insert(entry);
+            }
+            return false;
+        };
+
+        let _ = entry.tx.send(resp);
+        true
     }
 
     /// Удалить ожидание (например при timeout) чтобы освободить sender и не накапливать map.
     pub fn remove(&self, uid: u64) {
-        self.lock_map().remove(&uid);
+        self.lock_state().map.remove(&uid);
     }
 
-    /// Проверить, есть ли активный waiter для `uid`.
-    ///
-    /// Receive phase uses this as a cheap guard before parsing a full
-    /// `TEngineResponse`: large unregistered Engine API packets (for example
-    /// candle chunks handled by another registry) should not be decompressed in
-    /// receive-side dispatch just to discover that no `ApiPending` receiver exists.
+    /// Test helper: check whether a live waiter exists for `uid`.
+    #[cfg(test)]
     pub(crate) fn contains(&self, uid: u64) -> bool {
-        self.lock_map().contains_key(&uid)
+        let mut state = self.lock_state();
+        let now = Instant::now();
+        match state.map.get(&uid) {
+            Some(entry) if entry.deadline > now => true,
+            Some(_) => {
+                state.map.remove(&uid);
+                false
+            }
+            None => {
+                Self::sweep_expired_locked(&mut state, now, false);
+                false
+            }
+        }
+    }
+
+    /// Remove expired pending slots. Throttled unless `force` is set.
+    #[cfg(test)]
+    fn cleanup_expired(&self, force: bool) -> usize {
+        let now = Instant::now();
+        let mut state = self.lock_state();
+        Self::sweep_expired_locked(&mut state, now, force)
     }
 
     /// Количество активных ожиданий.
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
-        self.lock_map().len()
+        let _ = self.cleanup_expired(true);
+        self.lock_state().map.len()
     }
 
     /// Очистить все ожидания (например при reconnect).
     #[cfg(test)]
     pub fn clear(&self) {
-        self.lock_map().clear();
+        self.lock_state().map.clear();
     }
 }
 
 impl Default for ApiPending {
     fn default() -> Self {
+        let now = Instant::now();
         Self {
-            map: Mutex::new(HashMap::new()),
+            state: Mutex::new(PendingState {
+                map: HashMap::new(),
+                last_sweep: now,
+            }),
         }
     }
 }
@@ -230,5 +333,51 @@ mod tests {
         p.clear();
         assert_eq!(p.pending_count(), 0);
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn expired_slot_is_not_consumed() {
+        let p = ApiPending::default();
+        let rx = p.register_with_timeout(42, Duration::ZERO);
+        let returned = p.dispatch(mk_resp(42));
+        assert!(returned.is_some(), "expired response should fall through");
+        assert_eq!(p.pending_count(), 0);
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn next_register_sweeps_expired_slots() {
+        let p = ApiPending::default();
+        let rx_old = p.register_with_timeout(1, Duration::ZERO);
+        assert!(!p.contains(1));
+        let _rx_new = p.register(2);
+        assert_eq!(p.pending_count(), 1);
+        assert!(rx_old.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn dispatch_registered_with_delivers_parsed_response() {
+        let p = ApiPending::default();
+        let rx = p.register(42);
+
+        assert!(p.dispatch_registered_with(42, || Some(mk_resp(42))));
+
+        let resp = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        assert_eq!(resp.request_uid, 42);
+        assert_eq!(p.pending_count(), 0);
+    }
+
+    #[test]
+    fn dispatch_registered_with_parse_failure_keeps_waiter() {
+        let p = ApiPending::default();
+        let rx = p.register(42);
+
+        assert!(!p.dispatch_registered_with(42, || None));
+        assert_eq!(p.pending_count(), 1);
+        assert!(p.dispatch_registered_with(42, || Some(mk_resp(42))));
+
+        let resp = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        assert_eq!(resp.request_uid, 42);
+        assert_eq!(p.pending_count(), 0);
     }
 }

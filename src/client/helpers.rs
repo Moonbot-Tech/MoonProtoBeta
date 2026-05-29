@@ -45,6 +45,14 @@ pub(super) fn is_datagram_too_large_error(e: &std::io::Error) -> bool {
 }
 
 #[inline]
+pub(super) fn is_pmtu_probe_ack_command(cmd: u8) -> bool {
+    matches!(
+        Command::from_byte(cmd),
+        Command::SizeAck | Command::ProbeMTUAck
+    )
+}
+
+#[inline]
 pub(super) fn engine_request_uid(request_payload: &[u8]) -> Option<u64> {
     request_payload
         .get(3..11)
@@ -67,7 +75,6 @@ pub(super) fn engine_method_allowed_before_domain_ready(method: EngineMethod) ->
         EngineMethod::BaseCheck
             | EngineMethod::AuthCheck
             | EngineMethod::GetMarketsList
-            | EngineMethod::GetMarketsIndexes
             | EngineMethod::UpdateMarketsList
     )
 }
@@ -79,6 +86,20 @@ pub(super) fn outgoing_allowed_before_domain_ready(cmd: u8, data: &[u8]) -> bool
         Command::API
             if engine_request_method(data)
                 .is_some_and(engine_method_allowed_before_domain_ready)
+    ) || matches!(
+        Command::from_byte(cmd),
+        Command::Strat
+            if crate::commands::strat::is_schema_request_payload(data)
+    )
+}
+
+#[inline]
+pub(super) fn incoming_allowed_before_domain_ready(cmd: Command, data: &[u8]) -> bool {
+    matches!(
+        cmd,
+        Command::Strat
+            if crate::commands::strat::is_schema_payload(data)
+                || crate::commands::strat::is_snapshot_request_payload(data)
     )
 }
 
@@ -93,6 +114,7 @@ pub(super) fn timeout_remaining(start: Instant, timeout: Duration) -> Option<Dur
 }
 
 #[inline]
+#[cfg(test)]
 pub(super) fn queued_client_settings_updated_since(
     dispatcher: &crate::events::EventDispatcher,
     first_new_event: usize,
