@@ -74,8 +74,11 @@ pub struct MarketHistoryConfig {
     pub futures_trades_capacity: usize,
     pub spot_trades_capacity: usize,
     pub liquidation_capacity: usize,
+    /// Capacity of the MM-order ring. The taker/color companion ring rides this
+    /// same capacity (Delphi `TStreamableRingBuffer<TMMOrder, TMMOrderData>` has a
+    /// single `FSize` for both parallel arrays), so an order and its companion
+    /// always evict together and can never desync.
     pub mm_orders_capacity: usize,
-    pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub candles_5m_capacity: usize,
@@ -88,7 +91,6 @@ impl Default for MarketHistoryConfig {
             spot_trades_capacity: 5_000,
             liquidation_capacity: 2_000,
             mm_orders_capacity: 2_000,
-            mm_order_companion_capacity: 2_000,
             last_price_capacity: 5_000,
             mini_candles_capacity: 5_000,
             candles_5m_capacity: 5_000,
@@ -114,10 +116,17 @@ impl MarketHistoryConfig {
             capacity_from_share(per_market_budget, 18, 100, TRADE_SLOT_BYTES, 150_000);
         let liquidation_capacity =
             capacity_from_share(per_market_budget, 7, 100, TRADE_SLOT_BYTES, 50_000);
-        let mm_orders_capacity =
-            capacity_from_share(per_market_budget, 7, 100, MM_ORDER_SLOT_BYTES, 50_000);
-        let mm_order_companion_capacity =
-            capacity_from_share(per_market_budget, 7, 100, MM_COMPANION_SLOT_BYTES, 50_000);
+        // Single MM-order ring carries both the row and its taker/color companion
+        // (Delphi single-`FSize` parallel arrays). Budget the combined per-slot cost
+        // with the former orders+companion share (7%+7%) so retained count and memory
+        // footprint are unchanged versus the previous two-ring sizing.
+        let mm_orders_capacity = capacity_from_share(
+            per_market_budget,
+            14,
+            100,
+            MM_ORDER_SLOT_BYTES + MM_COMPANION_SLOT_BYTES,
+            50_000,
+        );
         let last_price_capacity =
             capacity_from_share(per_market_budget, 8, 100, LAST_PRICE_SLOT_BYTES, 80_000);
         let mini_candles_capacity =
@@ -130,7 +139,6 @@ impl MarketHistoryConfig {
             spot_trades_capacity,
             liquidation_capacity,
             mm_orders_capacity,
-            mm_order_companion_capacity,
             last_price_capacity,
             mini_candles_capacity,
             candles_5m_capacity,
@@ -150,7 +158,7 @@ impl MarketHistoryConfig {
             + self.spot_trades_capacity * TRADE_SLOT_BYTES
             + self.liquidation_capacity * TRADE_SLOT_BYTES
             + self.mm_orders_capacity * MM_ORDER_SLOT_BYTES
-            + self.mm_order_companion_capacity * MM_COMPANION_SLOT_BYTES
+            + self.mm_orders_capacity * MM_COMPANION_SLOT_BYTES
             + self.last_price_capacity * LAST_PRICE_SLOT_BYTES
             + self.last_price_capacity * MARK_PRICE_SLOT_BYTES
             + self.mini_candles_capacity * MINI_CANDLE_SLOT_BYTES

@@ -252,7 +252,6 @@ pub struct MarketHistoryConfig {
     pub spot_trades_capacity: usize,
     pub liquidation_capacity: usize,
     pub mm_orders_capacity: usize,
-    pub mm_order_companion_capacity: usize,
     pub last_price_capacity: usize,
     pub mini_candles_capacity: usize,
     pub candles_5m_capacity: usize,
@@ -267,6 +266,9 @@ impl MarketHistoryConfig {
 ```
 
 Capacities set to `0` disable that retained public history category.
+`mm_orders_capacity` governs both the MM-order ring and its taker/color
+companion ring; they push and evict in lockstep so an order and its companion
+can never desync (matching Delphi's single-size `TStreamableRingBuffer`).
 `from_system_memory(market_count)` is the recommended helper when the
 application wants a memory-aware default.
 

@@ -136,8 +136,10 @@ impl MarketHistoryStore {
         let (liquidations, liq_reader) =
             optional_ring::<TradeHistoryRow>(config.liquidation_capacity);
         let (mm_orders, mm_reader) = optional_ring::<MMOrderHistoryRow>(config.mm_orders_capacity);
+        // Companion ring shares the MM-order capacity so the two rings push and
+        // evict in lockstep (Delphi single-`FSize` `TStreamableRingBuffer<T, T2>`).
         let (mm_order_companion, mm_companion_reader) =
-            optional_ring::<MMOrderCompanionData>(config.mm_order_companion_capacity);
+            optional_ring::<MMOrderCompanionData>(config.mm_orders_capacity);
         let (last_prices, last_reader) =
             optional_ring::<LastPricePoint>(config.last_price_capacity);
         let (mark_prices, mark_reader) =
