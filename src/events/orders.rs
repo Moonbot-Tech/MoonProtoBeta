@@ -43,11 +43,11 @@ impl EventDispatcher {
             return;
         }
 
-        // audit_responsibility A5 / active library: автоматически подхватываем
-        // server_time_delta. При наличии per-Client `server_time_delta_source`
-        // (multi-Client) — читаем оттуда. Иначе fallback на global для raw
-        // dispatch без Client source. Без этого Orders::apply применяет AdjustTime со старым
-        // delta=0 — order timestamps сдвинуты на 0.5-2 сек (silent bug).
+        // audit_responsibility A5 / active library: automatically pick up the
+        // server_time_delta. If a per-Client `server_time_delta_source` exists
+        // (multi-Client), read from there. Otherwise fall back to the global for raw
+        // dispatch without a Client source. Without this, Orders::apply applies AdjustTime with the old
+        // delta=0 — order timestamps are shifted by 0.5-2 sec (silent bug).
         // Multi-client safe ServerTimeDelta source is linked by the active path.
         let server_time_delta = self.current_server_time_delta();
         self.orders.set_server_time_delta(server_time_delta);

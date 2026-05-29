@@ -35,8 +35,8 @@ mod parse_engine_response_tests {
 
     #[test]
     fn parse_skips_basecmd_header_and_reads_request_uid_correctly() {
-        // Регрессия от critical bug: парсер ДО fix начинал с offset 0
-        // и читал request_uid из `[CmdId][ver][own_UID 5 bytes]` — garbage.
+        // Regression for a critical bug: before the fix the parser started at
+        // offset 0 and read request_uid from `[CmdId][ver][own_UID 5 bytes]` — garbage.
         let request_uid = 0x12_34_56_78_9A_BC_DE_F0u64;
         let payload = build_wire_response(
             0xAAAA_BBBB_CCCC_DDDD, // own_UID (random)
@@ -59,7 +59,7 @@ mod parse_engine_response_tests {
 
     #[test]
     fn parse_carries_method_byte_after_request_uid() {
-        // Каждый method byte корректно читается с offset 19 (после header + request_uid).
+        // Each method byte is read correctly at offset 19 (after header + request_uid).
         for method in [
             EngineMethod::AuthCheck,
             EngineMethod::GetMarketsList,
@@ -299,14 +299,14 @@ mod parse_engine_response_tests {
 
     #[test]
     fn parse_returns_none_on_short_payload() {
-        // < 11 bytes header не парсится.
+        // < 11 bytes: header does not parse.
         let too_short = vec![0u8; 10];
         assert!(parse_engine_response(&too_short).is_none());
     }
 
     #[test]
     fn parse_returns_none_when_truncated_at_request_uid() {
-        // header (11) + 4 bytes (вместо 8 для request_uid) → None.
+        // header (11) + 4 bytes (instead of 8 for request_uid) → None.
         let mut buf = vec![0u8; 11];
         buf.extend_from_slice(&[1, 2, 3, 4]);
         assert!(parse_engine_response(&buf).is_none());
@@ -371,10 +371,10 @@ mod base_check_tests {
     /// Helper: build wire-payload for BaseCheck response from a fully-populated `ServerInfo`.
     /// Reverse of `parse_base_check_response` for round-trip testing.
     ///
-    /// Поля пишутся в том же порядке что и сервер (`MoonProtoEngineServer.pas:262-271`).
-    /// Каждое поле пишется только если `Some(...)`; первый `None` обрывает запись
-    /// (это соответствует семантике truncate'а — следующие поля становятся
-    /// "недоступными" для парсера).
+    /// Fields are written in the same order as the server (`MoonProtoEngineServer.pas:262-271`).
+    /// Each field is written only when `Some(...)`; the first `None` stops writing
+    /// (this matches truncation semantics — the following fields become
+    /// "unavailable" to the parser).
     fn encode_full(info: &ServerInfo) -> Vec<u8> {
         let mut buf = Vec::new();
         let Some(id) = info.bot_id else { return buf };
@@ -420,8 +420,8 @@ mod base_check_tests {
 
     #[test]
     fn parse_empty_payload_returns_all_none() {
-        // Старый сервер до multi-server расширения шлёт пустой response.
-        // Парсер не должен падать — возвращает дефолт со всеми None.
+        // An old server (before the multi-server extension) sends an empty response.
+        // The parser must not crash — it returns the default with all None.
         let info = parse_base_check_response(&[]);
         assert_eq!(info, ServerInfo::default());
         assert!(!info.has_identity());
@@ -437,7 +437,7 @@ mod base_check_tests {
             exchange_code: Some(ExchangeCode::from_byte(1)),
             exchange_name: Some("Binance Futures".to_string()),
             exchange_type_mask: Some(exchange_type_flags::FUTURES),
-            dex_name: Some(String::new()), // не HL futures → пусто
+            dex_name: Some(String::new()), // not HL futures → empty
             base_currency_name: Some("USDT".to_string()),
             base_currency_code: Some(BaseCurrency::USDT),
             server_version: Some(763), // v7.63
@@ -475,7 +475,7 @@ mod base_check_tests {
 
     #[test]
     fn parse_hl_futures_with_hip3_dex_name() {
-        // Hyperliquid futures с HIP-3 dex — все 4 типа в mask + непустой dex_name.
+        // Hyperliquid futures with a HIP-3 dex — all 4 types in mask + non-empty dex_name.
         let original = ServerInfo {
             bot_id: Some(42),
             server_name: Some("Hyper Test".to_string()),
@@ -499,10 +499,10 @@ mod base_check_tests {
 
     #[test]
     fn parse_truncated_at_server_name_returns_only_bot_id() {
-        // bot_id есть, server_name обрезан в середине строкового заголовка.
+        // bot_id is present, server_name is truncated in the middle of the string header.
         let mut buf = Vec::new();
         buf.extend_from_slice(&(42_i64).to_le_bytes());
-        buf.push(0x05); // частичный u16 length для server_name (только 1 байт)
+        buf.push(0x05); // partial u16 length for server_name (only 1 byte)
         let info = parse_base_check_response(&buf);
         assert_eq!(info.bot_id, Some(42));
         assert!(info.server_name.is_none());
@@ -511,12 +511,12 @@ mod base_check_tests {
 
     #[test]
     fn parse_truncated_at_exchange_code_returns_three_fields() {
-        // bot_id + server_name есть, exchange_code (1 байт) обрезан.
+        // bot_id + server_name are present, exchange_code (1 byte) is truncated.
         let mut buf = Vec::new();
         buf.extend_from_slice(&(7_i64).to_le_bytes());
         buf.extend_from_slice(&(4u16.to_le_bytes()));
         buf.extend_from_slice(b"name");
-        // exchange_code (1 byte) отсутствует.
+        // exchange_code (1 byte) is absent.
         let info = parse_base_check_response(&buf);
         assert_eq!(info.bot_id, Some(7));
         assert_eq!(info.server_name.as_deref(), Some("name"));
@@ -526,7 +526,7 @@ mod base_check_tests {
 
     #[test]
     fn parse_truncated_at_server_version_keeps_eight_fields() {
-        // Восемь полей заполнены, на server_version (i32) данных не хватает.
+        // Eight fields are populated; there is not enough data for server_version (i32).
         let info_partial = ServerInfo {
             bot_id: Some(1),
             server_name: Some("y".to_string()),
@@ -540,7 +540,7 @@ mod base_check_tests {
             moonproto_version: None,
         };
         let mut payload = encode_full(&info_partial);
-        // Добавим обрезанные 2 байта вместо полных 4 для server_version.
+        // Append a truncated 2 bytes instead of the full 4 for server_version.
         payload.extend_from_slice(&[0xAA, 0xBB]);
         let parsed = parse_base_check_response(&payload);
         assert_eq!(parsed.bot_id, Some(1));
@@ -551,7 +551,7 @@ mod base_check_tests {
 
     #[test]
     fn parse_only_moonproto_version_missing() {
-        // Все 9 полей кроме последнего.
+        // All 9 fields except the last one.
         let info_partial = ServerInfo {
             bot_id: Some(0xABC_i64),
             server_name: Some("Test".to_string()),
@@ -602,8 +602,8 @@ mod base_check_tests {
 
     #[test]
     fn parse_zero_length_strings_are_some_empty() {
-        // Сервер может явно прислать пустую строку (например `dex_name` для не-HL
-        // биржи). `Some("")` отличается от `None`.
+        // The server may explicitly send an empty string (for example `dex_name` for a
+        // non-HL exchange). `Some("")` is distinct from `None`.
         let mut buf = Vec::new();
         buf.extend_from_slice(&(1_i64).to_le_bytes());
         buf.extend_from_slice(&(0u16.to_le_bytes())); // server_name = ""
@@ -615,11 +615,11 @@ mod base_check_tests {
 
     #[test]
     fn parse_does_not_panic_on_random_garbage() {
-        // Стресс: рандом-байты не должны вызвать panic.
-        // Delphi-style decoder подменит невалидные байты на '?'.
+        // Stress: random bytes must not cause a panic.
+        // The Delphi-style decoder replaces invalid bytes with '?'.
         let garbage: Vec<u8> = (0..200).map(|i| ((i * 7) ^ 0xA5) as u8).collect();
         let _info = parse_base_check_response(&garbage);
-        // Парсер выживает; конкретные значения зависят от random pattern.
+        // The parser survives; the concrete values depend on the random pattern.
     }
 }
 

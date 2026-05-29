@@ -24,9 +24,9 @@ fn trades_subscription_round_trip() {
     assert!(!sub_off.want_mm);
 }
 
-/// Verify что Connected{fresh:true} срабатывает только на ПЕРВОМ Authenticated
-/// в жизни Client'а. После этого все последующие = fresh:false.
-/// Тестируем through state-machine simulation (без полного Client::new).
+/// Verify that Connected{fresh:true} fires only on the FIRST Authenticated
+/// in a Client's lifetime. After that every subsequent one = fresh:false.
+/// Tested through state-machine simulation (without a full Client::new).
 #[test]
 fn lifecycle_event_connected_fresh_flag_semantics() {
     let mut was_ever_connected = false;

@@ -1,22 +1,22 @@
-/// Aggregator для chunked candles response. Каждый chunk имеет header
-/// `ChunkIndex:u16 + ChunkTotal:u16`, затем payload данных. После сборки всех
-/// чанков — `merged_data()` возвращает склеенный поток для парсинга.
+/// Aggregator for the chunked candles response. Each chunk has the header
+/// `ChunkIndex:u16 + ChunkTotal:u16`, followed by the data payload. After all
+/// chunks are assembled, `merged_data()` returns the concatenated stream for parsing.
 ///
-/// **Требования к caller'у:**
-/// 1. `response_data` — это `EngineResponse.data` **уже после DEFLATE-decompression**
-///    (если `is_compressed=true` — `parse_engine_response` распаковал автоматически).
-/// 2. Фильтровать chunks по `request_uid`: если запущено несколько параллельных
-///    `RequestCandlesData`, нужно вести отдельный `CandlesAggregator` для каждого
-///    `request_uid` либо сбрасывать `reset()` при смене запроса. В Delphi эта
-///    фильтрация делается через `resp.RequestUID == CandlesRequestUID`.
-/// 3. Aggregator не валидирует payload — просто склеивает в порядке `ChunkIndex`.
+/// **Caller requirements:**
+/// 1. `response_data` is `EngineResponse.data` **already after DEFLATE-decompression**
+///    (if `is_compressed=true`, `parse_engine_response` decompressed it automatically).
+/// 2. Filter chunks by `request_uid`: if several parallel `RequestCandlesData` are
+///    in flight, keep a separate `CandlesAggregator` per `request_uid` or call
+///    `reset()` when switching requests. In Delphi this filtering is done via
+///    `resp.RequestUID == CandlesRequestUID`.
+/// 3. The aggregator does not validate the payload — it just concatenates in `ChunkIndex` order.
 ///
-/// Используется так:
+/// Used like this:
 /// ```ignore
 /// let mut agg = CandlesAggregator::new();
-/// // На каждый response с emk_RequestCandlesData:
+/// // For each response with emk_RequestCandlesData:
 /// if let Some(merged) = agg.on_chunk(&response.data) {
-///     // Все чанки получены — merged содержит zlib stream from StoreCandlesToZip.
+///     // All chunks received — merged holds the zlib stream from StoreCandlesToZip.
 ///     let markets = parse_request_candles_data_response(&merged)?;
 /// }
 /// ```
@@ -39,7 +39,7 @@ impl CandlesAggregator {
         Self::default()
     }
 
-    /// Добавить chunk. Если все чанки собраны — вернуть склеенный буфер и сбросить state.
+    /// Add a chunk. If all chunks are assembled, return the concatenated buffer and reset state.
     /// Wire: `ChunkIndex:u16 + ChunkTotal:u16 + chunk_payload`.
     pub fn on_chunk(&mut self, response_data: &[u8]) -> Option<Vec<u8>> {
         match self.on_chunk_result(response_data) {
@@ -48,11 +48,11 @@ impl CandlesAggregator {
         }
     }
 
-    /// Добавить chunk и вернуть точный статус обработки.
+    /// Add a chunk and return the exact processing status.
     ///
-    /// Delphi обновляет `Markets.LastChunkTime` только после сохранения нового
-    /// chunk'а в пустой слот. Caller использует `Stored`/`Complete`, чтобы не
-    /// продлевать timeout дубликатами или невалидными chunk headers.
+    /// Delphi updates `Markets.LastChunkTime` only after storing a new chunk in
+    /// an empty slot. The caller uses `Stored`/`Complete` so as not to extend the
+    /// timeout on duplicates or invalid chunk headers.
     pub(crate) fn on_chunk_result(&mut self, response_data: &[u8]) -> CandlesChunkResult {
         if response_data.len() < 4 {
             return CandlesChunkResult::Ignored;
@@ -67,7 +67,7 @@ impl CandlesAggregator {
             return CandlesChunkResult::Ignored;
         }
 
-        // Resize если первый раз или total изменился
+        // Resize if first time or total changed
         if self.total != chunk_total {
             self.chunks.clear();
             self.chunks.resize_with(chunk_total, || None);
@@ -75,7 +75,7 @@ impl CandlesAggregator {
             self.total = chunk_total;
         }
 
-        // Сохранить chunk (дедупликация если повтор)
+        // Store the chunk (deduplicate on repeat)
         if chunk_index < chunk_total && self.chunks[chunk_index].is_none() {
             self.chunks[chunk_index] = Some(payload.to_vec());
             self.received += 1;
@@ -83,7 +83,7 @@ impl CandlesAggregator {
             return CandlesChunkResult::Ignored;
         }
 
-        // Все ли собраны?
+        // Are all of them assembled?
         if self.received == self.total && self.total > 0 {
             let mut merged = Vec::with_capacity(
                 self.chunks
@@ -101,7 +101,7 @@ impl CandlesAggregator {
         CandlesChunkResult::Stored
     }
 
-    /// Сбросить state (при новом запросе свечей).
+    /// Reset state (on a new candles request).
     pub fn reset(&mut self) {
         self.chunks.clear();
         self.received = 0;

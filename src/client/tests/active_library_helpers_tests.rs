@@ -129,7 +129,7 @@ fn bind_failed_event_waits_for_elapsed_threshold() {
     client.record_bind_failure(1_010);
     assert!(
         events.lock().unwrap().is_empty(),
-        "три быстрые серии bind errors не должны сразу шуметь в UI",
+        "three quick series of bind errors must not immediately spam the UI",
     );
 
     client.record_bind_failure(16_000);
@@ -185,7 +185,7 @@ fn indexes_fetch_timeout_preserves_in_flight_within_window() {
     writer(&mut client).check_indexes_fetch_timeout(5_000);
     assert!(
         client.indexes_fetch_in_flight,
-        "в пределах timeout — флаг сохраняется"
+        "within the timeout — the flag is preserved"
     );
 }
 
@@ -199,7 +199,7 @@ fn indexes_fetch_timeout_clears_in_flight_after_window() {
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
         !client.indexes_fetch_in_flight,
-        "после timeout без peer_app_token mismatch — флаг сбрасывается"
+        "after the timeout without a peer_app_token mismatch — the flag is cleared"
     );
 }
 
@@ -214,7 +214,7 @@ fn indexes_fetch_timeout_does_not_retry_without_init_intent() {
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
         !client.indexes_fetch_in_flight,
-        "timeout cleanup только сбрасывает marker"
+        "timeout cleanup only clears the marker"
     );
     assert_eq!(
         client.indexes_fetch_started_ms, 0,
@@ -261,6 +261,6 @@ fn indexes_fetch_timeout_zero_peer_token_does_not_re_send() {
     writer(&mut client).check_indexes_fetch_timeout(13_000);
     assert!(
         !client.indexes_fetch_in_flight,
-        "peer_app_token=0 (не подключены) → не re-send, флаг сброшен"
+        "peer_app_token=0 (not connected) → no re-send, flag cleared"
     );
 }

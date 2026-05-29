@@ -5,13 +5,13 @@ use std::sync::Arc;
 // =============================================================================
 //  Subscription Registry — active library principle
 //
-//  Хранит ВОЛЮ потребителя: какие streams подписаны и с какими параметрами.
-//  До первого Init transport handshake этот реестр не отправляет. После Init
-//  (`domain_ready=true`) reconnect внутри той же Client-сессии сам восстанавливает
-//  registry, чтобы пользователь НЕ запускал Init второй раз.
+//  Stores the consumer's INTENT: which streams are subscribed and with which parameters.
+//  The transport handshake does not send this registry before the first Init. After Init
+//  (`domain_ready=true`), reconnect inside the same Client session restores the
+//  registry itself, so the user does NOT run Init a second time.
 //
-//  Ключ orderbook — `market_name` (стабилен через reindex), не `market_idx`
-//  (последний меняется при ServerRestart). Аналог Delphi
+//  The orderbook key is `market_name` (stable across reindex), not `market_idx`
+//  (the latter changes on ServerRestart). Analog of Delphi
 //  `MoonProtoEngine.pas:305-360 BookSubbed: TSet<TMarket>`.
 // =============================================================================
 
@@ -43,21 +43,21 @@ pub struct ActiveSubscriptions {
     pub mm_orders: bool,
 }
 
-/// Реестр подписок — что app просил, что либа обязана поддерживать на протяжении сессии.
+/// Subscription registry — what the app asked for, what the library must maintain across the session.
 ///
-/// Transport handshake сам подписки не шлет: registry применяется только из init/API
-/// слоя, чтобы `Fine` оставался Delphi-тождественным auth-блоком.
+/// The transport handshake does not send subscriptions itself: the registry is applied only from
+/// the init/API layer, so `Fine` stays a Delphi-identical auth block.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
     pub orderbook_subs: HashSet<String>,
     pub trades_sub: Option<TradesSubscription>,
     pub trades_storage_scope: crate::state::TradeStorageScope,
-    /// Последний серверный флаг `IsMMOrdersSubscribed`.
+    /// Last server-side `IsMMOrdersSubscribed` flag.
     ///
-    /// Delphi обновляет его двумя путями: `emk_SubscribeAllTrades` с bool-параметром
-    /// и прямой `TMMOrdersSubscribeCommand` из UI/strategy state. После reconnect
-    /// новый серверный client-state стартует с false, поэтому active library должна
-    /// воспроизвести последний известный intent в init/API слое.
+    /// Delphi updates it through two paths: `emk_SubscribeAllTrades` with a bool parameter
+    /// and a direct `TMMOrdersSubscribeCommand` from UI/strategy state. After reconnect
+    /// the new server-side client-state starts at false, so the active library must
+    /// reproduce the last known intent in the init/API layer.
     pub mm_orders_sub: Option<bool>,
 }
 
@@ -110,11 +110,11 @@ pub(crate) fn refresh_subscription_summary(
     *trades_scope.write() = scope;
 }
 
-/// Что единственный пользовательский Init заказал у доменного слоя.
+/// What the single user-level Init requested from the domain layer.
 ///
-/// Инвариант: Init вызывается один раз за жизнь `Client`-сессии.
-/// После этого reconnect не требует повторного Init: transport после нового
-/// `Fine` восстанавливает только эти сохранённые intent'ы и registry-подписки.
+/// Invariant: Init is called once per `Client` session lifetime.
+/// After that, reconnect does not require a second Init: after a new `Fine` the transport
+/// restores only these saved intents and the registry subscriptions.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct DomainRestoreIntent {
     pub(crate) fetch_indexes: bool,

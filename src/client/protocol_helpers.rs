@@ -227,8 +227,9 @@ impl Client {
         let mut payload: Cow<'_, [u8]> = Cow::Borrowed(data);
 
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
-            // B-V2-03: используем кэшированный cipher вместо ключа. До handshake
-            // (cipher = None) Crypted-пакетов и быть не должно — но защищаемся return.
+            // B-V2-03: use the cached cipher instead of the key. Before handshake
+            // (cipher = None) there should be no Crypted packets at all — but we
+            // guard with an early return.
             let DataReadState {
                 decode_cipher,
                 slider,

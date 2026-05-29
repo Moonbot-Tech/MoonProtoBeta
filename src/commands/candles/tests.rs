@@ -176,7 +176,7 @@ fn aggregator_single_chunk() {
 #[test]
 fn aggregator_multi_chunk() {
     let mut agg = CandlesAggregator::new();
-    // Total=3 chunks. Шлём в неправильном порядке.
+    // Total=3 chunks. Sent out of order.
     let c0 = {
         let mut v = vec![0u8, 0u8, 3u8, 0u8]; // idx=0, total=3
         v.extend_from_slice(&[10, 11]);
@@ -197,20 +197,20 @@ fn aggregator_multi_chunk() {
     assert!(agg.on_chunk(&c2).is_none());
     assert_eq!(agg.progress(), (2, 3));
     let merged = agg.on_chunk(&c1).unwrap();
-    // Merge order = idx 0, 1, 2 (по позициям в массиве, не по порядку прихода).
+    // Merge order = idx 0, 1, 2 (by position in the array, not by arrival order).
     assert_eq!(merged, vec![10, 11, 20, 21, 30, 31]);
 }
 
 #[test]
 fn aggregator_duplicate_chunk_ignored() {
     let mut agg = CandlesAggregator::new();
-    // Шлём один и тот же chunk дважды.
+    // Send the same chunk twice.
     let chunk = vec![0u8, 0u8, 2u8, 0u8, 1, 2];
     assert!(agg.on_chunk(&chunk).is_none());
     assert_eq!(agg.progress(), (1, 2));
-    assert!(agg.on_chunk(&chunk).is_none()); // дубликат — игнорируется
+    assert!(agg.on_chunk(&chunk).is_none()); // duplicate — ignored
     assert_eq!(agg.progress(), (1, 2));
-    // Прислать второй chunk
+    // Send the second chunk
     let chunk2 = vec![1u8, 0u8, 2u8, 0u8, 3, 4];
     let merged = agg.on_chunk(&chunk2).unwrap();
     assert_eq!(merged, vec![1, 2, 3, 4]);

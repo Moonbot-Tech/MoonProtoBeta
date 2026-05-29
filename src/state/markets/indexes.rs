@@ -6,9 +6,9 @@ use std::sync::Arc;
 use super::{MarketsEvent, MarketsState};
 
 impl MarketsState {
-    /// Применить ответ `emk_GetMarketsIndexes`.
-    /// Помечает `indexes_synchronized = true` — после этого EventDispatcher разблокирует
-    /// обработку TradesStream / OrderBook пакетов.
+    /// Apply the `emk_GetMarketsIndexes` response.
+    /// Sets `indexes_synchronized = true` — after this the EventDispatcher unblocks
+    /// processing of TradesStream / OrderBook packets.
     pub fn apply_markets_indexes(&mut self, names: Vec<String>) -> MarketsEvent {
         let count = names.len();
         self.replace_market_indexes_like_delphi_cow(names);
@@ -76,8 +76,8 @@ impl MarketsState {
     /// Delphi `AddNewAksPrice` from `GlassUpdated`: keep `ChartPriceStep` fresh
     /// when orderbook updates move the best ask before the next price refresh.
     pub(crate) fn update_chart_price_step_from_server_index(&self, m_index: u16, ask: f64) -> bool {
-        // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) гейтит и считает
-        // ChartPriceStep по `_epsM`, не `_eps`.
+        // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) gates and computes
+        // ChartPriceStep against `_epsM`, not `_eps`.
         if ask <= self.eps_profile.eps_m {
             return false;
         }

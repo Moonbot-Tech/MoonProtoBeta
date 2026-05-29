@@ -1157,7 +1157,7 @@ fn dispatcher_skips_inapplicable_incoming_strat_commands_like_delphi_client() {
 #[test]
 fn dispatcher_unknown_channel_returns_raw() {
     let mut d = EventDispatcher::new();
-    // Reserved1 — нет dispatch'а → fallback в Raw
+    // Reserved1 — no dispatch → fallback to Raw
     let events = d.dispatch(Command::Reserved1, b"hello", 1000);
     assert_eq!(events.len(), 1);
     match &events[0] {
@@ -1613,21 +1613,21 @@ fn dispatcher_ctx_unused_warning_silenced() {
 #[test]
 fn dispatcher_blocks_orderbook_until_indexes_sync() {
     let mut d = EventDispatcher::new();
-    // indexes_synchronized = false по умолчанию — OrderBook event должен быть дропнут.
-    // Делаем минимальный wire-payload для OrderBook (parse может не пройти, и это ок —
-    // главное что мы ВООБЩЕ не доходим до parse, потому что блокировка раньше).
+    // indexes_synchronized = false by default — the OrderBook event must be dropped.
+    // Build a minimal wire-payload for OrderBook (parse may fail, and that is fine —
+    // the point is that we do NOT reach parse at all, because the block happens earlier).
     let dummy_payload = vec![0u8; 32];
     let events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
     assert!(
         events.is_empty(),
-        "OrderBook event должен быть дропнут до indexes_synchronized"
+        "OrderBook event must be dropped until indexes_synchronized"
     );
 
-    // После apply_markets_indexes — должен начать парсить.
+    // After apply_markets_indexes — it must start parsing.
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
     let _events = d.dispatch(Command::OrderBook, &dummy_payload, 1000);
-    // Теперь либо успешный parse, либо ParseFailed (но не пусто).
-    // Точное значение зависит от содержимого dummy_payload — главное что блок снят.
+    // Now either a successful parse or ParseFailed (but not empty).
+    // The exact value depends on the dummy_payload contents — the point is the block is lifted.
 }
 
 #[test]
@@ -1699,7 +1699,7 @@ fn dispatcher_blocks_trades_until_indexes_sync() {
     let events = d.dispatch(Command::TradesStream, &dummy_payload, 1000);
     assert!(
         events.is_empty(),
-        "TradesStream должен быть дропнут до indexes_synchronized"
+        "TradesStream must be dropped until indexes_synchronized"
     );
 }
 
@@ -1711,7 +1711,7 @@ fn dispatcher_blocks_trades_resend_until_indexes_sync_like_delphi_process_trades
     let events = d.dispatch(Command::TradesResendResponse, &payload, 1000);
     assert!(
             events.is_empty(),
-            "Delphi ProcessTradesResendBatch вызывает ProcessTradesStream(..., False), а он выходит до fresh indexes"
+            "Delphi ProcessTradesResendBatch calls ProcessTradesStream(..., False), which exits before fresh indexes"
         );
 }
 
@@ -2433,7 +2433,7 @@ fn dispatcher_spot_trades_do_not_overwrite_futures_tail_like_delphi() {
 
 #[test]
 fn dispatcher_order_not_blocked_by_indexes_sync() {
-    // Order channel не зависит от market_idx → не должен блокироваться indexes_sync.
+    // The Order channel does not depend on market_idx → must not be blocked by indexes_sync.
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
     let payload = all_statuses_payload(
@@ -2449,7 +2449,7 @@ fn dispatcher_order_not_blocked_by_indexes_sync() {
     let events = d.dispatch(Command::Order, &payload, 1000);
     assert!(
         !events.is_empty(),
-        "Order должен обрабатываться даже без indexes_synchronized"
+        "Order must be processed even without indexes_synchronized"
     );
 }
 
@@ -2612,12 +2612,12 @@ fn dispatch_into_active_consumes_orderbook_full_request_event() {
             ev,
             Event::OrderBook(OrderBookEvent::RequestFullNeeded { .. })
         )),
-        "active dispatcher должен потреблять RequestFullNeeded как внутренний control-event"
+        "active dispatcher must consume RequestFullNeeded as an internal control-event"
     );
     assert!(
         !out.iter()
             .any(|ev| matches!(ev, Event::OrderBook(OrderBookEvent::Ignored { .. }))),
-        "active dispatcher должен скрывать диагностические ignored orderbook events от UI path"
+        "active dispatcher must hide diagnostic ignored orderbook events from the UI path"
     );
 
     let mut found = false;
@@ -2753,7 +2753,7 @@ fn dispatch_into_active_drops_domain_commands_before_init() {
 //  Multi-Client ServerTimeDelta tests
 // =========================================================================
 
-/// Helper для тестов: дни конвертирует в seconds для удобства сравнения.
+/// Test helper: converts days to seconds for easier comparison.
 fn delta_seconds(d: &EventDispatcher) -> f64 {
     d.current_server_time_delta() * 86400.0
 }
@@ -2761,45 +2761,45 @@ fn delta_seconds(d: &EventDispatcher) -> f64 {
 #[test]
 fn current_delta_falls_back_to_global_when_source_is_none() {
     let _guard = server_time_delta_test_lock();
-    // Raw dispatch без линковки dispatcher читает global.
+    // Raw dispatch without linking: the dispatcher reads the global.
     let d = EventDispatcher::new();
     assert!(d.server_time_delta_source.is_none());
-    // Записываем в global → dispatcher видит то же значение.
+    // Write to the global → the dispatcher sees the same value.
     crate::client::set_server_time_delta_global(2.5 / 86400.0);
     assert!((delta_seconds(&d) - 2.5).abs() < 1e-9);
-    // Сбросим global назад чтобы не аффектить другие тесты.
+    // Reset the global so it does not affect other tests.
     crate::client::set_server_time_delta_global(0.0);
 }
 
 #[test]
 fn current_delta_reads_from_source_when_set() {
     let _guard = server_time_delta_test_lock();
-    // Multi-Client: с линковкой dispatcher читает per-Client handle,
-    // НЕ global. Изменения global на этот dispatcher не влияют.
+    // Multi-Client: when linked, the dispatcher reads the per-Client handle,
+    // NOT the global. Changes to the global do not affect this dispatcher.
     let handle = Arc::new(AtomicU64::new(0));
-    // Эмулируем что Client записал свою delta = 7.0 секунд.
+    // Emulate the Client writing its own delta = 7.0 seconds.
     let days: f64 = 7.0 / 86400.0;
     handle.store(days.to_bits(), Ordering::Relaxed);
     let mut d = EventDispatcher::new();
     d.set_server_time_delta_source(Arc::clone(&handle));
-    // Global при этом стоит другое значение — dispatcher должен игнорировать.
+    // Meanwhile the global holds a different value — the dispatcher must ignore it.
     crate::client::set_server_time_delta_global(99.0 / 86400.0);
     assert!(
         (delta_seconds(&d) - 7.0).abs() < 1e-9,
-        "dispatcher должен читать handle, а не global"
+        "dispatcher must read the handle, not the global"
     );
     crate::client::set_server_time_delta_global(0.0);
 }
 
 #[test]
 fn delta_handle_update_visible_to_dispatcher() {
-    // Изменение handle отражается в следующем чтении dispatcher'а
-    // (atomic snapshot — нет кэширования).
+    // A handle change is reflected in the dispatcher's next read
+    // (atomic snapshot — no caching).
     let handle = Arc::new(AtomicU64::new(0));
     let mut d = EventDispatcher::new();
     d.set_server_time_delta_source(Arc::clone(&handle));
     assert!((delta_seconds(&d) - 0.0).abs() < 1e-9);
-    // Обновляем handle (как сделал бы Client::handle_ping).
+    // Update the handle (as Client::handle_ping would).
     let days: f64 = 3.5 / 86400.0;
     handle.store(days.to_bits(), Ordering::Relaxed);
     assert!((delta_seconds(&d) - 3.5).abs() < 1e-9);
@@ -2807,8 +2807,8 @@ fn delta_handle_update_visible_to_dispatcher() {
 
 #[test]
 fn two_dispatchers_with_distinct_handles_are_isolated() {
-    // **Core multi-Client gurantee**: два EventDispatcher'а с разными handle'ами
-    // (один на Client) видят разные delta.
+    // **Core multi-Client guarantee**: two EventDispatchers with distinct handles
+    // (one per Client) see different deltas.
     let h_a = Arc::new(AtomicU64::new(0));
     let h_b = Arc::new(AtomicU64::new(0));
     let mut d_a = EventDispatcher::new();
@@ -2816,19 +2816,19 @@ fn two_dispatchers_with_distinct_handles_are_isolated() {
     d_a.set_server_time_delta_source(Arc::clone(&h_a));
     d_b.set_server_time_delta_source(Arc::clone(&h_b));
 
-    // Client A: delta = +5s; Client B: delta = -200ms (разные серверы — разный drift).
+    // Client A: delta = +5s; Client B: delta = -200ms (different servers — different drift).
     h_a.store((5.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
     h_b.store((-0.2_f64 / 86400.0).to_bits(), Ordering::Relaxed);
 
     assert!((delta_seconds(&d_a) - 5.0).abs() < 1e-9);
     assert!((delta_seconds(&d_b) - (-0.2)).abs() < 1e-9);
 
-    // Изменение одного handle не аффектит другой.
+    // Changing one handle does not affect the other.
     h_a.store((10.0_f64 / 86400.0).to_bits(), Ordering::Relaxed);
     assert!((delta_seconds(&d_a) - 10.0).abs() < 1e-9);
     assert!(
         (delta_seconds(&d_b) - (-0.2)).abs() < 1e-9,
-        "dispatcher B не должен видеть изменения handle A"
+        "dispatcher B must not see changes to handle A"
     );
 }
 
@@ -3258,11 +3258,11 @@ fn active_trades_resend_check_runs_after_valid_trades_packet_like_delphi() {
 
 #[test]
 fn dispatch_into_active_records_initial_server_token() {
-    // Первый вызов запоминает текущий server_token в last_known_server_token.
-    // Sentinel значение 0 (init) → не triggers reset на первом non-zero token.
+    // The first call records the current server_token into last_known_server_token.
+    // Sentinel value 0 (init) → does not trigger a reset on the first non-zero token.
     let mut d = EventDispatcher::new();
     let mut client = crate::client::Client::new(dummy_client_cfg());
-    // Установим server_token=42 (имитация после первого Fine).
+    // Set server_token=42 (simulating the state after the first Fine).
     client.testing_set_server_token(42);
     assert_eq!(d.last_known_server_token, 0);
     let mut out = Vec::new();
@@ -3278,17 +3278,17 @@ fn dispatch_into_active_records_initial_server_token() {
     );
     assert_eq!(
         d.last_known_server_token, 42,
-        "первый dispatch_into_active должен запомнить server_token"
+        "the first dispatch_into_active must record the server_token"
     );
 }
 
 #[test]
 fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
-    // Init last_known=0 → первый non-zero token НЕ triggers full_reset.
-    // Чтобы это проверить — устанавливаем "сигнатурные" значения в trades/order_books
-    // и проверяем что они НЕ сбросились.
+    // Init last_known=0 → the first non-zero token does NOT trigger full_reset.
+    // To verify this — set "signature" values in trades/order_books
+    // and check that they were NOT reset.
     let mut d = EventDispatcher::new();
-    // Сделаем order_books непустым через apply_markets_indexes (создаёт market_idx mapping).
+    // Make order_books non-empty via apply_markets_indexes (creates the market_idx mapping).
     d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
     let snapshot_count_before = d.markets.by_name.len();
     let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -3304,22 +3304,22 @@ fn dispatch_into_active_does_not_reset_on_first_non_zero_token() {
         &client,
         &mut actions,
     );
-    // markets state НЕ должны быть сброшен (full_reset не вызывался).
+    // markets state must NOT be reset (full_reset was not called).
     assert_eq!(
         d.markets.by_name.len(),
         snapshot_count_before,
-        "первый non-zero token — не triggers reset"
+        "first non-zero token — does not trigger a reset"
     );
 }
 
 #[test]
 fn dispatch_into_active_triggers_reset_on_token_change() {
     let mut d = EventDispatcher::new();
-    // Симулируем что мы уже видели server_token = 0xAAA.
+    // Simulate that we already saw server_token = 0xAAA.
     d.last_known_server_token = 0xAAA;
-    // Установим trades state в non-default (last_packet_num != 0 наблюдаемо через
-    // повторный dispatch — но private. Достаточно проверить что `last_known`
-    // обновляется на новый, а full_reset работает на уровне самой TradesState).
+    // Set trades state to non-default (last_packet_num != 0 is observable via
+    // a repeat dispatch — but it is private. It is enough to check that `last_known`
+    // updates to the new value, while full_reset works at the level of TradesState itself).
     let mut client = crate::client::Client::new(dummy_client_cfg());
     client.testing_set_server_token(0xBBB);
     let mut out = Vec::new();
@@ -3335,16 +3335,16 @@ fn dispatch_into_active_triggers_reset_on_token_change() {
     );
     assert_eq!(
         d.last_known_server_token, 0xBBB,
-        "после смены токена — last_known обновлён"
+        "after a token change — last_known is updated"
     );
-    // Поведение TradesState.full_reset() и OrderBooks.reset_caches_keep_books() покрыто
-    // unit-тестами в соответствующих модулях (state::trades, state::order_books).
+    // The behavior of TradesState.full_reset() and OrderBooks.reset_caches_keep_books() is covered
+    // by unit tests in the respective modules (state::trades, state::order_books).
 }
 
 #[test]
 fn dispatch_into_active_auto_links_server_time_delta_source() {
-    // Первый вызов — линкует handle от Client'а. До этого source = None,
-    // dispatcher падает обратно на global.
+    // The first call links the handle from the Client. Before that source = None,
+    // and the dispatcher falls back to the global.
     let mut d = EventDispatcher::new();
     assert!(d.server_time_delta_source.is_none());
     let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -3362,10 +3362,10 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     );
     assert!(
         d.server_time_delta_source.is_some(),
-        "после первого dispatch_into_active — source привязан к Client'у"
+        "after the first dispatch_into_active — source is bound to the Client"
     );
 
-    // Повторный вызов — source не меняется (already linked).
+    // Repeat call — source does not change (already linked).
     let handle_after_first = Arc::clone(d.server_time_delta_source.as_ref().unwrap());
     actions.clear();
     dispatch_active_packet_for_test(
@@ -3380,14 +3380,14 @@ fn dispatch_into_active_auto_links_server_time_delta_source() {
     let handle_after_second = d.server_time_delta_source.as_ref().unwrap();
     assert!(
         Arc::ptr_eq(&handle_after_first, handle_after_second),
-        "повторный вызов — source остаётся тем же handle"
+        "repeat call — source stays the same handle"
     );
 }
 
 #[test]
 fn snapshot_requested_with_provider_triggers_fresh_reply() {
-    // Active library auto-action 2: при SnapshotRequested → если приложение
-    // дало provider, либа берёт fresh snapshot из provider'а и шлёт ответ.
+    // Active library auto-action 2: on SnapshotRequested → if the application
+    // supplied a provider, the library takes a fresh snapshot from the provider and sends the reply.
     let mut d = EventDispatcher::new();
     let fresh_snapshot = vec![0xAA, 0xBB, 0xCC, 0xDD];
     let fresh_for_provider = fresh_snapshot.clone();
@@ -3406,7 +3406,7 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     let mut out = Vec::new();
     let mut actions = Vec::new();
 
-    // Server prods клиента: "пришли свой snapshot стратегий" — это
+    // Server prods the client: "send your strategy snapshot" — this is
     // StratCommand::SnapshotRequest. Payload = `build_snapshot_request(uid)`.
     let payload = crate::commands::strat::build_snapshot_request(42);
 
@@ -3421,7 +3421,7 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     );
     apply_active_actions_for_test(&client, &mut actions);
 
-    // Drain send queues — должна быть отправка Command::Strat с fresh
+    // Drain send queues — there must be a Command::Strat send with a fresh
     // TStratSnapshot body: CmdId/ver/uid + ServerEpoch/ClientMaxLastDate/Size/Full/Data.
     let mut found_snapshot_send = false;
     for item in drain_client_send_items(&client) {
@@ -3448,10 +3448,10 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     }
     assert!(
         found_snapshot_send,
-        "после SnapshotRequest с provider — должна быть fresh отправка"
+        "after a SnapshotRequest with a provider — there must be a fresh send"
     );
 
-    // out содержит event SnapshotRequested (app тоже видит, для UI awareness).
+    // out contains the SnapshotRequested event (the app sees it too, for UI awareness).
     let has_snapshot_event = out.iter().any(|ev| {
         matches!(
             ev,
@@ -3460,15 +3460,15 @@ fn snapshot_requested_with_provider_triggers_fresh_reply() {
     });
     assert!(
         has_snapshot_event,
-        "event SnapshotRequested должен быть в out (для app awareness)"
+        "the SnapshotRequested event must be in out (for app awareness)"
     );
 }
 
 #[test]
 fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
-    // Если provider не задан и локальных стратегий нет, dispatcher всё равно
-    // отвечает корректным пустым snapshot'ом. Это active-lib механика:
-    // сервер не должен ждать ручного ответа от приложения.
+    // If no provider is set and there are no local strategies, the dispatcher still
+    // replies with a correct empty snapshot. This is active-lib mechanics:
+    // the server must not wait for a manual reply from the application.
     let mut d = EventDispatcher::new();
 
     let mut client = crate::client::Client::new(dummy_client_cfg());
@@ -3487,7 +3487,7 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
     );
     apply_active_actions_for_test(&client, &mut actions);
 
-    // Drain send queues — должен быть Command::Strat с пустым serializer batch.
+    // Drain send queues — there must be a Command::Strat with an empty serializer batch.
     let mut empty_snapshot_sends = 0;
     for item in drain_client_send_items(&client) {
         if item.cmd == Command::Strat.to_byte() {
@@ -3508,10 +3508,10 @@ fn snapshot_requested_without_provider_sends_owned_empty_snapshot() {
     }
     assert_eq!(
         empty_snapshot_sends, 1,
-        "без provider — должен уйти пустой owned snapshot"
+        "without a provider — an empty owned snapshot must be sent"
     );
 
-    // Event SnapshotRequested всё равно прилетает app'у для UI/диагностики.
+    // The SnapshotRequested event still reaches the app for UI/diagnostics.
     let has_event = out.iter().any(|ev| {
         matches!(
             ev,
@@ -3905,9 +3905,9 @@ fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
 
 #[test]
 fn dispatcher_propagates_delta_to_orders_state() {
-    // End-to-end: при `dispatch(Command::Order, ...)` dispatcher применяет текущий
-    // delta к Orders state. Проверяем что после линковки handle'а delta попадает
-    // в `Orders.server_time_delta`.
+    // End-to-end: on `dispatch(Command::Order, ...)` the dispatcher applies the current
+    // delta to Orders state. Verify that after linking the handle the delta reaches
+    // `Orders.server_time_delta`.
     let handle = Arc::new(AtomicU64::new(0));
     let days: f64 = 1.25 / 86400.0;
     handle.store(days.to_bits(), Ordering::Relaxed);
@@ -3915,16 +3915,16 @@ fn dispatcher_propagates_delta_to_orders_state() {
     let mut d = EventDispatcher::new();
     d.set_server_time_delta_source(Arc::clone(&handle));
 
-    // Любой Order payload триггерит set_server_time_delta.
+    // Any Order payload triggers set_server_time_delta.
     let payload = build_all_statuses_request(99);
     let _events = d.dispatch(Command::Order, &payload, 1000);
 
-    // Делаем round-trip days → seconds для сравнения с 1.25.
+    // Round-trip days → seconds for comparison against 1.25.
     let applied_days = d.orders.server_time_delta;
     let applied_seconds = applied_days * 86400.0;
     assert!(
         (applied_seconds - 1.25).abs() < 1e-9,
-        "Orders.server_time_delta должен получить значение из handle ({}s, got {}s)",
+        "Orders.server_time_delta must receive the value from the handle ({}s, got {}s)",
         1.25,
         applied_seconds
     );

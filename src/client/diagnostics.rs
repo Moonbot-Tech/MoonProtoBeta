@@ -12,28 +12,28 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 // =============================================================================
-//  ErrEmu — ТОЛЬКО ДЛЯ ТЕСТОВ. Симуляция packet loss на стороне клиента.
+//  ErrEmu — TESTS ONLY. Client-side packet-loss simulation.
 // =============================================================================
 //
-// ⚠️ **НЕ ИСПОЛЬЗОВАТЬ В PRODUCTION.** Это инструмент для нагрузочного тестирования
-// gap-recovery / reconnect / extend-bucket логики через искусственный дроп UDP-пакетов.
+// ⚠️ **DO NOT USE IN PRODUCTION.** This is a tool for load-testing the
+// gap-recovery / reconnect / extend-bucket logic via artificial UDP packet drops.
 //
-// По умолчанию выключено (ERR_EMU_RATE = 0). Включается явным вызовом
-// `set_err_emu(percent)` где percent ∈ [0..100].
+// Disabled by default (ERR_EMU_RATE = 0). Enabled by an explicit call to
+// `set_err_emu(percent)` where percent ∈ [0..100].
 //
-// Зеркало серверного `MoonProtoErrEmu` (Delphi `MoonProtoUDPClient.pas:534-541` и
-// `MoonProtoUDPServer.pas:1281-1288`): дроп происходит **после** успешной проверки
-// MAC и version, а в Delphi-клиенте ещё и после побочных эффектов `TotalRecvBytes`
-// / `LastOnline`. Rust сохраняет тот же порядок: валидный packet, выбранный ErrEmu
-// для дропа, всё равно доезжает до main-loop, обновляет transport stats, и только
-// потом не dispatch'ится в protocol layer. Служебные команды (Ping /
-// handshake-related / ACK) дропаются с rate/2 чтобы handshake не отваливался
-// полностью.
+// Mirror of the server-side `MoonProtoErrEmu` (Delphi `MoonProtoUDPClient.pas:534-541` and
+// `MoonProtoUDPServer.pas:1281-1288`): the drop happens **after** the successful
+// MAC and version check, and in the Delphi client also after the `TotalRecvBytes`
+// / `LastOnline` side effects. Rust keeps the same order: a valid packet selected by ErrEmu
+// for dropping still reaches the main loop, updates transport stats, and only
+// then is not dispatched into the protocol layer. Service commands (Ping /
+// handshake-related / ACK) are dropped at rate/2 so the handshake does not fall apart
+// entirely.
 //
-// Использование (пример: 75% loss):
+// Usage (example: 75% loss):
 //   moonproto::client::set_err_emu(75);
 //   let client = MoonClient::connect(cfg, connect)?;
-//   // дальше обычный MoonClient/EventSink pipeline.
+//   // then the usual MoonClient/EventSink pipeline.
 /// Process-wide incoming packet-loss emulator rate, in percent.
 ///
 /// This is a test hook for stress and FireTest-style scenarios. Prefer
@@ -501,8 +501,8 @@ pub(crate) fn trace_head(_: &[u8], _: usize) -> String {
     String::new()
 }
 
-/// Команды, для которых dropRate делится пополам (служебные).
-/// Точное соответствие Delphi MoonProtoUDPClient.pas:537-538.
+/// Commands for which dropRate is halved (service commands).
+/// Exact match with Delphi MoonProtoUDPClient.pas:537-538.
 #[inline]
 pub(crate) fn is_service_cmd(cmd: u8) -> bool {
     matches!(

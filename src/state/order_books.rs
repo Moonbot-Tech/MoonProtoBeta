@@ -103,13 +103,13 @@ impl OrderBooks {
 
         let cache = self.caches.entry(key).or_default();
 
-        // === 1. Full snapshot — всегда применяется (это reset кэша) ===
+        // === 1. Full snapshot — always applied (this is a cache reset) ===
         if pkt.is_full {
             let top = apply_full_book(&mut self.books, key, pkt.seq, &pkt.buys, &pkt.sells);
             cache.corrupted = false;
             cache.last_applied_seq = pkt.seq;
             cache.expected_seq = pkt.seq.wrapping_add(1);
-            // Чистим cache от старых seq < expected_seq.
+            // Clean the cache of stale seq < expected_seq.
             cache
                 .packets
                 .retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
@@ -124,15 +124,15 @@ impl OrderBooks {
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
-            // Попробовать применить накопленные diff из cache.
+            // Try to apply the accumulated diffs from the cache.
             self.drain_cache(key, events);
             return;
         }
 
         // === 2. Corrupted mode — Delphi MoonProtoEngine.pas:2021-2039 ===
-        // Пока ждём свежий Full snapshot, применяем приходящие diff'ы as-is для
-        // degraded live view + продолжаем требовать Full (throttle). Раньше Diff
-        // в этом режиме отбрасывались — UI замораживался на время ожидания.
+        // While waiting for a fresh Full snapshot, apply incoming diffs as-is for
+        // a degraded live view + keep requesting Full (throttle). Previously diffs
+        // were dropped in this mode — the UI froze while waiting.
         if cache.corrupted {
             let seq = pkt.seq;
             let cached_pkt = pkt.clone();
@@ -171,10 +171,10 @@ impl OrderBooks {
 
         let cmp = compare_seq(pkt.seq, cache.expected_seq);
 
-        // === 3. In-order OR первый Diff без Full ===
-        // Delphi `MoonProtoEngine.pas:2066-2071`: если `MoonProtoBookSeq = 0`
-        // (последний применённый seq = 0) — применяет первый Diff без ожидания
-        // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
+        // === 3. In-order OR first Diff without a Full ===
+        // Delphi `MoonProtoEngine.pas:2066-2071`: if `MoonProtoBookSeq = 0`
+        // (last applied seq = 0) — apply the first Diff without waiting for a
+        // Full. Previously we dropped it → an extra RequestFullNeeded request.
         if cmp == 0 || cache.last_applied_seq == 0 {
             let top = apply_diff_book(
                 &mut self.books,
@@ -197,12 +197,12 @@ impl OrderBooks {
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
-            // Может быть в cache следующие seq — drain.
+            // The cache may hold the following seq values — drain.
             self.drain_cache(key, events);
             return;
         }
 
-        // === 4. Stale: seq < expected → отброс ===
+        // === 4. Stale: seq < expected → drop ===
         if cmp < 0 {
             events.push(OrderBookEvent::Ignored {
                 market_index: pkt.market_index,
@@ -213,7 +213,7 @@ impl OrderBooks {
             return;
         }
 
-        // === 5. Gap: seq > expected → положить в cache, проверить expired/corrupted ===
+        // === 5. Gap: seq > expected → put in cache, check expired/corrupted ===
         let seq = pkt.seq;
         cache.add(seq, pkt.clone(), now_ms);
         if cache.is_expired(now_ms) || cache.packets.len() > BOOK_CACHE_MAX_PACKETS {
@@ -241,18 +241,18 @@ impl OrderBooks {
             None => return,
         };
 
-        // Удалить мусор (seq < expected).
+        // Drop garbage (seq < expected).
         cache
             .packets
             .retain(|p| compare_seq(p.seq, cache.expected_seq) >= 0);
 
         while let Some(p) = cache.packets.front() {
             if p.seq != cache.expected_seq {
-                // Gap остался — остановиться.
+                // A gap remains — stop.
                 break;
             }
 
-            // O(1) pop_front вместо O(N) remove(0).
+            // O(1) pop_front instead of O(N) remove(0).
             let entry = cache.packets.pop_front().unwrap();
             let top = apply_cached_packet(
                 &mut self.books,

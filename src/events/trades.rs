@@ -23,7 +23,7 @@ impl EventDispatcher {
         history_now_time_days: Option<f64>,
         out: &mut Vec<Event>,
     ) {
-        // Active library: блокируем обработку TradesStream пока markets indexes не sync.
+        // Active library: block TradesStream processing until the market indexes are synced.
         if !self.markets.indexes_synchronized {
             return;
         }

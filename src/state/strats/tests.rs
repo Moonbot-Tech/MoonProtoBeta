@@ -395,7 +395,7 @@ fn checked_sync_delta() {
     let mut s = StratsState::new();
     s.upsert(1, 0, "");
     s.upsert(2, 0, "");
-    // Дельта: только id=1 → checked.
+    // Delta: only id=1 → checked.
     let cmd = StratCommand::CheckedSync(StratCheckedSync {
         items: vec![StratCheckedItem {
             strategy_id: 1,
@@ -413,7 +413,7 @@ fn checked_sync_delta() {
     ));
     assert!(s.get(1).unwrap().checked);
     assert!(s.get(1).unwrap().prev_checked);
-    // id=2 не трогался.
+    // id=2 was not touched.
     assert!(!s.get(2).unwrap().checked);
     assert!(!s.get(2).unwrap().prev_checked);
 }
@@ -483,7 +483,7 @@ fn apply_snapshot_decoded_upserts_strategies() {
     assert!(!info200.checked);
     assert!(!info200.prev_checked);
 
-    // Поля стратегий доступны через возвращённый batch
+    // Strategy fields are available through the returned batch
     assert_eq!(
         batch.strategies[0].fields.get("StrategyName"),
         Some(&FieldValue::String("Strat-A".to_string()))
@@ -570,7 +570,7 @@ fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
 #[test]
 fn apply_snapshot_decoded_corrupted_returns_none() {
     let mut s = StratsState::new();
-    // Невалидный DEFLATE
+    // Invalid DEFLATE
     let result = s.apply_snapshot_decoded(&[0xFF, 0xFF, 0xFF, 0xFF]);
     assert!(result.is_none());
     assert!(s.is_empty());
@@ -628,7 +628,7 @@ fn full_snapshot_preserves_missing_strategies_like_delphi() {
 #[test]
 fn checked_sync_full_only_updates_items_like_delphi() {
     let mut s = StratsState::new();
-    // Изначально id=1 и id=2 checked.
+    // Initially id=1 and id=2 are checked.
     s.upsert(1, 0, "");
     s.upsert(2, 0, "");
     s.by_id.get_mut(&1).unwrap().checked = true;

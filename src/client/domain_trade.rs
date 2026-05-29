@@ -3,8 +3,8 @@ use super::*;
 impl Client {
     // ====================================================================
     //  High-level Trade wrappers (convenience over commands::trade::build_*)
-    //  Все шлются как Command::Order (28), Priority=High, encrypted, MaxRetries=3.
-    //  Кроме DoClose/DoLimitClose/DoSplit/DoSellOrder/DoMarketSplit — MaxRetries=1.
+    //  All are sent as Command::Order (28), Priority=High, encrypted, MaxRetries=3.
+    //  Except DoClose/DoLimitClose/DoSplit/DoSellOrder/DoMarketSplit — MaxRetries=1.
     // ====================================================================
 
     /// Send `TNewOrderCommand` (CmdId=3) to open a new order.
@@ -215,7 +215,7 @@ impl Client {
         self.send_trade(raw, 1)
     }
 
-    /// `TOrderStatusRequest` (CmdId=18) — запросить статус конкретного ордера.
+    /// `TOrderStatusRequest` (CmdId=18) — request the status of a specific order.
     #[doc(hidden)]
     pub fn request_order_status(
         &self,

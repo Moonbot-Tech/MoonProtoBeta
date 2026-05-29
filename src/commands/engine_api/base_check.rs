@@ -194,8 +194,8 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     pos += 1;
 
     // 9. server_version (i32 LE → u32) — Delphi WriteInt(Current_Version_Num_X).
-    // Trust серверу: значения версий монотонно растут с малых положительных
-    // чисел (например 763 для v7.63), поэтому signed/unsigned различие не влияет.
+    // Trust the server: version values grow monotonically from small positive
+    // numbers (for example 763 for v7.63), so the signed/unsigned difference does not matter.
     if pos + 4 > data.len() {
         return info;
     }
@@ -208,7 +208,7 @@ pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     }
     info.moonproto_version =
         Some(i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as u32);
-    // pos += 4;  // больше не используется
+    // pos += 4;  // no longer used
 
     info
 }

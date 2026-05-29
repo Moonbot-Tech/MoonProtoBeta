@@ -82,23 +82,23 @@ impl ProtocolCore<'_> {
     pub(crate) fn transport_writer_maintenance_tick(&mut self, cur_tm: i64) {
         self.copy_send_ack_and_check_sening_data(cur_tm);
 
-        // Timeout protection для init/API markets-index request marker.
+        // Timeout protection for the init/API markets-index request marker.
         self.check_indexes_fetch_timeout(cur_tm);
 
-        // F6/F7: periodic refresh prices + tags (опционально через ClientConfig.refresh).
-        // Шлём только если auth_status == AuthDone (сервер примет запрос только в этой
-        // фазе; до неё запрос потеряется впустую).
+        // F6/F7: periodic refresh prices + tags (optional, via ClientConfig.refresh).
+        // Send only if auth_status == AuthDone (the server accepts the request only in
+        // this phase; before it the request would be wasted).
         if matches!(self.client.auth_status, AuthStatus::AuthDone) && self.client.domain_ready {
             self.tick_periodic_refresh(cur_tm);
         }
     }
 
-    /// F6/F7: проверка пора ли слать periodic refresh-команды.
-    /// Вызывается из writer loop каждый тик (~5мс), но реальная отправка происходит
-    /// только когда прошёл `update_markets_every` / `check_tags_every` от последнего раза.
+    /// F6/F7: check whether it is time to send periodic refresh commands.
+    /// Called from the writer loop every tick (~5ms), but the actual send happens
+    /// only once `update_markets_every` / `check_tags_every` has elapsed since the last time.
     ///
-    /// Fire-and-forget: используем `send_api_request` без регистрации в pending registry —
-    /// EventDispatcher автоматически применяет ответ к MarketsState когда он придёт.
+    /// Fire-and-forget: we use `send_api_request` without registering in the pending registry —
+    /// the EventDispatcher automatically applies the response to MarketsState when it arrives.
     pub(crate) fn tick_periodic_refresh(&mut self, cur_tm: i64) {
         let hour_slot = if self.client.cfg.refresh.check_tags_every.is_some() {
             current_utc_hour_slot()
@@ -154,10 +154,10 @@ impl ProtocolCore<'_> {
     }
 
     /// Periodic timeout cleanup/retry for an in-flight markets-index restore marker.
-    /// UDP-ответ может потеряться — без этой проверки `indexes_fetch_in_flight = true`
-    /// остался бы навсегда. До Init запрос НЕ отправляется; после Init reconnect
-    /// restore имеет право повторить `GetMarketsIndexes`, потому что пользовательский
-    /// intent уже был задан единственным init-проходом.
+    /// The UDP response may be lost — without this check `indexes_fetch_in_flight = true`
+    /// would stay set forever. Before Init the request is NOT sent; after Init, reconnect
+    /// restore is allowed to repeat `GetMarketsIndexes`, because the user intent was already
+    /// established by the single init pass.
     pub(crate) fn check_indexes_fetch_timeout(&mut self, now_ms: i64) {
         const INDEXES_FETCH_TIMEOUT_MS: i64 = 12_000;
         if self.client.indexes_fetch_in_flight
@@ -174,7 +174,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    /// Periodic all-trades reconnect sequence (только в Dispatcher mode).
+    /// Periodic all-trades reconnect sequence (Dispatcher mode only).
     /// Trades gap recovery is not here: Delphi calls `CheckMissingTradesPackets`
     /// from the tail of `ProcessTradesStream`, and Rust mirrors that in
     /// `EventDispatcher::dispatch_into_active_actions`.

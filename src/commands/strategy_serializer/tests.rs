@@ -303,9 +303,9 @@ fn multiple_strategies_share_name_dict() {
 
     let parsed = parse_strategy_batch(&compressed).unwrap();
     assert_eq!(parsed.strategies.len(), 3);
-    // Имена уникальны: StrategyName, OrderSize, KeepAlert, AcceptCommands, Comment — 5 имён.
+    // Names are unique: StrategyName, OrderSize, KeepAlert, AcceptCommands, Comment — 5 names.
     assert_eq!(parsed.names.len(), 5);
-    // Пути уникальны: 2 штуки.
+    // Paths are unique: 2 of them.
     assert_eq!(parsed.paths.len(), 2);
 }
 
@@ -413,7 +413,7 @@ fn writer_wraps_name_path_and_string_lengths_like_delphi() {
 
 #[test]
 fn missing_path_id_yields_empty() {
-    // Конструируем raw plain payload где PathID=99 при пустом PathDict.
+    // Construct a raw plain payload where PathID=99 while PathDict is empty.
     let mut plain = Vec::new();
     // NameDict: 1 name "X"
     plain.extend_from_slice(&1u16.to_le_bytes());
@@ -439,8 +439,8 @@ fn missing_path_id_yields_empty() {
 
 #[test]
 fn unknown_type_id_skipped_8_bytes() {
-    // FieldIdx=0, TypeID=99 (неизвестный) → reader должен пропустить 8 байт.
-    // После этого должен корректно прочитать следующее поле.
+    // FieldIdx=0, TypeID=99 (unknown) → the reader must skip 8 bytes.
+    // After that it must correctly read the next field.
     let mut plain = Vec::new();
     // NameDict: 2 names
     plain.extend_from_slice(&2u16.to_le_bytes());
@@ -461,7 +461,7 @@ fn unknown_type_id_skipped_8_bytes() {
     plain.extend_from_slice(&0u16.to_le_bytes());
     // FieldCount=2
     plain.extend_from_slice(&2u16.to_le_bytes());
-    // Field 0: idx=0, typeID=99 (unknown), 8 bytes value (всё нули)
+    // Field 0: idx=0, typeID=99 (unknown), 8 bytes value (all zeros)
     plain.extend_from_slice(&0u16.to_le_bytes());
     plain.push(99);
     plain.extend_from_slice(&[0u8; 8]);
@@ -472,9 +472,9 @@ fn unknown_type_id_skipped_8_bytes() {
 
     let parsed = parse_strategy_batch_plain(&plain).unwrap();
     let ps = &parsed.strategies[0];
-    // Field A не разобран (unknown TypeID).
+    // Field A is not parsed (unknown TypeID).
     assert_eq!(ps.fields.get("A"), None);
-    // Field B разобран как Int32=42.
+    // Field B is parsed as Int32=42.
     assert_eq!(ps.fields.get("B"), Some(&FieldValue::Int32(42)));
 }
 
@@ -694,9 +694,9 @@ fn invalid_utf8_dicts_and_string_fields_use_delphi_question_mark_fallback() {
 #[test]
 fn truncated_payload_returns_none() {
     let mut plain = Vec::new();
-    // Только частичный NameDict header (нет данных)
-    plain.extend_from_slice(&100u16.to_le_bytes()); // обещано 100 имён
-                                                    // Но больше нет данных → должен вернуть None
+    // Only a partial NameDict header (no data)
+    plain.extend_from_slice(&100u16.to_le_bytes()); // promised 100 names
+                                                    // But there is no more data → must return None
     let parsed = parse_strategy_batch_plain(&plain);
     assert!(parsed.is_none());
 }

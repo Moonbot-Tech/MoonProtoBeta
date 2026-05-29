@@ -15,11 +15,11 @@ impl EventDispatcher {
         now_ms: i64,
         out: &mut Vec<Event>,
     ) {
-        // Active library: блокируем обработку OrderBook если markets indexes не sync.
-        // Соответствует Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
-        // PeerAppToken then exit`. Без этого: потеряем пакеты от первых апдейтов
-        // после server restart до получения свежих индексов (market_idx по новой
-        // нумерации применился бы к старому by_index -> silent data corruption).
+        // Active library: block OrderBook processing if the market indexes are not synced.
+        // Matches Delphi `MoonProtoEngine.pas:1580 If FLastServerAppToken <>
+        // PeerAppToken then exit`. Without this: we would lose packets from the first updates
+        // after a server restart until fresh indexes arrive (a market_idx in the new
+        // numbering would be applied to the old by_index -> silent data corruption).
         if !self.markets.indexes_synchronized {
             return;
         }

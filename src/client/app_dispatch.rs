@@ -15,16 +15,16 @@ pub(crate) type OnDataFn = Box<dyn FnMut(Command, &[u8]) + Send>;
 #[cfg(test)]
 pub(crate) type RawAppEvent = (Command, Vec<u8>);
 
-/// Куда доставлять `Command + payload` после внутренней обработки (decrypt,
-/// decompress, Grouped split, API pending dispatch). Два варианта:
+/// Where to deliver `Command + payload` after internal handling (decrypt,
+/// decompress, Grouped split, API pending dispatch). Two variants:
 ///
-/// * `Callback` — raw payload callback через `OnDataFn` (используется `Client::run`).
-/// * `Buffer` — буфер (Command, Vec<u8>) для пост-обработки через
-///   `EventDispatcher` (используется low-level active pump).
+/// * `Callback` — raw payload callback via `OnDataFn` (used by `Client::run`).
+/// * `Buffer` — a (Command, Vec<u8>) buffer for post-processing via
+///   `EventDispatcher` (used by the low-level active pump).
 ///
-/// Этот enum позволяет одному delivery pipeline (`ProtocolCore` drain +
-/// `client_new_data_decoded`) обслуживать оба сценария без
-/// `Arc<Mutex>`-обходов borrow checker.
+/// This enum lets a single delivery pipeline (`ProtocolCore` drain +
+/// `client_new_data_decoded`) serve both scenarios without
+/// `Arc<Mutex>` workarounds for the borrow checker.
 pub(crate) enum DispatchSink<'a> {
     #[cfg(test)]
     Callback(&'a mut OnDataFn),
@@ -39,8 +39,8 @@ impl<'a> DispatchSink<'a> {
         matches!(self, Self::Buffer(_))
     }
 
-    /// Доставка с уже-владеемым Vec (avoid лишний `to_vec`, когда payload
-    /// родился из decrypt/decompress и уже Owned).
+    /// Delivery with an already-owned Vec (avoids a redundant `to_vec` when the
+    /// payload originated from decrypt/decompress and is already owned).
     #[inline]
     pub(crate) fn deliver_owned(&mut self, cmd: Command, payload: Vec<u8>) {
         match self {
@@ -55,12 +55,12 @@ impl<'a> DispatchSink<'a> {
     }
 }
 
-/// Режим работы main loop — определяет как доставлять входящие data-пакеты
-/// и нужны ли active-library auto-actions.
+/// Main-loop run mode — defines how incoming data packets are delivered
+/// and whether active-library auto-actions are needed.
 ///
-/// `CallbackQueue` — low-level raw path для `Client::run`. Потребитель получает
-/// сырые `(Command, &[u8])` и сам решает что с ними делать (обычно — свой
-/// `dispatcher.dispatch_into(...)`). Production delivery goes through app
+/// `CallbackQueue` — low-level raw path for `Client::run`. The consumer receives
+/// raw `(Command, &[u8])` and decides what to do with them (usually its own
+/// `dispatcher.dispatch_into(...)`). Production delivery goes through the app
 /// queue.
 ///
 /// `Dispatcher` — active-library path. Runtime owns `EventDispatcher` directly,
@@ -75,11 +75,11 @@ pub(crate) enum RunMode<'a> {
     Dispatcher {
         dispatcher: &'a mut crate::events::EventDispatcher,
         on_event: DispatcherEventFn,
-        /// Переиспользуемый буфер событий (избегаем alloc per packet).
+        /// Reusable event buffer (avoids alloc per packet).
         event_buf: Vec<crate::events::Event>,
-        /// Переиспользуемый буфер decoded payload'ов перед dispatcher.
+        /// Reusable buffer of decoded payloads before the dispatcher.
         payload_buf: Vec<(Command, Vec<u8>)>,
-        /// Переиспользуемый буфер active-library side effects.
+        /// Reusable buffer of active-library side effects.
         active_actions_buf: Vec<crate::events::ActiveAction>,
     },
     #[cfg(not(test))]

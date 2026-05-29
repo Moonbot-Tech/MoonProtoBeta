@@ -32,7 +32,7 @@ const _: [(); 18] = [(); DEX_INFO_SIZE];
 impl From<WireDexInfo> for DexInfo {
     fn from(wire: WireDexInfo) -> Self {
         let name_len = wire.short_string_name[0] as usize;
-        // Защита: name_len по контракту <= 15. Если больше - corrupt, используем 15.
+        // Guard: name_len is <= 15 by contract. If larger it is corrupt, so use 15.
         let effective_len = name_len.min(15);
         let name_bytes = &wire.short_string_name[1..1 + effective_len];
         Self {
@@ -130,7 +130,7 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
 
     let account_id = read_string(data, &mut pos)?;
 
-    // Optional Phase 2 extensions (читаем if !EOF).
+    // Optional Phase 2 extensions (read if !EOF).
     let recvd_max_payload = if pos < data.len() {
         Some(read_i32_zero_tail(data, &mut pos))
     } else {
@@ -156,13 +156,13 @@ pub fn parse_auth_check_response(data: &[u8]) -> Option<AuthCheckResponse> {
             let wire = WireDexInfo::read_from_bytes(&dex).ok()?;
             known_dexes.push(wire.into());
         }
-        // hl_dex_market и hl_spot_market следуют сразу после массива.
+        // hl_dex_market and hl_spot_market follow immediately after the array.
         if pos < data.len() {
             hl_dex_market = Some(HyperDexIndex::from_byte(data[pos]));
             pos += 1;
             if pos < data.len() {
                 hl_spot_market = Some(HyperDexIndex::from_byte(data[pos]));
-                // pos += 1;  // больше не используется
+                // pos += 1;  // no longer used
             }
         }
     }

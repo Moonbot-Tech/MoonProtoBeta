@@ -469,16 +469,16 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .unwrap()
         .copy_last(8, &mut candles);
     assert_eq!(candles.len(), 2);
-    // Снапшот-свечи засилены — трейд их НЕ трогает (эталон: live-свеча отдельно от ring).
+    // Snapshot candles are sealed — a trade does NOT touch them (reference: the live candle is separate from the ring).
     assert_eq!(candles[1].close, 115.0);
     assert_eq!(candles[1].high, 120.0);
     assert_eq!(candles[1].volume, 2_000.0);
 
-    // refresh с временем >= трейда (в проде now всегда >= времени последнего трейда),
-    // иначе live-свеча (now+1s) выпала бы из окна дельт.
+    // refresh with a time >= the trade (in prod `now` is always >= the time of the last trade),
+    // otherwise the live candle (now+1s) would fall outside the delta window.
     store.refresh_derived_analytics(now + 1.0 / 86_400.0);
     let derived = store.derived_snapshot();
-    // Трейд ушёл в live-свечу (Delphi `FCandle`), выставлена отдельно от засиленного ring.
+    // The trade went into the live candle (Delphi `FCandle`), exposed separately from the sealed ring.
     let live = derived.current_candle.expect("live candle from trade");
     assert_eq!(live.close, 125.0);
     assert_eq!(live.high, 125.0);
@@ -511,8 +511,8 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         volume: 1_000.0,
     }]);
 
-    // Первый трейд следующего периода — копится в отдельный live-аккумулятор
-    // (Delphi `FCandle`), НЕ кладётся в засиленный ring.
+    // The first trade of the next period — accumulates into a separate live
+    // accumulator (Delphi `FCandle`), is NOT pushed into the sealed ring.
     let t1 = now + 6.0 / 1440.0;
     store.append_futures_trade_like_delphi(trade(t1, 120.0, 2.0));
 
@@ -522,7 +522,7 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 1, "снапшот-свеча засилена; live-свеча отдельно, не в ring");
+    assert_eq!(candles.len(), 1, "snapshot candle is sealed; live candle is separate, not in the ring");
     assert_eq!(candles[0].time, now);
     assert_eq!(candles[0].close, 105.0);
     store.refresh_derived_analytics(t1);
@@ -533,8 +533,8 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
     assert_eq!(live.open, 120.0);
     assert_eq!(live.close, 120.0);
 
-    // Второй трейд через >5 мин — текущая свеча засиливается в ring (end-stamped
-    // временем seal), начинается новая live-свеча (Delphi Recalc5mCandle roll).
+    // The second trade after >5 min — the current candle is sealed into the ring
+    // (end-stamped with the seal time), a new live candle starts (Delphi Recalc5mCandle roll).
     let t2 = t1 + 6.0 / 1440.0;
     store.append_futures_trade_like_delphi(trade(t2, 130.0, 1.0));
     candles.clear();
@@ -543,9 +543,9 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 2, "первая live-свеча засилена и добавлена в ring");
+    assert_eq!(candles.len(), 2, "first live candle is sealed and added to the ring");
     assert_eq!(candles[0].time, now);
-    assert_eq!(candles[1].time, t2, "засиленная свеча штампуется временем seal (конец периода)");
+    assert_eq!(candles[1].time, t2, "sealed candle is stamped with the seal time (end of period)");
     assert_eq!(candles[1].open, 120.0);
     assert_eq!(candles[1].close, 120.0);
     assert_eq!(candles[1].volume, 240.0);

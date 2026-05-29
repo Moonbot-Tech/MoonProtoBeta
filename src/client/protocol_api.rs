@@ -39,14 +39,15 @@ impl Client {
     }
 
     pub(crate) fn apply_engine_response_client_bookkeeping(&mut self, resp: &EngineResponse) {
-        // Active library: auto-clear indexes_fetch_in_flight на ответе
-        // GetMarketsIndexes (любой — даже неуспешный, чтобы не зависнуть навсегда).
+        // Active library: auto-clear indexes_fetch_in_flight on a
+        // GetMarketsIndexes response (any one — even unsuccessful, so it never
+        // hangs forever).
         if resp.method == EngineMethod::GetMarketsIndexes {
             self.indexes_fetch_in_flight = false;
             let indexes_payload_ok = resp.success
                 && crate::commands::market::parse_markets_indexes_response(&resp.data).is_some();
             if indexes_payload_ok {
-                // Запоминаем что для текущего PeerAppToken индексы получены.
+                // Remember that indexes have been received for the current PeerAppToken.
                 self.tracked_indexes_peer_app_token = self.peer_app_token;
                 if self.update_markets_after_indexes {
                     self.update_markets_after_indexes = false;
@@ -59,10 +60,10 @@ impl Client {
             }
         }
 
-        // Delphi `DoSubscribeOrderBooks`: только успешный ответ подтверждает
-        // текущий `ServerToken`. Для reconnect batch это полный `BookSubbed`
-        // replay; обычная точечная подписка может выставить token только в
-        // initial state, как Delphi `FSubscribedBookServerToken = 0`.
+        // Delphi `DoSubscribeOrderBooks`: only a successful response confirms
+        // the current `ServerToken`. For the reconnect batch this is a full
+        // `BookSubbed` replay; an ordinary point subscription may set the token
+        // only from the initial state, like Delphi `FSubscribedBookServerToken = 0`.
         if resp.method == EngineMethod::SubscribeOrderBook {
             let is_reconnect_batch =
                 self.pending_orderbook_resubscribe_uid == Some(resp.request_uid);
@@ -167,31 +168,32 @@ impl Client {
         candles_chunk_consumed_by_reader: bool,
         sink: &mut DispatchSink<'_>,
     ) -> Result<(), Vec<u8>> {
-        // Engine API responses: попытаться доставить в pending registry / chunked
-        // candles aggregator / internal recovery flags. Если UID не зарегистрирован —
-        // пробрасываем как обычный data callback.
+        // Engine API responses: try to deliver to the pending registry / chunked
+        // candles aggregator / internal recovery flags. If the UID is not
+        // registered, pass it through as an ordinary data callback.
         if candles_chunk_consumed_by_reader {
             return Ok(());
         }
         if let Some(meta) = Self::engine_response_meta_from_payload(&payload) {
-            // 1. Chunked candles (RequestCandlesData) — aggregator поддерживает
-            // несколько response пакетов с одинаковым UID. До завершения сборки
-            // не дропаем slot.
+            // 1. Chunked candles (RequestCandlesData) — the aggregator supports
+            // multiple response packets with the same UID. Do not drop the slot
+            // until assembly is complete.
             let now_ms = self.now_ms();
             if meta.method == EngineMethod::RequestCandlesData {
                 if let Some(resp) = parse_engine_response(&payload) {
                     if Self::handle_candles_chunk_in_map(&mut self.pending_candles, &resp, now_ms) {
-                        // Чанк потреблён aggregator'ом. Передаём в on_data только
-                        // если потребитель НЕ использует async API (тогда тут merged
-                        // ещё не готов — пусть приложение видит сырые chunks).
-                        // Однако: чтобы не путать — пропускаем on_data callback.
-                        // Async-потребитель получит результат через Receiver<MergedCandles>.
+                        // The chunk was consumed by the aggregator. Forward to
+                        // on_data only if the consumer does NOT use the async API
+                        // (in that case the merged result is not ready yet — let
+                        // the application see raw chunks). However: to avoid
+                        // confusion we skip the on_data callback. An async consumer
+                        // gets the result via Receiver<MergedCandles>.
                         return Ok(());
                     }
                 }
             }
-            // Если slot не зарегистрирован — fallback на pending registry /
-            // on_data для fire-and-forget API users.
+            // If the slot is not registered — fall back to the pending registry /
+            // on_data for fire-and-forget API users.
 
             let pending_side_effect_owner = api_pending_consumed_by_reader
                 && sink.is_buffer()
@@ -212,37 +214,40 @@ impl Client {
 
             self.apply_engine_response_client_bookkeeping(&resp);
 
-            // 2. Pending registry (обычный async API).
+            // 2. Pending registry (ordinary async API).
             let pending_consumed =
                 api_pending_consumed_by_reader || self.api_pending.dispatch(resp).is_none();
             if !pending_consumed || sink.is_buffer() {
-                // Если response не ждал конкретный receiver — это обычный API event.
-                // Если ждал, но мы в Dispatcher mode, всё равно отдаём raw payload
-                // dispatcher'у: active state (markets/indexes/tags) должен обновиться
-                // независимо от того, ждёт ли user code этот же ответ через Receiver.
-                // Callback mode сохраняет семантику: pending response не
-                // дублируется в on_data callback.
+                // If no specific receiver was waiting for the response — it is an
+                // ordinary API event. If one was waiting but we are in Dispatcher
+                // mode, we still hand the raw payload to the dispatcher: active
+                // state (markets/indexes/tags) must update regardless of whether
+                // user code is also waiting for this response via a Receiver.
+                // Callback mode preserves the semantics: a pending response is not
+                // duplicated into the on_data callback.
                 sink.deliver_owned(Command::API, payload);
             }
             return Ok(());
         }
-        // Не распарсилось — fallback на raw sink.
+        // Failed to parse — fall back to the raw sink.
         Err(payload)
     }
 
-    /// Поглотить candles chunk через pending aggregator. Возвращает `true` если slot
-    /// найден и chunk обработан (даже если merged ещё не готов — копить дальше);
-    /// `false` если UID не зарегистрирован (потребитель не использует async API).
+    /// Absorb a candles chunk through the pending aggregator. Returns `true` if the
+    /// slot was found and the chunk was processed (even if merged is not ready yet —
+    /// keep accumulating); `false` if the UID is not registered (the consumer does
+    /// not use the async API).
     ///
-    /// Когда aggregator вернул merged — sender'у отправляется готовый `MergedCandles`,
-    /// slot удаляется. Если sender уже дропнут (receiver не ждёт) — slot всё равно
-    /// удаляется (semantic = "fire-and-forget с финализацией").
+    /// When the aggregator returns merged, the completed `MergedCandles` is sent to
+    /// the sender and the slot is removed. If the sender has already been dropped
+    /// (no receiver waiting), the slot is removed anyway (semantics =
+    /// "fire-and-forget with finalization").
     pub(crate) fn handle_candles_chunk_in_map(
         pending_candles: &mut HashMap<u64, PartialCandles>,
         resp: &EngineResponse,
         _now_ms: i64,
     ) -> bool {
-        // Проверяем slot отдельным lookup — потом полное удаление через remove() если merged.
+        // Check the slot with a separate lookup — then full removal via remove() if merged.
         if !resp.success {
             if let Some(partial) = pending_candles.remove(&resp.request_uid) {
                 log::warn!(target: "moonproto::client",

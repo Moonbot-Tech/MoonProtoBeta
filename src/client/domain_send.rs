@@ -50,8 +50,8 @@ impl Client {
         true
     }
 
-    /// `send_trade` с UniqueKey — для команд имеющих `[MoonCmdUnique(UK_*)]` атрибут.
-    /// Старые pending команды с тем же UKey удаляются из `self.sending`/`self.pending_h`
+    /// `send_trade` with a UniqueKey — for commands carrying the `[MoonCmdUnique(UK_*)]` attribute.
+    /// Older pending commands with the same UKey are removed from `self.sending`/`self.pending_h`
     /// (matches Delphi SendCmdInt:780-785 + CheckSendingData).
     pub(super) fn send_trade_keyed(
         &self,

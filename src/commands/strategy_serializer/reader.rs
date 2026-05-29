@@ -12,17 +12,17 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 
-/// Парсинг с DEFLATE-сжатого payload'а (как приходит в `TStratSnapshot.data`).
+/// Parse from a DEFLATE-compressed payload (as it arrives in `TStratSnapshot.data`).
 pub fn parse_strategy_batch(deflate_bytes: &[u8]) -> Option<StrategyBatch> {
     parse_strategy_batch_with_schema(deflate_bytes, None)
 }
 
-/// Парсинг payload'а с проверкой полей по live `TStratSchema`.
+/// Parse a payload with field validation against the live `TStratSchema`.
 ///
-/// Если schema передана, reader повторяет Delphi `BuildReaderProps`/`ReadField`:
-/// имя должно существовать в public `TStrategy` schema, а wire TypeID должен
-/// совпасть с RTTI TypeID. Иначе поле пропускается через `SkipFieldByTypeID`.
-/// Без schema функция остаётся generic reader'ом wire-format для диагностики.
+/// If a schema is provided, the reader replicates Delphi `BuildReaderProps`/`ReadField`:
+/// the name must exist in the public `TStrategy` schema, and the wire TypeID must
+/// match the RTTI TypeID. Otherwise the field is skipped via `SkipFieldByTypeID`.
+/// Without a schema the function stays a generic wire-format reader for diagnostics.
 pub fn parse_strategy_batch_with_schema(
     deflate_bytes: &[u8],
     schema: Option<&StrategySchema>,
@@ -69,7 +69,7 @@ fn strategy_plain_capacity_hint(deflate_len: usize) -> usize {
         .clamp(4 * 1024, 8 * 1024 * 1024)
 }
 
-/// Парсинг уже распакованного плоского payload'а (для случая если decompression сделан снаружи).
+/// Parse an already-decompressed flat payload (for the case where decompression was done externally).
 pub fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
     parse_strategy_batch_plain_with_schema(data, None)
 }
@@ -241,7 +241,7 @@ fn read_strategy(
         }
 
         let value: Option<FieldValue> = if is_zero {
-            // Value bytes отсутствуют (Delphi: `If (TypeID and TID_ZERO_FLAG) <> 0 then exit`).
+            // Value bytes are absent (Delphi: `If (TypeID and TID_ZERO_FLAG) <> 0 then exit`).
             FieldValue::zero(real_type)
         } else {
             try_read_field_value(data, pos, real_type)
@@ -251,12 +251,12 @@ fn read_strategy(
             if let Some(name) = field_names.get(field_idx) {
                 fields.push_deserialized_field(Arc::clone(name), v);
             }
-            // Иначе — поле известного типа, но имя не в словаре. Поведение Delphi:
-            // ReaderProps[idx] = nil → SkipField; в данной точке мы УЖЕ прочитали значение,
-            // так что просто игнорируем (позиция корректна).
+            // Otherwise the field is of a known type, but the name is not in the dictionary.
+            // Delphi behavior: ReaderProps[idx] = nil → SkipField; at this point we have
+            // ALREADY read the value, so we just ignore it (the position is correct).
         }
-        // Если value=None и !is_zero — это случай unknown TypeID: `try_read_field_value`
-        // выполнил fallback skip 8 байт (как Delphi `SkipFieldByTypeID` else branch pas:373).
+        // If value=None and !is_zero, this is the unknown-TypeID case: `try_read_field_value`
+        // did a fallback skip of 8 bytes (like the Delphi `SkipFieldByTypeID` else branch pas:373).
     }
 
     Some(StrategySnapshot {
@@ -270,8 +270,8 @@ fn read_strategy(
     })
 }
 
-/// Читает значение по `type_id`. Если type_id неизвестный — fallback skip 8 байт
-/// (как `SkipFieldByTypeID` pas:373: `Stream.Position := Stream.Position + 8`).
+/// Reads a value by `type_id`. If type_id is unknown, fall back to skipping 8 bytes
+/// (like `SkipFieldByTypeID` pas:373: `Stream.Position := Stream.Position + 8`).
 pub(crate) fn try_read_field_value(
     data: &[u8],
     pos: &mut usize,
@@ -323,7 +323,7 @@ pub(crate) fn try_read_field_value(
             Some(FieldValue::String(s))
         }
         _ => {
-            // Unknown — fallback skip 8 байт. Позиция сдвигается, но значение не возвращается.
+            // Unknown — fallback skip of 8 bytes. The position advances, but no value is returned.
             *pos = (*pos + 8).min(data.len());
             None
         }

@@ -8,7 +8,7 @@ use crate::commands::market::EngineStreamReader;
 use super::{MarketTokenTags, MarketsEvent, MarketsState, TokenTags};
 
 impl MarketsState {
-    /// Применить ответ `emk_CheckBinanceTags`.
+    /// Apply the `emk_CheckBinanceTags` response.
     ///
     /// Delphi `TMoonProtoEngine.CheckBinanceTags` clears seen state for all
     /// markets, applies tags for markets present in the response, then clears

@@ -25,7 +25,7 @@ impl MarketsState {
         self.market_indexes.as_slice()
     }
 
-    /// Получить стабильный Delphi-like handle маркета по имени.
+    /// Get a stable Delphi-like market handle by name.
     ///
     /// The handle remains valid after listing refresh because the surrounding
     /// list/dictionaries are COW-replaced while the market object itself stays
@@ -34,7 +34,7 @@ impl MarketsState {
         self.handles_by_name.get(market_name).cloned()
     }
 
-    /// Получить owned snapshot маркета по имени.
+    /// Get an owned market snapshot by name.
     pub fn market_snapshot(&self, market_name: &str) -> Option<Market> {
         self.get(market_name).map(|handle| handle.snapshot())
     }
@@ -76,16 +76,16 @@ impl MarketsState {
         self.market_index_by_name.get(market_name).copied()
     }
 
-    /// Получить цену маркета по `mIndex`.
+    /// Get a market price by `mIndex`.
     ///
-    /// Цена живёт на `Market` (Delphi `TMarket`); возвращается копией под коротким
-    /// read-lock, как [`MarketHandle::balance_position`].
+    /// The price lives on the `Market` (Delphi `TMarket`); it is returned as a copy under a
+    /// short read-lock, like [`MarketHandle::balance_position`].
     pub fn price_by_index(&self, m_index: u16) -> Option<MarketPrice> {
         let idx = self.local_pos_for_server_index(m_index)?;
         self.markets.get(idx).map(|handle| handle.with(|m| m.price))
     }
 
-    /// Получить цену маркета по имени (через by_name lookup).
+    /// Get a market price by name (via the by_name lookup).
     pub fn price(&self, market_name: &str) -> Option<MarketPrice> {
         self.handles_by_name
             .get(market_name)
@@ -115,7 +115,7 @@ impl MarketsState {
             .map(|handle| handle.with(|market| market.trade_tail))
     }
 
-    /// Теги маркета (пустые если не было `apply_token_tags`).
+    /// Market tags (empty if `apply_token_tags` was never called).
     pub fn tags(&self, market_name: &str) -> TokenTags {
         self.token_tags
             .get(market_name)

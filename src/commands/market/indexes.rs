@@ -1,13 +1,13 @@
 use super::{write_str, EngineStreamReader};
 
-/// Ответ `emk_GetMarketsIndexes`: список имён маркетов в том же порядке что в `Markets.FList`.
-/// `index` = позиция в массиве (соответствует `mIndex` в Delphi).
+/// `emk_GetMarketsIndexes` response: list of market names in the same order as in `Markets.FList`.
+/// `index` = position in the array (corresponds to `mIndex` in Delphi).
 /// Wire-form (MoonProtoEngineServer.pas:278-284):
 ///   `count:i32 + names[count] (UTF-8 strings)`.
 #[doc(hidden)]
 pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
     let mut r = EngineStreamReader::new(data);
-    // Каждое имя — UTF-8 string с u16-prefix. Минимум 2 байта (пустая строка).
+    // Each name is a UTF-8 string with a u16 prefix. At least 2 bytes (empty string).
     let count = r.read_count()?;
     let mut names = Vec::with_capacity(r.bounded_count_capacity(count, 2));
     for _ in 0..count {

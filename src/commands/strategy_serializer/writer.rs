@@ -7,14 +7,15 @@ use flate2::Compression;
 use std::collections::HashMap;
 use std::io::Write;
 
-/// Builder для создания DEFLATE-compressed snapshot'а. Wire-format зеркало
+/// Builder for producing a DEFLATE-compressed snapshot. Wire-format mirror of
 /// `BeginWrite/WriteStrategy/FinalizeWrite`: dicts, headers, type IDs, zero flag,
-/// raw-deflate и length truncation совпадают с Delphi.
+/// raw-deflate, and length truncation match Delphi.
 ///
-/// Delphi writer идёт по RTTI `TStrategy` + `GetStrategyPropMask`. Rust не
-/// хранит статическую копию этих таблиц: для non-empty snapshot writer требует
-/// live `TStratSchema`, полученную от сервера в Init. Schema даёт тот же порядок
-/// public fields, TypeID, PropMask visibility и non-zero defaults.
+/// The Delphi writer walks RTTI `TStrategy` + `GetStrategyPropMask`. Rust does
+/// not keep a static copy of these tables: for a non-empty snapshot the writer
+/// requires the live `TStratSchema` received from the server in Init. The schema
+/// gives the same public field order, TypeID, PropMask visibility, and non-zero
+/// defaults.
 #[derive(Debug)]
 pub struct StrategyBatchBuilder<'a> {
     schema: &'a StrategySchema,
@@ -39,8 +40,8 @@ impl<'a> StrategyBatchBuilder<'a> {
         }
     }
 
-    /// Валидный serializer payload с нулём стратегий. Schema не нужна, потому
-    /// что Delphi `FinalizeWrite` для empty batch пишет пустые dicts/body.
+    /// Valid serializer payload with zero strategies. No schema is needed,
+    /// because Delphi `FinalizeWrite` writes empty dicts/body for an empty batch.
     pub fn empty_payload() -> Vec<u8> {
         finalize_strategy_batch(Vec::new(), Vec::new(), Vec::new(), 0)
     }
@@ -65,7 +66,7 @@ impl<'a> StrategyBatchBuilder<'a> {
         i
     }
 
-    /// Добавить одну стратегию.
+    /// Add a single strategy.
     pub fn write_strategy(&mut self, s: &StrategySnapshot) {
         let path_id = self.path_index(&s.path);
         // Header
@@ -76,7 +77,7 @@ impl<'a> StrategyBatchBuilder<'a> {
         self.body.push(s.kind);
         self.body.extend_from_slice(&path_id.to_le_bytes());
 
-        // Сериализуем поля. Записываем количество (placeholder), потом обновим.
+        // Serialize the fields. Write the count (placeholder), update it later.
         let count_offset = self.body.len();
         self.body.extend_from_slice(&[0u8, 0u8]);
         let mut field_count = 0u16;
@@ -103,7 +104,7 @@ impl<'a> StrategyBatchBuilder<'a> {
         self.count = self.count.wrapping_add(1);
     }
 
-    /// Финализировать в DEFLATE-compressed payload (формат TStratSnapshot.data).
+    /// Finalize into a DEFLATE-compressed payload (TStratSnapshot.data format).
     pub fn finalize(self) -> Vec<u8> {
         finalize_strategy_batch(self.name_dict, self.path_dict, self.body, self.count)
     }
@@ -131,7 +132,7 @@ fn finalize_strategy_batch(
     plain.extend_from_slice(&(name_dict.len() as u16).to_le_bytes());
     for n in &name_dict {
         let b = n.as_bytes();
-        // PathLen/NameLen — byte (max 255). Для стратегий имена полей < 255 байт.
+        // PathLen/NameLen are a byte (max 255). For strategies, field names are < 255 bytes.
         write_u8_len_bytes(&mut plain, b);
     }
     // PathDict
@@ -144,7 +145,7 @@ fn finalize_strategy_batch(
     plain.extend_from_slice(&count.to_le_bytes());
     plain.extend_from_slice(&body);
 
-    // DEFLATE compress (raw, без zlib header — Delphi -15)
+    // DEFLATE compress (raw, no zlib header — Delphi -15)
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&plain).unwrap();
     encoder.finish().unwrap()
@@ -153,7 +154,7 @@ fn finalize_strategy_batch(
 pub(crate) fn write_field(out: &mut Vec<u8>, v: &FieldValue) {
     let type_id = v.type_id();
     if v.is_zero() {
-        // Записываем только TypeID с флагом ZERO; value bytes отсутствуют.
+        // Write only the TypeID with the ZERO flag; value bytes are absent.
         out.push(type_id | TID_ZERO_FLAG);
         return;
     }

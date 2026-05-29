@@ -1,30 +1,30 @@
 # moonproto.conf.example
 #
-# Пример конфигурации для moonproto клиента.
+# Example configuration for a moonproto client.
 #
-# Использование:
-#   1. Скопировать этот файл в `moonproto.conf` (или другое имя по выбору).
-#   2. Отредактировать значения.
-#   3. В своём коде прочитать файл и передать значения в либу.
-#      См. examples/trading_flow.rs для минимального подключения.
+# Usage:
+#   1. Copy this file to `moonproto.conf` (or any name you prefer).
+#   2. Edit the values.
+#   3. Read the file in your own code and pass the values into the library.
+#      See examples/trading_flow.rs for a minimal connection.
 #
-# Формат: `key = value`, по одному параметру на строку.
-# Комментарии: строки начинающиеся с `#` игнорируются.
-# Пустые строки игнорируются.
+# Format: `key = value`, one parameter per line.
+# Comments: lines starting with `#` are ignored.
+# Blank lines are ignored.
 #
 # ============================================================================
-# NTP — синхронизация времени
+# NTP - time synchronization
 # ============================================================================
 #
-# Хост NTP-сервера для коррекции локального времени клиента.
-# Используется для корректного отображения timestamp'ов прикладных команд
-# (orders, trades) в UI. НЕ используется для replay-защиты или шифрования.
+# NTP server host used to correct the client's local time.
+# Used for correct display of application-command timestamps (orders, trades)
+# in the UI. NOT used for replay protection or encryption.
 #
-# Default (если не указан): pool.ntp.org
+# Default (if omitted): pool.ntp.org
 #
-# Альтернативы:
+# Alternatives:
 #   - time.cloudflare.com
 #   - time.google.com
-#   - <ip-сервера-MoonBot>:<порт> — если бот предоставляет свой NTP (зависит от конфига сервера)
+#   - <moonbot-server-ip>:<port> - if the bot provides its own NTP (depends on the server config)
 #
 ntp_host = pool.ntp.org

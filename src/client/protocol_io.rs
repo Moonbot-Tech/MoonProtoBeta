@@ -1,14 +1,14 @@
 ﻿use super::*;
 
 impl Client {
-    /// Auto-compress payload если `cmd` ещё не помечен `COMPRESSED_FLAG`, размер > 64 байт
-    /// и `mp_compress` дал savings ≥ 5% (`mp_compress` сам возвращает None если меньше).
-    /// Соответствует Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
+    /// Auto-compress payload if `cmd` is not yet marked with `COMPRESSED_FLAG`, size > 64 bytes
+    /// and `mp_compress` yielded savings ≥ 5% (`mp_compress` itself returns None otherwise).
+    /// Matches Delphi `TMoonProtoDataToSend.Create` (MoonProtoIntStruct.pas:661-672).
     ///
-    /// Аудит #3 (audit_delphi_deviation): возвращает `Cow<'_, [u8]>` вместо `Vec<u8>`.
-    /// Раньше делали безусловный `data.to_vec()` даже когда компрессия не применялась —
-    /// 1 alloc на каждый отправляемый H/L/Sliced пакет. В Delphi `TMemoryStream` передаётся
-    /// по ссылке, ноль копий. Теперь `Cow::Borrowed` когда без сжатия → zero alloc.
+    /// Audit #3 (audit_delphi_deviation): returns `Cow<'_, [u8]>` instead of `Vec<u8>`.
+    /// Previously we did an unconditional `data.to_vec()` even when compression did not apply —
+    /// 1 alloc per H/L/Sliced packet sent. In Delphi `TMemoryStream` is passed by reference,
+    /// zero copies. Now `Cow::Borrowed` when uncompressed → zero alloc.
     pub(crate) fn maybe_compress<'a>(cmd: u8, data: &'a [u8]) -> (u8, std::borrow::Cow<'a, [u8]>) {
         if cmd & COMPRESSED_FLAG == 0 && data.len() > MIN_SIZE_TO_COMPRESS {
             if let Some(compressed) = compression::mp_compress(data) {
@@ -41,14 +41,15 @@ impl Client {
             self.cfg.mask_ver.to_byte(),
             &mut self.transport_mode_state,
         );
-        // Извлекаем packet чтобы borrow checker не ругался на двойной &mut self
-        // (dispatch_send берёт &mut self, ему не нужен send_buf после copy в socket).
-        // Из send_buf берём slice — оно живёт в self, socket.send_to не сохранит ссылку.
-        // SAFETY pattern: take/restore чтобы &mut self в dispatch_send не пересекался с
-        // &self.send_buf — но проще: pass slice через owned vec swap.
+        // Take the packet out so the borrow checker does not complain about a double
+        // &mut self (dispatch_send takes &mut self and does not need send_buf after the
+        // copy into the socket). We take a slice from send_buf — it lives in self, and
+        // socket.send_to does not retain the reference. SAFETY pattern: take/restore so
+        // that &mut self in dispatch_send does not overlap with &self.send_buf — but
+        // simpler: pass the slice via an owned vec swap.
         let packet = std::mem::take(&mut self.send_buf);
         self.dispatch_send(cmd, &packet, extra.as_deref(), addr);
-        // Возвращаем буфер обратно (capacity сохранился, content сейчас не нужен).
+        // Return the buffer (capacity preserved, content not needed right now).
         self.send_buf = packet;
         self.send_buf.clear();
     }
@@ -73,10 +74,10 @@ impl Client {
         self.send_buf.clear();
     }
 
-    /// Реально отправляет пакет (плюс optional extra-пакет транспорта) с обработкой ошибок.
-    /// Закрывает D-06: send errors больше не игнорируются через `.ok()`.
-    /// EWOULDBLOCK логируется как warn (нормальная буферизация ядра). Прочие ошибки логируются,
-    /// но не меняют reconnect-state: Delphi `DoSendPacket` возвращает false и не ставит
+    /// Actually sends the packet (plus an optional extra transport packet) with error handling.
+    /// Closes D-06: send errors are no longer ignored via `.ok()`.
+    /// EWOULDBLOCK is logged as warn (normal kernel buffering). Other errors are logged
+    /// but do not change reconnect state: Delphi `DoSendPacket` returns false and does not set
     /// `ForceDisconnect`.
     pub(crate) fn dispatch_send(
         &mut self,
@@ -119,8 +120,8 @@ impl Client {
                 addr
             );
         }
-        // Сначала выполняем сетевые операции, собирая Result'ы в owned-переменные,
-        // потом обрабатываем через self.should_log без conflicting borrow.
+        // First perform the network operations, collecting the Results into owned
+        // variables, then process them through self.should_log without a conflicting borrow.
         let extra_result = match (extra, self.socket.as_ref()) {
             (Some(extra_pkt), Some(sock)) => Some(sock.send_to(extra_pkt, addr)),
             _ => None,

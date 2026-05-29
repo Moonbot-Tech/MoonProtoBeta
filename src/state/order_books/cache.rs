@@ -4,45 +4,45 @@ use super::{BOOK_EXPIRED_TIMEOUT, BOOK_FULL_REQUEST_THROTTLE};
 use crate::commands::order_book::{compare_seq, OrderBookUpdate};
 use std::collections::VecDeque;
 
-/// Один кэшированный пакет (out-of-order).
+/// A single cached packet (out-of-order).
 #[derive(Debug, Clone)]
 pub(super) struct CachedPacket {
     pub(super) seq: u16,
     pub(super) pkt: OrderBookUpdate,
 }
 
-/// Per-(market_index, book_kind) кэш. Соответствует Delphi `TOrderBookCache`.
+/// Per-(market_index, book_kind) cache. Matches Delphi `TOrderBookCache`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OrderBookCache {
-    /// Следующий ожидаемый seq.
+    /// Next expected seq.
     pub(super) expected_seq: u16,
-    /// Последний применённый seq. Аналог Delphi `m.MoonProtoBookSeq[bookKind]`.
-    /// Начальное значение 0 важно: normal-mode применяет первый Diff без Full
-    /// (Delphi `MoonProtoEngine.pas:2066-2071`). Раньше использовалось `has_full: bool`,
-    /// что заставляло клиента отправлять лишний `RequestOrderBookFull` и
-    /// terminale не показывали degraded diff-view.
+    /// Last applied seq. Analogue of Delphi `m.MoonProtoBookSeq[bookKind]`.
+    /// The initial value 0 matters: normal-mode applies the first Diff without a
+    /// Full (Delphi `MoonProtoEngine.pas:2066-2071`). Previously a `has_full: bool`
+    /// was used, which forced the client to send a redundant `RequestOrderBookFull`
+    /// and terminals did not show the degraded diff view.
     pub(super) last_applied_seq: u16,
-    /// Сортированный по seq список накопленных out-of-order пакетов.
-    /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` чтобы `pop_front()` в `drain_cache`
-    /// был O(1) вместо O(N) на `Vec::remove(0)`. На burst recovery 64 пакета это снимает
+    /// List of accumulated out-of-order packets, sorted by seq.
+    /// audit_rust_quality #5 + audit_robustness M5: `VecDeque` so that `pop_front()` in `drain_cache`
+    /// is O(1) instead of O(N) on `Vec::remove(0)`. On a burst recovery of 64 packets this saves
     /// ~2080 memmove ops (64+63+62+…+1).
     pub(super) packets: VecDeque<CachedPacket>,
-    /// Помечен ли кэш как corrupted (нужен Full).
+    /// Whether the cache is marked as corrupted (a Full is needed).
     pub(super) corrupted: bool,
-    /// Время последнего отправленного `RequestOrderBookFull` (throttle).
+    /// Time of the last sent `RequestOrderBookFull` (throttle).
     pub(super) last_full_request_ms: i64,
-    /// Время, когда кэш стал непустым (0 если пуст). Используется в `is_expired`.
+    /// Time when the cache became non-empty (0 if empty). Used in `is_expired`.
     pub(super) cache_not_empty_since_ms: i64,
 }
 
 impl OrderBookCache {
-    /// A-17 fix: используем стандартный `partition_point` вместо самописного binary search.
-    /// Wrapping-safe сравнение через `compare_seq` — оставляем (стандартный `binary_search`
-    /// не годится из-за u16 wrap-around).
+    /// A-17 fix: use the standard `partition_point` instead of a hand-written binary search.
+    /// Wrapping-safe comparison via `compare_seq` — kept (the standard `binary_search`
+    /// is unusable due to the u16 wrap-around).
     fn binary_search_insert(&mut self, seq: u16) -> usize {
-        // VecDeque не имеет `partition_point` на ring-форме; make_contiguous() выравнивает
-        // в один slice (O(1) если ring не wrapped, O(N) только при reset wrapped state).
-        // Для нашего N≤64 — пренебрежимо.
+        // VecDeque has no `partition_point` in ring form; make_contiguous() aligns
+        // it into a single slice (O(1) if the ring is not wrapped, O(N) only when
+        // resetting a wrapped state). For our N≤64 this is negligible.
         self.packets.make_contiguous();
         self.packets
             .as_slices()
@@ -77,7 +77,7 @@ impl OrderBookCache {
             && (now_ms - self.cache_not_empty_since_ms).abs() > BOOK_EXPIRED_TIMEOUT
     }
 
-    /// `MoonProtoOrderBook.pas:532-539 TryRequestFull` — true если надо отправить запрос.
+    /// `MoonProtoOrderBook.pas:532-539 TryRequestFull` — true if a request must be sent.
     pub(super) fn try_request_full(&mut self, now_ms: i64) -> bool {
         if !self.corrupted {
             return false;

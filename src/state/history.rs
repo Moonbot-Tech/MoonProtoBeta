@@ -574,9 +574,9 @@ pub struct MarketDerivedSnapshot {
     /// retained-history sources for that window, matching Delphi's "do not
     /// lower a hotter delta with a colder source" shape.
     pub deltas: DerivedDeltaSnapshot,
-    /// In-progress (ещё не засиленная) 5m свеча — Delphi `TMarket.FCandle`.
-    /// Живёт ВНЕ засиленного `candles_5m` ring; чарт дорисовывает её как live-бар.
-    /// `None` пока в текущем периоде не было трейдов.
+    /// In-progress (not yet sealed) 5m candle — Delphi `TMarket.FCandle`.
+    /// Lives OUTSIDE the sealed `candles_5m` ring; the chart draws it as a
+    /// live bar. `None` while the current period has had no trades yet.
     pub current_candle: Option<Candle5mRow>,
 }
 

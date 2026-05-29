@@ -1,20 +1,20 @@
 //! Pending Engine API response registry.
 //!
-//! Клиент отправляет `TEngineRequest` с уникальным UID; сервер отвечает
-//! `TEngineResponse` с тем же UID. `ApiPending` хранит маппинг
+//! The client sends a `TEngineRequest` with a unique UID; the server replies with
+//! a `TEngineResponse` carrying the same UID. `ApiPending` keeps the mapping
 //! `uid → mpsc::Sender<EngineResponse>`.
 //!
-//! Обычные приложения используют `MoonClient` intents/events/snapshots и не
-//! трогают этот registry напрямую. Внутренние runtime/test helpers могут
-//! зарегистрировать internal receiver, но ответы доставляются только пока живой runtime
-//! иначе ответ физически не будет decoded.
+//! Normal applications use `MoonClient` intents/events/snapshots and do not
+//! touch this registry directly. Internal runtime/test helpers may
+//! register an internal receiver, but responses are delivered only while the runtime is alive;
+//! otherwise the response is physically never decoded.
 //!
-//! Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже крутит
-//! main loop клиента. Как только `ProtocolCore` receive phase декодировал
-//! зарегистрированный `TEngineResponse`, он доставляет его в `ApiPending` сразу.
-//! Тяжёлые Delphi-style callers вроде `GetMarketsList` / `UpdateMarketsList`
-//! применяют active state из pending receiver'а после `SendAndWait`; unmatched /
-//! fire-and-forget responses продолжают идти через active-dispatch.
+//! A direct `rx.recv_timeout(...)` is appropriate only when another thread is already
+//! running the client main loop. As soon as the `ProtocolCore` receive phase decodes
+//! a registered `TEngineResponse`, it delivers it to `ApiPending` immediately.
+//! Heavy Delphi-style callers like `GetMarketsList` / `UpdateMarketsList`
+//! apply active state from the pending receiver after `SendAndWait`; unmatched /
+//! fire-and-forget responses keep flowing through active-dispatch.
 //!
 //! Pending slot lifetime follows Delphi `TMoonProtoEngine.SendAndWait`: normal
 //! one-shot callers remove their slot on timeout. Raw async users still get a
@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use crate::commands::engine_api::EngineResponse;
 
-/// Default request/response timeout — 12 секунд. Совпадает с Delphi
-/// `TMoonProtoEngine.FTimeout = 12000` (MoonProtoEngine.pas) для `SendAndWait`.
+/// Default request/response timeout — 12 seconds. Matches Delphi
+/// `TMoonProtoEngine.FTimeout = 12000` (MoonProtoEngine.pas) for `SendAndWait`.
 pub const DEFAULT_PENDING_TIMEOUT_MS: i64 = 12_000;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -43,27 +43,27 @@ struct PendingState {
     last_sweep: Instant,
 }
 
-/// Реестр pending Engine API запросов.
+/// Registry of pending Engine API requests.
 ///
-/// Thread-safe (внутри `Arc<Mutex>`). Можно клонировать `Arc<ApiPending>` и передавать в любые потоки.
+/// Thread-safe (internally `Arc<Mutex>`). `Arc<ApiPending>` can be cloned and passed to any threads.
 ///
 pub struct ApiPending {
     state: Mutex<PendingState>,
 }
 
 impl ApiPending {
-    /// Convenience: построить уже обёрнутый `Arc<ApiPending>`. Большинство callers
-    /// хотят shared доступ (Client держит, receive phase получает clone'd Arc).
+    /// Convenience: build an already-wrapped `Arc<ApiPending>`. Most callers
+    /// want shared access (the Client holds one, the receive phase gets a cloned Arc).
     pub fn new_arc() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// D-V2-02 fix: graceful recovery после Mutex poisoning. На long-running клиенте
-    /// невозможно гарантировать что какой-то поток не запаникует под локом — в этом
-    /// случае Rust помечает Mutex как poisoned и обычный `.lock().unwrap()` тоже
-    /// паникнул бы каскадом. Восстанавливаем guard из PoisonError — пусть API
-    /// pending registry продолжит работать (потеря части in-flight ответов терпима,
-    /// падение всего клиента — нет).
+    /// D-V2-02 fix: graceful recovery after Mutex poisoning. On a long-running client
+    /// it is impossible to guarantee that no thread panics while holding the lock — in that
+    /// case Rust marks the Mutex as poisoned and a plain `.lock().unwrap()` would
+    /// also panic in a cascade. We recover the guard from PoisonError — let the API
+    /// pending registry keep working (losing some in-flight responses is tolerable,
+    /// crashing the whole client is not).
     #[inline]
     fn lock_state(&self) -> std::sync::MutexGuard<'_, PendingState> {
         match self.state.lock() {
@@ -97,22 +97,22 @@ impl ApiPending {
         before - state.map.len()
     }
 
-    /// Зарегистрировать ожидание ответа по `uid`.
+    /// Register a wait for a response by `uid`.
     ///
-    /// Прямой `rx.recv_timeout(...)` подходит только когда другой thread уже
-    /// крутит main loop клиента; receive phase доставит зарегистрированный
-    /// response сразу после decode, но writer/send progress всё ещё должен
-    /// где-то выполняться.
+    /// A direct `rx.recv_timeout(...)` is appropriate only when another thread is already
+    /// running the client main loop; the receive phase will deliver the registered
+    /// response right after decode, but writer/send progress must still be
+    /// driven somewhere.
     ///
-    /// Если на тот же `uid` уже была регистрация — старый sender дропается (старый
-    /// receiver получит "channel closed").
+    /// If a registration already existed for the same `uid`, the old sender is dropped (the old
+    /// receiver gets "channel closed").
     pub fn register(&self, uid: u64) -> mpsc::Receiver<EngineResponse> {
         self.register_with_timeout(uid, Self::default_timeout())
     }
 
-    /// Зарегистрировать ожидание с явным deadline. Внутренний runtime использует
-    /// это для non-blocking запросов, чтобы потерянный response не оставлял
-    /// sender в registry навсегда.
+    /// Register a wait with an explicit deadline. The internal runtime uses
+    /// this for non-blocking requests, so a lost response does not leave a
+    /// sender in the registry forever.
     pub(crate) fn register_with_timeout(
         &self,
         uid: u64,
@@ -127,11 +127,11 @@ impl ApiPending {
         rx
     }
 
-    /// Доставить response в ожидающего receiver'а.
+    /// Deliver a response to the waiting receiver.
     ///
-    /// Возвращает `Some(resp)` если UID **не зарегистрирован** (response пришёл "сам",
-    /// без активного waitера — потребитель может обработать его через `on_data`).
-    /// Возвращает `None` если UID найден и response отправлен в receiver.
+    /// Returns `Some(resp)` if the UID is **not registered** (the response arrived "on its own",
+    /// with no active waiter — the consumer may handle it via `on_data`).
+    /// Returns `None` if the UID was found and the response was sent to the receiver.
     pub fn dispatch(&self, resp: EngineResponse) -> Option<EngineResponse> {
         let mut state = self.lock_state();
         let now = Instant::now();
@@ -143,8 +143,8 @@ impl ApiPending {
             return Some(resp);
         }
         {
-            // Если receiver был дропнут — отправка fails, response теряется.
-            // Это нормально: waiter уже не ждёт.
+            // If the receiver was dropped, the send fails and the response is lost.
+            // That is fine: the waiter is no longer waiting.
             let _ = entry.tx.send(resp);
             None
         }
@@ -184,7 +184,7 @@ impl ApiPending {
         true
     }
 
-    /// Удалить ожидание (например при timeout) чтобы освободить sender и не накапливать map.
+    /// Remove a wait (e.g. on timeout) to free the sender and avoid accumulating the map.
     pub fn remove(&self, uid: u64) {
         self.lock_state().map.remove(&uid);
     }
@@ -215,14 +215,14 @@ impl ApiPending {
         Self::sweep_expired_locked(&mut state, now, force)
     }
 
-    /// Количество активных ожиданий.
+    /// Number of active waits.
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         let _ = self.cleanup_expired(true);
         self.lock_state().map.len()
     }
 
-    /// Очистить все ожидания (например при reconnect).
+    /// Clear all waits (e.g. on reconnect).
     #[cfg(test)]
     pub fn clear(&self) {
         self.lock_state().map.clear();
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(p.pending_count(), 1);
         p.remove(10);
         assert_eq!(p.pending_count(), 0);
-        // recv должен вернуть error (Sender дропнут)
+        // recv must return an error (Sender dropped)
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
@@ -293,9 +293,9 @@ mod tests {
         let p = ApiPending::default();
         let rx_old = p.register(7);
         let rx_new = p.register(7);
-        // Старый sender дропнут — recv должен вернуть error.
+        // Old sender dropped — recv must return an error.
         assert!(rx_old.recv_timeout(Duration::from_millis(50)).is_err());
-        // Новый sender активен.
+        // New sender is active.
         p.dispatch(mk_resp(7));
         let r = rx_new.recv_timeout(Duration::from_millis(100)).unwrap();
         assert_eq!(r.request_uid, 7);

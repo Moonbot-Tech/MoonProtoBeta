@@ -108,7 +108,7 @@ fn tick_sends_first_time_immediately() {
     writer(&mut client).tick_periodic_refresh(0);
     assert_eq!(
         client.last_update_markets_ms, 0,
-        "первый тик должен зафиксировать timestamp 0"
+        "the first tick must record timestamp 0"
     );
 }
 
@@ -123,13 +123,13 @@ fn tick_respects_interval() {
     writer(&mut client).tick_periodic_refresh(100);
     assert_eq!(
         client.last_update_markets_ms, 50,
-        "interval не прошёл — last_update_markets_ms не меняется"
+        "interval not elapsed — last_update_markets_ms does not change"
     );
 
     writer(&mut client).tick_periodic_refresh(150);
     assert_eq!(
         client.last_update_markets_ms, 150,
-        "100ms прошло — отправка состоялась"
+        "100ms elapsed — the send happened"
     );
 }
 
@@ -144,11 +144,11 @@ fn tick_does_nothing_when_both_disabled() {
     writer(&mut client).tick_periodic_refresh(1_000_000);
     assert_eq!(
         client.last_update_markets_ms, was_markets,
-        "update_markets выключен — last_update_markets_ms не меняется"
+        "update_markets disabled — last_update_markets_ms does not change"
     );
     assert_eq!(
         client.last_check_tags_ms, was_tags,
-        "check_tags выключен — last_check_tags_ms не меняется"
+        "check_tags disabled — last_check_tags_ms does not change"
     );
 }
 
@@ -163,11 +163,11 @@ fn tick_check_tags_independent_from_update_markets() {
     writer(&mut client).tick_periodic_refresh(1_000_000);
     assert_eq!(
         client.last_update_markets_ms, was_markets,
-        "update_markets выключен — не трогаем"
+        "update_markets disabled — leave it alone"
     );
     assert_eq!(
         client.last_check_tags_ms, 1_000_000,
-        "check_tags включен — трогаем"
+        "check_tags enabled — touch it"
     );
 }
 

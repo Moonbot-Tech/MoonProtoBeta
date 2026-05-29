@@ -2,11 +2,11 @@
 
 use std::net::UdpSocket;
 
-/// Установить SO_RCVBUF + SO_SNDBUF в 8 MB через socket2 (cross-platform).
-/// Закрывает ARCH §30 ("UDP buffer sizes — должны быть существенно больше sysctl-defaults").
-/// На пиковой нагрузке (~50K packets/sec) маленький ядерный буфер → silent drop.
-/// D-07 + D-08: ошибки больше не игнорируются — логируем как warn (OS может отказать,
-/// например Linux без `net.core.rmem_max ≥ 8MB` молча обрежет до настройки sysctl).
+/// Set SO_RCVBUF + SO_SNDBUF to 8 MB via socket2 (cross-platform).
+/// Closes ARCH §30 ("UDP buffer sizes — must be substantially larger than sysctl defaults").
+/// At peak load (~50K packets/sec) a small kernel buffer → silent drop.
+/// D-07 + D-08: errors are no longer ignored — logged as warn (the OS may refuse,
+/// e.g. Linux without `net.core.rmem_max ≥ 8MB` silently clamps to the sysctl setting).
 pub(crate) fn set_socket_buffers(sock: &UdpSocket) {
     let sock2 = socket2::SockRef::from(sock);
     if let Err(e) = sock2.set_recv_buffer_size(8 * 1024 * 1024) {
@@ -18,19 +18,19 @@ pub(crate) fn set_socket_buffers(sock: &UdpSocket) {
 }
 
 /// Cross-platform IP_DONTFRAGMENT / IP_MTU_DISCOVER / IP_DONTFRAG.
-/// Закрывает ARCH §20 (PMTU discovery должен работать на всех платформах, не только Windows).
-/// Без этого SizeAck/ProbeMTUAck отправляются с разрешённой фрагментацией → измерение PMTU
-/// становится ложным → клиент выбирает неоптимальный PMTU → каскадные retransmit'ы.
+/// Closes ARCH §20 (PMTU discovery must work on all platforms, not only Windows).
+/// Without it SizeAck/ProbeMTUAck are sent with fragmentation allowed → the PMTU
+/// measurement becomes false → the client picks a non-optimal PMTU → cascading retransmits.
 ///
-/// IPv4 vs IPv6: option name на IPv6 socket'е другой — `IP_DONTFRAGMENT` (v4) НЕ работает
-/// на AF_INET6, нужен `IPV6_DONTFRAG` (или `IPV6_MTU_DISCOVER` на Linux). Без этого dual-stack
-/// клиент (Android/iOS) silently failед бы PMTU detection. См. rust_quality audit #5.
+/// IPv4 vs IPv6: the option name on an IPv6 socket is different — `IP_DONTFRAGMENT` (v4) does NOT
+/// work on AF_INET6, you need `IPV6_DONTFRAG` (or `IPV6_MTU_DISCOVER` on Linux). Without it a
+/// dual-stack client (Android/iOS) would silently fail PMTU detection. See rust_quality audit #5.
 ///
-/// Return value setsockopt проверяется и при ошибке логируется warn (раньше silently
-/// ignored — fingerprinting'у проблемы было не оставлено следов).
+/// The setsockopt return value is checked and warn-logged on error (previously silently
+/// ignored — no trace was left for diagnosing the problem).
 pub(crate) fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
-    // Определяем IPv6 vs IPv4 по local address. Если local_addr вернул ошибку — fallback на IPv4
-    // semantics (большая часть систем — IPv4 по умолчанию).
+    // Determine IPv6 vs IPv4 from the local address. If local_addr returned an error — fall back
+    // to IPv4 semantics (most systems are IPv4 by default).
     let is_v6 = sock.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
 
     #[cfg(target_os = "windows")]
@@ -130,7 +130,7 @@ pub(crate) fn set_dont_fragment_for_socket(sock: &UdpSocket, enable: bool) {
         target_os = "ios"
     )))]
     {
-        // Other platforms (BSD, etc.) — no-op для безопасности, PMTU discovery не работает.
+        // Other platforms (BSD, etc.) — no-op for safety, PMTU discovery does not work.
         let _ = (sock, enable, is_v6);
     }
 }

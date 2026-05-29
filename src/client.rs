@@ -216,10 +216,11 @@ pub struct Client {
     app_token: u64,
     encode_key: MoonKey,
     decode_key: MoonKey,
-    /// B-V2-03 fix: кэшированный AES-128-GCM cipher для encode (encrypt direction).
-    /// Обновляется одновременно с `encode_key` при handshake. `Aes128Gcm::new` дорогой
-    /// (key schedule expansion ~100 байт операций) — раньше делалось на каждый
-    /// зашифрованный пакет (тысячи раз/сек). Теперь один раз за сессию.
+    /// B-V2-03 fix: cached AES-128-GCM cipher for encode (encrypt direction).
+    /// Refreshed together with `encode_key` at handshake. `Aes128Gcm::new` is
+    /// expensive (key schedule expansion, ~100 bytes of work) — it used to run
+    /// for every encrypted packet (thousands of times/sec). Now it runs once per
+    /// session.
     encode_cipher: Option<crate::crypto::Aes128Gcm>,
 
     _start: Instant,
@@ -251,16 +252,16 @@ pub struct Client {
     used_sliced_limit: bool,  // UsedSlicedLimit
     actual_sleep_time: f64,   // ActualSleepTime (EMA of actual loop cycle time)
 
-    // BytesPerSec sliding window (10 sec) — observability метрик.
-    // B-13 fix: running sum поддерживается одновременно с window — `bytes_per_sec_*` O(1)
-    // вместо O(N) обхода каждого запроса.
-    // #5 audit_delphi_deviation: O(1) EMA counter (порт Delphi MoonProtoUDPClient.pas:113-138
-    // AddBytesCount). VecDeque<(i64,u64)> sliding window удалён — он давал ~8MB heap на
-    // burst 50K pps + 100K push_back/pop_front ops/sec. Сейчас 24 байта + 4 ops/add.
+    // BytesPerSec sliding window (10 sec) — observability metric.
+    // B-13 fix: a running sum is maintained alongside the window — `bytes_per_sec_*` is O(1)
+    // instead of an O(N) walk on every request.
+    // #5 audit_delphi_deviation: O(1) EMA counter (port of Delphi MoonProtoUDPClient.pas:113-138
+    // AddBytesCount). The VecDeque<(i64,u64)> sliding window was removed — it cost ~8MB heap on
+    // a 50K pps burst plus 100K push_back/pop_front ops/sec. Now it is 24 bytes + 4 ops/add.
     bps_sent: BpsCounter,
     bps_recv: BpsCounter,
 
-    // Log throttle: ключ → последний raise timestamp (anti-spam).
+    // Log throttle: key -> last raise timestamp (anti-spam).
     log_last: std::collections::HashMap<&'static str, i64>,
 
     // Grouped send batch (TmpSendList equivalent)
@@ -287,30 +288,30 @@ pub struct Client {
     next_port: u16,
     ping_count: u32,
 
-    /// Реестр pending Engine API запросов.
-    /// При получении `Command::API` пакета — `dispatch` доставит response
-    /// в зарегистрированный receiver, если UID найден.
+    /// Registry of pending Engine API requests.
+    /// On receiving a `Command::API` packet, `dispatch` delivers the response
+    /// to the registered receiver if the UID is found.
     api_pending: Arc<ApiPending>,
 
-    /// Lifecycle callback — queued при изменении статуса канала (Connecting → Connected{fresh} → Reconnecting/Disconnected).
-    /// Установить через `client.on_lifecycle(cb)`. Опционально.
+    /// Lifecycle callback — queued on channel status change (Connecting -> Connected{fresh} -> Reconnecting/Disconnected).
+    /// Set it via `client.on_lifecycle(cb)`. Optional.
     lifecycle_cb: Option<LifecycleFn>,
     lifecycle_app_tx: Arc<Mutex<Option<mpsc::Sender<LifecycleEvent>>>>,
     /// Delphi `cfg.MoonProtoConfig.ServerUpdateSent`: set by UI commands that
     /// can make the server restart/change routing; consumed by BaseCheck init.
     server_update_sent: Arc<AtomicBool>,
-    /// Предыдущий auth_status (для детектирования переходов).
+    /// Previous auth_status (for detecting transitions).
     prev_auth_status: AuthStatus,
 
-    /// Кэш разрешённого адреса сервера. Закрывает B-05: до этого `server_addr()` форматировал
-    /// строку + `send_to(&str)` делал `getaddrinfo` resolve на каждый send (потенциально DNS-блокирующий).
-    /// Кэш сбрасывается при ошибке resolve (например, DNS отвалился) — на следующем bind_socket
-    /// повторно резолвится.
+    /// Cached resolved server address. Closes B-05: previously `server_addr()` formatted
+    /// a string and `send_to(&str)` ran a `getaddrinfo` resolve on every send (potentially
+    /// DNS-blocking). The cache is cleared on a resolve error (e.g. DNS went down) — it is
+    /// re-resolved on the next bind_socket.
     cached_server_addr: Option<SocketAddr>,
 
-    /// **Active library — subscription registry**: что app просил подписать.
-    /// До Init transport handshake не отправляет этот реестр. После Init reconnect
-    /// сам восстанавливает registry через текущие keys / market mapping.
+    /// **Active library — subscription registry**: what the app asked to subscribe.
+    /// The transport handshake does not send this registry before Init. After Init,
+    /// reconnect restores the registry itself via the current keys / market mapping.
     pub(crate) subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     subscription_summary: Arc<SubscriptionRegistrySummary>,
     subscription_trades_scope:
@@ -323,13 +324,13 @@ pub struct Client {
     /// Init pass opens the Delphi `InitDone` gate.
     domain_ready_flag: Arc<AtomicBool>,
 
-    /// Сохранённый intent первого и единственного init-прохода. Нужен для
-    /// post-reconnect restore без повторного Init.
+    /// Saved intent of the first and only init pass. Needed for post-reconnect
+    /// restore without a second Init.
     domain_restore: DomainRestoreIntent,
 
-    /// Был ли когда-нибудь успешный Connected (`Fine` получен ≥1 раз).
-    /// Используется в `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
-    /// при ПЕРВОМ Connected; для всех последующих `fresh = false`.
+    /// Whether a successful Connected ever happened (`Fine` received >=1 time).
+    /// Used in `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
+    /// on the FIRST Connected; for all later ones `fresh = false`.
     was_ever_connected: bool,
 
     /// Internal full-candles snapshot collectors by `request_uid`. Filled by
@@ -340,26 +341,26 @@ pub struct Client {
     /// candles through snapshots/events.
     pending_candles: HashMap<u64, PartialCandles>,
 
-    /// Прошлый PeerAppToken который был зарегистрирован в `MarketsState.indexes_synchronized = true`.
-    /// Используется в handshake/Ping processing для детекции server restart:
-    /// если incoming `peer_app_token != tracked_peer_app_token` — помечаем индексы stale.
-    /// 0 = ещё не было успешной синхронизации (init состояние).
+    /// The previous PeerAppToken that was registered with `MarketsState.indexes_synchronized = true`.
+    /// Used in handshake/Ping processing to detect a server restart:
+    /// if incoming `peer_app_token != tracked_peer_app_token` — mark the indexes stale.
+    /// 0 = no successful synchronization yet (init state).
     tracked_indexes_peer_app_token: u64,
 
-    /// `true` если init/API слой уже отправил markets indexes request и ждёт ответа.
-    /// Защита от шторма повторных явных запросов до получения ответа.
+    /// `true` if the init/API layer already sent a markets indexes request and is waiting for the response.
+    /// Guards against a storm of repeated explicit requests before a response arrives.
     indexes_fetch_in_flight: bool,
 
-    /// После reconnect restore: как только fresh `GetMarketsIndexes` успешно пришёл,
-    /// сразу запросить `UpdateMarketsList`. Это повторяет Delphi-смысл
-    /// `TMoonProtoEngine.UpdateMarketsList`: при новом `PeerAppToken` он сначала
-    /// синхронизирует индексы, затем обновляет prices/funding.
+    /// On reconnect restore: as soon as a fresh `GetMarketsIndexes` arrives
+    /// successfully, immediately request `UpdateMarketsList`. This reproduces the
+    /// Delphi meaning of `TMoonProtoEngine.UpdateMarketsList`: on a new `PeerAppToken`
+    /// it first synchronizes indexes, then refreshes prices/funding.
     update_markets_after_indexes: bool,
 
-    /// После reconnect restore: отложенный replay orderbook registry до fresh
-    /// `GetMarketsIndexes`. Delphi `CheckBookTopics` выходит, пока
-    /// `FLastServerAppToken <> PeerAppToken`; подписки стаканов нельзя replay'ить
-    /// до синхронизации индексов новой server app session.
+    /// On reconnect restore: deferred replay of the orderbook registry until a fresh
+    /// `GetMarketsIndexes`. Delphi `CheckBookTopics` returns early while
+    /// `FLastServerAppToken <> PeerAppToken`; orderbook subscriptions cannot be replayed
+    /// before the new server app session's indexes are synchronized.
     restore_orderbooks_after_indexes: bool,
 
     /// Delphi `TMoonProtoEngine.LastReconnectCheck` for AllTrades reconnect.
@@ -411,23 +412,23 @@ pub struct Client {
     /// public API docs.
     debug_outgoing_blackhole: Arc<AtomicBool>,
 
-    /// Когда (`now_ms`) был отправлен последний `api_get_markets_indexes`. Используется
-    /// для timeout protection: UDP-ответ мог потеряться — после `INDEXES_FETCH_TIMEOUT_MS`
-    /// сбрасываем `indexes_fetch_in_flight = false`. Сам timeout handler запрос
-    /// не переотправляет: новая отправка разрешена только init/API слою.
+    /// When (`now_ms`) the last `api_get_markets_indexes` was sent. Used for
+    /// timeout protection: the UDP response may have been lost — after `INDEXES_FETCH_TIMEOUT_MS`
+    /// we reset `indexes_fetch_in_flight = false`. The timeout handler itself does not
+    /// resend the request: a new send is allowed only from the init/API layer.
     indexes_fetch_started_ms: i64,
 
-    /// Когда последний раз вызвали `trades_state.tick()` из active main loop.
-    /// Throttle ~100ms — соответствует Delphi
-    /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets` периодичности.
+    /// When `trades_state.tick()` was last called from the active main loop.
+    /// Throttle ~100ms — matches the periodicity of Delphi
+    /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`.
     last_trades_tick_ms: i64,
 
-    /// Сколько раз подряд весь 200-port retry в `bind_socket` упал. На каждой
-    /// серии неудач (= один main loop tick где все 200 портов отвергнуты)
-    /// инкрементируется; на первом успешном bind сбрасывается в 0. Используется
-    /// для эмиссии `LifecycleEvent::BindFailed`. Событие throttled по реальному
-    /// elapsed time: первый сигнал после 15с непрерывных неудач, дальше не чаще
-    /// одного раза в 50с. См. audit H9.
+    /// How many times in a row the whole 200-port retry in `bind_socket` failed. It is
+    /// incremented on each failure series (= one main loop tick where all 200 ports were
+    /// rejected); on the first successful bind it resets to 0. Used to emit
+    /// `LifecycleEvent::BindFailed`. The event is throttled by real elapsed time:
+    /// the first signal after 15s of continuous failures, then no more than once per 50s.
+    /// See audit H9.
     bind_failure_streak: u32,
     first_bind_failure_ms: i64,
     last_bind_failed_event_ms: i64,
@@ -437,31 +438,31 @@ pub struct Client {
     /// `TMoonProtoTymeSyncer` for the process instead of a worker per client.
     _ntp_process_guard: Option<crate::ntp::ProcessNtpGuard>,
 
-    /// F6/F7: timestamps последних periodic refresh-команд. `i64::MIN/2` =
-    /// "никогда" → первый tick срабатывает мгновенно после Connected (если в
-    /// `cfg.refresh` задан соответствующий интервал). Дальше — каждый
+    /// F6/F7: timestamps of the last periodic refresh commands. `i64::MIN/2` =
+    /// "never" -> the first tick fires immediately after Connected (if the matching
+    /// interval is set in `cfg.refresh`). After that — every
     /// `update_markets_every` / `check_tags_every`.
     last_update_markets_ms: i64,
     last_check_tags_ms: i64,
-    /// Delphi `BHeavyApiWorker` делает до 4 быстрых `CheckBinanceTags` после
-    /// смены часа. Эти поля хранят текущий wall-clock hour slot и прогресс burst.
+    /// Delphi `BHeavyApiWorker` issues up to 4 quick `CheckBinanceTags` after
+    /// the hour changes. These fields hold the current wall-clock hour slot and burst progress.
     check_tags_hour_slot: i64,
     check_tags_burst_sent: u8,
     last_check_tags_burst_ms: i64,
 
-    /// Identity сервера полученная из `emk_BaseCheck` response. Заполняется во
-    /// время Init (или внутренним тестом через [`Client::set_server_info`]). До первого
-    /// успешного BaseCheck — `ServerInfo::default()` (все поля `None`,
+    /// Server identity obtained from the `emk_BaseCheck` response. Filled during
+    /// Init (or by an internal test via [`Client::set_server_info`]). Before the first
+    /// successful BaseCheck — `ServerInfo::default()` (all fields `None`,
     /// `has_identity()=false`).
     ///
-    /// **Multi-server**: при подключении к нескольким серверам приложение хранит
-    /// `Vec<Client>` и различает их по `client.server_info().bot_id`.
+    /// **Multi-server**: when connecting to several servers the application keeps a
+    /// `Vec<Client>` and tells them apart by `client.server_info().bot_id`.
     server_info: crate::commands::engine_api::ServerInfo,
 
-    /// Кэш `server_info.base_currency_name` как `Arc<str>`. Клонируется (refcount-bump)
-    /// в `ActiveDispatchContext::from_client` на КАЖДЫЙ пакет вместо heap-clone строки —
-    /// Delphi читает `cfg.BaseCurrency` инлайн без копии (паритет, opt #7). Public
-    /// `ServerInfo.base_currency_name` остаётся `String` ради эргономики API.
+    /// Cache of `server_info.base_currency_name` as `Arc<str>`. Cloned (refcount-bump)
+    /// in `ActiveDispatchContext::from_client` on EVERY packet instead of heap-cloning the
+    /// string — Delphi reads `cfg.BaseCurrency` inline without a copy (parity, opt #7). The
+    /// public `ServerInfo.base_currency_name` stays a `String` for API ergonomics.
     server_base_currency_name_arc: Option<std::sync::Arc<str>>,
 
     /// Per-account data received from Delphi `TMoonProtoEngine.AuthCheck`.
@@ -472,43 +473,43 @@ pub struct Client {
     /// user code can observe the same successful AuthCheck result.
     auth_info: Option<crate::commands::engine_api::AuthCheckResponse>,
 
-    /// Delphi `InitDone`: transport auth уже завершён, но domain-пуши
-    /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) можно применять
-    /// только после полного init bootstrap. До этого `dispatch_into_active`
-    /// дропает эти каналы, как `TMoonProtoNetClient.ClientNewData`.
+    /// Delphi `InitDone`: transport auth is already complete, but domain pushes
+    /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) can only be applied
+    /// after the full init bootstrap. Before that, `dispatch_into_active`
+    /// drops these channels, like `TMoonProtoNetClient.ClientNewData`.
     domain_ready: bool,
 
-    /// **Per-Client ServerTimeDelta handle** — shareable через `Arc::clone`.
+    /// **Per-Client ServerTimeDelta handle** — shareable via `Arc::clone`.
     ///
-    /// Хранит текущий `ServerTimeDelta` (в днях, TDateTime-формат, упакован в u64
-    /// через `f64::to_bits`). Обновляется при обработке `MPC_Ping` синхронно с
-    /// `self.server_time_delta` и с глобальным `SERVER_TIME_DELTA_DAYS`,
-    /// который нужен только raw `EventDispatcher::dispatch_into` без handle.
+    /// Holds the current `ServerTimeDelta` (in days, TDateTime format, packed into u64
+    /// via `f64::to_bits`). Updated when processing `MPC_Ping`, in sync with
+    /// `self.server_time_delta` and with the global `SERVER_TIME_DELTA_DAYS`,
+    /// which is only needed by raw `EventDispatcher::dispatch_into` without a handle.
     ///
-    /// **Multi-Client**: `EventDispatcher` должен быть привязан к
-    /// этому handle через `EventDispatcher::set_server_time_delta_source(handle)`
-    /// или автоматически через active runtime. Без
-    /// привязки EventDispatcher падает обратно на global, что при multi-Client даёт
-    /// off-by-50-1000ms timestamps в ордерах (последний Client перезаписывает
-    /// delta всех остальных).
+    /// **Multi-Client**: `EventDispatcher` must be bound to
+    /// this handle via `EventDispatcher::set_server_time_delta_source(handle)`
+    /// or automatically through the active runtime. Without
+    /// the binding, EventDispatcher falls back to the global, which under multi-Client gives
+    /// off-by-50-1000ms timestamps in orders (the last Client overwrites the
+    /// delta of all the others).
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
 
-    /// Cached MAC context — один раз вычисленные ipad CRC + opad block для `cfg.mac_key`.
-    /// Используется в transport pack/unpack hot-path вместо пересчёта HMAC ipad/opad
-    /// (128 XOR + crc32c) на каждом пакете. См. `crate::transport::MacContext`.
+    /// Cached MAC context — the ipad CRC + opad block computed once for `cfg.mac_key`.
+    /// Used on the transport pack/unpack hot-path instead of recomputing HMAC ipad/opad
+    /// (128 XOR + crc32c) for every packet. See `crate::transport::MacContext`.
     ///
-    /// Поскольку `mac_key` фиксирован на всю life Client'а (приходит в
-    /// ClientConfig и не меняется) — этот context тоже фиксирован и
-    /// переиспользуется receive/send фазами.
+    /// Since `mac_key` is fixed for the whole life of the Client (it comes in
+    /// ClientConfig and never changes), this context is also fixed and
+    /// reused by the receive/send phases.
     mac_ctx: crate::transport::MacContext,
 
     /// Delphi `SentCountDNS` equivalent for transport mode V2.
     /// Lives on the client, not in a global/static transport helper.
     transport_mode_state: crate::transport::ClientTransportModeState,
 
-    /// Reusable buffer для client transport pack — экономит alloc/dealloc на каждый
-    /// исходящий пакет. Capacity растёт до peak packet size и переиспользуется.
-    /// audit_rust_quality #4: 50K pps × 1500б = 75 MB/s allocator pressure eximinated.
+    /// Reusable buffer for client transport pack — saves an alloc/dealloc on every
+    /// outgoing packet. Capacity grows up to the peak packet size and is reused.
+    /// audit_rust_quality #4: 50K pps × 1500B = 75 MB/s of allocator pressure eliminated.
     send_buf: Vec<u8>,
 }
 
@@ -591,9 +592,9 @@ impl Client {
             .as_ref()
             .and_then(|host| crate::ntp::acquire_process_sync(host.clone(), set_ntp_offset));
 
-        // Кэшированный MacContext для cfg.mac_key — фиксирован на всю life Client'а.
-        // Создание делает 128 XOR + crc32c(ipad_block) единожды; затем `mac()` вызовы
-        // только crc32c_append(cached, data) + crc32c_append(prev, opad_block).
+        // Cached MacContext for cfg.mac_key — fixed for the whole life of the Client.
+        // Construction does 128 XOR + crc32c(ipad_block) once; afterwards `mac()` calls
+        // are only crc32c_append(cached, data) + crc32c_append(prev, opad_block).
         let mac_ctx = crate::transport::MacContext::new(&cfg.mac_key);
 
         Self {
@@ -625,12 +626,12 @@ impl Client {
             decode_key: [0; 16],
             encode_cipher: None,
             _start: Instant::now(),
-            // NEVER_SENT sentinel = "очень давно". Любое `(cur_tm - NEVER_SENT) > interval`
-            // мгновенно true → первый Hello / cleanup / etc выстреливают на первом тике main loop
-            // (5мс после bind вместо 2 секунд задержки). Делфи использовал `GetTickCount64`
-            // (миллисекунды с boot) ≈ 10^7+ при инициализации `FLastSentHello := 0`, что давало
-            // тот же эффект; в Rust `now_ms()` = `Instant::elapsed()` стартует с 0 → нужен явный
-            // sentinel. См. delphi_deviation audit #1.
+            // NEVER_SENT sentinel = "long ago". Any `(cur_tm - NEVER_SENT) > interval`
+            // is instantly true -> the first Hello / cleanup / etc fire on the first main loop tick
+            // (5ms after bind instead of a 2 second delay). Delphi used `GetTickCount64`
+            // (milliseconds since boot) ~= 10^7+ when initializing `FLastSentHello := 0`, which gave
+            // the same effect; in Rust `now_ms()` = `Instant::elapsed()` starts at 0 -> an explicit
+            // sentinel is needed. See delphi_deviation audit #1.
             last_sent_hello: NEVER_SENT_MS,
             waiting_hello_start: 0,
             last_socket_recreate: i64::MIN / 2,
@@ -717,13 +718,13 @@ impl Client {
             last_check_tags_burst_ms: i64::MIN / 2,
             mac_ctx,
             transport_mode_state: crate::transport::ClientTransportModeState::new(),
-            send_buf: Vec::with_capacity(2048), // типичный send packet ~500-1500 байт
+            send_buf: Vec::with_capacity(2048), // typical send packet ~500-1500 bytes
         }
     }
 
-    /// Test-only setter для `server_token` — позволяет имитировать состояние после
-    /// успешного handshake без реального сетевого подключения. Используется в
-    /// `events.rs` тестах для проверки `dispatch_into_active` token tracking.
+    /// Test-only setter for `server_token` — lets a test simulate the state after
+    /// a successful handshake without a real network connection. Used in
+    /// `events.rs` tests to verify `dispatch_into_active` token tracking.
     #[cfg(test)]
     pub(crate) fn testing_set_server_token(&mut self, token: u64) {
         self.server_token = token;
@@ -758,8 +759,8 @@ impl Client {
 
 /// Drop: mark app queues closed and unregister the UDP poller even if the
 /// consumer did not call `disconnect()`.
-/// Process-level NTP guard освобождается автоматически после тела `drop`; если
-/// это был последний клиент, общий NTP worker остановится.
+/// The process-level NTP guard is released automatically after the `drop` body; if
+/// this was the last client, the shared NTP worker stops.
 impl Drop for Client {
     fn drop(&mut self) {
         self.app_queue_alive.store(false, Ordering::Relaxed);

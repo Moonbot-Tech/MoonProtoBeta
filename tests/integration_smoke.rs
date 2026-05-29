@@ -177,12 +177,12 @@ fn runtime_smoke_full_happy_path() {
     );
     assert!(
         trades_packets > 0,
-        "FAIL: 0 Trades packets за {STREAM_DURATION_SECS}с"
+        "FAIL: 0 Trades packets in {STREAM_DURATION_SECS}s"
     );
     println!("OK: trades_stream ({trades_packets} packets)");
     assert!(
         orderbook_applied > 0,
-        "FAIL: 0 OrderBook Apply events за {STREAM_DURATION_SECS}с"
+        "FAIL: 0 OrderBook Apply events in {STREAM_DURATION_SECS}s"
     );
     println!("OK: order_book_stream ({orderbook_applied} apply events)");
     assert!(

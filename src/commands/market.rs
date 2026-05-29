@@ -886,7 +886,7 @@ pub(crate) fn read_market_with_local_shift(
         BaseCurrency::EMPTY
     };
 
-    // Backfill MBClassic (см. ReadMarketFromStream MoonProtoSerialization.pas:160).
+    // Backfill MBClassic (see ReadMarketFromStream MoonProtoSerialization.pas:160).
     if market_name_mb_classic.is_empty() {
         market_name_mb_classic = market_name.clone();
     }
@@ -1042,7 +1042,7 @@ pub(super) fn write_market_with_local_shift(
     out.push(m.bn_iceberg as u8);
     out.push(m.bn_only_isolated as u8);
 
-    // Delphi: WriteMarketToStream пишет FuturesType всегда (без guard ver).
+    // Delphi: WriteMarketToStream always writes FuturesType (no ver guard).
     out.push(m.futures_type.to_byte());
 }
 

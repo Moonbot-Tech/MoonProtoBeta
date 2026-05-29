@@ -12,7 +12,7 @@ use crate::commands::market::{
 use super::{MarketHandle, MarketsEvent, MarketsListApplyTiming, MarketsState};
 
 impl MarketsState {
-    /// Применить ответ `emk_GetMarketsList`.
+    /// Apply the `emk_GetMarketsList` response.
     ///
     /// Delphi does not replace the whole market universe on a repeated list
     /// response. Existing `TMarket` objects are updated through
@@ -59,8 +59,8 @@ impl MarketsState {
                         self.copy_max_leverage_from_markets_list,
                         self.eps_profile.eps,
                     );
-                    // Live price (bid/ask/last/mark) сохраняется на самом `Market`;
-                    // merge обновляет только funding_time.
+                    // Live price (bid/ask/last/mark) is kept on the `Market` itself;
+                    // the merge updates only funding_time.
                     market.price.funding_time = market.funding_time;
                     consumed.insert(market.bn_market_name.clone(), true);
                 });

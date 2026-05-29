@@ -92,8 +92,8 @@ impl Client {
         self.pending_h.len()
     }
 
-    /// EMA % retransmission overhead для Sliced пакетов (matches AvgOverHeat MoonProtoIntStruct.pas:220).
-    /// 0 = идеально (no retries). >0 = вынужденные перепосылы.
+    /// EMA % retransmission overhead for Sliced packets (matches AvgOverHeat MoonProtoIntStruct.pas:220).
+    /// 0 = ideal (no retries). >0 = forced retransmissions.
     pub fn avg_over_heat(&self) -> f64 {
         self.avg_over_heat
     }
@@ -101,54 +101,54 @@ impl Client {
     // ====================================================================
     //  Diagnostic getters (audit_responsibility A4)
     //
-    //  В Delphi `TMoonProtoNetClient` эти поля публичны и читаются UI
-    //  (MoonProtoUnit.pas:363 — "Ping: %d PMTU: %d RS: %d%%"). Aналог в Rust
-    //  для построения статус-строки терминала.
+    //  In Delphi `TMoonProtoNetClient` these fields are public and read by the UI
+    //  (MoonProtoUnit.pas:363 — "Ping: %d PMTU: %d RS: %d%%"). The Rust analog
+    //  for building the terminal status line.
     // ====================================================================
 
-    /// RTT в ms (последний измеренный из Ping). Соответствует Delphi
+    /// RTT in ms (last measured from Ping). Matches Delphi
     /// `TMoonProtoNetClient.RoundTripDelay` (MoonProtoClient.pas:62).
     pub fn round_trip_delay_ms(&self) -> i64 {
         self.round_trip_delay
     }
 
-    /// Текущий Path MTU в байтах. Стартует с 508; runtime ProbeMTU может
-    /// увеличивать значение выше 8000 шагами по 32 байта.
-    /// Соответствует Delphi `TMoonProtoNetClient.PMTU`.
+    /// Current Path MTU in bytes. Starts at 508; the runtime ProbeMTU can
+    /// raise the value above 8000 in 32-byte steps.
+    /// Matches Delphi `TMoonProtoNetClient.PMTU`.
     pub fn actual_pmtu(&self) -> u16 {
         self.actual_pmtu
     }
 
-    /// Receive Status [0.0..1.0] — качество downlink канала. >0.92 = норма,
-    /// <0.85 = критично, между = серая зона. Соответствует Delphi
+    /// Receive Status [0.0..1.0] — downlink channel quality. >0.92 = normal,
+    /// <0.85 = critical, in between = gray zone. Matches Delphi
     /// `TMoonProtoNetClient.RS`.
     pub fn rs(&self) -> f64 {
         self.rs
     }
 
-    /// `ServerTime - LocalTime` в днях (как Delphi TDateTime). Применяется
-    /// автоматически к timestamp'ам входящих ордеров через `Orders::apply`.
-    /// Внешним потребителям обычно не нужен — выставлен публично для диагностики.
+    /// `ServerTime - LocalTime` in days (like Delphi TDateTime). Applied
+    /// automatically to incoming order timestamps via `Orders::apply`.
+    /// External consumers usually do not need it — exposed publicly for diagnostics.
     pub fn server_time_delta_days(&self) -> f64 {
         self.server_time_delta
     }
 
-    /// `|ServerTime - LocalTime|` в ms (абсолютный лаг от последнего Ping).
-    /// Полезно для UI индикатора "сервер близко / далеко".
+    /// `|ServerTime - LocalTime|` in ms (absolute lag from the last Ping).
+    /// Useful for a UI "server near / far" indicator.
     pub fn net_lag_ping_ms(&self) -> i64 {
         self.net_lag_ping
     }
 
-    /// `Orders cycle ms` от сервера — рекомендованный темп опроса ордерных событий.
-    /// Соответствует Delphi `TMoonProtoNetClient.GlobalTimingOrders`.
+    /// `Orders cycle ms` from the server — the recommended polling rate for order events.
+    /// Matches Delphi `TMoonProtoNetClient.GlobalTimingOrders`.
     pub fn global_timing_orders(&self) -> u16 {
         self.global_timing_orders
     }
 
-    /// Текущий `ServerToken` — меняется при каждом hard handshake (Hello→WhoAreYou→Fine).
-    /// Soft reconnect (HelloAgain) НЕ меняет этот токен. **Внутри либы используется для
-    /// init/API subscription restore** — внешнему потребителю обычно не нужен,
-    /// выставлен для diagnostic UI.
+    /// Current `ServerToken` — changes on every hard handshake (Hello->WhoAreYou->Fine).
+    /// Soft reconnect (HelloAgain) does NOT change this token. **Used inside the library for
+    /// init/API subscription restore** — an external consumer usually does not need it,
+    /// exposed for the diagnostic UI.
     pub fn server_token(&self) -> u64 {
         self.server_token
     }
@@ -157,9 +157,9 @@ impl Client {
         self.subscribed_book_server_token
     }
 
-    /// `PeerAppToken` — генерируется при старте серверного процесса. Меняется при перезапуске
-    /// сервера. **Внутри либы используется для проверки свежести markets indexes** — внешнему
-    /// потребителю обычно не нужен, выставлен для diagnostic UI / event correlation.
+    /// `PeerAppToken` — generated when the server process starts. Changes on a server
+    /// restart. **Used inside the library to check the freshness of markets indexes** — an
+    /// external consumer usually does not need it, exposed for the diagnostic UI / event correlation.
     pub fn peer_app_token(&self) -> u64 {
         self.peer_app_token
     }
@@ -169,16 +169,16 @@ impl Client {
     }
 
     // ====================================================================
-    //  BytesPerSec — O(1) EMA counter (порт Delphi AddBytesCount)
+    //  BytesPerSec — O(1) EMA counter (port of Delphi AddBytesCount)
     // ====================================================================
     //
-    // Аудит #5 (audit_delphi_deviation): ранее использовался `VecDeque<(i64,u64)>` sliding
-    // window. На пике 50K pps входящих VecDeque раскручивался до ~500K entries × 16B = 8MB
-    // только для recv (+ ещё 8MB для sent). Плюс 100K push_back/pop_front ops/sec.
+    // Audit #5 (audit_delphi_deviation): previously a `VecDeque<(i64,u64)>` sliding
+    // window was used. At a peak of 50K pps incoming, the VecDeque grew to ~500K entries × 16B = 8MB
+    // for recv alone (+ another 8MB for sent). Plus 100K push_back/pop_front ops/sec.
     //
-    // Delphi решает это за 24 байта (3×u64) + 1 if + 1 add per packet — byte-exact порт
-    // `MoonProtoUDPClient.pas:113-138 AddBytesCount`. EMA формула: `ema = ema*9/10 + bucket`,
-    // что в steady state даёт `ema = 10*bytes_per_sec` (отсюда деление на 10 в getter'е).
+    // Delphi solves this in 24 bytes (3×u64) + 1 if + 1 add per packet — a byte-exact port of
+    // `MoonProtoUDPClient.pas:113-138 AddBytesCount`. EMA formula: `ema = ema*9/10 + bucket`,
+    // which in steady state yields `ema = 10*bytes_per_sec` (hence the division by 10 in the getter).
 
     pub(crate) fn track_sent(&mut self, bytes: u64, ts_ms: i64) {
         self.bps_sent.add(bytes, ts_ms);
@@ -188,22 +188,22 @@ impl Client {
         self.bps_recv.add(bytes, ts_ms);
     }
 
-    /// Байт отправлено в среднем за последние ~10 секунд (B/s). O(1) EMA, see [`BpsCounter`].
+    /// Average bytes sent over the last ~10 seconds (B/s). O(1) EMA, see [`BpsCounter`].
     pub fn bytes_per_sec_sent(&self) -> u64 {
         self.bps_sent.bytes_per_sec()
     }
-    /// Байт принято в среднем за последние ~10 секунд (B/s). O(1) EMA.
+    /// Average bytes received over the last ~10 seconds (B/s). O(1) EMA.
     pub fn bytes_per_sec_recv(&self) -> u64 {
         self.bps_recv.bytes_per_sec()
     }
 
     // ====================================================================
-    //  Log throttle — anti-spam helper для warning'ов.
+    //  Log throttle — anti-spam helper for warnings.
     // ====================================================================
 
-    /// Возвращает `true` если с момента предыдущего лога с этим `key` прошло ≥ `interval_ms`.
-    /// Применение: оборачивать `eprintln!("...")` через `if client.should_log("X", 1000) { ... }`.
-    /// `#[inline]`: вызывается на КАЖДОМ warn/error в send/recv pathes.
+    /// Returns `true` if >= `interval_ms` has passed since the previous log with this `key`.
+    /// Usage: wrap `eprintln!("...")` as `if client.should_log("X", 1000) { ... }`.
+    /// `#[inline]`: called on EVERY warn/error in the send/recv paths.
     #[inline]
     pub fn should_log(&mut self, key: &'static str, interval_ms: i64) -> bool {
         let now_ms = self.now_ms();

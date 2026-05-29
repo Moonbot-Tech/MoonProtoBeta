@@ -941,16 +941,16 @@ fn apply_prices_without_funding_keeps_existing() {
         corr_markets: vec![],
     });
     let pre = st.price("BTC").unwrap().funding_rate;
-    assert_eq!(pre, 0.0005); // из Market.funding_rate
+    assert_eq!(pre, 0.0005); // from Market.funding_rate
 
     let prices = MarketsPricesResponse {
-        send_funding: false, // funding не передан
+        send_funding: false, // funding not sent
         prices: vec![MarketPriceUpdate {
             m_index: 0,
             bid: 50000.0,
             ask: 50001.0,
             funding_rate: 99.0,
-            funding_time: 99.0, // эти значения должны быть проигнорированы
+            funding_time: 99.0, // these values must be ignored
             mark_price: 50000.5,
             mark_price_found: true,
         }],
@@ -958,7 +958,7 @@ fn apply_prices_without_funding_keeps_existing() {
         corr_prices: vec![],
     };
     st.apply_markets_prices(prices);
-    // funding_rate должен сохраниться (send_funding=false)
+    // funding_rate must be preserved (send_funding=false)
     assert_eq!(st.price("BTC").unwrap().funding_rate, 0.0005);
 }
 
@@ -983,9 +983,9 @@ fn apply_prices_out_of_range_skipped() {
         send_corr_markets: false,
         corr_prices: vec![],
     };
-    // Не должно паниковать
+    // Must not panic
     let _ = st.apply_markets_prices(prices);
-    assert_eq!(st.price("BTC").unwrap().bid, 0.0); // не обновился
+    assert_eq!(st.price("BTC").unwrap().bid, 0.0); // not updated
 }
 
 #[test]
@@ -1312,8 +1312,8 @@ fn apply_markets_indexes() {
 
 #[test]
 fn apply_markets_indexes_sets_synchronized_flag() {
-    // Active library: indexes_synchronized = false по умолчанию (init состояние).
-    // EventDispatcher блокирует TradesStream/OrderBook до этого момента.
+    // Active library: indexes_synchronized = false by default (init state).
+    // EventDispatcher blocks TradesStream/OrderBook until this point.
     let mut st = MarketsState::new();
     assert!(!st.indexes_synchronized, "default: not synchronized");
     st.apply_markets_indexes(vec!["A".to_string()]);

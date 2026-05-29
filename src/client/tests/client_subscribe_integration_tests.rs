@@ -217,8 +217,8 @@ fn client_subscribe_orderbook_updates_registry_and_wire_queue_through_sender() {
 
 #[test]
 fn client_sender_can_be_held_independently_of_client() {
-    // Sender держит clone; даже если client держится по `&` ссылке — sender
-    // независим. Это база для multi-thread субскрайба без app-event backlog.
+    // Sender holds a clone; even if client is held by a `&` reference, the sender
+    // is independent. This is the basis for multi-thread subscribing without an app-event backlog.
     let client = ready_client();
     let sender = client.sender();
     sender.subscribe_all_trades(true);
@@ -900,8 +900,8 @@ fn unsubscribe_all_orderbooks_with_empty_registry_sends_no_wire() {
 
 #[test]
 fn subscribe_orderbook_is_idempotent() {
-    // Двойной subscribe для одной пары не должен иметь побочных эффектов
-    // в registry (HashSet dedup) и не должен слать второй wire-запрос.
+    // A double subscribe for the same pair must have no side effects
+    // on the registry (HashSet dedup) and must not send a second wire request.
     let client = ready_client();
     client.subscribe_orderbook("ETH");
     client.subscribe_orderbook("ETH");
@@ -926,7 +926,7 @@ fn subscribe_all_trades_sets_registry() {
         Some(true)
     );
     assert!(client.with_subscription_registry(|registry| registry.trades_storage_scope.is_all()));
-    // Повторный с другим want_mm — обновляет registry.
+    // A repeat with a different want_mm updates the registry.
     client.subscribe_all_trades(false);
     assert_eq!(
         client.with_subscription_registry(|registry| registry.trades_sub),

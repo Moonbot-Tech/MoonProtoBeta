@@ -46,8 +46,8 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn send_h_item(&mut self, item: &mut SendItem, cur_tm: i64) {
         // Auto-compression (matches Delphi TMoonProtoDataToSend.Create pas:661-672).
-        // Сжимает payload > 64 байт если результат < 95% оригинала. Inner cmd получает
-        // COMPRESSED_FLAG (0x80).
+        // Compresses payload > 64 bytes if the result is < 95% of the original. The
+        // inner cmd gets the COMPRESSED_FLAG (0x80).
         let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
 
         if item.encrypted {
@@ -71,7 +71,7 @@ impl ProtocolCore<'_> {
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
 
-            // B-V2-03: кэшированный cipher.
+            // B-V2-03: cached cipher.
             let Some(cipher) = self.client.encode_cipher.as_ref() else {
                 error!(target: "moonproto::crypto", "encrypt batch called before handshake — packet dropped");
                 return;
@@ -89,16 +89,16 @@ impl ProtocolCore<'_> {
                 let mut pending_item = item.clone();
                 pending_item.msg_num = msg_num;
                 pending_item.last_sent_at = cur_tm;
-                // Сохраняем СЖАТЫЕ данные + cmd с COMPRESSED_FLAG — при retry encrypt
-                // снова обернёт их (compression deterministic, можно было бы не хранить —
-                // но проще не пересжимать).
+                // Store the COMPRESSED data + cmd with COMPRESSED_FLAG — on retry,
+                // encrypt wraps them again (compression is deterministic, so we could
+                // avoid storing them — but it is simpler not to recompress).
                 pending_item.cmd = eff_cmd;
-                // pending_item.data — Vec<u8>, нужно owned. Если eff_data Borrowed —
-                // alloc здесь (необходимый — pending_h хранит копию между retry).
+                // pending_item.data is Vec<u8>, must be owned. If eff_data is Borrowed,
+                // alloc here (necessary — pending_h keeps a copy between retries).
                 pending_item.data = eff_data.into_owned();
-                // Delphi `PendingH` не имеет capacity-cap: H-команды живут до ACK
-                // или исчерпания `RetryLeft`. Старые trading-команды не дропаются
-                // искусственно при большом burst'е.
+                // Delphi `PendingH` has no capacity cap: H commands live until ACK
+                // or `RetryLeft` is exhausted. Old trading commands are not dropped
+                // artificially during a large burst.
                 self.client.pending_h.push(pending_item);
             }
         } else {
@@ -117,13 +117,13 @@ impl ProtocolCore<'_> {
         for (idx, item) in self.client.pending_h.iter_mut().enumerate() {
             if (item.last_sent_at - cur_tm).abs() > path_delay {
                 item.last_sent_at = cur_tm;
-                // 1+2. Сначала клонируем с ТЕКУЩИМ retry_left и кладём на resend.
-                //      WantACK будет вычислен в send_h_item как `retry_left > 0` — на последнем
-                //      retry (когда retry_left=1 ДО decrement) WantACK=true → сервер ACK'нет.
+                // 1+2. First clone with the CURRENT retry_left and queue for resend.
+                //      WantACK is computed in send_h_item as `retry_left > 0` — on the last
+                //      retry (when retry_left=1 BEFORE decrement) WantACK=true → server ACKs.
                 to_resend.push(item.clone());
                 // 3. Decrement.
                 item.retry_left -= 1;
-                // 4. Drop если исчерпался.
+                // 4. Drop if exhausted.
                 if item.retry_left <= 0 {
                     to_drop.push(idx);
                 }
@@ -146,8 +146,8 @@ impl ProtocolCore<'_> {
         let (eff_cmd, eff_data) = Client::maybe_compress(item.cmd, &item.data);
 
         // Encrypt if needed
-        // Аудит #3: wire_data становится Cow — для unencrypted path сохраняем borrowed
-        // (zero alloc); для encrypted — Owned (encrypt всегда возвращает Vec).
+        // Audit #3: wire_data becomes a Cow — for the unencrypted path we keep it
+        // borrowed (zero alloc); for encrypted it is Owned (encrypt always returns a Vec).
         let (wire_cmd, wire_data): (u8, std::borrow::Cow<'_, [u8]>) = if item.encrypted {
             let msg_num = self
                 .client
@@ -163,7 +163,7 @@ impl ProtocolCore<'_> {
             let mut plaintext = Vec::with_capacity(12 + eff_data.len());
             plaintext.extend_from_slice(&crypto_hdr);
             plaintext.extend_from_slice(&eff_data);
-            // B-V2-03: кэшированный cipher.
+            // B-V2-03: cached cipher.
             let cipher = match self.client.encode_cipher.as_ref() {
                 Some(c) => c,
                 None => {
@@ -213,12 +213,12 @@ impl ProtocolCore<'_> {
             payload.clear();
             self.client.tmp_send_buf = payload;
         } else {
-            // Single item: формат tmp_send_buf = [cmd(1) | sz(2 LE) | data(sz)].
-            // Wire-format MPC_Grouped header не нужен → отправляем как обычный пакет.
+            // Single item: tmp_send_buf format = [cmd(1) | sz(2 LE) | data(sz)].
+            // The MPC_Grouped wire-format header is not needed → send as a plain packet.
             let mut buf = std::mem::take(&mut self.client.tmp_send_buf);
             if buf.len() >= 3 {
                 let cmd = buf[0];
-                // sz прочитан только для slicing data (после 3 байт group-header'а).
+                // sz is read only for slicing data (after the 3-byte group header).
                 let data = &buf[3..];
                 self.send_command_raw(cmd, data);
             }

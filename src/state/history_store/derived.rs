@@ -27,8 +27,8 @@ impl MarketHistoryStore {
         self.derived.last_price_deltas = last_price_deltas;
         self.derived.deltas =
             combine_deltas(trade_deltas, self.derived.candle_deltas, last_price_deltas);
-        // Live (in-progress) свеча выставляется отдельно от засиленного ring,
-        // чтобы консьюмер дорисовал её как текущий бар (Delphi `FCandle`).
+        // The live (in-progress) candle is exposed separately from the sealed
+        // ring so the consumer can draw it as the current bar (Delphi `FCandle`).
         self.derived.current_candle = self.current_candle;
         self.read_handle
             .publish(&self.rolling_volumes, self.derived);
@@ -58,10 +58,11 @@ impl MarketHistoryStore {
         candle.volume += traded_value;
         self.current_candle = Some(candle);
         self.candle_deltas_dirty = true;
-        // In-progress свеча — отдельный аккумулятор (Delphi `FCandle`), НЕ публикуется
-        // в `candles_5m` ring; в ring кладутся только засиленные свечи (end-stamped),
-        // см. `seal_current_candle_if_due`. Это снимает смешение конвенций времени
-        // (снапшот end-stamped + live start-stamped) в одном ring.
+        // The in-progress candle is a separate accumulator (Delphi `FCandle`),
+        // NOT published into the `candles_5m` ring; only sealed (end-stamped)
+        // candles go into the ring, see `seal_current_candle_if_due`. This
+        // removes the mixing of time conventions (end-stamped snapshot + live
+        // start-stamped) within a single ring.
     }
 
     fn seal_current_candle_if_due(&mut self, now_time: f64) {
@@ -69,9 +70,9 @@ impl MarketHistoryStore {
             return;
         };
         if now_time > 0.0 && now_time - candle.time >= FIVE_MINUTES_DAYS {
-            // Delphi `Recalc5mCandle` (MarketsU.pas:9988): засиленную свечу штампуем
-            // временем seal (`NowTime` = конец периода) и кладём в Deep5m; in-progress
-            // (FCandle) остаётся отдельно и начинается заново.
+            // Delphi `Recalc5mCandle` (MarketsU.pas:9988): the sealed candle is
+            // stamped with the seal time (`NowTime` = end of period) and pushed
+            // into Deep5m; the in-progress (FCandle) stays separate and starts over.
             candle.time = now_time;
             if let Some(writer) = self.candles_5m.as_mut() {
                 writer.push(candle);
@@ -91,7 +92,7 @@ impl MarketHistoryStore {
                 view.for_each(|row| acc.add(*row));
             });
         }
-        // In-progress свеча больше не лежит в ring — всегда добавляем её к деривативам.
+        // The in-progress candle no longer lives in the ring — always add it to the derived values.
         if let Some(candle) = self.current_candle {
             acc.add(candle);
         }

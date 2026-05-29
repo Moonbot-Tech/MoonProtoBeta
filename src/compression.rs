@@ -15,30 +15,30 @@
 
 type Offsets = [usize; 4096];
 
-// Thread-local scratch буфер для SynLZ decompress (32 KB = `[usize; 4096]` × 8 байт).
+// Thread-local scratch buffer for SynLZ decompress (32 KB = `[usize; 4096]` × 8 bytes).
 //
-// Раньше — `Box::new([0; 4096])` per call (~30 нс alloc + ~10 нс free).
-// На пике TradesStream/OrderBook ~50K decompress/sec это ~2 мс/сек чистого CPU
-// на alloc/dealloc + allocator pressure. Thread-local: alloc один раз per thread
-// при первом вызове, далее — zero alloc.
+// Previously: `Box::new([0; 4096])` per call (~30 ns alloc + ~10 ns free).
+// At peak TradesStream/OrderBook ~50K decompress/sec that is ~2 ms/sec of pure CPU
+// on alloc/dealloc + allocator pressure. Thread-local: alloc once per thread
+// on the first call, zero alloc afterwards.
 //
-// Важно: offset scratch должен быть сброшен перед каждым decompress. Live
-// OrderBook-пакеты могут ссылаться на hash slot до записи в него в рамках
-// текущего вызова; persistent значение от предыдущего packet'а превращает такой
-// back-reference в ложный Corrupt. В Rust thread-local буфер обязан вести себя
-// как свежий scratch на каждый `SynLZdecompress1pas`, поэтому сбрасываем его в 0.
+// Important: the offset scratch must be reset before each decompress. Live
+// OrderBook packets can reference a hash slot before it is written within the
+// current call; a persistent value from the previous packet turns such a
+// back-reference into a false Corrupt. In Rust the thread-local buffer must behave
+// like fresh scratch for every `SynLZdecompress1pas`, so we reset it to 0.
 //
-// Рекурсии нет: `synlz_decompress` нигде сам себя не вызывает. RefCell гарантирует
-// safety если кто-то нарушит этот invariant (try_borrow_mut вернёт Err → fallback на свой alloc).
+// No recursion: `synlz_decompress` never calls itself. RefCell guarantees
+// safety if someone violates this invariant (try_borrow_mut returns Err → fallback to its own alloc).
 thread_local! {
     static DECOMPRESS_OFFSETS: std::cell::RefCell<Box<Offsets>> =
         std::cell::RefCell::new(Box::new([0usize; 4096]));
 }
 
-// Thread-local scratch для SynLZ compress: offset (32 KB) + cache (16 KB) = 48 KB.
-// Аналогично — alloc один раз, переиспользуется. cache требует reset до `0` для
-// корректной работы алгоритма (используется как `v ^ cache[h]`); offset инициализируется
-// `usize::MAX` (sentinel "не было записи").
+// Thread-local scratch for SynLZ compress: offset (32 KB) + cache (16 KB) = 48 KB.
+// Likewise: alloc once, reused. cache requires a reset to `0` for the
+// algorithm to work correctly (used as `v ^ cache[h]`); offset is initialized to
+// `usize::MAX` (sentinel for "no entry yet").
 thread_local! {
     static COMPRESS_OFFSETS: std::cell::RefCell<Box<[usize; 4096]>> =
         std::cell::RefCell::new(Box::new([usize::MAX; 4096]));
@@ -50,16 +50,16 @@ thread_local! {
 ///
 /// **Byte-exact port** `mormot.core.base.pas:10636-10717 SynLZdecompress1passub`.
 ///
-/// Алгоритм:
-/// - `last_hashed` инициализируется на позицию **перед** буфером (`dst - 1` в Delphi pointer-math,
-///   `isize -1` в Rust → используем `Option<usize>` через signed sentinel).
-/// - Для **литерала**: одиночный hash-update `if last_hashed < dst - 3 then inc(last_hashed); update`.
-///   Это ровно Delphi pointer rule: после записи литерала `dst` уже указывает на следующий
-///   байт, поэтому хэшируется позиция `<= dst - 3`. mORMot может читать один байт
-///   "вперёд" из уже выделенного output buffer; сдвиг на `dst - 4` меняет hash table
-///   и ломает валидные live `OrderBook` streams.
-/// - Для **back-ref**: до копирования back-ref хэшируются позиции `< dst` (НЕ `dst + t`!), затем
-///   `inc(dst, t); last_hashed := dst - 1` — скопированные t байт НЕ хэшируются в этой итерации.
+/// Algorithm:
+/// - `last_hashed` is initialized to the position **before** the buffer (`dst - 1` in Delphi pointer-math,
+///   `isize -1` in Rust → use `Option<usize>` via a signed sentinel).
+/// - For a **literal**: single hash-update `if last_hashed < dst - 3 then inc(last_hashed); update`.
+///   This is exactly the Delphi pointer rule: after writing a literal, `dst` already points to the next
+///   byte, so the position `<= dst - 3` is hashed. mORMot may read one byte
+///   "ahead" from the already-allocated output buffer; shifting to `dst - 4` changes the hash table
+///   and breaks valid live `OrderBook` streams.
+/// - For a **back-ref**: before copying, the back-ref hashes positions `< dst` (NOT `dst + t`!), then
+///   `inc(dst, t); last_hashed := dst - 1` — the copied t bytes are NOT hashed in this iteration.
 pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
     if src.len() < 2 {
         return None;
@@ -85,9 +85,9 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
 
     let mut dst = vec![0u8; out_size];
 
-    // Используем thread-local scratch buffer для offsets (32 KB). Reset обязателен:
-    // Delphi создаёт чистый scratch для каждого decode, а stale offset может
-    // изменить malformed-stream effect и byte-exact воспроизводимость.
+    // Use the thread-local scratch buffer for offsets (32 KB). Reset is mandatory:
+    // Delphi creates clean scratch for each decode, and a stale offset can
+    // change the malformed-stream effect and byte-exact reproducibility.
     let result = DECOMPRESS_OFFSETS.with(|cell| {
         match cell.try_borrow_mut() {
             Ok(mut guard) => {
@@ -95,8 +95,8 @@ pub fn synlz_decompress(src: &[u8]) -> Option<Vec<u8>> {
                 synlz_decompress_inner(src, &mut dst, &mut guard, pos, out_size)
             }
             Err(_) => {
-                // Recursion — невозможно по invariant, но если кто-то нарушит контракт —
-                // fallback на свой alloc.
+                // Recursion — impossible by invariant, but if someone violates the contract,
+                // fall back to its own alloc.
                 let mut fallback: Box<Offsets> = Box::new([0usize; 4096]);
                 synlz_decompress_inner(src, &mut dst, &mut fallback, pos, out_size)
             }
@@ -117,7 +117,7 @@ enum DecompressResult {
     Corrupt,
 }
 
-/// Внутренняя реализация — изолирует thread_local borrow от `?` early returns.
+/// Internal implementation — isolates the thread_local borrow from `?` early returns.
 fn synlz_decompress_inner(
     src: &[u8],
     dst: &mut [u8],
@@ -126,8 +126,8 @@ fn synlz_decompress_inner(
     out_size: usize,
 ) -> DecompressResult {
     let mut dst_pos = 0usize;
-    // last_hashed = dst - 1 в Delphi pointer-math (на 1 позицию ДО буфера).
-    // В Rust используем i64, где -1 представляет это начальное состояние.
+    // last_hashed = dst - 1 in Delphi pointer-math (1 position BEFORE the buffer).
+    // In Rust we use i64, where -1 represents this initial state.
     let mut last_hashed: i64 = -1;
 
     let src_end = src.len();
@@ -154,7 +154,7 @@ fn synlz_decompress_inner(
 
                 // Update hash table (SINGLE update, not loop).
                 // Delphi: `if last_hashed < dst - 3 then begin inc(last_hashed); update; end`.
-                // Эквивалент после `dst_pos += 1`: `last_hashed < dst_pos - 3`.
+                // Equivalent after `dst_pos += 1`: `last_hashed < dst_pos - 3`.
                 if last_hashed < (dst_pos as i64) - 3 {
                     last_hashed += 1;
                     let lh = last_hashed as usize;
@@ -190,15 +190,15 @@ fn synlz_decompress_inner(
                 let h_idx = (h_word >> 4) as usize;
                 let copy_from = offset[h_idx];
 
-                // Копируем t байт (учитываем overlap — Delphi MoveByOne для overlap'а).
+                // Copy t bytes (accounting for overlap — Delphi MoveByOne for overlap).
                 if dst_pos + t > out_size {
-                    // Защита от записи за границу буфера — Delphi полагается на корректность.
+                    // Guard against writing past the buffer boundary — Delphi relies on correctness.
                     return DecompressResult::Corrupt;
                 }
-                // D-V2-05 fix: malicious/corrupt SynLZ stream может выставить copy_from
-                // указывающий за пределы уже декомпрессированных данных. Delphi (без bounds
-                // check) делает out-of-bounds read; в Rust это panic. Отказываемся вместо
-                // panic — corrupt input не должен валить long-running клиент.
+                // D-V2-05 fix: a malicious/corrupt SynLZ stream can set copy_from
+                // pointing past the already-decompressed data. Delphi (without a bounds
+                // check) does an out-of-bounds read; in Rust that is a panic. We refuse instead of
+                // panicking — corrupt input must not crash a long-running client.
                 if copy_from.saturating_add(t) > dst.len() || copy_from > dst_pos {
                     return DecompressResult::Corrupt;
                 }
@@ -208,7 +208,7 @@ fn synlz_decompress_inner(
                         dst[dst_pos + i] = dst[copy_from + i];
                     }
                 } else {
-                    // No overlap: copy_within работает.
+                    // No overlap: copy_within works.
                     dst.copy_within(copy_from..copy_from + t, dst_pos);
                 }
 
@@ -216,7 +216,7 @@ fn synlz_decompress_inner(
                     break 'outer;
                 }
 
-                // Update hash table: хэшируем позиции **до** copying-target (до `dst_pos`).
+                // Update hash table: hash positions **up to** the copying-target (up to `dst_pos`).
                 // Delphi: `if last_hashed < dst then repeat inc(last_hashed); hash; until last_hashed >= dst`.
                 let target = dst_pos as i64;
                 while last_hashed < target {
@@ -239,7 +239,7 @@ fn synlz_decompress_inner(
                 }
             }
         }
-        // Inner loop закончился (pos >= src_end).
+        // Inner loop ended (pos >= src_end).
         break;
     }
 
@@ -275,22 +275,22 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
         }
     }
 
-    // Thread-local scratch — 32 KB offset + 16 KB cache. **cache требует reset**
-    // (используется как `v ^ cache[h]` для определения "повтор ли"); offset
-    // тоже сбрасывается в `usize::MAX` — sentinel "не было записи под этим hash".
-    // Без reset результат был бы wire-несовместимый со свежим compress.
+    // Thread-local scratch — 32 KB offset + 16 KB cache. **cache requires a reset**
+    // (used as `v ^ cache[h]` to decide whether it is a repeat); offset
+    // is also reset to `usize::MAX` — sentinel for "no entry under this hash".
+    // Without the reset the result would be wire-incompatible with a fresh compress.
     COMPRESS_OFFSETS.with(|off_cell| {
         COMPRESS_CACHE.with(|cache_cell| {
             let mut offset = off_cell.try_borrow_mut().map(Some).unwrap_or(None);
             let mut cache = cache_cell.try_borrow_mut().map(Some).unwrap_or(None);
 
-            // Fallback на свой alloc если try_borrow_mut не сработал (рекурсия — не должно случаться).
+            // Fall back to its own alloc if try_borrow_mut failed (recursion — should not happen).
             let mut fallback_off: Box<[usize; 4096]> = Box::new([usize::MAX; 4096]);
             let mut fallback_cache: Box<[u32; 4096]> = Box::new([0u32; 4096]);
 
             let off_ref: &mut [usize; 4096] = match offset.as_mut() {
                 Some(g) => {
-                    // Reset thread-local к начальному состоянию.
+                    // Reset thread-local to its initial state.
                     g.fill(usize::MAX);
                     g
                 }
@@ -309,7 +309,7 @@ fn synlz_compress_impl(src: &[u8], dst: &mut Vec<u8>) {
     });
 }
 
-/// Внутренняя реализация compress — изолирует thread_local borrow.
+/// Internal compress implementation — isolates the thread_local borrow.
 fn synlz_compress_inner(
     src: &[u8],
     dst: &mut Vec<u8>,

@@ -3,10 +3,10 @@ use super::*;
 impl Client {
     // ====================================================================
     //  High-level UI wrappers (Command::UI, encrypted=true)
-    //  Покрывают MClient.SendUICmd(T*Command.Create(...)) семантику Delphi.
-    //  UID авто-генерируется через rand::random() — потребитель не передаёт.
-    //  Priority/MaxRetries/UKey — из атрибутов соответствующих Delphi-классов.
-    //  Аудит docs_api B-01: было 14 build_* функций без Client-обёрток.
+    //  Cover the Delphi MClient.SendUICmd(T*Command.Create(...)) semantics.
+    //  UID is auto-generated via rand::random() — the consumer does not pass it.
+    //  Priority/MaxRetries/UKey — from the attributes of the matching Delphi classes.
+    //  Audit docs_api B-01: there were 14 build_* functions without Client wrappers.
     // ====================================================================
 
     #[doc(hidden)]

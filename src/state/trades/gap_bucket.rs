@@ -34,7 +34,7 @@ impl Default for GapBucket {
 
 impl GapBucket {
     pub(super) fn gap_size(&self) -> usize {
-        // Используем wrapping для u16, +1 (inclusive).
+        // Use u16 wrapping arithmetic, +1 (inclusive).
         self.end_num.wrapping_sub(self.start_num) as usize + 1
     }
 }

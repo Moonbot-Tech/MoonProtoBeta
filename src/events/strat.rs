@@ -26,9 +26,9 @@ impl EventDispatcher {
         }
         let ev = self.strats.apply(cmd_v);
         // Active library: auto-decode strategy snapshot raw bytes
-        // into `StratsState`. Раньше app должен был сам вызывать
-        // `strats.apply_snapshot_decoded(raw_data)`; теперь либа
-        // делает это сама на SnapshotFull/Partial event'ах.
+        // into `StratsState`. Previously the app had to call
+        // `strats.apply_snapshot_decoded(raw_data)` itself; now the library
+        // does it on SnapshotFull/Partial events.
         match &ev {
             crate::state::StratEvent::SnapshotFull {
                 server_epoch,

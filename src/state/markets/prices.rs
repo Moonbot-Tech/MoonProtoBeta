@@ -11,9 +11,9 @@ use crate::commands::market::{
 use super::{same_text_ascii, MarketLastPriceHistoryInput, MarketsEvent, MarketsState};
 
 impl MarketsState {
-    /// Применить ответ `emk_UpdateMarketsList`.
-    /// Обновляет цену рынка, резолвя server `mIndex` через `emk_GetMarketsIndexes`.
-    /// Если mapping неизвестен или stale после server restart — запись пропускается.
+    /// Apply the `emk_UpdateMarketsList` response.
+    /// Updates the market price, resolving the server `mIndex` via `emk_GetMarketsIndexes`.
+    /// If the mapping is unknown or stale after a server restart — the row is skipped.
     pub fn apply_markets_prices(&mut self, resp: MarketsPricesResponse) -> MarketsEvent {
         let count = resp.prices.len();
         for handle in self.markets.iter() {
@@ -148,11 +148,11 @@ impl MarketsState {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
             let handle = self.markets.get(idx).cloned()?;
             let market_name = handle.name_arc();
-            // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) гейтит и считает
-            // ChartPriceStep по `_epsM`, не `_eps`.
+            // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) gates and computes
+            // ChartPriceStep against `_epsM`, not `_eps`.
             let eps_m = self.eps_profile.eps_m;
-            // Цена живёт на `Market` (Delphi `TMarket`): пишем on the shared object
-            // через per-market lock, без клона markets-контейнера на price-apply.
+            // The price lives on the `Market` (Delphi `TMarket`): write on the shared object
+            // through a per-market lock, without cloning the markets container on price-apply.
             let row = handle.with_mut(|market| {
                 if send_funding {
                     market.funding_rate = p.funding_rate;

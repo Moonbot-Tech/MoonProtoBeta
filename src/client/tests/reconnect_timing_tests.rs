@@ -194,7 +194,7 @@ fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
 
     assert_eq!(
         client.last_sent_hello, 100,
-        "Delphi LastSentHello=0 означает немедленный retry; Rust Instant clock не должен ждать 2с",
+        "Delphi LastSentHello=0 means an immediate retry; the Rust Instant clock must not wait 2s",
     );
     assert!(client.waiting_hello);
 }
@@ -1361,7 +1361,7 @@ fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
 
     assert_eq!(
         client.last_sent_hello, 100,
-        "NeedHelloAgain должен обходить минимум 200мс после Delphi-сброса LastSentHello в ноль",
+        "NeedHelloAgain must bypass the 200ms minimum after the Delphi reset of LastSentHello to zero",
     );
     assert!(client.waiting_hello);
 }

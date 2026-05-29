@@ -279,25 +279,25 @@ fn release_process_sync() {
 /// Background NTP sync thread — byte-exact port of `TMoonProtoTymeSyncer.Execute`
 /// (MoonProtoIntStruct.pas:1246-1303).
 ///
-/// Поведение:
-/// 1. Init: `get_best_ntp(host, 4)` → `MinDelay` + apply offset через `apply_fn`.
-/// 2. Loop с шагом ~500ms:
+/// Behavior:
+/// 1. Init: `get_best_ntp(host, 4)` → `MinDelay` + apply offset via `apply_fn`.
+/// 2. Loop with a ~500ms step:
 ///    - `GetTimeTryCount++`
-///    - Если `GetTimeTryCount < 4` → ещё один `get_best_ntp(host, 2)`; если `NewDelay < MinDelay` → обновить offset.
-///    - Если `GetTimeTryCount > 1000` (~500с) → reset cycle (`MinDelay *= 1.1`), повтор уточнения.
+///    - If `GetTimeTryCount < 4` → another `get_best_ntp(host, 2)`; if `NewDelay < MinDelay` → update the offset.
+///    - If `GetTimeTryCount > 1000` (~500s) → reset the cycle (`MinDelay *= 1.1`), repeat the refinement.
 ///
-/// `apply_fn` вызывается с offset в **секундах** при каждом улучшении. Обычно передают
-/// `client::set_ntp_offset` чтобы атомарно обновить глобальный offset.
+/// `apply_fn` is called with the offset in **seconds** on every improvement. Usually
+/// `client::set_ntp_offset` is passed to atomically update the global offset.
 ///
-/// Возвращает `Arc<AtomicBool>` shutdown flag. Установка `true` приведёт к выходу из
-/// loop'а при следующей итерации (max ~500ms задержки до выхода). Если spawn не
-/// удался (mobile memory pressure / thread limits) — возвращает `Arc<AtomicBool::new(true)>`
-/// сразу (значит "уже выключен", остановить нечего).
+/// Returns an `Arc<AtomicBool>` shutdown flag. Setting it to `true` causes the loop
+/// to exit on the next iteration (at most ~500ms delay before exit). If the spawn
+/// failed (mobile memory pressure / thread limits) it returns `Arc<AtomicBool::new(true)>`
+/// immediately (meaning "already off", nothing to stop).
 ///
-/// audit_responsibility A6: возможность остановить thread нужна для:
-/// - mobile suspend (iOS Background App Refresh — экономия батареи)
-/// - graceful shutdown Client (через Drop)
-/// - переподключение к другому серверу (создаётся новый Client → старый NTP не нужен)
+/// audit_responsibility A6: the ability to stop the thread is needed for:
+/// - mobile suspend (iOS Background App Refresh — battery saving)
+/// - graceful Client shutdown (via Drop)
+/// - reconnecting to a different server (a new Client is created → the old NTP is no longer needed)
 pub fn spawn_sync_thread<F>(
     host: String,
     apply_fn: F,
@@ -308,16 +308,16 @@ where
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
 
-    // C-V2-05 fix: graceful обработка spawn'а NTP thread'а. На iOS / Android при
-    // memory pressure / thread limits ОС может отказать в создании потока. Long-running
-    // mobile клиент не должен паниковать — без NTP timestamps будут с системным временем
-    // (хуже точность, но клиент остаётся работоспособным).
+    // C-V2-05 fix: graceful handling of the NTP thread spawn. On iOS / Android under
+    // memory pressure / thread limits the OS may refuse to create the thread. A long-running
+    // mobile client must not panic — without NTP, timestamps fall back to system time
+    // (worse accuracy, but the client stays operational).
     if let Err(e) = std::thread::Builder::new()
         .name("moonproto-ntp-sync".into())
         .spawn(move || {
             let mut ntp_state = NtpState::default();
 
-            // Initial sync (try_count=4) — пропускаем если уже shutdown
+            // Initial sync (try_count=4) — skip if already shutdown
             if shutdown_thread.load(Ordering::Relaxed) {
                 return;
             }
@@ -333,8 +333,8 @@ where
             let mut try_count: u32 = 1;
 
             loop {
-                // Sleep 5 × 100ms = 500ms (как Delphi pas:1273-1275) с проверкой shutdown
-                // каждые 100ms — выход в течение ~100ms после `store(true)`.
+                // Sleep 5 × 100ms = 500ms (like Delphi pas:1273-1275) with a shutdown check
+                // every 100ms — exit within ~100ms after `store(true)`.
                 for _ in 0..5 {
                     if shutdown_thread.load(Ordering::Relaxed) {
                         return;
@@ -345,7 +345,7 @@ where
                 try_count += 1;
                 if try_count > 1000 {
                     try_count = 2;
-                    // Расширяем приёмное окно — позволим худший RTT перебить (Delphi pas:1281)
+                    // Widen the acceptance window — let a worse RTT win (Delphi pas:1281)
                     min_delay_ms = ((min_delay_ms as f64 * 1.1) as i64) + 10;
                 }
 
@@ -358,13 +358,13 @@ where
                         apply_fn(r.time_offset);
                     }
                 }
-                // try_count >= 4 и <= 1000 — idle (тишина, как Delphi)
+                // try_count >= 4 and <= 1000 — idle (silent, like Delphi)
             }
         })
     {
         log::error!(target: "moonproto::ntp",
-            "Не удалось запустить NTP sync thread: {e}. NTP отключён — timestamps будут с системным временем.");
-        // Возвращаем flag уже-в-shutdown — caller'у нечего останавливать.
+            "Failed to start NTP sync thread: {e}. NTP disabled - timestamps will use system time.");
+        // Return an already-in-shutdown flag — the caller has nothing to stop.
         shutdown.store(true, Ordering::Relaxed);
     }
     shutdown

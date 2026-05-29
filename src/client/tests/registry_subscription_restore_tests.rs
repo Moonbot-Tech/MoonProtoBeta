@@ -64,7 +64,7 @@ fn restore_with_empty_registry_sends_nothing() {
     client.server_token = 0xCAFE;
     client.restore_registry_subscriptions();
     let sent = drain_api_requests(&client);
-    assert!(sent.is_empty(), "пустой registry → 0 wire-запросов");
+    assert!(sent.is_empty(), "empty registry → 0 wire requests");
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn restore_trades_only_sends_single_subscribe_all_trades() {
     client.server_token = 1;
     client.restore_registry_subscriptions();
     let sent = drain_api_requests(&client);
-    assert_eq!(sent.len(), 1, "только trades → 1 wire-запрос");
+    assert_eq!(sent.len(), 1, "trades only → 1 wire request");
     assert_eq!(
         method_id(&sent[0]),
         Some(EngineMethod::SubscribeAllTrades.to_byte())
@@ -153,7 +153,7 @@ fn restore_orderbooks_are_batched_into_single_request() {
     client.server_token = 1;
     client.restore_registry_subscriptions();
     let sent = drain_api_requests(&client);
-    assert_eq!(sent.len(), 1, "3 orderbook подписки → 1 batch wire-запрос");
+    assert_eq!(sent.len(), 1, "3 orderbook subscriptions → 1 batch wire request");
     assert_eq!(
         method_id(&sent[0]),
         Some(EngineMethod::SubscribeOrderBook.to_byte())
@@ -190,7 +190,7 @@ fn restore_combined_sends_trades_plus_orderbook_batches() {
     client.server_token = 1;
     client.restore_registry_subscriptions();
     let sent = drain_api_requests(&client);
-    assert_eq!(sent.len(), 2, "1 trades + 1 orderbook batch = 2 запроса");
+    assert_eq!(sent.len(), 2, "1 trades + 1 orderbook batch = 2 requests");
     let methods: Vec<Option<u8>> = sent.iter().map(|p| method_id(p)).collect();
     assert!(methods.contains(&Some(EngineMethod::SubscribeAllTrades.to_byte())));
     let book_count = methods

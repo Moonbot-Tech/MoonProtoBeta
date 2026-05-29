@@ -26,20 +26,20 @@ pub struct EngineResponse {
 
 /// Parse TEngineResponse from command payload.
 ///
-/// **Wire-format** (после Crypted decrypt + CryptoHeader strip, payload **с** Engine
+/// **Wire-format** (after Crypted decrypt + CryptoHeader strip, payload **with** the Engine
 /// TBaseCommand header):
 /// ```text
 /// [CmdId(1)=1][ver(2)][own_UID(8)][RequestUID(8)][Method(1)][Success(1)][ErrorCode(4)][ErrorMsg(string)][IsCompressed(1)][DataSize(4)][Data]
 /// ```
 ///
-/// Engine TBaseCommand header (11 байт: `CmdId + ver + own_UID`) **пропускается**
-/// до чтения `RequestUID` — соответствует Delphi `TEngineResponse.CreateFromStream`
-/// который через `inherited CreateFromStream` (TBaseCommand) сначала читает ver+UID,
-/// потом own fields.
+/// The Engine TBaseCommand header (11 bytes: `CmdId + ver + own_UID`) is **skipped**
+/// before reading `RequestUID` — matching Delphi `TEngineResponse.CreateFromStream`,
+/// which via `inherited CreateFromStream` (TBaseCommand) first reads ver+UID,
+/// then its own fields.
 ///
-/// **Историческая ошибка** (исправлено): раньше парсер начинал с `pos=0`, читая
-/// `[ver][own_UID first 5 bytes]` как `request_uid` — никогда не совпадало с
-/// зарегистрированным uid -> все Engine API responses терялись (BaseCheck/AuthCheck/
+/// **Historical bug** (fixed): the parser used to start at `pos=0`, reading
+/// `[ver][own_UID first 5 bytes]` as `request_uid` — it never matched the
+/// registered uid -> all Engine API responses were lost (BaseCheck/AuthCheck/
 /// GetMarketsList timeouts).
 ///
 /// Matches `MoonProtoEngineStruct.pas:364-403`.

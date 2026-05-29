@@ -150,8 +150,8 @@ impl MarketsState {
     }
 
     fn next_base_currency_price_like_delphi(&self, bc: &BaseCurrencyPrice) -> Option<f64> {
-        // Delphi `TMarkets.UpdateCurrencyPrices` (MarketsU.pas:2882-2894) гейтит все
-        // четыре ветви (UsdtMarket/UsdtRev/UsdtCorr/UsdtRevCorr) по `_epsM`, не `_eps`.
+        // Delphi `TMarkets.UpdateCurrencyPrices` (MarketsU.pas:2882-2894) gates all
+        // four branches (UsdtMarket/UsdtRev/UsdtCorr/UsdtRevCorr) against `_epsM`, not `_eps`.
         if let Some(price) = bc
             .usdt_market
             .as_deref()

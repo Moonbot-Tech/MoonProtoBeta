@@ -1053,7 +1053,7 @@ fn order_not_found_marks_server_forced_then_deferred_removal_like_delphi() {
 #[test]
 fn phase_rollback_rejected() {
     let mut orders = Orders::new();
-    // SellSet (phase 3) → потом BuySet (phase 1) → rollback
+    // SellSet (phase 3) → then BuySet (phase 1) → rollback
     orders.apply(order_status_cmd(make_status(
         1,
         "X",
@@ -1071,7 +1071,7 @@ fn phase_rollback_rejected() {
 
 #[test]
 fn phase_rollback_not_applied_for_terminal() {
-    // BuySet (phase 1) → BuyCancel (phase 0): NOT rollback потому что новая phase = 0
+    // BuySet (phase 1) → BuyCancel (phase 0): NOT rollback because the new phase = 0
     let mut orders = Orders::new();
     orders.apply(order_status_cmd(make_status(
         1,
@@ -1100,10 +1100,10 @@ fn epoch_out_of_order_rejected() {
         OrderWorkerStatus::BuySet,
         10,
     )));
-    // Первый full status при создании worker'а в Delphi идёт через
-    // OnMServerOrder -> HandleServerCommand и не заполняет
-    // FServerLatestEpoch. Следующая команда этого status уже проходит
-    // AcceptServerCommand и выставляет latest=10.
+    // In Delphi the first full status that creates a worker goes through
+    // OnMServerOrder -> HandleServerCommand and does not populate
+    // FServerLatestEpoch. The next command for this status already passes
+    // AcceptServerCommand and sets latest=10.
     let (res, _) = orders.apply(order_status_cmd(make_status(
         1,
         "X",
@@ -1111,7 +1111,7 @@ fn epoch_out_of_order_rejected() {
         10,
     )));
     assert_eq!(res, ApplyResult::Applied);
-    // epoch 5 после 10: backDist=10-5=5 <= 100 → stale
+    // epoch 5 after 10: backDist=10-5=5 <= 100 → stale
     let (res, _) = orders.apply(order_status_cmd(make_status(
         1,
         "X",
@@ -1137,8 +1137,8 @@ fn epoch_duplicate_rejected() {
         10,
     )));
     assert_eq!(res, ApplyResult::Applied);
-    // Тот же epoch после AcceptServerCommand latest=10 — дубликат,
-    // отвергается (Delphi EpochIsOK: LastEpoch=NewEpoch → false).
+    // Same epoch after AcceptServerCommand latest=10 — a duplicate,
+    // rejected (Delphi EpochIsOK: LastEpoch=NewEpoch → false).
     let (res, _) = orders.apply(order_status_cmd(make_status(
         1,
         "X",
@@ -1184,7 +1184,7 @@ fn epoch_wrap_around_accepted() {
         OrderWorkerStatus::BuySet,
         65500,
     )));
-    // wrap: 65500 → 200, backDist = 65500-200 = 65300 > 100 → accept (новое сообщение)
+    // wrap: 65500 → 200, backDist = 65500-200 = 65300 > 100 → accept (new message)
     let (res, _) = orders.apply(order_status_cmd(make_status(
         1,
         "X",
@@ -1857,19 +1857,19 @@ fn epoch_is_ok_unit() {
 
     // duplicate
     assert!(!epoch_is_ok(10, 10));
-    // stale близко: backDist = 100-50 = 50 <= 100 → reject.
+    // stale and close: backDist = 100-50 = 50 <= 100 → reject.
     assert!(!epoch_is_ok(100, 50));
-    // accept forward через wrap: backDist = 100-250 = 65386 > 100 → accept.
+    // accept forward through wrap: backDist = 100-250 = 65386 > 100 → accept.
     assert!(epoch_is_ok(100, 250));
-    // wrap-around forward далеко: last=65500, new=200. backDist = 65300 > 100 → accept.
+    // wrap-around forward far: last=65500, new=200. backDist = 65300 > 100 → accept.
     assert!(epoch_is_ok(65500, 200));
     // last=200, new=65500. backDist = 200-65500 (wrap) = 236 > 100 → accept.
     assert!(epoch_is_ok(200, 65500));
-    // Ближний stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 <= 100 → reject.
+    // near stale: last=10, new=65500. backDist = 10-65500 (wrap) = 46 <= 100 → reject.
     assert!(!epoch_is_ok(10, 65500));
-    // Граница окна: backDist = 100 → НЕ accept (требуется СТРОГО > 100).
+    // window boundary: backDist = 100 → NOT accept (requires STRICTLY > 100).
     assert!(!epoch_is_ok(500, 400));
-    // На один больше границы → accept.
+    // one past the boundary → accept.
     assert!(epoch_is_ok(500, 399));
 }
 

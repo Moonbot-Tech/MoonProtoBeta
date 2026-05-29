@@ -7,12 +7,12 @@ impl Client {
     /// `DataToSend*` queue for its priority, separate from accepted UDP packets
     /// and receive-decoded delivery. This API has no local capacity-drop branch.
     ///
-    /// E-V2-06: возвращает `()`, **но** при закрытом канале (main loop завершён)
-    /// логирует error через `log` crate. Потерянная команда — серьёзный сигнал,
-    /// но возвращать Result сломало бы API всех Client wrappers (`client.new_order(...)`
-    /// и т.д.). Если потребителю нужен гарантированный feedback — он может
-    /// проверить статус через `LifecycleEvent::Disconnected` callback и не
-    /// шарашить новые команды после.
+    /// E-V2-06: returns `()`, **but** when the channel is closed (main loop has finished)
+    /// it logs an error through the `log` crate. A lost command is a serious signal,
+    /// but returning a Result would break the API of all Client wrappers (`client.new_order(...)`
+    /// etc.). If the consumer needs guaranteed feedback, it can
+    /// check the status via the `LifecycleEvent::Disconnected` callback and stop
+    /// firing new commands after that.
     ///
     /// **QUEUE BEHAVIOR:** internal send queues are unbounded. This matches
     /// Delphi `MoonProtoCommon.pas:765 SendCmdInt`: user commands are appended

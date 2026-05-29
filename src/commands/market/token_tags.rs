@@ -1,8 +1,8 @@
 use super::{write_str, EngineStreamReader};
 
-/// `TTokenTag` flag set (Vars.pas:64). На проводе — i32 bitmask.
+/// `TTokenTag` flag set (Vars.pas:64). On the wire it is an i32 bitmask.
 ///
-/// Биты соответствуют ordinal'ам Delphi enum'а `TTokenTag`:
+/// Bits correspond to the ordinals of the Delphi `TTokenTag` enum:
 /// `(tag_none, tag_Monitoring, tag_Fan, tag_seed, tag_launch, tag_gaming,
 ///   tag_New, tag_OLD, tag_BNB, tag_Alpha, tag_OICapped, tag_TradFi)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,13 +60,13 @@ pub struct MarketTokenTags {
     pub tags: TokenTags,
 }
 
-/// Ответ `emk_CheckBinanceTags`: список (market_name, tags).
+/// `emk_CheckBinanceTags` response: list of (market_name, tags).
 /// Wire-form (MoonProtoEngineServer.pas:324-333):
 ///   `count:i32 + (market_name:string + tags:i32)[count]`.
 #[doc(hidden)]
 pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
-    // MarketTokenTags: market_name (string u16+chars) + tags (i32) = минимум 6 байт.
+    // MarketTokenTags: market_name (string u16+chars) + tags (i32) = at least 6 bytes.
     let count = r.read_count()?;
     let mut out = Vec::with_capacity(r.bounded_count_capacity(count, 6));
     for _ in 0..count {

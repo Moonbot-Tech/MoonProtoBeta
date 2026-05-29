@@ -135,7 +135,7 @@ fn market_roundtrip_v2_with_futures_type() {
 
 #[test]
 fn market_mb_classic_backfilled_when_empty() {
-    // Если в payload `market_name_mb_classic = ""`, после чтения должен стать = market_name.
+    // If `market_name_mb_classic = ""` in the payload, after reading it must become = market_name.
     let mut m = sample_market("LTC", true);
     m.market_name_mb_classic = String::new();
     m.market_name = "LTCUSDT".to_string();
@@ -356,7 +356,7 @@ fn markets_prices_response_no_funding_no_corr() {
     assert!(!parsed.send_funding);
     assert_eq!(parsed.prices.len(), 1);
     assert_eq!(parsed.prices[0].m_index, 42);
-    // funding_rate должен быть 0 при send_funding=false
+    // funding_rate must be 0 when send_funding=false
     assert_eq!(parsed.prices[0].funding_rate, 0.0);
     assert!(!parsed.send_corr_markets);
 }

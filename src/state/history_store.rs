@@ -102,8 +102,9 @@ pub struct MarketHistoryStore {
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
-    /// In-progress 5m свеча (Delphi `TMarket.FCandle`) — отдельный аккумулятор,
-    /// НЕ хранится в `candles_5m` ring (там только засиленные end-stamped свечи).
+    /// In-progress 5m candle (Delphi `TMarket.FCandle`) — a separate
+    /// accumulator, NOT stored in the `candles_5m` ring (which holds only
+    /// sealed, end-stamped candles).
     current_candle: Option<Candle5mRow>,
     candle_deltas_dirty: bool,
     candle_deltas_bucket: Option<i64>,
@@ -195,11 +196,13 @@ impl MarketHistoryStore {
     }
 
     pub fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
-        // Снапшот = только засиленные свечи (Delphi `Deep5m`; `StoreCandlesToZip`
-        // сериализует Deep5m, а Recalc5mCandle пишет туда лишь на seal — in-progress
-        // `FCandle` сервер не шлёт). Кладём все в ring как есть (end-stamped). НЕ
-        // продолжаем последнюю как in-progress — её период закрыт; текущий период
-        // клиент копит сам из trade-потока в отдельный `current_candle` (Delphi FCandle).
+        // Snapshot = sealed candles only (Delphi `Deep5m`; `StoreCandlesToZip`
+        // serializes Deep5m, and Recalc5mCandle writes there only on seal — the
+        // server does not send the in-progress `FCandle`). Push them all into
+        // the ring as-is (end-stamped). Do NOT continue the last one as
+        // in-progress — its period is closed; the client accumulates the current
+        // period itself from the trade stream into a separate `current_candle`
+        // (Delphi FCandle).
         let last_time = candles.last().map(|candle| candle.time).unwrap_or_default();
         self.current_candle = None;
         self.candle_deltas_dirty = true;

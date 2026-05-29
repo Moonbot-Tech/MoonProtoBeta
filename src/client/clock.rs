@@ -29,24 +29,24 @@ fn get_ntp_offset_days() -> f64 {
     f64::from_bits(NTP_OFFSET_DAYS.load(Ordering::Relaxed))
 }
 
-/// Process-global fallback для low-level `EventDispatcher::dispatch_into` callers
-/// которые не привязали per-client `ServerTimeDelta` source. Рекомендуемый
-/// active path auto-link'ает `EventDispatcher` к `Client::server_time_delta_handle`
-/// через `MoonClient` / low-level active pump и **не использует** это global значение.
+/// Process-global fallback for low-level `EventDispatcher::dispatch_into` callers
+/// that have not linked a per-client `ServerTimeDelta` source. The recommended
+/// active path auto-links `EventDispatcher` to `Client::server_time_delta_handle`
+/// via `MoonClient` / the low-level active pump and **does not use** this global value.
 ///
 /// Multi-client sessions do not share this value in the active path: each
 /// `Client` has its own `Arc<AtomicU64>` handle.
 static SERVER_TIME_DELTA_DAYS: AtomicU64 = AtomicU64::new(0);
 
-/// Установить fallback server_time_delta (в днях, как TDateTime).
-/// Вызывается из обработки `MPC_Ping`; потребитель НЕ должен
-/// вызывать напрямую — используй `client.server_time_delta_handle()` для multi-Client.
+/// Set the fallback server_time_delta (in days, as TDateTime).
+/// Called from `MPC_Ping` handling; consumers must NOT call this
+/// directly — use `client.server_time_delta_handle()` for multi-Client.
 pub(crate) fn set_server_time_delta_global(delta_days: f64) {
     SERVER_TIME_DELTA_DAYS.store(delta_days.to_bits(), Ordering::Relaxed);
 }
 
-/// Получить fallback server_time_delta (дни). Используется `EventDispatcher` когда
-/// per-Client source не привязан.
+/// Get the fallback server_time_delta (days). Used by `EventDispatcher` when
+/// the per-Client source is not linked.
 pub(crate) fn get_server_time_delta_global() -> f64 {
     f64::from_bits(SERVER_TIME_DELTA_DAYS.load(Ordering::Relaxed))
 }

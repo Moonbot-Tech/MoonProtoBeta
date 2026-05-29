@@ -150,8 +150,8 @@ fn reset_caches_keep_books_matches_delphi_reset_orderbook_caches() {
 #[test]
 fn first_diff_without_full_is_applied_like_delphi() {
     // Delphi MoonProtoEngine.pas:2066-2071:
-    // Если `last_applied_seq = 0` (никогда ещё не применяли) — применяем
-    // первый Diff без ожидания Full. Раньше отбрасывали + просили Full.
+    // If `last_applied_seq = 0` (nothing applied yet) — apply the first Diff
+    // without waiting for a Full. Previously we dropped it + requested a Full.
     let mut ob = OrderBooks::new();
     let events = ob.on_packet(make_pkt(2, 0, 5, false), 1000);
     assert!(
@@ -163,13 +163,13 @@ fn first_diff_without_full_is_applied_like_delphi() {
                 ..
             }
         )),
-        "первый Diff с last_applied_seq=0 должен примениться (Delphi normal-mode)"
+        "the first Diff with last_applied_seq=0 must apply (Delphi normal-mode)"
     );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-        "RequestFullNeeded не нужен — Delphi не запрашивает Full в этом сценарии"
+        "RequestFullNeeded is not needed - Delphi does not request Full in this scenario"
     );
 }
 
@@ -177,7 +177,7 @@ fn first_diff_without_full_is_applied_like_delphi() {
 fn gap_caches_then_drains() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(make_pkt(3, 0, 10, true), 1000);
-    // Получен seq 12 — gap. Положить в cache.
+    // Received seq 12 — gap. Put it in the cache.
     let events = ob.on_packet(make_pkt(3, 0, 12, false), 1010);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -187,7 +187,7 @@ fn gap_caches_then_drains() {
             ..
         }
     )));
-    // Получен seq 11 — применить + drain seq 12.
+    // Received seq 11 — apply + drain seq 12.
     let events = ob.on_packet(make_pkt(3, 0, 11, false), 1020);
     let applied_seqs: Vec<u16> = events
         .iter()
@@ -215,34 +215,34 @@ fn stale_diff_rejected() {
 
 #[test]
 fn corrupted_throttle() {
-    // Throttle RequestFullNeeded после cache.is_expired() триггерит corrupted.
+    // Throttle RequestFullNeeded after cache.is_expired() triggers corrupted.
     let mut ob = OrderBooks::new();
-    // Full + gap → cache.add, не corrupted ещё.
+    // Full + gap → cache.add, not corrupted yet.
     let _ = ob.on_packet(make_pkt(5, 0, 1, true), 10_000);
     let _ = ob.on_packet(make_pkt(5, 0, 10, false), 10_010); // cache_not_empty_since=10010
-                                                             // 890ms прошло — is_expired (>800ms) → corrupted=true → первый RequestFullNeeded.
+                                                             // 890ms elapsed — is_expired (>800ms) → corrupted=true → first RequestFullNeeded.
     let events = ob.on_packet(make_pkt(5, 0, 11, false), 10_900);
     assert!(
         events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-        "is_expired (890>800ms) → corrupted=true → первый RequestFullNeeded"
+        "is_expired (890>800ms) -> corrupted=true -> first RequestFullNeeded"
     );
-    // Через 100мс в corrupted ветке — НЕ должен отправить (throttle 5000мс).
+    // After 100ms in the corrupted branch — must NOT send (throttle 5000ms).
     let events = ob.on_packet(make_pkt(5, 0, 12, false), 11_000);
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-        "throttle 5000ms блокирует второй RequestFullNeeded"
+        "throttle 5000ms blocks the second RequestFullNeeded"
     );
-    // Через >5000ms с момента первого запроса — throttle снимается.
+    // After >5000ms since the first request — the throttle is released.
     let events = ob.on_packet(make_pkt(5, 0, 13, false), 16_001);
     assert!(
         events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })),
-        "через 5000ms throttle снимается"
+        "after 5000ms the throttle is released"
     );
 }
 
@@ -274,19 +274,19 @@ fn initial_full_request_throttle_matches_delphi_zero_timestamp() {
 
 #[test]
 fn corrupted_mode_applies_diffs_while_waiting_for_full() {
-    // Delphi MoonProtoEngine.pas:2021-2039: в corrupted режиме клиент
-    // применяет diff'ы as-is для degraded live view, а не замораживает UI.
+    // Delphi MoonProtoEngine.pas:2021-2039: in corrupted mode the client
+    // applies diffs as-is for a degraded live view, rather than freezing the UI.
     let mut ob = OrderBooks::new();
-    // Full + Diff в order, потом gap → corrupted.
+    // Full + Diff in order, then gap → corrupted.
     let _ = ob.on_packet(make_pkt(6, 0, 10, true), 10_000);
     let _ = ob.on_packet(make_pkt(6, 0, 12, false), 10_010); // gap [11]
-                                                             // Через 890ms is_expired → corrupted.
+                                                             // After 890ms is_expired → corrupted.
     let events = ob.on_packet(make_pkt(6, 0, 13, false), 10_900);
     assert!(events
         .iter()
         .any(|e| matches!(e, OrderBookEvent::RequestFullNeeded { .. })));
 
-    // Следующий Diff в corrupted — должен примениться (degraded view).
+    // The next Diff in corrupted — must be applied (degraded view).
     let events = ob.on_packet(make_pkt(6, 0, 14, false), 10_910);
     assert!(
         events.iter().any(|e| matches!(
@@ -297,7 +297,7 @@ fn corrupted_mode_applies_diffs_while_waiting_for_full() {
                 ..
             }
         )),
-        "corrupted mode должен продолжать показывать degraded live view"
+        "corrupted mode must keep showing the degraded live view"
     );
 }
 
@@ -306,7 +306,7 @@ fn separate_pairs_independent() {
     let mut ob = OrderBooks::new();
     let _ = ob.on_packet(make_pkt(1, 0, 10, true), 1000); // Futures
     let _ = ob.on_packet(make_pkt(1, 1, 20, true), 1000); // Spot
-                                                          // Diff for spot at seq 21 — должен примениться.
+                                                          // Diff for spot at seq 21 — must be applied.
     let events = ob.on_packet(make_pkt(1, 1, 21, false), 1010);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -317,7 +317,7 @@ fn separate_pairs_independent() {
             ..
         }
     )));
-    // Diff для futures at seq 11 — должен примениться независимо.
+    // Diff for futures at seq 11 — must be applied independently.
     let events = ob.on_packet(make_pkt(1, 0, 11, false), 1010);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -332,16 +332,16 @@ fn separate_pairs_independent() {
 
 #[test]
 fn book_seq_zero_overrides_stale_compare_like_delphi() {
-    // Delphi normal-mode условие проверяет `m.MoonProtoBookSeq = 0` до
-    // stale-drop. Поэтому при начальном seq=0 пакет 65535 всё равно
-    // применяется, хотя CompareSeq(65535, 0) < 0.
+    // The Delphi normal-mode condition checks `m.MoonProtoBookSeq = 0` before
+    // the stale-drop. So with an initial seq=0 the packet 65535 is still
+    // applied, even though CompareSeq(65535, 0) < 0.
     let mut ob = OrderBooks::new();
     let events = ob.on_packet(make_pkt(9, 0, u16::MAX, false), 1000);
     assert!(
         events
             .iter()
             .any(|e| matches!(e, OrderBookEvent::Apply { seq: u16::MAX, .. })),
-        "MoonProtoBookSeq=0 должен применить Diff до stale-check"
+        "MoonProtoBookSeq=0 must apply the Diff before the stale-check"
     );
 }
 
@@ -376,16 +376,16 @@ fn normal_gap_overflow_enters_corrupted_without_clearing_cache() {
     let cache = ob.caches.get(&(11, 0)).unwrap();
     assert!(
         cache.corrupted,
-        "Count > BOOK_CACHE_MAX_PACKETS переводит cache в corrupted"
+        "Count > BOOK_CACHE_MAX_PACKETS moves the cache into corrupted"
     );
     assert!(
         request_full_seen,
-        "TryRequestFull должен сработать при входе в corrupted"
+        "TryRequestFull must fire when entering corrupted"
     );
     assert_eq!(
         cache.packets.len(),
         65,
-        "Delphi normal-mode не очищает cache при overflow; 65-й gap-пакет остаётся в списке"
+        "Delphi normal-mode does not clear the cache on overflow; the 65th gap packet stays in the list"
     );
 }
 
@@ -403,7 +403,7 @@ fn corrupted_mode_drops_oldest_before_add() {
     assert_eq!(
         cache.packets.front().map(|p| p.seq),
         Some(4),
-        "в corrupted mode Delphi DropOldest выполняется перед Add нового diff"
+        "in corrupted mode Delphi DropOldest runs before adding the new diff"
     );
 }
 

@@ -26,8 +26,9 @@ impl Client {
         if self.next_port < 1024 || self.next_port > 65000 {
             self.next_port = 1024;
         }
-        // Bind family выбирается по серверному адресу. Если сервер — IPv6 literal `[2001:db8::1]:3000`
-        // или DNS name резолвящийся в AAAA — bindаемся `[::]:port`. Иначе IPv4 `0.0.0.0:port`.
+        // The bind family is chosen by the server address. If the server is an IPv6 literal
+        // `[2001:db8::1]:3000` or a DNS name resolving to AAAA — bind to `[::]:port`.
+        // Otherwise IPv4 `0.0.0.0:port`.
         let bind_family = if self.cfg.server_ip.contains(':') {
             "[::]"
         } else {
@@ -45,7 +46,7 @@ impl Client {
                     debug!("bound UDP socket on {}:{}", bind_family, self.next_port);
                     self.next_port += 1;
                     self.socket = Some(sock);
-                    // Сброс кэша адреса сервера — может измениться при reconnect через DNS.
+                    // Reset the cached server address — it may change on reconnect via DNS.
                     self.cached_server_addr = None;
                     self.start_inline_reader_session();
                     self.reset_bind_failure_tracking();
@@ -60,14 +61,14 @@ impl Client {
                 }
             }
         }
-        // Все 200 попыток bind упали → не можем создать сокет В ЭТОТ ТИК.
-        // НЕ ставим need_connect=false (audit_responsibility H3): на mobile при port
-        // exhaustion (CGNAT, iOS background, ulimit) Disconnected заставил бы app
-        // пересоздавать Client. Delphi (`MoonProtoUDPClient.pas:680+`) ретраит forever —
-        // active library тоже должна.
+        // All 200 bind attempts failed → we cannot create a socket ON THIS TICK.
+        // Do NOT set need_connect=false (audit_responsibility H3): on mobile, port
+        // exhaustion (CGNAT, iOS background, ulimit) plus Disconnected would force the app
+        // to recreate the Client. Delphi (`MoonProtoUDPClient.pas:680+`) retries forever —
+        // the active library must too.
         //
-        // Throttled error-лог чтобы не спамить (раз в 5 сек). Следующий тик main loop
-        // снова войдёт в bind_socket — обычно через короткое время порты освободятся.
+        // Throttled error log to avoid spam (once every 5s). The next tick of the main loop
+        // will enter bind_socket again — usually the ports free up after a short time.
         if self.should_log("bind_socket_exhausted", 5000) {
             if let Some(ref e) = last_err {
                 error!(target: "moonproto::client",
@@ -82,8 +83,8 @@ impl Client {
 
         self.record_bind_failure(cur_tm);
 
-        // auth_status оставляем Base — main loop попробует bind ещё раз через DEFAULT_SLEEP_MS.
-        // Если app явно вызвал disconnect() — он сам выставит need_connect=false.
+        // Leave auth_status as Base — the main loop will try to bind again after DEFAULT_SLEEP_MS.
+        // If the app explicitly called disconnect() — it will set need_connect=false itself.
     }
 
     pub(crate) fn reset_bind_failure_tracking(&mut self) {

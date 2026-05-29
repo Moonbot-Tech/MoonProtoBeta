@@ -82,8 +82,8 @@ pub struct TradesState {
     last_packet_time_ms: i64,
     trades_started: bool,
     last_check_missing_ms: i64,
-    /// Delphi `LastLargeRecvdTime`: момент последнего роста `recvd` выше
-    /// `DEFAULT_RECVD_SIZE`. Используется для ленивого урезания памяти раз в 30 мин.
+    /// Delphi `LastLargeRecvdTime`: timestamp of the last time `recvd` grew
+    /// above `DEFAULT_RECVD_SIZE`. Used for the lazy memory shrink every 30 min.
     last_large_recvd_ms: i64,
 }
 

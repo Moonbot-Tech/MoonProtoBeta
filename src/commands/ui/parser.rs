@@ -4,7 +4,7 @@ use super::*;
 use zerocopy::IntoBytes;
 
 impl UICommand {
-    /// Распарсить TBaseUICommand payload (после dispatch'а по MPC_UI в data_read_int).
+    /// Parse a TBaseUICommand payload (after MPC_UI dispatch in data_read_int).
     /// Wire-format: `cmd_id:u8 + ver:u16 + UID:u64 + class-specific`.
     /// Version gate: ver > 3 -> [`UICommand::Skipped`], matching Delphi
     /// registry `FSkipped`.
@@ -285,7 +285,7 @@ fn parse_client_settings(
         temp_bl_times.push(t);
     }
 
-    // Soft-read tail. Каждая проверка: `pos < len` (поле есть).
+    // Soft-read tail. Each check: `pos < len` (the field is present).
     let mut use_manual_strategy = false;
     let mut manual_strategy_id = 0u64;
     if *pos < data.len() {
@@ -311,7 +311,7 @@ fn parse_client_settings(
         fallback.map(|f| f.use_stop_market).unwrap_or(false)
     };
 
-    // ASCfg: `if pos + sizeof(Word) < size`  -> Delphi `<`, не `<=`, чтобы было что-то ЗА размером.
+    // ASCfg: `if pos + sizeof(Word) < size` -> Delphi uses `<`, not `<=`, so there is something PAST the size field.
     let as_cfg = if can_read_sized_blob(data, *pos) {
         read_sized_autostart_config_with_fallback(data, pos, fallback.map(|f| f.as_cfg.as_slice()))
     } else {
@@ -429,7 +429,7 @@ fn parse_client_settings(
 /// Delphi first assigns `ASCfg := cfg.AutoStartConfig` and then reads only the
 /// prefix that exists in the stream. Missing tail bytes therefore keep fallback
 /// values; they are not zeroed and not truncated.
-/// Delphi гвард: `pos + SizeOf(Word) < size` — оставляем как `<`.
+/// Delphi guard: `pos + SizeOf(Word) < size` — kept as `<`.
 fn read_sized_autostart_config_with_fallback(
     data: &[u8],
     pos: &mut usize,

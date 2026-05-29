@@ -3,7 +3,7 @@
 use super::*;
 
 impl Client {
-    /// Установить lifecycle callback.
+    /// Install the lifecycle callback.
     ///
     /// During `run*` calls the callback is queued outside the protocol writer
     /// tick, matching Delphi `TThread.Queue` for status notifications.
@@ -40,8 +40,8 @@ impl Client {
         self.server_update_sent.swap(false, Ordering::Relaxed)
     }
 
-    /// Внутренний хук: вызывает callback на переход состояния.
-    /// Должен вызываться там где меняется `self.auth_status` или `self.need_connect`.
+    /// Internal hook: invokes the callback on a state transition.
+    /// Must be called wherever `self.auth_status` or `self.need_connect` changes.
     pub(super) fn fire_lifecycle(&mut self, ev: LifecycleEvent) {
         let tx = self.lifecycle_app_tx.lock().unwrap().clone();
         if let Some(tx) = tx {
@@ -53,28 +53,28 @@ impl Client {
         }
     }
 
-    /// Проверить изменение auth_status и эмитировать соответствующий lifecycle event.
-    /// Вызывается из main loop после каждого пакета.
+    /// Check for an auth_status change and emit the matching lifecycle event.
+    /// Called from the main loop after each packet.
     pub(super) fn check_lifecycle_transition(&mut self) {
         if self.auth_status == self.prev_auth_status {
             return;
         }
         let new_ev = match (self.prev_auth_status, self.auth_status) {
-            // Первичное подключение (cold start или после Disconnect)
+            // Initial connection (cold start or after Disconnect)
             (AuthStatus::Base, AuthStatus::Connected) => Some(LifecycleEvent::Connecting),
-            // Re-handshake после потери связи (soft reconnect) — Offline → Connected
+            // Re-handshake after connection loss (soft reconnect) — Offline → Connected
             (AuthStatus::Offline, AuthStatus::Connected) => Some(LifecycleEvent::Connecting),
-            // Успешная авторизация (Fine received) — `fresh = true` только для первого
-            // в жизни Connected. После was_ever_connected становится true и все
-            // последующие re-handshake'и шлют `fresh = false`.
+            // Successful authorization (Fine received) — `fresh = true` only for the first
+            // Connected of the session. Afterwards was_ever_connected becomes true and all
+            // subsequent re-handshakes send `fresh = false`.
             (_, AuthStatus::AuthDone) if self.prev_auth_status != AuthStatus::AuthDone => {
                 let fresh = !self.was_ever_connected;
                 self.was_ever_connected = true;
                 Some(LifecycleEvent::Connected { fresh })
             }
-            // Потеря связи
+            // Connection loss
             (AuthStatus::AuthDone, AuthStatus::Offline) => Some(LifecycleEvent::Reconnecting),
-            // Disconnect от потребителя (явный)
+            // Disconnect requested by the consumer (explicit)
             (_, AuthStatus::Base)
                 if self.prev_auth_status != AuthStatus::Base && !self.need_connect =>
             {

@@ -1418,8 +1418,8 @@ pub(crate) fn run_init_sequence(
     let mut strategy_schema: Option<PendingStrategySchemaStep> = None;
 
     // === 1. BaseCheck/AuthCheck === Delphi InitInt first auth block.
-    // При успехе — парсим server identity и сохраняем в Client.server_info
-    // (multi-server support: приложение различает серверы через `client.server_info().bot_id`).
+    // On success, parse server identity and store it in Client.server_info
+    // (multi-server support: the application distinguishes servers via `client.server_info().bot_id`).
     let auth_block_errors_before = result.errors.len();
     let mut base_status = run_base_check_delphi(
         client,
@@ -1499,7 +1499,7 @@ pub(crate) fn run_init_sequence(
         strategy_schema = Some(begin_required_strategy_schema_step(client, dispatcher));
     }
 
-    // === 3. GetMarketsList === критический Delphi init step.
+    // === 3. GetMarketsList === critical Delphi init step.
     // Delphi `ProcessApiCommand` only parks the response in PendingRequests;
     // `TMoonProtoEngine.GetMarketsList` applies markets after SendAndWait.
     let resp = run_required_engine_step(
@@ -1520,7 +1520,7 @@ pub(crate) fn run_init_sequence(
     // token/reconnect repair path inside `TMoonProtoEngine.UpdateMarketsList`.
     client.tracked_indexes_peer_app_token = client.peer_app_token;
 
-    // === 4. UpdateMarketsList === критический: Delphi InitInt does exactly
+    // === 4. UpdateMarketsList === critical: Delphi InitInt does exactly
     // `GetMarketsList and UpdateMarketsList`; if the token later becomes stale,
     // reconnect/periodic restore must run `GetMarketsIndexes` before prices.
     let resp = run_required_engine_step(
@@ -1563,7 +1563,7 @@ pub(crate) fn run_init_sequence(
         result.trades_subscribed = true;
     }
 
-    // === 7. Subscribe orderbooks === optional; fire-and-forget через registry
+    // === 7. Subscribe orderbooks === optional; fire-and-forget via registry
     for name in &cfg.subscribe_orderbooks {
         client.subscribe_orderbook(name);
         result.orderbooks_subscribed += 1;

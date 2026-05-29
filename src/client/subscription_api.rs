@@ -2,19 +2,19 @@ use super::*;
 
 impl Client {
     // ====================================================================
-    //  Active library: subscription API (по market_name + registry)
+    //  Active library: subscription API (by market_name + registry)
     //
-    //  F4: thread-safe API через [`ClientSender`]. В public Active Lib
-    //  пользователи вызывают одноименные методы на `MoonClient`; эти low-level
-    //  методы нужны runtime-owner'у. В отличие от raw `api_subscribe_order_book`
-    //  они:
-    //   1. Запоминают подписку в `subscription_registry`.
-    //   2. После единственного Init восстанавливаются самой либой при reconnect.
-    //   3. Принимают `market_name` (стабилен через reindex), не market_idx.
-    //   4. Работают на `&self` внутри runtime-owner'а.
+    //  F4: thread-safe API via [`ClientSender`]. In the public Active Lib
+    //  users call the same-named methods on `MoonClient`; these low-level
+    //  methods are needed by the runtime owner. Unlike the raw `api_subscribe_order_book`
+    //  they:
+    //   1. Remember the subscription in `subscription_registry`.
+    //   2. Are restored by the library itself on reconnect after the single Init.
+    //   3. Take a `market_name` (stable across reindex), not a market_idx.
+    //   4. Operate on `&self` inside the runtime owner.
     //
-    //  Аналог Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` с
-    //  `BookSubbed: TSet<TMarket>` и `NeedResubscribeOrderBooks`.
+    //  Analog of Delphi `MoonProtoEngine.pas:305-360 CheckBookTopics` with
+    //  `BookSubbed: TSet<TMarket>` and `NeedResubscribeOrderBooks`.
     // ====================================================================
 
     /// Thread-safe sender handle for subscribing and sending commands from any
@@ -229,8 +229,8 @@ impl Client {
 
     /// Batch restore helper for the subscription registry.
     ///
-    /// OrderBook подписки отправляются одним `emk_SubscribeOrderBook` batch'ем:
-    /// в Delphi wire request нет `OrderBookKind`, только список имён рынков.
+    /// OrderBook subscriptions are sent as a single `emk_SubscribeOrderBook` batch:
+    /// the Delphi wire request has no `OrderBookKind`, only a list of market names.
     #[cfg(test)]
     pub(crate) fn restore_registry_subscriptions(&mut self) {
         self.restore_registry_subscriptions_without_delayed_orderbooks(false, false);

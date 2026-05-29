@@ -149,16 +149,16 @@ pub struct EventDispatcher {
     /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
     /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
     local_strategy_epoch: u64,
-    /// Последний известный `ServerToken` — для детектирования hard reconnect.
-    /// При смене токена `dispatch_into_active` сбрасывает per-token state
-    /// (`trades.full_reset()`, `order_books.reset_caches_keep_books()`) до применения нового пакета.
-    /// Иначе stale `last_packet_num` / `expected_seq` в старой нумерации новой
-    /// сессии порождает spurious `GapDetected` события и corrupted orderbook display
-    /// в первые секунды. Аналог Delphi `MoonProtoEngine.pas:1586-1591`
+    /// Last known `ServerToken` — for detecting a hard reconnect.
+    /// On a token change, `dispatch_into_active` resets per-token state
+    /// (`trades.full_reset()`, `order_books.reset_caches_keep_books()`) before applying the new packet.
+    /// Otherwise stale `last_packet_num` / `expected_seq` from the old numbering of the new
+    /// session produces spurious `GapDetected` events and a corrupted orderbook display
+    /// in the first seconds. Analogous to Delphi `MoonProtoEngine.pas:1586-1591`
     /// (`If FTradesServerToken <> MClient.Client.ServerToken then ResetGapBuckets`) +
     /// `MoonProtoEngine.pas:316-318` (`If NeedResubscribeOrderBooks then ResetOrderBookCaches`).
-    /// Init=0 (никогда не подключались) → первый non-zero token не триггерит сброс.
-    /// См. audit_responsibility_hints #1, #2.
+    /// Init=0 (never connected) → the first non-zero token does not trigger a reset.
+    /// See audit_responsibility_hints #1, #2.
     last_known_server_token: u64,
     /// Delphi `Bworks.pas LastAddedNewMarket` analogue for active-lib
     /// `NewMarketFound -> GetMarketsList` auto refresh.
@@ -172,13 +172,13 @@ pub struct EventDispatcher {
     /// uses this to decide whether `SubscribeAllTrades` actually produced a
     /// stream for the current `Client.ServerToken`.
     trades_server_token: u64,
-    /// Per-Client `ServerTimeDelta` source. Если `Some` — `dispatch_into` для
-    /// `Command::Order` читает delta отсюда (multi-Client safe). Если `None` —
-    /// fallback на global `SERVER_TIME_DELTA_DAYS` для raw `dispatch_into`
-    /// потребителей без линковки.
+    /// Per-Client `ServerTimeDelta` source. If `Some`, `dispatch_into` for
+    /// `Command::Order` reads the delta from here (multi-Client safe). If `None`,
+    /// it falls back to the global `SERVER_TIME_DELTA_DAYS` for raw `dispatch_into`
+    /// consumers that are not linked.
     ///
-    /// Привязка: либо явный вызов [`Self::set_server_time_delta_source`] с
-    /// `client.server_time_delta_handle()`, либо автоматически через active
+    /// Binding: either an explicit call to [`Self::set_server_time_delta_source`] with
+    /// `client.server_time_delta_handle()`, or automatically via the active
     /// runtime path.
     server_time_delta_source: Option<Arc<AtomicU64>>,
     /// Optional override for fresh application-owned strategies. Without an
@@ -707,8 +707,8 @@ impl EventDispatcher {
         self.server_time_delta_source = Some(handle);
     }
 
-    /// Текущее значение `ServerTimeDelta` (days). Если установлен per-Client
-    /// source — берёт оттуда; иначе fallback на global.
+    /// Current `ServerTimeDelta` value (days). If a per-Client source is set,
+    /// it reads from there; otherwise it falls back to the global.
     fn current_server_time_delta(&self) -> f64 {
         match &self.server_time_delta_source {
             Some(handle) => f64::from_bits(handle.load(Ordering::Relaxed)),
@@ -723,7 +723,7 @@ impl EventDispatcher {
     /// batches can produce several events for one payload.
     #[must_use = "Events must be processed or application notifications are lost."]
     pub fn dispatch(&mut self, cmd: Command, payload: &[u8], now_ms: i64) -> Vec<Event> {
-        // Convenience-обёртка над `dispatch_into`.
+        // Convenience wrapper over `dispatch_into`.
         let mut out = Vec::new();
         self.dispatch_into(cmd, payload, now_ms, &mut out);
         out

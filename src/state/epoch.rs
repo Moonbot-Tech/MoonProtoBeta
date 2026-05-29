@@ -1,34 +1,34 @@
 //! Wrap-safe epoch comparison matching Delphi `EpochIsOK`.
 //!
-//! Используется для определения "новее ли" пришедшее значение `new` чем последнее
-//! известное `last` в условиях:
-//! - u16 epoch обёртывается каждые ~64K событий;
-//! - reorder из-за UDP / WiFi/cellular handoff может прислать legitimate update
-//!   "из прошлого" на несколько штук;
-//! - сервер может ребутнуть и начать счёт заново.
+//! Used to decide whether an incoming value `new` is "newer than" the last
+//! known `last`, under these conditions:
+//! - the u16 epoch wraps around every ~64K events;
+//! - reorder caused by UDP / WiFi/cellular handoff may deliver a legitimate
+//!   update "from the past" by a few units;
+//! - the server may reboot and restart the counter from scratch.
 //!
-//! Алгоритм соответствует Delphi `MoonProtoFunc.pas:188-203 EpochIsOK`:
-//! - `last == new` → дубликат, reject;
-//! - `(last - new) mod 2^16 <= 100` → stale (старее `last`), reject;
-//! - иначе → новее, accept.
+//! The algorithm matches Delphi `MoonProtoFunc.pas:188-203 EpochIsOK`:
+//! - `last == new` → duplicate, reject;
+//! - `(last - new) mod 2^16 <= 100` → stale (older than `last`), reject;
+//! - otherwise → newer, accept.
 
 const STALE_WINDOW: u16 = 100;
 
-/// Wrap-safe epoch comparison. Возвращает `true` если `new` — действительно
-/// новое значение (не дубликат, не stale).
+/// Wrap-safe epoch comparison. Returns `true` if `new` is genuinely a new
+/// value (not a duplicate, not stale).
 ///
-/// Шаблон использования:
+/// Usage pattern:
 /// ```ignore
 /// let last = self.last_epoch;
 /// if !epoch_is_ok(last, incoming.epoch) {
-///     return;  // duplicate или stale — игнорируем пакет
+///     return;  // duplicate or stale — drop the packet
 /// }
 /// self.last_epoch = incoming.epoch;
 /// // ... apply update
 /// ```
 ///
-/// См. `MoonProtoFunc.pas:188-203`: Delphi использует именно окно `100`, а не
-/// RFC 1982 half-cycle.
+/// See `MoonProtoFunc.pas:188-203`: Delphi uses exactly a window of `100`, not
+/// the RFC 1982 half-cycle.
 pub fn epoch_is_ok(last: u16, new: u16) -> bool {
     if last == new {
         return false; // duplicate
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn small_backward_rejected_as_stale() {
-        // Legitimate reorder в пределах малой дистанции — stale.
+        // Legitimate reorder within a small distance — stale.
         assert!(!epoch_is_ok(100, 99));
         assert!(!epoch_is_ok(100, 50));
         assert!(!epoch_is_ok(30_000, 29_900));
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn wrap_around_forward_accepted() {
-        // last близко к u16::MAX, new близко к 0 — это wrap forward, accept.
+        // last close to u16::MAX, new close to 0 — this is a wrap forward, accept.
         assert!(epoch_is_ok(u16::MAX - 5, 0));
         assert!(epoch_is_ok(u16::MAX - 5, 100));
         assert!(epoch_is_ok(60_000, 100));
@@ -90,7 +90,7 @@ mod tests {
             let new = last.wrapping_sub(backward);
             assert!(
                 !epoch_is_ok(last, new),
-                "backward by {backward} from {last} → new={new} должно быть stale"
+                "backward by {backward} from {last} -> new={new} must be stale"
             );
         }
         assert!(epoch_is_ok(last, last.wrapping_sub(101)));

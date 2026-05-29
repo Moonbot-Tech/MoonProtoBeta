@@ -4,7 +4,7 @@ use super::{
 };
 use crate::commands::candles::current_local_time_shift_minutes;
 
-/// Ответ на `emk_GetMarketsList`: полный список маркетов + CorrMarkets.
+/// `emk_GetMarketsList` response: full list of markets + CorrMarkets.
 /// Wire-form (MoonProtoEngineServer.pas:60-82 `WriteMarketsToStream`):
 ///   `count:i32 + markets[count] + corr_count:i32 + corr_markets[corr_count]`.
 #[doc(hidden)]
@@ -14,7 +14,7 @@ pub struct MarketsListResponse {
     pub corr_markets: Vec<CorrMarket>,
 }
 
-/// Parse `EngineResponse.data` для `emk_GetMarketsList`.
+/// Parse `EngineResponse.data` for `emk_GetMarketsList`.
 #[doc(hidden)]
 pub fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
     parse_markets_list_response_with_local_shift(data, ver, current_local_time_shift_minutes())
@@ -26,8 +26,8 @@ pub(super) fn parse_markets_list_response_with_local_shift(
     local_shift_minutes: f64,
 ) -> Option<MarketsListResponse> {
     let mut r = EngineStreamReader::new(data);
-    // Market минимум заведомо больше 16 байт; число используется только для
-    // prealloc, не для Delphi-incompatible early reject.
+    // A Market is certainly larger than 16 bytes; the count is used only for
+    // prealloc, not for a Delphi-incompatible early reject.
     let count = r.read_count()?;
     let mut markets = Vec::with_capacity(r.bounded_count_capacity(count, 16));
     for _ in 0..count {
@@ -37,7 +37,7 @@ pub(super) fn parse_markets_list_response_with_local_shift(
             local_shift_minutes,
         )?);
     }
-    // CorrMarket минимум больше 8 байт; только bounded prealloc.
+    // A CorrMarket is larger than 8 bytes; bounded prealloc only.
     let corr_count = r.read_count()?;
     let mut corr_markets = Vec::with_capacity(r.bounded_count_capacity(corr_count, 8));
     for _ in 0..corr_count {
@@ -49,7 +49,7 @@ pub(super) fn parse_markets_list_response_with_local_shift(
     })
 }
 
-/// Опциональный билдер для тестов.
+/// Optional builder for tests.
 #[doc(hidden)]
 pub fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
     build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())

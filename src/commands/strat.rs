@@ -1,21 +1,21 @@
-//! MPC_Strat канал — 9 подкоманд TBaseStratCommand.
+//! MPC_Strat channel — 9 TBaseStratCommand subcommands.
 //!
-//! Источник Delphi: `MoonProto/MoonProtoStratStruct.pas` (~408 строк).
+//! Delphi source: `MoonProto/MoonProtoStratStruct.pas` (~408 lines).
 //!
-//! ## CmdId маппинг
+//! ## CmdId mapping
 //! - 0 — TBaseStratCommand (base)
 //! - 1 — TStratSnapshotRequest (empty, S→C)
 //! - 2 — TStratSnapshot (both directions, Sliced, UK_StratSnapshot)
 //! - 3 — TStratDelete (S↔C)
 //! - 4 — TStratSellPriceUpdate (C→S, UK_StratSellPriceUpdate)
 //! - 5 — TStratCheckedSync (S↔C, Sliced)
-//! - 6 — TStratCheckedEcho (S→C ACK на дельту Checked)
+//! - 6 — TStratCheckedEcho (S→C ACK for the Checked delta)
 //! - 7 — TStratSchemaRequest (C→S, empty)
 //! - 8 — TStratSchema (S→C, Sliced, raw-deflate schema blob)
 //!
-//! ## Замечание про TStratSnapshot.Data
-//! `Data: bytes(Size)` — это сериализованный bin-формат `TStrategySerializer` (RTTI-driven,
-//! ~1118 строк). Декодер и writer находятся в `commands::strategy_serializer`.
+//! ## Note on TStratSnapshot.Data
+//! `Data: bytes(Size)` is the serialized `TStrategySerializer` bin format (RTTI-driven,
+//! ~1118 lines). The decoder and writer live in `commands::strategy_serializer`.
 
 use super::registry::{read_string, write_string, CURRENT_PROTO_CMD_VER};
 use super::strategy_schema::StrategySchema;
@@ -47,7 +47,7 @@ pub(crate) fn is_schema_payload(payload: &[u8]) -> bool {
     payload.first().copied() == Some(CMD_SCHEMA)
 }
 
-/// Один элемент TStratCheckedItem: `StrategyID:UInt64 + Checked:bool` (9 байт).
+/// A single TStratCheckedItem element: `StrategyID:UInt64 + Checked:bool` (9 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StratCheckedItem {
     pub strategy_id: u64,
@@ -117,14 +117,14 @@ impl StratCheckedItem {
     }
 }
 
-/// `TStratSnapshot` (CmdId=2). Priority=Sliced. UKey=UK_StratSnapshot (UID всегда = 1, overlap).
+/// `TStratSnapshot` (CmdId=2). Priority=Sliced. UKey=UK_StratSnapshot (UID is always = 1, overlap).
 #[derive(Debug, Clone)]
 pub struct StratSnapshot {
     pub server_epoch: u64,
     pub client_max_last_date: u64,
-    /// True если это полный snapshot (Markets и Strats заменяются). False — частичный.
+    /// True if this is a full snapshot (Markets and Strats are replaced). False means partial.
     pub full: bool,
-    /// Сырой `TStrategySerializer` bin payload. Декодер/writer — в `commands::strategy_serializer`.
+    /// Raw `TStrategySerializer` bin payload. Decoder/writer are in `commands::strategy_serializer`.
     pub data: Vec<u8>,
 }
 
@@ -132,7 +132,7 @@ pub struct StratSnapshot {
 #[derive(Debug, Clone)]
 pub struct StratDelete {
     pub strategy_id: u64,
-    /// Path в дереве стратегий. Soft-read: в старых версиях отсутствует.
+    /// Path in the strategy tree. Soft-read: absent in older versions.
     pub folder_path: String,
 }
 
@@ -145,14 +145,14 @@ pub struct StratSellPriceUpdate {
 }
 
 /// `TStratCheckedSync` (CmdId=5). Priority=Sliced.
-/// `is_delta=true` означает что Items — только изменённые относительно prev sync.
+/// `is_delta=true` means Items contains only entries changed relative to the previous sync.
 #[derive(Debug, Clone)]
 pub struct StratCheckedSync {
     pub items: Vec<StratCheckedItem>,
     pub is_delta: bool,
 }
 
-/// `TStratCheckedEcho` (CmdId=6) — server ACK на клиентскую дельту.
+/// `TStratCheckedEcho` (CmdId=6) — server ACK for the client delta.
 #[derive(Debug, Clone)]
 pub struct StratCheckedEcho {
     pub items: Vec<StratCheckedItem>,
@@ -165,7 +165,7 @@ pub struct StratSchema {
     pub data: Vec<u8>,
 }
 
-/// Все парсимые входящие подкоманды MPC_Strat.
+/// All parseable incoming MPC_Strat subcommands.
 #[derive(Debug, Clone)]
 pub enum StratCommand {
     SnapshotRequest {
@@ -195,9 +195,9 @@ pub enum StratCommand {
 }
 
 impl StratCommand {
-    /// Распарсить TBaseStratCommand payload (после dispatch'a по MPC_Strat в data_read_int).
+    /// Parse a TBaseStratCommand payload (after MPC_Strat dispatch in data_read_int).
     /// Wire-form: `cmd_id(1) + ver(2) + UID(8) + class-specific`.
-    /// Version gate: если `ver > 3` — возвращаем Skipped (Delphi registry
+    /// Version gate: if `ver > 3`, return Skipped (Delphi registry
     /// `FSkipped` forward-compat path).
     #[doc(hidden)]
     pub fn parse(payload: &[u8]) -> Option<Self> {
@@ -267,7 +267,7 @@ impl StratCommand {
                 let is_delta = if pos < payload.len() {
                     payload[pos] != 0
                 } else {
-                    true // default для старых пакетов
+                    true // default for older packets
                 };
                 Some(StratCommand::CheckedSync(StratCheckedSync {
                     items,

@@ -106,12 +106,12 @@ impl TradesState {
             }
         }
 
-        // Delphi MoonProtoEngine.pas:1566-1573 (хвост `CheckMissingTradesPackets`):
-        // ленивое урезание `recvd` неактивных buckets раз в 30 минут — вернуть память
-        // после разового большого gap. Rust растит `recvd` до gap_size при большом gap
-        // (`create_bucket` / extend) и без этого никогда не ужимал. Активные buckets в
-        // работе не трогаем; как в Delphi, доступно только при `used_buckets > 0`
-        // (ранний выход выше), что совпадает с `If UsedBuckets = 0 then exit` в эталоне.
+        // Delphi MoonProtoEngine.pas:1566-1573 (tail of `CheckMissingTradesPackets`):
+        // lazy shrink of `recvd` for inactive buckets every 30 minutes — reclaim memory
+        // after a one-off large gap. Rust grows `recvd` up to gap_size on a large gap
+        // (`create_bucket` / extend) and never shrank it without this. Active buckets in
+        // use are left untouched; like Delphi, this runs only when `used_buckets > 0`
+        // (early return above), matching `If UsedBuckets = 0 then exit` in the reference.
         const LARGE_RECVD_SHRINK_MS: i64 = 30 * 60 * 1000;
         if now_ms - self.last_large_recvd_ms > LARGE_RECVD_SHRINK_MS {
             for b in self.buckets.iter_mut() {

@@ -106,9 +106,9 @@ impl EngineMethod {
     /// `GetCoinCardCandles`: short candle history for a coin-card UI component.
     pub const GetCoinCardCandles: Self = Self(31);
 
-    /// Сохранить raw Delphi ordinal byte. Delphi читает/пишет
-    /// `TEngineMethodKind` через `ms.Read/Stream.Write` и не превращает
-    /// unknown ordinal в `emk_None`.
+    /// Keep the raw Delphi ordinal byte. Delphi reads/writes
+    /// `TEngineMethodKind` via `ms.Read/Stream.Write` and does not turn an
+    /// unknown ordinal into `emk_None`.
     pub const fn from_byte(b: u8) -> Self {
         Self(b)
     }

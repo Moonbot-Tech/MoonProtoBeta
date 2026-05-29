@@ -522,7 +522,7 @@ fn sender_balance_request_refresh_uses_balance_channel_defaults() {
 
 #[test]
 fn subscribe_error_displays_with_message() {
-    // Просто проверка что Display impl работает (полезно для логирования).
+    // Just a check that the Display impl works (useful for logging).
     assert_eq!(
         format!("{}", SubscribeError::Disconnected),
         "Client queues disconnected"

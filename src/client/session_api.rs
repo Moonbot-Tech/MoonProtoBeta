@@ -3,13 +3,13 @@
 use super::*;
 
 impl Client {
-    /// Identity сервера (`bot_id`, `exchange_name`, `base_currency_name`, версии и т.д.).
-    /// Заполняется автоматически во время Init после успешного `emk_BaseCheck`.
+    /// Server identity (`bot_id`, `exchange_name`, `base_currency_name`, versions, etc.).
+    /// Filled automatically during Init after a successful `emk_BaseCheck`.
     ///
-    /// До первого успешного BaseCheck возвращает дефолт со всеми `None`. Используется
-    /// для UI ("подключён к Binance Futures, USDT") и для multi-server идентификации.
+    /// Before the first successful BaseCheck it returns the default with all `None`. Used
+    /// for the UI ("connected to Binance Futures, USDT") and for multi-server identification.
     ///
-    /// См. [`crate::commands::engine_api::ServerInfo`].
+    /// See [`crate::commands::engine_api::ServerInfo`].
     pub fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
         &self.server_info
     }
@@ -23,17 +23,17 @@ impl Client {
         self.auth_info.as_ref()
     }
 
-    /// Установить `ServerInfo` вручную. Обычно не нужно — Init делает это
-    /// автоматически. Полезно только для внутренних протокольных тестов.
+    /// Set `ServerInfo` manually. Usually not needed — Init does this
+    /// automatically. Useful only for internal protocol tests.
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
-        // opt #7 parity: кэшируем base currency name как Arc<str>, чтобы per-packet
-        // `from_client` клонировал refcount, а не heap-clone строки (Delphi читает cfg инлайн).
+        // opt #7 parity: cache the base currency name as Arc<str>, so per-packet
+        // `from_client` clones a refcount instead of heap-cloning the string (Delphi reads cfg inline).
         self.server_base_currency_name_arc =
             info.base_currency_name.as_deref().map(std::sync::Arc::from);
         self.server_info = info;
     }
 
-    /// Дешёвый per-packet хэндл имени базовой валюты (Arc refcount-bump, без heap-clone).
+    /// Cheap per-packet handle to the base currency name (Arc refcount-bump, no heap-clone).
     pub(crate) fn server_base_currency_name_arc(&self) -> Option<std::sync::Arc<str>> {
         self.server_base_currency_name_arc.clone()
     }
@@ -108,9 +108,9 @@ impl Client {
         self.subscription_registry.lock().unwrap().active_subscriptions()
     }
 
-    /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
+    /// Shareable handle to this client's `ServerTimeDelta` (days, f64 in u64-bits).
     ///
-    /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:
+    /// Used to link with `EventDispatcher` in a multi-Client architecture:
     /// ```ignore
     /// let mut dispatcher = EventDispatcher::new();
     /// dispatcher.set_server_time_delta_source(client.server_time_delta_handle());

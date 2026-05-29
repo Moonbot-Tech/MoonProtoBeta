@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// Build CmdId=1 `TClientSettingsCommand`. Версия пишется как `CURRENT_PROTO_CMD_VER` (v3),
-/// поэтому BuyIceberg/SellIceberg/SignOrders **всегда** идут на провод.
+/// Build CmdId=1 `TClientSettingsCommand`. The version is written as `CURRENT_PROTO_CMD_VER` (v3),
+/// so BuyIceberg/SellIceberg/SignOrders **always** go on the wire.
 #[doc(hidden)]
 pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
@@ -44,7 +44,7 @@ pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     out.extend_from_slice(&cmd.vol_drop_level.to_le_bytes());
     out.push(cmd.use_stop_market as u8);
 
-    // ASCfg / ASCfg2: всегда пишем фиксированный sz = SizeOf(record).
+    // ASCfg / ASCfg2: always write a fixed sz = SizeOf(record).
     out.extend_from_slice(&(AS_CFG_SIZE as u16).to_le_bytes());
     write_autostart_config(&mut out, &cmd.as_cfg);
 
@@ -84,7 +84,7 @@ pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
         flags |= 0b10000;
     }
     out.push(flags);
-    out.push(0); // colorCount = 0 (legacy slot, не используется)
+    out.push(0); // colorCount = 0 (legacy slot, unused)
 
     out
 }
@@ -183,7 +183,7 @@ pub(crate) fn build_new_market_notify(uid: u64) -> Vec<u8> {
     out
 }
 
-/// CmdId=9 `TLevManageCommand`. `cmd_ver` пишется как `1` (Delphi `LevCmdVer = 1`).
+/// CmdId=9 `TLevManageCommand`. `cmd_ver` is written as `1` (Delphi `LevCmdVer = 1`).
 #[doc(hidden)]
 pub fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
@@ -247,7 +247,7 @@ pub fn build_arb_activate_notify(uid: u64, arb_valid: f64) -> Vec<u8> {
     out
 }
 
-/// CmdId=13 `TSwitchDexCommand`. Передаются ровно 16 байт ShortString\[15\].
+/// CmdId=13 `TSwitchDexCommand`. Exactly 16 bytes of ShortString\[15\] are sent.
 #[doc(hidden)]
 pub fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(27);

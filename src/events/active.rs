@@ -102,11 +102,11 @@ impl EventDispatcher {
         ctx: &ActiveDispatchContext,
         actions: &mut Vec<ActiveAction>,
     ) {
-        // Multi-Client safety: lazy-link `server_time_delta_source` к этому Client'у.
-        // После первого вызова `dispatch_into_active` все последующие dispatch'и
-        // используют Client-specific delta (а не global). Это критично при multi-Client:
-        // global перезаписывается последним активным Client'ом, что без линковки давало
-        // off-by-50-1000ms timestamps в ордерах других Client'ов.
+        // Multi-Client safety: lazy-link `server_time_delta_source` to this Client.
+        // After the first `dispatch_into_active` call, all subsequent dispatches
+        // use the Client-specific delta (not the global). This is critical for multi-Client:
+        // the global is overwritten by the last active Client, which without linking gave
+        // off-by-50-1000ms timestamps in other Clients' orders.
         if self.server_time_delta_source.is_none() {
             self.server_time_delta_source = Some(Arc::clone(&ctx.server_time_delta_source));
         }
@@ -136,13 +136,13 @@ impl EventDispatcher {
             self.markets.mark_indexes_stale();
         }
 
-        // Hard reconnect detection: при смене ServerToken вся per-session state
-        // (trades.last_packet_num, order_books.*.expected_seq) устарела - сервер
-        // начинает нумерацию заново. Сбрасываем ДО применения нового пакета.
-        // Init last_known=0; первый non-zero token (после первого Fine) - не triggers
-        // (последующие пакеты будут с тем же token, full_reset не нужен). Сброс
-        // срабатывает только на ИЗМЕНЕНИИ token'а между установившейся сессией и
-        // новой (hard reconnect через `WantNewHello` или server restart с новым ST).
+        // Hard reconnect detection: on a ServerToken change all per-session state
+        // (trades.last_packet_num, order_books.*.expected_seq) is stale - the server
+        // restarts numbering from scratch. Reset BEFORE applying the new packet.
+        // Init last_known=0; the first non-zero token (after the first Fine) does not trigger
+        // (subsequent packets carry the same token, full_reset is not needed). The reset
+        // fires only on a CHANGE of the token between an established session and
+        // a new one (hard reconnect via `WantNewHello` or a server restart with a new ST).
         let current_token = ctx.server_token;
         if current_token != 0
             && self.last_known_server_token != 0
@@ -203,26 +203,26 @@ impl EventDispatcher {
         }
         let new_markets_need_price_refresh =
             self.markets.take_new_markets_pending_price_refresh() > 0;
-        // now_ms прокинут в dispatch_into для state.on_packet(now_ms).
-        // Delphi `ProcessTradesStream` в конце вызывает `CheckMissingTradesPackets`;
-        // значит recovery resend - последействие успешного trades-пакета, а не
-        // независимый timer в тишине канала.
+        // now_ms is passed through dispatch_into for state.on_packet(now_ms).
+        // Delphi `ProcessTradesStream` calls `CheckMissingTradesPackets` at the end;
+        // so recovery resend is an after-effect of a successful trades packet, not an
+        // independent timer running in a silent channel.
         let processed_trades_packet =
             matches!(cmd, Command::TradesStream | Command::TradesResendResponse)
                 && out[start_len..]
                     .iter()
                     .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. })));
         // Auto-action 1: OrderBookEvent::RequestFullNeeded -> send_api_request (sync, no pending).
-        // Dedup через маленький Vec без heap при пустом наборе: Grouped-payload может содержать несколько
-        // RequestFullNeeded для одной и той же книги (corruption detection +
-        // последующий update в одном datagram'е). Шлём один запрос на пару.
+        // Dedup via a small Vec with no heap when the set is empty: a grouped payload can contain several
+        // RequestFullNeeded for the same book (corruption detection +
+        // a subsequent update in one datagram). We send one request per pair.
         let mut to_request_full: Vec<(u16, u8)> = Vec::new();
-        // Auto-action 2: StratEvent::SnapshotRequested -> remember/send fresh
-        // snapshot из library-owned StratsState (или provider override).
-        // Если request пришёл до `domain_ready`, не открываем весь MPC_Strat
-        // pre-init: только ставим latch и отвечаем post-init, когда schema/state
-        // уже готовы. Это сохраняет обязательство ответить без конкуренции с
-        // BaseCheck/AuthCheck и без Rust-only раннего Strat-domain flow.
+        // Auto-action 2: StratEvent::SnapshotRequested -> remember/send a fresh
+        // snapshot from the library-owned StratsState (or provider override).
+        // If the request arrived before `domain_ready`, do not open the whole MPC_Strat
+        // pre-init: only set a latch and reply post-init, once the schema/state
+        // are ready. This preserves the obligation to reply without competing with
+        // BaseCheck/AuthCheck and without a Rust-only early Strat-domain flow.
         let mut snapshot_requested_uid: Option<u64> = None;
         let mut strategy_schema_applied = false;
         let mut new_markets_added = false;
@@ -278,8 +278,8 @@ impl EventDispatcher {
             actions.push(ActiveAction::RequestUpdateMarketsList);
         }
         for (mi, bk) in to_request_full {
-            // Fire-and-forget - response придёт обычным OrderBook-пакетом (is_full=true)
-            // через тот же dispatcher. Регистрировать pending API receiver не нужно.
+            // Fire-and-forget - the response arrives as a normal OrderBook packet (is_full=true)
+            // through the same dispatcher. No need to register a pending API receiver.
             actions.push(ActiveAction::RequestOrderBookFull {
                 market_index: mi,
                 book_kind: bk,
@@ -301,7 +301,7 @@ impl EventDispatcher {
             } else {
                 self.pending_strategy_snapshot_request_uid = Some(uid);
             }
-            // Событие всё равно эмиттится в `out` для UI/диагностики.
+            // The event is emitted into `out` anyway for UI/diagnostics.
         }
         if strategy_schema_applied && ctx.domain_ready {
             if let Some(uid) = self.pending_strategy_snapshot_request_uid.take() {

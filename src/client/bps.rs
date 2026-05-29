@@ -30,20 +30,20 @@ impl BpsCounter {
 
     /// Add bytes observed at a monotonic millisecond timestamp.
     pub fn add(&mut self, bytes: u64, now_ms: i64) {
-        // Первый вызов — просто инициализируем bucket.
+        // First call — just initialize the bucket.
         if self.last_sec_ms == 0 {
             self.last_sec_ms = now_ms;
         }
-        // Прошла секунда? Закрываем bucket в EMA / accumulation.
+        // A second elapsed? Fold the bucket into the EMA / accumulation.
         if (now_ms - self.last_sec_ms).abs() > 1000 {
-            // Ramp-up (audit_delphi_deviation #2): первые 10 секунд — accumulation, далее EMA.
-            // Так Delphi `MoonProtoUDPClient.pas:113-138` гарантирует точное среднее
-            // с первой секунды (без 10×underestimate).
+            // Ramp-up (audit_delphi_deviation #2): first 10 seconds — accumulation, then EMA.
+            // This is how Delphi `MoonProtoUDPClient.pas:113-138` guarantees an exact average
+            // from the first second (no 10x underestimate).
             if self.stat_sec_count < 10 {
                 self.ema_10sec = self.ema_10sec.saturating_add(self.cur_sec_bytes);
                 self.stat_sec_count += 1;
             } else {
-                // EMA: 90% старого + 10% нового. Формула из Delphi: `ema := ema / 10 * 9 + bucket`.
+                // EMA: 90% old + 10% new. Delphi formula: `ema := ema / 10 * 9 + bucket`.
                 self.ema_10sec = (self.ema_10sec / 10) * 9 + self.cur_sec_bytes;
             }
             self.cur_sec_bytes = 0;
@@ -77,25 +77,25 @@ mod bps_tests {
         let mut c = BpsCounter::new();
         c.add(100, 1000);
         c.add(200, 1500);
-        // Не прошла секунда → ema_10sec не обновился → bytes_per_sec = 0.
+        // No second elapsed → ema_10sec not updated → bytes_per_sec = 0.
         assert_eq!(c.bytes_per_sec(), 0);
-        // Но bucket собрал 300.
+        // But the bucket accumulated 300.
         assert_eq!(c.cur_sec_bytes, 300);
     }
 
     #[test]
     fn bps_counter_steady_state_converges() {
         let mut c = BpsCounter::new();
-        // Эмулируем 100 секунд равномерного потока: 1000 байт/сек.
-        // Используем шаг 1100мс между бакетами чтобы условие `> 1000` срабатывало надёжно.
+        // Emulate 100 seconds of uniform flow: 1000 bytes/sec.
+        // Use a 1100ms step between buckets so the `> 1000` condition fires reliably.
         for sec in 1..101i64 {
             let bucket_start = sec * 1100;
             for _ in 0..10 {
                 c.add(100, bucket_start);
             }
         }
-        // EMA должна сойтись к ~10000 (= 10 × 1000 byte/sec — формула Delphi).
-        // bytes_per_sec возвращает ema/10 = ~1000.
+        // EMA should converge to ~10000 (= 10 × 1000 byte/sec — Delphi formula).
+        // bytes_per_sec returns ema/10 = ~1000.
         let bps = c.bytes_per_sec();
         assert!(bps > 850 && bps < 1100, "bps={}, expected ~1000", bps);
     }

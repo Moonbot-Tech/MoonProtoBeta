@@ -5,7 +5,7 @@ use super::{
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::time::DelphiTime;
 
-/// Обновление цены одного маркета (byte-exact с `WriteMarketPricesToStream`
+/// Price update for a single market (byte-exact with `WriteMarketPricesToStream`
 /// MoonProtoSerialization.pas:195-209).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,7 +13,7 @@ pub struct MarketPriceUpdate {
     pub m_index: u16,
     pub bid: f64,
     pub ask: f64,
-    /// Если `MarketsPricesResponse.send_funding == false` — 0.0.
+    /// If `MarketsPricesResponse.send_funding == false`, this is 0.0.
     pub funding_rate: f64,
     /// Delphi client-local `TDateTime` after adding local TZShift. If source
     /// `funding_time` was 0 → 0.
@@ -28,7 +28,7 @@ impl MarketPriceUpdate {
     }
 }
 
-/// Обновление цены `CorrMarket`.
+/// `CorrMarket` price update.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct CorrMarketPriceUpdate {
@@ -36,7 +36,7 @@ pub struct CorrMarketPriceUpdate {
     pub last_price: f64,
 }
 
-/// Полный ответ `emk_UpdateMarketsList`.
+/// Full `emk_UpdateMarketsList` response.
 /// Wire-form (MoonProtoEngineServer.pas:84-111):
 ///   `send_funding:bool + count:i32 + prices[count] + send_corr_markets:bool +
 ///    (if send_corr_markets) corr_count:i32 + corr_prices[corr_count]`.
@@ -60,8 +60,8 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
 ) -> Option<MarketsPricesResponse> {
     let mut r = EngineStreamReader::new(data);
     let send_funding = r.read_bool()?;
-    // MarketPriceUpdate минимум: m_index(2) + bid(8) + ask(8) + mark_price(8) + mark_found(1) = 27 байт.
-    // Если send_funding=true ещё +16. 27 используется только для bounded prealloc.
+    // MarketPriceUpdate minimum: m_index(2) + bid(8) + ask(8) + mark_price(8) + mark_found(1) = 27 bytes.
+    // If send_funding=true, +16 more. 27 is used only for bounded prealloc.
     let count = r.read_count()?;
     let mut prices = Vec::with_capacity(r.bounded_count_capacity(count, 27));
     for _ in 0..count {
@@ -91,7 +91,7 @@ pub(super) fn parse_markets_prices_response_with_local_shift(
     let send_corr_markets = r.read_bool()?;
     let mut corr_prices = Vec::new();
     if send_corr_markets {
-        // CorrMarketPriceUpdate: bn_market_name (string u16+chars) + last_price (8) = минимум 10 байт.
+        // CorrMarketPriceUpdate: bn_market_name (string u16+chars) + last_price (8) = at least 10 bytes.
         let corr_count = r.read_count()?;
         corr_prices.reserve(r.bounded_count_capacity(corr_count, 10));
         for _ in 0..corr_count {

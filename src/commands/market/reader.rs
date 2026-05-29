@@ -1,6 +1,6 @@
 use crate::commands::registry::read_string;
 
-/// Безопасный последовательный reader для `TEngineResponse.DataStream` payload'а.
+/// Safe sequential reader for the `TEngineResponse.DataStream` payload.
 #[doc(hidden)]
 pub struct EngineStreamReader<'a> {
     data: &'a [u8],

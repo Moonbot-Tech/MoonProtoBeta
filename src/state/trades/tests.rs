@@ -159,10 +159,10 @@ fn tick_emits_resend_after_path_delay() {
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104]
-                                              // Через 500мс с RTT 250 — PathDelay = 250 * 1.2 = 300мс → 500 > 300 → resend.
+                                              // After 500ms with RTT 250 — PathDelay = 250 * 1.2 = 300ms → 500 > 300 → resend.
     let payloads = s.tick(250, 1500);
-    assert_eq!(payloads.len(), 1, "должен быть один батч resend");
-    // payload должен содержать 4 packet_nums (101, 102, 103, 104).
+    assert_eq!(payloads.len(), 1, "expected one resend batch");
+    // payload must contain 4 packet_nums (101, 102, 103, 104).
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn tick_throttles_within_100ms() {
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010);
     let _ = s.tick(250, 1500);
-    // Сразу же — throttle 100мс ещё активен.
+    // Immediately after — the 100ms throttle is still active.
     let payloads = s.tick(250, 1550);
     assert!(payloads.is_empty());
 }
@@ -194,14 +194,14 @@ fn bucket_closes_after_max_retries() {
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010);
-    // После третьего resend bucket ждёт ещё PathDelay на ответ и только потом закрывается.
+    // After the third resend the bucket waits one more PathDelay for a reply and only then closes.
     for i in 0..MAX_RETRY_COUNT as i64 {
         let _ = s.tick(250, 1500 + i * 5000);
     }
     assert_eq!(
         s.used_buckets(),
         1,
-        "bucket не должен закрываться в тот же момент, когда исчерпал retry budget"
+        "bucket must not close at the same moment it exhausts its retry budget"
     );
 
     let _ = s.tick(250, 16500);
@@ -210,7 +210,7 @@ fn bucket_closes_after_max_retries() {
 
 #[test]
 fn iter_resend_response_simple() {
-    // count=2, 2 пакета по 3 байта.
+    // count=2, 2 packets of 3 bytes each.
     let payload: Vec<u8> = vec![
         2, // count
         3, 0, // sz=3
@@ -231,7 +231,7 @@ fn iter_resend_response_is_zero_copy() {
 
 #[test]
 fn iter_resend_response_truncated() {
-    // count=2, но второй пакет не помещается.
+    // count=2, but the second packet does not fit.
     let payload: Vec<u8> = vec![2, 3, 0, 0xAA, 0xBB, 0xCC, 5, 0, 0x11];
     let packets: Vec<&[u8]> = iter_trades_resend_response(&payload).collect();
     assert_eq!(packets.len(), 1);
@@ -239,28 +239,28 @@ fn iter_resend_response_truncated() {
 
 #[test]
 fn consecutive_gaps_extend_existing_bucket() {
-    // Сценарий: пакеты 100, [gap 101..104], 105 (sequential!), [gap 106..109], 110.
-    // Должны получить ОДИН расширенный bucket [101..109], а не два.
+    // Scenario: packets 100, [gap 101..104], 105 (sequential!), [gap 106..109], 110.
+    // We must end up with ONE extended bucket [101..109], not two.
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010); // gap [101..104] → bucket1
     assert_eq!(s.used_buckets(), 1);
-    let _ = s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 до [101..109]
-                                              // Bucket должен расшириться, а не создать второй.
+    let _ = s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 to [101..109]
+                                              // The bucket must extend, not create a second one.
     assert_eq!(
         s.used_buckets(),
         1,
-        "extend должен переиспользовать существующий bucket"
+        "extend must reuse the existing bucket"
     );
-    // Найдём bucket и проверим что end_num = 109, и Recvd[4] (= packet 105) = true.
+    // Find the bucket and check that end_num = 109 and Recvd[4] (= packet 105) = true.
     let bucket = s.buckets.iter().find(|b| b.active).unwrap();
     assert_eq!(bucket.start_num, 101);
     assert_eq!(bucket.end_num, 109);
     assert!(
         bucket.recvd[4],
-        "packet 105 (sequential между gap'ами) должен быть помечен как received"
+        "packet 105 (sequential between the gaps) must be marked as received"
     );
-    // Запросы resend пойдут только за [101..104, 106..109] (8 packets).
+    // Resend requests will only ask for [101..104, 106..109] (8 packets).
 }
 
 #[test]
@@ -327,14 +327,14 @@ fn bucket_with_retry_count_two_is_not_extended_like_delphi() {
 
 #[test]
 fn overflow_gap_resets_buckets_but_applies_packet_like_delphi() {
-    // Если gap превышает MAX_RECVD_SIZE, Delphi сбрасывает buckets, но не
-    // выбрасывает текущий пакет.
+    // If the gap exceeds MAX_RECVD_SIZE, Delphi resets the buckets but does not
+    // discard the current packet.
     let mut s = TradesState::new();
     let _ = s.on_packet(make_pkt(0), 1000);
     let _ = s.on_packet(make_pkt(2900), 1010); // bucket [1..2899]
     assert_eq!(s.used_buckets(), 1);
 
-    // Теперь новый gap [2901..N] больше MAX_RECVD_SIZE → reset + Apply.
+    // Now a new gap [2901..N] larger than MAX_RECVD_SIZE → reset + Apply.
     let evs = s.on_packet(make_pkt(7000), 1020);
     assert_eq!(s.used_buckets(), 0);
     assert!(evs.iter().any(|e| matches!(
@@ -348,8 +348,8 @@ fn overflow_gap_resets_buckets_but_applies_packet_like_delphi() {
         .iter()
         .any(|e| matches!(e, TradesEvent::GapDetected { .. })));
 
-    // Следующий пакет стартует tracking заново, потому что reset оставил
-    // trades_started=false как в Delphi ResetGapBuckets.
+    // The next packet restarts tracking from scratch, because the reset left
+    // trades_started=false as in Delphi ResetGapBuckets.
     let evs = s.on_packet(make_pkt(7001), 1030);
     assert!(evs.iter().any(|e| matches!(
         e,
@@ -364,7 +364,7 @@ fn overflow_gap_resets_buckets_but_applies_packet_like_delphi() {
 #[test]
 fn max_sized_gap_is_accepted() {
     // gap_size = packet_num - last - 1 (missing range [last+1 .. packet_num-1]).
-    // Если gap_size == MAX_RECVD_SIZE — bucket должен создаться без overflow.
+    // If gap_size == MAX_RECVD_SIZE — the bucket must be created without overflow.
     let mut s = TradesState::new();
     let first = 100u16;
     let next = first.wrapping_add(MAX_RECVD_SIZE as u16 + 1);
@@ -387,7 +387,7 @@ fn pause_resets_buckets() {
     let _ = s.on_packet(make_pkt(100), 1000);
     let _ = s.on_packet(make_pkt(105), 1010); // creates bucket
     assert_eq!(s.used_buckets(), 1);
-    // Через 31 сек — пауза.
+    // After 31 s — pause.
     let evs = s.on_packet(make_pkt(200), 1000 + 31_000);
     assert_eq!(s.used_buckets(), 0); // reset
     assert!(evs.iter().any(|e| matches!(e, TradesEvent::Applied { .. })));
@@ -396,14 +396,14 @@ fn pause_resets_buckets() {
 
 #[test]
 fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min_like_delphi() {
-    // Delphi MoonProtoEngine.pas:1566-1573: раз в 30 минут ужимает `recvd` неактивных
-    // buckets, выросший выше DEFAULT при разовом большом gap, возвращая память. Rust
-    // растил recvd до gap_size и без этого никогда не ужимал.
+    // Delphi MoonProtoEngine.pas:1566-1573: every 30 minutes it shrinks `recvd` for
+    // inactive buckets that grew above DEFAULT on a one-off large gap, reclaiming memory.
+    // Rust grew recvd up to gap_size and never shrank it without this.
     let mut s = TradesState::new();
-    // Неактивный bucket, чей recvd вырос выше DEFAULT (след разового большого gap).
+    // Inactive bucket whose recvd grew above DEFAULT (leftover from a one-off large gap).
     s.buckets[0].active = false;
     s.buckets[0].recvd = vec![false; 1500];
-    // Активный bucket: tick делает shrink только при used_buckets > 0 (как Delphi
+    // Active bucket: tick shrinks only when used_buckets > 0 (like Delphi
     // `If UsedBuckets = 0 then exit`).
     s.buckets[1].active = true;
     s.buckets[1].start_num = 10;
@@ -411,20 +411,20 @@ fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min_like_delphi() {
     s.used_buckets = 1;
     s.last_large_recvd_ms = 1_000;
 
-    // Раньше 30 минут с последнего большого роста — не трогаем.
+    // Earlier than 30 minutes since the last large growth — leave it alone.
     let _ = s.tick(250, 1_000 + 500);
     assert_eq!(
         s.buckets[0].recvd.len(),
         1500,
-        "до 30 минут oversized recvd не ужимаем"
+        "before 30 minutes the oversized recvd is not shrunk"
     );
 
-    // После 30 минут — неактивный oversized recvd ужат к DEFAULT, активный не тронут.
+    // After 30 minutes — the inactive oversized recvd is shrunk to DEFAULT, the active one untouched.
     let _ = s.tick(250, 1_000 + 30 * 60 * 1000 + 1);
     assert_eq!(
         s.buckets[0].recvd.len(),
         DEFAULT_RECVD_SIZE,
-        "неактивный recvd > DEFAULT ужат к DEFAULT раз в 30 мин (Delphi LastLargeRecvdTime)"
+        "inactive recvd > DEFAULT shrunk to DEFAULT every 30 min (Delphi LastLargeRecvdTime)"
     );
-    assert!(s.buckets[1].active, "активный bucket shrink не закрывает");
+    assert!(s.buckets[1].active, "shrink does not close the active bucket");
 }
