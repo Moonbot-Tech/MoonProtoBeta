@@ -424,22 +424,6 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefreshKind(kind))
     }
 
-    /// Request a fresh full balance snapshot and return immediately.
-    ///
-    /// Completion arrives through `Event::Balance`; read the current read model
-    /// through `snapshot().balances()`.
-    pub(crate) fn request_balance_snapshot(&self) -> Result<(), MoonClientError> {
-        self.refresh_balances()
-    }
-
-    /// Request a fresh order snapshot and return immediately.
-    ///
-    /// Completion arrives through order events, including `OrderEvent::Snapshot`;
-    /// read the current read model through `snapshot().orders()`.
-    pub(crate) fn request_order_snapshot(&self) -> Result<(), MoonClientError> {
-        self.send_no_reply(RuntimeCommand::OrderSnapshotRefresh)
-    }
-
     /// Request server-side full balance refresh and return immediately.
     ///
     /// The balance state arrives through the normal balance channel.
@@ -559,17 +543,6 @@ impl MoonClient {
         )
     }
 
-    /// Delphi-name alias for [`Self::transfer_asset`].
-    pub(crate) fn do_transfer_asset(
-        &self,
-        asset: impl AsRef<str>,
-        qty: f64,
-        from: crate::state::ExchangeKind,
-        to: crate::state::ExchangeKind,
-    ) -> Result<EngineActionTicket, MoonClientError> {
-        self.transfer_asset(asset, qty, from, to)
-    }
-
     /// Reload orderbook data through Engine API and return immediately.
     pub(crate) fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
@@ -630,11 +603,6 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
     }
 
-    /// Alias for [`Self::request_client_settings`].
-    pub(crate) fn refresh_settings(&self) -> Result<(), MoonClientError> {
-        self.request_client_settings()
-    }
-
     /// Set the market-maker orders subscription flag.
     pub(crate) fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
@@ -670,33 +638,6 @@ impl MoonClient {
     /// Switch spot mode.
     pub(crate) fn switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot)))
-    }
-
-    pub(crate) fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
-        self.set_mm_orders_subscription(subscribe)
-    }
-
-    pub(crate) fn ui_send_settings(
-        &self,
-        settings: crate::commands::ui::ClientSettingsCommand,
-    ) -> Result<(), MoonClientError> {
-        self.send_settings(settings)
-    }
-
-    pub(crate) fn ui_update_version(
-        &self,
-        version_name: impl Into<String>,
-        is_release: bool,
-    ) -> Result<(), MoonClientError> {
-        self.request_version_update(version_name, is_release)
-    }
-
-    pub(crate) fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
-        self.switch_dex(dex_name)
-    }
-
-    pub(crate) fn ui_switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
-        self.switch_spot(spot)
     }
 
     /// Send a strategy sell-price update.
