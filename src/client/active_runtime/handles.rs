@@ -519,8 +519,8 @@ impl MoonSettings<'_> {
     /// Send a trigger-management command (`TTriggerManageCommand`, CmdId 10).
     ///
     /// `markets` are server market indexes (`mIndex`); `keys` are trigger key
-    /// numbers. [`TriggerAction::Set`] arms the listed triggers,
-    /// [`TriggerAction::Clear`] clears them.
+    /// numbers. [`TriggerAction::Set`](crate::TriggerAction::Set) arms the listed
+    /// triggers, [`TriggerAction::Clear`](crate::TriggerAction::Clear) clears them.
     pub fn manage_triggers(
         &self,
         action: crate::commands::ui::TriggerAction,

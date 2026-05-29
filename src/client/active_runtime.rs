@@ -244,11 +244,13 @@ impl MoonClient {
             .map(MoonClientSnapshot::revision)
     }
 
-    /// Snapshot client-side ErrEmu counters for FireTest/stress diagnostics.
+    /// Snapshot client-side ErrEmu packet-loss counters collected while
+    /// `set_err_emu` is enabled (see the "Packet Loss Test Hook" guide).
     ///
-    /// This is not part of the normal application API; regular applications
-    /// should not enable ErrEmu at all.
-    #[doc(hidden)]
+    /// This is a test/diagnostic facility — production applications should not
+    /// enable ErrEmu at all. Mirrors [`crate::Client::err_emu_diagnostics_snapshot`]
+    /// on the high-level runtime path so health/stress tests built on
+    /// `MoonClient` can read the same counters.
     pub fn err_emu_diagnostics_snapshot(&self) -> crate::client::ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(Ordering::Relaxed);
         self.err_emu_diagnostics

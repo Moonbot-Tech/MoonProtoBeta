@@ -249,10 +249,12 @@ enable `set_err_emu` after the runtime reaches `LifecycleEvent::Ready`. Enabling
 it before connection intentionally tests handshake/reconnect loss and can
 prevent the client from reaching the API phase at all.
 
-For live health tests, `Client::err_emu_diagnostics_snapshot()` returns
-loss counters collected while `set_err_emu` is enabled. Use
-`Client::reset_err_emu_diagnostics()` to start a new measurement window without
-changing the loss rate.
+For live health tests, `err_emu_diagnostics_snapshot()` returns loss counters
+collected while `set_err_emu` is enabled. It is available on both the low-level
+`Client` and the high-level `MoonClient`, so a health/stress harness on either
+path reads the same counters. Use `Client::reset_err_emu_diagnostics()` to start
+a new measurement window without changing the loss rate. This whole facility is
+a test/diagnostic hook; production applications never enable ErrEmu.
 
 The snapshot includes total valid/delivered/dropped incoming packets,
 per-command counters, test-only outgoing drop counters, and per-sliced-datagram
