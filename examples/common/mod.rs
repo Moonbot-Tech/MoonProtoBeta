@@ -7,7 +7,7 @@ use std::{
 
 use moonproto::{
     parse_key_info, ClientConfig, ConnectConfig, ImportedKeyInfo, InitConfig, InitialStrategies,
-    LifecycleEvent, MoonClient, MoonClientError, RefreshConfig, TransportMode,
+    MoonClient, MoonClientError, RefreshConfig, TransportMode,
 };
 
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -51,25 +51,14 @@ fn connect_and_wait_ready(
     init: InitConfig,
     timeout: Duration,
 ) -> Result<MoonClient, MoonClientError> {
-    let client = MoonClient::connect(cfg, ConnectConfig::new(init).with_connect_timeout(timeout))?;
-    let deadline = Instant::now() + timeout + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        for event in client.drain_lifecycle_events() {
-            match event {
-                LifecycleEvent::Ready => return Ok(client),
-                LifecycleEvent::ConnectFailed { error } => {
-                    let _ = client.disconnect();
-                    let _ = client.wait_finished();
-                    return Err(MoonClientError::ConnectFailed(error));
-                }
-                _ => {}
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let _ = client.disconnect();
-    let _ = client.wait_finished();
-    Err(MoonClientError::RequestTimeout)
+    // CLI scripts do one-shot work after connect, so the blocking convenience is
+    // the right tool here. A long-running UI would use `MoonClient::connect` and
+    // react to `LifecycleEvent::Ready` from the event sink instead.
+    MoonClient::connect_blocking(
+        cfg,
+        ConnectConfig::new(init).with_connect_timeout(timeout),
+        timeout + Duration::from_secs(5),
+    )
 }
 
 pub fn init_config() -> InitConfig {

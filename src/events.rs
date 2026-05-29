@@ -110,7 +110,7 @@ impl<T: Clone> DerefMut for CowState<T> {
 /// State bundle + dispatch logic.
 ///
 /// The dispatcher owns all channel state and exposes it read-only through
-/// getters [`Self::orders`], [`Self::order_books`], [`Self::trades`],
+/// getters [`Self::orders`], [`Self::order_books`], [`Self::trades_recovery`],
 /// [`Self::balances`], [`Self::strats`], [`Self::settings`], [`Self::markets`].
 /// Applications should not mutate protocol state directly; state is maintained
 /// by [`Self::dispatch`], [`Self::dispatch_into`], and the active action

@@ -136,6 +136,13 @@ The background runtime performs AuthDone and the one-time Init sequence, then
 emits `LifecycleEvent::Ready`. Startup failure arrives as
 `LifecycleEvent::ConnectFailed`. UI code does not create its own protocol thread
 and does not block a paint/input callback waiting for network readiness.
+
+Command-line tools, scripts, and tests that do one-shot work after connect can
+use `MoonClient::connect_blocking(cfg, connect, timeout)` instead: it blocks on a
+single channel receive until `Ready` or failure (no busy polling). This is a
+convenience for scripts, not the UI path — long-running applications use
+`connect` and react to `LifecycleEvent::Ready` like the Delphi client gates work
+on its async `InitDone` flag.
 Applications do not choose a finite protocol-loop duration; the session runs
 until explicit `disconnect()` or drop. UI code reads typed events, lifecycle
 events, and immutable snapshots:

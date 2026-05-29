@@ -64,6 +64,44 @@ impl MoonClient {
         Self::start_inner(cfg, connect, sink, None, None)
     }
 
+    /// Start the runtime and block until the one-time init sequence reaches
+    /// [`LifecycleEvent::Ready`], or fail.
+    ///
+    /// This is a convenience for command-line tools, scripts, and tests that do
+    /// one-shot work after connect. It is **not** the canonical UI path: a long
+    /// running application should use [`Self::connect`] (which returns at once)
+    /// and react to [`LifecycleEvent::Ready`] / [`LifecycleEvent::ConnectFailed`]
+    /// from the event sink, exactly like the Delphi client gates work on its
+    /// async `InitDone` flag instead of blocking a thread on readiness.
+    ///
+    /// The wait is a single channel receive (no busy polling). `timeout` bounds
+    /// the whole connect+init wait; pick a value larger than the connect/init
+    /// timeout in `connect` so a precise [`ConnectError`] surfaces before this
+    /// outer bound trips. The default queue adapter stays attached, so events can
+    /// still be drained after this returns.
+    pub fn connect_blocking(
+        cfg: ClientConfig,
+        connect: ConnectConfig,
+        timeout: Duration,
+    ) -> Result<Self, MoonClientError> {
+        let (sink, queue) = MoonEventSink::queue();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let client = Self::start_inner(cfg, connect, sink, Some(queue), Some(ready_tx))?;
+        match ready_rx.recv_timeout(timeout) {
+            Ok(Ok(())) => Ok(client),
+            Ok(Err(err)) => {
+                let _ = client.disconnect();
+                let _ = client.wait_finished();
+                Err(MoonClientError::from(err))
+            }
+            Err(err) => {
+                let _ = client.disconnect();
+                let _ = client.wait_finished();
+                Err(MoonClientError::from(err))
+            }
+        }
+    }
+
     fn start_inner(
         cfg: ClientConfig,
         connect: ConnectConfig,
@@ -831,6 +869,28 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "shutdown waited for startup timeout instead of interrupting it: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn connect_blocking_returns_error_on_failed_startup() {
+        let cfg = ClientConfig::new("127.0.0.1", 9, [0; 16], [0; 16]).without_ntp();
+        let started = Instant::now();
+        let result = MoonClient::connect_blocking(
+            cfg,
+            ConnectConfig::new(InitConfig::default())
+                .with_connect_timeout(Duration::from_millis(50)),
+            Duration::from_secs(5),
+        );
+        assert!(
+            result.is_err(),
+            "connect_blocking must surface startup failure instead of returning Ready"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "connect_blocking should return on ConnectFailed via the ready channel well \
+             before the outer timeout: {:?}",
             started.elapsed()
         );
     }
