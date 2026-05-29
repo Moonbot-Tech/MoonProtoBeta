@@ -564,6 +564,65 @@ fn dispatcher_snapshot_is_immutable_after_later_domain_mutation() {
 }
 
 #[test]
+fn snapshot_carries_session_identity_set_after_init() {
+    use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
+
+    let mut d = EventDispatcher::new();
+
+    // Before the runtime pushes identity: default (all-empty) server info and no
+    // AuthCheck. Both are always safe to read.
+    let before = d.snapshot();
+    assert_eq!(
+        before.server_info(),
+        &ServerInfo::default(),
+        "snapshot must expose the all-empty default server identity before BaseCheck"
+    );
+    assert!(
+        before.auth_info().is_none(),
+        "snapshot must report no AuthCheck identity before authentication"
+    );
+
+    let server = ServerInfo {
+        bot_id: Some(777),
+        base_currency_name: Some("BTC".to_string()),
+        ..ServerInfo::default()
+    };
+    let auth = AuthCheckResponse {
+        binance_account_id: 42,
+        btc_address: "bc1qexample".to_string(),
+        spot_ref: 0,
+        is_sub_account: true,
+        account_id: "0xwallet".to_string(),
+        recvd_max_payload: Some(60000),
+        known_dexes: Vec::new(),
+        hl_dex_market: None,
+        hl_spot_market: None,
+    };
+    d.set_session_identity(server.clone(), Some(auth.clone()));
+
+    let after = d.snapshot();
+    assert_eq!(
+        after.server_info(),
+        &server,
+        "snapshot must carry the server identity the runtime pushes after Init"
+    );
+    assert_eq!(
+        after.auth_info(),
+        Some(&auth),
+        "snapshot must carry the AuthCheck identity the runtime pushes after Init"
+    );
+
+    // A published snapshot is an immutable copy: re-setting identity later (e.g.
+    // reconnect-with-reinit) must not mutate an already published snapshot.
+    d.set_session_identity(ServerInfo::default(), None);
+    assert_eq!(
+        after.server_info(),
+        &server,
+        "an already published snapshot must not change when identity is re-set later"
+    );
+}
+
+#[test]
 fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
