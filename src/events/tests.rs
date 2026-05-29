@@ -1737,6 +1737,68 @@ fn dispatcher_applies_futures_trades_to_market_tail_like_delphi() {
 }
 
 #[test]
+fn trades_datagram_does_not_clone_markets_state_while_snapshot_held() {
+    // Regression guard for the CowState container-clone fix (moonproto cac7451):
+    // the live trade tail lives on each per-market `Market`, so a trades datagram
+    // mutates it through that market's own lock and must NOT trigger
+    // `Arc::make_mut` on the whole `MarketsState` — even while a snapshot clone of
+    // the markets domain is alive (refcount >= 2, the published-snapshot condition
+    // that turns every `&mut` domain apply into a full container deep clone).
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    // Prime the tail once so the market is fully live.
+    let _ = d.dispatch(
+        Command::TradesStream,
+        &trades_payload_with_rows(800, 0, 0, &[(0, 100.0, 1.0)]),
+        7_000,
+    );
+
+    // Simulate a published snapshot keeping the markets domain alive (refcount 2).
+    let held = d.markets.clone();
+    let ptr_before = d.markets.arc_ptr();
+    assert_eq!(
+        ptr_before,
+        held.arc_ptr(),
+        "snapshot clone shares the live markets allocation"
+    );
+
+    // Apply another trades datagram while the snapshot is alive.
+    let events = d.dispatch(
+        Command::TradesStream,
+        &trades_payload_with_rows(801, 0, 0, &[(0, 110.0, -3.0)]),
+        8_000,
+    );
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, Event::Trade(TradesEvent::Applied { .. }))));
+
+    // The markets container must be the SAME allocation: no make_mut deep clone of
+    // prices/token_tags/corr_*/base_currency_prices on the hot trades path.
+    assert_eq!(
+        d.markets.arc_ptr(),
+        ptr_before,
+        "trades datagram must not copy-on-write clone the whole MarketsState"
+    );
+
+    // Tail updated in place, and live-shared with the held snapshot — this is the
+    // Delphi `TMarket` shape (shared object reference), not a frozen-at-snapshot copy.
+    let live = d.markets.trade_state("BTCUSDT").expect("known market");
+    assert_eq!(live.last_trade_price, 110.0);
+    assert!(live.last_trade_was_sell);
+    assert_eq!(
+        held.trade_state("BTCUSDT")
+            .expect("known market")
+            .last_trade_price,
+        110.0,
+        "per-market trade tail is structurally shared with the snapshot like Delphi TMarket"
+    );
+
+    drop(held);
+}
+
+#[test]
 fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 8,

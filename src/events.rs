@@ -107,6 +107,18 @@ impl<T: Clone> DerefMut for CowState<T> {
     }
 }
 
+#[cfg(test)]
+impl<T: Clone> CowState<T> {
+    /// Identity of the backing allocation, for copy-on-write regression tests.
+    ///
+    /// Two `CowState` values share state iff this pointer is equal. A hot apply
+    /// path that keeps the pointer stable while a snapshot clone is alive proves
+    /// it did not trigger `Arc::make_mut` (no per-packet container deep clone).
+    pub(crate) fn arc_ptr(&self) -> *const T {
+        Arc::as_ptr(&self.0)
+    }
+}
+
 /// State bundle + dispatch logic.
 ///
 /// The dispatcher owns all channel state and exposes it read-only through
