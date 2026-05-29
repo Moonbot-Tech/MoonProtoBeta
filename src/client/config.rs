@@ -335,6 +335,38 @@ impl ClientConfig {
         }
     }
 
+    /// Build a config from a parsed MoonBot key, applying the endpoint and
+    /// transport mode the key carries (Delphi `MoonProtoUnit` key-apply).
+    ///
+    /// The UDP port and transport mode (`V0`/`V1`/`V2`) always come from the
+    /// key's network metadata, so a V1/V2 key connects without the caller
+    /// hardcoding the mode. The server IP comes from the key when it exported
+    /// one; otherwise `fallback_server_ip` (the user's configured/selected host)
+    /// is kept, mirroring Delphi leaving the previously configured IP untouched.
+    ///
+    /// Legacy keys without embedded network metadata fall back to
+    /// `fallback_server_ip`, port `3000`, and `V0`; use [`Self::new`] when you
+    /// need an explicit endpoint for those.
+    ///
+    /// Parse the key with [`crate::parse_key_info`] — not [`crate::import_key`],
+    /// which returns only the cryptographic keys and drops the endpoint/transport.
+    pub fn from_key_info(
+        info: &crate::key_import::ImportedKeyInfo,
+        fallback_server_ip: impl Into<String>,
+    ) -> Self {
+        let port = info.network.map(|network| network.port).unwrap_or(3000);
+        let server_ip = info
+            .network
+            .and_then(|network| network.address)
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| fallback_server_ip.into());
+        let mut cfg = Self::new(server_ip, port, info.keys.master_key, info.keys.mac_key);
+        if let Some(network) = info.network {
+            cfg.mask_ver = network.mask_ver;
+        }
+        cfg
+    }
+
     /// Override transport mode.
     ///
     /// Override transport mode.

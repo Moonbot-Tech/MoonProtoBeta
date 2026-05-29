@@ -93,21 +93,20 @@ Basic application shape:
 
 ```rust
 use moonproto::{
-    import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
-    MoonClient, NewOrderParams, OrderSide, TradesStreamMode, TransportMode,
+    parse_key_info, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+    MoonClient, NewOrderParams, OrderSide, TradesStreamMode,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_b64 = std::env::var("MOONPROTO_KEY")?;
     let host = std::env::var("MOONPROTO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("MOONPROTO_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3000);
 
-    let keys = import_key(&key_b64).expect("invalid MoonBot key");
-    let cfg = ClientConfig::new(host, port, keys.master_key, keys.mac_key)
-        .with_transport_mode(TransportMode::V0);
+    let info = parse_key_info(&key_b64).expect("invalid MoonBot key");
+    // Endpoint + transport mode (V0/V1/V2) come from the key; `host` is the
+    // fallback used only when the key did not embed a server address. (Use
+    // `import_key` instead of `parse_key_info` only to get the keys alone and
+    // supply the endpoint yourself via `ClientConfig::new`.)
+    let cfg = ClientConfig::from_key_info(&info, host);
 
     let client = MoonClient::connect(
         cfg,

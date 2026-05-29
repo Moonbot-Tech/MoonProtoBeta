@@ -14,14 +14,13 @@ Create one `MoonClient` per server in regular applications.
 Use the imported MoonBot key plus the endpoint/settings selected by the user:
 
 ```rust
-let keys = moonproto::import_key(KEY_B64).expect("invalid key");
-let cfg = moonproto::ClientConfig::new(
-    host,
-    3000,
-    keys.master_key,
-    keys.mac_key,
-)
-.with_transport_mode(transport_mode);
+// Parse the full key (endpoint + transport mode), not `import_key` which returns
+// the keys only and drops the endpoint/transport metadata.
+let info = moonproto::parse_key_info(KEY_B64).expect("invalid key");
+// The UDP port and transport mode (V0/V1/V2) come from the key, so a V1/V2 key
+// connects without hardcoding the mode; `host` is the fallback used only when the
+// key did not embed a server address.
+let cfg = moonproto::ClientConfig::from_key_info(&info, host);
 let client = moonproto::MoonClient::connect(
     cfg,
     moonproto::ConnectConfig::new(moonproto::InitConfig::default()),
