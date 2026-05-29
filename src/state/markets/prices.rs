@@ -148,7 +148,9 @@ impl MarketsState {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
             let handle = self.markets.get(idx).cloned()?;
             let market_name = handle.name_arc();
-            let eps = self.eps_profile.eps;
+            // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) гейтит и считает
+            // ChartPriceStep по `_epsM`, не `_eps`.
+            let eps_m = self.eps_profile.eps_m;
             // Цена живёт на `Market` (Delphi `TMarket`): пишем on the shared object
             // через per-market lock, без клона markets-контейнера на price-apply.
             let row = handle.with_mut(|market| {
@@ -168,8 +170,8 @@ impl MarketsState {
                 price.last_ask = price.ask;
                 price.p_last = (price.bid + price.ask) * 0.5;
                 price.min_lot_size = (bn_step_size.max(bn_min_qty) * price.p_last).max(bn_min_notional);
-                if price.ask > eps {
-                    price.chart_price_step = eps.max(price.ask / 5000.0);
+                if price.ask > eps_m {
+                    price.chart_price_step = eps_m.max(price.ask / 5000.0);
                 }
                 if send_funding {
                     price.funding_rate = p.funding_rate;

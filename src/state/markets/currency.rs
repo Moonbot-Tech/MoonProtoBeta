@@ -150,12 +150,14 @@ impl MarketsState {
     }
 
     fn next_base_currency_price_like_delphi(&self, bc: &BaseCurrencyPrice) -> Option<f64> {
+        // Delphi `TMarkets.UpdateCurrencyPrices` (MarketsU.pas:2882-2894) гейтит все
+        // четыре ветви (UsdtMarket/UsdtRev/UsdtCorr/UsdtRevCorr) по `_epsM`, не `_eps`.
         if let Some(price) = bc
             .usdt_market
             .as_deref()
             .and_then(|name| self.price(name))
             .map(|p| p.ask)
-            .filter(|ask| *ask > self.eps_profile.eps)
+            .filter(|ask| *ask > self.eps_profile.eps_m)
         {
             return Some(price);
         }
@@ -164,7 +166,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.price(name))
             .map(|p| p.ask)
-            .filter(|ask| *ask > self.eps_profile.eps)
+            .filter(|ask| *ask > self.eps_profile.eps_m)
         {
             return Some(1.0 / price);
         }
@@ -173,7 +175,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.corr_prices.get(name))
             .copied()
-            .filter(|price| *price > self.eps_profile.eps)
+            .filter(|price| *price > self.eps_profile.eps_m)
         {
             return Some(price);
         }
@@ -182,7 +184,7 @@ impl MarketsState {
             .as_deref()
             .and_then(|name| self.corr_prices.get(name))
             .copied()
-            .filter(|price| *price > self.eps_profile.eps)
+            .filter(|price| *price > self.eps_profile.eps_m)
         {
             return Some(1.0 / price);
         }

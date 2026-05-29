@@ -76,7 +76,9 @@ impl MarketsState {
     /// Delphi `AddNewAksPrice` from `GlassUpdated`: keep `ChartPriceStep` fresh
     /// when orderbook updates move the best ask before the next price refresh.
     pub(crate) fn update_chart_price_step_from_server_index(&self, m_index: u16, ask: f64) -> bool {
-        if ask <= self.eps_profile.eps {
+        // Delphi `AddNewAksPrice` (MarketsU.pas:8510,8516) гейтит и считает
+        // ChartPriceStep по `_epsM`, не `_eps`.
+        if ask <= self.eps_profile.eps_m {
             return false;
         }
         let Some(idx) = self.local_pos_for_server_index(m_index) else {
@@ -88,9 +90,9 @@ impl MarketsState {
         // `&self` + per-market `with_mut`: an order-book datagram must not trigger
         // a copy-on-write clone of the markets container. The price lives on the
         // shared `Market` object (Delphi `TMarket.ChartPriceStep`).
-        let eps = self.eps_profile.eps;
+        let eps_m = self.eps_profile.eps_m;
         handle.with_mut(|market| {
-            market.price.chart_price_step = eps.max(ask / 5000.0);
+            market.price.chart_price_step = eps_m.max(ask / 5000.0);
         });
         true
     }
