@@ -82,6 +82,9 @@ pub struct TradesState {
     last_packet_time_ms: i64,
     trades_started: bool,
     last_check_missing_ms: i64,
+    /// Delphi `LastLargeRecvdTime`: момент последнего роста `recvd` выше
+    /// `DEFAULT_RECVD_SIZE`. Используется для ленивого урезания памяти раз в 30 мин.
+    last_large_recvd_ms: i64,
 }
 
 impl Default for TradesState {
@@ -99,6 +102,7 @@ impl TradesState {
             last_packet_time_ms: 0,
             trades_started: false,
             last_check_missing_ms: 0,
+            last_large_recvd_ms: 0,
         }
     }
 

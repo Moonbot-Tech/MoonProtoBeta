@@ -393,3 +393,38 @@ fn pause_resets_buckets() {
     assert!(evs.iter().any(|e| matches!(e, TradesEvent::Applied { .. })));
     assert_eq!(s.last_packet_num(), 200);
 }
+
+#[test]
+fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min_like_delphi() {
+    // Delphi MoonProtoEngine.pas:1566-1573: раз в 30 минут ужимает `recvd` неактивных
+    // buckets, выросший выше DEFAULT при разовом большом gap, возвращая память. Rust
+    // растил recvd до gap_size и без этого никогда не ужимал.
+    let mut s = TradesState::new();
+    // Неактивный bucket, чей recvd вырос выше DEFAULT (след разового большого gap).
+    s.buckets[0].active = false;
+    s.buckets[0].recvd = vec![false; 1500];
+    // Активный bucket: tick делает shrink только при used_buckets > 0 (как Delphi
+    // `If UsedBuckets = 0 then exit`).
+    s.buckets[1].active = true;
+    s.buckets[1].start_num = 10;
+    s.buckets[1].end_num = 11;
+    s.used_buckets = 1;
+    s.last_large_recvd_ms = 1_000;
+
+    // Раньше 30 минут с последнего большого роста — не трогаем.
+    let _ = s.tick(250, 1_000 + 500);
+    assert_eq!(
+        s.buckets[0].recvd.len(),
+        1500,
+        "до 30 минут oversized recvd не ужимаем"
+    );
+
+    // После 30 минут — неактивный oversized recvd ужат к DEFAULT, активный не тронут.
+    let _ = s.tick(250, 1_000 + 30 * 60 * 1000 + 1);
+    assert_eq!(
+        s.buckets[0].recvd.len(),
+        DEFAULT_RECVD_SIZE,
+        "неактивный recvd > DEFAULT ужат к DEFAULT раз в 30 мин (Delphi LastLargeRecvdTime)"
+    );
+    assert!(s.buckets[1].active, "активный bucket shrink не закрывает");
+}

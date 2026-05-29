@@ -11,6 +11,13 @@ impl TradesState {
         let gap_size = end_num.wrapping_sub(start_num) as usize + 1;
         let gap_size = gap_size.min(MAX_RECVD_SIZE);
 
+        // Delphi `CreateGapBucket`: `If gapSize > DEFAULT_RECVD_SIZE then
+        // LastLargeRecvdTime := NowTimeX`. Отмечаем рост recvd выше дефолта, чтобы
+        // ленивое урезание (tick) знало с какого момента отсчитывать 30 минут.
+        if gap_size > DEFAULT_RECVD_SIZE {
+            self.last_large_recvd_ms = now_ms;
+        }
+
         // Сначала ищем пустой слот.
         for b in self.buckets.iter_mut() {
             if !b.active {
