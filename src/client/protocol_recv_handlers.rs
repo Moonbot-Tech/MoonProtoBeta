@@ -115,10 +115,18 @@ impl ProtocolCore<'_> {
             self.client
                 .start_hello_wait(HelloWaitState::PrimaryImFriendSent, timestamp_ms);
             self.send_command(Command::ImFriend, &encrypted);
-            // Delphi blocks inside the WhoAreYou reader handler here. Besides
-            // duplicate-loss protection, this prevents post-Fine Engine API
-            // traffic from overtaking the server-side FClients insertion that
-            // happens after sending MPC_Fine.
+            // Delphi blocks inside the WhoAreYou reader handler here, and so do
+            // we, on purpose. Besides duplicate-loss protection (ImFriend is sent,
+            // paused 32 ms, then resent), the block is load-bearing for ordering:
+            // it stops the client from processing Fine and firing post-Fine Engine
+            // API traffic during this window, so that traffic cannot overtake the
+            // server-side FClients insertion that happens after MPC_Fine.
+            //
+            // sverka #14 A2 suggested replacing this with a non-blocking scheduled
+            // resend; we deliberately do NOT. The 32 ms block is rare (handshake
+            // only; Ping cadence is far longer, so the single-owner thread being
+            // deaf for 32 ms is benign), and converting it to async would let other
+            // packets process mid-window and break the ordering guarantee above.
             let protocol_wait = Duration::from_millis(DELPHI_IMFRIEND_RESEND_PAUSE_MS);
             thread::sleep(protocol_wait);
             self.send_command(Command::ImFriend, &encrypted);

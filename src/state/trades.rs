@@ -108,7 +108,7 @@ impl TradesState {
 
     /// Reset all gap buckets.
     ///
-    /// Delphi source: `ResetGapBuckets`, `MoonProtoEngine.pas:1364-1378`.
+    /// Delphi source: `ResetGapBuckets`, `MoonProtoEngine.pas:1370-1384`.
     pub fn reset_buckets(&mut self) {
         self.reset_gap_buckets(self.last_packet_time_ms);
     }

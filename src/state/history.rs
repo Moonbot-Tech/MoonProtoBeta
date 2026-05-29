@@ -577,6 +577,12 @@ pub struct MarketDerivedSnapshot {
     /// In-progress (not yet sealed) 5m candle — Delphi `TMarket.FCandle`.
     /// Lives OUTSIDE the sealed `candles_5m` ring; the chart draws it as a
     /// live bar. `None` while the current period has had no trades yet.
+    ///
+    /// Timestamp convention (sverka #14 V3): this live candle's `time` is the
+    /// period START (its first trade), while sealed candles in the `candles_5m`
+    /// ring are stamped at seal with the period END (Delphi `Deep5m[N].Time :=
+    /// NowTime`). OHLC and volume are correct in both; a chart that open-aligns
+    /// its bars should map the live candle to the current period's open.
     pub current_candle: Option<Candle5mRow>,
 }
 

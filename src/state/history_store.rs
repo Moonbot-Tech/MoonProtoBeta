@@ -227,8 +227,13 @@ impl MarketHistoryStore {
         is_btc_market: bool,
         is_base_usdt_market: bool,
     ) -> Option<u64> {
-        let eps = self.eps_profile.eps;
-        if current <= eps || (bid <= eps && ask <= eps) || (!is_btc_market && !is_base_usdt_market)
+        // F2 (sverka #14): market-price comparisons use Delphi `_epsM`, not the
+        // generic `_eps` (Unit1.pas:4715-4780 profile table). pLast/bid/ask are
+        // market prices.
+        let eps_m = self.eps_profile.eps_m;
+        if current <= eps_m
+            || (bid <= eps_m && ask <= eps_m)
+            || (!is_btc_market && !is_base_usdt_market)
         {
             return None;
         }
@@ -246,7 +251,8 @@ impl MarketHistoryStore {
         real_time: f64,
         mark_price_found: bool,
     ) -> Option<u64> {
-        if !mark_price_found || current <= self.eps_profile.eps {
+        // F2 (sverka #14): mark price is a market price -> Delphi `_epsM`.
+        if !mark_price_found || current <= self.eps_profile.eps_m {
             return None;
         }
         self.mark_prices.as_mut().map(|writer| {
