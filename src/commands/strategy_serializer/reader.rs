@@ -300,13 +300,23 @@ pub(crate) fn try_read_field_value(
         )))),
         TID_STRING => {
             let len = read_u16(data, pos)? as usize;
-            let mut bytes = vec![0u8; len];
             let available = data.len().saturating_sub(*pos).min(len);
-            if available > 0 {
-                bytes[..available].copy_from_slice(&data[*pos..*pos + available]);
-                *pos += available;
-            }
-            let s = decode_utf8_delphi(&bytes);
+            let s = if available == len {
+                // Normal path: full string present. Decode straight from the wire
+                // slice — no intermediate zero-filled Vec + copy per field.
+                let s = decode_utf8_delphi(&data[*pos..*pos + len]);
+                *pos += len;
+                s
+            } else {
+                // Short tail (malformed/truncated): zero-pad to len like Delphi
+                // `Stream.Read`. Rare; the temp buffer only allocates here.
+                let mut bytes = vec![0u8; len];
+                if available > 0 {
+                    bytes[..available].copy_from_slice(&data[*pos..*pos + available]);
+                    *pos += available;
+                }
+                decode_utf8_delphi(&bytes)
+            };
             Some(FieldValue::String(s))
         }
         _ => {

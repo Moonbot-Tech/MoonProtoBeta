@@ -232,7 +232,12 @@ impl BalancesState {
         // Delphi does not touch BalanceHash/bnMaxValue/LastBalanceEpoch in that
         // reset branch.
         let previous_map = std::mem::take(&mut self.by_market);
-        let mut new_map: HashMap<String, Arc<BalanceItem>> = HashMap::new();
+        // Pre-size: full snapshot ends up holding ~all known markets (~700). Without
+        // a capacity hint the map rehashes/reallocs repeatedly while filling.
+        let expected_len = full_known_markets
+            .map(|known| known.len())
+            .unwrap_or(upd.items.len());
+        let mut new_map: HashMap<String, Arc<BalanceItem>> = HashMap::with_capacity(expected_len);
         let mut count = 0;
         for it in upd.items {
             if !is_known_market(&it.market_name) {
