@@ -152,8 +152,9 @@ pub use commands::engine_api::{
 };
 pub use commands::{
     field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
-    ClientSettingsCommand, ExchangeCode, FieldValue, OrderType, PositionType, SpotMarketKind,
-    StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot, TokenTags,
+    ClientSettingsCommand, ExchangeCode, FieldValue, LevManage, OrderType, PositionType,
+    ResetProfitKind, SpotMarketKind, StrategyActiveMode, StrategyFields, StrategyKind,
+    StrategySnapshot, TokenTags, TriggerAction,
 };
 pub use events::{
     ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,

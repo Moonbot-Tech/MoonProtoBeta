@@ -678,6 +678,43 @@ impl MoonClient {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot)))
     }
 
+    /// Send a leverage-management command (`TLevManageCommand`).
+    pub(crate) fn manage_leverage(
+        &self,
+        cmd: crate::commands::ui::LevManage,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::LevManage(cmd)))
+    }
+
+    /// Send a trigger-management command (`TTriggerManageCommand`).
+    pub(crate) fn manage_triggers(
+        &self,
+        action: u8,
+        all_markets: bool,
+        markets: Vec<u16>,
+        keys: Vec<u16>,
+    ) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::TriggerManage {
+            action,
+            all_markets,
+            markets,
+            keys,
+        }))
+    }
+
+    /// Send a reset-profit command (`TResetProfitCommand`).
+    pub(crate) fn reset_profit(&self, kind: u8) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ResetProfit(kind)))
+    }
+
+    /// Send an arb-activation notify (`TArbActivateNotify`); `valid_days` is a
+    /// Delphi `TDateTime` (days).
+    pub(crate) fn notify_arb_activation(&self, valid_days: f64) -> Result<(), MoonClientError> {
+        self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::ArbActivateNotify(
+            valid_days,
+        )))
+    }
+
     /// Send a strategy sell-price update.
     pub(crate) fn strat_sell_price_update(
         &self,

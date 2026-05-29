@@ -502,6 +502,57 @@ impl MoonSettings<'_> {
     ) -> Result<(), MoonClientError> {
         self.client.switch_spot(spot)
     }
+
+    /// Send a leverage-management command (`TLevManageCommand`, CmdId 9).
+    ///
+    /// Set the behavioural fields on `cmd` (auto max-order, auto lev-up,
+    /// isolated/cross, fix-lev, telegram report, lev-control text). Its `uid`
+    /// and `cmd_ver` fields are ignored on send: the runtime assigns a fresh UID
+    /// and always writes Delphi's `LevCmdVer = 1`.
+    pub fn manage_leverage(
+        &self,
+        cmd: &crate::commands::ui::LevManage,
+    ) -> Result<(), MoonClientError> {
+        self.client.manage_leverage(cmd.clone())
+    }
+
+    /// Send a trigger-management command (`TTriggerManageCommand`, CmdId 10).
+    ///
+    /// `markets` are server market indexes (`mIndex`); `keys` are trigger key
+    /// numbers. [`TriggerAction::Set`] arms the listed triggers,
+    /// [`TriggerAction::Clear`] clears them.
+    pub fn manage_triggers(
+        &self,
+        action: crate::commands::ui::TriggerAction,
+        all_markets: bool,
+        markets: &[u16],
+        keys: &[u16],
+    ) -> Result<(), MoonClientError> {
+        self.client.manage_triggers(
+            action.to_byte(),
+            all_markets,
+            markets.to_vec(),
+            keys.to_vec(),
+        )
+    }
+
+    /// Send a reset-profit command (`TResetProfitCommand`, CmdId 11): reset the
+    /// current-session or all-time profit counter on the server.
+    pub fn reset_profit(
+        &self,
+        kind: crate::commands::ui::ResetProfitKind,
+    ) -> Result<(), MoonClientError> {
+        self.client.reset_profit(kind.to_byte())
+    }
+
+    /// Send an arb-activation notify (`TArbActivateNotify`, CmdId 12): tell the
+    /// server arbitrage is valid until `valid_until`.
+    pub fn notify_arb_activation(
+        &self,
+        valid_until: crate::DelphiTime,
+    ) -> Result<(), MoonClientError> {
+        self.client.notify_arb_activation(valid_until.as_days())
+    }
 }
 
 /// Demand-driven candle request handle.

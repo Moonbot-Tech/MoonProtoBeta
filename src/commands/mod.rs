@@ -54,4 +54,7 @@ pub use trade::{
     TradeCtx, TurnPanicSellCommand, VStopUpdate,
 };
 pub use trades_stream::{parse_watcher_fills, Trade, TradeSection, TradesPacket, WatcherFill};
-pub use ui::{ArbConfigCompact, ClientSettingsCommand, SpotMarketKind};
+pub use ui::{
+    ArbConfigCompact, ClientSettingsCommand, LevManage, ResetProfitKind, SpotMarketKind,
+    TriggerAction,
+};

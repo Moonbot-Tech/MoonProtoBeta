@@ -356,6 +356,48 @@ pub struct ResetProfit {
     pub reset_kind: u8,
 }
 
+/// Trigger-management action for [`crate::MoonSettings::manage_triggers`].
+///
+/// Maps the Delphi `TTriggerManageCommand.Action` byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerAction {
+    /// Clear the listed triggers (Delphi `Action = 0`).
+    Clear,
+    /// Set/arm the listed triggers (Delphi `Action = 1`).
+    Set,
+}
+
+impl TriggerAction {
+    /// Delphi wire ordinal: `Clear = 0`, `Set = 1`.
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Clear => 0,
+            Self::Set => 1,
+        }
+    }
+}
+
+/// Which profit counter to reset, for [`crate::MoonSettings::reset_profit`].
+///
+/// Maps the Delphi `TResetProfitCommand.ResetKind` byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetProfitKind {
+    /// Reset only the current-session profit (Delphi `ResetKind = 0`).
+    CurrentProfit,
+    /// Reset the all-time accumulated profit (Delphi `ResetKind = 1`).
+    AllProfit,
+}
+
+impl ResetProfitKind {
+    /// Delphi wire ordinal: `CurrentProfit = 0`, `AllProfit = 1`.
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::CurrentProfit => 0,
+            Self::AllProfit => 1,
+        }
+    }
+}
+
 /// CmdId=12 `TArbActivateNotify`.
 #[derive(Debug, Clone, Copy)]
 pub struct ArbActivateNotify {

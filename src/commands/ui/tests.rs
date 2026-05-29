@@ -385,6 +385,26 @@ fn arb_activate_notify_roundtrip() {
 }
 
 #[test]
+fn manage_command_kinds_map_to_delphi_ordinals() {
+    // Delphi TTriggerManageCommand.Action: 0 = Clear, 1 = Set.
+    assert_eq!(TriggerAction::Clear.to_byte(), 0);
+    assert_eq!(TriggerAction::Set.to_byte(), 1);
+    // Delphi TResetProfitCommand.ResetKind: 0 = CurProfit, 1 = AllProfit.
+    assert_eq!(ResetProfitKind::CurrentProfit.to_byte(), 0);
+    assert_eq!(ResetProfitKind::AllProfit.to_byte(), 1);
+
+    // The typed kind must produce exactly the same wire bytes as the raw ordinal.
+    assert_eq!(
+        build_reset_profit(8, ResetProfitKind::AllProfit.to_byte()),
+        build_reset_profit(8, 1)
+    );
+    assert_eq!(
+        build_trigger_manage(11, TriggerAction::Set.to_byte(), false, &[1u16], &[2u16]),
+        build_trigger_manage(11, 1, false, &[1u16], &[2u16])
+    );
+}
+
+#[test]
 fn switch_dex_truncates_to_15() {
     let raw = build_switch_dex(13, "VeryLongDexName_OverflowExtra");
     match UICommand::parse(&raw).unwrap() {

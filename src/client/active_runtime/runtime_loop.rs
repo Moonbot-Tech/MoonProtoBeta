@@ -890,6 +890,17 @@ fn handle_ui_command(client: &mut Client, cmd: UiRuntimeCommand) {
         } => client.ui_update_version(&version_name, is_release),
         UiRuntimeCommand::SwitchDex(dex_name) => client.ui_switch_dex(&dex_name),
         UiRuntimeCommand::SwitchSpot(spot) => client.ui_switch_spot(spot.to_byte()),
+        UiRuntimeCommand::LevManage(cmd) => client.ui_lev_manage(&cmd),
+        UiRuntimeCommand::TriggerManage {
+            action,
+            all_markets,
+            markets,
+            keys,
+        } => client.ui_trigger_manage(action, all_markets, &markets, &keys),
+        UiRuntimeCommand::ResetProfit(kind) => client.ui_reset_profit(kind),
+        UiRuntimeCommand::ArbActivateNotify(valid_days) => {
+            client.ui_arb_activate_notify(valid_days)
+        }
     }
 }
 

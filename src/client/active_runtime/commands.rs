@@ -57,6 +57,15 @@ pub(super) enum UiRuntimeCommand {
     },
     SwitchDex(String),
     SwitchSpot(crate::commands::ui::SpotMarketKind),
+    LevManage(crate::commands::ui::LevManage),
+    TriggerManage {
+        action: u8,
+        all_markets: bool,
+        markets: Vec<u16>,
+        keys: Vec<u16>,
+    },
+    ResetProfit(u8),
+    ArbActivateNotify(f64),
 }
 
 pub(super) enum StratRuntimeCommand {
