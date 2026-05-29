@@ -55,17 +55,24 @@ pub struct MarketsState {
     /// name-to-index helper O(1) instead of scanning the whole index vector.
     pub(crate) market_index_by_name: Arc<HashMap<String, u16>>,
     /// Correlation markets used for BTC/reference calculations, keyed by `bn_market_name`.
-    pub(crate) corr_markets: HashMap<String, CorrMarket>,
+    ///
+    /// Fat per-market/aggregate fields are `Arc`-wrapped (like `by_name`,
+    /// `markets`, `market_indexes` above) so a `&mut` apply that only touches one
+    /// of them does not deep-clone the rest on copy-on-write. A published snapshot
+    /// keeps `MarketsState` at refcount >= 2, so without this an
+    /// `emk_UpdateMarketsList` price apply would clone `token_tags` (one entry per
+    /// market) and the correlation maps even though it never mutates them.
+    pub(crate) corr_markets: Arc<HashMap<String, CorrMarket>>,
     /// Market prices by `mIndex`, updated by price apply.
-    pub(crate) prices: Vec<MarketPrice>,
+    pub(crate) prices: Arc<Vec<MarketPrice>>,
     /// Current CorrMarket prices keyed by `bn_market_name`.
-    pub(crate) corr_prices: HashMap<String, f64>,
+    pub(crate) corr_prices: Arc<HashMap<String, f64>>,
     /// Delphi `BaseCurDict`: base currency name -> price/ref state.
-    pub(crate) base_currency_prices: HashMap<String, BaseCurrencyPrice>,
+    pub(crate) base_currency_prices: Arc<HashMap<String, BaseCurrencyPrice>>,
     /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
-    pub(crate) ref_btc_corr_markets: HashMap<String, String>,
+    pub(crate) ref_btc_corr_markets: Arc<HashMap<String, String>>,
     /// Token tags keyed by `market_name`.
-    pub(crate) token_tags: HashMap<String, TokenTags>,
+    pub(crate) token_tags: Arc<HashMap<String, TokenTags>>,
     /// Canonical `mIndex` -> market name mapping.
     ///
     /// Cold init fills this from `emk_GetMarketsList`, matching Delphi

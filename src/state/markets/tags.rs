@@ -1,6 +1,7 @@
 //! Delphi `emk_CheckBinanceTags` apply logic.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::commands::market::EngineStreamReader;
 
@@ -13,11 +14,11 @@ impl MarketsState {
     /// markets, applies tags for markets present in the response, then clears
     /// tags for every market not seen in that response.
     pub fn apply_token_tags(&mut self, items: Vec<MarketTokenTags>) -> MarketsEvent {
-        self.token_tags.clear();
+        Arc::make_mut(&mut self.token_tags).clear();
         let mut count = 0usize;
         for it in items {
             if self.by_name.contains_key(&it.market_name) {
-                self.token_tags.insert(it.market_name, it.tags);
+                Arc::make_mut(&mut self.token_tags).insert(it.market_name, it.tags);
                 count += 1;
             }
         }
@@ -41,12 +42,12 @@ impl MarketsState {
             let market_name = r.read_str()?;
             let tags = TokenTags::from_bits(r.read_int()? as u32);
             if self.by_name.contains_key(&market_name) {
-                self.token_tags.insert(market_name.clone(), tags);
+                Arc::make_mut(&mut self.token_tags).insert(market_name.clone(), tags);
                 seen.insert(market_name);
             }
         }
 
-        self.token_tags.retain(|name, _| seen.contains(name));
+        Arc::make_mut(&mut self.token_tags).retain(|name, _| seen.contains(name));
         Some(MarketsEvent::TokenTagsUpdated { count: seen.len() })
     }
 }

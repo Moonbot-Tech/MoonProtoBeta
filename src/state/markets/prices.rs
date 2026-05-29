@@ -1,5 +1,7 @@
 //! `UpdateMarketsList` price-apply path.
 
+use std::sync::Arc;
+
 use crate::commands::candles::current_local_time_shift_minutes;
 use crate::commands::market::{
     apply_delphi_local_funding_shift, CorrMarketPriceUpdate, EngineStreamReader, Market,
@@ -14,7 +16,7 @@ impl MarketsState {
     /// Если mapping неизвестен или stale после server restart — запись пропускается.
     pub fn apply_markets_prices(&mut self, resp: MarketsPricesResponse) -> MarketsEvent {
         let count = resp.prices.len();
-        for slot in &mut self.prices {
+        for slot in Arc::make_mut(&mut self.prices) {
             slot.mark_price_found = false;
         }
         let base_usdt_context = self.base_usdt_market_context_like_delphi();
@@ -64,7 +66,7 @@ impl MarketsState {
         local_shift_minutes: f64,
         mut last_price_rows: Option<&mut Vec<MarketLastPriceHistoryInput>>,
     ) -> Option<MarketsEvent> {
-        for slot in &mut self.prices {
+        for slot in Arc::make_mut(&mut self.prices) {
             slot.mark_price_found = false;
         }
 
@@ -162,7 +164,7 @@ impl MarketsState {
                         market.bn_min_notional,
                     )
                 });
-            let slot = &mut self.prices[idx];
+            let slot = &mut Arc::make_mut(&mut self.prices)[idx];
             slot.bid = p.bid;
             slot.ask = p.ask;
             slot.last_bid = slot.bid;
@@ -217,7 +219,7 @@ impl MarketsState {
 
     fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
         if self.corr_markets.contains_key(&c.bn_market_name) {
-            self.corr_prices
+            Arc::make_mut(&mut self.corr_prices)
                 .insert(c.bn_market_name.clone(), c.last_price);
         }
     }

@@ -1162,7 +1162,7 @@ fn apply_corr_prices_merges_like_delphi() {
             base_currency_name: "BTC".to_string(),
         }],
     });
-    st.corr_prices.insert("ETHBTC".to_string(), 0.07);
+    std::sync::Arc::make_mut(&mut st.corr_prices).insert("ETHBTC".to_string(), 0.07);
     assert_eq!(st.corr_count(), 1);
 
     let prices = MarketsPricesResponse {

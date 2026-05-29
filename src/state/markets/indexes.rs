@@ -86,10 +86,11 @@ impl MarketsState {
         let Some(idx) = self.local_pos_for_server_index(m_index) else {
             return false;
         };
-        let Some(slot) = self.prices.get_mut(idx) else {
+        let eps = self.eps_profile.eps;
+        let Some(slot) = Arc::make_mut(&mut self.prices).get_mut(idx) else {
             return false;
         };
-        slot.chart_price_step = self.eps_profile.eps.max(ask / 5000.0);
+        slot.chart_price_step = eps.max(ask / 5000.0);
         true
     }
 }

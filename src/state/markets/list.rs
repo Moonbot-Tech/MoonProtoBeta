@@ -95,10 +95,9 @@ impl MarketsState {
         self.markets = Arc::new(markets);
         self.replace_market_lookups_like_delphi_cow(lookup_entries);
 
-        self.token_tags
-            .retain(|name, _| self.by_name.contains_key(name));
+        Arc::make_mut(&mut self.token_tags).retain(|name, _| self.by_name.contains_key(name));
 
-        self.prices = prices;
+        self.prices = Arc::new(prices);
         self.bump_markets_version();
 
         for cm in resp.corr_markets {
@@ -256,7 +255,7 @@ impl MarketsState {
                     );
                 });
             }
-            if let Some(price) = self.prices.get_mut(idx) {
+            if let Some(price) = Arc::make_mut(&mut self.prices).get_mut(idx) {
                 price.funding_time = market.funding_time;
             }
             return false;
@@ -277,7 +276,7 @@ impl MarketsState {
             pending_handles_by_name.get_or_insert_with(|| (*self.handles_by_name).clone());
         handles_by_name.insert(name.clone(), handle.clone());
         Arc::make_mut(&mut self.by_name).insert(name.clone(), idx);
-        self.prices.push(price);
+        Arc::make_mut(&mut self.prices).push(price);
         true
     }
 

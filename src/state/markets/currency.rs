@@ -1,5 +1,7 @@
 //! Base-currency and CorrMarket reference maintenance.
 
+use std::sync::Arc;
+
 use crate::commands::market::BaseCurrency;
 
 use super::{
@@ -13,11 +15,11 @@ impl MarketsState {
             return;
         }
         self.ensure_base_currency_price(&cm.base_currency_name);
-        if let Some(existing) = self.corr_markets.get_mut(&cm.bn_market_name) {
+        if let Some(existing) = Arc::make_mut(&mut self.corr_markets).get_mut(&cm.bn_market_name) {
             existing.bn_tick_size = cm.bn_tick_size;
             existing.base_currency_name = cm.base_currency_name;
         } else {
-            self.corr_markets.insert(cm.bn_market_name.clone(), cm);
+            Arc::make_mut(&mut self.corr_markets).insert(cm.bn_market_name.clone(), cm);
         }
     }
 
@@ -25,7 +27,7 @@ impl MarketsState {
         if base_currency.is_empty() || self.base_currency_prices.contains_key(base_currency) {
             return;
         }
-        self.base_currency_prices.insert(
+        Arc::make_mut(&mut self.base_currency_prices).insert(
             base_currency.to_string(),
             BaseCurrencyPrice::new(base_currency.to_string()),
         );
@@ -64,10 +66,10 @@ impl MarketsState {
             }
             let corr_name = replace_text_ascii_case_insensitive(market_name, currency, "BTC");
             if self.corr_markets.contains_key(&corr_name) {
-                self.ref_btc_corr_markets
+                Arc::make_mut(&mut self.ref_btc_corr_markets)
                     .insert(market_name.to_string(), corr_name);
             } else {
-                self.ref_btc_corr_markets.remove(market_name);
+                Arc::make_mut(&mut self.ref_btc_corr_markets).remove(market_name);
             }
         }
     }
@@ -110,7 +112,7 @@ impl MarketsState {
                 }
             }
 
-            let Some(bc) = self.base_currency_prices.get_mut(&key) else {
+            let Some(bc) = Arc::make_mut(&mut self.base_currency_prices).get_mut(&key) else {
                 continue;
             };
             if let Some(name) = usdt_market {
@@ -140,7 +142,7 @@ impl MarketsState {
                 .get(&key)
                 .and_then(|bc| self.next_base_currency_price_like_delphi(bc));
             if let Some(price) = next_price {
-                if let Some(bc) = self.base_currency_prices.get_mut(&key) {
+                if let Some(bc) = Arc::make_mut(&mut self.base_currency_prices).get_mut(&key) {
                     bc.last_price = price;
                 }
             }
