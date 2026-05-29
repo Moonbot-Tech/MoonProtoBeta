@@ -348,8 +348,11 @@ fn synlz_compress_inner(
             src_pos += 2;
             let o_pos = o + 2;
             let mut t: usize = 1;
-            // mORMot SynLZcompress1pas: `while (...) and (t < 270) and ...` — потолок 269.
-            let tmax = (srcend - src_pos - 1).min(269);
+            // mORMot `SynLZcompress1pas` (mormot.core.base.pas:10557-10562), base = src+2
+            // (same `inc(src,2)` before the cap as here): `tmax := srcend-src-1;
+            // if tmax >= (255+16) then tmax := (255+16); while (o[t]=src[t]) and (t<tmax) do inc(t)`.
+            // So `t` runs up to `min(remaining, 255+16) = 271`; encoded length byte `t-16` ∈ 0..255.
+            let tmax = (srcend - src_pos - 1).min(255 + 16);
             while t < tmax && o_pos + t < srcend && src[o_pos + t] == src[src_pos + t] {
                 t += 1;
             }
