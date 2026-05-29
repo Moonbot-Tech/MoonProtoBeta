@@ -99,7 +99,7 @@ mod tests {
     fn candle(close: f32) -> DeepPrice {
         DeepPrice {
             open: close,
-            close: close,
+            close,
             high: close,
             low: close,
             volume: 1.0,
