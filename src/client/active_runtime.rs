@@ -183,6 +183,30 @@ impl MoonClient {
         self.snapshot().and_then(|s| s.auth_info().cloned())
     }
 
+    /// Whether the latest published snapshot's server route has the fields
+    /// required for market-level trade commands (`exchange_code` and
+    /// `base_currency_code` from BaseCheck). Mirrors
+    /// [`Client::trade_route_status`] but reads the snapshot, so it reflects the
+    /// state after Init. Returns the all-missing error before the first snapshot.
+    pub fn trade_route_status(&self) -> Result<(), TradeContextError> {
+        match self.snapshot() {
+            Some(snapshot) => match TradeContextError::from_server_info(snapshot.server_info()) {
+                Some(err) => Err(err),
+                None => Ok(()),
+            },
+            None => Err(TradeContextError {
+                missing_exchange_code: true,
+                missing_base_currency_code: true,
+            }),
+        }
+    }
+
+    /// `true` when [`Self::trade_route_status`] is `Ok`: the session is ready to
+    /// send market-level trade commands. Convenient for gating a UI trade button.
+    pub fn is_ready_to_trade(&self) -> bool {
+        self.trade_route_status().is_ok()
+    }
+
     /// Latest immutable read-model snapshot with a monotonic runtime-local
     /// revision.
     ///

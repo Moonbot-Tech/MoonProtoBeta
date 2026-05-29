@@ -106,6 +106,42 @@ fn trade_ctx_uses_server_info_route_fields() {
 }
 
 #[test]
+fn trade_route_status_tracks_base_check_route_fields() {
+    let mut client = Client::new(dummy_cfg());
+
+    // No BaseCheck yet: not ready, both route fields reported missing.
+    assert!(!client.is_ready_to_trade());
+    let err = client
+        .trade_route_status()
+        .expect_err("new client has no BaseCheck route");
+    assert!(err.missing_exchange_code);
+    assert!(err.missing_base_currency_code);
+
+    // Only one field present: still not ready, the present field is not flagged.
+    client.set_server_info(ServerInfo {
+        exchange_code: Some(ExchangeCode::from_byte(1)),
+        ..Default::default()
+    });
+    assert!(!client.is_ready_to_trade());
+    let err = client
+        .trade_route_status()
+        .expect_err("base_currency_code is still missing");
+    assert!(!err.missing_exchange_code);
+    assert!(err.missing_base_currency_code);
+
+    // Both route fields present: ready, status is Ok.
+    client.set_server_info(ServerInfo {
+        exchange_code: Some(ExchangeCode::from_byte(1)),
+        base_currency_code: Some(BaseCurrency::USDT),
+        ..Default::default()
+    });
+    assert!(client.is_ready_to_trade());
+    assert!(client.trade_route_status().is_ok());
+    // Predicate must agree with the actual trade-context builder.
+    assert!(client.trade_ctx(0).is_ok());
+}
+
+#[test]
 fn set_auth_info_updates_storage_and_is_retrievable_via_getter() {
     let mut client = Client::new(dummy_cfg());
     let auth = AuthCheckResponse {

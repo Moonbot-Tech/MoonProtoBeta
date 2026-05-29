@@ -79,6 +79,26 @@ impl Client {
         self.trade_ctx(rand::random())
     }
 
+    /// Whether the active server route already has the fields required for
+    /// market-level trade commands: `exchange_code` and `base_currency_code`,
+    /// both learned from `emk_BaseCheck`.
+    ///
+    /// `Ok(())` means [`Self::trade_ctx`] / [`Self::new_order`] can build a route
+    /// now; `Err` names the missing field(s). This is the cheap predicate to gate
+    /// a UI trade affordance without constructing and discarding a `TradeCtx`.
+    pub fn trade_route_status(&self) -> Result<(), TradeContextError> {
+        match TradeContextError::from_server_info(&self.server_info) {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// `true` when [`Self::trade_route_status`] is `Ok` — the session learned the
+    /// route fields needed for market-level trade commands.
+    pub fn is_ready_to_trade(&self) -> bool {
+        self.trade_route_status().is_ok()
+    }
+
     /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
     ///
     /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:
