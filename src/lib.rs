@@ -109,6 +109,19 @@
 //! - [`transport`] — low-level wire layer: MAC, obfuscation, headers, and
 //!   transport modes V0/V1/V2.
 
+// Clippy: deliberate project-wide patterns, not lints to chase.
+// Protocol parsers/builders take many byte-field arguments by nature.
+#![allow(clippy::too_many_arguments)]
+// Explicit wire size arithmetic is kept manual: `is_multiple_of` (Rust 1.87) and
+// `div_ceil` (1.81) would silently raise MSRV, and the manual form keeps the
+// byte-exact intent obvious next to the protocol math.
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_div_ceil)]
+// Runtime command / engine-action enums carry occasional large intent payloads;
+// they are sent infrequently over the runtime channel, so boxing the large
+// variant would only add indirection without a hot-path benefit.
+#![allow(clippy::large_enum_variant)]
+
 mod api_pending;
 mod app_queue;
 pub mod client;

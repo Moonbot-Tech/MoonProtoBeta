@@ -23,16 +23,11 @@ const CANDLE_5M_SLOT_BYTES: usize = size_of::<Candle5mRow>();
 /// maintained once the stream is enabled. Rust additionally exposes an accepted
 /// API deviation for UI clients that want to retain only a subset locally while
 /// keeping the same wire `emk_SubscribeAllTrades` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TradeStorageScope {
+    #[default]
     All,
     Markets(BTreeSet<String>),
-}
-
-impl Default for TradeStorageScope {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl TradeStorageScope {

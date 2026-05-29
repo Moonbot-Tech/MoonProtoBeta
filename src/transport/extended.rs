@@ -132,7 +132,7 @@ fn unwrap_from_stun(raw: &[u8]) -> Option<Vec<u8>> {
     if raw[4..8] != STUN_MAGIC {
         return None;
     }
-    if !((raw[0] == 0x00 && raw[1] == 0x01) || (raw[0] == 0x01 && raw[1] == 0x01)) {
+    if !(raw[1] == 0x01 && (raw[0] == 0x00 || raw[0] == 0x01)) {
         return None;
     }
 

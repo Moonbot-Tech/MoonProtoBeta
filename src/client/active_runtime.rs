@@ -454,7 +454,7 @@ impl MoonClient {
                 market: market.to_string(),
                 new_leverage,
             },
-            crate::commands::engine_request::set_leverage(market.as_ref(), new_leverage),
+            crate::commands::engine_request::set_leverage(market, new_leverage),
         )
     }
 
@@ -481,7 +481,7 @@ impl MoonClient {
                 new_market,
             },
             crate::commands::engine_request::change_position_type(
-                market.as_ref(),
+                market,
                 position_type,
                 new_market,
             ),
@@ -506,7 +506,7 @@ impl MoonClient {
             crate::events::EngineActionKind::ConfirmRiskLimit {
                 market: market.to_string(),
             },
-            crate::commands::engine_request::confirm_risk_limit(market.as_ref()),
+            crate::commands::engine_request::confirm_risk_limit(market),
         )
     }
 

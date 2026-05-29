@@ -51,21 +51,11 @@ pub(crate) struct MarketHistoryReadHandle {
     inner: Arc<RwLock<MarketHistoryReadState>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct MarketHistoryReadState {
     readers: MarketHistoryReaders,
     rolling_volumes: RollingTradeVolumes,
     derived: MarketDerivedSnapshot,
-}
-
-impl Default for MarketHistoryReadState {
-    fn default() -> Self {
-        Self {
-            readers: MarketHistoryReaders::default(),
-            rolling_volumes: RollingTradeVolumes::default(),
-            derived: MarketDerivedSnapshot::default(),
-        }
-    }
 }
 
 impl MarketHistoryReadHandle {

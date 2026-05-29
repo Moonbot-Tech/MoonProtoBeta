@@ -83,11 +83,9 @@ impl<'a> EngineStreamReader<'a> {
     }
 
     pub fn bounded_count_capacity(&self, count: usize, min_elem_size: usize) -> usize {
-        if min_elem_size == 0 {
-            count
-        } else {
-            count.min(self.remaining() / min_elem_size)
-        }
+        self.remaining()
+            .checked_div(min_elem_size)
+            .map_or(count, |max| count.min(max))
     }
 
     fn read_zero_tail<const N: usize>(&mut self) -> [u8; N] {

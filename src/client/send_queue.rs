@@ -260,8 +260,7 @@ impl SendLockState {
     ) -> Option<Slider> {
         self.send_queues.take_into(sliced, high, low);
         acks.append(&mut self.incoming_sliced_acks);
-        let recvd = self.copy_tmp_slider();
-        recvd
+        self.copy_tmp_slider()
     }
 
     pub(crate) fn push_sliced_ack(&mut self, ack: SlicedAck) {

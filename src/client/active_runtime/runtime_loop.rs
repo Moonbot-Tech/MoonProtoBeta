@@ -406,8 +406,7 @@ fn handle_command(
             strategy_id,
             checked,
         } => {
-            let changed = dispatcher.set_strategy_checked(strategy_id, checked);
-            changed
+            dispatcher.set_strategy_checked(strategy_id, checked)
         }
         RuntimeCommand::StrategySendCheckedDelta => {
             dispatcher.send_strategy_checked_delta(client);

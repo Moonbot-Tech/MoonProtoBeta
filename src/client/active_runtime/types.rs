@@ -179,11 +179,8 @@ impl MoonEventQueue {
     /// needed.
     pub fn drain_events_into(&self, out: &mut Vec<crate::events::Event>) {
         let rx = self.events_rx.lock().unwrap();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => out.push(event),
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
-            }
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
         }
     }
 
@@ -197,11 +194,8 @@ impl MoonEventQueue {
     /// Drain lifecycle events into a caller-owned buffer.
     pub fn drain_lifecycle_events_into(&self, out: &mut Vec<LifecycleEvent>) {
         let rx = self.lifecycle_rx.lock().unwrap();
-        loop {
-            match rx.try_recv() {
-                Ok(event) => out.push(event),
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
-            }
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
         }
     }
 

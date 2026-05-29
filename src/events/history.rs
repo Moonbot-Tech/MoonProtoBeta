@@ -241,6 +241,6 @@ impl EventDispatcher {
     pub(super) fn trade_section_visible_to_active_lib(&self, market_name: &str) -> bool {
         self.trade_storage_scope
             .as_ref()
-            .map_or(true, |scope| scope.contains(market_name))
+            .is_none_or(|scope| scope.contains(market_name))
     }
 }

@@ -9,9 +9,10 @@ use std::sync::Arc;
 /// 1=`bk_Spot`. Used in incoming orderbook packets, full-book recovery
 /// requests, and internal state keys.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OrderBookKind {
     /// Futures orderbook (`bk_Futures = 0`).
+    #[default]
     Futures = 0,
     /// Spot orderbook (`bk_Spot = 1`).
     Spot = 1,
@@ -34,11 +35,6 @@ impl OrderBookKind {
     }
 }
 
-impl Default for OrderBookKind {
-    fn default() -> Self {
-        Self::Futures
-    }
-}
 
 /// Internal cache key: `(market_index, raw book_kind)`.
 pub type BookKey = (u16, u8);

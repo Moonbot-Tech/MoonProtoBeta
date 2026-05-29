@@ -6,8 +6,8 @@
 //! This module keeps only the account-level globals (BTC totals + total PnL),
 //! matching Delphi `TMarkets` scalars (`FTotalPNL` etc.). It does NOT keep a
 //! second per-market balance store: that was a Rust-only duplicate (double-apply
-//! + rebuild) of data already on `Market`, removed in favor of the single
-//! Delphi-parity source.
+//! and full-snapshot rebuild) of data already on `Market`, removed in favor of
+//! the single Delphi-parity source.
 
 use crate::commands::balance::BalanceUpdate;
 
