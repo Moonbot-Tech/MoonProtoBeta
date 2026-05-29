@@ -107,8 +107,9 @@ fn runtime_smoke_full_happy_path() {
     );
 
     client
-        .request_balance_snapshot()
-        .expect("FAIL: MoonClient::request_balance_snapshot failed");
+        .balances()
+        .refresh()
+        .expect("FAIL: MoonClient balances().refresh failed");
     let balance_deadline = Instant::now() + Duration::from_secs(15);
     let mut balance_events = 0u32;
     while Instant::now() < balance_deadline {

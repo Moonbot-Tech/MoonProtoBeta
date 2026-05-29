@@ -34,11 +34,13 @@ fn main() {
 
     if let Some(market) = market_filter.as_ref() {
         client
+            .streams()
             .subscribe_trades_for(TradesStreamMode::TradesOnly, [market.as_str()])
             .expect("runtime stopped");
         println!("[subscribe] all-trades, retained market={market}");
     } else {
         client
+            .streams()
             .subscribe_all_trades(TradesStreamMode::TradesOnly)
             .expect("runtime stopped");
         println!("[subscribe] all-trades, retained all markets");

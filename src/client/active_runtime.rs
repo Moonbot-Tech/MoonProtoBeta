@@ -314,8 +314,7 @@ impl MoonClient {
     }
 
     /// Subscribe to one orderbook by market name.
-    #[doc(hidden)]
-    pub fn subscribe_orderbook(
+    pub(crate) fn subscribe_orderbook(
         &self,
         market_name: impl Into<String>,
     ) -> Result<(), MoonClientError> {
@@ -323,8 +322,7 @@ impl MoonClient {
     }
 
     /// Subscribe to several orderbooks by market name.
-    #[doc(hidden)]
-    pub fn subscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    pub(crate) fn subscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -335,8 +333,7 @@ impl MoonClient {
     }
 
     /// Unsubscribe from one orderbook by market name.
-    #[doc(hidden)]
-    pub fn unsubscribe_orderbook(
+    pub(crate) fn unsubscribe_orderbook(
         &self,
         market_name: impl Into<String>,
     ) -> Result<(), MoonClientError> {
@@ -344,8 +341,7 @@ impl MoonClient {
     }
 
     /// Unsubscribe from several orderbooks by market name.
-    #[doc(hidden)]
-    pub fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    pub(crate) fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -356,14 +352,12 @@ impl MoonClient {
     }
 
     /// Unsubscribe from all orderbooks remembered in the reconnect registry.
-    #[doc(hidden)]
-    pub fn unsubscribe_all_orderbooks(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn unsubscribe_all_orderbooks(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllOrderBooks)
     }
 
     /// Subscribe to all trades and retain Active Lib data for all markets.
-    #[doc(hidden)]
-    pub fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
+    pub(crate) fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::SubscribeAllTrades(
             mode.want_market_makers(),
         ))
@@ -371,8 +365,7 @@ impl MoonClient {
 
     /// Subscribe to all trades on the wire while retaining Active Lib data for
     /// all markets when `market_names` is empty, or for the given markets.
-    #[doc(hidden)]
-    pub fn subscribe_trades_for<I, S>(
+    pub(crate) fn subscribe_trades_for<I, S>(
         &self,
         mode: TradesStreamMode,
         market_names: I,
@@ -388,14 +381,12 @@ impl MoonClient {
     }
 
     /// Unsubscribe from all trades and clear the reconnect registry intent.
-    #[doc(hidden)]
-    pub fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn unsubscribe_all_trades(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::UnsubscribeAllTrades)
     }
 
     /// Request a fresh balance snapshot through the active runtime.
-    #[doc(hidden)]
-    pub fn refresh_balances(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn refresh_balances(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::BalanceRefresh)
     }
 
@@ -403,8 +394,7 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Account`; read the current value from
     /// `snapshot().account().hedge_mode()`.
-    #[doc(hidden)]
-    pub fn refresh_hedge_mode(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn refresh_hedge_mode(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::AccountHedgeModeRefresh)
     }
 
@@ -412,8 +402,7 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Account`; read the current value from
     /// `snapshot().account().api_expiration()`.
-    #[doc(hidden)]
-    pub fn refresh_api_expiration_time(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn refresh_api_expiration_time(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::AccountApiExpirationRefresh)
     }
 
@@ -423,14 +412,12 @@ impl MoonClient {
     /// response to `snapshot().transfer_assets()`, emits per-wallet
     /// `Event::TransferAssets`, and emits `TransferAssetsEvent::RefreshCompleted`
     /// after all wallet kinds have answered.
-    #[doc(hidden)]
-    pub fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn refresh_transfer_assets(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::TransferAssetsRefresh)
     }
 
     /// Request transferable asset refresh for one wallet kind.
-    #[doc(hidden)]
-    pub fn refresh_transfer_assets_kind(
+    pub(crate) fn refresh_transfer_assets_kind(
         &self,
         kind: crate::state::ExchangeKind,
     ) -> Result<(), MoonClientError> {
@@ -441,8 +428,7 @@ impl MoonClient {
     ///
     /// Completion arrives through `Event::Balance`; read the current read model
     /// through `snapshot().balances()`.
-    #[doc(hidden)]
-    pub fn request_balance_snapshot(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn request_balance_snapshot(&self) -> Result<(), MoonClientError> {
         self.refresh_balances()
     }
 
@@ -450,16 +436,14 @@ impl MoonClient {
     ///
     /// Completion arrives through order events, including `OrderEvent::Snapshot`;
     /// read the current read model through `snapshot().orders()`.
-    #[doc(hidden)]
-    pub fn request_order_snapshot(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn request_order_snapshot(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::OrderSnapshotRefresh)
     }
 
     /// Request server-side full balance refresh and return immediately.
     ///
     /// The balance state arrives through the normal balance channel.
-    #[doc(hidden)]
-    pub fn refresh_markets_balance_full(&self) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn refresh_markets_balance_full(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::MarketsBalanceFullRefresh,
             crate::commands::engine_request::get_markets_balance_full(),
@@ -467,8 +451,7 @@ impl MoonClient {
     }
 
     /// Cancel all exchange orders through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn cancel_all_orders(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::CancelAllOrders,
             crate::commands::engine_request::cancel_all_orders(),
@@ -476,8 +459,7 @@ impl MoonClient {
     }
 
     /// Set leverage for a market through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn set_leverage(
+    pub(crate) fn set_leverage(
         &self,
         market: impl AsRef<str>,
         new_leverage: i32,
@@ -493,8 +475,7 @@ impl MoonClient {
     }
 
     /// Set account hedge mode through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::SetHedgeMode { hedge_mode },
             crate::commands::engine_request::set_hedge_mode(hedge_mode),
@@ -502,8 +483,7 @@ impl MoonClient {
     }
 
     /// Change position type for a market through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn change_position_type(
+    pub(crate) fn change_position_type(
         &self,
         market: impl AsRef<str>,
         position_type: PositionType,
@@ -525,8 +505,7 @@ impl MoonClient {
     }
 
     /// Convert dust to BNB through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn convert_dust_bnb(&self) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn convert_dust_bnb(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::ConvertDustBnb,
             crate::commands::engine_request::convert_dust_bnb(),
@@ -534,8 +513,7 @@ impl MoonClient {
     }
 
     /// Confirm risk limit for a market through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn confirm_risk_limit(
+    pub(crate) fn confirm_risk_limit(
         &self,
         market: impl AsRef<str>,
     ) -> Result<EngineActionTicket, MoonClientError> {
@@ -549,8 +527,7 @@ impl MoonClient {
     }
 
     /// Set MA mode through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn set_ma_mode(&self, ma_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn set_ma_mode(&self, ma_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::SetMaMode { ma_mode },
             crate::commands::engine_request::set_ma_mode(ma_mode),
@@ -558,8 +535,7 @@ impl MoonClient {
     }
 
     /// Transfer an asset between exchange wallets through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn transfer_asset(
+    pub(crate) fn transfer_asset(
         &self,
         asset: impl AsRef<str>,
         qty: f64,
@@ -584,8 +560,7 @@ impl MoonClient {
     }
 
     /// Delphi-name alias for [`Self::transfer_asset`].
-    #[doc(hidden)]
-    pub fn do_transfer_asset(
+    pub(crate) fn do_transfer_asset(
         &self,
         asset: impl AsRef<str>,
         qty: f64,
@@ -596,8 +571,7 @@ impl MoonClient {
     }
 
     /// Reload orderbook data through Engine API and return immediately.
-    #[doc(hidden)]
-    pub fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn reload_order_book(&self) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::ReloadOrderBook,
             crate::commands::engine_request::reload_order_book(),
@@ -610,8 +584,7 @@ impl MoonClient {
     /// They are separate from the retained 5m candles that Active Lib loads and
     /// maintains from trades. Completion arrives as `Event::CoinCardCandles`;
     /// read the latest rows through `snapshot().coin_card_candles()`.
-    #[doc(hidden)]
-    pub fn request_coin_card_candles(
+    pub(crate) fn request_coin_card_candles(
         &self,
         market: impl Into<String>,
         ticks: crate::commands::candles::DeepHistoryKind,
@@ -653,26 +626,22 @@ impl MoonClient {
     /// The command returns after being queued. Completion arrives as
     /// `Event::Settings(SettingsEvent::ClientSettingsUpdated)`, and the latest
     /// value is readable through `snapshot().settings().client_settings`.
-    #[doc(hidden)]
-    pub fn request_client_settings(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn request_client_settings(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SettingsRequest))
     }
 
     /// Alias for [`Self::request_client_settings`].
-    #[doc(hidden)]
-    pub fn refresh_settings(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn refresh_settings(&self) -> Result<(), MoonClientError> {
         self.request_client_settings()
     }
 
     /// Set the market-maker orders subscription flag.
-    #[doc(hidden)]
-    pub fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
+    pub(crate) fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
     }
 
     /// Send a full client-settings snapshot.
-    #[doc(hidden)]
-    pub fn send_settings(
+    pub(crate) fn send_settings(
         &self,
         settings: crate::commands::ui::ClientSettingsCommand,
     ) -> Result<(), MoonClientError> {
@@ -680,8 +649,7 @@ impl MoonClient {
     }
 
     /// Request a MoonBot version update.
-    #[doc(hidden)]
-    pub fn request_version_update(
+    pub(crate) fn request_version_update(
         &self,
         version_name: impl Into<String>,
         is_release: bool,
@@ -693,34 +661,29 @@ impl MoonClient {
     }
 
     /// Switch DEX mode.
-    #[doc(hidden)]
-    pub fn switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+    pub(crate) fn switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchDex(
             dex_name.into(),
         )))
     }
 
     /// Switch spot mode.
-    #[doc(hidden)]
-    pub fn switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
+    pub(crate) fn switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::SwitchSpot(spot)))
     }
 
-    #[doc(hidden)]
-    pub fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
+    pub(crate) fn ui_mm_subscribe(&self, subscribe: bool) -> Result<(), MoonClientError> {
         self.set_mm_orders_subscription(subscribe)
     }
 
-    #[doc(hidden)]
-    pub fn ui_send_settings(
+    pub(crate) fn ui_send_settings(
         &self,
         settings: crate::commands::ui::ClientSettingsCommand,
     ) -> Result<(), MoonClientError> {
         self.send_settings(settings)
     }
 
-    #[doc(hidden)]
-    pub fn ui_update_version(
+    pub(crate) fn ui_update_version(
         &self,
         version_name: impl Into<String>,
         is_release: bool,
@@ -728,19 +691,16 @@ impl MoonClient {
         self.request_version_update(version_name, is_release)
     }
 
-    #[doc(hidden)]
-    pub fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
+    pub(crate) fn ui_switch_dex(&self, dex_name: impl Into<String>) -> Result<(), MoonClientError> {
         self.switch_dex(dex_name)
     }
 
-    #[doc(hidden)]
-    pub fn ui_switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
+    pub(crate) fn ui_switch_spot(&self, spot: SpotMarketKind) -> Result<(), MoonClientError> {
         self.switch_spot(spot)
     }
 
     /// Send a strategy sell-price update.
-    #[doc(hidden)]
-    pub fn strat_sell_price_update(
+    pub(crate) fn strat_sell_price_update(
         &self,
         strategy_id: u64,
         sell_price: f64,
@@ -754,8 +714,7 @@ impl MoonClient {
     }
 
     /// Delete one strategy or folder.
-    #[doc(hidden)]
-    pub fn strat_delete(
+    pub(crate) fn strat_delete(
         &self,
         strategy_id: u64,
         folder_path: impl Into<String>,
@@ -772,8 +731,7 @@ impl MoonClient {
     /// The runtime uses the live strategy schema fetched during Init, so callers
     /// do not carry serializer field hardcode. The call only queues the intent;
     /// server echo/update arrives later through `Event::Strat`.
-    #[doc(hidden)]
-    pub fn send_strategy_snapshot_batch(
+    pub(crate) fn send_strategy_snapshot_batch(
         &self,
         strategies: Vec<crate::commands::strategy_serializer::StrategySnapshot>,
     ) -> Result<(), MoonClientError> {
@@ -781,8 +739,7 @@ impl MoonClient {
     }
 
     /// Change a local strategy checked flag in the active runtime state.
-    #[doc(hidden)]
-    pub fn set_strategy_checked(
+    pub(crate) fn set_strategy_checked(
         &self,
         strategy_id: u64,
         checked: bool,
@@ -796,14 +753,12 @@ impl MoonClient {
     }
 
     /// Send Delphi checked-state delta if any local strategy changed.
-    #[doc(hidden)]
-    pub fn send_strategy_checked_delta(&self) -> Result<(), MoonClientError> {
+    pub(crate) fn send_strategy_checked_delta(&self) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::StrategySendCheckedDelta)
     }
 
     /// Start or stop strategies with Delphi V2 checked-delta semantics.
-    #[doc(hidden)]
-    pub fn strategy_start_stop(&self, is_start: bool) -> Result<(), MoonClientError> {
+    pub(crate) fn strategy_start_stop(&self, is_start: bool) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::StrategyStartStop { is_start })
     }
 

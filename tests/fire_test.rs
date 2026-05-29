@@ -761,6 +761,7 @@ impl Session {
 
     fn request_transfer_assets_refresh(&mut self) {
         self.client
+            .balances()
             .refresh_transfer_assets()
             .expect("MoonClient refresh_transfer_assets must queue");
         println!(
@@ -775,7 +776,8 @@ impl Session {
 
     fn request_coin_card_candles(&mut self, market: &str, kind: DeepHistoryKind) {
         self.client
-            .request_coin_card_candles(market, kind)
+            .candles()
+            .request_coin_card(market, kind)
             .expect("MoonClient request_coin_card_candles must queue");
         println!(
             "FIRETEST non-blocking CoinCard candles queued market={} kind={kind:?}",
@@ -1335,7 +1337,8 @@ impl Session {
 
     fn send_strategy_snapshot_batch(&mut self, strategies: &[StrategySnapshot]) {
         self.client
-            .send_strategy_snapshot_batch(strategies.to_vec())
+            .strategies()
+            .send_snapshot_batch(strategies.to_vec())
             .expect("MoonClient strategy snapshot batch must queue");
     }
 
@@ -3865,10 +3868,12 @@ fn run_moonclient_public_smoke(
     .unwrap_or_else(|err| panic!("FIRETEST {label}: MoonClient connect failed: {err}"));
 
     client
+        .balances()
         .refresh_transfer_assets()
         .unwrap_or_else(|err| panic!("FIRETEST {label}: refresh_transfer_assets failed: {err}"));
     client
-        .request_coin_card_candles(&cfg.market, FIRETEST_COIN_CARD_KIND)
+        .candles()
+        .request_coin_card(&cfg.market, FIRETEST_COIN_CARD_KIND)
         .unwrap_or_else(|err| panic!("FIRETEST {label}: request_coin_card_candles failed: {err}"));
 
     let start = Instant::now();
@@ -3990,7 +3995,8 @@ fn request_settings_until(session: &mut Session, timeout: Duration) -> ClientSet
             attempts += 1;
             session
                 .client
-                .request_client_settings()
+                .settings()
+                .refresh()
                 .expect("MoonClient request_client_settings must queue");
             next_retry = Instant::now() + Duration::from_secs(2);
         }
@@ -4024,7 +4030,8 @@ fn request_balance_until(session: &mut Session, timeout: Duration) {
             attempts += 1;
             session
                 .client
-                .request_balance_snapshot()
+                .balances()
+                .refresh()
                 .expect("MoonClient request_balance_snapshot must queue");
             next_retry = Instant::now() + Duration::from_secs(2);
         }
@@ -4059,7 +4066,8 @@ fn request_orders_until(session: &mut Session, timeout: Duration) {
             attempts += 1;
             session
                 .client
-                .request_order_snapshot()
+                .orders()
+                .request_snapshot()
                 .expect("MoonClient request_order_snapshot must queue");
             next_retry = Instant::now() + Duration::from_secs(2);
         }
@@ -4103,10 +4111,12 @@ fn request_engine_until(
             match method {
                 EngineMethod::CheckAPIExpirationTime => session
                     .client
+                    .account()
                     .refresh_api_expiration_time()
                     .expect("MoonClient refresh_api_expiration_time must queue"),
                 EngineMethod::QueryHedgeMode => session
                     .client
+                    .account()
                     .refresh_hedge_mode()
                     .expect("MoonClient refresh_hedge_mode must queue"),
                 _ => panic!("FireTest non-blocking Engine API gate does not support {method:?}"),
@@ -4273,7 +4283,8 @@ fn ensure_server_emulator_mode(
     enabled.emu_mode = true;
     println!("FIRETEST order flow: enabling server emulator mode through UI settings");
     a.client
-        .send_settings(enabled.clone())
+        .settings()
+        .send(enabled.clone())
         .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(a, b, cfg.connect_timeout, "enable emulator mode", |a, b| {
@@ -4307,7 +4318,8 @@ fn ensure_server_real_order_mode(
     real.emu_mode = false;
     println!("FIRETEST real order cancel: disabling server emulator mode through UI settings");
     a.client
-        .send_settings(real.clone())
+        .settings()
+        .send(real.clone())
         .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(
@@ -4346,7 +4358,8 @@ fn restore_server_emulator_mode(
         original.emu_mode
     );
     a.client
-        .send_settings(original.clone())
+        .settings()
+        .send(original.clone())
         .expect("MoonClient send_settings must queue");
     assert!(
         pump_pair_until(
@@ -5185,7 +5198,8 @@ fn fire_test_active_library_health() {
     );
     a.send_strategy_snapshot_batch(std::slice::from_ref(&mutated_strategy));
     a.client
-        .send_settings(mutated_settings.clone())
+        .settings()
+        .send(mutated_settings.clone())
         .expect("MoonClient send_settings must queue");
 
     let mutation_seen =
@@ -5207,7 +5221,8 @@ fn fire_test_active_library_health() {
     );
     a.send_strategy_snapshot_batch(std::slice::from_ref(&restored_strategy));
     a.client
-        .send_settings(original_settings.clone())
+        .settings()
+        .send(original_settings.clone())
         .expect("MoonClient send_settings must queue");
     let restored = pump_pair_until(&mut a, &mut b, cfg.wait, "restore mutation", |_, b| {
         b.last_settings

@@ -37,6 +37,7 @@ fn main() {
     }
 
     client
+        .streams()
         .subscribe_trades_for(TradesStreamMode::TradesOnly, [market])
         .expect("runtime stopped");
 
@@ -117,6 +118,7 @@ fn main() {
     }
 
     client
+        .streams()
         .unsubscribe_orderbook(market)
         .expect("runtime stopped");
     client
