@@ -25,8 +25,8 @@ pub struct EventDispatcherSnapshot {
     markets: CowState<MarketsState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
-    server_info: ServerInfo,
-    auth_info: Option<AuthCheckResponse>,
+    server_info: std::sync::Arc<ServerInfo>,
+    auth_info: Option<std::sync::Arc<AuthCheckResponse>>,
 }
 
 impl EventDispatcherSnapshot {
@@ -76,13 +76,13 @@ impl EventDispatcherSnapshot {
     /// exchange code, server build/flags). Returns the default (all-empty) value
     /// until the first BaseCheck completes, so it is always safe to read.
     pub fn server_info(&self) -> &ServerInfo {
-        &self.server_info
+        self.server_info.as_ref()
     }
 
     /// Per-account metadata from the last successful `emk_AuthCheck`. `None`
     /// until the client authenticates; refreshed on reconnect re-auth.
     pub fn auth_info(&self) -> Option<&AuthCheckResponse> {
-        self.auth_info.as_ref()
+        self.auth_info.as_deref()
     }
 
     /// Read-only balance state.

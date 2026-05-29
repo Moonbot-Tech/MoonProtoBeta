@@ -143,8 +143,8 @@ pub struct EventDispatcher {
     /// runtime after Init so the published snapshot carries server/account info.
     /// Delphi keeps these in the engine's BaseCheck/AuthCheck state; multi-server
     /// UI and the account screen read them. Default (all-`None`) before BaseCheck.
-    session_server_info: ServerInfo,
-    session_auth_info: Option<AuthCheckResponse>,
+    session_server_info: std::sync::Arc<ServerInfo>,
+    session_auth_info: Option<std::sync::Arc<AuthCheckResponse>>,
     /// Delphi `cfg.ServerStratEpoch` for snapshots sent by this client.
     /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
     /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
@@ -232,7 +232,7 @@ impl Default for EventDispatcher {
             strats: CowState::default(),
             settings: CowState::default(),
             markets: CowState::default(),
-            session_server_info: ServerInfo::default(),
+            session_server_info: std::sync::Arc::new(ServerInfo::default()),
             session_auth_info: None,
             local_strategy_epoch: 0,
             last_known_server_token: 0,
@@ -289,8 +289,8 @@ impl EventDispatcher {
         server_info: ServerInfo,
         auth_info: Option<AuthCheckResponse>,
     ) {
-        self.session_server_info = server_info;
-        self.session_auth_info = auth_info;
+        self.session_server_info = std::sync::Arc::new(server_info);
+        self.session_auth_info = auth_info.map(std::sync::Arc::new);
     }
 
     /// Read-only order state, keyed by server order UID.

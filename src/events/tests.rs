@@ -623,6 +623,50 @@ fn snapshot_carries_session_identity_set_after_init() {
 }
 
 #[test]
+fn identity_snapshot_shares_arc_no_per_publish_clone() {
+    // O3 regression guard (sverka journal_review #14): session identity must be
+    // Arc-shared, not value-cloned on every publish. Two consecutive snapshots
+    // without an identity change must hand out the SAME underlying
+    // ServerInfo/AuthCheckResponse allocation. Before the Arc-wrap this cloned
+    // 6-10 Strings per publish.
+    use crate::commands::engine_api::{AuthCheckResponse, ServerInfo};
+
+    let mut d = EventDispatcher::new();
+    let auth = AuthCheckResponse {
+        binance_account_id: 1,
+        btc_address: String::new(),
+        spot_ref: 0,
+        is_sub_account: false,
+        account_id: String::new(),
+        recvd_max_payload: None,
+        known_dexes: Vec::new(),
+        hl_dex_market: None,
+        hl_spot_market: None,
+    };
+    d.set_session_identity(
+        ServerInfo {
+            bot_id: Some(7),
+            ..ServerInfo::default()
+        },
+        Some(auth),
+    );
+
+    let a = d.snapshot();
+    let b = d.snapshot();
+    assert!(
+        std::ptr::eq(a.server_info(), b.server_info()),
+        "server_info must be Arc-shared across publishes, not cloned per publish"
+    );
+    assert!(
+        std::ptr::eq(
+            a.auth_info().expect("auth present"),
+            b.auth_info().expect("auth present")
+        ),
+        "auth_info must be Arc-shared across publishes, not cloned per publish"
+    );
+}
+
+#[test]
 fn dispatcher_all_statuses_uses_process_command_order_item_loop() {
     let mut d = EventDispatcher::new();
     seed_event_markets(&mut d, &["BTCUSDT"]);
