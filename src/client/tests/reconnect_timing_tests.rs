@@ -90,6 +90,7 @@ fn test_market(name: &str) -> Market {
         position_type: crate::commands::market::PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
+        trade_tail: Default::default(),
         arb_slots: std::collections::HashMap::new(),
     }
 }

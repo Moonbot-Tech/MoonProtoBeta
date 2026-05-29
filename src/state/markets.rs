@@ -30,9 +30,12 @@ mod types;
 use self::text::same_text_ascii;
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 pub use self::types::{
-    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketTradeState,
-    MarketsEvent, MarketsListApplyTiming,
+    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketsEvent,
+    MarketsListApplyTiming,
 };
+// The live trade tail now lives on the `Market` object itself (Delphi `TMarket`
+// shape); re-export it from here so the public `state::markets` path is stable.
+pub use crate::commands::market::MarketTradeState;
 
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
@@ -61,11 +64,6 @@ pub struct MarketsState {
     pub(crate) base_currency_prices: HashMap<String, BaseCurrencyPrice>,
     /// Delphi `TMarket.refBTCMarket`, represented as market name -> CorrMarket name.
     pub(crate) ref_btc_corr_markets: HashMap<String, String>,
-    /// Live trade tail state keyed by `bn_market_name`.
-    ///
-    /// Delphi stores these fields directly on `TMarket`; Rust keeps the wire
-    /// market snapshot clean and stores the non-wire live tail here.
-    pub(crate) trade_states: HashMap<String, MarketTradeState>,
     /// Token tags keyed by `market_name`.
     pub(crate) token_tags: HashMap<String, TokenTags>,
     /// Canonical `mIndex` -> market name mapping.
@@ -127,7 +125,7 @@ impl MarketsState {
     /// tail and update `LastGotAllTrades`; spot trades update only
     /// `LastGotSpotTrades`.
     pub(crate) fn apply_trade_tail_row_like_delphi(
-        &mut self,
+        &self,
         market_index: u16,
         is_spot: bool,
         price: f32,
@@ -144,27 +142,27 @@ impl MarketsState {
         else {
             return;
         };
-        if !self.by_name.contains_key(name) {
+        // Mutate the live `TMarket` trade tail in place through its own lock.
+        // `&self` here is deliberate: the trades datagram must not trigger a
+        // copy-on-write clone of the whole `MarketsState`, exactly like the
+        // per-market balance apply path. The market objects are structurally
+        // shared with any published snapshot, matching Delphi's shared `TMarket`.
+        let Some(handle) = self.handles_by_name.get(name) else {
             return;
-        }
-        if !self.trade_states.contains_key(name) {
-            self.trade_states
-                .insert(name.to_string(), MarketTradeState::default());
-        }
-        let state = self
-            .trade_states
-            .get_mut(name)
-            .expect("known trade state inserted above");
-        if is_spot {
-            state.apply_spot_trade_like_delphi(now_ms);
-        } else {
-            state.apply_futures_trade_like_delphi(
-                f64::from(price),
-                f64::from(qty),
-                now_ms,
-                self.eps_profile.eps,
-            );
-        }
+        };
+        let eps = self.eps_profile.eps;
+        handle.with_mut(|market| {
+            if is_spot {
+                market.trade_tail.apply_spot_trade_like_delphi(now_ms);
+            } else {
+                market.trade_tail.apply_futures_trade_like_delphi(
+                    f64::from(price),
+                    f64::from(qty),
+                    now_ms,
+                    eps,
+                );
+            }
+        });
     }
 
     pub(crate) fn set_eps_profile(&mut self, eps_profile: EpsProfile) {

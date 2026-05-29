@@ -236,65 +236,6 @@ impl BaseCurrencyPrice {
     }
 }
 
-/// Delphi `TMarket` live trade tail fields maintained from `MPC_TradesStream`.
-///
-/// This is intentionally separate from the wire `Market` snapshot: Delphi does
-/// not send these fields in `GetMarketsList`, but it mutates them inline while
-/// processing trades.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct MarketTradeState {
-    /// Delphi `TMarket.LastGotAllTrades` (`GetTimeMS`) for futures trades.
-    pub last_got_all_trades_ms: i64,
-    /// Delphi `TMarket.LastGotSpotTrades` (`GetTimeMS`) for spot trades.
-    pub last_got_spot_trades_ms: i64,
-    /// Delphi `TMarket.LastTradePrice`.
-    pub last_trade_price: f64,
-    /// Delphi `TMarket.LastBuyPrice`; yes, Delphi updates this on `O_Sell`.
-    pub last_buy_price: f64,
-    /// Delphi `TMarket.LastSellPrice`; Delphi updates this on `O_Buy`.
-    pub last_sell_price: f64,
-    /// Delphi `TMarket.LastTradePriceEMA15`.
-    pub last_trade_price_ema15: f64,
-    /// Delphi `TMarket.LastTradePriceEMA5`.
-    pub last_trade_price_ema5: f64,
-    /// Delphi `TMarket.LastTradeKind = O_Sell`.
-    pub last_trade_was_sell: bool,
-}
-
-impl MarketTradeState {
-    pub(super) fn apply_futures_trade_like_delphi(
-        &mut self,
-        price: f64,
-        qty: f64,
-        now_ms: i64,
-        eps: f64,
-    ) {
-        let is_sell = qty < 0.0;
-        self.last_got_all_trades_ms = now_ms;
-        self.last_trade_price = price;
-        self.last_trade_was_sell = is_sell;
-
-        if self.last_trade_price_ema15 < eps {
-            self.last_trade_price_ema15 = price;
-        }
-        if self.last_trade_price_ema5 < eps {
-            self.last_trade_price_ema5 = price;
-        }
-        self.last_trade_price_ema15 = (self.last_trade_price_ema15 * 15.0 + price) / 16.0;
-        self.last_trade_price_ema5 = (self.last_trade_price_ema5 * 5.0 + price) / 6.0;
-
-        if is_sell {
-            self.last_buy_price = price;
-        } else {
-            self.last_sell_price = price;
-        }
-    }
-
-    pub(super) fn apply_spot_trade_like_delphi(&mut self, now_ms: i64) {
-        self.last_got_spot_trades_ms = now_ms;
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum MarketsEvent {
     /// A `GetMarketsList` response was applied.

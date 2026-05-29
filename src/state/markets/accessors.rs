@@ -107,12 +107,9 @@ impl MarketsState {
 
     /// Delphi `TMarket` live trade tail state for a known market.
     pub fn trade_state(&self, market_name: &str) -> Option<MarketTradeState> {
-        self.by_name.contains_key(market_name).then(|| {
-            self.trade_states
-                .get(market_name)
-                .copied()
-                .unwrap_or_default()
-        })
+        self.handles_by_name
+            .get(market_name)
+            .map(|handle| handle.with(|market| market.trade_tail))
     }
 
     /// Теги маркета (пустые если не было `apply_token_tags`).

@@ -277,7 +277,6 @@ impl MarketsState {
             pending_handles_by_name.get_or_insert_with(|| (*self.handles_by_name).clone());
         handles_by_name.insert(name.clone(), handle.clone());
         Arc::make_mut(&mut self.by_name).insert(name.clone(), idx);
-        self.trade_states.entry(name).or_default();
         self.prices.push(price);
         true
     }
@@ -290,7 +289,6 @@ impl MarketsState {
         let mut handles_by_name = HashMap::with_capacity(lookup_entries.len());
         for (i, (name, handle)) in lookup_entries.into_iter().enumerate() {
             by_name.insert(name.clone(), i);
-            self.trade_states.entry(name.clone()).or_default();
             handles_by_name.insert(name, handle);
         }
         self.by_name = Arc::new(by_name);

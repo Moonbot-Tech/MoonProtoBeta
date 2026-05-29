@@ -73,6 +73,7 @@ fn mk_market(name: &str, idx: u16) -> Market {
         position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
+        trade_tail: Default::default(),
         arb_slots: std::collections::HashMap::new(),
     }
 }

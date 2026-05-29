@@ -72,6 +72,7 @@ fn sample_market(name: &str, with_v2: bool) -> Market {
         position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
+        trade_tail: Default::default(),
         arb_slots: std::collections::HashMap::new(),
     }
 }

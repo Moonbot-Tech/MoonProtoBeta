@@ -505,9 +505,74 @@ pub struct Market {
     pub position_type: PositionType,
     pub balance_hash: u64,
     pub last_balance_epoch: u16,
+    // --- Active Lib live trade tail state (Delphi TMarket trade fields) ---
+    pub trade_tail: MarketTradeState,
     // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
     #[doc(hidden)]
     pub arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
+}
+
+/// Delphi `TMarket` live trade tail fields maintained from `MPC_TradesStream`.
+///
+/// These are not part of the wire `Market` snapshot written by
+/// `WriteMarketToStream`: Delphi does not send them in `GetMarketsList`, but it
+/// mutates them inline while processing trades. They live on `Market` (like the
+/// balance/position and arbitrage live state above) so a trades datagram updates
+/// the per-market object in place through its own lock, instead of a parallel
+/// `MarketsState` map that would force a full copy-on-write clone of the whole
+/// markets container on every trades datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketTradeState {
+    /// Delphi `TMarket.LastGotAllTrades` (`GetTimeMS`) for futures trades.
+    pub last_got_all_trades_ms: i64,
+    /// Delphi `TMarket.LastGotSpotTrades` (`GetTimeMS`) for spot trades.
+    pub last_got_spot_trades_ms: i64,
+    /// Delphi `TMarket.LastTradePrice`.
+    pub last_trade_price: f64,
+    /// Delphi `TMarket.LastBuyPrice`; yes, Delphi updates this on `O_Sell`.
+    pub last_buy_price: f64,
+    /// Delphi `TMarket.LastSellPrice`; Delphi updates this on `O_Buy`.
+    pub last_sell_price: f64,
+    /// Delphi `TMarket.LastTradePriceEMA15`.
+    pub last_trade_price_ema15: f64,
+    /// Delphi `TMarket.LastTradePriceEMA5`.
+    pub last_trade_price_ema5: f64,
+    /// Delphi `TMarket.LastTradeKind = O_Sell`.
+    pub last_trade_was_sell: bool,
+}
+
+impl MarketTradeState {
+    pub(crate) fn apply_futures_trade_like_delphi(
+        &mut self,
+        price: f64,
+        qty: f64,
+        now_ms: i64,
+        eps: f64,
+    ) {
+        let is_sell = qty < 0.0;
+        self.last_got_all_trades_ms = now_ms;
+        self.last_trade_price = price;
+        self.last_trade_was_sell = is_sell;
+
+        if self.last_trade_price_ema15 < eps {
+            self.last_trade_price_ema15 = price;
+        }
+        if self.last_trade_price_ema5 < eps {
+            self.last_trade_price_ema5 = price;
+        }
+        self.last_trade_price_ema15 = (self.last_trade_price_ema15 * 15.0 + price) / 16.0;
+        self.last_trade_price_ema5 = (self.last_trade_price_ema5 * 5.0 + price) / 6.0;
+
+        if is_sell {
+            self.last_buy_price = price;
+        } else {
+            self.last_sell_price = price;
+        }
+    }
+
+    pub(crate) fn apply_spot_trade_like_delphi(&mut self, now_ms: i64) {
+        self.last_got_spot_trades_ms = now_ms;
+    }
 }
 
 impl Market {
@@ -847,6 +912,7 @@ pub(crate) fn read_market_with_local_shift(
         position_type: PositionType::Cross,
         balance_hash: 0,
         last_balance_epoch: 0,
+        trade_tail: MarketTradeState::default(),
         arb_slots: HashMap::new(),
     })
 }
