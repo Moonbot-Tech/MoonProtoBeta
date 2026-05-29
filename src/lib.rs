@@ -147,10 +147,13 @@ pub use client::{
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
+pub use commands::engine_api::{
+    AuthCheckResponse, DexInfo, ExchangeTypeMask, HyperDexIndex, ServerInfo,
+};
 pub use commands::{
-    field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, ClientSettingsCommand,
-    ExchangeCode, FieldValue, OrderType, PositionType, SpotMarketKind, StrategyActiveMode,
-    StrategyFields, StrategyKind, StrategySnapshot, TokenTags,
+    field_names, ArbConfigCompact, ArbIsolationFlags, ArbPlatformCode, BaseCurrency,
+    ClientSettingsCommand, ExchangeCode, FieldValue, OrderType, PositionType, SpotMarketKind,
+    StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot, TokenTags,
 };
 pub use events::{
     ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcher, EventDispatcherSnapshot,

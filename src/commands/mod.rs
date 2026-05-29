@@ -33,7 +33,9 @@ pub use engine_api::{
     parse_auth_check_response, parse_get_balance_response, parse_query_hedge_mode_response,
     AuthCheckResponse, DexInfo, EngineMethod, EngineResponse,
 };
-pub use market::{ArbIsolationFlags, ArbPlatformCode, ExchangeCode, PositionType, TokenTags};
+pub use market::{
+    ArbIsolationFlags, ArbPlatformCode, BaseCurrency, ExchangeCode, PositionType, TokenTags,
+};
 pub use order_book::{OrderBookUpdate, OrderLevel};
 pub use strategy_schema::{
     StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldType, StrategyFieldUiKind,
