@@ -99,7 +99,8 @@ client.balances().refresh()?;
 for event in client.drain_events() {
     if matches!(event, moonproto::Event::Balance(_)) {
         if let Some(snapshot) = client.snapshot() {
-            println!("balance rows={}", snapshot.balances().len());
+            // Account totals; per-market balance/position is read from markets.
+            println!("total_pnl={}", snapshot.balances().global().total_pnl);
         }
     }
 }

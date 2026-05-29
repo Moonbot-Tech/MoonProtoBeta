@@ -34,7 +34,7 @@ for event in client.drain_events() {
 
 if let Some(snapshot) = client.snapshot() {
     println!("hedge={:?}", snapshot.account().hedge_mode());
-    println!("balances={}", snapshot.balances().len());
+    println!("total_pnl={}", snapshot.balances().global().total_pnl);
 }
 ```
 

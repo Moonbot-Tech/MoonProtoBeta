@@ -517,7 +517,7 @@ client.balances().refresh()?;
 for event in client.drain_events() {
     if matches!(event, moonproto::Event::Balance(_)) {
         if let Some(snapshot) = client.snapshot() {
-            println!("balance markets={}", snapshot.balances().len());
+            println!("markets={}", snapshot.markets().market_count());
             println!("btc total={}", snapshot.balances().global().btc_balance_total);
         }
     }

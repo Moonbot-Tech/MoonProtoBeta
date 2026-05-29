@@ -260,8 +260,6 @@ impl Orders {
 
                 if new_order {
                     (ApplyResult::Applied, OrderEvent::Created(uid))
-                } else if is_done {
-                    (ApplyResult::Applied, OrderEvent::Updated(uid))
                 } else {
                     (ApplyResult::Applied, OrderEvent::Updated(uid))
                 }
