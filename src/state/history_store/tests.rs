@@ -469,12 +469,20 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .unwrap()
         .copy_last(8, &mut candles);
     assert_eq!(candles.len(), 2);
-    assert_eq!(candles[1].close, 125.0);
-    assert_eq!(candles[1].high, 125.0);
-    assert_eq!(candles[1].volume, 2_250.0);
+    // Снапшот-свечи засилены — трейд их НЕ трогает (эталон: live-свеча отдельно от ring).
+    assert_eq!(candles[1].close, 115.0);
+    assert_eq!(candles[1].high, 120.0);
+    assert_eq!(candles[1].volume, 2_000.0);
 
-    store.refresh_derived_analytics(now);
+    // refresh с временем >= трейда (в проде now всегда >= времени последнего трейда),
+    // иначе live-свеча (now+1s) выпала бы из окна дельт.
+    store.refresh_derived_analytics(now + 1.0 / 86_400.0);
     let derived = store.derived_snapshot();
+    // Трейд ушёл в live-свечу (Delphi `FCandle`), выставлена отдельно от засиленного ring.
+    let live = derived.current_candle.expect("live candle from trade");
+    assert_eq!(live.close, 125.0);
+    assert_eq!(live.high, 125.0);
+    assert_eq!(live.volume, 250.0);
     assert!((derived.candle_deltas.fifteen_minutes - 38.8888888889).abs() < 1e-6);
     assert_eq!(derived.candle_volumes.fifteen_minutes, 3_250.0);
     assert_eq!(derived.candle_volumes.one_hour, 3_250.0);
@@ -503,8 +511,10 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         volume: 1_000.0,
     }]);
 
-    let next_time = now + 6.0 / 1440.0;
-    store.append_futures_trade_like_delphi(trade(next_time, 120.0, 2.0));
+    // Первый трейд следующего периода — копится в отдельный live-аккумулятор
+    // (Delphi `FCandle`), НЕ кладётся в засиленный ring.
+    let t1 = now + 6.0 / 1440.0;
+    store.append_futures_trade_like_delphi(trade(t1, 120.0, 2.0));
 
     let mut candles = Vec::new();
     store
@@ -512,14 +522,39 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-
-    assert_eq!(candles.len(), 2);
+    assert_eq!(candles.len(), 1, "снапшот-свеча засилена; live-свеча отдельно, не в ring");
     assert_eq!(candles[0].time, now);
     assert_eq!(candles[0].close, 105.0);
-    assert_eq!(candles[1].time, next_time);
+    store.refresh_derived_analytics(t1);
+    let live = store
+        .derived_snapshot()
+        .current_candle
+        .expect("live candle accumulating");
+    assert_eq!(live.open, 120.0);
+    assert_eq!(live.close, 120.0);
+
+    // Второй трейд через >5 мин — текущая свеча засиливается в ring (end-stamped
+    // временем seal), начинается новая live-свеча (Delphi Recalc5mCandle roll).
+    let t2 = t1 + 6.0 / 1440.0;
+    store.append_futures_trade_like_delphi(trade(t2, 130.0, 1.0));
+    candles.clear();
+    store
+        .readers()
+        .candles_5m
+        .unwrap()
+        .copy_last(8, &mut candles);
+    assert_eq!(candles.len(), 2, "первая live-свеча засилена и добавлена в ring");
+    assert_eq!(candles[0].time, now);
+    assert_eq!(candles[1].time, t2, "засиленная свеча штампуется временем seal (конец периода)");
     assert_eq!(candles[1].open, 120.0);
     assert_eq!(candles[1].close, 120.0);
     assert_eq!(candles[1].volume, 240.0);
+    store.refresh_derived_analytics(t2);
+    let live2 = store
+        .derived_snapshot()
+        .current_candle
+        .expect("new live candle after roll");
+    assert_eq!(live2.open, 130.0);
 }
 
 #[test]

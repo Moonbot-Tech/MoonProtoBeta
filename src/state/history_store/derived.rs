@@ -27,6 +27,9 @@ impl MarketHistoryStore {
         self.derived.last_price_deltas = last_price_deltas;
         self.derived.deltas =
             combine_deltas(trade_deltas, self.derived.candle_deltas, last_price_deltas);
+        // Live (in-progress) свеча выставляется отдельно от засиленного ring,
+        // чтобы консьюмер дорисовал её как текущий бар (Delphi `FCandle`).
+        self.derived.current_candle = self.current_candle;
         self.read_handle
             .publish(&self.rolling_volumes, self.derived);
     }
@@ -37,16 +40,13 @@ impl MarketHistoryStore {
         }
         self.seal_current_candle_if_due(row.time);
         let traded_value = row.traded_value();
-        let mut candle = self.current_candle.unwrap_or_else(|| {
-            self.current_candle_seq = None;
-            Candle5mRow {
-                open: row.price,
-                close: row.price,
-                high: row.price,
-                low: row.price,
-                volume: 0.0,
-                time: row.time,
-            }
+        let mut candle = self.current_candle.unwrap_or(Candle5mRow {
+            open: row.price,
+            close: row.price,
+            high: row.price,
+            low: row.price,
+            volume: 0.0,
+            time: row.time,
         });
         candle.close = row.price;
         candle.high = candle.high.max(row.price);
@@ -58,38 +58,27 @@ impl MarketHistoryStore {
         candle.volume += traded_value;
         self.current_candle = Some(candle);
         self.candle_deltas_dirty = true;
-        self.publish_current_candle();
+        // In-progress свеча — отдельный аккумулятор (Delphi `FCandle`), НЕ публикуется
+        // в `candles_5m` ring; в ring кладутся только засиленные свечи (end-stamped),
+        // см. `seal_current_candle_if_due`. Это снимает смешение конвенций времени
+        // (снапшот end-stamped + live start-stamped) в одном ring.
     }
 
     fn seal_current_candle_if_due(&mut self, now_time: f64) {
-        let Some(candle) = self.current_candle else {
+        let Some(mut candle) = self.current_candle else {
             return;
         };
         if now_time > 0.0 && now_time - candle.time >= FIVE_MINUTES_DAYS {
-            if self.current_candle_seq.is_none() {
-                self.publish_current_candle();
+            // Delphi `Recalc5mCandle` (MarketsU.pas:9988): засиленную свечу штампуем
+            // временем seal (`NowTime` = конец периода) и кладём в Deep5m; in-progress
+            // (FCandle) остаётся отдельно и начинается заново.
+            candle.time = now_time;
+            if let Some(writer) = self.candles_5m.as_mut() {
+                writer.push(candle);
             }
             self.current_candle = None;
-            self.current_candle_seq = None;
             self.candle_deltas_dirty = true;
         }
-    }
-
-    fn publish_current_candle(&mut self) {
-        let Some(candle) = self.current_candle else {
-            self.current_candle_seq = None;
-            return;
-        };
-        let Some(writer) = self.candles_5m.as_mut() else {
-            self.current_candle_seq = None;
-            return;
-        };
-        if let Some(seq) = self.current_candle_seq {
-            if writer.replace_seq(seq, candle) {
-                return;
-            }
-        }
-        self.current_candle_seq = Some(writer.push(candle));
     }
 
     fn candle_derived_one_pass(
@@ -102,10 +91,9 @@ impl MarketHistoryStore {
                 view.for_each(|row| acc.add(*row));
             });
         }
-        if self.current_candle_seq.is_none() {
-            if let Some(candle) = self.current_candle {
-                acc.add(candle);
-            }
+        // In-progress свеча больше не лежит в ring — всегда добавляем её к деривативам.
+        if let Some(candle) = self.current_candle {
+            acc.add(candle);
         }
         acc.finish()
     }

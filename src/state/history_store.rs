@@ -102,8 +102,9 @@ pub struct MarketHistoryStore {
     evicted_futures_for_compaction: Vec<TradeHistoryRow>,
     mini_scratch: Vec<MiniCandle>,
     rolling_volumes: RollingTradeVolumes,
+    /// In-progress 5m свеча (Delphi `TMarket.FCandle`) — отдельный аккумулятор,
+    /// НЕ хранится в `candles_5m` ring (там только засиленные end-stamped свечи).
     current_candle: Option<Candle5mRow>,
-    current_candle_seq: Option<u64>,
     candle_deltas_dirty: bool,
     candle_deltas_bucket: Option<i64>,
     derived: MarketDerivedSnapshot,
@@ -166,7 +167,6 @@ impl MarketHistoryStore {
             mini_scratch: Vec::new(),
             rolling_volumes: RollingTradeVolumes::default(),
             current_candle: None,
-            current_candle_seq: None,
             candle_deltas_dirty: false,
             candle_deltas_bucket: None,
             derived: MarketDerivedSnapshot::default(),
@@ -195,24 +195,19 @@ impl MarketHistoryStore {
     }
 
     pub fn replace_candles_5m_from_snapshot(&mut self, candles: &[Candle5mRow]) {
-        self.current_candle = candles.last().copied();
-        self.current_candle_seq = None;
+        // Снапшот = только засиленные свечи (Delphi `Deep5m`; `StoreCandlesToZip`
+        // сериализует Deep5m, а Recalc5mCandle пишет туда лишь на seal — in-progress
+        // `FCandle` сервер не шлёт). Кладём все в ring как есть (end-stamped). НЕ
+        // продолжаем последнюю как in-progress — её период закрыт; текущий период
+        // клиент копит сам из trade-потока в отдельный `current_candle` (Delphi FCandle).
+        let last_time = candles.last().map(|candle| candle.time).unwrap_or_default();
+        self.current_candle = None;
         self.candle_deltas_dirty = true;
         if let Some(writer) = self.candles_5m.as_mut() {
             writer.clear();
             writer.push_batch(candles);
-            if self.current_candle.is_some() {
-                let bounds = writer.bounds();
-                if bounds.len > 0 {
-                    self.current_candle_seq = Some(bounds.next_seq - 1);
-                }
-            }
         }
-        self.refresh_derived_analytics(
-            self.current_candle
-                .map(|candle| candle.time)
-                .unwrap_or_default(),
-        );
+        self.refresh_derived_analytics(last_time);
     }
 
     /// Delphi `TMarket.AddFrom` retained LastPrice row.
