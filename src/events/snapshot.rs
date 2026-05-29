@@ -55,8 +55,13 @@ impl EventDispatcherSnapshot {
             .map(OrderBookSnapshot::top)
     }
 
-    /// Read-only trades-stream state.
-    pub fn trades(&self) -> &TradesState {
+    /// Read-only trades-stream *recovery* state: packet counters, gap buckets,
+    /// and resend bookkeeping.
+    ///
+    /// This is gap/resend tracking, not the trade rows. For the retained trade
+    /// history (futures/spot/liquidation rings) use
+    /// [`Self::market_history_readers`].
+    pub fn trades_recovery(&self) -> &TradesState {
         &self.trades
     }
 

@@ -329,9 +329,10 @@ impl EventDispatcher {
         self.order_books.reset_caches_keep_books();
     }
 
-    /// Read-only trades-stream state: packet counters, gap buckets, and resend
-    /// bookkeeping.
-    pub fn trades(&self) -> &TradesState {
+    /// Read-only trades-stream *recovery* state: packet counters, gap buckets,
+    /// and resend bookkeeping. This is not the trade rows — read the retained
+    /// trade history from the market history readers instead.
+    pub fn trades_recovery(&self) -> &TradesState {
         &self.trades
     }
 

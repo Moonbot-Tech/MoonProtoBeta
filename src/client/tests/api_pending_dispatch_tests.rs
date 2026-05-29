@@ -649,8 +649,8 @@ fn decoded_batch_uses_receive_timestamp_for_active_timers() {
             gap_events,
             resend_requests,
             trades_resend_sends,
-            last_packet_num: dispatcher.trades().last_packet_num(),
-            used_buckets: dispatcher.trades().used_buckets(),
+            last_packet_num: dispatcher.trades_recovery().last_packet_num(),
+            used_buckets: dispatcher.trades_recovery().used_buckets(),
         }
     }
 
