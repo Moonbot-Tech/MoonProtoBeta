@@ -105,7 +105,7 @@ impl OrderBooks {
 
         // === 1. Full snapshot — всегда применяется (это reset кэша) ===
         if pkt.is_full {
-            apply_full_book(&mut self.books, key, pkt.seq, &pkt.buys, &pkt.sells);
+            let top = apply_full_book(&mut self.books, key, pkt.seq, &pkt.buys, &pkt.sells);
             cache.corrupted = false;
             cache.last_applied_seq = pkt.seq;
             cache.expected_seq = pkt.seq.wrapping_add(1);
@@ -120,11 +120,7 @@ impl OrderBooks {
                 kind,
                 is_full: true,
                 seq: pkt.seq,
-                top: self
-                    .books
-                    .get(&key)
-                    .map(|book| book.top())
-                    .unwrap_or_default(),
+                top,
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -140,7 +136,7 @@ impl OrderBooks {
         if cache.corrupted {
             let seq = pkt.seq;
             let cached_pkt = pkt.clone();
-            apply_diff_book(
+            let top = apply_diff_book(
                 &mut self.books,
                 &mut self.diff_scratch,
                 key,
@@ -156,11 +152,7 @@ impl OrderBooks {
                 kind,
                 is_full: false,
                 seq,
-                top: self
-                    .books
-                    .get(&key)
-                    .map(|book| book.top())
-                    .unwrap_or_default(),
+                top,
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -184,7 +176,7 @@ impl OrderBooks {
         // (последний применённый seq = 0) — применяет первый Diff без ожидания
         // Full. Раньше мы отбрасывали → лишний RequestFullNeeded request.
         if cmp == 0 || cache.last_applied_seq == 0 {
-            apply_diff_book(
+            let top = apply_diff_book(
                 &mut self.books,
                 &mut self.diff_scratch,
                 key,
@@ -201,11 +193,7 @@ impl OrderBooks {
                 kind,
                 is_full: false,
                 seq: pkt.seq,
-                top: self
-                    .books
-                    .get(&key)
-                    .map(|book| book.top())
-                    .unwrap_or_default(),
+                top,
                 buys: pkt.buys,
                 sells: pkt.sells,
             });
@@ -266,7 +254,7 @@ impl OrderBooks {
 
             // O(1) pop_front вместо O(N) remove(0).
             let entry = cache.packets.pop_front().unwrap();
-            apply_cached_packet(
+            let top = apply_cached_packet(
                 &mut self.books,
                 &mut self.diff_scratch,
                 key,
@@ -281,11 +269,7 @@ impl OrderBooks {
                 kind: OrderBookKind::from_u8(entry.pkt.book_kind).unwrap_or(OrderBookKind::Futures),
                 is_full: entry.pkt.is_full,
                 seq: entry.seq,
-                top: self
-                    .books
-                    .get(&key)
-                    .map(|book| book.top())
-                    .unwrap_or_default(),
+                top,
                 buys: entry.pkt.buys,
                 sells: entry.pkt.sells,
             });

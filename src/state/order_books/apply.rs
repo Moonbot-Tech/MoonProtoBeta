@@ -1,6 +1,6 @@
 //! Apply full/diff orderbook packets into the read model.
 
-use super::{BookKey, OrderBookKind, OrderBookLevel, OrderBookSnapshot};
+use super::{BookKey, OrderBookKind, OrderBookLevel, OrderBookSnapshot, TopOfBook};
 use crate::commands::order_book::{OrderBookUpdate, OrderLevel};
 use crate::state::eps::EpsProfile;
 use std::collections::HashMap;
@@ -13,11 +13,11 @@ pub(super) fn apply_cached_packet(
     key: BookKey,
     pkt: &OrderBookUpdate,
     eps: EpsProfile,
-) {
+) -> TopOfBook {
     if pkt.is_full {
-        apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells);
+        apply_full_book(books, key, pkt.seq, &pkt.buys, &pkt.sells)
     } else {
-        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells, eps);
+        apply_diff_book(books, scratch, key, pkt.seq, &pkt.buys, &pkt.sells, eps)
     }
 }
 
@@ -27,7 +27,7 @@ pub(super) fn apply_full_book(
     seq: u16,
     buys: &[OrderLevel],
     sells: &[OrderLevel],
-) {
+) -> TopOfBook {
     let book = order_book_entry_mut(books, key);
     book.seq = seq;
     book.buys.clear();
@@ -36,6 +36,7 @@ pub(super) fn apply_full_book(
     book.sells.clear();
     book.sells
         .extend(sells.iter().copied().map(OrderBookLevel::from));
+    book.top()
 }
 
 pub(super) fn apply_diff_book(
@@ -46,7 +47,7 @@ pub(super) fn apply_diff_book(
     buy_diff: &[OrderLevel],
     sell_diff: &[OrderLevel],
     eps: EpsProfile,
-) {
+) -> TopOfBook {
     let book = order_book_entry_mut(books, key);
     apply_order_book_diff_keep_zero_with_eps(
         &mut book.buys,
@@ -65,6 +66,7 @@ pub(super) fn apply_diff_book(
         eps,
     );
     book.seq = seq;
+    book.top()
 }
 
 fn order_book_entry_mut(
