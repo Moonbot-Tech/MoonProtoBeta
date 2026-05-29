@@ -22,7 +22,10 @@ pub struct StrategyInfo {
     /// Last server-acknowledged checked-state (`TStrategy.PrevChecked`).
     pub prev_checked: bool,
     /// Folder path in the strategy tree.
-    pub folder_path: String,
+    ///
+    /// `Arc<str>` shared with the decoded snapshot `path` — refcount bump on
+    /// apply instead of a per-strategy heap copy (Delphi COW string parity).
+    pub folder_path: std::sync::Arc<str>,
 }
 
 impl StrategyInfo {
@@ -34,7 +37,7 @@ impl StrategyInfo {
             sell_price: 0.0,
             checked: false,
             prev_checked: false,
-            folder_path: String::new(),
+            folder_path: std::sync::Arc::from(""),
         }
     }
 }

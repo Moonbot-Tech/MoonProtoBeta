@@ -3333,7 +3333,7 @@ fn firetest_strategy(cfg: &FireConfig) -> StrategySnapshot {
         last_date: now_epoch_ms(),
         checked: false,
         kind: StrategyKind::TELEGRAM.to_byte(),
-        path: "FireTest".to_string(),
+        path: "FireTest".into(),
         fields,
     }
 }

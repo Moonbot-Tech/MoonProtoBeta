@@ -46,10 +46,15 @@ impl StratsState {
     }
 
     /// Update lightweight strategy state from decoded snapshot header fields.
-    pub fn upsert(&mut self, strategy_id: u64, last_date: u64, folder_path: String) {
+    pub fn upsert(
+        &mut self,
+        strategy_id: u64,
+        last_date: u64,
+        folder_path: impl Into<std::sync::Arc<str>>,
+    ) {
         let entry = self.get_or_insert(strategy_id);
         entry.last_date = last_date;
-        entry.folder_path = folder_path;
+        entry.folder_path = folder_path.into();
         let path = entry.folder_path.clone();
         self.create_folders_for_path(&path);
     }

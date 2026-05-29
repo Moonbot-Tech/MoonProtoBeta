@@ -127,7 +127,11 @@ pub struct StrategySnapshot {
     pub checked: bool,
     pub kind: u8,
     /// Folder path from `PathDict` by `PathID`; empty when `PathID` is out of range.
-    pub path: String,
+    ///
+    /// `Arc<str>`: many strategies share the same folder path, so the reader
+    /// hands out a refcount bump per strategy instead of a fresh heap copy —
+    /// matching Delphi's copy-on-write string assignment.
+    pub path: Arc<str>,
     pub fields: StrategyFields,
 }
 

@@ -110,7 +110,7 @@ pub(crate) use super::strict_read::read_u8;
 #[doc(hidden)]
 pub struct StrategyBatch {
     pub names: Vec<String>,
-    pub paths: Vec<String>,
+    pub paths: Vec<std::sync::Arc<str>>,
     pub strategies: Vec<StrategySnapshot>,
 }
 

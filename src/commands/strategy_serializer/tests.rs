@@ -97,7 +97,7 @@ fn sample_strategy(id: u64, name: &str, path: &str) -> StrategySnapshot {
         last_date: 1737000000000, // 2026-01-16 UTC ms
         checked: true,
         kind: 5,
-        path: path.to_string(),
+        path: path.into(),
         fields,
     }
 }
@@ -113,7 +113,7 @@ fn strategy_with_fields(
         last_date: 1,
         checked,
         kind: kind.to_byte(),
-        path: String::new(),
+        path: "".into(),
         fields: fields
             .iter()
             .map(|(name, value)| (Arc::<str>::from(*name), value.clone()))
@@ -194,7 +194,7 @@ fn single_strategy_roundtrip() {
     assert_eq!(ps.strategy_ver, 1);
     assert!(ps.checked);
     assert_eq!(ps.kind, 5);
-    assert_eq!(ps.path, "Folder/A");
+    assert_eq!(&*ps.path,"Folder/A");
     assert_eq!(
         ps.fields.get("StrategyName"),
         Some(&FieldValue::String("Strat-1".to_string()))
@@ -228,7 +228,7 @@ fn writer_uses_schema_field_order_for_name_dict() {
         last_date: 0,
         checked: true,
         kind: 1,
-        path: String::new(),
+        path: "".into(),
         fields,
     });
 
@@ -265,7 +265,7 @@ fn writer_skips_schema_defaults_unknown_fields_and_type_mismatches() {
         last_date: 0,
         checked: true,
         kind: 1,
-        path: String::new(),
+        path: "".into(),
         fields,
     });
 
@@ -323,7 +323,7 @@ fn zero_flag_encoded_for_zero_values() {
         last_date: 0,
         checked: false,
         kind: 1,
-        path: String::new(),
+        path: "".into(),
         fields,
     };
 
@@ -393,7 +393,7 @@ fn writer_wraps_name_path_and_string_lengths_like_delphi() {
         last_date: 1737000000000,
         checked: true,
         kind: 1,
-        path: long_path,
+        path: long_path.into(),
         fields,
     };
 
@@ -404,7 +404,7 @@ fn writer_wraps_name_path_and_string_lengths_like_delphi() {
     let parsed = parse_strategy_batch(&compressed).unwrap();
     let ps = &parsed.strategies[0];
 
-    assert_eq!(ps.path, "P");
+    assert_eq!(&*ps.path,"P");
     assert_eq!(
         ps.fields.get("Comment"),
         Some(&FieldValue::String("V".to_string()))
@@ -434,7 +434,7 @@ fn missing_path_id_yields_empty() {
 
     let parsed = parse_strategy_batch_plain(&plain).unwrap();
     assert_eq!(parsed.strategies.len(), 1);
-    assert_eq!(parsed.strategies[0].path, ""); // PathID out of range → empty
+    assert_eq!(&*parsed.strategies[0].path, ""); // PathID out of range → empty
 }
 
 #[test]
@@ -679,9 +679,12 @@ fn invalid_utf8_dicts_and_string_fields_use_delphi_question_mark_fallback() {
 
     let parsed = parse_strategy_batch_plain(&plain).unwrap();
     assert_eq!(parsed.names, vec!["N?me".to_string()]);
-    assert_eq!(parsed.paths, vec!["P?".to_string()]);
+    assert_eq!(
+        parsed.paths,
+        vec![std::sync::Arc::<str>::from("P?")]
+    );
     let ps = &parsed.strategies[0];
-    assert_eq!(ps.path, "P?");
+    assert_eq!(&*ps.path,"P?");
     assert_eq!(
         ps.fields.get("N?me"),
         Some(&FieldValue::String("V?".to_string()))

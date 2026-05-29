@@ -365,7 +365,7 @@ fn build_snapshot_from_strategies_computes_max_last_date() {
             last_date: 10,
             checked: true,
             kind: 1,
-            path: "P".to_string(),
+            path: "P".into(),
             fields: fields.clone(),
         },
         StrategySnapshot {
@@ -374,7 +374,7 @@ fn build_snapshot_from_strategies_computes_max_last_date() {
             last_date: 30,
             checked: false,
             kind: 1,
-            path: "P".to_string(),
+            path: "P".into(),
             fields,
         },
     ];

@@ -3494,7 +3494,7 @@ fn snapshot_requested_uses_local_strategies() {
         last_date: 1234,
         checked: true,
         kind: 1,
-        path: "FireTest".to_string(),
+        path: "FireTest".into(),
         fields,
     };
 
@@ -3559,7 +3559,7 @@ fn snapshot_requested_defers_non_empty_local_strategies_until_schema() {
         last_date: 77,
         checked: true,
         kind: 1,
-        path: String::new(),
+        path: "".into(),
         fields,
     };
 
@@ -3682,7 +3682,7 @@ fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
             last_date: 1,
             checked: false,
             kind: 1,
-            path: String::new(),
+            path: "".into(),
             fields: StrategyFields::new(),
         },
         StrategySnapshot {
@@ -3691,7 +3691,7 @@ fn ui_strat_start_stop_v2_uses_owned_checked_delta() {
             last_date: 2,
             checked: true,
             kind: 1,
-            path: String::new(),
+            path: "".into(),
             fields: StrategyFields::new(),
         },
     ];

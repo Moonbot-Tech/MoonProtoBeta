@@ -152,7 +152,7 @@ fn bench_firetest_strategy_snapshot_payload() {
 #[test]
 fn sell_price_update_is_ignored_like_delphi_client() {
     let mut s = StratsState::new();
-    s.upsert(100, 0, "".into());
+    s.upsert(100, 0, "");
     let ev = s.apply(StratCommand::SellPriceUpdate(StratSellPriceUpdate {
         strategy_id: 100,
         sell_price: 50.5,
@@ -197,7 +197,7 @@ fn snapshot_for_listing_checks(
         last_date: id,
         checked,
         kind: kind.to_byte(),
-        path: String::new(),
+        path: "".into(),
         fields: fields
             .iter()
             .map(|(name, value)| (Arc::<str>::from(*name), value.clone()))
@@ -393,8 +393,8 @@ fn delete_unknown_strategy_without_folder_change_is_ignored_like_delphi() {
 #[test]
 fn checked_sync_delta() {
     let mut s = StratsState::new();
-    s.upsert(1, 0, "".into());
-    s.upsert(2, 0, "".into());
+    s.upsert(1, 0, "");
+    s.upsert(2, 0, "");
     // Дельта: только id=1 → checked.
     let cmd = StratCommand::CheckedSync(StratCheckedSync {
         items: vec![StratCheckedItem {
@@ -446,7 +446,7 @@ fn apply_snapshot_decoded_upserts_strategies() {
         last_date: 1737000000000,
         checked: true,
         kind: 5,
-        path: "F/A".to_string(),
+        path: "F/A".into(),
         fields: fields1,
     });
     let mut fields2 = StrategyFields::new();
@@ -457,7 +457,7 @@ fn apply_snapshot_decoded_upserts_strategies() {
         last_date: 1737000000001,
         checked: false,
         kind: 6,
-        path: "F/B".to_string(),
+        path: "F/B".into(),
         fields: fields2,
     });
 
@@ -469,7 +469,7 @@ fn apply_snapshot_decoded_upserts_strategies() {
 
     let info100 = s.get(100).unwrap();
     assert_eq!(info100.last_date, 1737000000000);
-    assert_eq!(info100.folder_path, "F/A");
+    assert_eq!(&*info100.folder_path, "F/A");
     assert!(info100.checked);
     assert!(info100.prev_checked);
     assert_eq!(
@@ -479,7 +479,7 @@ fn apply_snapshot_decoded_upserts_strategies() {
     );
 
     let info200 = s.get(200).unwrap();
-    assert_eq!(info200.folder_path, "F/B");
+    assert_eq!(&*info200.folder_path, "F/B");
     assert!(!info200.checked);
     assert!(!info200.prev_checked);
 
@@ -510,7 +510,7 @@ fn in_place_complete_snapshot_seeds_serialized_reply_cache() {
         last_date: 1737000000042,
         checked: true,
         kind: 5,
-        path: "Cache".to_string(),
+        path: "Cache".into(),
         fields,
     });
     let payload = b.finalize();
@@ -589,7 +589,7 @@ fn full_snapshot_preserves_missing_strategies_like_delphi() {
         last_date: 1,
         checked: true,
         kind: 1,
-        path: "OldPath".to_string(),
+        path: "OldPath".into(),
         fields: old_fields,
     });
 
@@ -603,7 +603,7 @@ fn full_snapshot_preserves_missing_strategies_like_delphi() {
         last_date: 2,
         checked: false,
         kind: 1,
-        path: "NewPath".to_string(),
+        path: "NewPath".into(),
         fields: new_fields,
     });
 
@@ -629,8 +629,8 @@ fn full_snapshot_preserves_missing_strategies_like_delphi() {
 fn checked_sync_full_only_updates_items_like_delphi() {
     let mut s = StratsState::new();
     // Изначально id=1 и id=2 checked.
-    s.upsert(1, 0, "".into());
-    s.upsert(2, 0, "".into());
+    s.upsert(1, 0, "");
+    s.upsert(2, 0, "");
     s.by_id.get_mut(&1).unwrap().checked = true;
     s.by_id.get_mut(&1).unwrap().prev_checked = true;
     s.by_id.get_mut(&2).unwrap().checked = true;
@@ -661,7 +661,7 @@ fn checked_sync_full_only_updates_items_like_delphi() {
 #[test]
 fn checked_sync_ignores_unknown_strategy() {
     let mut s = StratsState::new();
-    s.upsert(1, 0, "".into());
+    s.upsert(1, 0, "");
     let cmd = StratCommand::CheckedSync(StratCheckedSync {
         items: vec![
             StratCheckedItem {
@@ -701,7 +701,7 @@ fn snapshot_does_not_roll_back_newer_existing_strategy() {
         last_date: 200,
         checked: true,
         kind: 1,
-        path: "NewPath".to_string(),
+        path: "NewPath".into(),
         fields: fields.clone(),
     });
 
@@ -711,7 +711,7 @@ fn snapshot_does_not_roll_back_newer_existing_strategy() {
         last_date: 199,
         checked: false,
         kind: 1,
-        path: "OldPath".to_string(),
+        path: "OldPath".into(),
         fields,
     });
 
@@ -719,7 +719,7 @@ fn snapshot_does_not_roll_back_newer_existing_strategy() {
     let info = s.get(100).unwrap();
     assert_eq!(info.strategy_ver, 7);
     assert_eq!(info.last_date, 200);
-    assert_eq!(info.folder_path, "NewPath");
+    assert_eq!(&*info.folder_path, "NewPath");
     assert!(info.checked);
     assert!(info.prev_checked);
 }
@@ -737,7 +737,7 @@ fn local_checked_delta_waits_for_matching_echo() {
         last_date: 1,
         checked: true,
         kind: 1,
-        path: "P".to_string(),
+        path: "P".into(),
         fields,
     });
     assert!(s.checked_delta().is_empty());
@@ -792,7 +792,7 @@ fn snapshot_vec_preserves_delphi_list_order() {
             last_date: strategy_id,
             checked: false,
             kind: 1,
-            path: String::new(),
+            path: "".into(),
             fields: StrategyFields::new(),
         });
     }
@@ -821,7 +821,7 @@ fn clone_shares_full_strategy_snapshots_until_mutation() {
         last_date: 30,
         checked: false,
         kind: 1,
-        path: String::new(),
+        path: "".into(),
         fields,
     });
 
@@ -854,7 +854,7 @@ fn snapshot_applies_new_zero_version_strategy() {
         last_date: 0,
         checked: true,
         kind: 1,
-        path: "ZeroPath".to_string(),
+        path: "ZeroPath".into(),
         fields,
     });
 
@@ -862,6 +862,6 @@ fn snapshot_applies_new_zero_version_strategy() {
     let info = s.get(100).unwrap();
     assert_eq!(info.strategy_ver, 0);
     assert_eq!(info.last_date, 0);
-    assert_eq!(info.folder_path, "ZeroPath");
+    assert_eq!(&*info.folder_path, "ZeroPath");
     assert!(info.checked);
 }

@@ -88,7 +88,7 @@ fn parse_strategy_batch_plain_with_schema_field_types(
 ) -> Option<StrategyBatch> {
     let mut pos = 0usize;
     let names = read_dict(data, &mut pos)?;
-    let paths = read_dict(data, &mut pos)?;
+    let paths = read_dict_arc(data, &mut pos)?;
     let field_names = names
         .iter()
         .map(|name| Arc::<str>::from(name.as_str()))
@@ -123,7 +123,7 @@ where
 {
     let mut pos = 0usize;
     let field_names = read_dict_arc(data, &mut pos)?;
-    let paths = read_dict(data, &mut pos)?;
+    let paths = read_dict_arc(data, &mut pos)?;
     let reader_fields =
         schema_field_types.map(|field_types| build_reader_fields_arc(&field_names, field_types));
     let strat_count = read_u16(data, &mut pos)? as usize;
@@ -205,7 +205,7 @@ fn read_strategy(
     data: &[u8],
     pos: &mut usize,
     field_names: &[Arc<str>],
-    paths: &[String],
+    paths: &[Arc<str>],
     reader_fields: Option<&[Option<u8>]>,
 ) -> Option<StrategySnapshot> {
     let strategy_id = read_u64(data, pos)?;
@@ -214,7 +214,10 @@ fn read_strategy(
     let checked = read_u8(data, pos)? != 0;
     let kind = read_u8(data, pos)?;
     let path_id = read_u16(data, pos)? as usize;
-    let path = paths.get(path_id).cloned().unwrap_or_default();
+    let path = paths
+        .get(path_id)
+        .cloned()
+        .unwrap_or_else(|| Arc::<str>::from(""));
 
     let field_count = read_u16(data, pos)? as usize;
     let mut fields = StrategyFields::with_capacity(field_count);

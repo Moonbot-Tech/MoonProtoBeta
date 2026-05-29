@@ -977,7 +977,7 @@ fn post_init_resync_enqueues_delphi_commands() {
         last_date: 1234,
         checked: true,
         kind: 1,
-        path: "Init".to_string(),
+        path: "Init".into(),
         fields,
     };
     dispatcher.set_local_strategies(std::slice::from_ref(&strategy));
