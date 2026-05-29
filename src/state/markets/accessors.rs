@@ -77,16 +77,19 @@ impl MarketsState {
     }
 
     /// Получить цену маркета по `mIndex`.
-    pub fn price_by_index(&self, m_index: u16) -> Option<&MarketPrice> {
+    ///
+    /// Цена живёт на `Market` (Delphi `TMarket`); возвращается копией под коротким
+    /// read-lock, как [`MarketHandle::balance_position`].
+    pub fn price_by_index(&self, m_index: u16) -> Option<MarketPrice> {
         let idx = self.local_pos_for_server_index(m_index)?;
-        self.prices.get(idx)
+        self.markets.get(idx).map(|handle| handle.with(|m| m.price))
     }
 
     /// Получить цену маркета по имени (через by_name lookup).
-    pub fn price(&self, market_name: &str) -> Option<&MarketPrice> {
-        self.by_name
+    pub fn price(&self, market_name: &str) -> Option<MarketPrice> {
+        self.handles_by_name
             .get(market_name)
-            .and_then(|&i| self.prices.get(i))
+            .map(|handle| handle.with(|m| m.price))
     }
 
     /// Delphi `TMarket.refBTCMarket` analogue for a known market.

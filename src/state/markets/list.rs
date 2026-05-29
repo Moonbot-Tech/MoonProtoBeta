@@ -9,7 +9,7 @@ use crate::commands::market::{
     read_corr_market, read_market_with_local_shift, EngineStreamReader, Market, MarketsListResponse,
 };
 
-use super::{MarketHandle, MarketPrice, MarketsEvent, MarketsListApplyTiming, MarketsState};
+use super::{MarketHandle, MarketsEvent, MarketsListApplyTiming, MarketsState};
 
 impl MarketsState {
     /// Применить ответ `emk_GetMarketsList`.
@@ -37,7 +37,6 @@ impl MarketsState {
         };
 
         let old_markets = std::mem::take(&mut self.markets);
-        let old_prices = std::mem::take(&mut self.prices);
         let incoming_by_name = resp
             .markets
             .iter()
@@ -47,15 +46,10 @@ impl MarketsState {
         let mut consumed = HashMap::with_capacity(resp.markets.len());
 
         let mut markets = Vec::with_capacity(old_markets.len().max(incoming_count));
-        let mut prices = Vec::with_capacity(old_markets.len().max(incoming_count));
         let mut lookup_entries = Vec::with_capacity(old_markets.len().max(incoming_count));
 
-        for (old_idx, handle) in old_markets.iter().cloned().enumerate() {
+        for handle in old_markets.iter().cloned() {
             let old_name = handle.name_str().to_string();
-            let mut price = old_prices
-                .get(old_idx)
-                .copied()
-                .unwrap_or_else(|| handle.with(market_price_from_market));
             if let Some(&incoming_idx) = incoming_by_name.get(&old_name) {
                 let incoming = &resp.markets[incoming_idx];
                 handle.with_mut(|market| {
@@ -65,13 +59,14 @@ impl MarketsState {
                         self.copy_max_leverage_from_markets_list,
                         self.eps_profile.eps,
                     );
-                    price.funding_time = market.funding_time;
+                    // Live price (bid/ask/last/mark) сохраняется на самом `Market`;
+                    // merge обновляет только funding_time.
+                    market.price.funding_time = market.funding_time;
                     consumed.insert(market.bn_market_name.clone(), true);
                 });
             }
             lookup_entries.push((old_name, handle.clone()));
             markets.push(handle);
-            prices.push(price);
         }
 
         for market in resp.markets {
@@ -86,8 +81,8 @@ impl MarketsState {
                 self.new_markets_added.push(market.bn_market_name.clone());
             }
             let name = market.bn_market_name.clone();
-            prices.push(market_price_from_market(&market));
             let handle = MarketHandle::new(market);
+            seed_price_funding_from_market(&handle);
             lookup_entries.push((name, handle.clone()));
             markets.push(handle);
         }
@@ -97,7 +92,6 @@ impl MarketsState {
 
         Arc::make_mut(&mut self.token_tags).retain(|name, _| self.by_name.contains_key(name));
 
-        self.prices = Arc::new(prices);
         self.bump_markets_version();
 
         for cm in resp.corr_markets {
@@ -253,10 +247,8 @@ impl MarketsState {
                         self.copy_max_leverage_from_markets_list,
                         self.eps_profile.eps,
                     );
+                    existing.price.funding_time = market.funding_time;
                 });
-            }
-            if let Some(price) = Arc::make_mut(&mut self.prices).get_mut(idx) {
-                price.funding_time = market.funding_time;
             }
             return false;
         }
@@ -265,9 +257,9 @@ impl MarketsState {
             return false;
         }
 
-        let price = market_price_from_market(&market);
         let name = market.bn_market_name.clone();
         let handle = MarketHandle::new(market);
+        seed_price_funding_from_market(&handle);
         let markets = pending_markets.get_or_insert_with(|| self.markets.iter().cloned().collect());
         let idx = markets.len();
         markets.push(handle.clone());
@@ -276,7 +268,6 @@ impl MarketsState {
             pending_handles_by_name.get_or_insert_with(|| (*self.handles_by_name).clone());
         handles_by_name.insert(name.clone(), handle.clone());
         Arc::make_mut(&mut self.by_name).insert(name.clone(), idx);
-        Arc::make_mut(&mut self.prices).push(price);
         true
     }
 
@@ -335,20 +326,14 @@ fn merge_market_like_delphi_get_markets_list(
     dst.volume = src.volume;
 }
 
-fn market_price_from_market(m: &Market) -> MarketPrice {
-    MarketPrice {
-        bid: 0.0,
-        ask: 0.0,
-        last_bid: 0.0,
-        last_ask: 0.0,
-        p_last: 0.0,
-        min_lot_size: 0.0,
-        chart_price_step: 0.0,
-        funding_rate: m.funding_rate,
-        funding_time: m.funding_time,
-        mark_price: 0.0,
-        mark_price_found: false,
-    }
+/// Seed the live `MarketPrice.funding_*` from the market's funding fields when a
+/// market first enters the universe. Delphi `market_price_from_market` analogue:
+/// bid/ask/mark stay zero until the first `UpdateMarketsList`.
+fn seed_price_funding_from_market(handle: &MarketHandle) {
+    handle.with_mut(|m| {
+        m.price.funding_rate = m.funding_rate;
+        m.price.funding_time = m.funding_time;
+    });
 }
 
 fn elapsed_ns_u64(start: Instant) -> u64 {

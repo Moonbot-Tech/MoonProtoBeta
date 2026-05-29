@@ -1031,7 +1031,7 @@ impl Session {
         let manual_25 = trade_volume(&futures_25);
         let manual_60 = trade_volume(&futures_60);
         let derived = snapshot.market_history_derived_snapshot(market, now_time);
-        let price = snapshot.markets().price(market).copied();
+        let price = snapshot.markets().price(market);
         let handle = snapshot.markets().get(market);
         let balance = handle.as_ref().map(|handle| handle.balance_position());
 
@@ -2388,7 +2388,7 @@ fn sync_market_probe_from_dispatcher(
         );
     }
     if let Some(price) = dispatcher.markets().price(&st.market) {
-        st.last_market_price = Some(MarketProbePrice::from(price));
+        st.last_market_price = Some(MarketProbePrice::from(&price));
         if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
             st.market_invariant_error = Some(format!(
                 "bad UpdateMarketsList price for {}: bid={:.8} ask={:.8}",
@@ -3637,7 +3637,7 @@ impl MoonClientPathStats {
         self.market_index = snapshot.markets().market_index_by_name(target_market);
         if let Some(price) = snapshot.markets().price(target_market) {
             self.first_market_price_at_s.get_or_insert(elapsed_s);
-            self.last_market_price = Some(MarketProbePrice::from(price));
+            self.last_market_price = Some(MarketProbePrice::from(&price));
             if price.bid <= 0.0 || price.ask <= 0.0 || price.ask < price.bid {
                 self.market_invariant_error = Some(format!(
                     "bad MoonClient UpdateMarketsList price for {target_market}: bid={:.8} ask={:.8}",
@@ -4457,7 +4457,7 @@ fn active_balance_probe(session: &Session, market: &str) -> ActiveBalanceProbe {
 fn market_live_ask(session: &Session, market: &str) -> Option<f64> {
     session
         .maybe_state_snapshot()
-        .and_then(|snapshot| snapshot.markets().price(market).copied())
+        .and_then(|snapshot| snapshot.markets().price(market))
         .and_then(|price| {
             [price.ask, price.last_ask, price.bid, price.mark_price]
                 .into_iter()

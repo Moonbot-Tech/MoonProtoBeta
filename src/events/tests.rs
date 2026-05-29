@@ -428,6 +428,7 @@ fn event_market(name: &str) -> Market {
         balance_hash: 0,
         last_balance_epoch: 0,
         trade_tail: Default::default(),
+        price: Default::default(),
         arb_slots: std::collections::HashMap::new(),
     }
 }
@@ -2610,6 +2611,59 @@ fn orderbook_apply_updates_market_chart_price_step_like_delphi_glass_updated() {
         125.0 / 5000.0,
         "Delphi AddNewAksPrice is called from both price updates and GlassUpdated"
     );
+}
+
+#[test]
+fn orderbook_datagram_does_not_clone_markets_state_while_snapshot_held() {
+    // Regression guard for the prices→Market move (MarketPrice now lives on the
+    // per-market `Market`): an order-book datagram refreshes `ChartPriceStep`
+    // through that market's own lock, so it must NOT trigger `Arc::make_mut` on
+    // the whole `MarketsState` (no per-datagram clone of the price vector), even
+    // while a snapshot keeps the markets domain shared at refcount >= 2.
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    let mut out = Vec::new();
+
+    // Prime the book so the market is live.
+    d.dispatch_into(
+        Command::OrderBook,
+        &order_book_payload_full_with_levels(0, 1, &[(100.0, 1.0)], &[(125.0, 2.0)]),
+        10_000,
+        &mut out,
+    );
+    out.clear();
+
+    // Simulate a published snapshot keeping the markets domain alive.
+    let held = d.markets.clone();
+    let ptr_before = d.markets.arc_ptr();
+    assert_eq!(ptr_before, held.arc_ptr(), "snapshot shares the markets allocation");
+
+    // Another book datagram with a different best ask → ChartPriceStep changes.
+    d.dispatch_into(
+        Command::OrderBook,
+        &order_book_payload_full_with_levels(0, 1, &[(110.0, 1.0)], &[(150.0, 2.0)]),
+        11_000,
+        &mut out,
+    );
+
+    assert_eq!(
+        d.markets.arc_ptr(),
+        ptr_before,
+        "order-book datagram must not copy-on-write clone the whole MarketsState"
+    );
+    // ChartPriceStep updated in place and live-shared with the held snapshot
+    // (Delphi `TMarket` is a shared object, not a frozen-at-snapshot copy).
+    assert_eq!(
+        d.markets.price("BTCUSDT").unwrap().chart_price_step,
+        150.0 / 5000.0
+    );
+    assert_eq!(
+        held.price("BTCUSDT").unwrap().chart_price_step,
+        150.0 / 5000.0,
+        "live price lives on the shared Market object like Delphi TMarket"
+    );
+
+    drop(held);
 }
 
 #[test]

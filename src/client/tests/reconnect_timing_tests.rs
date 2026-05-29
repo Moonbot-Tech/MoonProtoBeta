@@ -91,6 +91,7 @@ fn test_market(name: &str) -> Market {
         balance_hash: 0,
         last_balance_epoch: 0,
         trade_tail: Default::default(),
+        price: Default::default(),
         arb_slots: std::collections::HashMap::new(),
     }
 }

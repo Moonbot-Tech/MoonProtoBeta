@@ -30,12 +30,11 @@ mod types;
 use self::text::same_text_ascii;
 pub(crate) use self::types::MarketLastPriceHistoryInput;
 pub use self::types::{
-    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketPrice, MarketsEvent,
-    MarketsListApplyTiming,
+    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketsEvent, MarketsListApplyTiming,
 };
-// The live trade tail now lives on the `Market` object itself (Delphi `TMarket`
-// shape); re-export it from here so the public `state::markets` path is stable.
-pub use crate::commands::market::MarketTradeState;
+// The live trade tail and price now live on the `Market` object itself (Delphi
+// `TMarket` shape); re-export them here so the public `state::markets` path is stable.
+pub use crate::commands::market::{MarketPrice, MarketTradeState};
 
 #[derive(Debug, Clone, Default)]
 pub struct MarketsState {
@@ -63,8 +62,6 @@ pub struct MarketsState {
     /// `emk_UpdateMarketsList` price apply would clone `token_tags` (one entry per
     /// market) and the correlation maps even though it never mutates them.
     pub(crate) corr_markets: Arc<HashMap<String, CorrMarket>>,
-    /// Market prices by `mIndex`, updated by price apply.
-    pub(crate) prices: Arc<Vec<MarketPrice>>,
     /// Current CorrMarket prices keyed by `bn_market_name`.
     pub(crate) corr_prices: Arc<HashMap<String, f64>>,
     /// Delphi `BaseCurDict`: base currency name -> price/ref state.

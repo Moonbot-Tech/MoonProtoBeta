@@ -507,6 +507,8 @@ pub struct Market {
     pub last_balance_epoch: u16,
     // --- Active Lib live trade tail state (Delphi TMarket trade fields) ---
     pub trade_tail: MarketTradeState,
+    // --- Active Lib live price state (Delphi TMarket bid/ask/last/mark fields) ---
+    pub price: MarketPrice,
     // --- Active Lib live arbitrage state (Delphi TMarket.ArbSlots/ArbNow) ---
     #[doc(hidden)]
     pub arb_slots: HashMap<ArbPlatformCode, MarketArbSlot>,
@@ -572,6 +574,50 @@ impl MarketTradeState {
 
     pub(crate) fn apply_spot_trade_like_delphi(&mut self, now_ms: i64) {
         self.last_got_spot_trades_ms = now_ms;
+    }
+}
+
+/// Per-market price snapshot updated by `emk_UpdateMarketsList`.
+///
+/// These are Delphi `TMarket` live price fields. They live on `Market` (like the
+/// balance/position and trade-tail state) so an `emk_UpdateMarketsList` price
+/// apply or an order-book `ChartPriceStep` refresh mutates the per-market object
+/// in place through its own lock, instead of a parallel `MarketsState.prices`
+/// vector that would force a copy-on-write clone of the whole price vector on
+/// every order-book datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketPrice {
+    /// Best bid price.
+    pub bid: f64,
+    /// Best ask price.
+    pub ask: f64,
+    /// Delphi `TMarket.LastBid`, updated from `Bid` by `UpdateMarketsList`.
+    pub last_bid: f64,
+    /// Delphi `TMarket.LastAsk`, updated from `Ask` by `UpdateMarketsList`.
+    pub last_ask: f64,
+    /// Delphi `TMarket.pLast = (Bid + Ask) / 2`.
+    pub p_last: f64,
+    /// Delphi `TMarket.MinLotSize`.
+    pub min_lot_size: f64,
+    /// Delphi `TMarket.ChartPriceStep`, updated by `AddNewAksPrice(Ask)`.
+    ///
+    /// Futures retained trade join uses this value for same-price aggregation.
+    /// Delphi updates it only when `Ask > eps`; otherwise the previous value is
+    /// kept.
+    pub chart_price_step: f64,
+    /// Funding rate for perpetual futures, for example `0.0001` = 0.01%.
+    pub funding_rate: f64,
+    /// Client-local Delphi `TDateTime` for the next funding charge.
+    pub funding_time: f64,
+    /// Exchange mark price used for PnL/liquidation calculations.
+    pub mark_price: f64,
+    /// Whether the latest update carried a mark price.
+    pub mark_price_found: bool,
+}
+
+impl MarketPrice {
+    pub fn funding_time_delphi(self) -> DelphiTime {
+        DelphiTime::from_days(self.funding_time)
     }
 }
 
@@ -913,6 +959,10 @@ pub(crate) fn read_market_with_local_shift(
         balance_hash: 0,
         last_balance_epoch: 0,
         trade_tail: MarketTradeState::default(),
+        // Live price starts empty; `MarketsState` seeds `price.funding_*` from the
+        // market's funding fields when the market enters the universe (Delphi
+        // `market_price_from_market` analogue), and `UpdateMarketsList` fills the rest.
+        price: MarketPrice::default(),
         arb_slots: HashMap::new(),
     })
 }

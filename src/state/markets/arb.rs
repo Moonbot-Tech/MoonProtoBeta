@@ -37,14 +37,10 @@ impl MarketsState {
                     else {
                         continue;
                     };
-                    let my_price = self
-                        .prices
-                        .get(local_idx)
-                        .map(|price| price.p_last as f32)
-                        .unwrap_or_default();
                     let Some(handle) = self.markets.get(local_idx).cloned() else {
                         continue;
                     };
+                    let my_price = handle.with(|market| market.price.p_last as f32);
                     handle.with_mut(|market| {
                         for item in &block.prices {
                             if apply_arb_price_like_delphi(

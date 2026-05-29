@@ -16,8 +16,8 @@ impl MarketsState {
     /// Если mapping неизвестен или stale после server restart — запись пропускается.
     pub fn apply_markets_prices(&mut self, resp: MarketsPricesResponse) -> MarketsEvent {
         let count = resp.prices.len();
-        for slot in Arc::make_mut(&mut self.prices) {
-            slot.mark_price_found = false;
+        for handle in self.markets.iter() {
+            handle.with_mut(|m| m.price.mark_price_found = false);
         }
         let base_usdt_context = self.base_usdt_market_context_like_delphi();
         for p in &resp.prices {
@@ -66,8 +66,8 @@ impl MarketsState {
         local_shift_minutes: f64,
         mut last_price_rows: Option<&mut Vec<MarketLastPriceHistoryInput>>,
     ) -> Option<MarketsEvent> {
-        for slot in Arc::make_mut(&mut self.prices) {
-            slot.mark_price_found = false;
+        for handle in self.markets.iter() {
+            handle.with_mut(|m| m.price.mark_price_found = false);
         }
 
         let mut r = EngineStreamReader::new(data);
@@ -116,24 +116,22 @@ impl MarketsState {
     ) -> Vec<MarketLastPriceHistoryInput> {
         let mut rows = Vec::new();
         let base_usdt_context = self.base_usdt_market_context_like_delphi();
-        for (idx, handle) in self.markets.iter().enumerate() {
-            let Some(slot) = self.prices.get(idx) else {
-                continue;
-            };
+        for handle in self.markets.iter() {
             let market_name = handle.name_arc();
-            let (is_btc_market, is_base_usdt_market) = handle.with(|market| {
+            let (price, is_btc_market, is_base_usdt_market) = handle.with(|market| {
                 (
+                    market.price,
                     market.is_btc_market,
                     base_usdt_context.is_base_usdt_market_like_delphi(market),
                 )
             });
             rows.push(MarketLastPriceHistoryInput {
                 market_name,
-                current: slot.p_last,
-                bid: slot.bid,
-                ask: slot.ask,
-                mark_price: slot.mark_price,
-                mark_price_found: slot.mark_price_found,
+                current: price.p_last,
+                bid: price.bid,
+                ask: price.ask,
+                mark_price: price.mark_price,
+                mark_price_found: price.mark_price_found,
                 is_btc_market,
                 is_base_usdt_market,
             });
@@ -150,46 +148,47 @@ impl MarketsState {
         if let Some(idx) = self.local_pos_for_server_index(p.m_index) {
             let handle = self.markets.get(idx).cloned()?;
             let market_name = handle.name_arc();
-            let (is_btc_market, is_base_usdt_market, bn_step_size, bn_min_qty, bn_min_notional) =
-                handle.with_mut(|market| {
-                    if send_funding {
-                        market.funding_rate = p.funding_rate;
-                        market.funding_time = p.funding_time;
-                    }
-                    (
-                        market.is_btc_market,
-                        base_usdt_context.is_base_usdt_market_like_delphi(market),
-                        market.bn_step_size,
-                        market.bn_min_qty,
-                        market.bn_min_notional,
-                    )
-                });
-            let slot = &mut Arc::make_mut(&mut self.prices)[idx];
-            slot.bid = p.bid;
-            slot.ask = p.ask;
-            slot.last_bid = slot.bid;
-            slot.last_ask = slot.ask;
-            slot.p_last = (slot.bid + slot.ask) * 0.5;
-            slot.min_lot_size = (bn_step_size.max(bn_min_qty) * slot.p_last).max(bn_min_notional);
-            if slot.ask > self.eps_profile.eps {
-                slot.chart_price_step = self.eps_profile.eps.max(slot.ask / 5000.0);
-            }
-            if send_funding {
-                slot.funding_rate = p.funding_rate;
-                slot.funding_time = p.funding_time;
-            }
-            slot.mark_price = p.mark_price;
-            slot.mark_price_found = p.mark_price_found;
-            Some(MarketLastPriceHistoryInput {
-                market_name,
-                current: slot.p_last,
-                bid: slot.bid,
-                ask: slot.ask,
-                mark_price: slot.mark_price,
-                mark_price_found: slot.mark_price_found,
-                is_btc_market,
-                is_base_usdt_market,
-            })
+            let eps = self.eps_profile.eps;
+            // Цена живёт на `Market` (Delphi `TMarket`): пишем on the shared object
+            // через per-market lock, без клона markets-контейнера на price-apply.
+            let row = handle.with_mut(|market| {
+                if send_funding {
+                    market.funding_rate = p.funding_rate;
+                    market.funding_time = p.funding_time;
+                }
+                let is_btc_market = market.is_btc_market;
+                let is_base_usdt_market = base_usdt_context.is_base_usdt_market_like_delphi(market);
+                let bn_step_size = market.bn_step_size;
+                let bn_min_qty = market.bn_min_qty;
+                let bn_min_notional = market.bn_min_notional;
+                let price = &mut market.price;
+                price.bid = p.bid;
+                price.ask = p.ask;
+                price.last_bid = price.bid;
+                price.last_ask = price.ask;
+                price.p_last = (price.bid + price.ask) * 0.5;
+                price.min_lot_size = (bn_step_size.max(bn_min_qty) * price.p_last).max(bn_min_notional);
+                if price.ask > eps {
+                    price.chart_price_step = eps.max(price.ask / 5000.0);
+                }
+                if send_funding {
+                    price.funding_rate = p.funding_rate;
+                    price.funding_time = p.funding_time;
+                }
+                price.mark_price = p.mark_price;
+                price.mark_price_found = p.mark_price_found;
+                MarketLastPriceHistoryInput {
+                    market_name,
+                    current: price.p_last,
+                    bid: price.bid,
+                    ask: price.ask,
+                    mark_price: price.mark_price,
+                    mark_price_found: price.mark_price_found,
+                    is_btc_market,
+                    is_base_usdt_market,
+                }
+            });
+            Some(row)
         } else if self.price_row_points_to_missing_market(p.m_index) {
             self.markets_list_refresh_needed = true;
             None

@@ -8,7 +8,6 @@ use crate::commands::market::{
     ArbPlatformCode, Market, MarketArbNowEntry, MarketArbSlot, PositionType,
 };
 use crate::commands::trade::OrderType;
-use crate::time::DelphiTime;
 
 /// Stable Delphi-like handle to one `TMarket` object.
 ///
@@ -161,43 +160,6 @@ pub struct MarketsListApplyTiming {
     pub index_rebuild_ns: u64,
     pub corr_loop_ns: u64,
     pub ref_passes_ns: u64,
-}
-
-/// Per-market price snapshot updated by `emk_UpdateMarketsList`.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct MarketPrice {
-    /// Best bid price.
-    pub bid: f64,
-    /// Best ask price.
-    pub ask: f64,
-    /// Delphi `TMarket.LastBid`, updated from `Bid` by `UpdateMarketsList`.
-    pub last_bid: f64,
-    /// Delphi `TMarket.LastAsk`, updated from `Ask` by `UpdateMarketsList`.
-    pub last_ask: f64,
-    /// Delphi `TMarket.pLast = (Bid + Ask) / 2`.
-    pub p_last: f64,
-    /// Delphi `TMarket.MinLotSize`.
-    pub min_lot_size: f64,
-    /// Delphi `TMarket.ChartPriceStep`, updated by `AddNewAksPrice(Ask)`.
-    ///
-    /// Futures retained trade join uses this value for same-price aggregation.
-    /// Delphi updates it only when `Ask > eps`; otherwise the previous value is
-    /// kept.
-    pub chart_price_step: f64,
-    /// Funding rate for perpetual futures, for example `0.0001` = 0.01%.
-    pub funding_rate: f64,
-    /// Client-local Delphi `TDateTime` for the next funding charge.
-    pub funding_time: f64,
-    /// Exchange mark price used for PnL/liquidation calculations.
-    pub mark_price: f64,
-    /// Whether the latest update carried a mark price.
-    pub mark_price_found: bool,
-}
-
-impl MarketPrice {
-    pub fn funding_time_delphi(self) -> DelphiTime {
-        DelphiTime::from_days(self.funding_time)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

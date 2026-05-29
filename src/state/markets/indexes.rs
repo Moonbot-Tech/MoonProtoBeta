@@ -55,7 +55,7 @@ impl MarketsState {
         // Cold-start compatibility: before the first explicit indexes response,
         // `GetMarketsList` arrives in server order. Once a mapping exists but is
         // marked stale, direct fallback would silently apply prices to old names.
-        if self.market_indexes.is_empty() && server_pos < self.prices.len() {
+        if self.market_indexes.is_empty() && server_pos < self.markets.len() {
             Some(server_pos)
         } else {
             None
@@ -70,27 +70,28 @@ impl MarketsState {
                 .get(server_pos)
                 .is_none_or(|name| !self.by_name.contains_key(name));
         }
-        self.market_indexes.is_empty() && server_pos >= self.prices.len()
+        self.market_indexes.is_empty() && server_pos >= self.markets.len()
     }
 
     /// Delphi `AddNewAksPrice` from `GlassUpdated`: keep `ChartPriceStep` fresh
     /// when orderbook updates move the best ask before the next price refresh.
-    pub(crate) fn update_chart_price_step_from_server_index(
-        &mut self,
-        m_index: u16,
-        ask: f64,
-    ) -> bool {
+    pub(crate) fn update_chart_price_step_from_server_index(&self, m_index: u16, ask: f64) -> bool {
         if ask <= self.eps_profile.eps {
             return false;
         }
         let Some(idx) = self.local_pos_for_server_index(m_index) else {
             return false;
         };
-        let eps = self.eps_profile.eps;
-        let Some(slot) = Arc::make_mut(&mut self.prices).get_mut(idx) else {
+        let Some(handle) = self.markets.get(idx) else {
             return false;
         };
-        slot.chart_price_step = eps.max(ask / 5000.0);
+        // `&self` + per-market `with_mut`: an order-book datagram must not trigger
+        // a copy-on-write clone of the markets container. The price lives on the
+        // shared `Market` object (Delphi `TMarket.ChartPriceStep`).
+        let eps = self.eps_profile.eps;
+        handle.with_mut(|market| {
+            market.price.chart_price_step = eps.max(ask / 5000.0);
+        });
         true
     }
 }
