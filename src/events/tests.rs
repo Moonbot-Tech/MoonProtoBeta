@@ -1944,6 +1944,44 @@ fn idle_orders_tick_does_not_clone_orders_while_snapshot_held() {
 }
 
 #[test]
+fn trades_datagram_does_not_clone_trades_state_while_snapshot_held() {
+    // O2 regression guard (sverka journal_review #14): TradesState (gap buckets +
+    // recvd bitmap) is gap-recovery diagnostic (INVARIANT §1.7), not part of the
+    // trader-visible read model, so it was removed from EventDispatcherSnapshot.
+    // on_packet_header mutates it on every trades datagram; with TradesState out
+    // of the snapshot its refcount stays 1, so make_mut mutates in place and must
+    // NOT clone the [GapBucket;50] + recvd bitmap even while a snapshot is held.
+    let mut d = EventDispatcher::new();
+    seed_event_markets(&mut d, &["BTCUSDT"]);
+    d.markets.apply_markets_indexes(vec!["BTCUSDT".to_string()]);
+
+    // Prime the gap-state once.
+    let _ = d.dispatch(
+        Command::TradesStream,
+        &trades_payload_with_rows(800, 0, 0, &[(0, 100.0, 1.0)]),
+        7_000,
+    );
+
+    // A published snapshot no longer carries trades; hold one to prove it.
+    let held = d.snapshot();
+    let ptr_before = d.trades.arc_ptr();
+
+    // Another trades datagram while the snapshot is alive.
+    let _ = d.dispatch(
+        Command::TradesStream,
+        &trades_payload_with_rows(801, 0, 0, &[(0, 110.0, -3.0)]),
+        8_000,
+    );
+
+    assert_eq!(
+        d.trades.arc_ptr(),
+        ptr_before,
+        "trades gap-state must mutate in place; TradesState is no longer in the snapshot"
+    );
+    drop(held);
+}
+
+#[test]
 fn active_dispatch_queues_trades_into_history_worker_without_direct_store_write() {
     let worker = crate::state::MarketHistoryWorker::spawn(crate::state::MarketHistoryConfig {
         futures_trades_capacity: 8,

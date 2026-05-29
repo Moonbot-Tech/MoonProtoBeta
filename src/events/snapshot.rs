@@ -15,7 +15,6 @@ use crate::state::{OrderBookKind, OrderBookSnapshot, TopOfBook};
 pub struct EventDispatcherSnapshot {
     orders: CowState<Orders>,
     order_books: CowState<OrderBooks>,
-    trades: CowState<TradesState>,
     account: CowState<AccountState>,
     balances: CowState<BalancesState>,
     transfer_assets: CowState<TransferAssetsState>,
@@ -55,16 +54,6 @@ impl EventDispatcherSnapshot {
     pub fn top_of_book(&self, market_name: &str, kind: OrderBookKind) -> Option<TopOfBook> {
         self.order_book(market_name, kind)
             .map(OrderBookSnapshot::top)
-    }
-
-    /// Read-only trades-stream *recovery* state: packet counters, gap buckets,
-    /// and resend bookkeeping.
-    ///
-    /// This is gap/resend tracking, not the trade rows. For the retained trade
-    /// history (futures/spot/liquidation rings) use
-    /// [`Self::market_history_readers`].
-    pub fn trades_recovery(&self) -> &TradesState {
-        &self.trades
     }
 
     /// Read-only account-level state.
@@ -211,7 +200,6 @@ impl EventDispatcher {
         EventDispatcherSnapshot {
             orders: self.orders.clone(),
             order_books: self.order_books.clone(),
-            trades: self.trades.clone(),
             account: self.account.clone(),
             balances: self.balances.clone(),
             transfer_assets: self.transfer_assets.clone(),
