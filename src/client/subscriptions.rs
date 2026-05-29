@@ -26,6 +26,23 @@ pub struct TradesSubscription {
     pub want_mm: bool,
 }
 
+/// Read-only snapshot of the streams a session currently has subscribed.
+///
+/// Returned by [`crate::Client::active_subscriptions`] and
+/// [`crate::MoonClient::active_subscriptions`]. Because the active library
+/// replays these after reconnect, they reflect the session's maintained intent,
+/// not just the last packet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveSubscriptions {
+    /// Market names with an active orderbook subscription, sorted for stable
+    /// display.
+    pub orderbooks: Vec<String>,
+    /// All-trades subscription intent, or `None` when not subscribed.
+    pub all_trades: Option<TradesSubscription>,
+    /// Whether market-maker order sections are subscribed in the trades stream.
+    pub mm_orders: bool,
+}
+
 /// Реестр подписок — что app просил, что либа обязана поддерживать на протяжении сессии.
 ///
 /// Transport handshake сам подписки не шлет: registry применяется только из init/API
@@ -42,6 +59,19 @@ pub(crate) struct SubscriptionRegistry {
     /// новый серверный client-state стартует с false, поэтому active library должна
     /// воспроизвести последний известный intent в init/API слое.
     pub mm_orders_sub: Option<bool>,
+}
+
+impl SubscriptionRegistry {
+    /// Build the public read-model of the currently subscribed streams.
+    pub(crate) fn active_subscriptions(&self) -> ActiveSubscriptions {
+        let mut orderbooks: Vec<String> = self.orderbook_subs.iter().cloned().collect();
+        orderbooks.sort_unstable();
+        ActiveSubscriptions {
+            orderbooks,
+            all_trades: self.trades_sub,
+            mm_orders: self.mm_orders_sub.unwrap_or(false),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -94,6 +124,36 @@ pub(crate) struct DomainRestoreIntent {
 pub(crate) struct PendingTradesUnsubscribe {
     pub(crate) request_uid: u64,
     pub(crate) sent_ms: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_subscriptions_snapshot_sorts_and_maps_registry() {
+        let mut reg = SubscriptionRegistry::default();
+
+        // Empty registry: nothing subscribed.
+        let empty = reg.active_subscriptions();
+        assert!(empty.orderbooks.is_empty());
+        assert_eq!(empty.all_trades, None);
+        assert!(!empty.mm_orders);
+
+        // HashSet insertion order is non-deterministic; the snapshot must sort.
+        reg.orderbook_subs.insert("ETHUSDT".to_string());
+        reg.orderbook_subs.insert("BTCUSDT".to_string());
+        reg.trades_sub = Some(TradesSubscription { want_mm: true });
+        reg.mm_orders_sub = Some(true);
+
+        let active = reg.active_subscriptions();
+        assert_eq!(
+            active.orderbooks,
+            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+        );
+        assert_eq!(active.all_trades, Some(TradesSubscription { want_mm: true }));
+        assert!(active.mm_orders);
+    }
 }
 
 // =============================================================================

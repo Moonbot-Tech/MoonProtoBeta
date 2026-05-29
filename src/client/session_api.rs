@@ -99,6 +99,15 @@ impl Client {
         self.trade_route_status().is_ok()
     }
 
+    /// Read the streams this session currently has subscribed (orderbooks,
+    /// all-trades, market-maker orders).
+    ///
+    /// This reads the subscription registry — the intent the active library
+    /// maintains and replays across reconnect — not the last received packet.
+    pub fn active_subscriptions(&self) -> ActiveSubscriptions {
+        self.subscription_registry.lock().unwrap().active_subscriptions()
+    }
+
     /// Shareable handle на `ServerTimeDelta` этого клиента (days, f64 в u64-bits).
     ///
     /// Используется для линковки с `EventDispatcher` в multi-Client архитектуре:

@@ -38,6 +38,9 @@ pub struct MoonClient {
     snapshot: Arc<RwLock<Option<MoonClientSnapshot>>>,
     err_emu_diagnostics: Arc<Mutex<super::diagnostics::ErrEmuDiagnosticsState>>,
     protocol_metrics: Arc<ProtocolMetrics>,
+    /// Shared subscription registry, mirrored from the runtime client so
+    /// `active_subscriptions()` can read it without a channel round-trip.
+    subscription_registry: Arc<Mutex<SubscriptionRegistry>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     lifecycle_join: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -128,6 +131,7 @@ impl MoonClient {
             let _ = diagnostics_tx.send((
                 client.err_emu_diagnostics_handle(),
                 Arc::clone(&client.protocol_metrics),
+                Arc::clone(&client.subscription_registry),
             ));
             client.set_runtime_shutdown_flag(runtime_shutdown);
             client.set_lifecycle_event_sender(Some(lifecycle_tx));
@@ -143,7 +147,7 @@ impl MoonClient {
                 ready_tx,
             );
         });
-        let (err_emu_diagnostics, protocol_metrics) = diagnostics_rx
+        let (err_emu_diagnostics, protocol_metrics, subscription_registry) = diagnostics_rx
             .recv()
             .map_err(|_| MoonClientError::RuntimeStopped)?;
 
@@ -154,6 +158,7 @@ impl MoonClient {
             snapshot,
             err_emu_diagnostics,
             protocol_metrics,
+            subscription_registry,
             join: Mutex::new(Some(join)),
             lifecycle_join: Mutex::new(Some(lifecycle_join)),
         })
@@ -205,6 +210,19 @@ impl MoonClient {
     /// send market-level trade commands. Convenient for gating a UI trade button.
     pub fn is_ready_to_trade(&self) -> bool {
         self.trade_route_status().is_ok()
+    }
+
+    /// Read the streams this session currently has subscribed (orderbooks,
+    /// all-trades, market-maker orders).
+    ///
+    /// This reflects the subscription registry — the intent the active library
+    /// maintains and replays across reconnect — so it stays correct even after a
+    /// link loss restored the session automatically.
+    pub fn active_subscriptions(&self) -> crate::client::ActiveSubscriptions {
+        self.subscription_registry
+            .lock()
+            .unwrap()
+            .active_subscriptions()
     }
 
     /// Latest immutable read-model snapshot with a monotonic runtime-local

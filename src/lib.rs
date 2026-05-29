@@ -137,7 +137,8 @@ pub mod time;
 pub mod transport;
 
 pub use client::{
-    Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket, ConnectConfig, ConnectError,
+    ActiveSubscriptions, Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket,
+    ConnectConfig, ConnectError, TradesSubscription,
     EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent, MoonAccount,
     MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot,
     MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,

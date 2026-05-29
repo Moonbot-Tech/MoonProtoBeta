@@ -109,7 +109,7 @@ pub use send_queue::{
 };
 #[doc(hidden)]
 pub use sender::{ClientSender, SubscribeError};
-pub use subscriptions::TradesSubscription;
+pub use subscriptions::{ActiveSubscriptions, TradesSubscription};
 
 #[cfg(test)]
 pub(crate) use app_dispatch::OnDataFn;
