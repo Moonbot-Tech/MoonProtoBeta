@@ -32,7 +32,8 @@ use std::sync::Arc;
 
 use crate::app_queue::AppQueue;
 use crate::commands::engine_api::{
-    parse_update_transfer_assets_response, EngineMethod, EngineResponse, ServerInfo,
+    parse_update_transfer_assets_response, AuthCheckResponse, EngineMethod, EngineResponse,
+    ServerInfo,
 };
 use crate::commands::market::ExchangeCode;
 use crate::commands::trade::{OrderType, TradeCtx};
@@ -138,6 +139,12 @@ pub struct EventDispatcher {
     pub(crate) strats: CowState<StratsState>,
     pub(crate) settings: CowState<SettingsState>,
     pub(crate) markets: CowState<MarketsState>,
+    /// Session identity from `emk_BaseCheck`/`emk_AuthCheck`, pushed by the active
+    /// runtime after Init so the published snapshot carries server/account info.
+    /// Delphi keeps these in the engine's BaseCheck/AuthCheck state; multi-server
+    /// UI and the account screen read them. Default (all-`None`) before BaseCheck.
+    session_server_info: ServerInfo,
+    session_auth_info: Option<AuthCheckResponse>,
     /// Delphi `cfg.ServerStratEpoch` for snapshots sent by this client.
     /// Do not confuse it with `StratsState::last_server_epoch`, which mirrors
     /// Delphi `cfg.LocalStratEpoch` after receiving a server snapshot.
@@ -225,6 +232,8 @@ impl Default for EventDispatcher {
             strats: CowState::default(),
             settings: CowState::default(),
             markets: CowState::default(),
+            session_server_info: ServerInfo::default(),
+            session_auth_info: None,
             local_strategy_epoch: 0,
             last_known_server_token: 0,
             last_markets_list_refresh_ms: 0,
@@ -270,6 +279,18 @@ impl EventDispatcher {
         if let Some(handle) = &self.market_history {
             handle.set_eps_profile(eps_profile);
         }
+    }
+
+    /// Push session identity (BaseCheck/AuthCheck) into the dispatcher so the
+    /// published snapshot exposes server/account info. The active runtime calls
+    /// this once Init completes (and after reconnect re-auth).
+    pub(crate) fn set_session_identity(
+        &mut self,
+        server_info: ServerInfo,
+        auth_info: Option<AuthCheckResponse>,
+    ) {
+        self.session_server_info = server_info;
+        self.session_auth_info = auth_info;
     }
 
     /// Read-only order state, keyed by server order UID.

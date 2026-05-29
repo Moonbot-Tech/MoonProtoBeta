@@ -55,6 +55,14 @@ pub(super) fn runtime_loop(
                         sync_runtime_trade_storage_scope(&client, &mut dispatcher);
                         schedule_auto_candles_snapshot(&mut client, &mut pending);
                     }
+                    // Carry server/account identity (BaseCheck/AuthCheck) into the
+                    // published snapshot so `MoonClient` consumers can read it
+                    // without holding the low-level client. Set once Init has
+                    // resolved both checks; reconnect-with-reinit re-runs this.
+                    dispatcher.set_session_identity(
+                        client.server_info().clone(),
+                        client.auth_info().cloned(),
+                    );
                     publish_snapshot(&dispatcher, &snapshot);
                     client.fire_lifecycle(LifecycleEvent::InitStepCompleted {
                         step: "StartupSnapshot",

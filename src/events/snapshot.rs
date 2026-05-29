@@ -25,6 +25,8 @@ pub struct EventDispatcherSnapshot {
     markets: CowState<MarketsState>,
     market_history: Option<MarketHistoryHandle>,
     local_strategy_epoch: u64,
+    server_info: ServerInfo,
+    auth_info: Option<AuthCheckResponse>,
 }
 
 impl EventDispatcherSnapshot {
@@ -68,6 +70,19 @@ impl EventDispatcherSnapshot {
     /// Read-only account-level state.
     pub fn account(&self) -> &AccountState {
         &self.account
+    }
+
+    /// Server identity from the last `emk_BaseCheck` (bot id, base-currency name,
+    /// exchange code, server build/flags). Returns the default (all-empty) value
+    /// until the first BaseCheck completes, so it is always safe to read.
+    pub fn server_info(&self) -> &ServerInfo {
+        &self.server_info
+    }
+
+    /// Per-account metadata from the last successful `emk_AuthCheck`. `None`
+    /// until the client authenticates; refreshed on reconnect re-auth.
+    pub fn auth_info(&self) -> Option<&AuthCheckResponse> {
+        self.auth_info.as_ref()
     }
 
     /// Read-only balance state.
@@ -206,6 +221,8 @@ impl EventDispatcher {
             markets: self.markets.clone(),
             market_history: self.market_history.clone(),
             local_strategy_epoch: self.local_strategy_epoch,
+            server_info: self.session_server_info.clone(),
+            auth_info: self.session_auth_info.clone(),
         }
     }
 }

@@ -169,6 +169,20 @@ impl MoonClient {
             .map(MoonClientSnapshot::state_arc)
     }
 
+    /// Server identity (bot id, base-currency name, exchange code, server
+    /// build/flags) from the latest published snapshot. `None` until the first
+    /// snapshot is published; the value is the all-empty default until BaseCheck
+    /// resolves. Convenience over `snapshot()?.server_info().clone()`.
+    pub fn server_info(&self) -> Option<crate::commands::engine_api::ServerInfo> {
+        self.snapshot().map(|s| s.server_info().clone())
+    }
+
+    /// Per-account metadata from the last successful AuthCheck, taken from the
+    /// latest published snapshot. `None` before the client authenticates.
+    pub fn auth_info(&self) -> Option<crate::commands::engine_api::AuthCheckResponse> {
+        self.snapshot().and_then(|s| s.auth_info().cloned())
+    }
+
     /// Latest immutable read-model snapshot with a monotonic runtime-local
     /// revision.
     ///
