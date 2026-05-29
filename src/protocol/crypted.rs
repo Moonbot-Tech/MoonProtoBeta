@@ -61,9 +61,9 @@ impl CryptoHeader {
 /// Returns (cmd, payload, want_ack) or None if decryption/replay fails.
 /// Matches TMoonProtoClient.DeCrypt exactly.
 ///
-/// `decode_cipher` — кэшированный `Aes128Gcm` (B-V2-03), построенный из
-/// `MPKeys[not ServerSide]`. Для клиента (ServerSide=false) это `MPKeys[true]`.
-/// Хранится в `Client::decode_cipher` и обновляется при handshake.
+/// `decode_cipher` — cached `Aes128Gcm` (B-V2-03), built from
+/// `MPKeys[not ServerSide]`. For the client (ServerSide=false) this is `MPKeys[true]`.
+/// Stored in `Client::decode_cipher` and updated on handshake.
 pub fn decrypt_command(
     decode_cipher: &Aes128Gcm,
     encrypted_data: &[u8],
@@ -72,8 +72,8 @@ pub fn decrypt_command(
     let mut plaintext = match crypto::decrypt_with_cipher(decode_cipher, encrypted_data, &[]) {
         Some(pt) => pt,
         None => {
-            // GCM tag mismatch / PKCS7 fail — corrupt packet или wrong key.
-            // Throttle на caller'е, здесь — обычный warn target для фильтрации.
+            // GCM tag mismatch / PKCS7 fail — corrupt packet or wrong key.
+            // Throttling is on the caller; here it's a plain warn target for filtering.
             warn!(target: "moonproto::crypted", "AES-GCM decrypt failed (tag mismatch or bad padding)");
             return None;
         }
@@ -93,8 +93,8 @@ pub fn decrypt_command(
         return None;
     }
 
-    // B-04 fix: drain первые 12 байт вместо `plaintext[12..].to_vec()` —
-    // переиспользуем owned Vec, на одну аллокацию меньше per Crypted packet.
+    // B-04 fix: drain the first 12 bytes instead of `plaintext[12..].to_vec()` —
+    // reuse the owned Vec, one fewer allocation per Crypted packet.
     plaintext.drain(..CRYPTO_HEADER_SIZE);
     Some((hdr.cmd, plaintext, hdr.want_ack))
 }

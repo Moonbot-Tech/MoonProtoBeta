@@ -4,10 +4,10 @@ use super::MoonKey;
 /// `buf[0]` is the seed (left unchanged), remaining bytes are XOR'd with keystream.
 /// Identical operation for encrypt and decrypt (XOR is symmetric).
 ///
-/// `#[inline]` обязателен: функция зовётся per-packet (десятки тысяч раз/сек на
-/// пике), а вызов идёт через cross-crate границу из `moonproto`. Без явного
-/// `#[inline]` LLVM не инлайнит cross-crate без `lto = "fat"`. Тело компактное,
-/// I-cache pressure минимальный. Аудит B-V2-04. НЕ удалять без замены на LTO-fat.
+/// `#[inline]` is mandatory: the function is called per-packet (tens of thousands of
+/// times/sec at peak), and the call crosses a cross-crate boundary from `moonproto`. Without
+/// an explicit `#[inline]` LLVM won't inline cross-crate without `lto = "fat"`. The body is
+/// compact, I-cache pressure is minimal. Audit B-V2-04. Do NOT remove without switching to LTO-fat.
 #[inline]
 pub fn outer_light_crypt(buf: &mut [u8], key: &MoonKey) {
     if buf.len() <= 1 {

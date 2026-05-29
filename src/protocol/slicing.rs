@@ -264,9 +264,9 @@ pub fn parse_ack_bytes(payload: &[u8]) -> Option<([u8; 32], u16)> {
 /// Matches TMoonProtoClient.Receiving: TDictionary<TDatagramNum, TMoonProtoSlicedData>
 pub struct SlicingReceiver {
     pub receiving: HashMap<u16, SlicedData>,
-    /// B-09 fix: фиксированный размер LAST_RECVD_BUF_SIZE — типизирован как массив,
-    /// `Box<[..; N]>` чтобы не паковать 16KB на stack (создание Client не падает по стеку),
-    /// но размер известен compile-time → bounds checks eliminate'ятся.
+    /// B-09 fix: fixed LAST_RECVD_BUF_SIZE — typed as an array,
+    /// `Box<[..; N]>` so we don't put 16KB on the stack (Client creation doesn't blow the stack),
+    /// but the size is known at compile-time → bounds checks are eliminated.
     last_recvd_ts: Box<[i64; LAST_RECVD_BUF_SIZE]>,
     last_online: i64,
     last_cleaned_received: i64,
@@ -373,9 +373,9 @@ impl SlicingReceiver {
         } else {
             // Existing entry — check if MaxBlockNum matches (recreate if mismatch)
             let existing = self.receiving.get(&datagram_num).unwrap();
-            // D-V2-13 fix: saturating_sub защита от theoretical underflow если blocks_count=0.
-            // Логически blocks_count = max_block_num+1, минимум 1 — но защита defensive
-            // на случай code change ниже по стеку.
+            // D-V2-13 fix: saturating_sub guards against theoretical underflow if blocks_count=0.
+            // Logically blocks_count = max_block_num+1, minimum 1 — but the guard is defensive
+            // in case of a code change further down the stack.
             if existing.blocks_count.saturating_sub(1) != hdr.max_block_num as usize {
                 action = "recreate-maxblock-change";
                 self.receiving.remove(&datagram_num);

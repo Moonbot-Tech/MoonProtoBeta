@@ -18,9 +18,9 @@ struct WireMoonProtoIv {
 
 const _: () = assert!(core::mem::size_of::<WireMoonProtoIv>() == IV_SIZE);
 
-/// `GlobalAESIVMask` — random u64 заводится при первом encrypt'е (≡ Delphi
-/// initialization секция MoonProtoFunc.pas:834 `GlobalAESIVMask := random64`).
-/// Используется для XOR с IV counter — обфускация порядка пакетов на проводе.
+/// `GlobalAESIVMask` — a random u64 initialized on the first encrypt (≡ Delphi
+/// initialization section MoonProtoFunc.pas:834 `GlobalAESIVMask := random64`).
+/// Used for XOR with the IV counter — obfuscates packet ordering on the wire.
 static IV_MASK: OnceLock<u64> = OnceLock::new();
 
 #[inline(always)]
@@ -28,9 +28,9 @@ fn iv_mask() -> u64 {
     *IV_MASK.get_or_init(rand::random::<u64>)
 }
 
-/// Pseudo-RDTSC: 64-bit timestamp counter с ~ns-резолюцией.
-/// На x86_64 использует реальный RDTSC (≡ Delphi `GetCPUTimeStamp` MoonProtoFunc.pas:152-156).
-/// На других архитектурах fallback на `SystemTime::nanos_since(UNIX_EPOCH)`.
+/// Pseudo-RDTSC: 64-bit timestamp counter with ~ns resolution.
+/// On x86_64 uses the real RDTSC (≡ Delphi `GetCPUTimeStamp` MoonProtoFunc.pas:152-156).
+/// On other architectures falls back to `SystemTime::nanos_since(UNIX_EPOCH)`.
 #[inline(always)]
 fn cpu_timestamp() -> u64 {
     #[cfg(target_arch = "x86_64")]
@@ -46,18 +46,18 @@ fn cpu_timestamp() -> u64 {
     }
 }
 
-/// Сконструировать переиспользуемый `Aes128Gcm` cipher из 16-байтного ключа.
-/// B-V2-03 fix: ключ фиксирован на всю сессию (меняется только при handshake),
-/// key schedule расширяется один раз, дальше cipher используется на каждый пакет.
-/// `Aes128Gcm` — Send+Sync, можно держать в `Client`.
+/// Construct a reusable `Aes128Gcm` cipher from a 16-byte key.
+/// B-V2-03 fix: the key is fixed for the whole session (changes only on handshake),
+/// the key schedule is expanded once, after which the cipher is used for every packet.
+/// `Aes128Gcm` is Send+Sync, so it can be held in `Client`.
 #[inline]
 pub fn cipher_from_key(key: &MoonKey) -> Aes128Gcm {
     Aes128Gcm::new(key.into())
 }
 
-/// AES-128-GCM encrypt with PKCS7 padding — hot path версия с переиспользуемым cipher.
-/// B-V2-03: на hot path callers держат cipher в Client и передают сюда — экономим
-/// `Aes128Gcm::new` (key schedule expansion) на каждый encrypt'е (50K pps на пике).
+/// AES-128-GCM encrypt with PKCS7 padding — hot path version with a reusable cipher.
+/// B-V2-03: on the hot path callers hold the cipher in Client and pass it here — saving
+/// `Aes128Gcm::new` (key schedule expansion) on every encrypt (50K pps at peak).
 pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     // Build IV: (counter XOR mask)(8) + RDTSC[low 32 bits](4)
     let counter = IV_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -81,8 +81,8 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
     output.resize(total_len, padding as u8);
     let nonce = Nonce::from_slice(&iv_bytes);
 
-    // Encrypt in-place — `expect` invariant: AES-GCM fails только при ≥ 16 EiB payload,
-    // что невозможно в MoonProto (PMTU < 8KB → одно сообщение).
+    // Encrypt in-place — `expect` invariant: AES-GCM fails only at a ≥ 16 EiB payload,
+    // which is impossible in MoonProto (PMTU < 8KB → one message).
     let tag = cipher
         .encrypt_in_place_detached(nonce, aad, &mut output[cipher_offset..])
         .expect("AES-GCM payload < 16 EiB — invariant satisfied by MTU");
@@ -92,8 +92,8 @@ pub fn encrypt_with_cipher(cipher: &Aes128Gcm, plaintext: &[u8], aad: &[u8]) -> 
     output
 }
 
-/// AES-128-GCM decrypt с переиспользуемым cipher — hot path версия.
-/// См. `encrypt_with_cipher` для контекста B-V2-03.
+/// AES-128-GCM decrypt with a reusable cipher — hot path version.
+/// See `encrypt_with_cipher` for the B-V2-03 context.
 pub fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if data.len() < IV_SIZE + 16 {
         return None;
@@ -129,21 +129,21 @@ pub fn decrypt_with_cipher(cipher: &Aes128Gcm, data: &[u8], aad: &[u8]) -> Optio
     Some(buf)
 }
 
-/// AES-128-GCM encrypt with PKCS7 padding — convenience-обёртка для редких
-/// случаев (handshake) где cipher не закэширован. Каждый вызов создаёт cipher
-/// заново — допустимо только когда вызывается несколько раз за сессию.
+/// AES-128-GCM encrypt with PKCS7 padding — convenience wrapper for the rare
+/// cases (handshake) where the cipher is not cached. Each call creates the cipher
+/// anew — acceptable only when called a handful of times per session.
 ///
 /// Output layout: IV(12) + Tag(16) + Ciphertext(padded)
 ///
-/// IV construction (byte-exact с Delphi MoonProtoFunc.pas:584-587):
+/// IV construction (byte-exact with Delphi MoonProtoFunc.pas:584-587):
 /// - `R1 = atomic_inc(counter) XOR iv_mask` (8 bytes LE)
-/// - `R2 = GetCPUTimeStamp (RDTSC)` (4 младших байта)
+/// - `R2 = GetCPUTimeStamp (RDTSC)` (4 low-order bytes)
 pub fn encrypt(key: &MoonKey, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     encrypt_with_cipher(&cipher_from_key(key), plaintext, aad)
 }
 
-/// AES-128-GCM decrypt, verifies tag, strips PKCS7 padding — convenience-обёртка
-/// для handshake. На hot path используй `decrypt_with_cipher`.
+/// AES-128-GCM decrypt, verifies tag, strips PKCS7 padding — convenience wrapper
+/// for handshake. On the hot path use `decrypt_with_cipher`.
 pub fn decrypt(key: &MoonKey, data: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     decrypt_with_cipher(&cipher_from_key(key), data, aad)
 }

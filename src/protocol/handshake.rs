@@ -92,8 +92,8 @@ impl Hello {
 }
 
 /// Build the Hello packet ready to send (encrypted with MasterKey).
-/// AAD = client_id (8 bytes LE). Vars.pas:434 `MakeCorrectAAD = true` ⇒ AAD реально применяется.
-/// `timestamp_dt` — TDateTime от вызывающего (client.rs::delphi_now включает NTP offset).
+/// AAD = client_id (8 bytes LE). Vars.pas:434 `MakeCorrectAAD = true` ⇒ AAD is actually applied.
+/// `timestamp_dt` — TDateTime from the caller (client.rs::delphi_now includes the NTP offset).
 pub fn build_hello_packet(
     master_key: &MoonKey,
     client_id: u64,

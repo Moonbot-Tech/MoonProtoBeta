@@ -58,10 +58,10 @@ pub struct ClientMsgHeader {
     pub client_id: u64,
 }
 
-// Маленькие parser/serializer'ы заголовков вызываются per-packet через cross-crate
-// границу. `#[inline]` обязателен — без него LLVM не инлайнит cross-crate (нужен
-// lto=fat который ломает быстрые dev-сборки). Тело ≤ 7-15 байт копий, code-bloat
-// при инлайне в caller'ы минимальный. Аудит B-V2-04. НЕ убирать.
+// The small header parsers/serializers are called per-packet across a cross-crate
+// boundary. `#[inline]` is mandatory — without it LLVM won't inline cross-crate (it would
+// need lto=fat, which breaks fast dev builds). The body is ≤ 7-15 bytes of copies, code-bloat
+// when inlined into callers is minimal. Audit B-V2-04. Do NOT remove.
 
 impl ServerMsgHeader {
     /// Parse a server-to-client header from the beginning of `data`.

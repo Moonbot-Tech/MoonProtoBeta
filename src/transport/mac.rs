@@ -9,9 +9,9 @@ use super::MoonKey;
 ///   opad_block = k0 XOR 0x5C (per byte), 64 bytes
 ///   result = CRC32C(0, ipad_block) → CRC32C(prev, message) → CRC32C(prev, opad_block)
 ///
-/// `#[inline]` обязателен: hot path (MAC проверяется на каждом принятом и MAC
-/// строится на каждом отправляемом пакете), cross-crate вызов из `moonproto`.
-/// Без явного inline LLVM не инлайнит cross-crate. Аудит B-V2-04.
+/// `#[inline]` is mandatory: hot path (the MAC is verified on every received packet and
+/// built on every sent packet), cross-crate call from `moonproto`.
+/// Without an explicit inline LLVM won't inline cross-crate. Audit B-V2-04.
 #[inline]
 pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
     const BLOCK_SIZE: usize = 64;
@@ -33,16 +33,16 @@ pub fn calculate_mac32(key: &MoonKey, data: &[u8]) -> u32 {
     crc
 }
 
-/// Cached MAC context: pre-computed CRC32C(ipad) и opad_block для сессионного ключа.
+/// Cached MAC context: pre-computed CRC32C(ipad) and opad_block for the session key.
 ///
-/// Создаётся один раз на сессию через [`MacContext::new`], затем `mac(data)` выполняет
-/// только `crc32c_append(cached, data) + crc32c_append(prev, opad_block)` — без пересчёта
-/// ipad/opad на каждом пакете. audit_rust_quality #3: ~20K XOR/сек убраны на пиковой
-/// нагрузке (50K MAC ops × 128 XOR байт = 6.4M ops/sec → 0).
+/// Created once per session via [`MacContext::new`], then `mac(data)` performs
+/// only `crc32c_append(cached, data) + crc32c_append(prev, opad_block)` — without recomputing
+/// ipad/opad on every packet. audit_rust_quality #3: ~20K XOR/sec removed at peak
+/// load (50K MAC ops × 128 XOR bytes = 6.4M ops/sec → 0).
 ///
-/// Wire-результат byte-exact идентичен [`calculate_mac32`]: один и тот же continuous
-/// CRC32C stream (`CRC32C(ipad || data || opad)`), просто промежуточное значение после
-/// ipad закэшировано.
+/// The wire result is byte-exact identical to [`calculate_mac32`]: the same continuous
+/// CRC32C stream (`CRC32C(ipad || data || opad)`), just with the intermediate value after
+/// ipad cached.
 #[derive(Clone)]
 pub struct MacContext {
     crc_after_ipad: u32,
@@ -50,8 +50,8 @@ pub struct MacContext {
 }
 
 impl MacContext {
-    /// Создать контекст для данного ключа. Делает 128 XOR + один `crc32c(ipad)` —
-    /// тяжёлая часть. Затем `mac()` выполняет только финализацию.
+    /// Create the context for the given key. Does 128 XOR + one `crc32c(ipad)` —
+    /// the heavy part. After that `mac()` performs only finalization.
     pub fn new(key: &MoonKey) -> Self {
         const BLOCK_SIZE: usize = 64;
         let mut k0 = [0u8; BLOCK_SIZE];
@@ -69,8 +69,8 @@ impl MacContext {
         }
     }
 
-    /// Вычислить MAC для данных. На hot path заменяет `calculate_mac32(&key, data)`:
-    /// одна и та же байт-точная функция, но без 128 XOR + `crc32c(ipad)` per call.
+    /// Compute the MAC for the data. On the hot path it replaces `calculate_mac32(&key, data)`:
+    /// the same byte-exact function, but without 128 XOR + `crc32c(ipad)` per call.
     #[inline]
     pub fn mac(&self, data: &[u8]) -> u32 {
         let crc = crc32c::crc32c_append(self.crc_after_ipad, data);
@@ -80,7 +80,7 @@ impl MacContext {
 
 impl std::fmt::Debug for MacContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Не показываем opad_block (зависит от mac_key) в логах.
+        // Don't show opad_block (depends on mac_key) in logs.
         f.debug_struct("MacContext")
             .field("crc_after_ipad", &"<cached>")
             .finish()
@@ -109,9 +109,9 @@ mod tests {
         assert_ne!(calculate_mac32(&key1, data), calculate_mac32(&key2, data));
     }
 
-    /// Critical correctness test (audit_rust_quality #3): MacContext должен давать
-    /// бит-в-бит тот же результат что и плоская `calculate_mac32`. Любое расхождение =
-    /// wire incompatibility c сервером.
+    /// Critical correctness test (audit_rust_quality #3): MacContext must produce
+    /// the bit-for-bit same result as the flat `calculate_mac32`. Any divergence =
+    /// wire incompatibility with the server.
     #[test]
     fn context_matches_flat() {
         let key: MoonKey = [
