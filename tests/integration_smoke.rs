@@ -99,10 +99,10 @@ fn runtime_smoke_full_happy_path() {
         "FAIL: market indexes gate is closed after Init"
     );
     println!(
-        "OK: initial_snapshot markets={} orders={} balances={} strategies={}",
+        "OK: initial_snapshot markets={} orders={} total_pnl={} strategies={}",
         snapshot.markets().market_count(),
         snapshot.orders().len(),
-        snapshot.balances().len(),
+        snapshot.balances().global().total_pnl,
         snapshot.strategy_snapshot_vec().len()
     );
 

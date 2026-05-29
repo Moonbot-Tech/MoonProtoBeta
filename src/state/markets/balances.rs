@@ -29,6 +29,24 @@ impl MarketsState {
         }
     }
 
+    /// Delphi `TMarkets.RecalcTotalPnl` (`MarketsU.pas:8185`): sum per-market
+    /// `total_profit` over `IsBTCMarket` markets. Computed from the live markets
+    /// (single Delphi-parity source), not a duplicate balance store.
+    pub(crate) fn sum_btc_total_profit_like_delphi(&self) -> f64 {
+        self.markets
+            .iter()
+            .map(|handle| {
+                handle.with(|market| {
+                    if market.is_btc_market {
+                        market.total_profit()
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .sum()
+    }
+
     fn apply_balance_snapshot_like_delphi(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
         use std::collections::HashSet;
 

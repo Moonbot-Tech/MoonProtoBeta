@@ -43,10 +43,10 @@ fn main() {
 
     if let Some(snapshot) = client.snapshot() {
         println!(
-            "[snapshot] markets={} orders={} balances={} strategies={}",
+            "[snapshot] markets={} orders={} total_pnl={} strategies={}",
             snapshot.markets().market_count(),
             snapshot.orders().len(),
-            snapshot.balances().len(),
+            snapshot.balances().global().total_pnl,
             snapshot.strategy_snapshot_vec().len()
         );
     }

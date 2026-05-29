@@ -1212,7 +1212,7 @@ impl Session {
             balances.global.btc_balance_full,
             balances.global.special_coin_balance,
             balances.global.total_pnl,
-            balances.len(),
+            snapshot.markets().market_count(),
         );
         assert!(
             balances.global.btc_balance_total.abs()
@@ -1253,33 +1253,6 @@ impl Session {
             "FIRETEST ActiveLib assets nonzero_count={} preview=[{}]",
             assets.len(),
             preview
-        );
-
-        let mut balance_item_assets = balances
-            .iter()
-            .map(|(_, item)| item)
-            .filter_map(|item| {
-                let amount = item.asset_balance_full.abs().max(item.asset_balance.abs());
-                (amount > EPS).then(|| {
-                    (
-                        item.market_name.clone(),
-                        item.asset_balance,
-                        item.asset_balance_full,
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        balance_item_assets.sort_by(|a, b| b.2.abs().total_cmp(&a.2.abs()));
-        let raw_preview = balance_item_assets
-            .iter()
-            .take(12)
-            .map(|(market, bal, full)| format!("{market}:{bal:.8}/{full:.8}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!(
-            "FIRETEST ActiveLib balance_item_assets nonzero_count={} preview=[{}]",
-            balance_item_assets.len(),
-            raw_preview
         );
 
         let mut total_transfer_nonzero = 0usize;

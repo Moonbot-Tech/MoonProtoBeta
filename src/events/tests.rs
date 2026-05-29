@@ -1419,8 +1419,6 @@ fn dispatcher_filters_balance_items_through_markets_state() {
         events[0],
         Event::Balance(BalanceEvent::SnapshotApplied { count: 1, epoch: 1 })
     ));
-    assert!(d.balances.get("BTCUSDT").is_some());
-    assert!(d.balances.get("UNKNOWNUSDT").is_none());
     assert_eq!(
         d.markets
             .get("BTCUSDT")
@@ -1447,13 +1445,14 @@ fn dispatcher_full_balance_creates_default_for_all_known_markets_like_delphi() {
         events[0],
         Event::Balance(BalanceEvent::SnapshotApplied { count: 1, epoch: 1 })
     ));
-    assert_eq!(d.balances.get("BTCUSDT").unwrap().initial_balance, 100.0);
-    let eth = d
-        .balances
-        .get("ETHUSDT")
-        .expect("Delphi OnBalanceSnapshot resets every known TMarket");
-    assert_eq!(eth.initial_balance, 0.0);
-    assert_eq!(eth.leverage_x, 1);
+    assert_eq!(
+        d.markets
+            .get("BTCUSDT")
+            .unwrap()
+            .with(|m| m.initial_balance),
+        100.0
+    );
+    // Delphi OnBalanceSnapshot resets every known TMarket missing from the snapshot.
     let eth_market = d.markets.get("ETHUSDT").unwrap().snapshot();
     assert_eq!(eth_market.initial_balance, 0.0);
     assert_eq!(eth_market.leverage_x, 1);

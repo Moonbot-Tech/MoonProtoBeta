@@ -252,7 +252,6 @@ impl EventDispatcher {
             return;
         }
         self.eps_profile = eps_profile;
-        self.balances.set_eps_profile(eps_profile);
         self.orders.set_eps_profile(eps_profile);
         self.order_books.set_eps_profile(eps_profile);
         self.markets.set_eps_profile(eps_profile);
