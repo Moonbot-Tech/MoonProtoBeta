@@ -117,7 +117,7 @@ pub(crate) struct InitResult {
 ///
 /// These are returned only when continuing would be meaningless. Non-fatal
 /// notes are accumulated internally while Init runs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InitError {
     /// The command channel is closed because the client loop is no longer alive.
     SendChannelClosed,
@@ -194,7 +194,7 @@ impl ConnectConfig {
 }
 
 /// Errors reported by the connection/init startup sequence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConnectError {
     /// Non-blocking runtime startup was canceled by `MoonClient::disconnect`.
     Canceled,

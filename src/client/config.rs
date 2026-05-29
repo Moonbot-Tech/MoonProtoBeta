@@ -1,3 +1,4 @@
+use super::ConnectError;
 use crate::commands::engine_api::ServerInfo;
 use crate::MoonKey;
 use std::time::Duration;
@@ -136,9 +137,14 @@ pub enum LifecycleEvent {
         elapsed_ms: u64,
     },
     /// Initial connect/init failed in the background runtime.
+    ///
+    /// Carries the typed [`ConnectError`] so observers can branch on the failure
+    /// kind (connect timeout vs. cancellation vs. a specific failed init step)
+    /// instead of parsing a message; its `Display` still yields the same
+    /// human-readable text.
     ConnectFailed {
-        /// Human-readable error text.
-        error: String,
+        /// Typed startup failure for this connection attempt.
+        error: ConnectError,
     },
     /// The application explicitly called `client.disconnect()`.
     ///

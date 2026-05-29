@@ -82,7 +82,7 @@ pub(super) fn runtime_loop(
                 }
                 RuntimeInitPoll::Failed(err) => {
                     client.fire_lifecycle(LifecycleEvent::ConnectFailed {
-                        error: err.to_string(),
+                        error: err.clone(),
                     });
                     if let Some(tx) = ready_tx.as_ref() {
                         let _ = tx.send(Err(err));

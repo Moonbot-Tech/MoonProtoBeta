@@ -280,9 +280,10 @@ impl VStopParams {
 #[derive(Debug)]
 pub enum MoonClientError {
     /// Connect/init failed before the runtime became usable.
+    ///
+    /// Carries the typed [`ConnectError`], including background non-blocking
+    /// startup failures surfaced through the ready channel.
     Connect(ConnectError),
-    /// Background connect/init failed after non-blocking runtime start.
-    ConnectFailed(String),
     /// A one-shot runtime request timed out.
     RequestTimeout,
     /// A one-shot runtime request channel was closed.
@@ -297,7 +298,6 @@ impl std::fmt::Display for MoonClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect(err) => write!(f, "{err}"),
-            Self::ConnectFailed(err) => write!(f, "{err}"),
             Self::RequestTimeout => write!(f, "MoonProto request timed out"),
             Self::RequestDisconnected => write!(f, "MoonProto request channel disconnected"),
             Self::TradeContext(err) => write!(f, "{err}"),
@@ -311,7 +311,7 @@ impl std::error::Error for MoonClientError {
         match self {
             Self::Connect(err) => Some(err),
             Self::TradeContext(err) => Some(err),
-            Self::ConnectFailed(_) | Self::RequestTimeout | Self::RequestDisconnected => None,
+            Self::RequestTimeout | Self::RequestDisconnected => None,
             Self::RuntimeStopped => None,
         }
     }
