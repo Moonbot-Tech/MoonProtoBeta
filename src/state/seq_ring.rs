@@ -376,12 +376,17 @@ impl<T: SeqRingTimedRow> SeqRingReader<T> {
         out.clear();
         out.reserve(limit.min(bounds.len));
         let mut end_seq = start_seq;
+        let mut slot = state.slot_index(start_seq);
         while end_seq < bounds.next_seq && out.len() < limit {
-            let row = state.row_at_seq(end_seq);
+            let row = state.rows[slot];
             if row.seq_ring_time() >= from_time && row.seq_ring_time() < to_time {
                 out.push(row);
             }
             end_seq += 1;
+            slot += 1;
+            if slot == state.capacity {
+                slot = 0;
+            }
         }
 
         Some(SeqRingReadMeta {
@@ -457,9 +462,17 @@ impl<T: SeqRingRow> SeqRingState<T> {
 impl<T: SeqRingTimedRow> SeqRingState<T> {
     fn first_seq_at_or_after_time(&self, time: f64) -> u64 {
         let bounds = self.bounds();
+        // Consecutive seqs map to consecutive slots (`seq % capacity`). Hoist the
+        // single modulo out of the loop and advance the slot with a wrap instead
+        // of a per-element int64 DIV (audit #12 opt #1, hot chart scan).
+        let mut slot = self.slot_index(bounds.oldest_seq);
         for seq in bounds.oldest_seq..bounds.next_seq {
-            if self.row_at_seq(seq).seq_ring_time() >= time {
+            if self.rows[slot].seq_ring_time() >= time {
                 return seq;
+            }
+            slot += 1;
+            if slot == self.capacity {
+                slot = 0;
             }
         }
         bounds.next_seq
@@ -472,12 +485,17 @@ impl<T: SeqRingTimedRow> SeqRingState<T> {
         }
         let mut first = bounds.next_seq;
         let mut min_time = f64::INFINITY;
+        let mut slot = self.slot_index(bounds.oldest_seq);
         for seq in bounds.oldest_seq..bounds.next_seq {
-            let row_time = self.row_at_seq(seq).seq_ring_time();
+            let row_time = self.rows[slot].seq_ring_time();
             if first == bounds.next_seq && row_time >= time {
                 first = seq;
             }
             min_time = min_time.min(row_time);
+            slot += 1;
+            if slot == self.capacity {
+                slot = 0;
+            }
         }
         (first, time < min_time)
     }
