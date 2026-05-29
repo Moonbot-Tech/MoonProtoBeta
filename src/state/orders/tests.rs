@@ -316,6 +316,62 @@ fn outgoing_send_stops_if_changed_matches_delphi_change_gate() {
 }
 
 #[test]
+fn send_stops_derives_take_profit_changed_like_delphi_gui_u2() {
+    // U2 (sverka journal_review #14): the trader must never set the
+    // take_profit_changed wire flag by hand. The runtime derives it so the server
+    // never auto-defaults (clobbers) the trader's TP on the SELL transition
+    // (Unit1.pas:18760). Enabling/changing the TP latches the flag true; once set
+    // it stays latched.
+    let mut orders = Orders::new();
+    orders.apply(order_status_cmd(make_status(
+        7,
+        "BTCUSDT",
+        OrderWorkerStatus::BuySet,
+        1,
+    )));
+    assert!(orders.mark_local_visual_order(7));
+
+    // Caller forgets the flag (FALSE) but enables a take-profit: runtime sends TRUE.
+    let stops = StopSettings {
+        use_take_profit: DelphiBool::TRUE,
+        take_profit: 123.0,
+        take_profit_changed: DelphiBool::FALSE,
+        ..StopSettings::default()
+    };
+    let (_, _, _, sent) = orders
+        .send_stops_if_changed(7, &stops)
+        .expect("enabling TP must send");
+    assert_eq!(
+        sent.take_profit_changed,
+        DelphiBool::TRUE,
+        "enabling/changing TP must latch take_profit_changed regardless of caller input"
+    );
+
+    // Re-sending the same stops (still FALSE from the caller) is a no-op: the
+    // latched-true stored value makes the derived flag equal, so nothing changes.
+    assert!(
+        orders.send_stops_if_changed(7, &stops).is_none(),
+        "re-sending identical stops is a no-op; the latched flag keeps it equal"
+    );
+
+    // Changing only a non-TP field keeps the flag latched true (Delphi keeps it
+    // once set), proving the latch is independent of the caller's flag.
+    let sl_only = StopSettings {
+        stop_loss_on: DelphiBool::TRUE,
+        sl_level: 50.0,
+        ..stops
+    };
+    let (_, _, _, sent2) = orders
+        .send_stops_if_changed(7, &sl_only)
+        .expect("SL change must send");
+    assert_eq!(
+        sent2.take_profit_changed,
+        DelphiBool::TRUE,
+        "take_profit_changed stays latched once set, like Delphi"
+    );
+}
+
+#[test]
 fn local_visual_order_marker_can_be_registered_before_first_status() {
     let mut orders = Orders::new();
     assert!(

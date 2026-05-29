@@ -303,6 +303,11 @@ pub struct StopSettings {
     pub ts_spread: f64,
     pub use_take_profit: DelphiBool,
     pub take_profit: f64,
+    /// "Trader explicitly set the take-profit" latch. On the inbound order state
+    /// this is the server's value; on outbound stops the runtime computes it (see
+    /// `Orders::send_stops_if_changed`) so callers never set it by hand. The
+    /// server auto-defaults TP on the SELL transition only while this is false
+    /// (Delphi `Unit1.pas:18760`).
     pub take_profit_changed: DelphiBool,
 }
 

@@ -676,7 +676,14 @@ fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
 
     assert!(orders.mark_local_visual_order(uid));
     assert!(client.update_order_stops(&mut orders, uid, &stops));
-    assert_eq!(orders.get(uid).unwrap().stops, stops);
+    // U2 (sverka #14): the runtime derives take_profit_changed = TRUE here because
+    // the take-profit was enabled/changed from the default. The caller-supplied
+    // flag (FALSE) is ignored, closing the SELL auto-default money-trap.
+    let expected = StopSettings {
+        take_profit_changed: DelphiBool::TRUE,
+        ..stops
+    };
+    assert_eq!(orders.get(uid).unwrap().stops, expected);
 
     let (_, high, _) = client.take_send_queues_for_test();
     assert_eq!(high.len(), 1);
@@ -689,7 +696,7 @@ fn client_update_order_stops_uses_delphi_send_if_changed_gate() {
             assert_eq!(cmd.epoch_header.market.market_name, "DOGEUSDT");
             assert_eq!(cmd.epoch_header.epoch, 0);
             assert_eq!(cmd.epoch_header.status, OrderWorkerStatus::BuySet);
-            assert_eq!(cmd.stops, stops);
+            assert_eq!(cmd.stops, expected);
         }
         other => panic!("unexpected trade command: {other:?}"),
     }

@@ -129,15 +129,28 @@ impl Orders {
         if !order.has_local_visual_order {
             return None;
         }
-        if order.stops == *stops {
+        // U2 (sverka #14): derive the `take_profit_changed` wire flag here instead
+        // of trusting the caller. It is the "trader explicitly set TP" signal that
+        // stops the server auto-defaulting take-profit on the SELL transition
+        // (Unit1.pas:18760 `not v.TakeProfitChanged -> v.TakeProfit := DefTakeProfit`).
+        // Forgetting to set it silently clobbers the trader's TP, so the runtime
+        // computes it like the Delphi GUI: true when the take-profit value or its
+        // enable flag differs from the order's current stops, and latched true once
+        // it has ever been set.
+        let mut stops = *stops;
+        let tp_changed = bool::from(order.stops.take_profit_changed)
+            || stops.use_take_profit != order.stops.use_take_profit
+            || stops.take_profit.to_bits() != order.stops.take_profit.to_bits();
+        stops.take_profit_changed = crate::commands::trade::DelphiBool::from_bool(tp_changed);
+        if order.stops == stops {
             return None;
         }
-        order.stops = *stops;
+        order.stops = stops;
         Some((
             order.trade_ctx(),
             order.market_name.clone(),
             order.status,
-            *stops,
+            stops,
         ))
     }
 

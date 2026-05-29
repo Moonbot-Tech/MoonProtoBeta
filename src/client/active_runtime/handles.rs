@@ -72,6 +72,13 @@ impl MoonOrders {
     }
 
     /// Update Stops for one tracked order.
+    ///
+    /// Set the stop-loss / trailing / take-profit values you want; the runtime
+    /// only sends a command when they differ from the order's current stops
+    /// (Delphi `SendStopsIfChanged`). The `StopSettings::take_profit_changed`
+    /// flag is **computed by the runtime** on send (it latches "the trader set a
+    /// TP" so the server does not auto-default it) — any value you put there is
+    /// ignored, so it can never be forgotten and silently clobber the TP.
     pub fn update_stops(
         &self,
         order: impl Into<OrderTarget>,
