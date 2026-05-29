@@ -26,7 +26,16 @@ impl Client {
     /// Установить `ServerInfo` вручную. Обычно не нужно — Init делает это
     /// автоматически. Полезно только для внутренних протокольных тестов.
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
+        // opt #7 parity: кэшируем base currency name как Arc<str>, чтобы per-packet
+        // `from_client` клонировал refcount, а не heap-clone строки (Delphi читает cfg инлайн).
+        self.server_base_currency_name_arc =
+            info.base_currency_name.as_deref().map(std::sync::Arc::from);
         self.server_info = info;
+    }
+
+    /// Дешёвый per-packet хэндл имени базовой валюты (Arc refcount-bump, без heap-clone).
+    pub(crate) fn server_base_currency_name_arc(&self) -> Option<std::sync::Arc<str>> {
+        self.server_base_currency_name_arc.clone()
     }
 
     /// Set per-account AuthCheck metadata manually for custom init flows.

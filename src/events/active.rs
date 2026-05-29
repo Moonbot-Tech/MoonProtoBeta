@@ -27,7 +27,7 @@ pub(crate) struct ActiveDispatchContext {
     pub(crate) trades_storage_scope: Option<Arc<crate::state::TradeStorageScope>>,
     pub(crate) copy_max_leverage_from_markets_list: bool,
     pub(crate) eps_profile: EpsProfile,
-    pub(crate) server_base_currency_name: Option<String>,
+    pub(crate) server_base_currency_name: Option<Arc<str>>,
     pub(crate) server_base_currency_code: Option<BaseCurrency>,
 }
 
@@ -47,7 +47,7 @@ impl ActiveDispatchContext {
                 client.server_info(),
             ),
             eps_profile: EpsProfile::from_exchange_code(client.server_info().exchange_code),
-            server_base_currency_name: client.server_info().base_currency_name.clone(),
+            server_base_currency_name: client.server_base_currency_name_arc(),
             server_base_currency_code: client.server_info().base_currency_code,
         }
     }

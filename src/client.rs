@@ -458,6 +458,12 @@ pub struct Client {
     /// `Vec<Client>` и различает их по `client.server_info().bot_id`.
     server_info: crate::commands::engine_api::ServerInfo,
 
+    /// Кэш `server_info.base_currency_name` как `Arc<str>`. Клонируется (refcount-bump)
+    /// в `ActiveDispatchContext::from_client` на КАЖДЫЙ пакет вместо heap-clone строки —
+    /// Delphi читает `cfg.BaseCurrency` инлайн без копии (паритет, opt #7). Public
+    /// `ServerInfo.base_currency_name` остаётся `String` ради эргономики API.
+    server_base_currency_name_arc: Option<std::sync::Arc<str>>,
+
     /// Per-account data received from Delphi `TMoonProtoEngine.AuthCheck`.
     ///
     /// Delphi stores `BinanceAccountID`, `BTCAddress`, `AccountID`,
@@ -701,6 +707,7 @@ impl Client {
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_info: crate::commands::engine_api::ServerInfo::default(),
+            server_base_currency_name_arc: None,
             auth_info: None,
             domain_ready: false,
             last_update_markets_ms: i64::MIN / 2,
