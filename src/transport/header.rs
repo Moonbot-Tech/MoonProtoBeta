@@ -146,15 +146,21 @@ impl ClientMsgHeader {
     }
 }
 
-/// B-V2-12 fix: используем `rand::random::<u8>()` — thread-local Xoshiro RNG,
-/// ~5 нс/вызов с криптографически слабой но достаточной для obfuscation энтропией.
-/// Раньше делали `SystemTime::now()` (OS syscall ~50-300 нс) что:
-/// (а) hot path накладные расходы — 2 мс/сек wasted CPU при 10K pps,
-/// (б) low entropy — nanosecs могут повторяться при batch-send'ах подряд,
-///     снижая obfuscation strength `seed` поля в header'е.
+/// Obfuscation seed byte (`Rnd`) for the wire header.
+///
+/// Byte-exact with Delphi `MoonProtoCommon.pas:383,447 Rnd := Random(255)`:
+/// Delphi `Random(255)` returns `0..254`, so the wire never carries `Rnd = 255`
+/// from a Delphi client. The range is matched here so a passive observer profiling
+/// the plaintext seed byte cannot distinguish this client from Delphi.
+///
+/// Source: `rand::thread_rng()` is rand 0.8 `ReseedingRng<ChaCha12Core, OsRng>`
+/// (a ChaCha12 CSPRNG reseeded from the OS), not a weak PRNG. It replaces the old
+/// `SystemTime::now()` seed, which cost an OS syscall (~50-300 ns) on the send hot
+/// path and could repeat nanoseconds across back-to-back batch sends.
 #[inline]
 fn rand_byte() -> u8 {
-    rand::random()
+    use rand::Rng;
+    rand::thread_rng().gen_range(0u8..255)
 }
 
 #[cfg(test)]
