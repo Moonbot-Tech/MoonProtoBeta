@@ -75,7 +75,7 @@ When funding is included, the same row also updates
 mutation in the `HasFunding` branch.
 
 Trades stream packets also update the bounded live trade tail kept by Delphi on
-`TMarket`. For futures trade rows, the dispatcher updates
+`TMarket`. For futures trade rows, the runtime updates
 `MarketTradeState::last_got_all_trades_ms`, `last_trade_price`,
 `last_buy_price`, `last_sell_price`, `last_trade_price_ema15`,
 `last_trade_price_ema5`, and `last_trade_was_sell` before emitting the public
@@ -85,10 +85,10 @@ Trades stream packets also update the bounded live trade tail kept by Delphi on
 
 If `UpdateMarketsList` refers to a server market index whose name is present in
 `GetMarketsIndexes` but absent from the current market list, the active
-dispatcher follows Delphi `NewMarketFound`: it schedules a fresh
+runtime follows Delphi `NewMarketFound`: it schedules a fresh
 `GetMarketsList` request automatically, throttled to roughly one request per
 30 seconds while the unknown market condition persists. If that listing refresh
-adds new markets, the active dispatcher emits
+adds new markets, the runtime emits
 `MarketsEvent::NewMarketsAdded { names }` and immediately requests
 `TAllStatusesReq` plus `UpdateMarketsList` again. The order snapshot mirrors
 Delphi `AddNewMarket`: order pushes for an unknown market may have been dropped

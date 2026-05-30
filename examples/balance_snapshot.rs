@@ -58,7 +58,7 @@ fn main() {
 
     let snapshot = client
         .snapshot()
-        .expect("balance event must publish dispatcher snapshot");
+        .expect("balance event must publish state snapshot");
     let balances = snapshot.balances();
     let g = balances.global();
     println!(

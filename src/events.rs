@@ -63,7 +63,9 @@ mod types;
 mod ui;
 
 pub(crate) use active::{ActiveAction, ActiveDispatchContext};
+#[doc(hidden)]
 pub use snapshot::EventDispatcherSnapshot;
+pub use snapshot::MoonStateSnapshot;
 pub use types::{
     ArbEvent, EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest,
     StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,

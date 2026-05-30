@@ -84,7 +84,7 @@ for event in client.drain_events() {
                 println!("checked changed={changed} delta={is_delta}");
             }
             StratEvent::SnapshotRequested { .. } => {
-                // Already answered by the dispatcher from its owned strategy list.
+                // Already answered by the runtime from its owned strategy list.
                 // The event is emitted for UI/diagnostic awareness.
             }
             StratEvent::SchemaApplied { kind_count, field_count, .. } => {
@@ -158,7 +158,7 @@ use moonproto::{
 
 `StrategySchema::parse_compressed(data)` and `StrategySchema::parse_plain(data)`
 are public for protocol tools, but normal clients should read the active
-dispatcher state populated by Init.
+runtime state populated by Init.
 
 ## State
 
@@ -176,7 +176,7 @@ pub struct StrategyInfo {
 
 `StrategyInfo` is a lightweight UI/index state. Full `TStrategy` fields are not
 stored there; they are stored as `StrategySnapshot` values owned by the
-dispatcher. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
+runtime state. `checked` is Delphi `CheckedDirect`; `prev_checked` is Delphi
 `PrevChecked`. Checked deltas are pending while these fields differ and become
 acknowledged only after server `TStratCheckedEcho` or `TStratCheckedSync`.
 `sell_price` is copied from the decoded snapshot field `SellPrice` when that
@@ -190,11 +190,11 @@ that are absent from the payload. Delphi keeps those strategies as local
 is non-zero, then delete `FolderPath` when it names an existing empty non-root
 folder. `StratEvent::Deleted` exposes both result flags. `strategy_deleted` and
 `folder_deleted` tell which parts actually changed state; if both are false the
-dispatcher emits `StratEvent::Ignored`.
+runtime emits `StratEvent::Ignored`.
 
 Future-version strat commands, unknown strat command ids, incoming
 `TStratSchemaRequest`, and incoming `TStratSellPriceUpdate` do not emit active
-dispatcher events. Delphi turns those into a skipped/base command or has no
+strategy events. Delphi turns those into a skipped/base command or has no
 client-side branch, then frees the object without strategy side effects. The
 low-level parser/state APIs still expose `StratCommand::Skipped`,
 `StratCommand::Unknown`, and `StratEvent::Ignored` for explicit diagnostics.
@@ -223,7 +223,7 @@ if kind == StrategyKind::NEW_LISTING && strategy.sell_from_asset() {
 `StratsState` also exposes listing predicates:
 
 ```rust
-let has_listing = dispatcher
+let has_listing = state
     .strats()
     .has_listing_strategy(StrategyActiveMode::ActiveClient);
 
@@ -331,7 +331,7 @@ Do not send `TStratSnapshotRequest` from client code. It is a server-to-client
 command in Delphi, and the Delphi server explicitly ignores it when received
 from a client. The real flows are: post-init sends the current local strategy
 list as `TStratSnapshot`, and later the server may send
-`TStratSnapshotRequest`, which the dispatcher answers automatically.
+`TStratSnapshotRequest`, which the runtime answers automatically.
 
 `strat_sell_price_update` is the Delphi client-to-server command. The server
 applies it to its local strategy if the strategy exists; the active client does
@@ -415,35 +415,10 @@ also keep type checks through the same schema: if the incoming TypeID does not
 match the schema/RTTI field type, the value is skipped instead of being exposed
 as a wrongly typed field.
 
-For advanced override replies, register a fresh snapshot provider on the
-dispatcher:
-
-```rust
-use moonproto::{StrategySnapshot, StrategySnapshotReply};
-
-let schema = dispatcher
-    .strats()
-    .strategy_schema()
-    .expect("Init fetched TStratSchema")
-    .clone();
-
-dispatcher.set_strategy_snapshot_provider(move |_request_uid| {
-    let strategies: Vec<StrategySnapshot> = load_current_strategies();
-    let server_epoch = load_local_strategy_epoch();
-    Some(StrategySnapshotReply::from_strategies(
-        server_epoch,
-        true,
-        &schema,
-        &strategies,
-    ))
-});
-```
-
-The provider must return current application-owned strategies. The dispatcher
-falls back to its owned strategy list when the provider is absent or returns
-`None`, using `local_strategy_epoch()` as outgoing `ServerEpoch`. If the server
-requests a non-empty local snapshot before schema has arrived, the dispatcher
-requests `TStratSchema` and sends the pending snapshot after `SchemaApplied`;
-it does not use a stale Rust field table. A provider that returns
-`StrategySnapshotReply::from_payload(..., Vec::new())` gets the same empty-list
-normalization as the normal owned empty-strategy snapshot path.
+The runtime owns the local strategy list used for future server snapshot
+requests. If the application reloads strategies after startup, call
+`client.strategies().send_snapshot_batch(...)`; do not try to intercept the
+server request path yourself. If the server asks before schema has arrived, the
+runtime requests `TStratSchema` and sends the pending snapshot after
+`SchemaApplied`, so it never serializes a non-empty strategy list from a stale
+Rust field table.

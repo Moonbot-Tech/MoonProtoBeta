@@ -178,7 +178,7 @@ impl MoonClient {
 
     /// Latest immutable read-model snapshot, cheap to clone and safe to keep in
     /// UI state.
-    pub fn snapshot(&self) -> Option<Arc<crate::events::EventDispatcherSnapshot>> {
+    pub fn snapshot(&self) -> Option<Arc<crate::events::MoonStateSnapshot>> {
         self.snapshot
             .read()
             .unwrap()

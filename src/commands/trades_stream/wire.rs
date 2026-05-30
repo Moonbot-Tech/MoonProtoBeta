@@ -24,6 +24,10 @@ pub(crate) struct WireTradesPacketHeader {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 pub(crate) struct WireTradeRow {
+    // Delphi packs one trade as 10 bytes: time delta + f32 price + f32 volume.
+    // Keeping this exact dense row is what lets the high-rate trades stream stay
+    // low-latency on weak UDP paths instead of spending bandwidth on per-row
+    // strings, timestamps, or f64 values.
     pub(crate) time_delta_ms: LeI16,
     pub(crate) a: LeF32,
     pub(crate) b: LeF32,

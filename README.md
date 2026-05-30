@@ -267,7 +267,7 @@ Start here:
 ```text
 src/client/       active client/session, init, reconnect, send/receive paths
 src/commands/     typed MoonProto command parsers/builders
-src/events/       public events and dispatcher
+src/events/       public events and immutable state snapshots
 src/state/        read-model state: markets, trades, books, orders, balances
 src/transport/    built-in low-level transport modes V0/V1/V2
 tests/            integration, polling, and FireTest

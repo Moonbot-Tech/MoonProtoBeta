@@ -168,13 +168,13 @@ sequence.
 
 ## Low-Level Parsing
 
-Inside the owned `MoonClient` runtime, the low-level dispatcher parses UI
-payloads and applies `SettingsState` automatically for known, supported UI
-commands. Applications normally read the resulting snapshot/events and do not
-instantiate the dispatcher themselves.
+Inside the owned `MoonClient` runtime, UI payloads are parsed and applied to
+`SettingsState` automatically for known, supported UI commands. Applications
+normally read the resulting snapshot/events and do not instantiate protocol
+state machinery themselves.
 
 `UICommand::Skipped { .. }` and `UICommand::Unknown { .. }` are diagnostic
-variants for forward compatibility. The active dispatcher ignores them: they do
+variants for forward compatibility. The active runtime ignores them: they do
 not mutate `SettingsState` and do not emit `Event::Settings`.
 
 `ClientSettingsCommand` is tolerant to old append-only settings snapshots:

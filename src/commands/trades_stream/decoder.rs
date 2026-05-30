@@ -12,7 +12,9 @@ use zerocopy::FromBytes;
 ///
 /// This is the zero-copy entry point that mirrors Delphi's `DataStream` walk:
 /// compressed packets own the decompressed buffer, plain packets borrow the
-/// incoming UDP payload without allocating.
+/// incoming UDP payload without allocating. The common live path is therefore
+/// "verify -> borrow -> iterate compact rows", which keeps tape/chart updates
+/// from paying an avoidable memcpy before Active Lib state apply.
 pub(crate) struct DecodedTradesPacket<'a> {
     data: Cow<'a, [u8]>,
     has_taker: bool,

@@ -22,11 +22,11 @@ pub enum MoonClientEvent {
 #[derive(Clone, Debug)]
 pub struct MoonClientSnapshot {
     revision: u64,
-    state: Arc<crate::events::EventDispatcherSnapshot>,
+    state: Arc<crate::events::MoonStateSnapshot>,
 }
 
 impl MoonClientSnapshot {
-    pub(crate) fn new(revision: u64, state: Arc<crate::events::EventDispatcherSnapshot>) -> Self {
+    pub(crate) fn new(revision: u64, state: Arc<crate::events::MoonStateSnapshot>) -> Self {
         Self { revision, state }
     }
 
@@ -36,13 +36,13 @@ impl MoonClientSnapshot {
     }
 
     /// Clone the underlying immutable state snapshot.
-    pub fn state_arc(&self) -> Arc<crate::events::EventDispatcherSnapshot> {
+    pub fn state_arc(&self) -> Arc<crate::events::MoonStateSnapshot> {
         Arc::clone(&self.state)
     }
 }
 
 impl std::ops::Deref for MoonClientSnapshot {
-    type Target = crate::events::EventDispatcherSnapshot;
+    type Target = crate::events::MoonStateSnapshot;
 
     fn deref(&self) -> &Self::Target {
         &self.state

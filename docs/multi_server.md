@@ -26,7 +26,7 @@ let sessions: Vec<Session> = configs
 ```
 
 Each `MoonClient` owns its runtime thread, UDP socket, reconnect state,
-subscription registry, pending API registry, candle aggregators, dispatcher
+subscription registry, pending API registry, candle aggregators, runtime state
 state, and server-time delta handle.
 
 ## Event Routing
@@ -46,7 +46,7 @@ snapshots from different servers.
 
 ## ServerTimeDelta Isolation
 
-`MoonClient` automatically links each runtime dispatcher to the matching
+`MoonClient` automatically links each runtime state owner to the matching
 client's `server_time_delta_handle`. That keeps order timestamps correct when
 two servers have different clock drift.
 

@@ -169,9 +169,8 @@ pub enum OrderEvent {
 `removed_uid()` returns UIDs for removed rows. `Snapshot` means a full order
 snapshot was applied and the UI should reconcile the whole list.
 
-`Ignored` is mainly useful for direct low-level state tests. The active
-dispatcher does not emit user-visible ignored events for client-originated raw
-commands.
+`Ignored` is mainly useful for direct low-level state tests. The active runtime
+does not emit user-visible ignored events for client-originated raw commands.
 
 ## Trace Lines
 

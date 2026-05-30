@@ -89,7 +89,7 @@ fn runtime_smoke_full_happy_path() {
 
     let snapshot = client
         .snapshot()
-        .expect("FAIL: no initial EventDispatcherSnapshot after connect");
+        .expect("FAIL: no initial MoonStateSnapshot after connect");
     assert!(
         snapshot.markets().market_count() > 0,
         "FAIL: markets are empty after Init"

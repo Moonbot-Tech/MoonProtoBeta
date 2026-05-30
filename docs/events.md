@@ -111,8 +111,8 @@ if let Some(book) = state.order_book("BTCUSDT", OrderBookKind::Futures) {
 }
 ```
 
-`snapshot()` returns a read-only `EventDispatcherSnapshot`. It is not the live
-dispatcher and cannot mutate protocol state. UI code can keep snapshots for
+`snapshot()` returns a read-only `MoonStateSnapshot`. It is not the live runtime
+state and cannot mutate protocol state. UI code can keep snapshots for
 rendering, while stateful commands go back through `MoonClient` handles such as
 `client.orders()` and `client.trade()`.
 
@@ -230,8 +230,8 @@ if let Some(readers) = client
 `streams().subscribe_all_trades` creates retained stores for all known markets.
 `streams().subscribe_trades_for` creates them only for the requested market names.
 
-## Dispatcher Ownership
+## Runtime Ownership
 
-`MoonClient` owns the dispatcher in the normal Active Lib path. Applications
-read immutable snapshots and receive events; they do not drive dispatcher ticks
-or protocol pumps themselves.
+`MoonClient` owns the mutable read model in the normal Active Lib path.
+Applications read immutable snapshots and receive events; they do not drive
+state-apply ticks or protocol pumps themselves.

@@ -79,9 +79,9 @@ use moonproto::state::{
 };
 use moonproto::Command;
 use moonproto::{
-    parse_key_info, ClientConfig, ConnectConfig, EventDispatcherSnapshot, ExchangeKind,
-    ImportedKeys, InitConfig, InitialStrategies, LifecycleEvent, MoonClient,
-    ProtocolMetricsSnapshot, TradesStreamMode, TransportMode,
+    parse_key_info, ClientConfig, ConnectConfig, ExchangeKind, ImportedKeys, InitConfig,
+    InitialStrategies, LifecycleEvent, MoonClient, MoonStateSnapshot, ProtocolMetricsSnapshot,
+    TradesStreamMode, TransportMode,
 };
 
 const DEFAULT_FIRETEST_ERR_EMU_PERCENT: u8 = 10;
@@ -613,7 +613,7 @@ impl SessionStats {
 
 struct Session {
     client: MoonClient,
-    latest_snapshot: Option<Arc<EventDispatcherSnapshot>>,
+    latest_snapshot: Option<Arc<MoonStateSnapshot>>,
     stats: Arc<Mutex<SessionStats>>,
     parse_failure_correlations_logged: usize,
 }
@@ -787,7 +787,7 @@ impl Session {
             .unwrap_or(0)
     }
 
-    fn state_snapshot(&self) -> Arc<EventDispatcherSnapshot> {
+    fn state_snapshot(&self) -> Arc<MoonStateSnapshot> {
         self.latest_snapshot.as_ref().cloned().unwrap_or_else(|| {
             self.client
                 .snapshot()
@@ -795,7 +795,7 @@ impl Session {
         })
     }
 
-    fn maybe_state_snapshot(&self) -> Option<Arc<EventDispatcherSnapshot>> {
+    fn maybe_state_snapshot(&self) -> Option<Arc<MoonStateSnapshot>> {
         self.latest_snapshot
             .as_ref()
             .cloned()
@@ -962,7 +962,7 @@ impl Session {
     fn emit_active_lib_market_report(
         &self,
         profile: FireProfile,
-        snapshot: &EventDispatcherSnapshot,
+        snapshot: &MoonStateSnapshot,
         market: &str,
         now_time: f64,
     ) {
@@ -1198,7 +1198,7 @@ impl Session {
         }
     }
 
-    fn emit_balance_asset_report(&self, snapshot: &EventDispatcherSnapshot) {
+    fn emit_balance_asset_report(&self, snapshot: &MoonStateSnapshot) {
         let balances = snapshot.balances();
         println!(
             "FIRETEST ActiveLib balances global btc_total={:.8} btc_locked={:.8} btc_full={:.8} special_coin={:.8} total_pnl={:.8} rows={}",
@@ -1283,7 +1283,7 @@ impl Session {
         );
     }
 
-    fn emit_order_report(&self, snapshot: &EventDispatcherSnapshot, st: &SessionStats) {
+    fn emit_order_report(&self, snapshot: &MoonStateSnapshot, st: &SessionStats) {
         let mut statuses = HashMap::<String, u64>::new();
         for order in snapshot.orders().iter() {
             *statuses.entry(format!("{:?}", order.status)).or_default() += 1;
@@ -1962,7 +1962,7 @@ fn delphi_now_raw_for_test() -> f64 {
 fn record_event(
     stats: &Arc<Mutex<SessionStats>>,
     event: &Event,
-    dispatcher: Option<&EventDispatcherSnapshot>,
+    dispatcher: Option<&MoonStateSnapshot>,
     candles_snapshot_tx: Option<&mpsc::Sender<Vec<RequestCandlesMarket>>>,
 ) {
     let mut st = stats.lock().unwrap();
@@ -2425,7 +2425,7 @@ fn record_event(
 fn sync_market_probe_from_dispatcher(
     st: &mut SessionStats,
     event_no: u64,
-    dispatcher: &EventDispatcherSnapshot,
+    dispatcher: &MoonStateSnapshot,
     log_changes: bool,
 ) {
     let old_index = st.market_index;
@@ -2451,7 +2451,7 @@ fn sync_market_probe_from_dispatcher(
     }
 }
 
-fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &EventDispatcherSnapshot) {
+fn record_order_state_snapshot(st: &mut SessionStats, dispatcher: &MoonStateSnapshot) {
     for order in dispatcher.orders().iter() {
         st.order_status_by_uid.insert(order.uid, order.status);
         st.order_market_by_uid
@@ -3685,7 +3685,7 @@ impl MoonClientPathStats {
 
     fn refresh_from_snapshot(
         &mut self,
-        snapshot: &EventDispatcherSnapshot,
+        snapshot: &MoonStateSnapshot,
         target_market: &str,
         elapsed_s: f64,
     ) {
@@ -5098,7 +5098,7 @@ fn fire_test_active_library_health() {
     assert!(
         a.strategy_snapshot(seeded_strategy_id).is_some()
             && b.strategy_snapshot(seeded_strategy_id).is_some(),
-        "FireTest local strategies must be available through EventDispatcher API before stream checks"
+        "FireTest local strategies must be available through MoonStateSnapshot before stream checks"
     );
     write_strategy_info_dump(FireProfile::Full, &cfg, &[("A", &a), ("B", &b)]);
 

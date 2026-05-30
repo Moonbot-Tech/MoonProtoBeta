@@ -399,10 +399,10 @@ mode, including internal low-level test pumps. This matches the Delphi
 transport service packets are not part of this domain gate, because Init itself
 depends on Engine API. Once the Engine API init block succeeds, the helper opens
 the domain gate, requests `TStratSchema`, then sends the post-init refresh set:
-order snapshot request, full client strategy snapshot from the dispatcher-owned
+order snapshot request, full client strategy snapshot from the runtime-owned
 local strategy list, settings request, MM-orders subscription state, and balance
 refresh request. When the server later sends `TStratSnapshotRequest`, the
-dispatcher replies from the same current local strategy list; an empty list is a
+runtime replies from the same current local strategy list; an empty list is a
 valid non-empty serializer payload.
 `SnapshotRequested` is still queued for UI/diagnostic awareness. Set
 `InitConfig::mm_orders_subscribe` when the UI needs a heat-map MM-orders
@@ -500,12 +500,12 @@ for event in client.drain_events() {
 }
 ```
 
-If an application already has local UI settings before connecting, pass them to
-the dispatcher with `set_client_settings_fallback`. This preserves Delphi
-soft-read behavior for old settings snapshots: missing tail fields keep the
-current local values (`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`,
-auto-start blobs, hotkey prices, `JoinSellKind`, and `SignOrders` for old
-versions) instead of being reset to Rust defaults.
+If an application already has local UI settings before connecting, pass them in
+the active-library init/settings path. This preserves Delphi soft-read behavior
+for old settings snapshots: missing tail fields keep the current local values
+(`FreePositionCheck`, `VolDropLevel`, `UseStopMarket`, auto-start blobs, hotkey
+prices, `JoinSellKind`, and `SignOrders` for old versions) instead of being
+reset to Rust defaults.
 
 ## Order Snapshot Request
 

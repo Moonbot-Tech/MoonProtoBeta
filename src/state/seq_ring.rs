@@ -5,7 +5,9 @@
 //! `Vec<T>` behind a short `parking_lot::RwLock`: appends take the write lock,
 //! readers either copy a simple range or scan a zero-copy read view inside a
 //! closure. This keeps the hot history memory layout close to Delphi's dense
-//! arrays without unsafe aliasing around overwrite-ring slots.
+//! arrays without unsafe aliasing around overwrite-ring slots. The API offers
+//! both copy and borrowed-view reads so UI code can choose simple bulk copies for
+//! rendering or zero-copy scans for derived calculations without per-row atomics.
 
 use std::sync::Arc;
 

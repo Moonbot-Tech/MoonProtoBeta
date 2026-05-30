@@ -44,7 +44,7 @@ fn main() {
 
     let snapshot = client
         .snapshot()
-        .expect("settings event must publish dispatcher snapshot");
+        .expect("settings event must publish state snapshot");
     let settings = snapshot
         .settings()
         .client_settings

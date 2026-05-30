@@ -55,7 +55,7 @@
 //! Account/UI refreshes are Active Lib intents:
 //! [`MoonClient::account`], [`MoonClient::settings`], and
 //! [`MoonClient::balances`] expose command handles that update
-//! [`EventDispatcherSnapshot::account`] and emit [`Event::Account`].
+//! [`MoonStateSnapshot::account`] and emit [`Event::Account`].
 //! Demand-driven CoinCard candles use non-blocking
 //! [`MoonClient::candles`] and arrive as
 //! [`Event::CoinCardCandles`]. The full 5m candles snapshot is requested
@@ -68,7 +68,7 @@
 //! [`MoonEventSink`]; the default [`MoonClient::connect`] queue adapter exposes
 //! [`MoonClient::drain_events`] for immediate-mode UIs and tools.
 //! Transfer UI should normally use [`MoonBalances::refresh_transfer_assets`] and
-//! read [`EventDispatcherSnapshot::transfer_assets`] after
+//! read [`MoonStateSnapshot::transfer_assets`] after
 //! [`Event::TransferAssets`].
 //!
 //! Regular applications should start with [`MoonClient`]. Lower-level protocol
@@ -97,7 +97,7 @@
 //! - [`client`] — [`MoonClient`], `ClientConfig` builder, lifecycle,
 //!   EventSink adapters, snapshots, and high-level intents.
 //! - [`events`] — typed [`Event`] values and the read-only
-//!   [`EventDispatcherSnapshot`].
+//!   [`MoonStateSnapshot`].
 //! - [`commands`] — protocol value types re-exported by the high-level API;
 //!   direct parser/builder use is for diagnostics and internal tests.
 //! - [`state`] — Active Lib read models: Orders / OrderBooks / Trades /
@@ -176,9 +176,11 @@ pub use commands::{
 pub use commands::candles::{DeepHistoryKind, DeepPrice};
 pub use commands::trade::{MoveAllBuysParams, MoveAllSellsParams};
 pub use commands::ui::EmuTradePoint;
+#[doc(hidden)]
+pub use events::EventDispatcherSnapshot;
 pub use events::{
-    ArbEvent, EngineActionEvent, EngineActionKind, Event, EventDispatcherSnapshot,
-    MissingOrderStatusRequest, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
+    ArbEvent, EngineActionEvent, EngineActionKind, Event, MissingOrderStatusRequest,
+    MoonStateSnapshot, StrategySnapshotReply, WatcherFillEvent, WatcherFillsEvent,
 };
 pub use key_import::{
     import_key, parse_key_info, ImportedIpVersion, ImportedKeyFormat, ImportedKeyInfo,

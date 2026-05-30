@@ -51,7 +51,7 @@ fn main() {
 
     let snapshot = client
         .snapshot()
-        .expect("transfer-assets event must publish dispatcher snapshot");
+        .expect("transfer-assets event must publish state snapshot");
     let mut printed = 0usize;
     for (kind, rows) in snapshot.transfer_assets().iter() {
         for row in rows {

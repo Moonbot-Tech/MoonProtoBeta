@@ -1,15 +1,13 @@
-//! Read-only dispatcher snapshot for application callbacks.
+//! Read-only Active Lib state snapshot for application callbacks.
 
 use super::*;
 use crate::commands::strategy_serializer::StrategySnapshot;
 use crate::state::{OrderBookKind, OrderBookSnapshot, TopOfBook};
 
-/// Immutable read-model copy published by `MoonClient` and by custom
-/// low-level active runtimes.
+/// Immutable read-model copy published by `MoonClient`.
 ///
-/// The live [`EventDispatcher`] stays owned by the protocol loop. This snapshot
-/// is cloned after dispatcher state is updated, then sent through the
-/// application callback queue. User code can block or keep the snapshot without
+/// The runtime owns the live state and publishes immutable snapshots after
+/// applying server data. User code can keep a snapshot for rendering without
 /// blocking protocol ACK/retry/send progress.
 #[derive(Debug, Clone)]
 pub struct EventDispatcherSnapshot {
@@ -27,6 +25,13 @@ pub struct EventDispatcherSnapshot {
     server_info: std::sync::Arc<ServerInfo>,
     auth_info: Option<std::sync::Arc<AuthCheckResponse>>,
 }
+
+/// Public name for the immutable Active Lib read model.
+///
+/// `EventDispatcherSnapshot` remains as a hidden compatibility name for
+/// protocol tests and older code. New application code should use
+/// `MoonStateSnapshot`.
+pub type MoonStateSnapshot = EventDispatcherSnapshot;
 
 impl EventDispatcherSnapshot {
     /// Read-only order state, keyed by server order UID.

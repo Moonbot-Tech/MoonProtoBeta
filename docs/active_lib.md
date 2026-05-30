@@ -71,4 +71,4 @@ state.
   `DelphiTime` helpers such as `row.time_delphi().unix_millis()`.
 
 Regular applications should start from `MoonClient`: it owns the protocol loop,
-dispatcher, event sink, and retained state.
+event sink, and retained state.
