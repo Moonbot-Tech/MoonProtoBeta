@@ -29,7 +29,7 @@ impl ProtocolCore<'_> {
         if (timestamp_ms - self.client.last_need_hello_again).abs() > NEED_HELLO_AGAIN_THROTTLE_MS {
             self.client.last_need_hello_again = timestamp_ms;
             if self.client.server_token == 0
-                || (!self.client.authorized && !self.client.was_ever_connected)
+                || (!self.client.authorized && !self.client.lifecycle.was_ever_connected)
             {
                 self.client.auth_status = AuthStatus::Connected;
                 self.client.authorized = false;
@@ -73,6 +73,7 @@ impl ProtocolCore<'_> {
         let encode_cipher = crate::crypto::cipher_from_key(&self.client.encode_key);
         self.client.encode_cipher = Some(encode_cipher.clone());
         self.client
+            .recv
             .data_read_state
             .set_decode_cipher(crate::crypto::cipher_from_key(&self.client.decode_key));
 
@@ -84,7 +85,8 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn apply_fine_auth_done(&mut self) {
-        let restore_after_reconnect = self.client.domain_ready && self.client.was_ever_connected;
+        let restore_after_reconnect =
+            self.client.domain_ready && self.client.lifecycle.was_ever_connected;
         self.client.need_connect = false;
         self.client.auth_status = AuthStatus::AuthDone;
         self.client.authorized = true;

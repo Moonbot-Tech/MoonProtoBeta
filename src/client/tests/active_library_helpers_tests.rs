@@ -159,13 +159,13 @@ fn bind_failure_tracking_resets_after_successful_bind() {
     let mut client = Client::new(dummy_cfg());
     client.record_bind_failure(0);
     client.record_bind_failure(15_000);
-    assert!(client.bind_failure_streak > 0);
+    assert!(client.transport.bind_failure_streak > 0);
 
     client.reset_bind_failure_tracking();
 
-    assert_eq!(client.bind_failure_streak, 0);
-    assert_eq!(client.first_bind_failure_ms, NEVER_TIME_MS);
-    assert_eq!(client.last_bind_failed_event_ms, NEVER_TIME_MS);
+    assert_eq!(client.transport.bind_failure_streak, 0);
+    assert_eq!(client.transport.first_bind_failure_ms, NEVER_TIME_MS);
+    assert_eq!(client.transport.last_bind_failed_event_ms, NEVER_TIME_MS);
 }
 
 #[test]

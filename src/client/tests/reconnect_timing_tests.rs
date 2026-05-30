@@ -211,7 +211,7 @@ fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
     let mut client = dummy_client();
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
-    client.was_ever_connected = true;
+    client.lifecycle.was_ever_connected = true;
     client.server_token = 0x1111;
     client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
 
@@ -365,7 +365,7 @@ fn post_init_reconnect_restores_domain_without_second_init_and_reopens_stream_ga
 
     // Simulate a Client that already connected once and completed its single Init.
     client.set_domain_ready(true);
-    client.was_ever_connected = true;
+    client.lifecycle.was_ever_connected = true;
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
     client.authorized = true;
@@ -605,7 +605,7 @@ fn post_init_reconnect_same_peer_app_token_does_not_refetch_indexes() {
     let mut client = dummy_client();
 
     client.set_domain_ready(true);
-    client.was_ever_connected = true;
+    client.lifecycle.was_ever_connected = true;
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
     client.authorized = true;
@@ -1353,7 +1353,7 @@ fn soft_reconnect_waiting_hello_still_retries_hello_again() {
 fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
     let mut client = dummy_client();
     install_session_key(&mut client);
-    client.was_ever_connected = true;
+    client.lifecycle.was_ever_connected = true;
 
     ProtocolCore {
         client: &mut client,

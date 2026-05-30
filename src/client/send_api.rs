@@ -84,7 +84,7 @@ impl Client {
     }
 
     fn enqueue_send_item(&self, item: SendItem) -> Result<(), SubscribeError> {
-        if !self.app_queue_alive.load(Ordering::Relaxed) {
+        if !self.lifecycle.app_queue_alive.load(Ordering::Relaxed) {
             return Err(SubscribeError::Disconnected);
         }
         if !self.domain_ready && !outgoing_allowed_before_domain_ready(item.cmd, &item.data) {

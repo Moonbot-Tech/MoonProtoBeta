@@ -35,7 +35,7 @@ impl Client {
     pub fn sender(&self) -> ClientSender {
         ClientSender {
             shared: Arc::new(ClientSenderShared {
-                app_queue_alive: Arc::clone(&self.app_queue_alive),
+                app_queue_alive: Arc::clone(&self.lifecycle.app_queue_alive),
                 domain_ready: Arc::clone(&self.domain_ready_flag),
                 send_lock: Arc::clone(&self.send_lock),
                 subscription_registry: Arc::clone(&self.subscription_registry),

@@ -92,7 +92,7 @@ fn inline_reader_test_client() -> (UdpSocket, SocketAddr, Client) {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     (server_sock, client_addr, client)
@@ -175,12 +175,13 @@ fn install_active_session(client: &mut Client, server_token: u64) -> (MoonKey, M
     client.decode_key = decode_key;
     client.encode_cipher = Some(crypto::cipher_from_key(&encode_key));
     client
+        .recv
         .data_read_state
         .set_decode_cipher(crypto::cipher_from_key(&decode_key));
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     client.need_connect = false;
-    client.was_ever_connected = true;
+    client.lifecycle.was_ever_connected = true;
     (encode_key, decode_key)
 }
 
@@ -253,10 +254,16 @@ fn run_drains_udp_data_without_wake_fifo() {
     let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut client = Client::new(dummy_cfg_for_server(server_sock.local_addr().unwrap()));
     client.testing_set_domain_ready(true);
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
     client.start_inline_reader_session();
-    let client_addr = client.socket.as_ref().unwrap().local_addr().unwrap();
+    let client_addr = client
+        .transport
+        .socket
+        .as_ref()
+        .unwrap()
+        .local_addr()
+        .unwrap();
     // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
     // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
     // use a non-sensitive command (these go through the same generic path).
@@ -298,7 +305,7 @@ fn reader_sends_sliced_ack_without_main_loop_tick() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let slice_payload = vec![
@@ -344,7 +351,7 @@ fn reader_handles_sliced_ack_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let datagram_num = 0x3344u16;
@@ -400,7 +407,7 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let datagram_num = 43u16;
@@ -472,7 +479,7 @@ fn reader_handles_size_test_without_main_loop_tick() {
     let client_addr = client_sock.local_addr().unwrap();
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let size = 64u16;
@@ -496,7 +503,7 @@ fn reader_handles_size_test_without_main_loop_tick() {
     assert_eq!(ack_payload.len(), size as usize);
     assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
     assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
-    assert_eq!(client.data_read_state.data_size_ack_series_num, series);
+    assert_eq!(client.recv.data_read_state.data_size_ack_series_num, series);
     assert_eq!(client.metrics.total_recv, packet.len() as u64);
 }
 
@@ -516,7 +523,7 @@ fn reader_handles_probe_mtu_without_main_loop_tick() {
     let client_addr = client_sock.local_addr().unwrap();
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let probe_id = 0x1234u16;
@@ -565,7 +572,7 @@ fn reader_handles_ping_response_without_main_loop_tick() {
     client.auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.need_connect = true;
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let ping = service_ping_payload(123, 8_224, 456, 7, 128);
@@ -631,7 +638,7 @@ fn reader_handles_who_are_you_imfriend_without_main_loop_tick() {
     let app_token = client.app_token;
     let server_token = 0x2222_3333_4444_5555;
     let peer_app_token = 0xAAAA_BBBB_CCCC_DDDD;
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
     client.start_hello_wait(HelloWaitState::PrimaryHelloCold, 0);
 
@@ -698,7 +705,7 @@ fn reader_who_are_you_uses_writer_updated_hello_token() {
     let token_before = client.client_token;
     let server_token = 0x2222_3333_4444_5555;
     let peer_app_token = 0xAAAA_BBBB_CCCC_DDDD;
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     ProtocolCore {
@@ -758,7 +765,7 @@ fn reader_handles_fine_auth_done_without_recv_event_backlog() {
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.need_connect = true;
     client.start_hello_wait(HelloWaitState::PrimaryImFriendSent, 0);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     let fine = encrypted_server_hello(
@@ -843,7 +850,7 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     client.last_sent_hello = 12345;
     client.crypt_msg_counter.store(77, Ordering::Relaxed);
     client.metrics.total_sent.store(123, Ordering::Relaxed);
-    client.recvd_slider.has_new_data = true;
+    client.recv.recvd_slider.has_new_data = true;
 
     let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
     server_sock.send_to(&packet, client_addr).unwrap();
@@ -857,7 +864,7 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     assert!(!client.soft_reconnect);
     assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
     assert_eq!(client.total_sent(), 0);
-    assert!(!client.recvd_slider.has_new_data);
+    assert!(!client.recv.recvd_slider.has_new_data);
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     assert_eq!(client.auth_status, AuthStatus::Connected);
     assert!(!client.authorized);
@@ -897,7 +904,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     let server_token = 0x2222_3333_4444_5555;
     let (encode_key, _decode_key) = install_active_session(&mut client, server_token);
-    client.socket = Some(old_socket);
+    client.transport.socket = Some(old_socket);
     client.start_inline_reader_session();
 
     client.clear_recv_poller();
@@ -907,7 +914,7 @@ fn nat_binding_change_rebinds_with_hello_again_from_new_socket() {
         old_addr, new_addr,
         "test must emulate a changed NAT binding"
     );
-    client.socket = Some(new_socket);
+    client.transport.socket = Some(new_socket);
     client.start_inline_reader_session();
 
     let need = pack_server_packet(&client.cfg.mac_key, Command::NeedHelloAgain, &[]);
@@ -986,7 +993,7 @@ fn data_read_decodes_regular_data_without_recv_event_backlog() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
@@ -1018,7 +1025,7 @@ fn reader_err_emu_drop_updates_stats_without_recv_event_backlog() {
     let client_addr = client_sock.local_addr().unwrap();
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.start_inline_reader_session();
 
     // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
@@ -1079,7 +1086,7 @@ fn generic_send_error_logs_without_force_disconnect() {
         ntp_host: None,
         refresh: RefreshConfig::default(),
     });
-    client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     let incompatible_addr: SocketAddr = "[::1]:9".parse().unwrap();
 
     client.dispatch_send(Command::Ping.to_byte(), &[0xAA], None, incompatible_addr);

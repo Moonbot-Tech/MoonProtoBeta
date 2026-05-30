@@ -91,7 +91,7 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
     client.metrics.total_recv = 5678;
     client.rs = 0.25;
     client.used_sliced_limit = true;
-    client.recvd_slider.has_new_data = true;
+    client.recv.recvd_slider.has_new_data = true;
     client.last_online = 999;
     client.last_sent_hello = 888;
 
@@ -117,7 +117,7 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
     assert_eq!(client.metrics.total_recv, 0);
     assert_eq!(client.rs, 1.0);
     assert!(!client.used_sliced_limit);
-    assert!(!client.recvd_slider.has_new_data);
+    assert!(!client.recv.recvd_slider.has_new_data);
     assert_eq!(client.last_online, 0);
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
 }
@@ -276,14 +276,14 @@ fn ping_ack_does_not_drop_pending_h_until_writer_copy_apply() {
         "Delphi DataReadInt(MPC_Ping) writes TmpSlider only; PendingH is writer work"
     );
     assert!(client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-    assert!(!client.recvd_slider.has_new_data);
+    assert!(!client.recv.recvd_slider.has_new_data);
 
     ProtocolCore {
         client: &mut client,
     }
     .copy_recvd_data();
     assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-    assert!(client.recvd_slider.has_new_data);
+    assert!(client.recv.recvd_slider.has_new_data);
 
     ProtocolCore {
         client: &mut client,
@@ -309,7 +309,7 @@ fn ping_ack_reader_core_is_not_reapplied_by_main_ping_branch() {
     }
     .copy_recvd_data();
     assert!(!client.send_lock.lock().unwrap().tmp_slider.has_new_data);
-    assert!(client.recvd_slider.has_new_data);
+    assert!(client.recv.recvd_slider.has_new_data);
 
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_for_cb = Arc::clone(&delivered);
@@ -426,10 +426,10 @@ fn high_u_key_cleanup_runs_after_regular_ack_like_delphi() {
     client.pending_h.push(not_acked_same_key);
 
     {
-        client.recvd_slider.start_num = 40;
-        client.recvd_slider.bit_field[0] = 1 << 2;
-        client.recvd_slider.has_new_data = true;
-        client.recvd_slider.r_count = 1;
+        client.recv.recvd_slider.start_num = 40;
+        client.recv.recvd_slider.bit_field[0] = 1 << 2;
+        client.recv.recvd_slider.has_new_data = true;
+        client.recv.recvd_slider.r_count = 1;
     }
 
     let new_high = SendItem {
@@ -579,7 +579,7 @@ fn do_send_mp_data_sends_current_item_direct_when_buffer_is_smaller_like_delphi(
     let mut cfg = dummy_cfg();
     cfg.server_port = server_addr.port();
     let mut client = Client::new(cfg);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.actual_pmtu = 100;
 
     let small = SendItem {
@@ -644,7 +644,7 @@ fn low_priority_items_are_split_around_sliced_retry_like_delphi() {
     let mut cfg = dummy_cfg();
     cfg.server_port = server_addr.port();
     let mut client = Client::new(cfg);
-    client.socket = Some(client_sock);
+    client.transport.socket = Some(client_sock);
     client.actual_pmtu = 508;
     client.round_trip_delay = 0;
     client.trip_delay_k = 1.1;
@@ -1098,7 +1098,7 @@ fn send_lock_snapshot_copies_send_acks_and_tmp_slider_atomically_like_delphi() {
     assert!(low.is_empty());
     assert_eq!(acks.len(), 1);
     assert_eq!(acks[0].datagram_num, 9);
-    assert!(client.recvd_slider.has_new_data);
+    assert!(client.recv.recvd_slider.has_new_data);
     let send_lock = client.send_lock.lock().unwrap();
     assert!(send_lock.send_queues.is_empty());
     assert!(send_lock.incoming_sliced_acks.is_empty());

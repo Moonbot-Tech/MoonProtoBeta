@@ -2,31 +2,34 @@ use super::*;
 
 impl Client {
     pub(crate) fn set_runtime_shutdown_flag(&mut self, flag: Arc<AtomicBool>) {
-        self.runtime_shutdown = flag;
+        self.lifecycle.runtime_shutdown = flag;
     }
 
     pub(crate) fn shutdown_requested(&self) -> bool {
-        self.runtime_shutdown.load(Ordering::Relaxed)
+        self.lifecycle.runtime_shutdown.load(Ordering::Relaxed)
     }
 
     pub(crate) fn start_inline_reader_session(&mut self) {
-        self.recv_slicer = slicing::SlicingReceiver::new();
+        self.transport.recv_slicer = slicing::SlicingReceiver::new();
         self.register_recv_poller();
     }
 
     pub(crate) fn clear_recv_poller(&mut self) {
-        if let (Some(poller), Some(sock)) = (self.recv_poller.as_ref(), self.socket.as_ref()) {
+        if let (Some(poller), Some(sock)) = (
+            self.transport.recv_poller.as_ref(),
+            self.transport.socket.as_ref(),
+        ) {
             if let Err(e) = poller.delete(sock) {
                 log::warn!(target: "moonproto::reader", "UDP poller delete failed: {e}");
             }
         }
-        self.recv_poller = None;
-        self.recv_events.clear();
+        self.transport.recv_poller = None;
+        self.transport.recv_events.clear();
     }
 
     pub(crate) fn register_recv_poller(&mut self) {
         self.clear_recv_poller();
-        let Some(sock) = self.socket.as_ref() else {
+        let Some(sock) = self.transport.socket.as_ref() else {
             return;
         };
         if let Err(e) = sock.set_nonblocking(true) {
@@ -49,7 +52,7 @@ impl Client {
                 "UDP poller add failed: {e}; falling back to 5ms nonblocking recv probe");
             return;
         }
-        self.recv_poller = Some(poller);
+        self.transport.recv_poller = Some(poller);
     }
 
     /// `GetTimeMS` equivalent: monotonic milliseconds since this `Client`
@@ -74,14 +77,14 @@ impl Client {
     /// repeated DNS/`getaddrinfo` work. On resolve failure, packets are not sent
     /// and the failure is logged.
     pub(crate) fn server_socket_addr(&mut self) -> Option<SocketAddr> {
-        if let Some(addr) = self.cached_server_addr {
+        if let Some(addr) = self.transport.cached_server_addr {
             return Some(addr);
         }
         let key = format!("{}:{}", self.cfg.server_ip, self.cfg.server_port);
         match key.to_socket_addrs() {
             Ok(mut iter) => {
                 if let Some(addr) = iter.next() {
-                    self.cached_server_addr = Some(addr);
+                    self.transport.cached_server_addr = Some(addr);
                     return Some(addr);
                 }
                 if self.should_log("server_addr_empty", 5000) {
@@ -112,14 +115,14 @@ impl Client {
         let lifecycle_pair = if self.lifecycle_event_sender_installed() {
             None
         } else {
-            self.lifecycle_cb.take().map(|cb| {
+            self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
                 (rx, cb)
             })
         };
         let clear_lifecycle_app_tx = lifecycle_pair.is_some();
-        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
             let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
@@ -156,14 +159,16 @@ impl Client {
             }
         });
         if restored_lifecycle_cb.is_some() {
-            self.lifecycle_cb = restored_lifecycle_cb;
+            self.lifecycle.lifecycle_cb = restored_lifecycle_cb;
         }
     }
 
     /// Send LogOff and close socket. Call when done.
     /// Matches TMoonProtoBaseClient.Disconnect (Common.pas:290-298)
     pub fn disconnect(&mut self) {
-        self.runtime_shutdown.store(true, Ordering::Relaxed);
+        self.lifecycle
+            .runtime_shutdown
+            .store(true, Ordering::Relaxed);
         self.need_connect = false;
         self.force_disconnect = true;
         self.authorized = false;

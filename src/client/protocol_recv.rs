@@ -45,7 +45,7 @@ impl ProtocolCore<'_> {
                 break;
             }
             let recv_result = {
-                let Some(sock) = self.client.socket.as_ref() else {
+                let Some(sock) = self.client.transport.socket.as_ref() else {
                     break;
                 };
                 sock.recv_from(&mut buf)
@@ -100,14 +100,14 @@ impl ProtocolCore<'_> {
 
     pub(crate) fn rearm_recv_poller(&mut self) {
         let (Some(poller), Some(sock)) = (
-            self.client.recv_poller.as_ref(),
-            self.client.socket.as_ref(),
+            self.client.transport.recv_poller.as_ref(),
+            self.client.transport.socket.as_ref(),
         ) else {
             return;
         };
         if let Err(e) = poller.modify(sock, PollEvent::readable(1)) {
             log::warn!(target: "moonproto::reader", "UDP poller rearm failed: {e}");
-            self.client.recv_poller = None;
+            self.client.transport.recv_poller = None;
         }
     }
 
@@ -126,7 +126,7 @@ impl ProtocolCore<'_> {
 
         let continue_recv = if let Some((hdr, payload)) =
             crate::transport::transport_unpack_with_mac(
-                &self.client.mac_ctx,
+                &self.client.transport.mac_ctx,
                 &self.client.cfg.mac_key,
                 datagram,
                 self.client.cfg.mask_ver.to_byte(),
@@ -228,8 +228,11 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
         protocol_wait: &mut Duration,
     ) -> bool {
-        self.client.recv_slicer.set_last_online(timestamp_ms);
-        self.client.recv_slicer.do_cleanup();
+        self.client
+            .transport
+            .recv_slicer
+            .set_last_online(timestamp_ms);
+        self.client.transport.recv_slicer.do_cleanup();
 
         match Command::from_byte(raw_cmd) {
             Command::Ping => {
@@ -340,7 +343,7 @@ impl ProtocolCore<'_> {
             return;
         }
         let decoded = Client::decode_data_read_int_payload_shared(
-            &mut self.client.data_read_state,
+            &mut self.client.recv.data_read_state,
             raw_cmd,
             payload,
         );
@@ -373,7 +376,7 @@ impl ProtocolCore<'_> {
             return;
         }
         let Some((cmd, payload)) = Client::decode_data_read_int_payload_owned(
-            &mut self.client.data_read_state,
+            &mut self.client.recv.data_read_state,
             raw_cmd,
             payload,
         ) else {

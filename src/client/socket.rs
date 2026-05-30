@@ -1,6 +1,65 @@
 //! UDP socket options used by the MoonProto client.
 
-use std::net::UdpSocket;
+use crate::protocol::slicing;
+use polling::{Events as PollEvents, Poller};
+use std::net::{SocketAddr, UdpSocket};
+
+/// Transport state carved out of [`super::Client`]: the UDP socket, the
+/// receive/send buffers, the slicing receiver, the bind-port cursor, the cached
+/// server address, and the bind-failure tracking. These are the hot recv/send
+/// path. Field names, types, and meaning are unchanged from when they lived
+/// directly on `Client`.
+///
+/// Note: `last_socket_recreate` is **not** here — it is a reconnect-throttle
+/// clock owned by the handshake/reconnect core and stays on `Client`.
+pub(crate) struct ClientTransport {
+    /// Main-thread UDP socket. `None` until the first successful `bind_socket`.
+    pub(crate) socket: Option<UdpSocket>,
+    /// Sliced-datagram reassembly receiver (matches Delphi `SlicingReceiver`).
+    pub(crate) recv_slicer: slicing::SlicingReceiver,
+    /// Readiness poller registered on `socket`; `None` when polling is unavailable
+    /// (falls back to a 5 ms nonblocking recv probe).
+    pub(crate) recv_poller: Option<Poller>,
+    /// Reusable event buffer for `recv_poller.wait`.
+    pub(crate) recv_events: PollEvents,
+    /// Cached resolved server address; cleared on bind and on a resolve error.
+    pub(crate) cached_server_addr: Option<SocketAddr>,
+    /// Next UDP bind port to try (200-port walk in `bind_socket`).
+    pub(crate) next_port: u16,
+    /// How many consecutive `bind_socket` 200-port walks failed (for `BindFailed`).
+    pub(crate) bind_failure_streak: u32,
+    /// Wall-clock ms of the first bind failure in the current streak.
+    pub(crate) first_bind_failure_ms: i64,
+    /// Wall-clock ms of the last emitted `BindFailed` event (event throttle).
+    pub(crate) last_bind_failed_event_ms: i64,
+    /// Cached MAC context (ipad CRC + opad block) for `cfg.mac_key` — fixed for
+    /// the whole life of the Client, reused by the recv/send phases.
+    pub(crate) mac_ctx: crate::transport::MacContext,
+    /// Delphi `SentCountDNS` equivalent for transport mode V2.
+    pub(crate) transport_mode_state: crate::transport::ClientTransportModeState,
+    /// Reusable client transport pack buffer — reused across outgoing packets to
+    /// avoid an alloc/dealloc per send; capacity grows up to the peak packet size.
+    pub(crate) send_buf: Vec<u8>,
+}
+
+impl ClientTransport {
+    pub(crate) fn new(mac_ctx: crate::transport::MacContext, next_port: u16) -> Self {
+        Self {
+            socket: None,
+            recv_slicer: slicing::SlicingReceiver::new(),
+            recv_poller: None,
+            recv_events: PollEvents::new(),
+            cached_server_addr: None,
+            next_port,
+            bind_failure_streak: 0,
+            first_bind_failure_ms: super::constants::NEVER_TIME_MS,
+            last_bind_failed_event_ms: super::constants::NEVER_TIME_MS,
+            mac_ctx,
+            transport_mode_state: crate::transport::ClientTransportModeState::new(),
+            send_buf: Vec::with_capacity(2048), // typical send packet ~500-1500 bytes
+        }
+    }
+}
 
 /// Set SO_RCVBUF + SO_SNDBUF to 8 MB via socket2 (cross-platform).
 /// Closes ARCH §30 ("UDP buffer sizes — must be substantially larger than sysctl defaults").

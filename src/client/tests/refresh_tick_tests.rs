@@ -41,7 +41,7 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
         update_markets_every: Some(Duration::from_millis(1)),
         check_tags_every: Some(Duration::from_millis(1)),
     }));
-    client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
@@ -81,7 +81,7 @@ fn run_loop_does_not_refresh_between_auth_done_and_domain_init() {
 #[test]
 fn default_refresh_starts_after_domain_init() {
     let mut client = Client::new(dummy_cfg(RefreshConfig::default()));
-    client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;

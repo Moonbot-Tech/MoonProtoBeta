@@ -36,6 +36,7 @@ fn pack_server_packet(mac_key: &MoonKey, cmd: Command, payload: &[u8]) -> Vec<u8
 
 fn send_server_packet_to_client_socket(client: &Client, cmd: Command, payload: &[u8]) {
     let addr = client
+        .transport
         .socket
         .as_ref()
         .expect("client socket")
@@ -127,7 +128,7 @@ fn raw_run_delivers_callback_on_app_thread() {
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
 
     let caller_thread = thread::current().id();
@@ -154,7 +155,7 @@ fn raw_run_delivers_callback_on_app_thread() {
 fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
 
     let (started_tx, started_rx) = mpsc::channel();
@@ -190,7 +191,7 @@ fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
 #[test]
 fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
     let mut client = Client::new(dummy_cfg());
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     client.auth_status = AuthStatus::Connected;
     client.prev_auth_status = AuthStatus::Base;
 
@@ -227,7 +228,7 @@ fn lifecycle_callback_block_does_not_extend_protocol_writer_tick() {
 fn app_send_queue_is_not_blocked_by_data_read_delivery() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     let mut dispatcher = EventDispatcher::new();
 
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
@@ -254,7 +255,7 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
-    client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     client.register_recv_poller();
 
     send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);

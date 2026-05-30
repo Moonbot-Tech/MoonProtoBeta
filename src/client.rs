@@ -23,7 +23,7 @@ use log::{debug, error, warn};
 // MoonProto UDP Client architecture follows Delphi receive machine effects
 // inside one ProtocolCore owner: recv drain, immediate service replies,
 // domain dispatch enqueue, then send/maintenance.
-use polling::{Event as PollEvent, Events as PollEvents, Poller};
+use polling::{Event as PollEvent, Poller};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -132,18 +132,21 @@ use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
 use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
+use lifecycle::ClientLifecycle;
 use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
 #[cfg(test)]
 pub(crate) use send_queue::SendQueues;
 pub(crate) use send_queue::{initial_retry_left, SendItem, SendLockState};
 pub(crate) use sender::ClientSenderShared;
-use socket::{set_dont_fragment_for_socket, set_socket_buffers};
+use socket::{set_dont_fragment_for_socket, set_socket_buffers, ClientTransport};
 pub(crate) use subscriptions::{
     refresh_subscription_summary, DomainRestoreIntent, PendingTradesUnsubscribe,
     SubscriptionRegistry, SubscriptionRegistrySummary,
 };
-pub(crate) use transport_state::{DataReadState, ReaderSlicedStats, SentSliced, SlicedAck};
+pub(crate) use transport_state::{
+    DataReadState, ReaderSlicedStats, RecvState, SentSliced, SlicedAck,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HelloWaitState {
@@ -224,8 +227,12 @@ impl SessionIdentity {
 pub struct Client {
     cfg: ClientConfig,
 
-    app_queue_alive: Arc<AtomicBool>,
-    runtime_shutdown: Arc<AtomicBool>,
+    /// Runtime/lifecycle state: the lifecycle callback plumbing
+    /// (`lifecycle_cb`/`lifecycle_app_tx`), the first-Connected marker
+    /// (`was_ever_connected`), and the shutdown/queue flags shared with the
+    /// runtime thread and `ClientSender` (`app_queue_alive`/`runtime_shutdown`).
+    /// See [`ClientLifecycle`].
+    lifecycle: ClientLifecycle,
     // Delphi `SendLock`: raw send queues, SlicedACK queue, and TmpSlider are
     // copied as one short writer snapshot before CheckSeningData.
     send_lock: Arc<Mutex<SendLockState>>,
@@ -235,11 +242,11 @@ pub struct Client {
     // Sent Sliced datagrams awaiting ACK (matches TMoonProtoClient.Sending)
     sending: Vec<SentSliced>,
 
-    // Main thread state
-    socket: Option<UdpSocket>,
-    recv_slicer: slicing::SlicingReceiver,
-    recv_poller: Option<Poller>,
-    recv_events: PollEvents,
+    // Transport: UDP socket, recv/send buffers, slicing receiver, bind-port
+    // cursor, cached server address, bind-failure tracking, MacContext and the
+    // V2 transport-mode state. The hot recv/send path. `last_socket_recreate`
+    // stays on `Client` (reconnect-throttle clock). See [`ClientTransport`].
+    transport: ClientTransport,
     connected: bool, // FConnected: true after first valid packet received
     authorized: bool,
     last_online: i64,
@@ -316,15 +323,11 @@ pub struct Client {
     copy_send_low: Vec<SendItem>,
     copy_sliced_acks: Vec<SlicedAck>,
 
-    // Delphi DataReadInt receive state that survives soft reconnect: MPSlider
-    // replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider lives in
-    // SendLockState so the send phase copies it atomically with ACK queues.
-    data_read_state: DataReadState,
-    // Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
-    // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
-    // RecvdSlider and only then drops ACKed PendingH.
-    recvd_slider: Slider,
-    next_port: u16,
+    // Receive/replay state grouped off the Client God object: the Delphi
+    // DataReadInt receive state (`data_read_state` — MPSlider replay/ACK bitmap,
+    // SizeAck series, decode cipher) and the `recvd_slider` server-ACK bitmap
+    // copied from TmpSlider. Both survive a soft reconnect. See [`RecvState`].
+    recv: RecvState,
     ping_count: u32,
 
     /// Registry of pending Engine API requests.
@@ -332,21 +335,11 @@ pub struct Client {
     /// to the registered receiver if the UID is found.
     api_pending: Arc<ApiPending>,
 
-    /// Lifecycle callback — queued on channel status change (Connecting -> Connected{fresh} -> Reconnecting/Disconnected).
-    /// Set it via `client.on_lifecycle(cb)`. Optional.
-    lifecycle_cb: Option<LifecycleFn>,
-    lifecycle_app_tx: Arc<Mutex<Option<mpsc::Sender<LifecycleEvent>>>>,
     /// Delphi `cfg.MoonProtoConfig.ServerUpdateSent`: set by UI commands that
     /// can make the server restart/change routing; consumed by BaseCheck init.
     server_update_sent: Arc<AtomicBool>,
     /// Previous auth_status (for detecting transitions).
     prev_auth_status: AuthStatus,
-
-    /// Cached resolved server address. Closes B-05: previously `server_addr()` formatted
-    /// a string and `send_to(&str)` ran a `getaddrinfo` resolve on every send (potentially
-    /// DNS-blocking). The cache is cleared on a resolve error (e.g. DNS went down) — it is
-    /// re-resolved on the next bind_socket.
-    cached_server_addr: Option<SocketAddr>,
 
     /// **Active library — subscription registry**: what the app asked to subscribe.
     /// The transport handshake does not send this registry before Init. After Init,
@@ -366,11 +359,6 @@ pub struct Client {
     /// Saved intent of the first and only init pass. Needed for post-reconnect
     /// restore without a second Init.
     domain_restore: DomainRestoreIntent,
-
-    /// Whether a successful Connected ever happened (`Fine` received >=1 time).
-    /// Used in `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
-    /// on the FIRST Connected; for all later ones `fresh = false`.
-    was_ever_connected: bool,
 
     /// Internal full-candles snapshot collectors by `request_uid`. Filled by
     /// the automatic Active Lib snapshot request and cleared when the
@@ -456,16 +444,9 @@ pub struct Client {
     /// `MoonProtoEngine.pas:1483 CheckMissingTradesPackets`.
     last_trades_tick_ms: i64,
 
-    /// How many times in a row the whole 200-port retry in `bind_socket` failed. It is
-    /// incremented on each failure series (= one main loop tick where all 200 ports were
-    /// rejected); on the first successful bind it resets to 0. Used to emit
-    /// `LifecycleEvent::BindFailed`. The event is throttled by real elapsed time:
-    /// the first signal after 15s of continuous failures, then no more than once per 50s.
-    /// See audit H9.
-    bind_failure_streak: u32,
-    first_bind_failure_ms: i64,
-    last_bind_failed_event_ms: i64,
-
+    // Bind-failure tracking (`bind_failure_streak`, `first_bind_failure_ms`,
+    // `last_bind_failed_event_ms`) — emits `LifecycleEvent::BindFailed`, audit
+    // H9 — now lives on [`Self::transport`].
     /// Guard for the shared process-level NTP syncer (if `cfg.ntp_host = Some`).
     /// Dropping the last guard stops the worker. This matches Delphi's single
     /// `TMoonProtoTymeSyncer` for the process instead of a worker per client.
@@ -509,24 +490,8 @@ pub struct Client {
     /// off-by-50-1000ms timestamps in orders (the last Client overwrites the
     /// delta of all the others).
     server_time_delta_handle: Arc<std::sync::atomic::AtomicU64>,
-
-    /// Cached MAC context — the ipad CRC + opad block computed once for `cfg.mac_key`.
-    /// Used on the transport pack/unpack hot-path instead of recomputing HMAC ipad/opad
-    /// (128 XOR + crc32c) for every packet. See `crate::transport::MacContext`.
-    ///
-    /// Since `mac_key` is fixed for the whole life of the Client (it comes in
-    /// ClientConfig and never changes), this context is also fixed and
-    /// reused by the receive/send phases.
-    mac_ctx: crate::transport::MacContext,
-
-    /// Delphi `SentCountDNS` equivalent for transport mode V2.
-    /// Lives on the client, not in a global/static transport helper.
-    transport_mode_state: crate::transport::ClientTransportModeState,
-
-    /// Reusable buffer for client transport pack — saves an alloc/dealloc on every
-    /// outgoing packet. Capacity grows up to the peak packet size and is reused.
-    /// audit_rust_quality #4: 50K pps × 1500B = 75 MB/s of allocator pressure eliminated.
-    send_buf: Vec<u8>,
+    // `mac_ctx`, `transport_mode_state`, and `send_buf` now live on
+    // [`Self::transport`]; see [`ClientTransport`].
 }
 
 impl Client {
@@ -613,15 +578,14 @@ impl Client {
 
         Self {
             cfg,
-            app_queue_alive,
-            runtime_shutdown,
+            lifecycle: ClientLifecycle::new(app_queue_alive, runtime_shutdown),
             send_lock,
             pending_h: Vec::new(),
             sending: Vec::new(),
-            socket: None,
-            recv_slicer: slicing::SlicingReceiver::new(),
-            recv_poller: None,
-            recv_events: PollEvents::new(),
+            transport: ClientTransport::new(
+                mac_ctx,
+                1024 + (rand::random::<u16>() % (65000 - 1024)),
+            ),
             connected: false,
             authorized: false,
             last_online: 0,
@@ -676,22 +640,16 @@ impl Client {
             copy_send_high: Vec::new(),
             copy_send_low: Vec::new(),
             copy_sliced_acks: Vec::new(),
-            data_read_state: DataReadState::new(),
-            recvd_slider: Slider::new(),
-            next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
+            recv: RecvState::new(),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
-            lifecycle_cb: None,
-            lifecycle_app_tx: Arc::new(Mutex::new(None)),
             server_update_sent: Arc::new(AtomicBool::new(false)),
             prev_auth_status: AuthStatus::Base,
-            cached_server_addr: None,
             subscription_registry: Arc::new(Mutex::new(SubscriptionRegistry::default())),
             subscription_summary,
             subscription_trades_scope,
             domain_ready_flag,
             domain_restore: DomainRestoreIntent::default(),
-            was_ever_connected: false,
             pending_candles: HashMap::new(),
             tracked_indexes_peer_app_token: 0,
             indexes_fetch_in_flight: false,
@@ -708,9 +666,6 @@ impl Client {
             pending_trades_resubscribe_after_ms: None,
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
-            bind_failure_streak: 0,
-            first_bind_failure_ms: NEVER_TIME_MS,
-            last_bind_failed_event_ms: NEVER_TIME_MS,
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             identity: SessionIdentity::new(),
@@ -720,9 +675,6 @@ impl Client {
             check_tags_hour_slot: i64::MIN,
             check_tags_burst_sent: CHECK_TAGS_BURST_COUNT,
             last_check_tags_burst_ms: i64::MIN / 2,
-            mac_ctx,
-            transport_mode_state: crate::transport::ClientTransportModeState::new(),
-            send_buf: Vec::with_capacity(2048), // typical send packet ~500-1500 bytes
         }
     }
 
@@ -767,7 +719,9 @@ impl Client {
 /// this was the last client, the shared NTP worker stops.
 impl Drop for Client {
     fn drop(&mut self) {
-        self.app_queue_alive.store(false, Ordering::Relaxed);
+        self.lifecycle
+            .app_queue_alive
+            .store(false, Ordering::Relaxed);
         self.clear_recv_poller();
     }
 }

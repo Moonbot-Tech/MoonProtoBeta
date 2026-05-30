@@ -66,14 +66,14 @@ impl Client {
         let lifecycle_pair = if self.lifecycle_event_sender_installed() {
             None
         } else {
-            self.lifecycle_cb.take().map(|cb| {
+            self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
                 (rx, cb)
             })
         };
         let clear_lifecycle_app_tx = lifecycle_pair.is_some();
-        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         let mut result = None;
         thread::scope(|scope| {
@@ -107,7 +107,7 @@ impl Client {
             }
         });
         if restored_lifecycle_cb.is_some() {
-            self.lifecycle_cb = restored_lifecycle_cb;
+            self.lifecycle.lifecycle_cb = restored_lifecycle_cb;
         }
         result.expect("dispatcher pump closure must run")
     }
@@ -121,14 +121,14 @@ impl Client {
         let lifecycle_pair = if self.lifecycle_event_sender_installed() {
             None
         } else {
-            self.lifecycle_cb.take().map(|cb| {
+            self.lifecycle.lifecycle_cb.take().map(|cb| {
                 let (tx, rx) = mpsc::channel::<LifecycleEvent>();
-                *self.lifecycle_app_tx.lock().unwrap() = Some(tx);
+                *self.lifecycle.lifecycle_app_tx.lock().unwrap() = Some(tx);
                 (rx, cb)
             })
         };
         let clear_lifecycle_app_tx = lifecycle_pair.is_some();
-        let lifecycle_app_tx = Arc::clone(&self.lifecycle_app_tx);
+        let lifecycle_app_tx = Arc::clone(&self.lifecycle.lifecycle_app_tx);
         let mut restored_lifecycle_cb: Option<LifecycleFn> = None;
         thread::scope(|scope| {
             let lifecycle_handle = lifecycle_pair.map(|(rx, cb)| {
@@ -162,7 +162,7 @@ impl Client {
             }
         });
         if restored_lifecycle_cb.is_some() {
-            self.lifecycle_cb = restored_lifecycle_cb;
+            self.lifecycle.lifecycle_cb = restored_lifecycle_cb;
         }
     }
 }

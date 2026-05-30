@@ -2,22 +2,60 @@
 
 use super::*;
 
+/// Runtime/lifecycle state carved out of [`super::Client`].
+///
+/// Groups the lifecycle callback plumbing (`lifecycle_cb`/`lifecycle_app_tx`),
+/// the first-Connected marker (`was_ever_connected`), and the two shutdown/queue
+/// flags shared with the runtime thread and `ClientSender` (`app_queue_alive`,
+/// `runtime_shutdown`). Field names, types, and meaning are unchanged from when
+/// they lived directly on `Client`.
+pub(crate) struct ClientLifecycle {
+    /// Mirrors the app-queue-alive flag handed to every `ClientSender`. Cleared
+    /// on `Drop` so senders stop enqueueing once the owning client is gone.
+    pub(crate) app_queue_alive: Arc<AtomicBool>,
+    /// Set by the active runtime owner; polled by the protocol loop to break out.
+    pub(crate) runtime_shutdown: Arc<AtomicBool>,
+    /// Lifecycle callback — queued on channel status change (Connecting ->
+    /// Connected{fresh} -> Reconnecting/Disconnected). Set via
+    /// `client.on_lifecycle(cb)`. Optional.
+    pub(crate) lifecycle_cb: Option<LifecycleFn>,
+    /// Shared lifecycle event sender used when the callback is driven from a
+    /// dedicated queue thread instead of inline.
+    pub(crate) lifecycle_app_tx: Arc<Mutex<Option<mpsc::Sender<LifecycleEvent>>>>,
+    /// Whether a successful Connected ever happened (`Fine` received >=1 time).
+    /// Used in `LifecycleEvent::Connected { fresh }` — `fresh = !was_ever_connected`
+    /// on the FIRST Connected; for all later ones `fresh = false`.
+    pub(crate) was_ever_connected: bool,
+}
+
+impl ClientLifecycle {
+    pub(crate) fn new(app_queue_alive: Arc<AtomicBool>, runtime_shutdown: Arc<AtomicBool>) -> Self {
+        Self {
+            app_queue_alive,
+            runtime_shutdown,
+            lifecycle_cb: None,
+            lifecycle_app_tx: Arc::new(Mutex::new(None)),
+            was_ever_connected: false,
+        }
+    }
+}
+
 impl Client {
     /// Install the lifecycle callback.
     ///
     /// During `run*` calls the callback is queued outside the protocol writer
     /// tick, matching Delphi `TThread.Queue` for status notifications.
     pub fn on_lifecycle(&mut self, cb: LifecycleFn) {
-        self.lifecycle_cb = Some(cb);
+        self.lifecycle.lifecycle_cb = Some(cb);
     }
 
     pub(super) fn set_lifecycle_event_sender(&self, tx: Option<mpsc::Sender<LifecycleEvent>>) {
-        *self.lifecycle_app_tx.lock().unwrap() = tx;
+        *self.lifecycle.lifecycle_app_tx.lock().unwrap() = tx;
     }
 
     #[cfg(test)]
     pub(super) fn lifecycle_event_sender_installed(&self) -> bool {
-        self.lifecycle_app_tx.lock().unwrap().is_some()
+        self.lifecycle.lifecycle_app_tx.lock().unwrap().is_some()
     }
 
     /// Mark Delphi `ServerUpdateSent`.
@@ -43,12 +81,12 @@ impl Client {
     /// Internal hook: invokes the callback on a state transition.
     /// Must be called wherever `self.auth_status` or `self.need_connect` changes.
     pub(super) fn fire_lifecycle(&mut self, ev: LifecycleEvent) {
-        let tx = self.lifecycle_app_tx.lock().unwrap().clone();
+        let tx = self.lifecycle.lifecycle_app_tx.lock().unwrap().clone();
         if let Some(tx) = tx {
             let _ = tx.send(ev);
             return;
         }
-        if let Some(ref mut cb) = self.lifecycle_cb {
+        if let Some(ref mut cb) = self.lifecycle.lifecycle_cb {
             cb(ev);
         }
     }
@@ -68,8 +106,8 @@ impl Client {
             // Connected of the session. Afterwards was_ever_connected becomes true and all
             // subsequent re-handshakes send `fresh = false`.
             (_, AuthStatus::AuthDone) if self.prev_auth_status != AuthStatus::AuthDone => {
-                let fresh = !self.was_ever_connected;
-                self.was_ever_connected = true;
+                let fresh = !self.lifecycle.was_ever_connected;
+                self.lifecycle.was_ever_connected = true;
                 Some(LifecycleEvent::Connected { fresh })
             }
             // Connection loss

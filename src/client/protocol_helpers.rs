@@ -114,7 +114,7 @@ impl Client {
         self.net_lag_ping = ((corrected_now_dt - server_time) * 86400000.0).abs() as i64;
 
         // SendPing(var APing): mutate the same Ping struct, then append our ACK half.
-        let (ack_start, ack_words) = self.data_read_state.build_ack_half();
+        let (ack_start, ack_words) = self.recv.data_read_state.build_ack_half();
         let mut response = ping.response_bytes(
             corrected_now_dt,
             total_sent_before_ping,

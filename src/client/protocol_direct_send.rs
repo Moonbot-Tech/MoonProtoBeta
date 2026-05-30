@@ -4,11 +4,11 @@ use super::*;
 impl ProtocolCore<'_> {
     pub(crate) fn apply_regular_hl_ack(&mut self) {
         let recvd_slider = {
-            if !self.client.recvd_slider.has_new_data {
+            if !self.client.recv.recvd_slider.has_new_data {
                 return;
             }
-            self.client.recvd_slider.has_new_data = false;
-            self.client.recvd_slider.clone()
+            self.client.recv.recvd_slider.has_new_data = false;
+            self.client.recv.recvd_slider.clone()
         };
 
         let limit = (recvd_slider.r_count.max(0) as u64) * 64;

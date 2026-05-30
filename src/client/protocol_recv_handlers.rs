@@ -35,16 +35,17 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn on_new_size_test_inline(&mut self, payload: &[u8]) {
-        if let Some(ack) = Client::build_size_ack_payload(&mut self.client.data_read_state, payload)
+        if let Some(ack) =
+            Client::build_size_ack_payload(&mut self.client.recv.data_read_state, payload)
         {
             // Delphi `SendSizeAck`: pad the ack to the tested size and send it
             // with DontFragment. If the OS rejects it as too large, that is the
             // negative PMTU signal; this service packet must not be sliced.
-            if let Some(sock) = self.client.socket.as_ref() {
+            if let Some(sock) = self.client.transport.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, true);
             }
             self.send_command(Command::SizeAck, &ack);
-            if let Some(sock) = self.client.socket.as_ref() {
+            if let Some(sock) = self.client.transport.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, false);
             }
         }
@@ -54,11 +55,11 @@ impl ProtocolCore<'_> {
         if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
             // Same PMTU rule as SizeAck: ProbeMTUAck is intentionally padded to
             // the tested size and sent with DF. EMSGSIZE means "probe failed".
-            if let Some(sock) = self.client.socket.as_ref() {
+            if let Some(sock) = self.client.transport.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, true);
             }
             self.send_command(Command::ProbeMTUAck, &ack);
-            if let Some(sock) = self.client.socket.as_ref() {
+            if let Some(sock) = self.client.transport.socket.as_ref() {
                 set_dont_fragment_for_socket(sock, false);
             }
         }
@@ -78,13 +79,13 @@ impl ProtocolCore<'_> {
             self.client.clear_hello_wait_state();
         }
         if cmd == Command::WantNewHello {
-            self.client.data_read_state.reset();
+            self.client.recv.data_read_state.reset();
             self.client.send_lock.lock().unwrap().reset_tmp_slider();
             self.client.used_sliced_limit = false;
             self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
             self.client.metrics.total_sent.store(0, Ordering::Relaxed);
-            self.client.recvd_slider = Slider::new();
-            self.client.recv_slicer = slicing::SlicingReceiver::new();
+            self.client.recv.recvd_slider = Slider::new();
+            self.client.transport.recv_slicer = slicing::SlicingReceiver::new();
             self.client
                 .metrics
                 .total_recv_shared
@@ -169,7 +170,7 @@ impl ProtocolCore<'_> {
         timestamp_ms: i64,
         mode: &mut RunMode<'_>,
     ) -> bool {
-        let (assembled, ack) = self.client.recv_slicer.on_new_sliced(payload);
+        let (assembled, ack) = self.client.transport.recv_slicer.on_new_sliced(payload);
 
         if slicing::trace_enabled() {
             if let Some(hdr) = slicing::SliceHeader::from_bytes(payload) {
@@ -216,7 +217,11 @@ impl ProtocolCore<'_> {
                 }),
                 mode,
             );
-            self.client.recv_slicer.receiving.remove(&datagram_num);
+            self.client
+                .transport
+                .recv_slicer
+                .receiving
+                .remove(&datagram_num);
         }
 
         true

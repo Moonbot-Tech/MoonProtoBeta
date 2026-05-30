@@ -49,6 +49,36 @@ pub(crate) struct DataReadState {
     pub(crate) data_size_ack_series_num: u16,
 }
 
+/// Receive/replay state carved out of [`super::Client`].
+///
+/// Groups the two distinct receive-side sliders that survive a soft reconnect:
+/// the Delphi `DataReadInt` receive state ([`DataReadState`] — MPSlider replay
+/// bitmap, SizeAck series, decode cipher) and the `RecvdSlider` server-ACK
+/// bitmap. They are reset together on `full_reset`, but through different code
+/// (`data_read_state.reset()` vs replacing `recvd_slider`), so they stay as two
+/// fields here rather than being folded into [`DataReadState`] — that keeps the
+/// `DataReadState` contract (DataReadInt receive state) intact. Field names and
+/// types are unchanged from when they lived directly on `Client`.
+pub(crate) struct RecvState {
+    /// Delphi DataReadInt receive state that survives soft reconnect: MPSlider
+    /// replay/ACK bitmap, SizeAck series, and decode cipher. TmpSlider lives in
+    /// SendLockState so the send phase copies it atomically with ACK queues.
+    pub(crate) data_read_state: DataReadState,
+    /// Delphi RecvdSlider/TmpSlider: server ACK bitmap from incoming MPC_Ping.
+    /// Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
+    /// RecvdSlider and only then drops ACKed PendingH.
+    pub(crate) recvd_slider: Slider,
+}
+
+impl RecvState {
+    pub(crate) fn new() -> Self {
+        Self {
+            data_read_state: DataReadState::new(),
+            recvd_slider: Slider::new(),
+        }
+    }
+}
+
 impl DataReadState {
     pub(crate) fn new() -> Self {
         Self {

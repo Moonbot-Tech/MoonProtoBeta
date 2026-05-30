@@ -22,13 +22,13 @@ impl ProtocolCore<'_> {
     }
 
     pub(crate) fn ensure_socket_bound(&mut self, cur_tm: i64) -> bool {
-        if self.client.socket.is_none() && self.client.need_connect {
+        if self.client.transport.socket.is_none() && self.client.need_connect {
             self.client.bind_socket(cur_tm);
         }
-        if self.client.socket.is_some() && self.client.recv_poller.is_none() {
+        if self.client.transport.socket.is_some() && self.client.transport.recv_poller.is_none() {
             self.client.register_recv_poller();
         }
-        self.client.socket.is_some()
+        self.client.transport.socket.is_some()
     }
 
     pub(crate) fn drain_app_commands(&mut self, cur_tm: i64, mode: &mut RunMode<'_>) {
@@ -43,12 +43,12 @@ impl ProtocolCore<'_> {
             return;
         }
         let timeout = Some(Duration::from_millis(DEFAULT_SLEEP_MS));
-        let Some(poller) = self.client.recv_poller.as_ref() else {
+        let Some(poller) = self.client.transport.recv_poller.as_ref() else {
             thread::sleep(Duration::from_millis(DEFAULT_SLEEP_MS));
             return;
         };
-        self.client.recv_events.clear();
-        match poller.wait(&mut self.client.recv_events, timeout) {
+        self.client.transport.recv_events.clear();
+        match poller.wait(&mut self.client.transport.recv_events, timeout) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => {

@@ -49,7 +49,7 @@ impl ProtocolCore<'_> {
             HelloWaitState::RebindHelloAgain
         } else {
             let state = if self.client.next_primary_hello_new_session
-                || self.client.was_ever_connected
+                || self.client.lifecycle.was_ever_connected
                 || self.client.server_token != 0
             {
                 HelloWaitState::PrimaryHelloNewSession
@@ -139,7 +139,7 @@ impl ProtocolCore<'_> {
             self.send_command(Command::LogOff, &[]);
         }
         self.client.clear_recv_poller();
-        self.client.socket = None;
+        self.client.transport.socket = None;
         if !self.client.soft_reconnect {
             self.client.full_reset();
         }

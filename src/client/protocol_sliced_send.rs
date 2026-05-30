@@ -324,20 +324,20 @@ impl ProtocolCore<'_> {
             let extra = {
                 let slice = &client.sending[idx].slices[block_num];
                 crate::transport::pack_client_packet(
-                    &mut client.send_buf,
-                    &client.mac_ctx,
+                    &mut client.transport.send_buf,
+                    &client.transport.mac_ctx,
                     &client.cfg.mac_key,
                     Command::Sliced.to_byte(),
                     client.cfg.client_id,
                     slice,
                     client.cfg.mask_ver.to_byte(),
-                    &mut client.transport_mode_state,
+                    &mut client.transport.transport_mode_state,
                 )
             };
-            let packet = std::mem::take(&mut client.send_buf);
+            let packet = std::mem::take(&mut client.transport.send_buf);
             client.dispatch_send(Command::Sliced.to_byte(), &packet, extra.as_deref(), addr);
-            client.send_buf = packet;
-            client.send_buf.clear();
+            client.transport.send_buf = packet;
+            client.transport.send_buf.clear();
         }
 
         for idx in to_remove.into_iter().rev() {

@@ -90,6 +90,7 @@ fn pack_server_packet(mac_key: &MoonKey, cmd: Command, payload: &[u8]) -> Vec<u8
 
 fn send_server_packet_to_client_socket(client: &Client, cmd: Command, payload: &[u8]) {
     let addr = client
+        .transport
         .socket
         .as_ref()
         .expect("client socket")
@@ -130,6 +131,7 @@ fn install_server_decode_session(client: &mut Client, server_token: u64) -> Moon
     client.decode_key = decode_key;
     client.encode_cipher = Some(crypto::cipher_from_key(&encode_key));
     client
+        .recv
         .data_read_state
         .set_decode_cipher(crypto::cipher_from_key(&decode_key));
     decode_key
@@ -455,9 +457,9 @@ fn primary_hello_resets_transport_receive_state_before_new_session() {
     client.peer_app_token = 0x7777;
     client.need_connect = true;
     client.last_sent_hello = NEVER_SENT_MS;
-    client.data_read_state.slider.check_revd(5000);
+    client.recv.data_read_state.slider.check_revd(5000);
     assert!(
-        !client.data_read_state.slider.check_revd(1),
+        !client.recv.data_read_state.slider.check_revd(1),
         "test setup must prove the old receive slider would reject fresh low msg_num",
     );
 
@@ -470,7 +472,7 @@ fn primary_hello_resets_transport_receive_state_before_new_session() {
     assert_eq!(client.peer_app_token, 0);
     assert!(!client.authorized);
     assert!(
-        client.data_read_state.slider.check_revd(1),
+        client.recv.data_read_state.slider.check_revd(1),
         "primary Hello starts a new transport session and clears the old replay window",
     );
     assert!(matches!(
@@ -541,7 +543,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     let forged = build_engine_response_payload(0x77, EngineMethod::GetBalance, &[]);
     assert!(
         Client::decode_data_read_int_payload_shared(
-            &mut client.data_read_state,
+            &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &forged,
         )
@@ -550,7 +552,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     );
     assert!(
         Client::decode_data_read_int_payload_owned(
-            &mut client.data_read_state,
+            &mut client.recv.data_read_state,
             Command::API.to_byte(),
             forged,
         )
@@ -565,7 +567,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     let unparseable = vec![0u8; 5];
     assert!(
         Client::decode_data_read_int_payload_shared(
-            &mut client.data_read_state,
+            &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &unparseable,
         )
@@ -582,7 +584,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     ] {
         let ok = build_engine_response_payload(0x88, method, &[]);
         let decoded = Client::decode_data_read_int_payload_shared(
-            &mut client.data_read_state,
+            &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &ok,
         );
@@ -878,7 +880,7 @@ fn failed_compressed_payload_is_delivered_with_real_cmd_like_delphi() {
     // sensitive cmds (Order/Strat/UI/Balance) in decode, so this compressed-fail
     // delivery test uses a non-sensitive command.
     let (cmd, payload) = Client::decode_data_read_int_payload_shared(
-        &mut client.data_read_state,
+        &mut client.recv.data_read_state,
         Command::OrderBook.to_byte() | COMPRESSED_FLAG,
         &compressed_garbage,
     )
@@ -904,7 +906,7 @@ fn owned_data_read_keeps_plain_sliced_payload_allocation() {
     // decode path, not API semantics. API now carries the S1 part-2 gate, which
     // would drop this non-response payload.
     let (cmd, decoded) = Client::decode_data_read_int_payload_owned(
-        &mut client.data_read_state,
+        &mut client.recv.data_read_state,
         Command::Data.to_byte(),
         payload,
     )
@@ -1009,7 +1011,7 @@ fn wait_for_receiver_in_owned_runtime_does_not_overflow_huge_timeout_when_ready(
 #[test]
 fn wait_for_receiver_in_owned_runtime_queues_events_seen_while_waiting() {
     let mut client = Client::new(dummy_cfg());
-    client.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    client.transport.socket = Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     client.need_connect = false;
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;

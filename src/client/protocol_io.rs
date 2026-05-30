@@ -30,28 +30,28 @@ impl Client {
         let Some(addr) = self.server_socket_addr() else {
             return;
         };
-        // Zero-alloc fast path: reuse self.send_buf + cached MacContext.
+        // Zero-alloc fast path: reuse self.transport.send_buf + cached MacContext.
         let extra = crate::transport::pack_client_packet(
-            &mut self.send_buf,
-            &self.mac_ctx,
+            &mut self.transport.send_buf,
+            &self.transport.mac_ctx,
             &self.cfg.mac_key,
             cmd,
             self.cfg.client_id,
             payload,
             self.cfg.mask_ver.to_byte(),
-            &mut self.transport_mode_state,
+            &mut self.transport.transport_mode_state,
         );
         // Take the packet out so the borrow checker does not complain about a double
         // &mut self (dispatch_send takes &mut self and does not need send_buf after the
         // copy into the socket). We take a slice from send_buf — it lives in self, and
         // socket.send_to does not retain the reference. SAFETY pattern: take/restore so
-        // that &mut self in dispatch_send does not overlap with &self.send_buf — but
+        // that &mut self in dispatch_send does not overlap with &self.transport.send_buf — but
         // simpler: pass the slice via an owned vec swap.
-        let packet = std::mem::take(&mut self.send_buf);
+        let packet = std::mem::take(&mut self.transport.send_buf);
         self.dispatch_send(cmd, &packet, extra.as_deref(), addr);
         // Return the buffer (capacity preserved, content not needed right now).
-        self.send_buf = packet;
-        self.send_buf.clear();
+        self.transport.send_buf = packet;
+        self.transport.send_buf.clear();
     }
 
     pub(crate) fn send_raw_packet(&mut self, cmd: Command, payload: &[u8]) {
@@ -59,19 +59,19 @@ impl Client {
             return;
         };
         let extra = crate::transport::pack_client_packet(
-            &mut self.send_buf,
-            &self.mac_ctx,
+            &mut self.transport.send_buf,
+            &self.transport.mac_ctx,
             &self.cfg.mac_key,
             cmd.to_byte(),
             self.cfg.client_id,
             payload,
             self.cfg.mask_ver.to_byte(),
-            &mut self.transport_mode_state,
+            &mut self.transport.transport_mode_state,
         );
-        let packet = std::mem::take(&mut self.send_buf);
+        let packet = std::mem::take(&mut self.transport.send_buf);
         self.dispatch_send(cmd.to_byte(), &packet, extra.as_deref(), addr);
-        self.send_buf = packet;
-        self.send_buf.clear();
+        self.transport.send_buf = packet;
+        self.transport.send_buf.clear();
     }
 
     /// Actually sends the packet (plus an optional extra transport packet) with error handling.
@@ -127,11 +127,11 @@ impl Client {
         }
         // First perform the network operations, collecting the Results into owned
         // variables, then process them through self.should_log without a conflicting borrow.
-        let extra_result = match (extra, self.socket.as_ref()) {
+        let extra_result = match (extra, self.transport.socket.as_ref()) {
             (Some(extra_pkt), Some(sock)) => Some(sock.send_to(extra_pkt, addr)),
             _ => None,
         };
-        let main_result = match self.socket.as_ref() {
+        let main_result = match self.transport.socket.as_ref() {
             Some(sock) => sock.send_to(packet, addr),
             None => return,
         };

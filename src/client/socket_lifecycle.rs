@@ -11,20 +11,20 @@ impl Client {
         self.metrics.total_recv_shared.store(0, Ordering::Relaxed);
         self.rs = 1.0;
         self.used_sliced_limit = false;
-        self.data_read_state.reset();
+        self.recv.data_read_state.reset();
         self.send_lock.lock().unwrap().reset_tmp_slider();
-        self.recvd_slider = Slider::new();
-        self.recv_slicer = slicing::SlicingReceiver::new();
+        self.recv.recvd_slider = Slider::new();
+        self.transport.recv_slicer = slicing::SlicingReceiver::new();
         self.last_online = 0;
         self.last_sent_hello = NEVER_SENT_MS;
         self.clear_hello_wait_state();
     }
 
     pub(crate) fn bind_socket(&mut self, cur_tm: i64) {
-        self.transport_mode_state.reset();
+        self.transport.transport_mode_state.reset();
         self.force_disconnect = false;
-        if self.next_port < 1024 || self.next_port > 65000 {
-            self.next_port = 1024;
+        if self.transport.next_port < 1024 || self.transport.next_port > 65000 {
+            self.transport.next_port = 1024;
         }
         // The bind family is chosen by the server address. If the server is an IPv6 literal
         // `[2001:db8::1]:3000` or a DNS name resolving to AAAA — bind to `[::]:port`.
@@ -36,27 +36,30 @@ impl Client {
         };
         let mut last_err: Option<std::io::Error> = None;
         for _ in 0..200 {
-            let addr = format!("{}:{}", bind_family, self.next_port);
+            let addr = format!("{}:{}", bind_family, self.transport.next_port);
             match UdpSocket::bind(&addr) {
                 Ok(sock) => {
                     if let Err(e) = sock.set_read_timeout(Some(Duration::from_secs(1))) {
                         warn!("set_read_timeout failed: {e}");
                     }
                     set_socket_buffers(&sock);
-                    debug!("bound UDP socket on {}:{}", bind_family, self.next_port);
-                    self.next_port += 1;
-                    self.socket = Some(sock);
+                    debug!(
+                        "bound UDP socket on {}:{}",
+                        bind_family, self.transport.next_port
+                    );
+                    self.transport.next_port += 1;
+                    self.transport.socket = Some(sock);
                     // Reset the cached server address — it may change on reconnect via DNS.
-                    self.cached_server_addr = None;
+                    self.transport.cached_server_addr = None;
                     self.start_inline_reader_session();
                     self.reset_bind_failure_tracking();
                     return;
                 }
                 Err(e) => {
                     last_err = Some(e);
-                    self.next_port += 1;
-                    if self.next_port > 65000 {
-                        self.next_port = 1024;
+                    self.transport.next_port += 1;
+                    if self.transport.next_port > 65000 {
+                        self.transport.next_port = 1024;
                     }
                 }
             }
@@ -88,26 +91,27 @@ impl Client {
     }
 
     pub(crate) fn reset_bind_failure_tracking(&mut self) {
-        self.bind_failure_streak = 0;
-        self.first_bind_failure_ms = NEVER_TIME_MS;
-        self.last_bind_failed_event_ms = NEVER_TIME_MS;
+        self.transport.bind_failure_streak = 0;
+        self.transport.first_bind_failure_ms = NEVER_TIME_MS;
+        self.transport.last_bind_failed_event_ms = NEVER_TIME_MS;
     }
 
     pub(crate) fn record_bind_failure(&mut self, cur_tm: i64) {
-        if self.first_bind_failure_ms == NEVER_TIME_MS {
-            self.first_bind_failure_ms = cur_tm;
+        if self.transport.first_bind_failure_ms == NEVER_TIME_MS {
+            self.transport.first_bind_failure_ms = cur_tm;
         }
-        self.bind_failure_streak = self.bind_failure_streak.saturating_add(1);
+        self.transport.bind_failure_streak = self.transport.bind_failure_streak.saturating_add(1);
 
-        let first_due =
-            cur_tm.saturating_sub(self.first_bind_failure_ms) >= BIND_FAILED_FIRST_EVENT_MS;
-        let repeat_due = self.last_bind_failed_event_ms == NEVER_TIME_MS
-            || cur_tm.saturating_sub(self.last_bind_failed_event_ms) >= BIND_FAILED_REPEAT_EVENT_MS;
+        let first_due = cur_tm.saturating_sub(self.transport.first_bind_failure_ms)
+            >= BIND_FAILED_FIRST_EVENT_MS;
+        let repeat_due = self.transport.last_bind_failed_event_ms == NEVER_TIME_MS
+            || cur_tm.saturating_sub(self.transport.last_bind_failed_event_ms)
+                >= BIND_FAILED_REPEAT_EVENT_MS;
 
         if first_due && repeat_due {
-            self.last_bind_failed_event_ms = cur_tm;
+            self.transport.last_bind_failed_event_ms = cur_tm;
             self.fire_lifecycle(LifecycleEvent::BindFailed {
-                consecutive_failures: self.bind_failure_streak,
+                consecutive_failures: self.transport.bind_failure_streak,
             });
         }
     }
