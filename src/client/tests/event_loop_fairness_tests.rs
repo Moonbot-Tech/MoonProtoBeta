@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::events::EventDispatcher;
 use crate::transport::{outer_light_crypt, MacContext, ServerMsgHeader, TRANSPORT_VER};
 
@@ -128,14 +128,14 @@ fn raw_run_delivers_callback_on_app_thread() {
     client.auth_status = AuthStatus::AuthDone;
     client.prev_auth_status = AuthStatus::AuthDone;
     client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    send_server_packet_to_client_socket(&client, Command::UI, &[0xAA]);
+    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
 
     let caller_thread = thread::current().id();
     let (tx, rx) = mpsc::channel();
     client.run(
         Duration::from_millis(5),
         Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::UI);
+            assert_eq!(cmd, Command::OrderBook);
             assert_eq!(payload, &[0xAA]);
             tx.send(thread::current().id()).unwrap();
         }),
@@ -155,7 +155,7 @@ fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
     client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
-    send_server_packet_to_client_socket(&client, Command::UI, &[0xAA]);
+    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
 
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -163,7 +163,7 @@ fn raw_run_callback_block_does_not_extend_protocol_writer_tick() {
         client.run(
             Duration::from_millis(20),
             Box::new(move |cmd, payload| {
-                assert_eq!(cmd, Command::UI);
+                assert_eq!(cmd, Command::OrderBook);
                 assert_eq!(payload, &[0xAA]);
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -230,7 +230,7 @@ fn app_send_queue_is_not_blocked_by_data_read_delivery() {
     client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     let mut dispatcher = EventDispatcher::new();
 
-    send_server_packet_to_client_socket(&client, Command::UI, &[0xAA]);
+    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
     client.send_cmd(
         vec![1, 2, 3, 4],
         Command::UI,
@@ -257,8 +257,8 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
     client.socket = Some(UdpSocket::bind("127.0.0.1:0").unwrap());
     client.register_recv_poller();
 
-    send_server_packet_to_client_socket(&client, Command::UI, &[0xAA]);
-    send_server_packet_to_client_socket(&client, Command::UI, &[0xBB]);
+    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xAA]);
+    send_server_packet_to_client_socket(&client, Command::OrderBook, &[0xBB]);
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_cb = Arc::clone(&events);
@@ -280,7 +280,7 @@ fn production_protocol_step_does_not_drain_udp_until_empty() {
         1,
         "production run_step must process a bounded receive unit before returning to runtime publish/command work"
     );
-    assert_eq!(events[0], (Command::UI, vec![0xAA]));
+    assert_eq!(events[0], (Command::OrderBook, vec![0xAA]));
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
     let delivered_cb = Arc::clone(&delivered);
     let mut mode = RunMode::Callback {
         on_data: Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::UI);
+            assert_eq!(cmd, Command::OrderBook);
             assert_eq!(payload, &[0xAA, 0xBB]);
             delivered_cb.fetch_add(1, Ordering::Relaxed);
         }),
@@ -432,7 +432,7 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
         client: &mut client,
     }
     .data_read_int_inline(
-        Command::UI.to_byte(),
+        Command::OrderBook.to_byte(),
         &[0xAA, 0xBB],
         321,
         123,
@@ -456,10 +456,12 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
     let mut client = Client::new(dummy_cfg());
     client.testing_set_domain_ready(true);
     let mut grouped = Vec::new();
-    grouped.push(Command::UI.to_byte());
+    // Non-sensitive sub-commands: S1 drops plaintext sensitive cmds even inside a
+    // group, so the grouped-delivery test uses non-sensitive commands.
+    grouped.push(Command::OrderBook.to_byte());
     grouped.extend_from_slice(&1u16.to_le_bytes());
     grouped.push(0xAA);
-    grouped.push(Command::Balance.to_byte());
+    grouped.push(Command::Data.to_byte());
     grouped.extend_from_slice(&1u16.to_le_bytes());
     grouped.push(0xBB);
 
@@ -469,11 +471,11 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
         on_data: Box::new(move |cmd, payload| {
             match delivered_cb.load(Ordering::Relaxed) {
                 0 => {
-                    assert_eq!(cmd, Command::UI);
+                    assert_eq!(cmd, Command::OrderBook);
                     assert_eq!(payload, &[0xAA]);
                 }
                 1 => {
-                    assert_eq!(cmd, Command::Balance);
+                    assert_eq!(cmd, Command::Data);
                     assert_eq!(payload, &[0xBB]);
                 }
                 _ => panic!("unexpected extra grouped payload"),
@@ -497,4 +499,69 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
     assert_eq!(delivered.load(Ordering::Relaxed), 2);
     assert_eq!(client.total_recv, 77);
     assert_eq!(client.last_online, 456);
+}
+
+#[test]
+fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
+    // S1 (эталон MoonProtoCommon.pas DataReadInt): a non-crypted command in
+    // MoonProtoSensitiveCmds (Order/UI/Strat/Balance — and API on the server)
+    // must be dropped before it reaches the application. The transport MAC only
+    // proves authenticity against a known PSK; without this gate a peer that
+    // never completed the AES-GCM handshake could inject order/strat/balance
+    // state in plaintext. Non-sensitive commands pass through, and the same
+    // commands arriving Crypted are delivered (handshake/crypted paths cover that).
+    let mut client = Client::new(dummy_cfg());
+    client.testing_set_domain_ready(true);
+
+    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let delivered_cb = Arc::clone(&delivered);
+    let mut mode = RunMode::Callback {
+        on_data: Box::new(move |cmd, payload| {
+            // Only the non-sensitive OrderBook fed below may ever reach the sink;
+            // every plaintext sensitive command must have been dropped earlier.
+            assert_eq!(cmd, Command::OrderBook);
+            assert_eq!(payload, &[0xAA]);
+            delivered_cb.fetch_add(1, Ordering::Relaxed);
+        }),
+    };
+
+    for sensitive in [
+        Command::Order,
+        Command::UI,
+        Command::Strat,
+        Command::Balance,
+    ] {
+        ProtocolCore {
+            client: &mut client,
+        }
+        .data_read_int_inline(
+            sensitive.to_byte(),
+            &[0x01, 0x02],
+            0,
+            0,
+            false,
+            None,
+            &mut mode,
+        );
+    }
+    assert_eq!(
+        delivered.load(Ordering::Relaxed),
+        0,
+        "plaintext sensitive commands must be dropped by the S1 gate"
+    );
+
+    // A non-sensitive command on the same plaintext path is delivered as usual.
+    ProtocolCore {
+        client: &mut client,
+    }
+    .data_read_int_inline(
+        Command::OrderBook.to_byte(),
+        &[0xAA],
+        0,
+        0,
+        false,
+        None,
+        &mut mode,
+    );
+    assert_eq!(delivered.load(Ordering::Relaxed), 1);
 }

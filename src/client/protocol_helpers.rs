@@ -216,6 +216,19 @@ impl Client {
         }
     }
 
+    /// S1 (эталон `MoonProtoCommon.pas` DataReadInt): a non-crypted command in
+    /// `MoonProtoSensitiveCmds` must be dropped on the client, except `MPC_API`
+    /// (a server API response is the only legitimate plaintext sensitive command;
+    /// its method is further checked by the dispatcher). On the server every
+    /// sensitive command including API must be crypted, but the Rust port is a
+    /// client, so the API exception always applies here.
+    fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
+        matches!(
+            Command::from_byte(real_cmd),
+            Command::Order | Command::Strat | Command::UI | Command::Balance
+        )
+    }
+
     pub(crate) fn decode_data_read_int_payload_shared(
         data_read_state: &mut DataReadState,
         raw_cmd: u8,
@@ -227,6 +240,7 @@ impl Client {
         // to the planned hot-path delivery optimization.
         use std::borrow::Cow;
         let mut cmd = raw_cmd;
+        let mut was_crypted = false;
         let mut payload: Cow<'_, [u8]> = Cow::Borrowed(data);
 
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
@@ -243,9 +257,16 @@ impl Client {
             if let Some((inner_cmd, decrypted, _want_ack)) = decrypted {
                 cmd = inner_cmd;
                 payload = Cow::Owned(decrypted);
+                was_crypted = true;
             } else {
                 return None;
             }
+        }
+
+        // S1: drop plaintext sensitive commands early (before decompression),
+        // matching the эталон DataReadInt security gate.
+        if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
+            return None;
         }
 
         if cmd & COMPRESSED_FLAG != 0 {
@@ -267,6 +288,7 @@ impl Client {
         data: Vec<u8>,
     ) -> Option<(u8, Vec<u8>)> {
         let mut cmd = raw_cmd;
+        let mut was_crypted = false;
         let mut payload = data;
 
         if Command::from_byte(cmd & 0x7F) == Command::Crypted {
@@ -280,9 +302,15 @@ impl Client {
             if let Some((inner_cmd, decrypted, _want_ack)) = decrypted {
                 cmd = inner_cmd;
                 payload = decrypted;
+                was_crypted = true;
             } else {
                 return None;
             }
+        }
+
+        // S1: drop plaintext sensitive commands early, like the эталон DataReadInt gate.
+        if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
+            return None;
         }
 
         if cmd & COMPRESSED_FLAG != 0 {

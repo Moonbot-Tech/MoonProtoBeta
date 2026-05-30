@@ -257,7 +257,10 @@ fn run_drains_udp_data_without_wake_fifo() {
     client.need_connect = false;
     client.start_inline_reader_session();
     let client_addr = client.socket.as_ref().unwrap().local_addr().unwrap();
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
+    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
+    // use a non-sensitive command (these go through the same generic path).
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::OrderBook, &[0xAA, 0xBB]);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -265,7 +268,7 @@ fn run_drains_udp_data_without_wake_fifo() {
     client.run(
         Duration::from_millis(DEFAULT_SLEEP_MS + 5),
         Box::new(move |cmd, payload| {
-            assert_eq!(cmd, Command::UI);
+            assert_eq!(cmd, Command::OrderBook);
             assert_eq!(payload, &[0xAA, 0xBB]);
             delivered_cb.fetch_add(1, Ordering::Relaxed);
         }),
@@ -983,11 +986,14 @@ fn data_read_decodes_regular_data_without_recv_event_backlog() {
     client.socket = Some(client_sock);
     client.start_inline_reader_session();
 
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
+    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
+    // use a non-sensitive command (these go through the same generic path).
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::OrderBook, &[0xAA, 0xBB]);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     let events = pump_inline_reader_collect(&mut client);
-    assert_eq!(events, vec![(Command::UI, vec![0xAA, 0xBB])]);
+    assert_eq!(events, vec![(Command::OrderBook, vec![0xAA, 0xBB])]);
     assert_no_inline_reader_events(
         &mut client,
         "regular data must be delivered immediately, not left in decoded queue",
@@ -1012,7 +1018,10 @@ fn reader_err_emu_drop_updates_stats_without_recv_event_backlog() {
     client.socket = Some(client_sock);
     client.start_inline_reader_session();
 
-    let packet = pack_server_packet(&client.cfg.mac_key, Command::UI, &[0xAA, 0xBB]);
+    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // sensitive cmds (Order/Strat/UI/Balance) at decode, so reader-delivery tests
+    // use a non-sensitive command (these go through the same generic path).
+    let packet = pack_server_packet(&client.cfg.mac_key, Command::OrderBook, &[0xAA, 0xBB]);
     server_sock.send_to(&packet, client_addr).unwrap();
 
     wait_reader_total_recv(&mut client, packet.len() as u64);

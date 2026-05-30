@@ -800,9 +800,12 @@ fn failed_compressed_payload_is_delivered_with_real_cmd_like_delphi() {
     let mut client = Client::new(dummy_cfg());
     let compressed_garbage = vec![4, 0, 1, 0, 0, 0, 0x0F, 0];
     let mut payloads = Vec::new();
+    // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
+    // sensitive cmds (Order/Strat/UI/Balance) in decode, so this compressed-fail
+    // delivery test uses a non-sensitive command.
     let (cmd, payload) = Client::decode_data_read_int_payload_shared(
         &mut client.data_read_state,
-        Command::UI.to_byte() | COMPRESSED_FLAG,
+        Command::OrderBook.to_byte() | COMPRESSED_FLAG,
         &compressed_garbage,
     )
     .expect("failed compressed payload still has a decoded real command");
@@ -813,7 +816,7 @@ fn failed_compressed_payload_is_delivered_with_real_cmd_like_delphi() {
     }
 
     assert_eq!(payloads.len(), 1);
-    assert_eq!(payloads[0].0, Command::UI);
+    assert_eq!(payloads[0].0, Command::OrderBook);
     assert_eq!(payloads[0].1, compressed_garbage);
 }
 
