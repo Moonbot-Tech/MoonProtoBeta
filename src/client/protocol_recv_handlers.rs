@@ -82,10 +82,13 @@ impl ProtocolCore<'_> {
             self.client.send_lock.lock().unwrap().reset_tmp_slider();
             self.client.used_sliced_limit = false;
             self.client.crypt_msg_counter.store(0, Ordering::Relaxed);
-            self.client.total_sent.store(0, Ordering::Relaxed);
+            self.client.metrics.total_sent.store(0, Ordering::Relaxed);
             self.client.recvd_slider = Slider::new();
             self.client.recv_slicer = slicing::SlicingReceiver::new();
-            self.client.total_recv_shared.store(0, Ordering::Relaxed);
+            self.client
+                .metrics
+                .total_recv_shared
+                .store(0, Ordering::Relaxed);
         }
         let _ = recv_bytes;
         match cmd {
@@ -237,7 +240,7 @@ impl ProtocolCore<'_> {
             payload,
             raw_now_dt,
             corrected_now_dt,
-            self.client.total_sent.load(Ordering::Relaxed),
+            self.client.metrics.total_sent.load(Ordering::Relaxed),
             total_recv_after,
         ) {
             self.send_command(Command::Ping, &response);

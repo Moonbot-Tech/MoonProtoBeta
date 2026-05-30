@@ -6,9 +6,9 @@ impl Client {
     /// sending, api_pending, pending_candles, trip_delay_k, can_send_rate.
     pub(crate) fn full_reset(&mut self) {
         self.crypt_msg_counter.store(0, Ordering::Relaxed);
-        self.total_sent.store(0, Ordering::Relaxed);
-        self.total_recv = 0;
-        self.total_recv_shared.store(0, Ordering::Relaxed);
+        self.metrics.total_sent.store(0, Ordering::Relaxed);
+        self.metrics.total_recv = 0;
+        self.metrics.total_recv_shared.store(0, Ordering::Relaxed);
         self.rs = 1.0;
         self.used_sliced_limit = false;
         self.data_read_state.reset();

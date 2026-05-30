@@ -1,7 +1,56 @@
 //! Passive protocol timing counters.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use super::bps::BpsCounter;
+use super::diagnostics::ErrEmuDiagnosticsState;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Observability/diagnostics cluster carved out of [`super::Client`].
+///
+/// These fields never influence send/retry/drop decisions — they are byte/packet
+/// accounting, the passive [`ProtocolMetrics`] sink, the log throttle table, the
+/// client-side ErrEmu diagnostics, and the FireTest blackhole hook. They are
+/// grouped here so the `Client` God object stays free of the observability
+/// concern. Construction and field types are unchanged from when they lived
+/// directly on `Client`.
+pub(crate) struct ClientMetrics {
+    /// Accepted UDP bytes received (main-thread counter, no sharing).
+    pub(crate) total_recv: u64,
+    /// Total UDP bytes sent (shared atomic, read by diagnostics).
+    pub(crate) total_sent: AtomicU64,
+    /// Accepted UDP bytes received (shared atomic mirror of `total_recv`).
+    pub(crate) total_recv_shared: AtomicU64,
+    /// O(1) EMA sliding-window byte/sec counter for the send direction.
+    pub(crate) bps_sent: BpsCounter,
+    /// O(1) EMA sliding-window byte/sec counter for the recv direction.
+    pub(crate) bps_recv: BpsCounter,
+    /// Client-side ErrEmu packet-loss diagnostics (test-only loss emulator).
+    pub(crate) err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
+    /// Passive protocol loop timing counters.
+    pub(crate) protocol_metrics: Arc<ProtocolMetrics>,
+    /// Log throttle table: key -> last raise timestamp (anti-spam).
+    pub(crate) log_last: HashMap<&'static str, i64>,
+    /// FireTest-only hook: drop every outgoing datagram before socket send.
+    pub(crate) debug_outgoing_blackhole: Arc<AtomicBool>,
+}
+
+impl ClientMetrics {
+    pub(crate) fn new() -> Self {
+        Self {
+            total_recv: 0,
+            total_sent: AtomicU64::new(0),
+            total_recv_shared: AtomicU64::new(0),
+            bps_sent: BpsCounter::new(),
+            bps_recv: BpsCounter::new(),
+            err_emu_diagnostics: Arc::new(Mutex::new(ErrEmuDiagnosticsState::default())),
+            protocol_metrics: Arc::new(ProtocolMetrics::default()),
+            log_last: HashMap::new(),
+            debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 /// Passive snapshot of MoonProto protocol loop metrics.
 ///

@@ -117,7 +117,7 @@ impl ProtocolCore<'_> {
         recv_bytes: u64,
         mode: &mut RunMode<'_>,
     ) -> bool {
-        let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
+        let protocol_metrics = Arc::clone(&self.client.metrics.protocol_metrics);
         protocol_metrics.record_recv_packet();
         let protocol_start = Instant::now();
         let mut protocol_wait = Duration::ZERO;
@@ -153,12 +153,14 @@ impl ProtocolCore<'_> {
             self.apply_recv_side_effects(recv_bytes, timestamp_ms);
             let total_recv_after = self
                 .client
+                .metrics
                 .total_recv_shared
                 .fetch_add(recv_bytes, Ordering::Relaxed)
                 + recv_bytes;
 
             if let Some(decision) = err_emu_drop_decision(hdr.cmd) {
                 self.client
+                    .metrics
                     .err_emu_diagnostics
                     .lock()
                     .unwrap()
@@ -413,6 +415,7 @@ impl ProtocolCore<'_> {
         );
         if let Some(stats) = sliced_stats.as_ref() {
             self.client
+                .metrics
                 .err_emu_diagnostics
                 .lock()
                 .unwrap()

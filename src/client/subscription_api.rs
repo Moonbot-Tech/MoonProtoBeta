@@ -63,7 +63,8 @@ impl Client {
     /// library reconnects and restores subscriptions after the flag is cleared.
     #[doc(hidden)]
     pub fn debug_set_outgoing_blackhole(&mut self, enabled: bool) {
-        self.debug_outgoing_blackhole
+        self.metrics
+            .debug_outgoing_blackhole
             .store(enabled, Ordering::Relaxed);
     }
 

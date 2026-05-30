@@ -11,7 +11,7 @@ impl Client {
     ///
     /// See [`crate::commands::engine_api::ServerInfo`].
     pub fn server_info(&self) -> &crate::commands::engine_api::ServerInfo {
-        &self.server_info
+        &self.identity.server_info
     }
 
     /// Per-account metadata from the last successful `emk_AuthCheck`.
@@ -20,7 +20,7 @@ impl Client {
     /// Returns `None` before a successful AuthCheck, or if a successful response
     /// had a malformed mandatory AuthCheck payload.
     pub fn auth_info(&self) -> Option<&crate::commands::engine_api::AuthCheckResponse> {
-        self.auth_info.as_ref()
+        self.identity.auth_info.as_ref()
     }
 
     /// Set `ServerInfo` manually. Usually not needed — Init does this
@@ -28,19 +28,19 @@ impl Client {
     pub fn set_server_info(&mut self, info: crate::commands::engine_api::ServerInfo) {
         // opt #7 parity: cache the base currency name as Arc<str>, so per-packet
         // `from_client` clones a refcount instead of heap-cloning the string (Delphi reads cfg inline).
-        self.server_base_currency_name_arc =
+        self.identity.server_base_currency_name_arc =
             info.base_currency_name.as_deref().map(std::sync::Arc::from);
-        self.server_info = info;
+        self.identity.server_info = info;
     }
 
     /// Cheap per-packet handle to the base currency name (Arc refcount-bump, no heap-clone).
     pub(crate) fn server_base_currency_name_arc(&self) -> Option<std::sync::Arc<str>> {
-        self.server_base_currency_name_arc.clone()
+        self.identity.server_base_currency_name_arc.clone()
     }
 
     /// Set per-account AuthCheck metadata manually for custom init flows.
     pub fn set_auth_info(&mut self, info: crate::commands::engine_api::AuthCheckResponse) {
-        self.auth_info = Some(info);
+        self.identity.auth_info = Some(info);
     }
 
     /// Build a trade command context from the active server route.
@@ -58,14 +58,16 @@ impl Client {
         uid: u64,
     ) -> Result<crate::commands::trade::TradeCtx, TradeContextError> {
         match (
-            self.server_info.base_currency_code,
-            self.server_info.exchange_code,
+            self.identity.server_info.base_currency_code,
+            self.identity.server_info.exchange_code,
         ) {
             (Some(currency), Some(platform)) => Ok(crate::commands::trade::TradeCtx::with_route(
                 uid, currency, platform,
             )),
-            _ => Err(TradeContextError::from_server_info(&self.server_info)
-                .expect("route fields are missing")),
+            _ => Err(
+                TradeContextError::from_server_info(&self.identity.server_info)
+                    .expect("route fields are missing"),
+            ),
         }
     }
 
@@ -87,7 +89,7 @@ impl Client {
     /// now; `Err` names the missing field(s). This is the cheap predicate to gate
     /// a UI trade affordance without constructing and discarding a `TradeCtx`.
     pub fn trade_route_status(&self) -> Result<(), TradeContextError> {
-        match TradeContextError::from_server_info(&self.server_info) {
+        match TradeContextError::from_server_info(&self.identity.server_info) {
             Some(err) => Err(err),
             None => Ok(()),
         }

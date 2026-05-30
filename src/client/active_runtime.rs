@@ -130,7 +130,7 @@ impl MoonClient {
             let mut client = Client::new(cfg);
             let _ = diagnostics_tx.send((
                 client.err_emu_diagnostics_handle(),
-                Arc::clone(&client.protocol_metrics),
+                Arc::clone(&client.metrics.protocol_metrics),
                 Arc::clone(&client.subscription_registry),
             ));
             client.set_runtime_shutdown_flag(runtime_shutdown);

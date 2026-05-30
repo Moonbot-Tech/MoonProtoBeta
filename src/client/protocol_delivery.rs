@@ -7,7 +7,7 @@ impl ProtocolCore<'_> {
         if self.client.auth_status == AuthStatus::Base {
             self.client.auth_status = AuthStatus::Connected;
         }
-        self.client.total_recv += recv_bytes;
+        self.client.metrics.total_recv += recv_bytes;
         self.client.track_recv(recv_bytes, timestamp_ms);
         self.client.last_online = timestamp_ms;
     }
@@ -33,7 +33,7 @@ impl ProtocolCore<'_> {
                 on_event.drain_events(
                     event_buf,
                     dispatcher,
-                    &self.client.protocol_metrics,
+                    &self.client.metrics.protocol_metrics,
                     None,
                     u8::MAX,
                     0,
@@ -177,18 +177,21 @@ impl ProtocolCore<'_> {
                     let action_count = active_actions_buf.len();
                     self.client
                         .apply_active_actions(active_actions_buf.drain(..));
-                    self.client.protocol_metrics.record_active_dispatch_labeled(
-                        active_dispatch_start.elapsed(),
-                        c.to_byte(),
-                        metric_api_method(c, &p),
-                        p.len(),
-                        event_count,
-                        action_count,
-                    );
+                    self.client
+                        .metrics
+                        .protocol_metrics
+                        .record_active_dispatch_labeled(
+                            active_dispatch_start.elapsed(),
+                            c.to_byte(),
+                            metric_api_method(c, &p),
+                            p.len(),
+                            event_count,
+                            action_count,
+                        );
                     on_event.drain_events(
                         event_buf,
                         dispatcher,
-                        &self.client.protocol_metrics,
+                        &self.client.metrics.protocol_metrics,
                         Some(c),
                         metric_api_method(c, &p),
                         p.len(),

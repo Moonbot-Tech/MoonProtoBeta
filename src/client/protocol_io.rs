@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl Client {
     /// Auto-compress payload if `cmd` is not yet marked with `COMPRESSED_FLAG`, size > 64 bytes
@@ -86,8 +86,13 @@ impl Client {
         extra: Option<&[u8]>,
         addr: SocketAddr,
     ) {
-        if self.debug_outgoing_blackhole.load(Ordering::Relaxed) {
-            self.err_emu_diagnostics
+        if self
+            .metrics
+            .debug_outgoing_blackhole
+            .load(Ordering::Relaxed)
+        {
+            self.metrics
+                .err_emu_diagnostics
                 .lock()
                 .unwrap()
                 .record_outgoing(cmd, true);
@@ -138,11 +143,13 @@ impl Client {
         }
         match main_result {
             Ok(_) => {
-                self.err_emu_diagnostics
+                self.metrics
+                    .err_emu_diagnostics
                     .lock()
                     .unwrap()
                     .record_outgoing(cmd, false);
                 let total_sent = self
+                    .metrics
                     .total_sent
                     .fetch_add(packet.len() as u64, Ordering::Relaxed)
                     + packet.len() as u64;

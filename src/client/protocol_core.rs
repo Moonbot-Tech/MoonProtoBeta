@@ -6,7 +6,7 @@ pub(crate) struct ProtocolCore<'client> {
 
 impl ProtocolCore<'_> {
     pub(crate) fn run_step(&mut self, mode: &mut RunMode<'_>) -> bool {
-        let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
+        let protocol_metrics = Arc::clone(&self.client.metrics.protocol_metrics);
         let _tick_timer = protocol_metrics.writer_tick_timer();
         if self.client.shutdown_requested() {
             self.client.disconnect();
@@ -38,7 +38,7 @@ impl ProtocolCore<'_> {
     pub(crate) fn run(&mut self, duration: Duration, mode: &mut RunMode<'_>) {
         let run_start = Instant::now();
         let run_deadline = run_start + duration;
-        let protocol_metrics = Arc::clone(&self.client.protocol_metrics);
+        let protocol_metrics = Arc::clone(&self.client.metrics.protocol_metrics);
 
         loop {
             let _tick_timer = protocol_metrics.writer_tick_timer();

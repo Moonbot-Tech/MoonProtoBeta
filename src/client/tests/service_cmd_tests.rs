@@ -380,7 +380,7 @@ fn reader_handles_sliced_ack_without_recv_event_backlog() {
 
     assert_eq!(ack.datagram_num, datagram_num);
     assert_eq!(ack.flags[0], 0b1010_0101);
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
 }
 
 #[test]
@@ -450,7 +450,10 @@ fn reader_handles_partial_sliced_without_recv_event_backlog() {
         second_events,
         vec![(Command::OrderBook, vec![0xCA, 0xFE, 0xBE, 0xEF])]
     );
-    assert_eq!(client.total_recv, (packet.len() + packet2.len()) as u64);
+    assert_eq!(
+        client.metrics.total_recv,
+        (packet.len() + packet2.len()) as u64
+    );
 }
 
 #[test]
@@ -494,7 +497,7 @@ fn reader_handles_size_test_without_main_loop_tick() {
     assert_eq!(&ack_payload[0..2], &size.to_le_bytes());
     assert_eq!(&ack_payload[4..6], &series.to_le_bytes());
     assert_eq!(client.data_read_state.data_size_ack_series_num, series);
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
 }
 
 #[test]
@@ -538,7 +541,7 @@ fn reader_handles_probe_mtu_without_main_loop_tick() {
     assert_eq!(&ack_payload[0..2], &probe_id.to_le_bytes());
     assert_eq!(ack_payload[2], probe_index);
     assert_eq!(&ack_payload[3..5], &test_size.to_le_bytes());
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
 }
 
 #[test]
@@ -558,7 +561,7 @@ fn reader_handles_ping_response_without_main_loop_tick() {
 
     let mut client = Client::new(dummy_cfg_for_server(server_addr));
     client.testing_set_domain_ready(true);
-    client.total_sent.store(777, Ordering::Relaxed);
+    client.metrics.total_sent.store(777, Ordering::Relaxed);
     client.auth_status = AuthStatus::AuthDone;
     client.authorized = true;
     client.need_connect = true;
@@ -596,7 +599,7 @@ fn reader_handles_ping_response_without_main_loop_tick() {
     assert_eq!(client.actual_pmtu, 8_224);
     assert_eq!(client.global_timing_orders, 456);
     assert_eq!(client.ping_count, 1);
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
     assert_eq!(client.auth_status, AuthStatus::AuthDone);
     assert!(!client.need_connect);
 
@@ -839,7 +842,7 @@ fn reader_handles_want_new_hello_without_recv_event_backlog() {
     client.set_hello_wait_state(HelloWaitState::RebindHelloAgain);
     client.last_sent_hello = 12345;
     client.crypt_msg_counter.store(77, Ordering::Relaxed);
-    client.total_sent.store(123, Ordering::Relaxed);
+    client.metrics.total_sent.store(123, Ordering::Relaxed);
     client.recvd_slider.has_new_data = true;
 
     let packet = pack_server_packet(&client.cfg.mac_key, Command::WantNewHello, &[]);
@@ -998,7 +1001,7 @@ fn data_read_decodes_regular_data_without_recv_event_backlog() {
         &mut client,
         "regular data must be delivered immediately, not left in decoded queue",
     );
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
 }
 
 #[test]
@@ -1032,7 +1035,7 @@ fn reader_err_emu_drop_updates_stats_without_recv_event_backlog() {
 
     assert!(client.connected);
     assert_eq!(client.auth_status, AuthStatus::Connected);
-    assert_eq!(client.total_recv, packet.len() as u64);
+    assert_eq!(client.metrics.total_recv, packet.len() as u64);
     assert!(client.last_online >= 0);
 }
 

@@ -8,19 +8,20 @@ impl Client {
     /// "Sliced reassembly/parse failed after packets arrived".
     pub fn err_emu_diagnostics_snapshot(&self) -> ErrEmuDiagnostics {
         let configured_rate = ERR_EMU_RATE.load(std::sync::atomic::Ordering::Relaxed);
-        self.err_emu_diagnostics
+        self.metrics
+            .err_emu_diagnostics
             .lock()
             .unwrap()
             .snapshot(configured_rate)
     }
 
     pub(super) fn err_emu_diagnostics_handle(&self) -> Arc<Mutex<ErrEmuDiagnosticsState>> {
-        Arc::clone(&self.err_emu_diagnostics)
+        Arc::clone(&self.metrics.err_emu_diagnostics)
     }
 
     /// Clear client-side [`set_err_emu`] counters without changing the loss rate.
     pub fn reset_err_emu_diagnostics(&self) {
-        *self.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
+        *self.metrics.err_emu_diagnostics.lock().unwrap() = ErrEmuDiagnosticsState::default();
     }
 
     /// Snapshot passive protocol loop metrics.
@@ -30,7 +31,7 @@ impl Client {
     /// receive-side protocol work and writer send/maintenance phases stay
     /// bounded while auditing Delphi machine-effect parity.
     pub fn protocol_metrics_snapshot(&self) -> ProtocolMetricsSnapshot {
-        self.protocol_metrics.snapshot(0)
+        self.metrics.protocol_metrics.snapshot(0)
     }
 
     /// Snapshot protocol metrics and include the current dispatcher public
@@ -39,7 +40,8 @@ impl Client {
         &self,
         dispatcher: &crate::events::EventDispatcher,
     ) -> ProtocolMetricsSnapshot {
-        self.protocol_metrics
+        self.metrics
+            .protocol_metrics
             .snapshot(dispatcher.queued_event_count())
     }
 
@@ -66,7 +68,7 @@ impl Client {
     }
     /// Total UDP bytes sent by this client session.
     pub fn total_sent(&self) -> u64 {
-        self.total_sent.load(Ordering::Relaxed)
+        self.metrics.total_sent.load(Ordering::Relaxed)
     }
     /// Total accepted UDP bytes received by this client session.
     ///
@@ -74,7 +76,7 @@ impl Client {
     /// to this counter, matching Delphi side effects before `MoonProtoErrEmu`
     /// drops the packet from protocol dispatch.
     pub fn total_recv(&self) -> u64 {
-        self.total_recv
+        self.metrics.total_recv
     }
 
     /// Number of outgoing Sliced datagrams still waiting for `SlicedACK`.
@@ -181,20 +183,20 @@ impl Client {
     // which in steady state yields `ema = 10*bytes_per_sec` (hence the division by 10 in the getter).
 
     pub(crate) fn track_sent(&mut self, bytes: u64, ts_ms: i64) {
-        self.bps_sent.add(bytes, ts_ms);
+        self.metrics.bps_sent.add(bytes, ts_ms);
     }
 
     pub(crate) fn track_recv(&mut self, bytes: u64, ts_ms: i64) {
-        self.bps_recv.add(bytes, ts_ms);
+        self.metrics.bps_recv.add(bytes, ts_ms);
     }
 
     /// Average bytes sent over the last ~10 seconds (B/s). O(1) EMA, see [`BpsCounter`].
     pub fn bytes_per_sec_sent(&self) -> u64 {
-        self.bps_sent.bytes_per_sec()
+        self.metrics.bps_sent.bytes_per_sec()
     }
     /// Average bytes received over the last ~10 seconds (B/s). O(1) EMA.
     pub fn bytes_per_sec_recv(&self) -> u64 {
-        self.bps_recv.bytes_per_sec()
+        self.metrics.bps_recv.bytes_per_sec()
     }
 
     // ====================================================================
@@ -207,7 +209,7 @@ impl Client {
     #[inline]
     pub fn should_log(&mut self, key: &'static str, interval_ms: i64) -> bool {
         let now_ms = self.now_ms();
-        let last = self.log_last.entry(key).or_insert(0);
+        let last = self.metrics.log_last.entry(key).or_insert(0);
         if now_ms - *last >= interval_ms {
             *last = now_ms;
             true

@@ -229,7 +229,7 @@ impl ProtocolCore<'_> {
                 on_event.drain_events(
                     event_buf,
                     dispatcher,
-                    &self.client.protocol_metrics,
+                    &self.client.metrics.protocol_metrics,
                     None,
                     u8::MAX,
                     0,

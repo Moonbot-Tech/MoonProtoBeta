@@ -308,7 +308,7 @@ fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
 
     assert!(client.connected);
     assert_eq!(client.auth_status, AuthStatus::Connected);
-    assert_eq!(client.total_recv, 1234);
+    assert_eq!(client.metrics.total_recv, 1234);
     assert_eq!(client.last_online, 777);
     assert_eq!(
         delivered.load(Ordering::Relaxed),
@@ -360,7 +360,7 @@ fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
         "Delphi ClientNewData drops domain pushes before InitDone/domain_ready"
     );
     assert_eq!(
-        client.total_recv, 91,
+        client.metrics.total_recv, 91,
         "transport receive side effects still happen before the domain gate"
     );
 }
@@ -447,7 +447,7 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
 
     assert_eq!(delivered.load(Ordering::Relaxed), 1);
     assert_eq!(client.avg_dup_count, 25.0);
-    assert_eq!(client.total_recv, 321);
+    assert_eq!(client.metrics.total_recv, 321);
     assert_eq!(client.last_online, 123);
 }
 
@@ -497,7 +497,7 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
     );
 
     assert_eq!(delivered.load(Ordering::Relaxed), 2);
-    assert_eq!(client.total_recv, 77);
+    assert_eq!(client.metrics.total_recv, 77);
     assert_eq!(client.last_online, 456);
 }
 

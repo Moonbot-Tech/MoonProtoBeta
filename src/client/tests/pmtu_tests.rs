@@ -87,8 +87,8 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
     let _rx = client.api_pending.register(0x4455);
 
     client.crypt_msg_counter.store(77, Ordering::Relaxed);
-    client.total_sent.store(1234, Ordering::Relaxed);
-    client.total_recv = 5678;
+    client.metrics.total_sent.store(1234, Ordering::Relaxed);
+    client.metrics.total_recv = 5678;
     client.rs = 0.25;
     client.used_sliced_limit = true;
     client.recvd_slider.has_new_data = true;
@@ -114,7 +114,7 @@ fn full_reset_preserves_sending_and_api_slots_like_delphi_reset() {
     );
     assert_eq!(client.crypt_msg_counter.load(Ordering::Relaxed), 0);
     assert_eq!(client.total_sent(), 0);
-    assert_eq!(client.total_recv, 0);
+    assert_eq!(client.metrics.total_recv, 0);
     assert_eq!(client.rs, 1.0);
     assert!(!client.used_sliced_limit);
     assert!(!client.recvd_slider.has_new_data);
@@ -141,7 +141,7 @@ fn process_ping_reader_msg(
     };
     let mut writer = writer(client);
     writer.apply_recv_side_effects(recv_bytes, 123);
-    let total_sent = writer.client.total_sent.load(Ordering::Relaxed);
+    let total_sent = writer.client.metrics.total_sent.load(Ordering::Relaxed);
     writer
         .client
         .apply_ping_and_build_response(

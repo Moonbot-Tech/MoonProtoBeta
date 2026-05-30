@@ -132,7 +132,7 @@ use diagnostics::{err_emu_drop_rate_for_cmd, is_service_cmd};
 use helpers::*;
 #[cfg(test)]
 pub(crate) use init::{run_base_check_delphi, send_post_init_resync, CriticalInitStatus};
-use metrics::ProtocolMetrics;
+use metrics::{ClientMetrics, ProtocolMetrics};
 use protocol_core::ProtocolCore;
 #[cfg(test)]
 pub(crate) use send_queue::SendQueues;
@@ -179,6 +179,47 @@ impl HelloWaitState {
     }
 }
 
+/// Server/account identity learned during Init (`emk_BaseCheck` / `emk_AuthCheck`).
+///
+/// Grouped off the [`Client`] God object: the `BaseCheck` server identity, the
+/// per-packet `Arc<str>` cache of its base-currency name, and the `AuthCheck`
+/// per-account payload. Field types and meaning are unchanged from when they
+/// lived directly on `Client`; see the accessor docs in `session_api.rs`.
+struct SessionIdentity {
+    /// Server identity obtained from the `emk_BaseCheck` response. Filled during
+    /// Init (or by an internal test via [`Client::set_server_info`]). Before the first
+    /// successful BaseCheck — `ServerInfo::default()` (all fields `None`,
+    /// `has_identity()=false`).
+    ///
+    /// **Multi-server**: when connecting to several servers the application keeps a
+    /// `Vec<Client>` and tells them apart by `client.server_info().bot_id`.
+    server_info: crate::commands::engine_api::ServerInfo,
+
+    /// Cache of `server_info.base_currency_name` as `Arc<str>`. Cloned (refcount-bump)
+    /// in `ActiveDispatchContext::from_client` on EVERY packet instead of heap-cloning the
+    /// string — Delphi reads `cfg.BaseCurrency` inline without a copy (parity, opt #7). The
+    /// public `ServerInfo.base_currency_name` stays a `String` for API ergonomics.
+    server_base_currency_name_arc: Option<std::sync::Arc<str>>,
+
+    /// Per-account data received from Delphi `TMoonProtoEngine.AuthCheck`.
+    ///
+    /// Delphi stores `BinanceAccountID`, `BTCAddress`, `AccountID`,
+    /// `RecvdMaxPayload`, and Hyperliquid DEX tail in local engine/cfg state
+    /// during init. Rust keeps the parsed payload here so active-lib state and
+    /// user code can observe the same successful AuthCheck result.
+    auth_info: Option<crate::commands::engine_api::AuthCheckResponse>,
+}
+
+impl SessionIdentity {
+    fn new() -> Self {
+        Self {
+            server_info: crate::commands::engine_api::ServerInfo::default(),
+            server_base_currency_name_arc: None,
+            auth_info: None,
+        }
+    }
+}
+
 /// Public handle to the client. Allows sending commands from any thread.
 pub struct Client {
     cfg: ClientConfig,
@@ -202,7 +243,6 @@ pub struct Client {
     connected: bool, // FConnected: true after first valid packet received
     authorized: bool,
     last_online: i64,
-    total_recv: u64,
     auth_status: AuthStatus,
     need_connect: bool,
     force_disconnect: bool,
@@ -258,11 +298,14 @@ pub struct Client {
     // #5 audit_delphi_deviation: O(1) EMA counter (port of Delphi MoonProtoUDPClient.pas:113-138
     // AddBytesCount). The VecDeque<(i64,u64)> sliding window was removed — it cost ~8MB heap on
     // a 50K pps burst plus 100K push_back/pop_front ops/sec. Now it is 24 bytes + 4 ops/add.
-    bps_sent: BpsCounter,
-    bps_recv: BpsCounter,
-
-    // Log throttle: key -> last raise timestamp (anti-spam).
-    log_last: std::collections::HashMap<&'static str, i64>,
+    //
+    // Observability/diagnostics cluster: byte/packet counters (`total_recv`,
+    // `total_sent`, `total_recv_shared`), the BytesPerSec EMA counters
+    // (`bps_sent`/`bps_recv`), the passive `protocol_metrics` sink, the
+    // `log_last` throttle table, the client-side `err_emu_diagnostics`, and the
+    // FireTest `debug_outgoing_blackhole` hook. None of these influence
+    // send/retry/drop decisions. See [`metrics::ClientMetrics`].
+    metrics: ClientMetrics,
 
     // Grouped send batch (TmpSendList equivalent)
     tmp_send_buf: Vec<u8>, // accumulated Grouped payload
@@ -281,10 +324,6 @@ pub struct Client {
     // Reader/DataReadInt writes TmpSlider; writer CheckSeningData copies it to
     // RecvdSlider and only then drops ACKed PendingH.
     recvd_slider: Slider,
-    total_sent: AtomicU64,
-    total_recv_shared: AtomicU64,
-    err_emu_diagnostics: Arc<Mutex<ErrEmuDiagnosticsState>>,
-    protocol_metrics: Arc<ProtocolMetrics>,
     next_port: u16,
     ping_count: u32,
 
@@ -406,12 +445,6 @@ pub struct Client {
     pending_trades_unsubscribe: Option<PendingTradesUnsubscribe>,
     pending_trades_resubscribe_after_ms: Option<i64>,
 
-    /// FireTest-only hook: drop every outgoing datagram before socket send.
-    /// This lets the live health test force a real server-side disconnect and
-    /// then verify the library reconnect path. It is deliberately hidden from
-    /// public API docs.
-    debug_outgoing_blackhole: Arc<AtomicBool>,
-
     /// When (`now_ms`) the last `api_get_markets_indexes` was sent. Used for
     /// timeout protection: the UDP response may have been lost — after `INDEXES_FETCH_TIMEOUT_MS`
     /// we reset `indexes_fetch_in_flight = false`. The timeout handler itself does not
@@ -450,28 +483,11 @@ pub struct Client {
     check_tags_burst_sent: u8,
     last_check_tags_burst_ms: i64,
 
-    /// Server identity obtained from the `emk_BaseCheck` response. Filled during
-    /// Init (or by an internal test via [`Client::set_server_info`]). Before the first
-    /// successful BaseCheck — `ServerInfo::default()` (all fields `None`,
-    /// `has_identity()=false`).
-    ///
-    /// **Multi-server**: when connecting to several servers the application keeps a
-    /// `Vec<Client>` and tells them apart by `client.server_info().bot_id`.
-    server_info: crate::commands::engine_api::ServerInfo,
-
-    /// Cache of `server_info.base_currency_name` as `Arc<str>`. Cloned (refcount-bump)
-    /// in `ActiveDispatchContext::from_client` on EVERY packet instead of heap-cloning the
-    /// string — Delphi reads `cfg.BaseCurrency` inline without a copy (parity, opt #7). The
-    /// public `ServerInfo.base_currency_name` stays a `String` for API ergonomics.
-    server_base_currency_name_arc: Option<std::sync::Arc<str>>,
-
-    /// Per-account data received from Delphi `TMoonProtoEngine.AuthCheck`.
-    ///
-    /// Delphi stores `BinanceAccountID`, `BTCAddress`, `AccountID`,
-    /// `RecvdMaxPayload`, and Hyperliquid DEX tail in local engine/cfg state
-    /// during init. Rust keeps the parsed payload here so active-lib state and
-    /// user code can observe the same successful AuthCheck result.
-    auth_info: Option<crate::commands::engine_api::AuthCheckResponse>,
+    /// Server/account identity learned during Init (`emk_BaseCheck` /
+    /// `emk_AuthCheck`): `server_info`, the per-packet `Arc<str>` base-currency
+    /// cache, and the `auth_info` per-account payload. See
+    /// [`SessionIdentity`] and the accessors in `session_api.rs`.
+    identity: SessionIdentity,
 
     /// Delphi `InitDone`: transport auth is already complete, but domain pushes
     /// (`Order`/`Strat`/`Balance`/`Trades*`/`OrderBook`/`UI`) can only be applied
@@ -576,8 +592,6 @@ impl Client {
         let send_lock = Arc::new(Mutex::new(SendLockState::default()));
         let subscription_summary = Arc::new(SubscriptionRegistrySummary::default());
         let subscription_trades_scope = Arc::new(parking_lot::RwLock::new(None));
-        let err_emu_diagnostics = Arc::new(Mutex::new(ErrEmuDiagnosticsState::default()));
-        let protocol_metrics = Arc::new(ProtocolMetrics::default());
         let domain_ready_flag = Arc::new(AtomicBool::new(false));
         let last_trades_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
         let last_orderbook_subscribe_request_ms = Arc::new(AtomicI64::new(NEVER_TIME_MS));
@@ -611,7 +625,6 @@ impl Client {
             connected: false,
             authorized: false,
             last_online: 0,
-            total_recv: 0,
             auth_status: AuthStatus::Base,
             need_connect: true,
             force_disconnect: false,
@@ -655,9 +668,7 @@ impl Client {
             can_send_rate: 2 * 1024 * 1024, // StartCanSendRate = 2 MB/s
             used_sliced_limit: false,
             actual_sleep_time: 5.0,
-            bps_sent: BpsCounter::new(),
-            bps_recv: BpsCounter::new(),
-            log_last: std::collections::HashMap::new(),
+            metrics: ClientMetrics::new(),
             tmp_send_buf: Vec::new(),
             tmp_send_count: 0,
             tmp_send_size: 0,
@@ -667,10 +678,6 @@ impl Client {
             copy_sliced_acks: Vec::new(),
             data_read_state: DataReadState::new(),
             recvd_slider: Slider::new(),
-            total_sent: AtomicU64::new(0),
-            total_recv_shared: AtomicU64::new(0),
-            err_emu_diagnostics,
-            protocol_metrics,
             next_port: 1024 + (rand::random::<u16>() % (65000 - 1024)),
             ping_count: 0,
             api_pending: ApiPending::new_arc(),
@@ -699,7 +706,6 @@ impl Client {
             pending_orderbook_resubscribe_uid: None,
             pending_trades_unsubscribe: None,
             pending_trades_resubscribe_after_ms: None,
-            debug_outgoing_blackhole: Arc::new(AtomicBool::new(false)),
             indexes_fetch_started_ms: 0,
             last_trades_tick_ms: i64::MIN / 2,
             bind_failure_streak: 0,
@@ -707,9 +713,7 @@ impl Client {
             last_bind_failed_event_ms: NEVER_TIME_MS,
             _ntp_process_guard: ntp_process_guard,
             server_time_delta_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            server_info: crate::commands::engine_api::ServerInfo::default(),
-            server_base_currency_name_arc: None,
-            auth_info: None,
+            identity: SessionIdentity::new(),
             domain_ready: false,
             last_update_markets_ms: i64::MIN / 2,
             last_check_tags_ms: i64::MIN / 2,
