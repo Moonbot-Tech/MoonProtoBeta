@@ -272,7 +272,10 @@ pub struct SlicingReceiver {
     last_cleaned_received: i64,
 }
 
-const LAST_RECVD_BUF_SIZE: usize = 2048;
+// Delphi `LastRecvdBufSize` (MoonProtoIntStruct.pas). Bumped 2048 -> 4096 to
+// match the эталон: x2 headroom against Sliced-dedup slot collisions (ceiling
+// ~455 datagrams/s within the 9s window; real Sliced-rate is units-tens/s).
+const LAST_RECVD_BUF_SIZE: usize = 4096;
 const TIME_WHEN_CAN_RECEIVE_RPT: i64 = 9000; // ms
                                              // Client time is monotonic milliseconds since `Client::new`, so `0` is a valid
                                              // early timestamp. A never-seen slot must sit outside the duplicate window.
