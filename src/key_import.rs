@@ -627,17 +627,6 @@ mod tests {
         assert_eq!(cfg.server_ip, "127.0.0.1");
         assert_eq!(cfg.server_port, 3000);
         assert_eq!(cfg.mask_ver, TransportMode::V2);
-
-        // U1 (sverka #14): from_key_info encapsulates the manual pattern above so a
-        // V2 key connects without the caller hardcoding the transport mode. The
-        // key's embedded address/port/mask_ver win; the fallback host is unused
-        // here because the key exported an address.
-        let cfg2 = crate::ClientConfig::from_key_info(&info, "9.9.9.9");
-        assert_eq!(cfg2.server_ip, "127.0.0.1");
-        assert_eq!(cfg2.server_port, 3000);
-        assert_eq!(cfg2.mask_ver, TransportMode::V2);
-        assert_eq!(cfg2.master_key, master_key);
-        assert_eq!(cfg2.mac_key, mac_key);
     }
 
     #[test]
@@ -670,14 +659,6 @@ mod tests {
         assert_eq!(cfg.server_ip, "example.com");
         assert_eq!(cfg.server_port, 4000);
         assert_eq!(cfg.mask_ver, TransportMode::V0);
-
-        // U1 (sverka #14): the key carried no address (zero IP), so from_key_info
-        // keeps the caller's fallback host while still applying the key's port and
-        // transport mode — mirroring Delphi leaving the configured IP untouched.
-        let cfg2 = crate::ClientConfig::from_key_info(&info, "example.com");
-        assert_eq!(cfg2.server_ip, "example.com");
-        assert_eq!(cfg2.server_port, 4000);
-        assert_eq!(cfg2.mask_ver, TransportMode::V0);
     }
 
     #[test]

@@ -31,14 +31,12 @@ Use one `MoonClient` per server connection in regular applications.
 
 ```rust
 use moonproto::{
-    parse_key_info, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
+    import_key, ClientConfig, ConnectConfig, InitConfig, InitialStrategies,
     MoonClient, TradesStreamMode,
 };
 
-let info = parse_key_info(KEY_B64).expect("invalid key");
-// Endpoint + transport mode (V0/V1/V2) come from the key; the second argument is
-// the fallback host used only when the key did not embed a server address.
-let cfg = ClientConfig::from_key_info(&info, "127.0.0.1");
+let keys = import_key(KEY_B64).expect("invalid key");
+let cfg = ClientConfig::new("127.0.0.1", 3000, keys.master_key, keys.mac_key);
 
 let init = InitConfig {
     initial_strategies: Some(InitialStrategies::new(
