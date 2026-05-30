@@ -229,6 +229,29 @@ impl Client {
         )
     }
 
+    /// S1 part 2 (эталон `MoonProtoClient.pas` ClientNewData `MPC_API` branch):
+    /// a non-crypted `MPC_API` packet is only legitimate when it is an engine
+    /// *response* whose method is in `UnencryptedMethods` — the reference server
+    /// sends `GetMarketsList` / `UpdateMarketsList` / `RequestCandlesData`
+    /// unencrypted (public market lists, and candle data that is already
+    /// zlib-compressed). A plaintext engine response carrying any other method is
+    /// a spoof: part 1 deliberately lets `MPC_API` through the sensitive gate, so
+    /// the method check is what blocks an attacker from injecting, say, a forged
+    /// balance or order-status response over the authenticity-only transport MAC.
+    /// A payload that does not parse as an engine response is left alone, matching
+    /// the эталон guard which only fires for `ApiCmd is TEngineResponse`.
+    fn drop_plaintext_api(payload: &[u8]) -> bool {
+        match Self::engine_response_meta_from_payload(payload) {
+            Some(meta) => !matches!(
+                meta.method,
+                EngineMethod::GetMarketsList
+                    | EngineMethod::UpdateMarketsList
+                    | EngineMethod::RequestCandlesData
+            ),
+            None => false,
+        }
+    }
+
     pub(crate) fn decode_data_read_int_payload_shared(
         data_read_state: &mut DataReadState,
         raw_cmd: u8,
@@ -276,6 +299,16 @@ impl Client {
             }
         }
 
+        // S1 part 2: drop a plaintext API response whose method is not in
+        // UnencryptedMethods. Runs after decompression, like the эталон
+        // ClientNewData MPC_API guard that parses the already-decompressed stream.
+        if !was_crypted
+            && cmd & 0x7F == Command::API.to_byte()
+            && Self::drop_plaintext_api(&payload)
+        {
+            return None;
+        }
+
         // MPC_Ping is handled in the reader Ping path. Its server ACK bitmap follows the
         // Delphi TmpSlider -> RecvdSlider -> ApplyRegularHLAck path, not this
         // generic delivery branch.
@@ -318,6 +351,15 @@ impl Client {
             if let Some(decompressed) = compression::mp_decompress(&payload) {
                 payload = decompressed;
             }
+        }
+
+        // S1 part 2: drop a plaintext API response whose method is not in
+        // UnencryptedMethods (after decompression, like the эталон MPC_API guard).
+        if !was_crypted
+            && cmd & 0x7F == Command::API.to_byte()
+            && Self::drop_plaintext_api(&payload)
+        {
+            return None;
         }
 
         Some((cmd, payload))

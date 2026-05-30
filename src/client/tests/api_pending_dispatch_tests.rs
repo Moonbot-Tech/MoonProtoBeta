@@ -350,9 +350,16 @@ fn pending_heavy_markets_response_is_applied_by_pending_owner_not_inline_dispatc
 #[test]
 fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
     let mut client = Client::new(dummy_cfg());
+    let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
+    client.authorized = true;
+    client.auth_status = AuthStatus::AuthDone;
     let request_uid = 0x7766_5544_3322_1100;
     let rx = client.api_pending.register(request_uid);
-    let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+    let response_payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+    // AuthCheck is not an UnencryptedMethod, so the server sends it Crypted; feed
+    // the crypted command path (S1 part 2 drops a plaintext AuthCheck as a spoof).
+    let encrypted_response =
+        build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
     let mut mode = RunMode::Callback {
         on_data: Box::new(|_, _| panic!("pending response must not be duplicated")),
     };
@@ -361,8 +368,8 @@ fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
         client: &mut client,
     }
     .data_read_int_inline(
-        Command::API.to_byte(),
-        &payload,
+        Command::Crypted.to_byte(),
+        &encrypted_response,
         64,
         123,
         true,
@@ -518,6 +525,58 @@ fn reader_consumed_api_response_still_reaches_dispatcher_state() {
         crate::events::Event::EngineResponse(resp)
             if resp.request_uid == 0x66 && resp.method == EngineMethod::AuthCheck
     )));
+}
+
+#[test]
+fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
+    // S1 part 2 (эталон MoonProtoClient.pas ClientNewData MPC_API guard): a
+    // plaintext API response is only legitimate for UnencryptedMethods
+    // (GetMarketsList / UpdateMarketsList / RequestCandlesData). The sensitive
+    // gate (part 1) intentionally lets MPC_API through, so without this method
+    // check a spoofer could inject a forged GetBalance / order-status response
+    // over the authenticity-only transport MAC.
+    let mut client = Client::new(dummy_cfg());
+
+    // Forged plaintext balance response — must be dropped on both decode paths.
+    let forged = build_engine_response_payload(0x77, EngineMethod::GetBalance, &[]);
+    assert!(
+        Client::decode_data_read_int_payload_shared(
+            &mut client.data_read_state,
+            Command::API.to_byte(),
+            &forged,
+        )
+        .is_none(),
+        "plaintext API response with a non-UnencryptedMethods method must be dropped"
+    );
+    assert!(
+        Client::decode_data_read_int_payload_owned(
+            &mut client.data_read_state,
+            Command::API.to_byte(),
+            forged,
+        )
+        .is_none(),
+        "owned decode path drops the same forged plaintext API response"
+    );
+
+    // Legitimate plaintext responses (public market data / already-zlib candles)
+    // still pass through the gate.
+    for method in [
+        EngineMethod::GetMarketsList,
+        EngineMethod::UpdateMarketsList,
+        EngineMethod::RequestCandlesData,
+    ] {
+        let ok = build_engine_response_payload(0x88, method, &[]);
+        let decoded = Client::decode_data_read_int_payload_shared(
+            &mut client.data_read_state,
+            Command::API.to_byte(),
+            &ok,
+        );
+        assert!(
+            decoded.is_some(),
+            "plaintext API response with UnencryptedMethods method {method:?} must pass"
+        );
+        assert_eq!(decoded.unwrap().0, Command::API.to_byte());
+    }
 }
 
 #[test]
@@ -936,11 +995,16 @@ fn wait_for_receiver_in_owned_runtime_queues_events_seen_while_waiting() {
     client.need_connect = false;
     client.authorized = true;
     client.auth_status = AuthStatus::AuthDone;
+    let decode_key = install_server_decode_session(&mut client, 0x0123_4567_89AB_CDEF);
 
     let request_uid = 0x55AA;
     let rx = client.api_pending.register(request_uid);
-    let payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
-    send_server_packet_to_client_socket(&client, Command::API, &payload);
+    let response_payload = build_engine_response_payload(request_uid, EngineMethod::AuthCheck, &[]);
+    // AuthCheck is sent Crypted by the server (not an UnencryptedMethod); feed the
+    // crypted command so S1 part 2 does not drop it as a plaintext spoof.
+    let encrypted_response =
+        build_server_crypted_payload(&decode_key, 1, Command::API, &response_payload);
+    send_server_packet_to_client_socket(&client, Command::Crypted, &encrypted_response);
 
     let mut dispatcher = EventDispatcher::new();
     let resp = client
