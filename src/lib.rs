@@ -105,9 +105,10 @@
 //!   Balances / Strats / Settings / Markets.
 //! - [`key_import`] — parser for base64 MoonBot exported keys.
 //! - [`ntp`] — SNTP client and Delphi-style process-level syncer.
-//! - [`compression`] — SynLZ/DEFLATE helpers for wire-format payloads.
-//! - [`transport`] — low-level wire layer: MAC, obfuscation, headers, and
-//!   transport modes V0/V1/V2.
+//!
+//! The low-level wire layers (compression, crypto, framing, and transport modes
+//! V0/V1/V2) are crate-internal implementation details; the high-level API above
+//! is the application model.
 
 // Clippy: deliberate project-wide patterns, not lints to chase.
 // Protocol parsers/builders take many byte-field arguments by nature.
