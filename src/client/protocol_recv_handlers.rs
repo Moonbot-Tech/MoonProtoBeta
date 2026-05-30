@@ -2,7 +2,7 @@ use super::protocol_core::ProtocolCore;
 use super::*;
 
 impl ProtocolCore<'_> {
-    pub(crate) fn on_err_emu_drop_inline(raw_cmd: u8, payload: &[u8]) {
+    pub(crate) fn on_err_emu_drop(raw_cmd: u8, payload: &[u8]) {
         if trace_io_enabled() {
             eprintln!(
                 "[mp-io-drop-err-emu] t={} cmd={:?} raw={} payload_len={} payload_hash={:016X} payload_head={}",
@@ -34,7 +34,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_new_size_test_inline(&mut self, payload: &[u8]) {
+    pub(crate) fn on_new_size_test(&mut self, payload: &[u8]) {
         if let Some(ack) =
             Client::build_size_ack_payload(&mut self.client.recv.data_read_state, payload)
         {
@@ -51,7 +51,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_new_probe_mtu_inline(&mut self, payload: &[u8]) {
+    pub(crate) fn on_new_probe_mtu(&mut self, payload: &[u8]) {
         if let Some(ack) = Client::build_probe_mtu_ack_payload(payload) {
             // Same PMTU rule as SizeAck: ProbeMTUAck is intentionally padded to
             // the tested size and sent with DF. EMSGSIZE means "probe failed".
@@ -65,7 +65,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_handshake_control_inline(
+    pub(crate) fn on_handshake_control(
         &mut self,
         cmd: Command,
         recv_bytes: u64,
@@ -100,7 +100,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_who_are_you_inline(
+    pub(crate) fn on_who_are_you(
         &mut self,
         payload: &[u8],
         recv_bytes: u64,
@@ -116,7 +116,7 @@ impl ProtocolCore<'_> {
             Command::WhoAreYou.to_byte(),
             payload,
         ) {
-            let encrypted = self.apply_who_are_you_hello_and_build_imfriend(hello);
+            let encrypted = self.apply_hello_and_build_imfriend(hello);
             self.client
                 .start_hello_wait(HelloWaitState::PrimaryImFriendSent, timestamp_ms);
             self.send_command(Command::ImFriend, &encrypted);
@@ -143,7 +143,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_fine_inline(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
+    pub(crate) fn on_fine(&mut self, payload: &[u8], recv_bytes: u64, timestamp_ms: i64) {
         if !self.client.hello_wait_state.allows_fine() {
             let _ = (payload, recv_bytes, timestamp_ms);
             return;
@@ -163,7 +163,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn on_new_sliced_inline(
+    pub(crate) fn on_new_sliced(
         &mut self,
         payload: &[u8],
         recv_bytes: u64,
@@ -204,7 +204,7 @@ impl ProtocolCore<'_> {
         }
 
         if let Some((datagram_num, cmd, payload, dup_count, blocks_count)) = assembled {
-            self.data_read_int_owned_inline(
+            self.dispatch_command_owned(
                 cmd,
                 payload,
                 recv_bytes,
@@ -227,11 +227,11 @@ impl ProtocolCore<'_> {
         true
     }
 
-    pub(crate) fn on_new_sliced_ack_inline(&mut self, payload: &[u8]) {
+    pub(crate) fn on_new_sliced_ack(&mut self, payload: &[u8]) {
         Client::push_sliced_ack_payload(&self.client.send_lock, payload);
     }
 
-    pub(crate) fn on_new_ping_inline(
+    pub(crate) fn on_new_ping(
         &mut self,
         payload: &[u8],
         recv_bytes: u64,

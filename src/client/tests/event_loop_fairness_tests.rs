@@ -297,7 +297,7 @@ fn err_emu_drop_updates_valid_packet_stats_before_protocol_drop() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::OrderBook.to_byte(),
         &[],
         1234,
@@ -344,7 +344,7 @@ fn pre_init_domain_pushes_are_dropped_before_callback_delivery() {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_int_inline(
+        .dispatch_command(
             cmd.to_byte(),
             &[idx as u8],
             10 + idx as u64,
@@ -382,7 +382,7 @@ fn post_init_trades_stream_requires_explicit_subscription_intent() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::TradesStream.to_byte(),
         &[0xAA],
         1,
@@ -402,7 +402,7 @@ fn post_init_trades_stream_requires_explicit_subscription_intent() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::TradesStream.to_byte(),
         &[0xAA],
         1,
@@ -432,7 +432,7 @@ fn data_read_sliced_payload_bypasses_recv_event_backlog() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::OrderBook.to_byte(),
         &[0xAA, 0xBB],
         321,
@@ -488,7 +488,7 @@ fn data_read_grouped_payload_applies_recv_effects_once() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_inline(
+    .dispatch_packet_commands(
         Command::Grouped.to_byte(),
         &grouped,
         77,
@@ -535,7 +535,7 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
         ProtocolCore {
             client: &mut client,
         }
-        .data_read_int_inline(
+        .dispatch_command(
             sensitive.to_byte(),
             &[0x01, 0x02],
             0,
@@ -555,7 +555,7 @@ fn s1_drops_plaintext_sensitive_commands_but_delivers_non_sensitive() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::OrderBook.to_byte(),
         &[0xAA],
         0,

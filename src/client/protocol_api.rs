@@ -96,11 +96,7 @@ impl Client {
         }
     }
 
-    pub(crate) fn dispatch_api_pending_inline(
-        api_pending: &ApiPending,
-        cmd: u8,
-        payload: &[u8],
-    ) -> bool {
+    pub(crate) fn dispatch_api_pending(api_pending: &ApiPending, cmd: u8, payload: &[u8]) -> bool {
         if cmd != Command::API.to_byte() {
             return false;
         }
@@ -110,7 +106,7 @@ impl Client {
         api_pending.dispatch_registered_with(uid, || parse_engine_response(payload))
     }
 
-    pub(crate) fn dispatch_candles_chunk_inline(
+    pub(crate) fn dispatch_candles_chunk(
         pending_candles: &mut HashMap<u64, PartialCandles>,
         cmd: u8,
         payload: &[u8],

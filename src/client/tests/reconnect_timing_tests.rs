@@ -126,8 +126,7 @@ fn apply_reader_handshake_payload(client: &mut Client, cmd: Command, payload: &[
 
     match cmd {
         Command::WhoAreYou => {
-            let _encrypted_imfriend =
-                ProtocolCore { client }.apply_who_are_you_hello_and_build_imfriend(hello);
+            let _encrypted_imfriend = ProtocolCore { client }.apply_hello_and_build_imfriend(hello);
             true
         }
         Command::Fine => {
@@ -191,7 +190,7 @@ fn want_new_hello_allows_immediate_hello_on_young_client_clock() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control_inline(Command::WantNewHello, 0, 0);
+    .on_handshake_control(Command::WantNewHello, 0, 0);
 
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     ProtocolCore {
@@ -218,13 +217,13 @@ fn want_new_hello_makes_late_fine_invalid_until_new_who_are_you() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control_inline(Command::WantNewHello, 0, 0);
+    .on_handshake_control(Command::WantNewHello, 0, 0);
 
     let fine = encrypted_hello(&client, Command::Fine, 0x2222, 0x3333);
     ProtocolCore {
         client: &mut client,
     }
-    .on_fine_inline(&fine, 0, 10);
+    .on_fine(&fine, 0, 10);
 
     assert!(!client.authorized);
     assert_eq!(client.auth_status, AuthStatus::Connected);
@@ -247,7 +246,7 @@ fn late_want_new_hello_does_not_reset_fresh_authorized_session() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control_inline(Command::WantNewHello, 0, 10);
+    .on_handshake_control(Command::WantNewHello, 0, 10);
 
     assert!(client.authorized);
     assert_eq!(client.auth_status, AuthStatus::AuthDone);
@@ -268,7 +267,7 @@ fn want_new_hello_is_accepted_during_rebind_hello_again() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control_inline(Command::WantNewHello, 0, 10);
+    .on_handshake_control(Command::WantNewHello, 0, 10);
 
     assert!(!client.authorized);
     assert_eq!(client.auth_status, AuthStatus::Connected);
@@ -1379,7 +1378,7 @@ fn need_hello_again_allows_immediate_retry_on_young_client_clock() {
     ProtocolCore {
         client: &mut client,
     }
-    .on_handshake_control_inline(Command::NeedHelloAgain, 0, 1000);
+    .on_handshake_control(Command::NeedHelloAgain, 0, 1000);
 
     assert_eq!(client.last_sent_hello, NEVER_SENT_MS);
     ProtocolCore {

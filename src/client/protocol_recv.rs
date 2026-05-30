@@ -55,7 +55,7 @@ impl ProtocolCore<'_> {
                 Ok((n, _)) => {
                     drained_any = true;
                     datagrams += 1;
-                    let continue_recv = self.process_datagram_inline(&buf[..n], n as u64, mode);
+                    let continue_recv = self.process_datagram(&buf[..n], n as u64, mode);
                     self.drain_post_receive_delivery(cur_tm, mode);
                     if !continue_recv {
                         break;
@@ -111,7 +111,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn process_datagram_inline(
+    pub(crate) fn process_datagram(
         &mut self,
         datagram: &[u8],
         recv_bytes: u64,
@@ -166,10 +166,10 @@ impl ProtocolCore<'_> {
                     .unwrap()
                     .record_packet(hdr.cmd, &payload, decision);
                 if decision.dropped {
-                    Self::on_err_emu_drop_inline(hdr.cmd, &payload);
+                    Self::on_err_emu_drop(hdr.cmd, &payload);
                     true
                 } else {
-                    self.handle_command_inline(
+                    self.route_command(
                         hdr.cmd,
                         &payload,
                         recv_bytes,
@@ -180,7 +180,7 @@ impl ProtocolCore<'_> {
                     )
                 }
             } else {
-                self.handle_command_inline(
+                self.route_command(
                     hdr.cmd,
                     &payload,
                     recv_bytes,
@@ -218,7 +218,11 @@ impl ProtocolCore<'_> {
         continue_recv
     }
 
-    pub(crate) fn handle_command_inline(
+    // Routes one decoded wire command byte to its service/handshake handler,
+    // falling through to `dispatch_packet_commands` for data commands.
+    // (Named `route_command` to stay distinct from the runtime-loop
+    // `handle_command`, which dispatches app-level `RuntimeCommand`s.)
+    pub(crate) fn route_command(
         &mut self,
         raw_cmd: u8,
         payload: &[u8],
@@ -236,44 +240,50 @@ impl ProtocolCore<'_> {
 
         match Command::from_byte(raw_cmd) {
             Command::Ping => {
-                self.on_new_ping_inline(payload, recv_bytes, total_recv_after, timestamp_ms, mode);
+                self.on_new_ping(payload, recv_bytes, total_recv_after, timestamp_ms, mode);
             }
             Command::WrongHello | Command::WantNewHello | Command::NeedHelloAgain => {
-                self.on_handshake_control_inline(
-                    Command::from_byte(raw_cmd),
-                    recv_bytes,
-                    timestamp_ms,
-                );
+                self.on_handshake_control(Command::from_byte(raw_cmd), recv_bytes, timestamp_ms);
             }
             Command::WhoAreYou => {
-                *protocol_wait += self.on_who_are_you_inline(payload, recv_bytes, timestamp_ms);
+                *protocol_wait += self.on_who_are_you(payload, recv_bytes, timestamp_ms);
             }
             Command::Fine => {
-                self.on_fine_inline(payload, recv_bytes, timestamp_ms);
+                self.on_fine(payload, recv_bytes, timestamp_ms);
             }
             Command::SizeTest => {
-                self.on_new_size_test_inline(payload);
+                self.on_new_size_test(payload);
             }
             Command::ProbeMTU => {
-                self.on_new_probe_mtu_inline(payload);
+                self.on_new_probe_mtu(payload);
             }
             Command::SlicedACK => {
-                self.on_new_sliced_ack_inline(payload);
+                self.on_new_sliced_ack(payload);
             }
             Command::Sliced => {
-                if !self.on_new_sliced_inline(payload, recv_bytes, timestamp_ms, mode) {
+                if !self.on_new_sliced(payload, recv_bytes, timestamp_ms, mode) {
                     return false;
                 }
             }
             _ => {
-                self.data_read_inline(raw_cmd, payload, recv_bytes, timestamp_ms, false, mode);
+                self.dispatch_packet_commands(
+                    raw_cmd,
+                    payload,
+                    recv_bytes,
+                    timestamp_ms,
+                    false,
+                    mode,
+                );
             }
         }
 
         true
     }
 
-    pub(crate) fn data_read_inline(
+    // parity: MoonBot MoonProtoCommon.pas:DataRead — splits a Grouped container
+    // into its sub-commands (cmd byte + u16 len + payload) and dispatches each;
+    // a non-Grouped command is dispatched directly as the single command.
+    pub(crate) fn dispatch_packet_commands(
         &mut self,
         raw_cmd: u8,
         payload: &[u8],
@@ -283,7 +293,7 @@ impl ProtocolCore<'_> {
         mode: &mut RunMode<'_>,
     ) {
         if Command::from_byte(raw_cmd) != Command::Grouped {
-            self.data_read_int_inline(
+            self.dispatch_command(
                 raw_cmd,
                 payload,
                 recv_bytes,
@@ -305,7 +315,7 @@ impl ProtocolCore<'_> {
             if pos + sz > payload.len() {
                 break;
             }
-            self.data_read_int_inline(
+            self.dispatch_command(
                 sub_cmd,
                 &payload[pos..pos + sz],
                 recv_bytes,
@@ -323,7 +333,9 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn data_read_int_inline(
+    // parity: MoonBot MoonProtoCommon.pas:DataReadInt — per-single-command
+    // decode (Crypted/compressed/auth gates) then dispatch; borrowed payload.
+    pub(crate) fn dispatch_command(
         &mut self,
         raw_cmd: u8,
         payload: &[u8],
@@ -342,7 +354,7 @@ impl ProtocolCore<'_> {
             }
             return;
         }
-        let decoded = Client::decode_data_read_int_payload_shared(
+        let decoded = Client::decode_command_payload_shared(
             &mut self.client.recv.data_read_state,
             raw_cmd,
             payload,
@@ -353,10 +365,13 @@ impl ProtocolCore<'_> {
             }
             return;
         };
-        self.finish_data_read_int_decoded(cmd, payload, timestamp_ms, sliced_stats, mode);
+        self.finish_decoded_command(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
-    pub(crate) fn data_read_int_owned_inline(
+    // parity: MoonBot MoonProtoCommon.pas:DataReadInt — same per-command decode
+    // and dispatch as `dispatch_command`, but takes ownership of the payload
+    // bytes (sliced reassembly already owns a Vec, so no extra copy).
+    pub(crate) fn dispatch_command_owned(
         &mut self,
         raw_cmd: u8,
         payload: Vec<u8>,
@@ -375,14 +390,14 @@ impl ProtocolCore<'_> {
             }
             return;
         }
-        let Some((cmd, payload)) = Client::decode_data_read_int_payload_owned(
+        let Some((cmd, payload)) = Client::decode_command_payload_owned(
             &mut self.client.recv.data_read_state,
             raw_cmd,
             payload,
         ) else {
             return;
         };
-        self.finish_data_read_int_decoded(cmd, payload, timestamp_ms, sliced_stats, mode);
+        self.finish_decoded_command(cmd, payload, timestamp_ms, sliced_stats, mode);
     }
 
     fn should_drop_crypted_before_auth(&self, raw_cmd: u8, payload_len: usize) -> bool {
@@ -400,7 +415,7 @@ impl ProtocolCore<'_> {
         true
     }
 
-    fn finish_data_read_int_decoded(
+    fn finish_decoded_command(
         &mut self,
         cmd: u8,
         payload: Vec<u8>,
@@ -408,12 +423,12 @@ impl ProtocolCore<'_> {
         sliced_stats: Option<ReaderSlicedStats>,
         mode: &mut RunMode<'_>,
     ) {
-        let api_pending_consumed = Client::dispatch_api_pending_inline(
+        let api_pending_consumed = Client::dispatch_api_pending(
             self.client.pending_api.api_pending.as_ref(),
             cmd,
             &payload,
         );
-        let candles_chunk_consumed = Client::dispatch_candles_chunk_inline(
+        let candles_chunk_consumed = Client::dispatch_candles_chunk(
             &mut self.client.pending_api.pending_candles,
             cmd,
             &payload,

@@ -257,7 +257,9 @@ impl Client {
         }
     }
 
-    pub(crate) fn decode_data_read_int_payload_shared(
+    // parity: MoonBot MoonProtoCommon.pas:DataReadInt — the decode half of a
+    // single command: Crypted decrypt, plaintext-sensitive drop, decompress.
+    pub(crate) fn decode_command_payload_shared(
         data_read_state: &mut DataReadState,
         raw_cmd: u8,
         data: &[u8],
@@ -320,7 +322,9 @@ impl Client {
         Some((cmd, payload.into_owned()))
     }
 
-    pub(crate) fn decode_data_read_int_payload_owned(
+    // parity: MoonBot MoonProtoCommon.pas:DataReadInt — owned-payload variant of
+    // `decode_command_payload_shared` (decrypts/decompresses in place).
+    pub(crate) fn decode_command_payload_owned(
         data_read_state: &mut DataReadState,
         raw_cmd: u8,
         data: Vec<u8>,

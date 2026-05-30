@@ -327,7 +327,7 @@ fn pending_heavy_markets_response_is_applied_by_pending_owner_not_inline_dispatc
     let rx = client.pending_api.api_pending.register(request_uid);
     let payload = build_engine_response_payload(request_uid, EngineMethod::GetMarketsList, &[]);
 
-    let consumed = Client::dispatch_api_pending_inline(
+    let consumed = Client::dispatch_api_pending(
         client.pending_api.api_pending.as_ref(),
         Command::API.to_byte(),
         &payload,
@@ -369,7 +369,7 @@ fn data_read_api_response_reaches_pending_receiver_before_run_loop() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::Crypted.to_byte(),
         &encrypted_response,
         64,
@@ -405,7 +405,7 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::Crypted.to_byte(),
         &stale_domain,
         128,
@@ -417,7 +417,7 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::Crypted.to_byte(),
         &encrypted_response,
         128,
@@ -433,7 +433,7 @@ fn crypted_app_packets_before_auth_do_not_advance_slider_or_pending_api() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::Crypted.to_byte(),
         &encrypted_response,
         128,
@@ -542,7 +542,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     // Forged plaintext balance response — must be dropped on both decode paths.
     let forged = build_engine_response_payload(0x77, EngineMethod::GetBalance, &[]);
     assert!(
-        Client::decode_data_read_int_payload_shared(
+        Client::decode_command_payload_shared(
             &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &forged,
@@ -551,7 +551,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
         "plaintext API response with a non-UnencryptedMethods method must be dropped"
     );
     assert!(
-        Client::decode_data_read_int_payload_owned(
+        Client::decode_command_payload_owned(
             &mut client.recv.data_read_state,
             Command::API.to_byte(),
             forged,
@@ -566,7 +566,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
     // the TEngineResponse gate or no-ops in ProcessApiCommand (no state change).
     let unparseable = vec![0u8; 5];
     assert!(
-        Client::decode_data_read_int_payload_shared(
+        Client::decode_command_payload_shared(
             &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &unparseable,
@@ -583,7 +583,7 @@ fn s1_drops_plaintext_api_response_with_non_unencrypted_method() {
         EngineMethod::RequestCandlesData,
     ] {
         let ok = build_engine_response_payload(0x88, method, &[]);
-        let decoded = Client::decode_data_read_int_payload_shared(
+        let decoded = Client::decode_command_payload_shared(
             &mut client.recv.data_read_state,
             Command::API.to_byte(),
             &ok,
@@ -649,7 +649,7 @@ fn decoded_batch_uses_receive_timestamp_for_active_timers() {
                     ProtocolCore {
                         client: &mut client,
                     }
-                    .data_read_int_inline(
+                    .dispatch_command(
                         Command::TradesStream.to_byte(),
                         payload,
                         64,
@@ -664,7 +664,7 @@ fn decoded_batch_uses_receive_timestamp_for_active_timers() {
                     ProtocolCore {
                         client: &mut client,
                     }
-                    .data_read_int_inline(
+                    .dispatch_command(
                         Command::TradesStream.to_byte(),
                         &payload,
                         64,
@@ -763,7 +763,7 @@ fn data_read_candles_chunks_complete_receiver_from_background_parse_worker() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::API.to_byte(),
         &payload0,
         64,
@@ -780,7 +780,7 @@ fn data_read_candles_chunks_complete_receiver_from_background_parse_worker() {
     ProtocolCore {
         client: &mut client,
     }
-    .data_read_int_inline(
+    .dispatch_command(
         Command::API.to_byte(),
         &payload1,
         64,
@@ -879,7 +879,7 @@ fn failed_compressed_payload_is_delivered_with_real_cmd_like_delphi() {
     // OrderBook stands in for "a non-sensitive data command": S1 drops plaintext
     // sensitive cmds (Order/Strat/UI/Balance) in decode, so this compressed-fail
     // delivery test uses a non-sensitive command.
-    let (cmd, payload) = Client::decode_data_read_int_payload_shared(
+    let (cmd, payload) = Client::decode_command_payload_shared(
         &mut client.recv.data_read_state,
         Command::OrderBook.to_byte() | COMPRESSED_FLAG,
         &compressed_garbage,
@@ -905,7 +905,7 @@ fn owned_data_read_keeps_plain_sliced_payload_allocation() {
     // Generic non-API command: this test pins buffer ownership of the owned
     // decode path, not API semantics. API now carries the S1 part-2 gate, which
     // would drop this non-response payload.
-    let (cmd, decoded) = Client::decode_data_read_int_payload_owned(
+    let (cmd, decoded) = Client::decode_command_payload_owned(
         &mut client.recv.data_read_state,
         Command::Data.to_byte(),
         payload,

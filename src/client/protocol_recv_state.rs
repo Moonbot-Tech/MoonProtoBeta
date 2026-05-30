@@ -47,7 +47,7 @@ impl ProtocolCore<'_> {
         }
     }
 
-    pub(crate) fn apply_who_are_you_hello_and_build_imfriend(
+    pub(crate) fn apply_hello_and_build_imfriend(
         &mut self,
         mut hello: handshake::Hello,
     ) -> Vec<u8> {

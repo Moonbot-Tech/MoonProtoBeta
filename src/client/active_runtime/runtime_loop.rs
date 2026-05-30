@@ -43,7 +43,7 @@ pub(super) fn runtime_loop(
             break;
         }
 
-        if !run_protocol_step_inline(&mut client, &mut dispatcher, &mut dispatch_buffers) {
+        if !run_protocol_step(&mut client, &mut dispatcher, &mut dispatch_buffers) {
             break;
         }
 
@@ -159,7 +159,7 @@ struct InlineDispatchBuffers {
     active_actions_buf: Vec<crate::events::ActiveAction>,
 }
 
-fn run_protocol_step_inline(
+fn run_protocol_step(
     client: &mut Client,
     dispatcher: &mut crate::events::EventDispatcher,
     buffers: &mut InlineDispatchBuffers,
