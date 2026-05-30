@@ -218,12 +218,10 @@ impl Client {
         }
     }
 
-    /// S1 (эталон `MoonProtoCommon.pas` DataReadInt): a non-crypted command in
-    /// `MoonProtoSensitiveCmds` must be dropped on the client, except `MPC_API`
-    /// (a server API response is the only legitimate plaintext sensitive command;
-    /// its method is further checked by [`Self::drop_plaintext_api`]). On the
-    /// server every sensitive command including API must be crypted, but the Rust
-    /// port is a client, so the API exception always applies here.
+    // Order/account/strategy/UI mutations are the session-integrity boundary.
+    // They must arrive through AES-GCM; public market/control traffic can stay
+    // on the transport MAC/obfuscation layer. API is checked separately because
+    // a few large public server responses are intentionally plaintext.
     fn drop_plaintext_sensitive(real_cmd: u8) -> bool {
         matches!(
             Command::from_byte(real_cmd),
@@ -231,22 +229,11 @@ impl Client {
         )
     }
 
-    /// S1 part 2 (эталон `MoonProtoClient.pas` ClientNewData `MPC_API` branch):
-    /// the only legitimate plaintext `MPC_API` is an engine *response* whose
-    /// method is in `UnencryptedMethods` — the reference server sends
-    /// `GetMarketsList` / `UpdateMarketsList` / `RequestCandlesData` unencrypted
-    /// (public market lists, and candle data that is already zlib-compressed) and
-    /// crypts everything else. Anything else over plaintext is dropped:
-    /// - a response with a sensitive method → forged balance/order-status spoof;
-    /// - a request or an unparseable payload → never sent plaintext by the server.
-    ///
-    /// This nets out exactly like the эталон, where the only plaintext API that
-    /// ever reaches client state is an `UnencryptedMethods` response: the
-    /// `ClientNewData` gate drops sensitive-method responses, and
-    /// `ProcessApiCommand` is a no-op for a non-response
-    /// (`if cmd.ClassType = TEngineResponse`), so a plaintext request changes
-    /// nothing. Part 1 deliberately lets `MPC_API` past the sensitive gate, so
-    /// this method check is what blocks injection over the authenticity-only MAC.
+    // Plaintext API is limited to public bulk responses the Delphi server also
+    // sends outside AES-GCM: market lists, market updates, and compressed candle
+    // data. Account/order/settings API methods remain session-encrypted; a
+    // plaintext response for those methods is not a useful data packet and is
+    // dropped before it can match a pending request.
     fn drop_plaintext_api(payload: &[u8]) -> bool {
         match Self::engine_response_meta_from_payload(payload) {
             Some(meta) => !matches!(
@@ -295,8 +282,8 @@ impl Client {
             }
         }
 
-        // S1: drop plaintext sensitive commands early (before decompression),
-        // matching the эталон DataReadInt security gate.
+        // Drop state-changing plaintext before decompression; high-rate public
+        // data keeps its cheaper transport path.
         if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
             return None;
         }
@@ -308,9 +295,8 @@ impl Client {
             }
         }
 
-        // S1 part 2: drop a plaintext API response whose method is not in
-        // UnencryptedMethods. Runs after decompression, like the эталон
-        // ClientNewData MPC_API guard that parses the already-decompressed stream.
+        // Public bulk API responses may be plaintext; everything else in API is
+        // part of session/account state and must have crossed AES-GCM.
         if !was_crypted
             && cmd & 0x7F == Command::API.to_byte()
             && Self::drop_plaintext_api(&payload)
@@ -352,7 +338,8 @@ impl Client {
             }
         }
 
-        // S1: drop plaintext sensitive commands early, like the эталон DataReadInt gate.
+        // Drop state-changing plaintext before decompression; high-rate public
+        // data keeps its cheaper transport path.
         if !was_crypted && Self::drop_plaintext_sensitive(cmd & 0x7F) {
             return None;
         }
@@ -364,8 +351,8 @@ impl Client {
             }
         }
 
-        // S1 part 2: drop a plaintext API response whose method is not in
-        // UnencryptedMethods (after decompression, like the эталон MPC_API guard).
+        // Public bulk API responses may be plaintext; everything else in API is
+        // part of session/account state and must have crossed AES-GCM.
         if !was_crypted
             && cmd & 0x7F == Command::API.to_byte()
             && Self::drop_plaintext_api(&payload)

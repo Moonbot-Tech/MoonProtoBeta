@@ -52,6 +52,12 @@ mod outer_crypt;
 
 use log::warn;
 
+// The transport layer is deliberately narrow: authenticate and shape datagrams,
+// then hand payload bytes to the session/domain layers. High-rate public market
+// data and recovery traffic do not need the same treatment as state-changing
+// commands; the AES-GCM command gate above this layer is where order/account
+// integrity is enforced.
+
 pub(crate) use extended::ClientTransportModeState;
 pub(crate) use header::{ClientMsgHeader, TRANSPORT_VER};
 // `ServerMsgHeader` is re-exported from the crate root (`moonproto::ServerMsgHeader`).
