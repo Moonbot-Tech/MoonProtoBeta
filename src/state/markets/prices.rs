@@ -169,7 +169,8 @@ impl MarketsState {
                 price.last_bid = price.bid;
                 price.last_ask = price.ask;
                 price.p_last = (price.bid + price.ask) * 0.5;
-                price.min_lot_size = (bn_step_size.max(bn_min_qty) * price.p_last).max(bn_min_notional);
+                price.min_lot_size =
+                    (bn_step_size.max(bn_min_qty) * price.p_last).max(bn_min_notional);
                 if price.ask > eps_m {
                     price.chart_price_step = eps_m.max(price.ask / 5000.0);
                 }
@@ -220,8 +221,7 @@ impl MarketsState {
 
     fn apply_one_corr_price_update(&mut self, c: &CorrMarketPriceUpdate) {
         if self.corr_markets.contains_key(&c.bn_market_name) {
-            Arc::make_mut(&mut self.corr_prices)
-                .insert(c.bn_market_name.clone(), c.last_price);
+            Arc::make_mut(&mut self.corr_prices).insert(c.bn_market_name.clone(), c.last_price);
         }
     }
 }

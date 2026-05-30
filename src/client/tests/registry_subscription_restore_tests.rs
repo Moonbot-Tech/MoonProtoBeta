@@ -153,7 +153,11 @@ fn restore_orderbooks_are_batched_into_single_request() {
     client.server_token = 1;
     client.restore_registry_subscriptions();
     let sent = drain_api_requests(&client);
-    assert_eq!(sent.len(), 1, "3 orderbook subscriptions → 1 batch wire request");
+    assert_eq!(
+        sent.len(),
+        1,
+        "3 orderbook subscriptions → 1 batch wire request"
+    );
     assert_eq!(
         method_id(&sent[0]),
         Some(EngineMethod::SubscribeOrderBook.to_byte())

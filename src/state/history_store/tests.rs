@@ -522,7 +522,11 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 1, "snapshot candle is sealed; live candle is separate, not in the ring");
+    assert_eq!(
+        candles.len(),
+        1,
+        "snapshot candle is sealed; live candle is separate, not in the ring"
+    );
     assert_eq!(candles[0].time, now);
     assert_eq!(candles[0].close, 105.0);
     store.refresh_derived_analytics(t1);
@@ -543,9 +547,16 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
         .candles_5m
         .unwrap()
         .copy_last(8, &mut candles);
-    assert_eq!(candles.len(), 2, "first live candle is sealed and added to the ring");
+    assert_eq!(
+        candles.len(),
+        2,
+        "first live candle is sealed and added to the ring"
+    );
     assert_eq!(candles[0].time, now);
-    assert_eq!(candles[1].time, t2, "sealed candle is stamped with the seal time (end of period)");
+    assert_eq!(
+        candles[1].time, t2,
+        "sealed candle is stamped with the seal time (end of period)"
+    );
     assert_eq!(candles[1].open, 120.0);
     assert_eq!(candles[1].close, 120.0);
     assert_eq!(candles[1].volume, 240.0);

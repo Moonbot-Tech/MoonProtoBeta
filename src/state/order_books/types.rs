@@ -35,7 +35,6 @@ impl OrderBookKind {
     }
 }
 
-
 /// Internal cache key: `(market_index, raw book_kind)`.
 pub type BookKey = (u16, u8);
 

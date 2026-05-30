@@ -194,7 +194,7 @@ fn single_strategy_roundtrip() {
     assert_eq!(ps.strategy_ver, 1);
     assert!(ps.checked);
     assert_eq!(ps.kind, 5);
-    assert_eq!(&*ps.path,"Folder/A");
+    assert_eq!(&*ps.path, "Folder/A");
     assert_eq!(
         ps.fields.get("StrategyName"),
         Some(&FieldValue::String("Strat-1".to_string()))
@@ -404,7 +404,7 @@ fn writer_wraps_name_path_and_string_lengths_like_delphi() {
     let parsed = parse_strategy_batch(&compressed).unwrap();
     let ps = &parsed.strategies[0];
 
-    assert_eq!(&*ps.path,"P");
+    assert_eq!(&*ps.path, "P");
     assert_eq!(
         ps.fields.get("Comment"),
         Some(&FieldValue::String("V".to_string()))
@@ -679,12 +679,9 @@ fn invalid_utf8_dicts_and_string_fields_use_delphi_question_mark_fallback() {
 
     let parsed = parse_strategy_batch_plain(&plain).unwrap();
     assert_eq!(parsed.names, vec!["N?me".to_string()]);
-    assert_eq!(
-        parsed.paths,
-        vec![std::sync::Arc::<str>::from("P?")]
-    );
+    assert_eq!(parsed.paths, vec![std::sync::Arc::<str>::from("P?")]);
     let ps = &parsed.strategies[0];
-    assert_eq!(&*ps.path,"P?");
+    assert_eq!(&*ps.path, "P?");
     assert_eq!(
         ps.fields.get("N?me"),
         Some(&FieldValue::String("V?".to_string()))

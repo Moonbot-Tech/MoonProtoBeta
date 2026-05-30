@@ -247,11 +247,7 @@ fn consecutive_gaps_extend_existing_bucket() {
     assert_eq!(s.used_buckets(), 1);
     let _ = s.on_packet(make_pkt(110), 1020); // gap [106..109] → extend bucket1 to [101..109]
                                               // The bucket must extend, not create a second one.
-    assert_eq!(
-        s.used_buckets(),
-        1,
-        "extend must reuse the existing bucket"
-    );
+    assert_eq!(s.used_buckets(), 1, "extend must reuse the existing bucket");
     // Find the bucket and check that end_num = 109 and Recvd[4] (= packet 105) = true.
     let bucket = s.buckets.iter().find(|b| b.active).unwrap();
     assert_eq!(bucket.start_num, 101);
@@ -426,5 +422,8 @@ fn tick_lazily_shrinks_oversized_inactive_recvd_after_30min_like_delphi() {
         DEFAULT_RECVD_SIZE,
         "inactive recvd > DEFAULT shrunk to DEFAULT every 30 min (Delphi LastLargeRecvdTime)"
     );
-    assert!(s.buckets[1].active, "shrink does not close the active bucket");
+    assert!(
+        s.buckets[1].active,
+        "shrink does not close the active bucket"
+    );
 }

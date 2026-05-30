@@ -81,9 +81,7 @@ pub(super) fn runtime_loop(
                     true
                 }
                 RuntimeInitPoll::Failed(err) => {
-                    client.fire_lifecycle(LifecycleEvent::ConnectFailed {
-                        error: err.clone(),
-                    });
+                    client.fire_lifecycle(LifecycleEvent::ConnectFailed { error: err.clone() });
                     if let Some(tx) = ready_tx.as_ref() {
                         let _ = tx.send(Err(err));
                     }
@@ -413,9 +411,7 @@ fn handle_command(
         RuntimeCommand::StrategySetChecked {
             strategy_id,
             checked,
-        } => {
-            dispatcher.set_strategy_checked(strategy_id, checked)
-        }
+        } => dispatcher.set_strategy_checked(strategy_id, checked),
         RuntimeCommand::StrategySendCheckedDelta => {
             dispatcher.send_strategy_checked_delta(client);
             false

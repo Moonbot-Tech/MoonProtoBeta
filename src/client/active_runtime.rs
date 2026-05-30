@@ -399,7 +399,10 @@ impl MoonClient {
     }
 
     /// Unsubscribe from several orderbooks by market name.
-    pub(crate) fn unsubscribe_orderbooks<I, S>(&self, market_names: I) -> Result<(), MoonClientError>
+    pub(crate) fn unsubscribe_orderbooks<I, S>(
+        &self,
+        market_names: I,
+    ) -> Result<(), MoonClientError>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -415,7 +418,10 @@ impl MoonClient {
     }
 
     /// Subscribe to all trades and retain Active Lib data for all markets.
-    pub(crate) fn subscribe_all_trades(&self, mode: TradesStreamMode) -> Result<(), MoonClientError> {
+    pub(crate) fn subscribe_all_trades(
+        &self,
+        mode: TradesStreamMode,
+    ) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::SubscribeAllTrades(
             mode.want_market_makers(),
         ))
@@ -485,7 +491,9 @@ impl MoonClient {
     /// Request server-side full balance refresh and return immediately.
     ///
     /// The balance state arrives through the normal balance channel.
-    pub(crate) fn refresh_markets_balance_full(&self) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn refresh_markets_balance_full(
+        &self,
+    ) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::MarketsBalanceFullRefresh,
             crate::commands::engine_request::get_markets_balance_full(),
@@ -517,7 +525,10 @@ impl MoonClient {
     }
 
     /// Set account hedge mode through Engine API and return immediately.
-    pub(crate) fn set_hedge_mode(&self, hedge_mode: bool) -> Result<EngineActionTicket, MoonClientError> {
+    pub(crate) fn set_hedge_mode(
+        &self,
+        hedge_mode: bool,
+    ) -> Result<EngineActionTicket, MoonClientError> {
         self.queue_engine_action(
             crate::events::EngineActionKind::SetHedgeMode { hedge_mode },
             crate::commands::engine_request::set_hedge_mode(hedge_mode),
@@ -662,7 +673,10 @@ impl MoonClient {
     }
 
     /// Set the market-maker orders subscription flag.
-    pub(crate) fn set_mm_orders_subscription(&self, subscribe: bool) -> Result<(), MoonClientError> {
+    pub(crate) fn set_mm_orders_subscription(
+        &self,
+        subscribe: bool,
+    ) -> Result<(), MoonClientError> {
         self.send_no_reply(RuntimeCommand::Ui(UiRuntimeCommand::MmSubscribe(subscribe)))
     }
 

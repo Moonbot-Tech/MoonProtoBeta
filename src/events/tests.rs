@@ -2818,7 +2818,11 @@ fn orderbook_datagram_does_not_clone_markets_state_while_snapshot_held() {
     // Simulate a published snapshot keeping the markets domain alive.
     let held = d.markets.clone();
     let ptr_before = d.markets.arc_ptr();
-    assert_eq!(ptr_before, held.arc_ptr(), "snapshot shares the markets allocation");
+    assert_eq!(
+        ptr_before,
+        held.arc_ptr(),
+        "snapshot shares the markets allocation"
+    );
 
     // Another book datagram with a different best ask → ChartPriceStep changes.
     d.dispatch_into(

@@ -151,7 +151,10 @@ mod tests {
             active.orderbooks,
             vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
         );
-        assert_eq!(active.all_trades, Some(TradesSubscription { want_mm: true }));
+        assert_eq!(
+            active.all_trades,
+            Some(TradesSubscription { want_mm: true })
+        );
         assert!(active.mm_orders);
     }
 }

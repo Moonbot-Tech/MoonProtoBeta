@@ -138,13 +138,12 @@ pub mod transport;
 
 pub use client::{
     ActiveSubscriptions, Client, ClientConfig, ClosePositionParams, CoinCardCandlesTicket,
-    ConnectConfig, ConnectError, TradesSubscription,
-    EngineActionTicket, InitConfig, InitError, InitialStrategies, LifecycleEvent, MoonAccount,
-    MoonBalances, MoonCandles, MoonClient, MoonClientError, MoonClientEvent, MoonClientSnapshot,
-    MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings, MoonStrategies, MoonStreams,
-    MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget, ProtocolMetricsSnapshot,
-    RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams, TradeContextError,
-    TradesStreamMode, TransportMode, UniqueKey, VStopParams,
+    ConnectConfig, ConnectError, EngineActionTicket, InitConfig, InitError, InitialStrategies,
+    LifecycleEvent, MoonAccount, MoonBalances, MoonCandles, MoonClient, MoonClientError,
+    MoonClientEvent, MoonClientSnapshot, MoonEventQueue, MoonEventSink, MoonOrders, MoonSettings,
+    MoonStrategies, MoonStreams, MoonTrade, NewOrderParams, NewOrderTicket, OrderSide, OrderTarget,
+    ProtocolMetricsSnapshot, RefreshConfig, SellOrderParams, SendPriority, SplitOrderParams,
+    TradeContextError, TradesStreamMode, TradesSubscription, TransportMode, UniqueKey, VStopParams,
 };
 #[doc(hidden)]
 pub use client::{ClientSender, SubscribeError};
