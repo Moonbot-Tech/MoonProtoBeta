@@ -24,7 +24,7 @@ pub use self::aggregator::CandlesAggregator;
 pub(crate) use self::aggregator::CandlesChunkResult;
 #[doc(hidden)]
 pub use self::request_parser::parse_request_candles_data_response;
-pub(crate) use self::request_parser::parse_request_candles_data_response_partial_like_delphi;
+pub(crate) use self::request_parser::parse_request_candles_data_response_partial;
 #[cfg(test)]
 pub(crate) use self::request_parser::{
     parse_request_candles_data_response_partial_with_local_shift,

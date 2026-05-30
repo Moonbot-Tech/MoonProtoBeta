@@ -560,13 +560,9 @@ impl EventDispatcher {
                 to,
             } = &kind
             {
-                let ev = self.transfer_assets.apply_transfer_like_delphi(
-                    asset,
-                    *qty,
-                    *from,
-                    *to,
-                    resp.request_uid,
-                );
+                let ev =
+                    self.transfer_assets
+                        .apply_transfer(asset, *qty, *from, *to, resp.request_uid);
                 self.queued_events.extend([Event::TransferAssets(ev)]);
             }
         }

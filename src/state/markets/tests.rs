@@ -627,7 +627,7 @@ fn direct_price_payload_clears_mark_found_on_empty_scalar_payload_like_delphi_re
     assert!(st.price("BTC").unwrap().mark_price_found);
     assert!(st.price("ETH").unwrap().mark_price_found);
 
-    let event = st.apply_markets_prices_payload_like_delphi(&[]).unwrap();
+    let event = st.apply_markets_prices_payload(&[]).unwrap();
     assert!(matches!(
         event,
         MarketsEvent::PricesUpdated {
@@ -1291,7 +1291,7 @@ fn apply_token_tags_payload_keeps_read_tags_on_late_parse_error_like_delphi() {
     data.extend_from_slice(&(TokenTags::ALPHA.bits() as i32).to_le_bytes());
     data.extend_from_slice(&10u16.to_le_bytes()); // broken second market string
 
-    let ev = st.apply_token_tags_payload_like_delphi(&data);
+    let ev = st.apply_token_tags_payload(&data);
 
     assert!(ev.is_none());
     assert!(st.tags("BTCUSDT").contains(TokenTags::ALPHA));

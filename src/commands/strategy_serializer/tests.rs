@@ -149,25 +149,25 @@ fn strategy_fields_typed_getters_and_aliases_hide_string_bag_boilerplate() {
 #[test]
 fn strategy_active_helpers_match_delphi_check_active_modes() {
     let listing = strategy_with_fields(StrategyKind::NEW_LISTING, true, &[]);
-    assert!(listing.active_like_delphi(StrategyActiveMode::ActiveClient));
-    assert!(!listing.active_like_delphi(StrategyActiveMode::UsingMoonProto));
-    assert!(listing.active_like_delphi(StrategyActiveMode::Standalone));
+    assert!(listing.is_active(StrategyActiveMode::ActiveClient));
+    assert!(!listing.is_active(StrategyActiveMode::UsingMoonProto));
+    assert!(listing.is_active(StrategyActiveMode::Standalone));
 
     let moonshot = strategy_with_fields(StrategyKind::MOON_SHOT, true, &[]);
     assert!(
-        moonshot.can_auto_buy_like_delphi(),
+        moonshot.can_auto_buy(),
         "Delphi CanAutoBuy is true for MoonShot even when AutoBuy=false"
     );
-    assert!(!moonshot.active_like_delphi(StrategyActiveMode::ActiveClient));
-    assert!(moonshot.active_like_delphi(StrategyActiveMode::UsingMoonProto));
+    assert!(!moonshot.is_active(StrategyActiveMode::ActiveClient));
+    assert!(moonshot.is_active(StrategyActiveMode::UsingMoonProto));
 
     let remote_kernel = strategy_with_fields(
         StrategyKind::NEW_LISTING,
         true,
         &[("RunDetectOnKernel", FieldValue::Bool(true))],
     );
-    assert!(!remote_kernel.active_like_delphi(StrategyActiveMode::ActiveClient));
-    assert!(remote_kernel.active_like_delphi(StrategyActiveMode::UsingMoonProto));
+    assert!(!remote_kernel.is_active(StrategyActiveMode::ActiveClient));
+    assert!(remote_kernel.is_active(StrategyActiveMode::UsingMoonProto));
 }
 
 #[test]

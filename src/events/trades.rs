@@ -30,7 +30,7 @@ impl EventDispatcher {
         match decode_trades_packet(payload) {
             Some(decoded) => {
                 let effects = self.trades.on_packet_header(decoded.packet_num, now_ms);
-                self.collect_known_trades_events_like_delphi(
+                self.collect_known_trades_events(
                     &decoded,
                     effects,
                     now_ms,
@@ -58,7 +58,7 @@ impl EventDispatcher {
             match decode_trades_packet(inner) {
                 Some(decoded) => {
                     let effects = self.trades.on_packet_resend_header(decoded.packet_num);
-                    self.collect_known_trades_events_like_delphi(
+                    self.collect_known_trades_events(
                         &decoded,
                         effects,
                         now_ms,
@@ -71,7 +71,8 @@ impl EventDispatcher {
         }
     }
 
-    fn ensure_trades_packet_time_shift_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (TimeShift fix on first row)
+    fn ensure_trades_packet_time_shift(
         base_time: f64,
         time_delta_ms: i16,
         now_time_days: Option<f64>,
@@ -85,7 +86,8 @@ impl EventDispatcher {
         }
     }
 
-    fn trades_packet_shifted_time_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (Order.Time + TimeShift)
+    fn trades_packet_shifted_time(
         base_time: f64,
         time_delta_ms: i16,
         now_time_days: Option<f64>,
@@ -100,7 +102,8 @@ impl EventDispatcher {
         event_time + packet_time_shift.unwrap_or(0.0)
     }
 
-    fn apply_known_trades_sections_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (per-section apply loop)
+    fn apply_known_trades_sections(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
         now_ms: Option<i64>,
@@ -138,14 +141,14 @@ impl EventDispatcher {
                             history_trade_rows.reserve(row_count);
                         }
                         for trade in rows {
-                            Self::ensure_trades_packet_time_shift_like_delphi(
+                            Self::ensure_trades_packet_time_shift(
                                 decoded.base_time,
                                 trade.time_delta_ms,
                                 history_now_time_days,
                                 &mut packet_time_shift,
                             );
                             if let Some(now_ms) = now_ms {
-                                self.markets.apply_trade_tail_row_like_delphi(
+                                self.markets.apply_trade_tail_row(
                                     trade.market_index,
                                     trade.is_spot,
                                     trade.price,
@@ -198,7 +201,7 @@ impl EventDispatcher {
                             history_mm_order_rows.reserve(row_count);
                         }
                         for row in rows {
-                            Self::ensure_trades_packet_time_shift_like_delphi(
+                            Self::ensure_trades_packet_time_shift(
                                 decoded.base_time,
                                 row.time_delta_ms,
                                 history_now_time_days,
@@ -246,7 +249,7 @@ impl EventDispatcher {
                             history_trade_rows.reserve(row_count);
                         }
                         for trade in rows {
-                            Self::ensure_trades_packet_time_shift_like_delphi(
+                            Self::ensure_trades_packet_time_shift(
                                 decoded.base_time,
                                 trade.time_delta_ms,
                                 history_now_time_days,
@@ -289,7 +292,7 @@ impl EventDispatcher {
                         };
                         let mut fills = Vec::with_capacity(records.len());
                         for fill in records {
-                            let time = Self::trades_packet_shifted_time_like_delphi(
+                            let time = Self::trades_packet_shifted_time(
                                 decoded.base_time,
                                 fill.time_delta_ms,
                                 history_now_time_days,
@@ -333,7 +336,8 @@ impl EventDispatcher {
         }
     }
 
-    fn collect_known_trades_events_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (gap effects + apply gate)
+    fn collect_known_trades_events(
         &mut self,
         decoded: &DecodedTradesPacket<'_>,
         effects: Vec<TradesPacketEffect>,
@@ -344,12 +348,7 @@ impl EventDispatcher {
         let mut applied_sections = false;
         for effect in effects {
             if matches!(&effect, TradesPacketEffect::Apply) && !applied_sections {
-                self.apply_known_trades_sections_like_delphi(
-                    decoded,
-                    Some(now_ms),
-                    history_now_time_days,
-                    out,
-                );
+                self.apply_known_trades_sections(decoded, Some(now_ms), history_now_time_days, out);
                 applied_sections = true;
             }
             out.push(Event::Trade(

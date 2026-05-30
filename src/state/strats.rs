@@ -249,29 +249,16 @@ impl StratsState {
         out
     }
 
-    #[doc(hidden)]
-    /// Delphi `TStrategies.IsThereListingStrat`.
-    pub fn is_there_listing_strat_like_delphi(&self, mode: StrategyActiveMode) -> bool {
-        self.snapshots().any(|s| {
-            s.active_like_delphi(mode) && s.kind_like_delphi() == StrategyKind::NEW_LISTING
-        })
-    }
-
+    // parity: MoonBot Strategies.pas:TStrategies.IsThereListingStrat
     pub fn has_listing_strategy(&self, mode: StrategyActiveMode) -> bool {
-        self.is_there_listing_strat_like_delphi(mode)
+        self.snapshots()
+            .any(|s| s.is_active(mode) && s.kind() == StrategyKind::NEW_LISTING)
     }
 
-    #[doc(hidden)]
-    /// Delphi `TStrategies.IsThereListingSell`.
-    pub fn is_there_listing_sell_like_delphi(
-        &self,
-        mode: StrategyActiveMode,
-        is_futures: bool,
-    ) -> bool {
+    // parity: MoonBot Strategies.pas:TStrategies.IsThereListingSell
+    pub fn has_listing_sell_strategy(&self, mode: StrategyActiveMode, is_futures: bool) -> bool {
         let has_listing_sell = self.snapshots().any(|s| {
-            s.active_like_delphi(mode)
-                && s.kind_like_delphi() == StrategyKind::NEW_LISTING
-                && s.sell_from_asset_like_delphi()
+            s.is_active(mode) && s.kind() == StrategyKind::NEW_LISTING && s.sell_from_asset()
         });
         if has_listing_sell {
             return true;
@@ -280,17 +267,10 @@ impl StratsState {
             return false;
         }
         self.snapshots().any(|s| {
-            s.active_like_delphi(mode)
-                && s.short_like_delphi()
-                && matches!(
-                    s.kind_like_delphi(),
-                    StrategyKind::MOON_SHOT | StrategyKind::MOON_HOOK
-                )
+            s.is_active(mode)
+                && s.is_short()
+                && matches!(s.kind(), StrategyKind::MOON_SHOT | StrategyKind::MOON_HOOK)
         })
-    }
-
-    pub fn has_listing_sell_strategy(&self, mode: StrategyActiveMode, is_futures: bool) -> bool {
-        self.is_there_listing_sell_like_delphi(mode, is_futures)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&u64, &StrategyInfo)> {

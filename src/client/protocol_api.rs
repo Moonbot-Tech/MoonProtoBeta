@@ -303,7 +303,7 @@ impl Client {
                             uid,
                             zipped_data.len()
                         );
-                        parse_request_candles_data_response_partial_like_delphi(&zipped_data)
+                        parse_request_candles_data_response_partial(&zipped_data)
                             .unwrap_or_default()
                     });
                 let _ = sender.send(MergedCandles {

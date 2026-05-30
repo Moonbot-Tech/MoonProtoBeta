@@ -2518,7 +2518,7 @@ fn enabling_trade_storage_backfills_current_last_price_history() {
         send_corr_markets: false,
         corr_prices: vec![],
     });
-    d.markets.apply_markets_prices_payload_like_delphi(&data);
+    d.markets.apply_markets_prices_payload(&data);
 
     d.set_trade_storage_scope(Some(&TradeStorageScope::All), 45_001.0);
     assert!(worker.flush(45_001.0));

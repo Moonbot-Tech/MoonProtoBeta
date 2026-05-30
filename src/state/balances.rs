@@ -1,7 +1,7 @@
 //! Account-level balance totals maintained by the active `MoonClient` runtime.
 //!
 //! Per-market balance/position lives on each `Market` (Delphi `TMarket`), applied
-//! by `MarketsState::apply_balance_update_like_delphi` (`MoonProtoEngine.pas:
+//! by `MarketsState::apply_balance_update` (`MoonProtoEngine.pas:
 //! ApplyBalanceItem` — Delphi writes liq/pos/profit straight into `TMarket`).
 //! This module keeps only the account-level globals (BTC totals + total PnL),
 //! matching Delphi `TMarkets` scalars (`FTotalPNL` etc.). It does NOT keep a
@@ -65,13 +65,14 @@ impl BalancesState {
 
     /// Apply the account-level globals after the per-market balance apply ran on
     /// markets. `total_pnl` is
-    /// [`crate::state::markets::MarketsState::sum_btc_total_profit_like_delphi`]
+    /// [`crate::state::markets::MarketsState::sum_btc_total_profit`]
     /// over the just-updated live markets (Delphi `RecalcTotalPnl`).
     ///
     /// - cmd 3 (full snapshot): always carries globals.
     /// - cmd 4 (incremental): updates globals only when `global_changed`.
     /// - other (e.g. cmd 2): not applied, like Delphi.
-    pub(crate) fn apply_global_like_delphi(&mut self, upd: &BalanceUpdate, total_pnl: f64) {
+    // parity: MoonBot MarketsU.pas:TMarkets (FTotalPNL/BTC globals) + RecalcTotalPnl
+    pub(crate) fn apply_global(&mut self, upd: &BalanceUpdate, total_pnl: f64) {
         let set_btc = match upd.cmd_id {
             3 => true,
             4 => upd.global_changed,

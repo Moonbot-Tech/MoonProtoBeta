@@ -19,7 +19,7 @@ impl MarketsState {
         for handle in self.markets.iter() {
             handle.with_mut(|m| m.price.mark_price_found = false);
         }
-        let base_usdt_context = self.base_usdt_market_context_like_delphi();
+        let base_usdt_context = self.base_usdt_market_context();
         for p in &resp.prices {
             self.apply_one_market_price_update(p, resp.send_funding, &base_usdt_context);
         }
@@ -28,7 +28,7 @@ impl MarketsState {
                 self.apply_one_corr_price_update(c);
             }
         }
-        self.update_currency_prices_like_delphi();
+        self.update_currency_prices();
         MarketsEvent::PricesUpdated {
             count,
             included_funding: resp.send_funding,
@@ -41,14 +41,13 @@ impl MarketsState {
     /// Delphi mutates market prices inside the read loop. If a later corr-market
     /// string read raises, already-applied prices remain. The pure parser remains
     /// a low-level command helper; dispatcher uses this method for protocol state.
-    pub(crate) fn apply_markets_prices_payload_like_delphi(
-        &mut self,
-        data: &[u8],
-    ) -> Option<MarketsEvent> {
-        self.apply_markets_prices_payload_collecting_last_price_like_delphi(data, None)
+    // parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList
+    pub(crate) fn apply_markets_prices_payload(&mut self, data: &[u8]) -> Option<MarketsEvent> {
+        self.apply_markets_prices_payload_collecting_last_price(data, None)
     }
 
-    pub(crate) fn apply_markets_prices_payload_collecting_last_price_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList (+ LastPrice history collect)
+    pub(crate) fn apply_markets_prices_payload_collecting_last_price(
         &mut self,
         data: &[u8],
         last_price_rows: Option<&mut Vec<MarketLastPriceHistoryInput>>,
@@ -73,11 +72,10 @@ impl MarketsState {
         let mut r = EngineStreamReader::new(data);
         let send_funding = r.read_bool()?;
         let count = r.read_count()?;
-        let base_usdt_context = self.base_usdt_market_context_like_delphi();
+        let base_usdt_context = self.base_usdt_market_context();
 
         for _ in 0..count {
-            let update =
-                read_market_price_update_like_delphi(&mut r, send_funding, local_shift_minutes)?;
+            let update = read_market_price_update(&mut r, send_funding, local_shift_minutes)?;
             if let Some(row) =
                 self.apply_one_market_price_update(&update, send_funding, &base_usdt_context)
             {
@@ -91,12 +89,12 @@ impl MarketsState {
         if send_corr_markets {
             let corr_count = r.read_count()?;
             for _ in 0..corr_count {
-                let update = read_corr_price_update_like_delphi(&mut r)?;
+                let update = read_corr_price_update(&mut r)?;
                 self.apply_one_corr_price_update(&update);
             }
         }
 
-        self.update_currency_prices_like_delphi();
+        self.update_currency_prices();
         Some(MarketsEvent::PricesUpdated {
             count,
             included_funding: send_funding,
@@ -111,18 +109,17 @@ impl MarketsState {
     /// one always-live `TMarket.HistoryPrice`; Rust creates retained stores only
     /// after the agreed trades-storage opt-in, so the already-known `pLast`
     /// values must be copied once when the storage scope becomes active.
-    pub(crate) fn current_last_price_history_rows_like_delphi(
-        &self,
-    ) -> Vec<MarketLastPriceHistoryInput> {
+    // parity: MoonBot MarketsU.pas:TMarket.AddFrom (LastPrice history backfill)
+    pub(crate) fn current_last_price_history_rows(&self) -> Vec<MarketLastPriceHistoryInput> {
         let mut rows = Vec::new();
-        let base_usdt_context = self.base_usdt_market_context_like_delphi();
+        let base_usdt_context = self.base_usdt_market_context();
         for handle in self.markets.iter() {
             let market_name = handle.name_arc();
             let (price, is_btc_market, is_base_usdt_market) = handle.with(|market| {
                 (
                     market.price,
                     market.is_btc_market,
-                    base_usdt_context.is_base_usdt_market_like_delphi(market),
+                    base_usdt_context.is_base_usdt_market(market),
                 )
             });
             rows.push(MarketLastPriceHistoryInput {
@@ -159,7 +156,7 @@ impl MarketsState {
                     market.funding_time = p.funding_time;
                 }
                 let is_btc_market = market.is_btc_market;
-                let is_base_usdt_market = base_usdt_context.is_base_usdt_market_like_delphi(market);
+                let is_base_usdt_market = base_usdt_context.is_base_usdt_market(market);
                 let bn_step_size = market.bn_step_size;
                 let bn_min_qty = market.bn_min_qty;
                 let bn_min_notional = market.bn_min_notional;
@@ -200,7 +197,8 @@ impl MarketsState {
         }
     }
 
-    fn base_usdt_market_context_like_delphi(&self) -> BaseUsdtMarketContext {
+    // parity: MoonBot MarketsU.pas:TMarkets (base/USDT market resolution)
+    fn base_usdt_market_context(&self) -> BaseUsdtMarketContext {
         let server_base_currency = self.server_base_currency_name.clone();
         let (usdt_market, usdt_rev_market) = server_base_currency
             .as_deref()
@@ -233,7 +231,8 @@ struct BaseUsdtMarketContext {
 }
 
 impl BaseUsdtMarketContext {
-    fn is_base_usdt_market_like_delphi(&self, market: &Market) -> bool {
+    // parity: MoonBot MarketsU.pas:TMarket.IsBaseUSDTMarket
+    fn is_base_usdt_market(&self, market: &Market) -> bool {
         let market_name = market.bn_market_name.as_str();
         if let Some(base_currency) = self.server_base_currency.as_deref() {
             if self
@@ -261,7 +260,8 @@ impl BaseUsdtMarketContext {
     }
 }
 
-fn read_market_price_update_like_delphi(
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList (per-market price record read)
+fn read_market_price_update(
     r: &mut EngineStreamReader<'_>,
     send_funding: bool,
     local_shift_minutes: f64,
@@ -290,9 +290,8 @@ fn read_market_price_update_like_delphi(
     })
 }
 
-fn read_corr_price_update_like_delphi(
-    r: &mut EngineStreamReader<'_>,
-) -> Option<CorrMarketPriceUpdate> {
+// parity: MoonBot MoonProtoEngine.pas:UpdateMarketsList (corr-market price record read)
+fn read_corr_price_update(r: &mut EngineStreamReader<'_>) -> Option<CorrMarketPriceUpdate> {
     let bn_market_name = r.read_str()?;
     let last_price = r.read_double()?;
     Some(CorrMarketPriceUpdate {

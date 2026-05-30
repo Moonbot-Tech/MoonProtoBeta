@@ -166,7 +166,7 @@ impl EventDispatcher {
             self.ensure_default_market_history_worker();
             self.sync_market_history_storage();
             if self.trade_storage_scope.is_some() {
-                self.queue_current_last_price_history_like_delphi(now_time_days);
+                self.queue_current_last_price_history(now_time_days);
             }
         }
     }

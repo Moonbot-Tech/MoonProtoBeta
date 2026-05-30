@@ -158,10 +158,11 @@ impl MarketHistoryRegistry {
             .collect()
     }
 
-    pub(crate) fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
+    // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory
+    pub(crate) fn compact_evicted_futures(&mut self, now_time: f64) -> usize {
         self.stores
             .values_mut()
-            .map(|store| store.compact_evicted_futures_like_delphi(now_time))
+            .map(|store| store.compact_evicted_futures(now_time))
             .sum()
     }
 

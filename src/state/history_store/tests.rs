@@ -128,7 +128,7 @@ fn registry_reconfigure_preserves_existing_store_like_delphi_market_cow() {
     registry
         .get_mut("BTCUSDT")
         .unwrap()
-        .append_futures_trade_like_delphi(trade(45_000.0, 100.0, 1.0));
+        .append_futures_trade(trade(45_000.0, 100.0, 1.0));
 
     let after_listing = vec![
         "BTCUSDT".to_string(),
@@ -170,11 +170,11 @@ fn registry_allocates_market_history_only_from_configured_scope() {
     registry
         .get_mut("BTCUSDT")
         .unwrap()
-        .append_last_price_like_delphi(100.0, 45_000.0, 99.0, 101.0, true, false);
+        .append_last_price(100.0, 45_000.0, 99.0, 101.0, true, false);
     registry
         .get_mut("ETHUSDT")
         .unwrap()
-        .append_futures_trade_like_delphi(trade(45_000.0, 10.0, 1.0));
+        .append_futures_trade(trade(45_000.0, 10.0, 1.0));
 
     assert_eq!(registry.len(), 2);
     assert!(registry.contains_market("BTCUSDT"));
@@ -209,19 +209,19 @@ fn last_price_appends_only_delphi_history_price_markets() {
     });
 
     assert_eq!(
-        store.append_last_price_like_delphi(10.0, 45_000.0, 9.0, 11.0, false, false),
+        store.append_last_price(10.0, 45_000.0, 9.0, 11.0, false, false),
         None
     );
     assert_eq!(
-        store.append_last_price_like_delphi(0.0, 45_000.0, 9.0, 11.0, true, false),
+        store.append_last_price(0.0, 45_000.0, 9.0, 11.0, true, false),
         None
     );
     assert_eq!(
-        store.append_last_price_like_delphi(10.0, 45_000.0, 0.0, 0.0, true, false),
+        store.append_last_price(10.0, 45_000.0, 0.0, 0.0, true, false),
         None
     );
     assert_eq!(
-        store.append_last_price_like_delphi(10.0, 45_000.0, 9.0, 11.0, true, false),
+        store.append_last_price(10.0, 45_000.0, 9.0, 11.0, true, false),
         Some(0)
     );
 
@@ -249,7 +249,7 @@ fn last_price_history_feeds_delphi_hourly_delta_windows() {
         candles_5m_capacity: 0,
     });
 
-    store.append_last_price_like_delphi(
+    store.append_last_price(
         100.0,
         now - 50.0 / SECONDS_PER_DAY,
         99.0,
@@ -257,9 +257,9 @@ fn last_price_history_feeds_delphi_hourly_delta_windows() {
         true,
         false,
     );
-    store.append_last_price_like_delphi(130.0, now - 14.0 / 1440.0, 129.0, 131.0, true, false);
-    store.append_last_price_like_delphi(170.0, now - 59.0 / 1440.0, 169.0, 171.0, true, false);
-    store.append_last_price_like_delphi(250.0, now - 60.0 / 1440.0, 249.0, 251.0, true, false);
+    store.append_last_price(130.0, now - 14.0 / 1440.0, 129.0, 131.0, true, false);
+    store.append_last_price(170.0, now - 59.0 / 1440.0, 169.0, 171.0, true, false);
+    store.append_last_price(250.0, now - 60.0 / 1440.0, 249.0, 251.0, true, false);
 
     store.refresh_derived_analytics(now);
     let derived = store.derived_snapshot();
@@ -286,20 +286,20 @@ fn futures_trades_append_directly_and_update_volumes() {
     });
 
     assert_eq!(
-        store.append_futures_trade_like_delphi(trade(sec(10.0), 100.0, 1.0)),
+        store.append_futures_trade(trade(sec(10.0), 100.0, 1.0)),
         Some(0)
     );
 
     assert_eq!(
-        store.append_futures_trade_like_delphi(trade(sec(9.0), 90.0, 1.0)),
+        store.append_futures_trade(trade(sec(9.0), 90.0, 1.0)),
         Some(1)
     );
     assert_eq!(
-        store.append_futures_trade_like_delphi(trade(sec(12.0), 120.0, -2.0)),
+        store.append_futures_trade(trade(sec(12.0), 120.0, -2.0)),
         Some(2)
     );
     assert_eq!(
-        store.append_futures_trade_like_delphi(trade(sec(11.0), 110.0, 3.0)),
+        store.append_futures_trade(trade(sec(11.0), 110.0, 3.0)),
         Some(3)
     );
 
@@ -340,20 +340,12 @@ fn stream_append_helpers_share_delphi_packet_time_shift() {
         candles_5m_capacity: 0,
     });
 
-    let fut_time =
-        store.append_futures_stream_trade_like_delphi(base, 100, now, 100.0, 1.0, &mut shift);
+    let fut_time = store.append_futures_stream_trade(base, 100, now, 100.0, 1.0, &mut shift);
     let taker = [7u8; 20];
-    let (mm_time, mm_seq) = store.append_mm_stream_order_like_delphi(
-        base,
-        200,
-        base - 10.0,
-        5.0,
-        -2.0,
-        Some(taker),
-        &mut shift,
-    );
+    let (mm_time, mm_seq) =
+        store.append_mm_stream_order(base, 200, base - 10.0, 5.0, -2.0, Some(taker), &mut shift);
     let (spot_time, spot_seq) =
-        store.append_spot_stream_trade_like_delphi(base, -300, base - 10.0, 90.0, -1.0, &mut shift);
+        store.append_spot_stream_trade(base, -300, base - 10.0, 90.0, -1.0, &mut shift);
     assert_eq!(shift.shift_days(), Some(2.0 / 24.0));
     assert_eq!(fut_time, base + 100.0 / 86_400_000.0 + 2.0 / 24.0);
     assert_eq!(mm_time, base + 200.0 / 86_400_000.0 + 2.0 / 24.0);
@@ -386,7 +378,7 @@ fn stream_append_helpers_share_delphi_packet_time_shift() {
         companions,
         vec![MMOrderCompanionData {
             taker,
-            color: hl_address_color_like_delphi(taker),
+            color: hl_address_color(taker),
         }]
     );
 }
@@ -404,14 +396,10 @@ fn evicted_futures_compact_to_mini_candles() {
     });
 
     for i in 0..4 {
-        store.append_futures_trade_like_delphi(trade(
-            10.0 + i as f64 / 86_400.0,
-            100.0 + i as f32,
-            1.0,
-        ));
+        store.append_futures_trade(trade(10.0 + i as f64 / 86_400.0, 100.0 + i as f32, 1.0));
     }
     assert_eq!(store.pending_evicted_futures_for_compaction(), 2);
-    assert_eq!(store.compact_evicted_futures_like_delphi(20.0), 1);
+    assert_eq!(store.compact_evicted_futures(20.0), 1);
 
     let mut out = Vec::new();
     store.readers().mini_candles.unwrap().copy_last(8, &mut out);
@@ -461,7 +449,7 @@ fn candles_snapshot_replaces_retained_5m_rows_and_feeds_deltas() {
         .copy_last(8, &mut candles);
     assert_eq!(candles.len(), 2);
 
-    store.append_futures_trade_like_delphi(trade(now + 1.0 / 86_400.0, 125.0, 2.0));
+    store.append_futures_trade(trade(now + 1.0 / 86_400.0, 125.0, 2.0));
     candles.clear();
     store
         .readers()
@@ -514,7 +502,7 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
     // The first trade of the next period — accumulates into a separate live
     // accumulator (Delphi `FCandle`), is NOT pushed into the sealed ring.
     let t1 = now + 6.0 / 1440.0;
-    store.append_futures_trade_like_delphi(trade(t1, 120.0, 2.0));
+    store.append_futures_trade(trade(t1, 120.0, 2.0));
 
     let mut candles = Vec::new();
     store
@@ -540,7 +528,7 @@ fn futures_trades_roll_current_candle_after_five_minutes() {
     // The second trade after >5 min — the current candle is sealed into the ring
     // (end-stamped with the seal time), a new live candle starts (Delphi Recalc5mCandle roll).
     let t2 = t1 + 6.0 / 1440.0;
-    store.append_futures_trade_like_delphi(trade(t2, 130.0, 1.0));
+    store.append_futures_trade(trade(t2, 130.0, 1.0));
     candles.clear();
     store
         .readers()
@@ -580,8 +568,8 @@ fn retained_trades_update_current_candle_and_derived_volumes() {
         candles_5m_capacity: 8,
     });
     let now = 45_000.0;
-    store.append_futures_trade_like_delphi(trade(now - 10.0 / 86_400.0, 100.0, 2.0));
-    store.append_futures_trade_like_delphi(trade(now - 5.0 / 86_400.0, 110.0, -1.0));
+    store.append_futures_trade(trade(now - 10.0 / 86_400.0, 100.0, 2.0));
+    store.append_futures_trade(trade(now - 5.0 / 86_400.0, 110.0, -1.0));
     store.refresh_derived_analytics(now);
 
     let derived = store.derived_snapshot();

@@ -550,13 +550,8 @@ pub struct MarketTradeState {
 }
 
 impl MarketTradeState {
-    pub(crate) fn apply_futures_trade_like_delphi(
-        &mut self,
-        price: f64,
-        qty: f64,
-        now_ms: i64,
-        eps: f64,
-    ) {
+    // parity: MoonBot MarketsU.pas:TMarket.SetLastTradePrices (+ LastGotAllTrades)
+    pub(crate) fn apply_futures_trade(&mut self, price: f64, qty: f64, now_ms: i64, eps: f64) {
         let is_sell = qty < 0.0;
         self.last_got_all_trades_ms = now_ms;
         self.last_trade_price = price;
@@ -578,7 +573,8 @@ impl MarketTradeState {
         }
     }
 
-    pub(crate) fn apply_spot_trade_like_delphi(&mut self, now_ms: i64) {
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (spot -> m.LastGotSpotTrades)
+    pub(crate) fn apply_spot_trade(&mut self, now_ms: i64) {
         self.last_got_spot_trades_ms = now_ms;
     }
 }
@@ -724,19 +720,16 @@ impl Market {
     }
 
     /// Listed-on-exchange kind derived from `futures_type`.
+    ///
+    /// Delphi `GetMarketsList` post-pass:
+    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
+    // parity: MoonBot MoonProtoEngine.pas:GetMarketsList (FuturesType -> ListedType)
     pub fn listed_type(&self) -> ListedType {
         if self.futures_type == BaseCurrency::EMPTY {
             ListedType::SPOT
         } else {
             ListedType::BOTH
         }
-    }
-
-    /// Delphi `GetMarketsList` post-pass:
-    /// `FuturesType <> BC_EMPTY -> L_Both`, otherwise `L_Spot`.
-    #[doc(hidden)]
-    pub fn listed_type_like_delphi(&self) -> ListedType {
-        self.listed_type()
     }
 
     /// Delphi `TMarket.FTotalProfit`.

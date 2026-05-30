@@ -30,10 +30,8 @@ impl MarketsState {
     /// Delphi applies tags inside the read loop and clears unseen tags only
     /// after the loop completes. A late string read error therefore leaves
     /// already-read tag updates applied and does not clear old absent tags.
-    pub(crate) fn apply_token_tags_payload_like_delphi(
-        &mut self,
-        data: &[u8],
-    ) -> Option<MarketsEvent> {
+    // parity: MoonBot MoonProtoEngine.pas:CheckBinanceTags
+    pub(crate) fn apply_token_tags_payload(&mut self, data: &[u8]) -> Option<MarketsEvent> {
         let mut r = EngineStreamReader::new(data);
         let count = r.read_count()?;
         let mut seen = HashSet::with_capacity(r.bounded_count_capacity(count, 6));

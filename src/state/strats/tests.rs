@@ -215,10 +215,10 @@ fn listing_strategy_helpers_match_delphi_active_predicates() {
         &[("SellFromAsset", FieldValue::Bool(true))],
     ));
 
-    assert!(s.is_there_listing_strat_like_delphi(StrategyActiveMode::ActiveClient));
-    assert!(s.is_there_listing_sell_like_delphi(StrategyActiveMode::ActiveClient, false));
+    assert!(s.has_listing_strategy(StrategyActiveMode::ActiveClient));
+    assert!(s.has_listing_sell_strategy(StrategyActiveMode::ActiveClient, false));
     assert!(
-            !s.is_there_listing_strat_like_delphi(StrategyActiveMode::UsingMoonProto),
+            !s.has_listing_strategy(StrategyActiveMode::UsingMoonProto),
             "plain listing strategy is local-active in ActiveClient mode, remote-active in UsingMoonProto mode"
         );
 }
@@ -233,9 +233,9 @@ fn listing_sell_helper_uses_short_moonshot_only_for_spot_like_delphi() {
         &[("Short", FieldValue::Bool(true))],
     ));
 
-    assert!(s.is_there_listing_sell_like_delphi(StrategyActiveMode::UsingMoonProto, false));
+    assert!(s.has_listing_sell_strategy(StrategyActiveMode::UsingMoonProto, false));
     assert!(
-        !s.is_there_listing_sell_like_delphi(StrategyActiveMode::UsingMoonProto, true),
+        !s.has_listing_sell_strategy(StrategyActiveMode::UsingMoonProto, true),
         "Delphi skips the MoonShot/MoonHook Short fallback when cfg.IsFutures"
     );
 }

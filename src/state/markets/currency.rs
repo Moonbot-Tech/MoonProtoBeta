@@ -44,13 +44,14 @@ impl MarketsState {
         }
         self.server_base_currency_name = next_name;
         self.server_base_currency_code = code;
-        self.check_corr_markets_like_delphi();
-        self.check_currency_ref_markets_like_delphi();
-        self.update_currency_prices_like_delphi();
+        self.check_corr_markets();
+        self.check_currency_ref_markets();
+        self.update_currency_prices();
     }
 
-    pub(super) fn check_corr_markets_like_delphi(&mut self) {
-        if self.server_base_is_btc_like_delphi() {
+    // parity: MoonBot MarketsU.pas:TMarkets.CheckCorrMarkets
+    pub(super) fn check_corr_markets(&mut self) {
+        if self.server_base_is_btc() {
             return;
         }
         let Some(currency) = self.server_base_currency_name.as_deref() else {
@@ -74,13 +75,14 @@ impl MarketsState {
         }
     }
 
-    pub(super) fn check_currency_ref_markets_like_delphi(&mut self) {
+    // parity: MoonBot MarketsU.pas:TMarkets.CheckCurrencyRefMarkets
+    pub(super) fn check_currency_ref_markets(&mut self) {
         let keys = self
             .base_currency_prices
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let market_refs = collect_market_currency_refs_like_delphi(&self.markets);
+        let market_refs = collect_market_currency_refs(&self.markets);
         for key in keys {
             let mut usdt_market = None;
             let mut usdt_rev_market = None;
@@ -130,7 +132,8 @@ impl MarketsState {
         }
     }
 
-    pub(super) fn update_currency_prices_like_delphi(&mut self) {
+    // parity: MoonBot MarketsU.pas:TMarkets.UpdateCurrencyPrices
+    pub(super) fn update_currency_prices(&mut self) {
         let keys = self
             .base_currency_prices
             .keys()
@@ -140,7 +143,7 @@ impl MarketsState {
             let next_price = self
                 .base_currency_prices
                 .get(&key)
-                .and_then(|bc| self.next_base_currency_price_like_delphi(bc));
+                .and_then(|bc| self.next_base_currency_price(bc));
             if let Some(price) = next_price {
                 if let Some(bc) = Arc::make_mut(&mut self.base_currency_prices).get_mut(&key) {
                     bc.last_price = price;
@@ -149,7 +152,8 @@ impl MarketsState {
         }
     }
 
-    fn next_base_currency_price_like_delphi(&self, bc: &BaseCurrencyPrice) -> Option<f64> {
+    // parity: MoonBot MarketsU.pas:TMarkets.UpdateCurrencyPrices (per-currency price pick)
+    fn next_base_currency_price(&self, bc: &BaseCurrencyPrice) -> Option<f64> {
         // Delphi `TMarkets.UpdateCurrencyPrices` (MarketsU.pas:2882-2894) gates all
         // four branches (UsdtMarket/UsdtRev/UsdtCorr/UsdtRevCorr) against `_epsM`, not `_eps`.
         if let Some(price) = bc
@@ -194,7 +198,8 @@ impl MarketsState {
         None
     }
 
-    fn server_base_is_btc_like_delphi(&self) -> bool {
+    // parity: MoonBot MarketsU.pas:TMarkets (server base currency = BTC check)
+    fn server_base_is_btc(&self) -> bool {
         self.server_base_currency_code == Some(BaseCurrency::BTC)
             || self
                 .server_base_currency_name
@@ -209,7 +214,8 @@ struct MarketCurrencyRef {
     base_currency: String,
 }
 
-fn collect_market_currency_refs_like_delphi(markets: &[MarketHandle]) -> Vec<MarketCurrencyRef> {
+// parity: MoonBot MarketsU.pas:TMarkets.CheckCurrencyRefMarkets (market currency refs)
+fn collect_market_currency_refs(markets: &[MarketHandle]) -> Vec<MarketCurrencyRef> {
     markets
         .iter()
         .map(|handle| {

@@ -27,11 +27,11 @@ fn trades_packet_time_shift_is_fixed_by_first_row_like_delphi() {
     let now_time = base_time + 3.0 / 24.0 + 10.0 / SECONDS_PER_DAY;
     let mut shift = TradesPacketTimeShift::new();
 
-    let first = shift.apply_like_delphi(base_time, 250, now_time);
+    let first = shift.shifted_time(base_time, 250, now_time);
     assert_eq!(shift.shift_days(), Some(3.0 / 24.0));
     assert_eq!(first, base_time + 250.0 / DELPHI_MSECS_PER_DAY + 3.0 / 24.0);
 
-    let second = shift.apply_like_delphi(base_time, -500, base_time - 5.0);
+    let second = shift.shifted_time(base_time, -500, base_time - 5.0);
     assert_eq!(
         second,
         base_time - 500.0 / DELPHI_MSECS_PER_DAY + 3.0 / 24.0,
@@ -172,7 +172,7 @@ fn hl_address_color_matches_delphi_xor_scale() {
     for (idx, byte) in taker.iter_mut().enumerate() {
         *byte = idx as u8;
     }
-    assert_eq!(hl_address_color_like_delphi(taker), 0xFF62_5360);
+    assert_eq!(hl_address_color(taker), 0xFF62_5360);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn compacts_trades_to_mini_candles_like_delphi_resize() {
     ];
 
     let mut out = Vec::new();
-    compact_trades_to_mini_candles_like_delphi(&rows, 0.0, t0 + 1.0, &mut out);
+    compact_trades_to_mini_candles(&rows, 0.0, t0 + 1.0, &mut out);
 
     assert_eq!(
         out,
@@ -239,12 +239,7 @@ fn compact_trades_skips_split_group_not_newer_than_existing_mini() {
     ];
 
     let mut out = Vec::new();
-    compact_trades_to_mini_candles_like_delphi(
-        &rows,
-        t0 + 1.0 / SECONDS_PER_DAY,
-        t0 + 1.0,
-        &mut out,
-    );
+    compact_trades_to_mini_candles(&rows, t0 + 1.0 / SECONDS_PER_DAY, t0 + 1.0, &mut out);
 
     assert_eq!(
         out,

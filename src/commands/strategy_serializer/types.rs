@@ -290,12 +290,8 @@ pub enum StrategyActiveMode {
 }
 
 impl StrategySnapshot {
+    // parity: MoonBot Strategies.pas:TStrategy.StrategyKind
     pub fn kind(&self) -> StrategyKind {
-        self.kind_like_delphi()
-    }
-
-    #[doc(hidden)]
-    pub fn kind_like_delphi(&self) -> StrategyKind {
         StrategyKind(self.kind)
     }
 
@@ -311,69 +307,40 @@ impl StrategySnapshot {
         self.fields.get_double(field_names::SELL_PRICE)
     }
 
+    // parity: MoonBot Strategies.pas:TStrategy.AutoBuy
     pub fn auto_buy(&self) -> bool {
-        self.auto_buy_like_delphi()
-    }
-
-    #[doc(hidden)]
-    pub fn auto_buy_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::AUTO_BUY)
     }
 
+    // parity: MoonBot Strategies.pas:TStrategy.RunDetectOnKernel
     pub fn run_detect_on_kernel(&self) -> bool {
-        self.run_detect_on_kernel_like_delphi()
-    }
-
-    #[doc(hidden)]
-    pub fn run_detect_on_kernel_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::RUN_DETECT_ON_KERNEL)
     }
 
+    // parity: MoonBot Strategies.pas:TStrategy.Short
     pub fn is_short(&self) -> bool {
-        self.short_like_delphi()
-    }
-
-    #[doc(hidden)]
-    pub fn short_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::SHORT)
     }
 
+    // parity: MoonBot Strategies.pas:TStrategy.SellFromAsset
     pub fn sell_from_asset(&self) -> bool {
-        self.sell_from_asset_like_delphi()
-    }
-
-    #[doc(hidden)]
-    pub fn sell_from_asset_like_delphi(&self) -> bool {
         self.field_bool_or_false(field_names::SELL_FROM_ASSET)
     }
 
+    // parity: MoonBot Strategies.pas:TStrategy.CanAutoBuy
     pub fn can_auto_buy(&self) -> bool {
-        self.can_auto_buy_like_delphi()
+        (self.auto_buy() || self.kind() == StrategyKind::MOON_SHOT)
+            && self.kind() != StrategyKind::MANUAL
     }
 
-    #[doc(hidden)]
-    /// Delphi `TStrategy.CanAutoBuy`.
-    pub fn can_auto_buy_like_delphi(&self) -> bool {
-        (self.auto_buy_like_delphi() || self.kind_like_delphi() == StrategyKind::MOON_SHOT)
-            && self.kind_like_delphi() != StrategyKind::MANUAL
-    }
-
+    // parity: MoonBot Strategies.pas:TStratForm.CheckActive (active assignment)
     pub fn is_active(&self, mode: StrategyActiveMode) -> bool {
-        self.active_like_delphi(mode)
-    }
-
-    #[doc(hidden)]
-    /// Delphi `TStratForm.CheckActive` / `bStartCheckedClick` active assignment.
-    pub fn active_like_delphi(&self, mode: StrategyActiveMode) -> bool {
         match mode {
             StrategyActiveMode::ActiveClient => {
-                self.checked
-                    && !self.can_auto_buy_like_delphi()
-                    && !self.run_detect_on_kernel_like_delphi()
+                self.checked && !self.can_auto_buy() && !self.run_detect_on_kernel()
             }
             StrategyActiveMode::UsingMoonProto => {
-                self.checked
-                    && (self.can_auto_buy_like_delphi() || self.run_detect_on_kernel_like_delphi())
+                self.checked && (self.can_auto_buy() || self.run_detect_on_kernel())
             }
             StrategyActiveMode::Standalone => self.checked,
         }

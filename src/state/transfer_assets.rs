@@ -143,7 +143,8 @@ impl TransferAssetsState {
         }
     }
 
-    pub(crate) fn apply_transfer_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:AfterTransferAsset
+    pub(crate) fn apply_transfer(
         &mut self,
         asset: &str,
         qty: f64,
@@ -231,13 +232,7 @@ mod tests {
         state.apply_update(ExchangeKind::Spot, 10, vec![asset("USDT", 10.0, 12.0)]);
         state.apply_update(ExchangeKind::Futures, 11, vec![asset("USDT", 1.0, 2.0)]);
 
-        let ev = state.apply_transfer_like_delphi(
-            "usdt",
-            3.0,
-            ExchangeKind::Spot,
-            ExchangeKind::Futures,
-            99,
-        );
+        let ev = state.apply_transfer("usdt", 3.0, ExchangeKind::Spot, ExchangeKind::Futures, 99);
 
         assert!(matches!(
             ev,

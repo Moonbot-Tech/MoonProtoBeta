@@ -53,7 +53,7 @@ impl MarketsState {
             if let Some(&incoming_idx) = incoming_by_name.get(&old_name) {
                 let incoming = &resp.markets[incoming_idx];
                 handle.with_mut(|market| {
-                    merge_market_like_delphi_get_markets_list(
+                    merge_market_from_list(
                         market,
                         incoming,
                         self.copy_max_leverage_from_markets_list,
@@ -88,7 +88,7 @@ impl MarketsState {
         }
 
         self.markets = Arc::new(markets);
-        self.replace_market_lookups_like_delphi_cow(lookup_entries);
+        self.replace_market_lookups_cow(lookup_entries);
 
         Arc::make_mut(&mut self.token_tags).retain(|name, _| self.by_name.contains_key(name));
 
@@ -97,10 +97,10 @@ impl MarketsState {
         for cm in resp.corr_markets {
             self.apply_one_corr_market_from_list(cm);
         }
-        self.check_corr_markets_like_delphi();
-        self.check_currency_ref_markets_like_delphi();
+        self.check_corr_markets();
+        self.check_currency_ref_markets();
         if rebuild_server_indexes {
-            self.replace_market_indexes_like_delphi_cow(incoming_server_names);
+            self.replace_market_indexes_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
         self.markets_list_refresh_needed = false;
@@ -116,7 +116,8 @@ impl MarketsState {
     /// Delphi applies each market inside the read loop, rebuilds server indexes
     /// after that loop, then applies CorrMarkets. If a CorrMarket read fails,
     /// already-read markets and rebuilt indexes remain.
-    pub(crate) fn apply_markets_list_payload_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:GetMarketsList
+    pub(crate) fn apply_markets_list_payload(
         &mut self,
         data: &[u8],
         ver: u16,
@@ -191,7 +192,7 @@ impl MarketsState {
 
         let index_rebuild_start = Instant::now();
         if rebuild_server_indexes {
-            self.replace_market_indexes_like_delphi_cow(incoming_server_names);
+            self.replace_market_indexes_cow(incoming_server_names);
             self.indexes_synchronized = true;
         }
         let index_rebuild_ns = elapsed_ns_u64(index_rebuild_start);
@@ -205,8 +206,8 @@ impl MarketsState {
         let corr_loop_ns = elapsed_ns_u64(corr_loop_start);
 
         let ref_passes_start = Instant::now();
-        self.check_corr_markets_like_delphi();
-        self.check_currency_ref_markets_like_delphi();
+        self.check_corr_markets();
+        self.check_currency_ref_markets();
         let ref_passes_ns = elapsed_ns_u64(ref_passes_start);
         self.markets_list_refresh_needed = false;
         self.last_markets_list_timing = Some(MarketsListApplyTiming {
@@ -241,7 +242,7 @@ impl MarketsState {
             });
             if let Some(handle) = handle {
                 handle.with_mut(|existing| {
-                    merge_market_like_delphi_get_markets_list(
+                    merge_market_from_list(
                         existing,
                         &market,
                         self.copy_max_leverage_from_markets_list,
@@ -271,10 +272,8 @@ impl MarketsState {
         true
     }
 
-    fn replace_market_lookups_like_delphi_cow(
-        &mut self,
-        lookup_entries: Vec<(String, MarketHandle)>,
-    ) {
+    // parity: MoonBot MoonProtoEngine.pas:GetMarketsList (rebuilds Markets lookups)
+    fn replace_market_lookups_cow(&mut self, lookup_entries: Vec<(String, MarketHandle)>) {
         let mut by_name = HashMap::with_capacity(lookup_entries.len());
         let mut handles_by_name = HashMap::with_capacity(lookup_entries.len());
         for (i, (name, handle)) in lookup_entries.into_iter().enumerate() {
@@ -290,12 +289,8 @@ impl MarketsState {
     }
 }
 
-fn merge_market_like_delphi_get_markets_list(
-    dst: &mut Market,
-    src: &Market,
-    copy_max_leverage: bool,
-    eps: f64,
-) {
+// parity: MoonBot MarketsU.pas:TMarket.CopyFromMarket
+fn merge_market_from_list(dst: &mut Market, src: &Market, copy_max_leverage: bool, eps: f64) {
     dst.bn_tick_size = src.bn_tick_size;
     dst.bn_step_size = src.bn_step_size;
     dst.bn_min_price = src.bn_min_price;

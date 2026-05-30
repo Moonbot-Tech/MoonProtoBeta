@@ -59,7 +59,8 @@ impl TradesPacketTimeShift {
         self.shift_days
     }
 
-    pub(crate) fn apply_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (per-packet TimeShift)
+    pub(crate) fn shifted_time(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -164,6 +165,7 @@ pub struct MMOrderCompanionData {
     pub color: u32,
 }
 
+// parity: MoonBot HLHelpers.pas:HLAddressColor
 pub fn hl_address_color(taker: [u8; 20]) -> u32 {
     let mut r = 0u8;
     let mut g = 0u8;
@@ -178,11 +180,6 @@ pub fn hl_address_color(taker: [u8; 20]) -> u32 {
 
     let scale = |x: u8| -> u32 { ((u32::from(x) * 5) >> 3) + 80 };
     0xFF00_0000 | (scale(r) << 16) | (scale(g) << 8) | scale(b)
-}
-
-#[doc(hidden)]
-pub fn hl_address_color_like_delphi(taker: [u8; 20]) -> u32 {
-    hl_address_color(taker)
 }
 
 /// Delphi `THistoricalPrices` used by `Market.HistoryPrice`.
@@ -398,7 +395,8 @@ impl SeqRingTimedRow for MiniCandle {
 /// new candle starts when `abs(anchor - row.Time) > 5 / SecsPerDay`, split
 /// groups are appended only when newer than `last_mini_time` and older than the
 /// resize `now_time`, and the final group only checks `c.Time > last_mini_time`.
-pub(crate) fn compact_trades_to_mini_candles_like_delphi(
+// parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory (UseTradesCompression)
+pub(crate) fn compact_trades_to_mini_candles(
     rows: &[TradeHistoryRow],
     last_mini_time: f64,
     now_time: f64,

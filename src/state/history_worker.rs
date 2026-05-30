@@ -535,7 +535,7 @@ fn process_last_price_batch(
         let Some(store) = registry.get_mut(row.market_name.as_ref()) else {
             continue;
         };
-        store.append_last_price_like_delphi(
+        store.append_last_price(
             row.current,
             batch.now_time,
             row.bid,
@@ -558,7 +558,7 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                 };
                 let end = section.start.saturating_add(section.len);
                 for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
-                    store.append_futures_stream_trade_like_delphi(
+                    store.append_futures_stream_trade(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
@@ -574,7 +574,7 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                 };
                 let end = section.start.saturating_add(section.len);
                 for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
-                    store.append_spot_stream_trade_like_delphi(
+                    store.append_spot_stream_trade(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
@@ -590,7 +590,7 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                 };
                 let end = section.start.saturating_add(section.len);
                 for &row in batch.trade_rows.get(section.start..end).unwrap_or_default() {
-                    store.append_liquidation_stream_like_delphi(
+                    store.append_liquidation_stream(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
@@ -610,7 +610,7 @@ fn process_stream_batch(registry: &mut MarketHistoryRegistry, batch: MarketHisto
                     .get(section.start..end)
                     .unwrap_or_default()
                 {
-                    store.append_mm_stream_order_like_delphi(
+                    store.append_mm_stream_order(
                         batch.base_time,
                         row.time_delta_ms,
                         batch.now_time,
@@ -639,7 +639,7 @@ fn process_candles_snapshot(
 
 fn run_store_maintenance(registry: &mut MarketHistoryRegistry, now_time: f64) {
     if now_time > 0.0 {
-        registry.compact_evicted_futures_like_delphi(now_time);
+        registry.compact_evicted_futures(now_time);
         registry.refresh_derived_analytics(now_time);
     }
 }

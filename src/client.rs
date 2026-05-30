@@ -8,7 +8,7 @@
 
 use crate::api_pending::ApiPending;
 use crate::commands::candles::{
-    parse_request_candles_data_response, parse_request_candles_data_response_partial_like_delphi,
+    parse_request_candles_data_response, parse_request_candles_data_response_partial,
     CandlesAggregator, CandlesChunkResult,
 };
 use crate::commands::engine_api::{

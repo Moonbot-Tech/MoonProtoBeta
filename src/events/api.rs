@@ -38,14 +38,10 @@ impl EventDispatcher {
         if resp.success {
             match resp.method {
                 EngineMethod::GetMarketsList => {
-                    self.apply_get_markets_list_response_like_delphi(&resp, out);
+                    self.apply_get_markets_list_response(&resp, out);
                 }
                 EngineMethod::UpdateMarketsList => {
-                    self.apply_update_markets_list_response_like_delphi(
-                        &resp,
-                        history_now_time_days,
-                        out,
-                    );
+                    self.apply_update_markets_list_response(&resp, history_now_time_days, out);
                 }
                 EngineMethod::GetMarketsIndexes => {
                     if let Some(names) = parse_markets_indexes_response(&resp.data) {
@@ -54,10 +50,7 @@ impl EventDispatcher {
                     }
                 }
                 EngineMethod::CheckBinanceTags => {
-                    if let Some(ev) = self
-                        .markets
-                        .apply_token_tags_payload_like_delphi(&resp.data)
-                    {
+                    if let Some(ev) = self.markets.apply_token_tags_payload(&resp.data) {
                         out.push(Event::Markets(ev));
                     }
                 }
@@ -78,7 +71,8 @@ impl EventDispatcher {
         out.push(Event::EngineResponse(resp));
     }
 
-    pub(crate) fn apply_get_markets_list_response_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessApiCommand (emk_GetMarketsList)
+    pub(crate) fn apply_get_markets_list_response(
         &mut self,
         resp: &EngineResponse,
         out: &mut Vec<Event>,
@@ -88,7 +82,7 @@ impl EventDispatcher {
         }
         let Some(ev) = self
             .markets
-            .apply_markets_list_payload_like_delphi(&resp.data, resp.ver)
+            .apply_markets_list_payload(&resp.data, resp.ver)
         else {
             return false;
         };
@@ -102,7 +96,8 @@ impl EventDispatcher {
         true
     }
 
-    pub(crate) fn apply_update_markets_list_response_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessApiCommand (emk_UpdateMarketsList)
+    pub(crate) fn apply_update_markets_list_response(
         &mut self,
         resp: &EngineResponse,
         history_now_time_days: Option<f64>,
@@ -117,25 +112,25 @@ impl EventDispatcher {
         let mut last_price_rows = Vec::new();
         let ev = if wants_history {
             self.markets
-                .apply_markets_prices_payload_collecting_last_price_like_delphi(
+                .apply_markets_prices_payload_collecting_last_price(
                     &resp.data,
                     Some(&mut last_price_rows),
                 )
         } else {
-            self.markets
-                .apply_markets_prices_payload_like_delphi(&resp.data)
+            self.markets.apply_markets_prices_payload(&resp.data)
         };
         let Some(ev) = ev else {
             return false;
         };
         if wants_history {
-            self.queue_last_price_history_like_delphi(history_now_time_days, last_price_rows);
+            self.queue_last_price_history(history_now_time_days, last_price_rows);
         }
         out.push(Event::Markets(ev));
         true
     }
 
-    fn queue_last_price_history_like_delphi(
+    // parity: MoonBot MarketsU.pas:TMarket.AddFrom (LastPrice history backfill)
+    fn queue_last_price_history(
         &self,
         history_now_time_days: Option<f64>,
         rows: Vec<MarketLastPriceHistoryInput>,
@@ -166,8 +161,9 @@ impl EventDispatcher {
         handle.send_last_price_batch(MarketHistoryLastPriceBatch { now_time, rows });
     }
 
-    pub(super) fn queue_current_last_price_history_like_delphi(&self, now_time_days: f64) {
-        let rows = self.markets.current_last_price_history_rows_like_delphi();
-        self.queue_last_price_history_like_delphi(Some(now_time_days), rows);
+    // parity: MoonBot MarketsU.pas:TMarket.AddFrom (LastPrice history backfill)
+    pub(super) fn queue_current_last_price_history(&self, now_time_days: f64) {
+        let rows = self.markets.current_last_price_history_rows();
+        self.queue_last_price_history(Some(now_time_days), rows);
     }
 }

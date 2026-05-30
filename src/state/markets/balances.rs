@@ -14,14 +14,15 @@ use crate::state::epoch::epoch_is_ok;
 use super::{Market, MarketsState};
 
 impl MarketsState {
-    pub(crate) fn apply_balance_update_like_delphi(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
+    // parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem (cmd dispatch)
+    pub(crate) fn apply_balance_update(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
         match upd.cmd_id {
             2 => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
             },
-            3 => self.apply_balance_snapshot_like_delphi(upd),
-            4 => self.apply_balance_increment_like_delphi(upd),
+            3 => self.apply_balance_snapshot(upd),
+            4 => self.apply_balance_increment(upd),
             _ => BalanceEvent::Ignored {
                 cmd_id: upd.cmd_id,
                 epoch: upd.epoch,
@@ -32,7 +33,8 @@ impl MarketsState {
     /// Delphi `TMarkets.RecalcTotalPnl` (`MarketsU.pas:8185`): sum per-market
     /// `total_profit` over `IsBTCMarket` markets. Computed from the live markets
     /// (single Delphi-parity source), not a duplicate balance store.
-    pub(crate) fn sum_btc_total_profit_like_delphi(&self) -> f64 {
+    // parity: MoonBot MarketsU.pas:TMarkets.RecalcTotalPnl
+    pub(crate) fn sum_btc_total_profit(&self) -> f64 {
         self.markets
             .iter()
             .map(|handle| {
@@ -47,7 +49,8 @@ impl MarketsState {
             .sum()
     }
 
-    fn apply_balance_snapshot_like_delphi(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
+    // parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem (full snapshot)
+    fn apply_balance_snapshot(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
         use std::collections::HashSet;
 
         let mut seen = HashSet::with_capacity(upd.items.len());
@@ -58,7 +61,7 @@ impl MarketsState {
                 continue;
             };
             handle.with_mut(|market| {
-                apply_balance_item_like_delphi(market, item, upd.epoch, self.eps_profile.eps);
+                apply_balance_item(market, item, upd.epoch, self.eps_profile.eps);
             });
             seen.insert(item.market_name.as_str());
             count += 1;
@@ -67,7 +70,7 @@ impl MarketsState {
         for handle in self.markets.iter() {
             let was_seen = handle.with(|market| seen.contains(market.bn_market_name.as_str()));
             if !was_seen {
-                handle.with_mut(reset_missing_balance_like_delphi);
+                handle.with_mut(reset_missing_balance);
             }
         }
 
@@ -77,7 +80,8 @@ impl MarketsState {
         }
     }
 
-    fn apply_balance_increment_like_delphi(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
+    // parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem (incremental, epoch-gated)
+    fn apply_balance_increment(&mut self, upd: &BalanceUpdate) -> BalanceEvent {
         let mut count = 0;
         for item in &upd.items {
             let Some(handle) = self.get(&item.market_name) else {
@@ -87,7 +91,7 @@ impl MarketsState {
                 if !epoch_is_ok(market.last_balance_epoch, upd.epoch) {
                     return false;
                 }
-                apply_balance_item_like_delphi(market, item, upd.epoch, self.eps_profile.eps);
+                apply_balance_item(market, item, upd.epoch, self.eps_profile.eps);
                 true
             });
             if applied {
@@ -103,7 +107,8 @@ impl MarketsState {
     }
 }
 
-fn apply_balance_item_like_delphi(market: &mut Market, item: &BalanceItem, epoch: u16, eps: f64) {
+// parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem
+fn apply_balance_item(market: &mut Market, item: &BalanceItem, epoch: u16, eps: f64) {
     market.initial_balance = item.initial_balance;
     market.locked_balance = item.locked_balance;
 
@@ -140,7 +145,8 @@ fn apply_balance_item_like_delphi(market: &mut Market, item: &BalanceItem, epoch
     market.last_balance_epoch = epoch;
 }
 
-fn reset_missing_balance_like_delphi(market: &mut Market) {
+// parity: MoonBot MoonProtoEngine.pas:ApplyBalanceItem (full snapshot resets absent markets)
+fn reset_missing_balance(market: &mut Market) {
     market.initial_balance = 0.0;
     market.locked_balance = 0.0;
     market.pos_size = 0.0;

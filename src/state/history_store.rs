@@ -9,10 +9,9 @@ use std::sync::Arc;
 
 use crate::state::eps::EpsProfile;
 use crate::state::history::{
-    compact_trades_to_mini_candles_like_delphi, hl_address_color_like_delphi, Candle5mRow,
-    LastPricePoint, MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot,
-    MiniCandle, RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow,
-    TradesPacketTimeShift,
+    compact_trades_to_mini_candles, hl_address_color, Candle5mRow, LastPricePoint,
+    MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
+    RollingTradeVolumeSnapshot, RollingTradeVolumes, TradeHistoryRow, TradesPacketTimeShift,
 };
 use crate::state::seq_ring::{SeqRingReader, SeqRingWriter};
 use parking_lot::RwLock;
@@ -218,7 +217,8 @@ impl MarketHistoryStore {
     /// The caller passes `p_last = (Bid + Ask) / 2` from `UpdateMarketsList`.
     /// Delphi appends only for BTC markets or base-USDT markets, only when a
     /// real bid/ask was present, and only after the caller checked `pLast`.
-    pub(crate) fn append_last_price_like_delphi(
+    // parity: MoonBot MarketsU.pas:TMarket.AddFrom
+    pub(crate) fn append_last_price(
         &mut self,
         current: f64,
         real_time: f64,
@@ -263,14 +263,16 @@ impl MarketHistoryStore {
         })
     }
 
-    pub(crate) fn append_futures_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (futures trade -> m.FuturesTrades)
+    pub(crate) fn append_futures_trade(&mut self, row: TradeHistoryRow) -> Option<u64> {
         let seq = self.push_retained_futures_trade(row)?;
         self.rolling_volumes.add_trade(row);
         self.update_current_candle_from_trade(row);
         Some(seq)
     }
 
-    pub(crate) fn append_futures_stream_trade_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (futures section -> m.FuturesTrades)
+    pub(crate) fn append_futures_stream_trade(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -279,16 +281,18 @@ impl MarketHistoryStore {
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
     ) -> f64 {
-        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
-        self.append_futures_trade_like_delphi(TradeHistoryRow { time, price, qty });
+        let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
+        self.append_futures_trade(TradeHistoryRow { time, price, qty });
         time
     }
 
-    pub(crate) fn append_spot_trade_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (spot trade -> m.SpotTrades)
+    pub(crate) fn append_spot_trade(&mut self, row: TradeHistoryRow) -> Option<u64> {
         self.spot_trades.as_mut().map(|writer| writer.push(row))
     }
 
-    pub(crate) fn append_spot_stream_trade_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (spot section -> m.SpotTrades)
+    pub(crate) fn append_spot_stream_trade(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -297,16 +301,18 @@ impl MarketHistoryStore {
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>) {
-        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
-        let seq = self.append_spot_trade_like_delphi(TradeHistoryRow { time, price, qty });
+        let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
+        let seq = self.append_spot_trade(TradeHistoryRow { time, price, qty });
         (time, seq)
     }
 
-    pub(crate) fn append_liquidation_like_delphi(&mut self, row: TradeHistoryRow) -> Option<u64> {
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (liq section -> m.LiqOrders)
+    pub(crate) fn append_liquidation(&mut self, row: TradeHistoryRow) -> Option<u64> {
         self.liquidations.as_mut().map(|writer| writer.push(row))
     }
 
-    pub(crate) fn append_liquidation_stream_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (liq section -> m.LiqOrders)
+    pub(crate) fn append_liquidation_stream(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -315,12 +321,13 @@ impl MarketHistoryStore {
         qty: f32,
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>) {
-        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
-        let seq = self.append_liquidation_like_delphi(TradeHistoryRow { time, price, qty });
+        let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
+        let seq = self.append_liquidation(TradeHistoryRow { time, price, qty });
         (time, seq)
     }
 
-    pub(crate) fn append_mm_order_with_companion_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (m.MMOrders.Add(MMOrder, moData))
+    pub(crate) fn append_mm_order_with_companion(
         &mut self,
         row: MMOrderHistoryRow,
         companion: Option<MMOrderCompanionData>,
@@ -332,7 +339,8 @@ impl MarketHistoryStore {
         Some(seq)
     }
 
-    pub(crate) fn append_mm_stream_order_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (MMOrders section + HLAddressColor)
+    pub(crate) fn append_mm_stream_order(
         &mut self,
         base_time: f64,
         time_delta_ms: i16,
@@ -342,12 +350,12 @@ impl MarketHistoryStore {
         taker: Option<[u8; 20]>,
         time_shift: &mut TradesPacketTimeShift,
     ) -> (f64, Option<u64>) {
-        let time = time_shift.apply_like_delphi(base_time, time_delta_ms, now_time);
+        let time = time_shift.shifted_time(base_time, time_delta_ms, now_time);
         let companion = taker.map(|taker| MMOrderCompanionData {
             taker,
-            color: hl_address_color_like_delphi(taker),
+            color: hl_address_color(taker),
         });
-        let seq = self.append_mm_order_with_companion_like_delphi(
+        let seq = self.append_mm_order_with_companion(
             MMOrderHistoryRow {
                 time,
                 volume: f64::from(vol),
@@ -361,12 +369,13 @@ impl MarketHistoryStore {
     /// Fold detailed futures rows evicted from `SeqRing` into retained
     /// `TMiniCandle` rows. StoreWorker should call this from its periodic
     /// derived-state tick.
-    pub(crate) fn compact_evicted_futures_like_delphi(&mut self, now_time: f64) -> usize {
+    // parity: MoonBot MarketsU.pas:TMarket.ResizeOrdersHistory
+    pub(crate) fn compact_evicted_futures(&mut self, now_time: f64) -> usize {
         if self.evicted_futures_for_compaction.is_empty() {
             return 0;
         }
         let last_mini_time = last_mini_time(self.readers.mini_candles.as_ref()).unwrap_or(0.0);
-        compact_trades_to_mini_candles_like_delphi(
+        compact_trades_to_mini_candles(
             &self.evicted_futures_for_compaction,
             last_mini_time,
             now_time,

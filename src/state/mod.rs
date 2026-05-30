@@ -35,9 +35,9 @@ pub use account::{AccountEvent, AccountState};
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};
 pub use coin_card_candles::{CoinCardCandlesEvent, CoinCardCandlesState};
 pub use history::{
-    hl_address_color, hl_address_color_like_delphi, Candle5mRow, CandleVolumeSnapshot,
-    CandlesSnapshotApplySummary, CandlesSnapshotEvent, DerivedDeltaSnapshot, LastPricePoint,
-    MMOrderCompanionData, MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
+    hl_address_color, Candle5mRow, CandleVolumeSnapshot, CandlesSnapshotApplySummary,
+    CandlesSnapshotEvent, DerivedDeltaSnapshot, LastPricePoint, MMOrderCompanionData,
+    MMOrderHistoryRow, MarkPricePoint, MarketDerivedSnapshot, MiniCandle,
     RollingTradeVolumeSnapshot, TradeHistoryRow, TradeVolumeTotals, DELPHI_MSECS_PER_DAY,
     DELPHI_SAME_TRADES_TIME_DAYS,
 };

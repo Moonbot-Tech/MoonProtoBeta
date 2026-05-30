@@ -31,11 +31,11 @@ impl EventDispatcher {
             3 | 4 => match parse_balance(sub_cmd_id, body) {
                 Some(upd) => {
                     // Single Delphi-parity apply: per-market into live markets.
-                    let ev = self.markets.apply_balance_update_like_delphi(&upd);
+                    let ev = self.markets.apply_balance_update(&upd);
                     // Account total PnL recomputed from the just-updated markets
                     // (Delphi `RecalcTotalPnl`), then account globals applied.
-                    let total_pnl = self.markets.sum_btc_total_profit_like_delphi();
-                    self.balances.apply_global_like_delphi(&upd, total_pnl);
+                    let total_pnl = self.markets.sum_btc_total_profit();
+                    self.balances.apply_global(&upd, total_pnl);
                     out.push(Event::Balance(ev));
                 }
                 None => out.push(Self::parse_failed(Command::Balance, payload)),
@@ -49,7 +49,7 @@ impl EventDispatcher {
                             .client_settings
                             .as_ref()
                             .map(|settings| &settings.arb_config.wanted);
-                        let summary = self.markets.apply_arb_payload_like_delphi(
+                        let summary = self.markets.apply_arb_payload(
                             &parsed,
                             wanted,
                             now_time_days.unwrap_or_default(),

@@ -11,12 +11,13 @@ impl MarketsState {
     /// processing of TradesStream / OrderBook packets.
     pub fn apply_markets_indexes(&mut self, names: Vec<String>) -> MarketsEvent {
         let count = names.len();
-        self.replace_market_indexes_like_delphi_cow(names);
+        self.replace_market_indexes_cow(names);
         self.indexes_synchronized = true;
         MarketsEvent::IndexesUpdated { count }
     }
 
-    pub(super) fn replace_market_indexes_like_delphi_cow(&mut self, names: Vec<String>) {
+    // parity: MoonBot MoonProtoEngine.pas:ProcessApiCommand (emk_GetMarketsIndexes)
+    pub(super) fn replace_market_indexes_cow(&mut self, names: Vec<String>) {
         let mut by_name = HashMap::with_capacity(names.len());
         for (idx, name) in names.iter().enumerate() {
             if let Ok(idx) = u16::try_from(idx) {

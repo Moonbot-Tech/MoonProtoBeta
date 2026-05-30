@@ -1213,7 +1213,7 @@ fn apply_required_get_markets_list_response(
     result: &mut InitResult,
 ) -> Result<(), InitError> {
     let mut events = Vec::new();
-    if !dispatcher.apply_get_markets_list_response_like_delphi(resp, &mut events) {
+    if !dispatcher.apply_get_markets_list_response(resp, &mut events) {
         return Err(malformed_required_engine_step(
             result,
             "GetMarketsList",
@@ -1230,7 +1230,7 @@ fn apply_required_update_markets_list_response(
     result: &mut InitResult,
 ) -> Result<(), InitError> {
     let mut events = Vec::new();
-    if !dispatcher.apply_update_markets_list_response_like_delphi(resp, None, &mut events) {
+    if !dispatcher.apply_update_markets_list_response(resp, None, &mut events) {
         return Err(malformed_required_engine_step(
             result,
             "UpdateMarketsList",

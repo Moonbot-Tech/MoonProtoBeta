@@ -126,7 +126,8 @@ impl MarketsState {
     /// per-market tail fields: futures trades call the `SetLastTradePrices`
     /// tail and update `LastGotAllTrades`; spot trades update only
     /// `LastGotSpotTrades`.
-    pub(crate) fn apply_trade_tail_row_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ProcessTradesStream (per-market live tail)
+    pub(crate) fn apply_trade_tail_row(
         &self,
         market_index: u16,
         is_spot: bool,
@@ -155,9 +156,9 @@ impl MarketsState {
         let eps = self.eps_profile.eps;
         handle.with_mut(|market| {
             if is_spot {
-                market.trade_tail.apply_spot_trade_like_delphi(now_ms);
+                market.trade_tail.apply_spot_trade(now_ms);
             } else {
-                market.trade_tail.apply_futures_trade_like_delphi(
+                market.trade_tail.apply_futures_trade(
                     f64::from(price),
                     f64::from(qty),
                     now_ms,

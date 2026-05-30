@@ -35,7 +35,8 @@ pub fn parse_request_candles_data_response(
     )
 }
 
-pub(crate) fn parse_request_candles_data_response_partial_like_delphi(
+// parity: MoonBot MoonProtoClient.pas:ProcessApiCommand (chunked emk_RequestCandlesData read)
+pub(crate) fn parse_request_candles_data_response_partial(
     zipped_data: &[u8],
 ) -> Option<Vec<RequestCandlesMarket>> {
     parse_request_candles_data_response_partial_with_local_shift(

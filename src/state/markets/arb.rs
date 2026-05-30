@@ -19,7 +19,8 @@ pub(crate) struct ArbApplySummary {
 }
 
 impl MarketsState {
-    pub(crate) fn apply_arb_payload_like_delphi(
+    // parity: MoonBot MoonProtoEngine.pas:ParseArbPayloadCompact
+    pub(crate) fn apply_arb_payload(
         &mut self,
         payload: &ArbPayload,
         wanted_platforms: Option<&[bool; 256]>,
@@ -43,7 +44,7 @@ impl MarketsState {
                     let my_price = handle.with(|market| market.price.p_last as f32);
                     handle.with_mut(|market| {
                         for item in &block.prices {
-                            if apply_arb_price_like_delphi(
+                            if apply_arb_price(
                                 market,
                                 item,
                                 wanted_platforms,
@@ -73,13 +74,14 @@ impl MarketsState {
                         summary.applied_isolation_entries += 1;
                     });
                 }
-                self.arb_isol_commit_like_delphi();
+                self.arb_isol_commit();
             }
         }
         summary
     }
 
-    fn arb_isol_commit_like_delphi(&mut self) {
+    // parity: MoonBot MoonProtoEngine.pas:ParseArbPayloadCompact (isolation commit pass)
+    fn arb_isol_commit(&mut self) {
         for handle in self.markets.iter() {
             handle.with_mut(|market| {
                 for slot in market.arb_slots.values_mut() {
@@ -91,7 +93,8 @@ impl MarketsState {
     }
 }
 
-fn apply_arb_price_like_delphi(
+// parity: MoonBot MoonProtoEngine.pas:ParseArbPayloadCompact (per-platform price slot)
+fn apply_arb_price(
     market: &mut Market,
     item: &ArbPriceItem,
     wanted_platforms: &[bool; 256],
