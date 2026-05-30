@@ -7,7 +7,7 @@ pub(crate) const TRADES_FLAG_HAS_TAKER: u8 = 0x02;
 
 /// Size in bytes of one Delphi watcher-fill record inside a watcher-fills
 /// extended section.
-pub const WATCHER_FILL_RECORD_SIZE: usize = std::mem::size_of::<WireWatcherFill>();
+pub(crate) const WATCHER_FILL_RECORD_SIZE: usize = std::mem::size_of::<WireWatcherFill>();
 const _: [(); 20] = [(); WATCHER_FILL_RECORD_SIZE];
 pub(crate) const TRADES_PACKET_HEADER_SIZE: usize = std::mem::size_of::<WireTradesPacketHeader>();
 const _: [(); 10] = [(); TRADES_PACKET_HEADER_SIZE];

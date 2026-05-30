@@ -28,10 +28,8 @@ mod text;
 mod types;
 
 use self::text::same_text_ascii;
-pub(crate) use self::types::MarketLastPriceHistoryInput;
-pub use self::types::{
-    BaseCurrencyPrice, MarketBalancePosition, MarketHandle, MarketsEvent, MarketsListApplyTiming,
-};
+pub(crate) use self::types::{BaseCurrencyPrice, MarketLastPriceHistoryInput};
+pub use self::types::{MarketBalancePosition, MarketHandle, MarketsEvent, MarketsListApplyTiming};
 // The live trade tail and price now live on the `Market` object itself (Delphi
 // `TMarket` shape); re-export them here so the public `state::markets` path is stable.
 pub use crate::commands::market::{MarketPrice, MarketTradeState};

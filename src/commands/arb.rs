@@ -15,14 +15,14 @@ const ARB_PRICES_CMD_ID: u8 = 6;
 
 #[derive(Debug, Clone)]
 #[doc(hidden)]
-pub struct ArbPricesCommand {
+pub(crate) struct ArbPricesCommand {
     pub uid: u64,
     pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
-pub enum ArbPayload {
+pub(crate) enum ArbPayload {
     Price {
         version: u8,
         blocks: Vec<ArbPriceBlock>,
@@ -35,21 +35,21 @@ pub enum ArbPayload {
 
 #[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
-pub struct ArbPriceBlock {
+pub(crate) struct ArbPriceBlock {
     pub market_index: u16,
     pub prices: Vec<ArbPriceItem>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[doc(hidden)]
-pub struct ArbPriceItem {
+pub(crate) struct ArbPriceItem {
     pub platform_code: u8,
     pub price: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[doc(hidden)]
-pub struct ArbIsolationEntry {
+pub(crate) struct ArbIsolationEntry {
     pub market_index: u16,
     pub platform_code: u8,
     pub flags: u8,
@@ -64,7 +64,7 @@ const CMD_ISOL: u8 = 2;
 /// `payload` must already be routed from the MPC_Balance channel. Returns
 /// `None` when `cmd_id != 6` or the command envelope is too short.
 #[doc(hidden)]
-pub fn parse_arb_prices(payload: &[u8]) -> Option<ArbPricesCommand> {
+pub(crate) fn parse_arb_prices(payload: &[u8]) -> Option<ArbPricesCommand> {
     if payload.len() < 11 {
         return None;
     }
@@ -107,7 +107,7 @@ pub fn parse_arb_prices(payload: &[u8]) -> Option<ArbPricesCommand> {
 /// - `ArbClientU.pas:205-226` — compact price items;
 /// - `ArbClientU.pas:232-259` — compact isolation snapshot.
 #[doc(hidden)]
-pub fn parse_arb_payload_compact(payload: &[u8]) -> Option<ArbPayload> {
+pub(crate) fn parse_arb_payload_compact(payload: &[u8]) -> Option<ArbPayload> {
     if payload.len() < 2 {
         return None;
     }
@@ -212,7 +212,8 @@ fn parse_isolation_compact(data: &[u8], pos: &mut usize) -> Vec<ArbIsolationEntr
 
 /// Build `TArbPricesCommand` for low-level protocol tools.
 #[doc(hidden)]
-pub fn build_arb_prices(uid: u64, payload: &[u8]) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn build_arb_prices(uid: u64, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(11 + 4 + payload.len());
     out.push(ARB_PRICES_CMD_ID);
     out.extend_from_slice(&CURRENT_PROTO_CMD_VER.to_le_bytes());

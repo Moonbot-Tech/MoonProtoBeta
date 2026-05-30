@@ -43,7 +43,7 @@ pub struct EngineResponse {
 /// GetMarketsList timeouts).
 ///
 /// Matches `MoonProtoEngineStruct.pas:364-403`.
-pub fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
+pub(crate) fn parse_engine_response(data: &[u8]) -> Option<EngineResponse> {
     if data.len() < 11 {
         return None;
     }

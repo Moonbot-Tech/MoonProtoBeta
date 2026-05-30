@@ -6,19 +6,21 @@
 //!
 //! Version gate: if ver > CURRENT_VER (3), skip the command.
 
-pub const CURRENT_PROTO_CMD_VER: u16 = 3;
+pub(crate) const CURRENT_PROTO_CMD_VER: u16 = 3;
 
 /// Common header for all sub-commands within a channel.
 #[derive(Debug, Clone)]
-pub struct CommandHeader {
+#[allow(dead_code)]
+pub(crate) struct CommandHeader {
     pub cmd_id: u8,
     pub ver: u16,
     pub uid: u64,
 }
 
+#[allow(dead_code)]
 impl CommandHeader {
     /// Read command header from bytes. Returns (header, bytes_consumed).
-    pub fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<(Self, usize)> {
         if data.len() < 11 {
             // 1 + 2 + 8
             return None;
@@ -30,14 +32,14 @@ impl CommandHeader {
     }
 
     /// Check version gate. Returns true if command should be processed.
-    pub fn is_valid_version(&self) -> bool {
+    pub(crate) fn is_valid_version(&self) -> bool {
         self.ver <= CURRENT_PROTO_CMD_VER
     }
 }
 
 /// Read a UTF-8 string with 2-byte LE length prefix.
 /// Matches Delphi WriteStringToStreamUtf8/ReadStringFromStreamUtf8.
-pub fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
+pub(crate) fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
     if *pos + 2 > data.len() {
         return None;
     }
@@ -56,7 +58,7 @@ pub fn read_string(data: &[u8], pos: &mut usize) -> Option<String> {
 /// Rust `from_utf8_lossy` inserts U+FFFD for invalid input, but Delphi's default
 /// replacement fallback inserts ASCII `?`. Protocol parsers use this for every
 /// wire string so damaged bytes produce the same machine effect as Delphi.
-pub fn decode_utf8_delphi(bytes: &[u8]) -> String {
+pub(crate) fn decode_utf8_delphi(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_owned(),
         Err(_) => {
@@ -85,7 +87,7 @@ pub fn decode_utf8_delphi(bytes: &[u8]) -> String {
 }
 
 /// Write a UTF-8 string with 2-byte LE length prefix.
-pub fn write_string(buf: &mut Vec<u8>, s: &str) {
+pub(crate) fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len() as u16;
     let len_usize = usize::from(len);

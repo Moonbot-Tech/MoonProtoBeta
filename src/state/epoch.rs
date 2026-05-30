@@ -29,7 +29,7 @@ const STALE_WINDOW: u16 = 100;
 ///
 /// See `MoonProtoFunc.pas:188-203`: Delphi uses exactly a window of `100`, not
 /// the RFC 1982 half-cycle.
-pub fn epoch_is_ok(last: u16, new: u16) -> bool {
+pub(crate) fn epoch_is_ok(last: u16, new: u16) -> bool {
     if last == new {
         return false; // duplicate
     }

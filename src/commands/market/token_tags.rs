@@ -64,7 +64,8 @@ pub struct MarketTokenTags {
 /// Wire-form (MoonProtoEngineServer.pas:324-333):
 ///   `count:i32 + (market_name:string + tags:i32)[count]`.
 #[doc(hidden)]
-pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
+#[allow(dead_code)]
+pub(crate) fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
     let mut r = EngineStreamReader::new(data);
     // MarketTokenTags: market_name (string u16+chars) + tags (i32) = at least 6 bytes.
     let count = r.read_count()?;
@@ -81,7 +82,8 @@ pub fn parse_token_tags_response(data: &[u8]) -> Option<Vec<MarketTokenTags>> {
 }
 
 #[doc(hidden)]
-pub fn build_token_tags_response(items: &[MarketTokenTags]) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn build_token_tags_response(items: &[MarketTokenTags]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + items.len() * 16);
     out.extend_from_slice(&(items.len() as i32).to_le_bytes());
     for it in items {

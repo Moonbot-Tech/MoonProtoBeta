@@ -23,7 +23,7 @@ pub fn parse_strategy_batch(deflate_bytes: &[u8]) -> Option<StrategyBatch> {
 /// the name must exist in the public `TStrategy` schema, and the wire TypeID must
 /// match the RTTI TypeID. Otherwise the field is skipped via `SkipFieldByTypeID`.
 /// Without a schema the function stays a generic wire-format reader for diagnostics.
-pub fn parse_strategy_batch_with_schema(
+pub(crate) fn parse_strategy_batch_with_schema(
     deflate_bytes: &[u8],
     schema: Option<&StrategySchema>,
 ) -> Option<StrategyBatch> {
@@ -70,11 +70,13 @@ fn strategy_plain_capacity_hint(deflate_len: usize) -> usize {
 }
 
 /// Parse an already-decompressed flat payload (for the case where decompression was done externally).
-pub fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
+#[allow(dead_code)]
+pub(crate) fn parse_strategy_batch_plain(data: &[u8]) -> Option<StrategyBatch> {
     parse_strategy_batch_plain_with_schema(data, None)
 }
 
-pub fn parse_strategy_batch_plain_with_schema(
+#[allow(dead_code)]
+pub(crate) fn parse_strategy_batch_plain_with_schema(
     data: &[u8],
     schema: Option<&StrategySchema>,
 ) -> Option<StrategyBatch> {

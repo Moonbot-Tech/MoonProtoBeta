@@ -61,7 +61,7 @@ struct WireStratCheckedItem {
     checked: u8,
 }
 
-pub const STRAT_CHECKED_ITEM_SIZE: usize = std::mem::size_of::<WireStratCheckedItem>();
+pub(crate) const STRAT_CHECKED_ITEM_SIZE: usize = std::mem::size_of::<WireStratCheckedItem>();
 const _: [(); 9] = [(); STRAT_CHECKED_ITEM_SIZE];
 
 impl StratCheckedItem {
@@ -355,7 +355,7 @@ pub(crate) fn build_snapshot_request(uid: u64) -> Vec<u8> {
 
 /// `TStratSchemaRequest` (CmdId=7).
 #[doc(hidden)]
-pub fn build_schema_request(uid: u64) -> Vec<u8> {
+pub(crate) fn build_schema_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_SCHEMA_REQUEST, uid);
     out
@@ -372,7 +372,7 @@ pub fn build_schema_request(uid: u64) -> Vec<u8> {
 /// dictionaries and zero strategies. A wire `Size=0` snapshot is malformed for
 /// normal client sends.
 #[doc(hidden)]
-pub fn build_snapshot(
+pub(crate) fn build_snapshot(
     uid: u64,
     server_epoch: u64,
     client_max_last_date: u64,
@@ -404,7 +404,7 @@ pub fn build_snapshot(
 /// computes `ClientMaxLastDate`, and wraps the result as CmdId=2. The builder
 /// needs live `TStratSchema` for Delphi field order/default parity.
 #[doc(hidden)]
-pub fn build_snapshot_from_strategies(
+pub(crate) fn build_snapshot_from_strategies(
     uid: u64,
     server_epoch: u64,
     full: bool,
@@ -423,7 +423,7 @@ pub fn build_snapshot_from_strategies(
 
 /// `TStratDelete` (CmdId=3).
 #[doc(hidden)]
-pub fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
+pub(crate) fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_DELETE, uid);
     out.extend_from_slice(&strategy_id.to_le_bytes());
@@ -433,7 +433,7 @@ pub fn build_delete(uid: u64, strategy_id: u64, folder_path: &str) -> Vec<u8> {
 
 /// `TStratSellPriceUpdate` (CmdId=4).
 #[doc(hidden)]
-pub fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> Vec<u8> {
+pub(crate) fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_SELL_PRICE_UPDATE, uid);
     out.extend_from_slice(&strategy_id.to_le_bytes());
@@ -443,7 +443,7 @@ pub fn build_sell_price_update(uid: u64, strategy_id: u64, sell_price: f64) -> V
 
 /// `TStratCheckedSync` (CmdId=5).
 #[doc(hidden)]
-pub fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) -> Vec<u8> {
+pub(crate) fn build_checked_sync(uid: u64, items: &[StratCheckedItem], is_delta: bool) -> Vec<u8> {
     let count = items.len() as u16;
     let count_usize = usize::from(count);
     let mut out = Vec::with_capacity(11 + 2 + count_usize * 9 + 1);

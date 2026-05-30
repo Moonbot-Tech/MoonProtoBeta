@@ -14,22 +14,22 @@
 //! snapshots. Custom runtimes can read them through `EventDispatcher` getters.
 //! The per-channel guides live in `moonproto/docs/<channel>.md`.
 
-pub mod account;
-pub mod balances;
-pub mod coin_card_candles;
-pub mod epoch;
+pub(crate) mod account;
+pub(crate) mod balances;
+pub(crate) mod coin_card_candles;
+pub(crate) mod epoch;
 pub(crate) mod eps;
-pub mod history;
-pub mod history_store;
-pub mod history_worker;
-pub mod markets;
-pub mod order_books;
-pub mod orders;
-pub mod seq_ring;
-pub mod settings;
-pub mod strats;
-pub mod trades;
-pub mod transfer_assets;
+pub(crate) mod history;
+pub(crate) mod history_store;
+pub(crate) mod history_worker;
+pub(crate) mod markets;
+pub(crate) mod order_books;
+pub(crate) mod orders;
+pub(crate) mod seq_ring;
+pub(crate) mod settings;
+pub(crate) mod strats;
+pub(crate) mod trades;
+pub(crate) mod transfer_assets;
 
 pub use account::{AccountEvent, AccountState};
 pub use balances::{BalanceEvent, BalancesState, GlobalBalance};

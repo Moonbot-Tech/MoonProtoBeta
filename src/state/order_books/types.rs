@@ -36,7 +36,7 @@ impl OrderBookKind {
 }
 
 /// Internal cache key: `(market_index, raw book_kind)`.
-pub type BookKey = (u16, u8);
+pub(crate) type BookKey = (u16, u8);
 
 /// One applied orderbook level stored in the client read model.
 ///

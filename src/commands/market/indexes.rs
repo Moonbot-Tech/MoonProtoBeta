@@ -5,7 +5,7 @@ use super::{write_str, EngineStreamReader};
 /// Wire-form (MoonProtoEngineServer.pas:278-284):
 ///   `count:i32 + names[count] (UTF-8 strings)`.
 #[doc(hidden)]
-pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
+pub(crate) fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
     let mut r = EngineStreamReader::new(data);
     // Each name is a UTF-8 string with a u16 prefix. At least 2 bytes (empty string).
     let count = r.read_count()?;
@@ -17,7 +17,8 @@ pub fn parse_markets_indexes_response(data: &[u8]) -> Option<Vec<String>> {
 }
 
 #[doc(hidden)]
-pub fn build_markets_indexes_response(names: &[String]) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn build_markets_indexes_response(names: &[String]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + names.iter().map(|s| 2 + s.len()).sum::<usize>());
     out.extend_from_slice(&(names.len() as i32).to_le_bytes());
     for n in names {

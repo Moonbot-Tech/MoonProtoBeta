@@ -14,11 +14,12 @@ mod method;
 mod response;
 
 pub use self::auth_check::{parse_auth_check_response, AuthCheckResponse, DexInfo, HyperDexIndex};
-pub use self::base_check::{
-    exchange_type_flags, parse_base_check_response, ExchangeTypeMask, ServerInfo,
-};
+#[allow(unused_imports)]
+pub(crate) use self::base_check::{exchange_type_flags, parse_base_check_response};
+pub use self::base_check::{ExchangeTypeMask, ServerInfo};
 pub use self::method::EngineMethod;
-pub use self::response::{parse_engine_response, EngineResponse};
+pub(crate) use self::response::parse_engine_response;
+pub use self::response::EngineResponse;
 
 const DELPHI_UNIX_EPOCH_DAYS: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
@@ -133,7 +134,7 @@ impl ApiExpirationTime {
 /// `emk_CheckAPIExpirationTime` (`resp.WriteDouble(ExpTime)`). Extra trailing
 /// bytes are ignored so newer servers can append fields without breaking old
 /// consumers.
-pub fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTime> {
+pub(crate) fn parse_api_expiration_time_response(data: &[u8]) -> Option<ApiExpirationTime> {
     let mut pos = 0usize;
     Some(ApiExpirationTime::from_delphi_time(f64::from_le_bytes(
         read_zero_tail::<8>(data, &mut pos),
@@ -171,7 +172,7 @@ pub struct TransferAsset {
 ///   amount:   f64 LE
 ///   total:    f64 LE
 /// ```
-pub fn parse_update_transfer_assets_response(data: &[u8]) -> Option<Vec<TransferAsset>> {
+pub(crate) fn parse_update_transfer_assets_response(data: &[u8]) -> Option<Vec<TransferAsset>> {
     let mut pos = 0usize;
     let count_raw = read_i32_zero_tail(data, &mut pos);
     if count_raw <= 0 {

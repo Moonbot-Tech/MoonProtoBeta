@@ -17,7 +17,7 @@ use std::io::Write;
 /// gives the same public field order, TypeID, PropMask visibility, and non-zero
 /// defaults.
 #[derive(Debug)]
-pub struct StrategyBatchBuilder<'a> {
+pub(crate) struct StrategyBatchBuilder<'a> {
     schema: &'a StrategySchema,
     name_dict: Vec<String>,
     name_idx: HashMap<String, u16>,
@@ -28,7 +28,7 @@ pub struct StrategyBatchBuilder<'a> {
 }
 
 impl<'a> StrategyBatchBuilder<'a> {
-    pub fn new(schema: &'a StrategySchema) -> Self {
+    pub(crate) fn new(schema: &'a StrategySchema) -> Self {
         Self {
             schema,
             name_dict: Vec::new(),
@@ -42,7 +42,7 @@ impl<'a> StrategyBatchBuilder<'a> {
 
     /// Valid serializer payload with zero strategies. No schema is needed,
     /// because Delphi `FinalizeWrite` writes empty dicts/body for an empty batch.
-    pub fn empty_payload() -> Vec<u8> {
+    pub(crate) fn empty_payload() -> Vec<u8> {
         finalize_strategy_batch(Vec::new(), Vec::new(), Vec::new(), 0)
     }
 
@@ -67,7 +67,7 @@ impl<'a> StrategyBatchBuilder<'a> {
     }
 
     /// Add a single strategy.
-    pub fn write_strategy(&mut self, s: &StrategySnapshot) {
+    pub(crate) fn write_strategy(&mut self, s: &StrategySnapshot) {
         let path_id = self.path_index(&s.path);
         // Header
         self.body.extend_from_slice(&s.strategy_id.to_le_bytes());
@@ -105,7 +105,7 @@ impl<'a> StrategyBatchBuilder<'a> {
     }
 
     /// Finalize into a DEFLATE-compressed payload (TStratSnapshot.data format).
-    pub fn finalize(self) -> Vec<u8> {
+    pub(crate) fn finalize(self) -> Vec<u8> {
         finalize_strategy_batch(self.name_dict, self.path_dict, self.body, self.count)
     }
 }

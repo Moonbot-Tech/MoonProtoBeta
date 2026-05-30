@@ -90,7 +90,7 @@ impl TradeCtx {
 ///
 /// Delphi `TOrderReplaceCommand.Create` always sends `Epoch=0` and
 /// `Status=OS_None` for client-originated replace commands.
-pub fn build_order_replace(
+pub(crate) fn build_order_replace(
     ctx: TradeCtx,
     market_name: &str,
     order_type: OrderType,
@@ -104,14 +104,14 @@ pub fn build_order_replace(
 }
 
 /// CmdId=9: request all active orders.
-pub fn build_all_statuses_request(uid: u64) -> Vec<u8> {
+pub(crate) fn build_all_statuses_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_base_command_header(&mut out, 9, uid);
     out
 }
 
 /// CmdId=10: `TOrderCancelCommand`, cancel one order.
-pub fn build_order_cancel(
+pub(crate) fn build_order_cancel(
     ctx: TradeCtx,
     market_name: &str,
     epoch: u16,
@@ -123,7 +123,7 @@ pub fn build_order_cancel(
 }
 
 /// CmdId=11: TJoinOrdersCommand.
-pub fn build_join_orders(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
+pub(crate) fn build_join_orders(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -138,7 +138,7 @@ pub fn build_join_orders(ctx: TradeCtx, market_name: &str, is_short: bool) -> Ve
 }
 
 /// CmdId=12: TSplitOrderCommand.
-pub fn build_split_order(
+pub(crate) fn build_split_order(
     ctx: TradeCtx,
     market_name: &str,
     split_parts: i32,
@@ -161,7 +161,7 @@ pub fn build_split_order(
 }
 
 /// CmdId=13: TMoveAllSellsCommand.
-pub fn build_move_all_sells(
+pub(crate) fn build_move_all_sells(
     ctx: TradeCtx,
     market_name: &str,
     params: MoveAllSellsParams,
@@ -184,7 +184,11 @@ pub fn build_move_all_sells(
 }
 
 /// CmdId=14: TDoClosePositionCommand.
-pub fn build_do_close_position(ctx: TradeCtx, market_name: &str, market_sell: bool) -> Vec<u8> {
+pub(crate) fn build_do_close_position(
+    ctx: TradeCtx,
+    market_name: &str,
+    market_sell: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -199,7 +203,11 @@ pub fn build_do_close_position(ctx: TradeCtx, market_name: &str, market_sell: bo
 }
 
 /// CmdId=15: TDoLimitClosePositionCommand (= JoinOrdersCommand format).
-pub fn build_do_limit_close_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
+pub(crate) fn build_do_limit_close_position(
+    ctx: TradeCtx,
+    market_name: &str,
+    is_short: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -214,7 +222,7 @@ pub fn build_do_limit_close_position(ctx: TradeCtx, market_name: &str, is_short:
 }
 
 /// CmdId=16: TDoSplitPositionCommand (= JoinOrdersCommand format).
-pub fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
+pub(crate) fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -229,7 +237,12 @@ pub fn build_do_split_position(ctx: TradeCtx, market_name: &str, is_short: bool)
 }
 
 /// CmdId=17: TDoSellOrderCommand.
-pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f64) -> Vec<u8> {
+pub(crate) fn build_do_sell_order(
+    ctx: TradeCtx,
+    market_name: &str,
+    price: f64,
+    size: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
     write_market_header(
         &mut out,
@@ -245,14 +258,14 @@ pub fn build_do_sell_order(ctx: TradeCtx, market_name: &str, price: f64, size: f
 }
 
 /// CmdId=18: `TOrderStatusRequest`, request one order status.
-pub fn build_order_status_request(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
+pub(crate) fn build_order_status_request(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_trade_epoch_header(&mut out, 18, ctx, market_name, 0, OrderWorkerStatus::None);
     out
 }
 
 /// CmdId=20: TOrderStopsUpdate.
-pub fn build_order_stops_update(
+pub(crate) fn build_order_stops_update(
     ctx: TradeCtx,
     market_name: &str,
     epoch: u16,
@@ -270,7 +283,7 @@ pub fn build_order_stops_update(
 /// Delphi `TTurnPanicSellCommand.Create` does not set inherited
 /// `TTradeEpochCommand` fields on the client path, so object zero-init gives
 /// `Epoch=0` and `Status=OS_None`.
-pub fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, turn_on: bool) -> Vec<u8> {
+pub(crate) fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, turn_on: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_trade_epoch_header(&mut out, 21, ctx, market_name, 0, OrderWorkerStatus::None);
     out.push(turn_on as u8);
@@ -278,7 +291,7 @@ pub fn build_turn_panic_sell(ctx: TradeCtx, market_name: &str, turn_on: bool) ->
 }
 
 /// CmdId=22: TSetImmuneCommand.
-pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
+pub(crate) fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
     let wire_count = items.len() as u8;
     let wire_items = &items[..wire_count as usize];
     let mut out = Vec::with_capacity(11 + 1 + wire_items.len() * 9);
@@ -291,7 +304,11 @@ pub fn build_set_immune(uid: u64, items: &[ImmuneItem]) -> Vec<u8> {
 }
 
 /// CmdId=27: TMoveAllBuysCommand.
-pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, params: MoveAllBuysParams) -> Vec<u8> {
+pub(crate) fn build_move_all_buys(
+    ctx: TradeCtx,
+    market_name: &str,
+    params: MoveAllBuysParams,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
     write_market_header(
         &mut out,
@@ -309,7 +326,7 @@ pub fn build_move_all_buys(ctx: TradeCtx, market_name: &str, params: MoveAllBuys
 }
 
 /// CmdId=29: TVStopUpdate.
-pub fn build_vstop_update(
+pub(crate) fn build_vstop_update(
     ctx: TradeCtx,
     market_name: &str,
     epoch: u16,
@@ -325,7 +342,11 @@ pub fn build_vstop_update(
 }
 
 /// CmdId=30: TDoMarketSplitPositionCommand (= JoinOrdersCommand format).
-pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short: bool) -> Vec<u8> {
+pub(crate) fn build_do_market_split_position(
+    ctx: TradeCtx,
+    market_name: &str,
+    is_short: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -342,7 +363,7 @@ pub fn build_do_market_split_position(ctx: TradeCtx, market_name: &str, is_short
 /// CmdId=23: `TPenaltyCommand`, mark a market penalty/cooldown.
 ///
 /// Delphi call sites: TaskWorkers.pas:8361, Unit1.pas:11859/23750.
-pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
+pub(crate) fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_market_header(
         &mut out,
@@ -356,7 +377,7 @@ pub fn build_penalty(ctx: TradeCtx, market_name: &str) -> Vec<u8> {
 }
 
 /// CmdId=3: `TNewOrderCommand`, request a new order.
-pub fn build_new_order(
+pub(crate) fn build_new_order(
     ctx: TradeCtx,
     market_name: &str,
     is_short: bool,

@@ -46,12 +46,12 @@ pub struct OrderBookUpdate {
 }
 
 /// Wrapping-safe sequence comparison (matches Delphi CompareSeq)
-pub fn compare_seq(a: u16, b: u16) -> i16 {
+pub(crate) fn compare_seq(a: u16, b: u16) -> i16 {
     a.wrapping_sub(b) as i16
 }
 
 /// Parse a raw MPC_OrderBook payload (SynLZ compressed).
-pub fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
+pub(crate) fn parse_order_book_packet(raw: &[u8]) -> Option<OrderBookUpdate> {
     // Decompress (OrderBook is always compressed)
     let data = compression::mp_decompress(raw)?;
 

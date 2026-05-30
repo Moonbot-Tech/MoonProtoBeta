@@ -66,19 +66,12 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use moonproto::client::{set_err_emu, ErrEmuDiagnostics, ErrEmuSlicedDatagramDiagnostics};
-use moonproto::commands::candles::{
-    parse_request_candles_data_response, CandlesAggregator, DeepHistoryKind, RequestCandlesMarket,
+use moonproto::commands::{
+    parse_request_candles_data_response, parse_strategy_batch, CandlesAggregator,
+    ClientSettingsCommand, DeepHistoryKind, EngineMethod, EngineResponse, FieldValue, OrderCompact,
+    OrderWorkerStatus, RequestCandlesMarket, StrategyDynamicPicklist, StrategyFieldLayout,
+    StrategyFieldUiKind, StrategyFields, StrategyKind, StrategySchema, StrategySnapshot,
 };
-use moonproto::commands::engine_api::{EngineMethod, EngineResponse};
-use moonproto::commands::engine_request;
-use moonproto::commands::strategy_schema::{
-    StrategyDynamicPicklist, StrategyFieldLayout, StrategyFieldUiKind, StrategySchema,
-};
-use moonproto::commands::strategy_serializer::{
-    parse_strategy_batch, FieldValue, StrategyFields, StrategyKind, StrategySnapshot,
-};
-use moonproto::commands::trade::{OrderCompact, OrderWorkerStatus};
-use moonproto::commands::ui::ClientSettingsCommand;
 use moonproto::events::Event;
 use moonproto::state::{
     ApplyResult, BalanceEvent, LastPricePoint, MarkPricePoint, MarketPrice, Order, OrderBookEvent,
@@ -4065,12 +4058,7 @@ fn request_orders_until(session: &mut Session, timeout: Duration) {
     }
 }
 
-fn request_engine_until(
-    session: &mut Session,
-    method: EngineMethod,
-    _request: Vec<u8>,
-    timeout: Duration,
-) {
+fn request_engine_until(session: &mut Session, method: EngineMethod, timeout: Duration) {
     let start = Instant::now();
     let mut attempts = 0u32;
     let mut next_retry = start;
@@ -4148,18 +4136,8 @@ fn run_high_loss_simple_ops_gate(
     );
     log_high_loss_recovery_math();
 
-    request_engine_until(
-        a,
-        EngineMethod::CheckAPIExpirationTime,
-        engine_request::check_api_expiration_time(),
-        timeout,
-    );
-    request_engine_until(
-        a,
-        EngineMethod::QueryHedgeMode,
-        engine_request::query_hedge_mode(),
-        timeout,
-    );
+    request_engine_until(a, EngineMethod::CheckAPIExpirationTime, timeout);
+    request_engine_until(a, EngineMethod::QueryHedgeMode, timeout);
     let _settings = request_settings_until(a, timeout);
     request_balance_until(a, timeout);
     request_orders_until(a, timeout);

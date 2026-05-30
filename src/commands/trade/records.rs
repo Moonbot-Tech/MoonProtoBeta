@@ -177,7 +177,7 @@ struct WireOrderCompact {
 }
 
 /// `TOrderCompact` wire size: 13×8 + 4 + 9×1 = 117 bytes.
-pub const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
+pub(crate) const ORDER_COMPACT_SIZE: usize = std::mem::size_of::<WireOrderCompact>();
 const _: [(); 117] = [(); ORDER_COMPACT_SIZE];
 
 impl OrderCompact {
@@ -327,7 +327,7 @@ struct WireStopSettings {
     take_profit_changed: u8,
 }
 
-pub const STOP_SETTINGS_SIZE: usize = std::mem::size_of::<WireStopSettings>();
+pub(crate) const STOP_SETTINGS_SIZE: usize = std::mem::size_of::<WireStopSettings>();
 const _: [(); 46] = [(); STOP_SETTINGS_SIZE];
 
 impl PartialEq for StopSettings {
@@ -432,7 +432,7 @@ struct WireOrderUpdateData {
     stop_flag: u8,
 }
 
-pub const ORDER_UPDATE_DATA_SIZE: usize = std::mem::size_of::<WireOrderUpdateData>();
+pub(crate) const ORDER_UPDATE_DATA_SIZE: usize = std::mem::size_of::<WireOrderUpdateData>();
 const _: [(); 66] = [(); ORDER_UPDATE_DATA_SIZE];
 
 impl OrderUpdateData {

@@ -10,16 +10,19 @@ mod owned;
 mod types;
 mod wire;
 
-pub use decoder::{
+#[allow(unused_imports)]
+pub(crate) use decoder::{
     decode_trades_packet, DecodedTradesPacket, MMOrderRows, TradeRows, TradeSectionIter,
     TradeSectionRef,
 };
-pub use owned::{parse_trades_packet, parse_watcher_fills};
-pub use types::{
-    watcher_fill_flags, LiqOrder, MMOrder, Trade, TradeSection, TradesPacket, WatcherFill,
-    WatcherFillFlags,
-};
-pub use wire::WATCHER_FILL_RECORD_SIZE;
+#[allow(unused_imports)]
+pub(crate) use owned::parse_trades_packet;
+pub use owned::parse_watcher_fills;
+#[allow(unused_imports)]
+pub(crate) use types::{watcher_fill_flags, LiqOrder, MMOrder, WatcherFillFlags};
+pub use types::{Trade, TradeSection, TradesPacket, WatcherFill};
+#[allow(unused_imports)]
+pub(crate) use wire::WATCHER_FILL_RECORD_SIZE;
 
 #[cfg(test)]
 pub(super) use wire::{

@@ -44,9 +44,9 @@ mod types;
 pub(crate) use self::apply::apply_order_book_diff_keep_zero;
 use self::apply::{apply_cached_packet, apply_diff_book, apply_full_book};
 use self::cache::OrderBookCache;
+pub(crate) use self::types::BookKey;
 pub use self::types::{
-    ApplyResult, BookKey, OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot,
-    TopOfBook,
+    ApplyResult, OrderBookEvent, OrderBookKind, OrderBookLevel, OrderBookSnapshot, TopOfBook,
 };
 
 /// Cache becomes corrupted if it stays non-empty longer than this threshold.

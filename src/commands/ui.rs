@@ -42,7 +42,7 @@ mod parser;
 
 #[cfg(test)]
 pub(crate) use builders::build_new_market_notify;
-pub use builders::{
+pub(crate) use builders::{
     build_arb_activate_notify, build_client_settings, build_emu_trades, build_lev_manage,
     build_mm_orders_subscribe, build_reset_profit, build_settings_request, build_strat_start_stop,
     build_strat_start_stop_v2, build_switch_dex, build_switch_spot, build_trigger_manage,
@@ -68,9 +68,9 @@ const CMD_SWITCH_SPOT: u8 = 14;
 const LEV_CMD_VER: u8 = 1;
 
 /// `TAutoStartConfig` packed record size in bytes (Config.pas:344).
-pub const AS_CFG_SIZE: usize = 104;
+pub(crate) const AS_CFG_SIZE: usize = 104;
 /// `TAutoStartConfig2` packed record size in bytes (Config.pas:384).
-pub const AS_CFG2_SIZE: usize = 168;
+pub(crate) const AS_CFG2_SIZE: usize = 168;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -104,7 +104,7 @@ impl WireAutoStartConfig2 {
 }
 
 /// ArbConfig wire version byte (ArbTypes.pas:25 `ARB_CONFIG_VER = 1`).
-pub const ARB_CONFIG_VER: u8 = 1;
+pub(crate) const ARB_CONFIG_VER: u8 = 1;
 
 // =============================================================================
 //  ArbConfig — compact wire form (NOT raw record)

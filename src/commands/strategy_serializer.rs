@@ -58,49 +58,51 @@ use std::sync::Arc;
 // =============================================================================
 
 #[doc(hidden)]
-pub const TID_BOOL: u8 = 1;
+pub(crate) const TID_BOOL: u8 = 1;
 #[doc(hidden)]
-pub const TID_INT32: u8 = 2;
+pub(crate) const TID_INT32: u8 = 2;
 #[doc(hidden)]
-pub const TID_INT64: u8 = 3;
+pub(crate) const TID_INT64: u8 = 3;
 #[doc(hidden)]
-pub const TID_DOUBLE: u8 = 4;
+pub(crate) const TID_DOUBLE: u8 = 4;
 #[doc(hidden)]
-pub const TID_STRING: u8 = 5;
+pub(crate) const TID_STRING: u8 = 5;
 #[doc(hidden)]
-pub const TID_BYTE: u8 = 6;
+pub(crate) const TID_BYTE: u8 = 6;
 #[doc(hidden)]
-pub const TID_WORD: u8 = 7;
+pub(crate) const TID_WORD: u8 = 7;
 #[doc(hidden)]
-pub const TID_UINT32: u8 = 8;
+pub(crate) const TID_UINT32: u8 = 8;
 #[doc(hidden)]
-pub const TID_UINT64: u8 = 9;
+pub(crate) const TID_UINT64: u8 = 9;
 #[doc(hidden)]
-pub const TID_SINGLE: u8 = 10;
+pub(crate) const TID_SINGLE: u8 = 10;
 #[doc(hidden)]
-pub const TID_ZERO_FLAG: u8 = 0x80;
+pub(crate) const TID_ZERO_FLAG: u8 = 0x80;
 
 mod reader;
 mod types;
 mod writer;
 
+#[doc(hidden)]
+pub use self::reader::parse_strategy_batch;
 #[cfg(test)]
 pub(crate) use self::reader::try_read_field_value;
-#[doc(hidden)]
-pub use self::reader::{
-    parse_strategy_batch, parse_strategy_batch_plain, parse_strategy_batch_plain_with_schema,
-    parse_strategy_batch_with_schema,
-};
 pub(crate) use self::reader::{
     parse_strategy_batch_for_each_with_schema_field_types,
     parse_strategy_batch_with_schema_field_types,
+};
+#[allow(unused_imports)]
+pub(crate) use self::reader::{
+    parse_strategy_batch_plain, parse_strategy_batch_plain_with_schema,
+    parse_strategy_batch_with_schema,
 };
 pub use self::types::field_names;
 pub use self::types::{
     FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };
 #[doc(hidden)]
-pub use self::writer::StrategyBatchBuilder;
+pub(crate) use self::writer::StrategyBatchBuilder;
 #[cfg(test)]
 pub(crate) use self::writer::{write_field, write_u8_len_bytes};
 #[cfg(test)]

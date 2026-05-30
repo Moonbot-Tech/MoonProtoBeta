@@ -83,7 +83,7 @@ pub struct BalanceUpdate {
 ///
 /// Priority = `MPS_High`, encrypted = true, max_retries = 3.
 #[doc(hidden)]
-pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
+pub(crate) fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
     const CMD_REQUEST_BALANCE_REFRESH: u8 = 5;
     const CURRENT_PROTO_CMD_VER: u16 = 3;
     let mut out = Vec::with_capacity(11);
@@ -101,7 +101,7 @@ pub fn build_request_balance_refresh(uid: u64) -> Vec<u8> {
 /// cmd_id determines the wire format (002/003 vs 004); state application is
 /// only defined by Delphi for 003/004.
 #[doc(hidden)]
-pub fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
+pub(crate) fn parse_balance(cmd_id: u8, data: &[u8]) -> Option<BalanceUpdate> {
     let mut pos = 0usize;
 
     // Delphi reads fixed fields with TStream.Read into zero-initialized object

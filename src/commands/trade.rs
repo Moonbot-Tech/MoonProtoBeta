@@ -23,13 +23,13 @@ use super::registry::{write_string, CURRENT_PROTO_CMD_VER};
 use std::convert::TryInto;
 
 mod builders;
-pub use builders::{
+pub use builders::TradeCtx;
+pub(crate) use builders::{
     build_all_statuses_request, build_do_close_position, build_do_limit_close_position,
     build_do_market_split_position, build_do_sell_order, build_do_split_position,
     build_join_orders, build_move_all_buys, build_move_all_sells, build_new_order,
     build_order_cancel, build_order_replace, build_order_status_request, build_order_stops_update,
     build_penalty, build_set_immune, build_split_order, build_turn_panic_sell, build_vstop_update,
-    TradeCtx,
 };
 #[cfg(test)]
 use builders::{write_base_command_header, write_market_header};
@@ -41,18 +41,19 @@ pub use enums::{
     ReplaceMultiKind,
 };
 mod headers;
-pub use headers::{BaseCommandHeader, MarketCommandHeader, TradeEpochHeader};
+pub(crate) use headers::{BaseCommandHeader, MarketCommandHeader, TradeEpochHeader};
 mod records;
 use records::{
     read_f32_zero_tail, read_f64_zero_tail, read_i32_zero_tail, read_immune_item_zero_tail,
     read_u16_zero_tail, read_u64_zero_tail, read_u8_zero_tail,
 };
-pub use records::{
-    DelphiBool, ImmuneItem, OrderCompact, OrderUpdateData, PriceZone, StopSettings,
-    ORDER_COMPACT_SIZE, ORDER_UPDATE_DATA_SIZE, STOP_SETTINGS_SIZE,
-};
+pub use records::{DelphiBool, ImmuneItem, OrderCompact, OrderUpdateData, PriceZone, StopSettings};
+#[allow(unused_imports)]
+pub(crate) use records::{ORDER_COMPACT_SIZE, ORDER_UPDATE_DATA_SIZE, STOP_SETTINGS_SIZE};
 mod trace;
-pub use trace::{trace_flags, BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
+#[allow(unused_imports)]
+pub(crate) use trace::trace_flags;
+pub use trace::{BulkReplaceNotify, CorridorUpdate, OrderTracePoint};
 
 /// Parameters for `TMoveAllSellsCommand`.
 ///
@@ -88,7 +89,7 @@ pub struct MoveAllBuysParams {
 /// matching Delphi `BOrderWorker.SendVStopIfChanged`. Low-level builders keep
 /// `epoch` and `status` explicit for protocol tests and replay tools.
 #[derive(Debug, Clone, Copy)]
-pub struct VStopUpdateParams {
+pub(crate) struct VStopUpdateParams {
     pub status: OrderWorkerStatus,
     pub vstop_on: bool,
     pub vstop_fixed: bool,

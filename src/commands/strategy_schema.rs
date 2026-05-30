@@ -18,7 +18,7 @@ use super::strict_read::{
     read_u8,
 };
 
-pub const SCHEMA_FORMAT_VERSION: u8 = 1;
+pub(crate) const SCHEMA_FORMAT_VERSION: u8 = 1;
 
 const UI_EDIT: u8 = 0;
 const UI_CHECKBOX: u8 = 1;

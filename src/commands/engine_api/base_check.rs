@@ -55,17 +55,21 @@ impl std::fmt::Debug for ExchangeTypeMask {
 }
 
 /// Named flags for `ServerInfo::exchange_type_mask`.
-pub mod exchange_type_flags {
+pub(crate) mod exchange_type_flags {
     use super::ExchangeTypeMask;
 
     /// Spot trading is available.
-    pub const SPOT: ExchangeTypeMask = ExchangeTypeMask::SPOT;
+    #[allow(dead_code)]
+    pub(crate) const SPOT: ExchangeTypeMask = ExchangeTypeMask::SPOT;
     /// Futures trading is available.
-    pub const FUTURES: ExchangeTypeMask = ExchangeTypeMask::FUTURES;
+    #[allow(dead_code)]
+    pub(crate) const FUTURES: ExchangeTypeMask = ExchangeTypeMask::FUTURES;
     /// The server works with a DEX backend such as Hyperliquid.
-    pub const DEX: ExchangeTypeMask = ExchangeTypeMask::DEX;
+    #[allow(dead_code)]
+    pub(crate) const DEX: ExchangeTypeMask = ExchangeTypeMask::DEX;
     /// Prediction / outcome markets.
-    pub const PREDICT: ExchangeTypeMask = ExchangeTypeMask::PREDICT;
+    #[allow(dead_code)]
+    pub(crate) const PREDICT: ExchangeTypeMask = ExchangeTypeMask::PREDICT;
 }
 
 /// Server identity returned by `EngineMethod::BaseCheck`.
@@ -137,7 +141,7 @@ impl ServerInfo {
 /// Empty payload is valid for old servers and returns `ServerInfo::default()`.
 /// Truncated optional tails keep fields parsed before the truncation and leave
 /// the rest as `None`, matching Delphi's `if not EOF` optional-field pattern.
-pub fn parse_base_check_response(data: &[u8]) -> ServerInfo {
+pub(crate) fn parse_base_check_response(data: &[u8]) -> ServerInfo {
     let mut info = ServerInfo::default();
     let mut pos = 0usize;
 

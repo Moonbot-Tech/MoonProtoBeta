@@ -25,15 +25,18 @@ mod prices;
 mod reader;
 mod token_tags;
 #[doc(hidden)]
-pub use self::indexes::{build_markets_indexes_response, parse_markets_indexes_response};
+#[allow(unused_imports)]
+pub(crate) use self::indexes::{build_markets_indexes_response, parse_markets_indexes_response};
 #[cfg(test)]
 use self::list::build_markets_list_response_with_local_shift;
 #[doc(hidden)]
-pub use self::list::{
+#[allow(unused_imports)]
+pub(crate) use self::list::{
     build_markets_list_response, parse_markets_list_response, MarketsListResponse,
 };
 #[doc(hidden)]
-pub use self::prices::{
+#[allow(unused_imports)]
+pub(crate) use self::prices::{
     build_markets_prices_response, parse_markets_prices_response, CorrMarketPriceUpdate,
     MarketPriceUpdate, MarketsPricesResponse,
 };
@@ -42,10 +45,13 @@ use self::prices::{
     build_markets_prices_response_with_local_shift, parse_markets_prices_response_with_local_shift,
 };
 #[doc(hidden)]
-pub use self::reader::EngineStreamReader;
+pub(crate) use self::reader::EngineStreamReader;
 pub use self::token_tags::TokenTags;
 #[doc(hidden)]
-pub use self::token_tags::{build_token_tags_response, parse_token_tags_response, MarketTokenTags};
+#[allow(unused_imports)]
+pub(crate) use self::token_tags::{
+    build_token_tags_response, parse_token_tags_response, MarketTokenTags,
+};
 
 // =============================================================================
 //  TBotPlatform ordinal (Vars.pas:24)
@@ -743,7 +749,7 @@ impl Market {
     }
 }
 
-pub const ARB_PRICE_RING_LEN: usize = 10;
+pub(crate) const ARB_PRICE_RING_LEN: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MarketArbPricePoint {
@@ -822,7 +828,8 @@ impl MarketArbSlot {
 ///
 /// `ver >= 2` means the payload contains the trailing `FuturesType` byte.
 #[doc(hidden)]
-pub fn read_market(r: &mut EngineStreamReader, ver: u16) -> Option<Market> {
+#[allow(dead_code)]
+pub(crate) fn read_market(r: &mut EngineStreamReader, ver: u16) -> Option<Market> {
     read_market_with_local_shift(r, ver, current_local_time_shift_minutes())
 }
 
@@ -984,10 +991,12 @@ pub(crate) fn apply_delphi_local_funding_shift(
 /// as in the reference implementation; `ver` is kept only for symmetry with
 /// `read_market`.
 #[doc(hidden)]
-pub fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
+#[allow(dead_code)]
+pub(crate) fn write_market(out: &mut Vec<u8>, m: &Market, _ver: u16) {
     write_market_with_local_shift(out, m, _ver, current_local_time_shift_minutes())
 }
 
+#[allow(dead_code)]
 pub(super) fn write_market_with_local_shift(
     out: &mut Vec<u8>,
     m: &Market,
@@ -1046,6 +1055,7 @@ pub(super) fn write_market_with_local_shift(
     out.push(m.futures_type.to_byte());
 }
 
+#[allow(dead_code)]
 pub(super) fn remove_delphi_local_funding_shift(
     local_funding_time: f64,
     local_shift_minutes: f64,
@@ -1057,6 +1067,7 @@ pub(super) fn remove_delphi_local_funding_shift(
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn write_str(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len() as u16;
@@ -1084,7 +1095,7 @@ pub struct CorrMarket {
 }
 
 #[doc(hidden)]
-pub fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket> {
+pub(crate) fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket> {
     let bn_market_name = r.read_str()?;
     let bn_market_currency = r.read_str()?;
     let bn_tick_size = r.read_double()?;
@@ -1098,7 +1109,8 @@ pub fn read_corr_market(r: &mut EngineStreamReader) -> Option<CorrMarket> {
 }
 
 #[doc(hidden)]
-pub fn write_corr_market(out: &mut Vec<u8>, c: &CorrMarket) {
+#[allow(dead_code)]
+pub(crate) fn write_corr_market(out: &mut Vec<u8>, c: &CorrMarket) {
     write_str(out, &c.bn_market_name);
     write_str(out, &c.bn_market_currency);
     out.extend_from_slice(&c.bn_tick_size.to_le_bytes());

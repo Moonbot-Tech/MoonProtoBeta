@@ -51,15 +51,18 @@ impl std::fmt::Debug for WatcherFillFlags {
     }
 }
 
-pub mod watcher_fill_flags {
+pub(crate) mod watcher_fill_flags {
     use super::WatcherFillFlags;
 
     /// Fill belongs to a short position.
-    pub const IS_SHORT: WatcherFillFlags = WatcherFillFlags::IS_SHORT;
+    #[allow(dead_code)]
+    pub(crate) const IS_SHORT: WatcherFillFlags = WatcherFillFlags::IS_SHORT;
     /// Fill opens position exposure rather than closing it.
-    pub const IS_OPEN: WatcherFillFlags = WatcherFillFlags::IS_OPEN;
+    #[allow(dead_code)]
+    pub(crate) const IS_OPEN: WatcherFillFlags = WatcherFillFlags::IS_OPEN;
     /// Fill was taker-side.
-    pub const IS_TAKER: WatcherFillFlags = WatcherFillFlags::IS_TAKER;
+    #[allow(dead_code)]
+    pub(crate) const IS_TAKER: WatcherFillFlags = WatcherFillFlags::IS_TAKER;
 }
 
 /// One exchange trade record from a futures or spot section.

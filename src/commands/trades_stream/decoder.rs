@@ -13,7 +13,7 @@ use zerocopy::FromBytes;
 /// This is the zero-copy entry point that mirrors Delphi's `DataStream` walk:
 /// compressed packets own the decompressed buffer, plain packets borrow the
 /// incoming UDP payload without allocating.
-pub struct DecodedTradesPacket<'a> {
+pub(crate) struct DecodedTradesPacket<'a> {
     data: Cow<'a, [u8]>,
     has_taker: bool,
     pub base_time: f64,
@@ -22,7 +22,7 @@ pub struct DecodedTradesPacket<'a> {
 
 impl<'a> DecodedTradesPacket<'a> {
     /// Iterate sections in wire order.
-    pub fn sections(&self) -> TradeSectionIter<'_> {
+    pub(crate) fn sections(&self) -> TradeSectionIter<'_> {
         TradeSectionIter {
             data: &self.data,
             pos: TRADES_PACKET_HEADER_SIZE,
@@ -34,7 +34,7 @@ impl<'a> DecodedTradesPacket<'a> {
 
 /// Borrowed section view from a decoded trades packet.
 #[derive(Debug, Clone, Copy)]
-pub enum TradeSectionRef<'a> {
+pub(crate) enum TradeSectionRef<'a> {
     /// Futures or spot exchange trades.
     Trades(TradeRows<'a>),
     /// Market-maker order rows.
@@ -49,8 +49,9 @@ pub enum TradeSectionRef<'a> {
     },
 }
 
+#[allow(dead_code)]
 impl<'a> TradeSectionRef<'a> {
-    pub fn market_index(&self) -> u16 {
+    pub(crate) fn market_index(&self) -> u16 {
         match self {
             Self::Trades(rows) | Self::LiqOrders(rows) => rows.market_index(),
             Self::MMOrders(rows) => rows.market_index(),
@@ -86,27 +87,28 @@ impl<'a> TradeSectionRef<'a> {
 
 /// Borrowed iterator over futures/spot trade rows or liquidation rows.
 #[derive(Debug, Clone, Copy)]
-pub struct TradeRows<'a> {
+pub(crate) struct TradeRows<'a> {
     market_index: u16,
     is_spot: bool,
     data: &'a [u8],
     pos: usize,
 }
 
+#[allow(dead_code)]
 impl<'a> TradeRows<'a> {
-    pub fn market_index(&self) -> u16 {
+    pub(crate) fn market_index(&self) -> u16 {
         self.market_index
     }
 
-    pub fn is_spot(&self) -> bool {
+    pub(crate) fn is_spot(&self) -> bool {
         self.is_spot
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         (self.data.len().saturating_sub(self.pos)) / TRADE_ROW_SIZE
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
@@ -133,24 +135,25 @@ impl Iterator for TradeRows<'_> {
 
 /// Borrowed iterator over market-maker order rows.
 #[derive(Debug, Clone, Copy)]
-pub struct MMOrderRows<'a> {
+pub(crate) struct MMOrderRows<'a> {
     market_index: u16,
     has_taker: bool,
     data: &'a [u8],
     pos: usize,
 }
 
+#[allow(dead_code)]
 impl<'a> MMOrderRows<'a> {
-    pub fn market_index(&self) -> u16 {
+    pub(crate) fn market_index(&self) -> u16 {
         self.market_index
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         let row_size = TRADE_ROW_SIZE + if self.has_taker { 20 } else { 0 };
         (self.data.len().saturating_sub(self.pos)) / row_size
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
@@ -187,7 +190,7 @@ impl Iterator for MMOrderRows<'_> {
 }
 
 /// Iterator over borrowed trades sections.
-pub struct TradeSectionIter<'a> {
+pub(crate) struct TradeSectionIter<'a> {
     data: &'a [u8],
     pos: usize,
     has_taker: bool,
@@ -320,7 +323,7 @@ impl<'a> Iterator for TradeSectionIter<'a> {
 
 /// Decode a raw `MPC_TradesStream` payload into a borrowed packet view.
 /// Returns `None` on malformed payload.
-pub fn decode_trades_packet(raw: &[u8]) -> Option<DecodedTradesPacket<'_>> {
+pub(crate) fn decode_trades_packet(raw: &[u8]) -> Option<DecodedTradesPacket<'_>> {
     if raw.is_empty() {
         return None;
     }

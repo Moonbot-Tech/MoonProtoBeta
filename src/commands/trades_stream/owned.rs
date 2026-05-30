@@ -22,7 +22,8 @@ impl TradeSection {
 ///
 /// Active dispatch uses [`decode_trades_packet`] and borrowed section iteration;
 /// this helper is for low-level tools that explicitly need owned rows.
-pub fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
+#[allow(dead_code)]
+pub(crate) fn parse_trades_packet(raw: &[u8]) -> Option<TradesPacket> {
     let decoded = decode_trades_packet(raw)?;
     Some(TradesPacket {
         base_time: decoded.base_time,

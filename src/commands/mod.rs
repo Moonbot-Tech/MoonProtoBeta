@@ -1,34 +1,39 @@
-//! Byte-level builders and parsers for MoonProto command channels.
+//! Protocol data-model types for MoonProto command channels.
 //!
 //! Regular applications should use `MoonClient` intents, typed events, and
-//! read-only snapshots. These modules are public for advanced tools, tests,
-//! custom protocol integrations, and consumers that need direct access to the
-//! wire payloads.
+//! read-only snapshots. This module re-exports the data-model records, enums,
+//! and command structs that appear in public signatures, snapshots, and events;
+//! the byte-level builders and parsers themselves are crate-internal.
 //!
-//! The builders and parsers preserve the Delphi wire formats: base command
-//! header, command id, version, UID, per-command priority/retry semantics, and
-//! exact field order. See `docs/` for public Active Lib/API guides.
+//! These types preserve the Delphi wire formats: base command header, command
+//! id, version, UID, per-command priority/retry semantics, and exact field
+//! order. See `docs/` for public Active Lib/API guides.
 
-pub mod arb;
-pub mod balance;
-pub mod candles;
-pub mod engine_api;
-pub mod engine_request;
-pub mod market;
-pub mod order_book;
-pub mod registry;
-pub mod strat;
-pub mod strategy_schema;
-pub mod strategy_serializer;
+pub(crate) mod arb;
+pub(crate) mod balance;
+pub(crate) mod candles;
+pub(crate) mod engine_api;
+pub(crate) mod engine_request;
+pub(crate) mod market;
+pub(crate) mod order_book;
+pub(crate) mod registry;
+pub(crate) mod strat;
+pub(crate) mod strategy_schema;
+pub(crate) mod strategy_serializer;
 pub(crate) mod strict_read;
-pub mod trade;
-pub mod trades_stream;
-pub mod ui;
+pub(crate) mod trade;
+pub(crate) mod trades_stream;
+pub(crate) mod ui;
 
 // Re-exports
 pub use balance::BalanceItem;
 #[doc(hidden)]
 pub use balance::BalanceUpdate;
+// CoinCard candle data model (public) plus the low-level chunk parser/aggregator
+// used by protocol diagnostics and the live FireTest harness (doc-hidden).
+#[doc(hidden)]
+pub use candles::{parse_request_candles_data_response, CandlesAggregator, RequestCandlesMarket};
+pub use candles::{DeepHistoryKind, DeepPrice};
 pub use engine_api::{
     parse_auth_check_response, parse_get_balance_response, parse_query_hedge_mode_response,
     AuthCheckResponse, DexInfo, EngineMethod, EngineResponse,
@@ -44,6 +49,10 @@ pub use strategy_schema::{
 pub use strategy_serializer::{
     field_names, FieldValue, StrategyActiveMode, StrategyFields, StrategyKind, StrategySnapshot,
 };
+// Low-level strategy-batch decoder used by protocol diagnostics and the live
+// FireTest harness; not part of the documented application surface.
+#[doc(hidden)]
+pub use strategy_serializer::parse_strategy_batch;
 pub use trade::{
     AllStatuses, BulkReplaceNotify, CorridorUpdate, DelphiBool, DoClosePositionCommand,
     DoSellOrderCommand, FixedPosition, ImmuneItem, JoinOrdersCommand, MoveAllBuysCmdType,

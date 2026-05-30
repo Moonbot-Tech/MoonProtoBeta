@@ -5,7 +5,7 @@ use super::*;
 /// Build CmdId=1 `TClientSettingsCommand`. The version is written as `CURRENT_PROTO_CMD_VER` (v3),
 /// so BuyIceberg/SellIceberg/SignOrders **always** go on the wire.
 #[doc(hidden)]
-pub fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
+pub(crate) fn build_client_settings(cmd: &ClientSettingsCommand) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     write_header(&mut out, CMD_CLIENT_SETTINGS, cmd.uid);
 
@@ -99,7 +99,7 @@ fn write_autostart_config2(out: &mut Vec<u8>, blob: &[u8]) {
 
 /// CmdId=2 `TSettingsRequest` (empty body).
 #[doc(hidden)]
-pub fn build_settings_request(uid: u64) -> Vec<u8> {
+pub(crate) fn build_settings_request(uid: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(11);
     write_header(&mut out, CMD_SETTINGS_REQUEST, uid);
     out
@@ -107,7 +107,7 @@ pub fn build_settings_request(uid: u64) -> Vec<u8> {
 
 /// CmdId=3 `TStratStartStopCommand`.
 #[doc(hidden)]
-pub fn build_strat_start_stop(uid: u64, is_start: bool) -> Vec<u8> {
+pub(crate) fn build_strat_start_stop(uid: u64, is_start: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     write_header(&mut out, CMD_STRAT_START_STOP, uid);
     out.push(is_start as u8);
@@ -116,7 +116,11 @@ pub fn build_strat_start_stop(uid: u64, is_start: bool) -> Vec<u8> {
 
 /// CmdId=4 `TStratStartStopCommandV2`.
 #[doc(hidden)]
-pub fn build_strat_start_stop_v2(uid: u64, is_start: bool, items: &[StratCheckedItem]) -> Vec<u8> {
+pub(crate) fn build_strat_start_stop_v2(
+    uid: u64,
+    is_start: bool,
+    items: &[StratCheckedItem],
+) -> Vec<u8> {
     let count = items.len() as u16;
     let count_usize = usize::from(count);
     let mut out = Vec::with_capacity(11 + 1 + 2 + count_usize * 9);
@@ -131,7 +135,7 @@ pub fn build_strat_start_stop_v2(uid: u64, is_start: bool, items: &[StratChecked
 
 /// CmdId=5 `TMMOrdersSubscribeCommand`.
 #[doc(hidden)]
-pub fn build_mm_orders_subscribe(uid: u64, subscribe: bool) -> Vec<u8> {
+pub(crate) fn build_mm_orders_subscribe(uid: u64, subscribe: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     write_header(&mut out, CMD_MM_ORDERS_SUBSCRIBE, uid);
     out.push(subscribe as u8);
@@ -143,7 +147,7 @@ pub fn build_mm_orders_subscribe(uid: u64, subscribe: bool) -> Vec<u8> {
 /// Low-level wire builder. Prefer [`crate::Client::ui_update_version`] when a
 /// running client should mirror Delphi `ServerUpdateSent` behavior.
 #[doc(hidden)]
-pub fn build_update_version(uid: u64, version_name: &str, is_release: bool) -> Vec<u8> {
+pub(crate) fn build_update_version(uid: u64, version_name: &str, is_release: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_UPDATE_VERSION, uid);
     write_string(&mut out, version_name);
@@ -153,7 +157,7 @@ pub fn build_update_version(uid: u64, version_name: &str, is_release: bool) -> V
 
 /// CmdId=7 `TEmuTradesCommand`.
 #[doc(hidden)]
-pub fn build_emu_trades(
+pub(crate) fn build_emu_trades(
     uid: u64,
     m_index: u16,
     base_time: f64,
@@ -185,7 +189,7 @@ pub(crate) fn build_new_market_notify(uid: u64) -> Vec<u8> {
 
 /// CmdId=9 `TLevManageCommand`. `cmd_ver` is written as `1` (Delphi `LevCmdVer = 1`).
 #[doc(hidden)]
-pub fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
+pub(crate) fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     write_header(&mut out, CMD_LEV_MANAGE, uid);
     out.push(LEV_CMD_VER);
@@ -202,7 +206,7 @@ pub fn build_lev_manage(uid: u64, cmd: &LevManage) -> Vec<u8> {
 
 /// CmdId=10 `TTriggerManageCommand`.
 #[doc(hidden)]
-pub fn build_trigger_manage(
+pub(crate) fn build_trigger_manage(
     uid: u64,
     action: u8,
     all_markets: bool,
@@ -231,7 +235,7 @@ pub fn build_trigger_manage(
 
 /// CmdId=11 `TResetProfitCommand`.
 #[doc(hidden)]
-pub fn build_reset_profit(uid: u64, reset_kind: u8) -> Vec<u8> {
+pub(crate) fn build_reset_profit(uid: u64, reset_kind: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     write_header(&mut out, CMD_RESET_PROFIT, uid);
     out.push(reset_kind);
@@ -240,7 +244,7 @@ pub fn build_reset_profit(uid: u64, reset_kind: u8) -> Vec<u8> {
 
 /// CmdId=12 `TArbActivateNotify`.
 #[doc(hidden)]
-pub fn build_arb_activate_notify(uid: u64, arb_valid: f64) -> Vec<u8> {
+pub(crate) fn build_arb_activate_notify(uid: u64, arb_valid: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(19);
     write_header(&mut out, CMD_ARB_ACTIVATE_NOTIFY, uid);
     out.extend_from_slice(&arb_valid.to_le_bytes());
@@ -249,7 +253,7 @@ pub fn build_arb_activate_notify(uid: u64, arb_valid: f64) -> Vec<u8> {
 
 /// CmdId=13 `TSwitchDexCommand`. Exactly 16 bytes of ShortString\[15\] are sent.
 #[doc(hidden)]
-pub fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
+pub(crate) fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(27);
     write_header(&mut out, CMD_SWITCH_DEX, uid);
     let bytes = dex_name.as_bytes();
@@ -262,7 +266,7 @@ pub fn build_switch_dex(uid: u64, dex_name: &str) -> Vec<u8> {
 
 /// CmdId=14 `TSwitchSpotCommand`.
 #[doc(hidden)]
-pub fn build_switch_spot(uid: u64, spot_index: u8) -> Vec<u8> {
+pub(crate) fn build_switch_spot(uid: u64, spot_index: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(12);
     write_header(&mut out, CMD_SWITCH_SPOT, uid);
     out.push(spot_index);

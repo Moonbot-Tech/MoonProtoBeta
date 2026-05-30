@@ -16,10 +16,12 @@ pub struct MarketsListResponse {
 
 /// Parse `EngineResponse.data` for `emk_GetMarketsList`.
 #[doc(hidden)]
-pub fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
+#[allow(dead_code)]
+pub(crate) fn parse_markets_list_response(data: &[u8], ver: u16) -> Option<MarketsListResponse> {
     parse_markets_list_response_with_local_shift(data, ver, current_local_time_shift_minutes())
 }
 
+#[allow(dead_code)]
 pub(super) fn parse_markets_list_response_with_local_shift(
     data: &[u8],
     ver: u16,
@@ -51,10 +53,12 @@ pub(super) fn parse_markets_list_response_with_local_shift(
 
 /// Optional builder for tests.
 #[doc(hidden)]
-pub fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn build_markets_list_response(resp: &MarketsListResponse, ver: u16) -> Vec<u8> {
     build_markets_list_response_with_local_shift(resp, ver, current_local_time_shift_minutes())
 }
 
+#[allow(dead_code)]
 pub(super) fn build_markets_list_response_with_local_shift(
     resp: &MarketsListResponse,
     ver: u16,

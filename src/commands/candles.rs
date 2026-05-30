@@ -66,7 +66,7 @@ struct WireDeepPrice {
 }
 
 #[doc(hidden)]
-pub const DEEP_PRICE_SIZE: usize = std::mem::size_of::<WireDeepPrice>();
+pub(crate) const DEEP_PRICE_SIZE: usize = std::mem::size_of::<WireDeepPrice>();
 const _: [(); 28] = [(); DEEP_PRICE_SIZE];
 const MINS_IN_DAY: f64 = 1440.0;
 
@@ -179,10 +179,10 @@ struct WireDeepPricePackOld {
 }
 
 #[doc(hidden)]
-pub const DEEP_PRICE_PACK_SIZE: usize = std::mem::size_of::<WireDeepPricePack>();
+pub(crate) const DEEP_PRICE_PACK_SIZE: usize = std::mem::size_of::<WireDeepPricePack>();
 const _: [(); 20] = [(); DEEP_PRICE_PACK_SIZE];
 #[doc(hidden)]
-pub const DEEP_PRICE_PACK_OLD_SIZE: usize = std::mem::size_of::<WireDeepPricePackOld>();
+pub(crate) const DEEP_PRICE_PACK_OLD_SIZE: usize = std::mem::size_of::<WireDeepPricePackOld>();
 const _: [(); 32] = [(); DEEP_PRICE_PACK_OLD_SIZE];
 const WALL_ITEM_SIZE: usize = 8;
 const REQUEST_CANDLES_MARKET_MIN_SIZE: usize = 2 + 4 + WALL_ITEM_SIZE * 8;
@@ -230,7 +230,7 @@ pub enum DeepHistoryKind {
 /// `emk_GetCoinCardCandles(market, ticks)` — request CoinCard candles.
 ///
 /// Wire: market_name + `WriteByte(Ord(ticks))`.
-pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u8> {
+pub(crate) fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u8> {
     let params = vec![ticks as u8];
     build_engine_request_full(EngineMethod::GetCoinCardCandles, market_name, &[], &params)
 }
@@ -243,7 +243,7 @@ pub fn get_coin_card_candles(market_name: &str, ticks: DeepHistoryKind) -> Vec<u
 /// `count:i32 + N × TDeepPrice`.
 ///
 /// `data` is already-uncompressed `EngineResponse.data`.
-pub fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
+pub(crate) fn parse_coin_card_candles_response(data: &[u8]) -> Option<Vec<DeepPrice>> {
     let mut pos = 0usize;
     let count_raw = i32::from_le_bytes(read_zero_tail::<4>(data, &mut pos));
     if count_raw <= 0 {

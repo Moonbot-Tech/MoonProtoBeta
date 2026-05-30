@@ -3,10 +3,10 @@
 use super::*;
 
 /// Trace flags (TradeStruct.pas:234): bit0=IsTemp, bit1=IsFinish, bit2=IsInitial.
-pub mod trace_flags {
-    pub const IS_TEMP: u8 = 0x01;
-    pub const IS_FINISH: u8 = 0x02;
-    pub const IS_INITIAL: u8 = 0x04;
+pub(crate) mod trace_flags {
+    pub(crate) const IS_TEMP: u8 = 0x01;
+    pub(crate) const IS_FINISH: u8 = 0x02;
+    pub(crate) const IS_INITIAL: u8 = 0x04;
 }
 
 /// `TOrderTracePoint` (TradeStruct.pas:237-252).
